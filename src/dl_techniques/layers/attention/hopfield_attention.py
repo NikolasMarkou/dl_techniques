@@ -12,6 +12,25 @@ initial query (a "probe" or noisy pattern) is repeatedly refined until it
 converges to one of the stored patterns (the "memories"), which are represented
 by the Key-Value pairs.
 
+Architecture:
+    Projections and head-splitting are exactly a standard multi-head attention
+    block; the difference is that the attention step is applied in a bounded
+    loop, feeding its own output back in as the next query::
+
+        [Q, K, V] -> Dense x3 -> heads -> (optional Q/K norm)
+                                            │
+                        ┌───────────────────▼───────────────────┐
+                        │  repeat update_steps_max + 1 times:   │
+                        │    A   = prob(Q K^T / sqrt(d_k))      │
+                        │    out = A V                          │
+                        │    Q   = A K      (skipped on last)   │
+                        └───────────────────┬───────────────────┘
+                                            ▼
+                             merge heads -> Dense -> output
+
+    ``update_steps_max=0`` runs the loop body exactly once and never updates the
+    query, which is ordinary single-step attention.
+
 Difference from Standard Transformer Attention:
 ---------------------------------------------
 The fundamental difference is the computational flow:
@@ -45,6 +64,27 @@ terminates based on one of the following conditions:
     norm falls below the threshold defined by `update_steps_eps`, the
     iteration stops. This indicates that the system has settled into a
     stable fixed-point attractor.
+
+Foundational Mathematics:
+    The update rule is the gradient-descent step of the modern Hopfield energy
+    over continuous states::
+
+        E(xi) = -lse(beta, X^T xi) + 0.5 * xi^T xi + const,   beta = 1/sqrt(d_k)
+
+    whose stationary condition ``dE/dxi = 0`` rearranges into the fixed-point
+    iteration this layer implements::
+
+        xi_{t+1} = X softmax(beta * X^T xi_t)
+
+    i.e. exactly ``attention(Q=xi_t, K=V=X)``. Ramsauer et al. show this converges
+    in one step for well-separated patterns, which is why a single-step
+    transformer attention layer is already a Hopfield retrieval; multiple steps
+    matter only for metastable / clustered memories.
+
+    Caveat specific to this implementation: the loop feeds back ``A K`` (keys),
+    while the returned output is ``A V`` (values). The two coincide in the
+    self-attention case the theory assumes; with distinct K and V the iteration is
+    a heuristic generalization, not the energy descent above.
 
 References:
     [1] Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need".
@@ -175,11 +215,22 @@ class HopfieldAttention(keras.layers.Layer):
         Defaults to ``1e-4``.
     :type update_steps_eps: float
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :type kwargs: Any
 
     :raises ValueError: If ``num_heads <= 0`` or ``key_dim <= 0``.
     :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
     :raises ValueError: If ``update_steps_max < 0``.
     :raises ValueError: If ``update_steps_eps <= 0``.
+    :raises ValueError: If ``probability_type`` names a routing/hierarchical
+        variant.
+    :raises ValueError: From ``call()``, if a list/tuple input has a length other
+        than 2 or 3.
+
+    .. note::
+       ``update_steps_eps`` is retained for API and serialization compatibility
+       but is **inert**: the convergence early-exit it controlled was removed as
+       graph-unsafe (see the anchored comment in ``call()``). The loop always runs
+       the full ``update_steps_max + 1`` steps.
     """
 
     def __init__(
@@ -239,6 +290,13 @@ class HopfieldAttention(keras.layers.Layer):
         # Python int, so math.sqrt(float(key_dim)) is the identical scalar value
         # that ops.sqrt(ops.cast(key_dim, ...)) produced in call() — folding it
         # into __init__ avoids a per-call op while staying byte-identical.
+        #
+        # R13: deliberately NOT `common.compute_attention_scale`. This layer
+        # stores sqrt(key_dim) and DIVIDES by it in `_hopfield_update_step`; the
+        # helper returns the reciprocal 1/sqrt(key_dim) for sites that MULTIPLY.
+        # Adopting it would turn a divide into a multiply — a real numerics change
+        # (measured: the two values differ for 26 of 27 probed dims, as they must,
+        # being reciprocals). Same convention split as `wave_field_attention.py`.
         self._sqrt_key_dim = math.sqrt(float(self.key_dim))
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
@@ -480,6 +538,35 @@ class HopfieldAttention(keras.layers.Layer):
                 mask_tensor = ops.expand_dims(mask_tensor, axis=1)
 
             # Add large negative values to masked positions
+            #
+            # KNOWN DEFECT — fp16 mask NaN (documented in place, deliberately NOT
+            # fixed by this behavior-preserving pass; the fix is a numerics change
+            # and belongs to a follow-up plan).
+            #
+            # This is the ARITHMETIC mask form, the exact shape of the bug that
+            # already shipped once in `energy_attention.py` (see the WHAT-NOT-TO-DO
+            # block on `common.MASK_BIAS_VALUE`). Under
+            # `mixed_precision.set_global_policy('mixed_float16')`,
+            # `mask_tensor` is float16, so `-1e9` is materialized as float16 -inf
+            # (np.float16(-1e9) == -inf). At every UNMASKED position
+            # `(1.0 - mask) == 0`, and `0 * -inf == NaN`.
+            #
+            # Measured, not inferred (2x6x32 input, num_heads=4, key_dim=8, under
+            # mixed_float16):
+            #   * no mask supplied          -> 0/384 NaN   (this branch is skipped)
+            #   * partial 3D mask           -> 384/384 NaN
+            #   * ALL-ONES mask (nothing actually masked) -> 384/384 NaN
+            #   * same partial mask, float32 -> 0/384 NaN
+            # So under mixed precision ANY mask at all — including a vacuous
+            # all-ones one — destroys the whole batch. In float32 the code is
+            # correct.
+            #
+            # THE FIX (for the follow-up plan, do NOT apply here): use the
+            # structurally-safe select form instead of the arithmetic one, i.e.
+            # `ops.where(mask_tensor > 0, attention_scores, MASK_BIAS_VALUE)`
+            # evaluated in `common.mask_dtype(self.compute_dtype)`. `where` cannot
+            # produce a `0 * inf` product at all — the failure mode is removed
+            # structurally rather than numerically.
             attention_scores = attention_scores + (1.0 - mask_tensor) * -1e9
 
         attention_weights = self.attn_prob(attention_scores, training=training)

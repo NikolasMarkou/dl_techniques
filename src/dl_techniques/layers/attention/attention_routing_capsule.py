@@ -25,19 +25,48 @@ several documented limitations of the iterative dynamic-routing scheme used in
 The companion :class:`CapsuleBlockV2` wraps :class:`AttentionRoutingCapsule`
 with optional dropout and a length-preserving direction-only normalizer.
 
-References
-----------
-* Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
-  capsules. Advances in NeurIPS 30.
-* Hahn, T., Pyeon, M., & Kim, G. (2019). Self-Routing Capsule Networks.
-* Tsai, Y.-H. H., et al. (2020). Capsules with Inverted Dot-Product Attention
-  Routing.
-* Shazeer, N., et al. (2017). Outrageously Large Neural Networks: The
-  Sparsely-Gated Mixture-of-Experts Layer (load-balancing loss).
+Architecture:
+    Two layers, one of which composes the other::
+
+        AttentionRoutingCapsule : (B, N_in, D_in) -> (B, N_out, D_out)
+            u_hat -> score -> [top-k] -> softmax -> aggregate -> decoupled output
+
+        CapsuleBlockV2 : (B, N_in, D_in) -> (B, N_out, D_out)
+            AttentionRoutingCapsule -> [Dropout] -> [direction-only LayerNorm]
+
+    ``CapsuleBlockV2`` forwards every routing argument through to the capsule it
+    owns, so the two classes share one parameter vocabulary. It is consumed in
+    production by ``models/capsnet/model_v2.py``.
+
+Foundational Mathematics:
+    Routing is one softmax over agreement scores rather than an iterative
+    agreement loop::
+
+        u_hat[b,i,o,:] = W[i,o,:,:] @ u[b,i,:]
+        score[b,i,o]   = <u_hat[b,i,o,:], q[o,:]> / sqrt(D_out)
+        a              = softmax(score, axis = output | input)
+        s[b,o,:]       = sum_i a[b,i,o] * u_hat[b,i,o,:]  (+ bias)
+        v[b,o,:]       = sigmoid(prob_head(s)) * s / (||s|| + eps)
+
+    The final line is the decoupling: ``||v||`` is a learned scalar in ``(0, 1)``
+    read as a detection probability, while ``v / ||v||`` carries the pose. The
+    classic ``squash`` conflates the two and saturates to zero magnitude for
+    small ``||s||``; this form cannot.
+
+References:
+    - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
+      capsules. Advances in NeurIPS 30.
+    - Hahn, T., Pyeon, M., & Kim, G. (2019). Self-Routing Capsule Networks.
+    - Tsai, Y.-H. H., et al. (2020). Capsules with Inverted Dot-Product Attention
+      Routing.
+    - Shazeer, N., et al. (2017). Outrageously Large Neural Networks: The
+      Sparsely-Gated Mixture-of-Experts Layer (load-balancing loss).
 """
 
+# ---------------------------------------------------------------------
+
 import keras
-from typing import Optional, Union, Dict, Any, Literal
+from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -58,7 +87,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
     a single softmax to compute the routing weights, then aggregates with a
     decoupled magnitude/direction output.
 
-    Forward pass:
+    **Architecture Overview:**
 
     .. code-block:: text
 
@@ -81,30 +110,58 @@ class AttentionRoutingCapsule(keras.layers.Layer):
               direction = s / (||s|| + eps)         # (B, N_out, D_out)
               v         = mag * direction           # (B, N_out, D_out)
 
-    Args:
-        num_capsules: Number of output capsules. Must be positive.
-        dim_capsules: Dimension of each output capsule vector. Must be
-            positive.
-        softmax_axis: Either ``"output"`` (each input capsule competes for
-            output assignment — matches dynamic-routing semantics) or
-            ``"input"`` (each output capsule receives a normalised mixture
-            of inputs — like classic attention). Defaults to ``"output"``.
-        top_k: If set, restrict each softmax row to the ``top_k`` largest
-            scores along the soft-maxed axis (other entries are masked
-            with -inf before softmax). ``None`` (default) disables masking.
-        use_bias: Whether to add a learned bias to the routing aggregate
-            ``s`` before computing the output. Defaults to ``True``.
-        use_load_balancing: Whether to attach an auxiliary importance loss
-            on the routing assignments via ``self.add_loss`` (only during
-            training). Defaults to ``False``.
-        load_balancing_weight: Scalar weight on the auxiliary loss when
-            ``use_load_balancing=True``. Defaults to ``0.01``.
-        eps: Numerical-stability constant for the unit-direction division.
-            Defaults to ``1e-7``.
-        kernel_initializer: Initializer for transformation matrices ``W``
-            and the per-output query ``q``. Defaults to ``'glorot_uniform'``.
-        kernel_regularizer: Optional regularizer for transformation matrices.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param num_capsules: Number of output capsules ``N_out``. Must be positive.
+    :type num_capsules: int
+    :param dim_capsules: Dimension ``D_out`` of each output capsule vector. Must be
+        positive. Also sets the softmax temperature ``1 / sqrt(D_out)``.
+    :type dim_capsules: int
+    :param softmax_axis: Either ``"output"`` (each input capsule competes for
+        output assignment — matches dynamic-routing semantics; softmax over axis 2)
+        or ``"input"`` (each output capsule receives a normalised mixture of
+        inputs — like classic attention; softmax over axis 1). Defaults to
+        ``"output"``.
+    :type softmax_axis: Literal["output", "input"]
+    :param top_k: If set, restrict each softmax row to the ``top_k`` largest scores
+        along the soft-maxed axis; the remaining entries are replaced with a large
+        negative constant before the softmax. Clamped to the axis size at call
+        time. ``None`` (default) disables masking entirely.
+    :type top_k: Optional[int]
+    :param use_bias: Whether to add a learned bias of shape
+        ``(1, N_out, D_out)`` to the routing aggregate ``s`` before the output is
+        computed. Defaults to ``True``.
+    :type use_bias: bool
+    :param use_load_balancing: Whether to attach an auxiliary importance loss on
+        the routing assignments via ``self.add_loss``. The loss is added **only
+        when ``training`` is truthy** — it is absent from inference graphs.
+        Defaults to ``False``.
+    :type use_load_balancing: bool
+    :param load_balancing_weight: Scalar multiplier on the auxiliary loss when
+        ``use_load_balancing=True``. Must be non-negative. Defaults to ``0.01``.
+    :type load_balancing_weight: float
+    :param eps: Numerical-stability constant. Added under the square root of the
+        direction normalization and to both denominators of the load-balancing
+        coefficient of variation. Defaults to ``1e-7``.
+    :type eps: float
+    :param kernel_initializer: Initializer for the transformation tensor ``W`` and
+        the per-output query ``q``. The internal ``prob_head`` Dense is always
+        ``'glorot_uniform'`` and is deliberately not configured by this argument.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer applied to ``W`` and ``q``.
+        Stored and serialized as given (it is not passed through
+        ``keras.regularizers.get``). Defaults to ``None``.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments forwarded to the ``Layer`` base
+        class (``name``, ``dtype``, ...).
+    :type kwargs: Any
+
+    :raises ValueError: If ``num_capsules`` is not positive.
+    :raises ValueError: If ``dim_capsules`` is not positive.
+    :raises ValueError: If ``softmax_axis`` is not ``"output"`` or ``"input"``.
+    :raises ValueError: If ``top_k`` is given and not positive.
+    :raises ValueError: If ``load_balancing_weight`` is negative.
+    :raises ValueError: From ``build()``, if the input is not 3D, or if the
+        number of input capsules is not statically known.
     """
 
     def __init__(
@@ -167,7 +224,27 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         self.input_dim_capsules: Optional[int] = None
 
     # ------------------------------------------------------------------
-    def build(self, input_shape):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create ``W``, ``q``, the optional bias, and build the probability head.
+
+        :param input_shape: Shape of the input capsule tensor, expected as
+            ``(batch, num_input_capsules, input_dim_capsules)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :raises ValueError: If ``input_shape`` is not rank 3.
+        :raises ValueError: If ``num_input_capsules`` (axis 1) is ``None``. It is
+            needed statically because ``W``'s first axis is per-input-capsule.
+
+        :return: ``None``.
+        :rtype: None
+        """
+        # Idempotency guard (rubric R7, matching the package-wide sweep in commit
+        # 1cdd4767). Without it a second build() — functional-API reuse, or
+        # from_config() followed by a rebuild — calls add_weight() again and
+        # orphans the already-restored W / q / bias variables.
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(
                 "Expected 3D input shape [batch, num_input_capsules, "
@@ -234,7 +311,22 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         score: keras.KerasTensor,
         axis: int,
     ) -> keras.KerasTensor:
-        """Mask all but the top-k entries of ``score`` along ``axis`` to -inf."""
+        """Mask all but the top-k entries of ``score`` along ``axis``.
+
+        ``keras.ops.top_k`` only operates on the last axis, so scoring along axis 1
+        is done by transposing to last, thresholding, and transposing the boolean
+        keep-mask back — the score tensor itself is never permuted in place.
+
+        :param score: Routing scores of shape ``(B, N_in, N_out)``.
+        :type score: keras.KerasTensor
+        :param axis: Axis to select the top-k along; ``1`` (input capsules) or
+            ``2`` (output capsules). Matches the softmax axis.
+        :type axis: int
+
+        :return: ``score`` with every non-top-k entry replaced by a large negative
+            constant, same shape and dtype as the input.
+        :rtype: keras.KerasTensor
+        """
         k = int(self.top_k)
         # Clamp to the axis size — the static shape is known after build.
         if axis == 1:
@@ -257,6 +349,22 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         if axis == 1:
             keep = keras.ops.transpose(keep, (0, 2, 1))
         # Use a large negative number so post-softmax weight ≈ 0.
+        #
+        # fp16 note (rubric R13; measured, not argued): under
+        # `mixed_precision.set_global_policy('mixed_float16')` this cast produces
+        # -inf, because np.float16(-1e9) == -inf. That is SAFE HERE, and only
+        # because of the `ops.where` form on the next line combined with the
+        # top-k construction: `keep` is true for at least k >= 1 entries of every
+        # row along `axis`, and the softmax that consumes this tensor runs along
+        # THAT SAME axis — so no softmax row is all -inf, and no `0 * -inf`
+        # product exists anywhere. Probed under mixed_float16 at
+        # (top_k=2, axis=output), (top_k=2, axis=input) and the worst case
+        # (top_k=1, axis=output): 0 NaN out of 96 outputs each time.
+        #
+        # WHAT NOT TO DO: do not rewrite this as the arithmetic form
+        # `score + (1 - keep) * -1e9`. That form is the one that DOES produce
+        # `0 * -inf = NaN` in fp16, and it is a live defect elsewhere in this
+        # package (see the KNOWN DEFECT block in `hopfield_attention.py`).
         neg_inf = keras.ops.cast(-1e9, score.dtype)
         masked = keras.ops.where(keep, score, neg_inf)
         return masked
@@ -267,6 +375,19 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
+        """Route input capsules to output capsules in a single forward pass.
+
+        :param inputs: Input capsule tensor of shape ``(B, N_in, D_in)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag. Truthy enables the optional
+            load-balancing auxiliary loss; it has no other effect (this layer has
+            no dropout and no normalization statistics).
+        :type training: Optional[bool]
+
+        :return: Output capsules of shape ``(B, N_out, D_out)`` whose per-capsule
+            norm lies in ``(0, 1)`` by construction.
+        :rtype: keras.KerasTensor
+        """
         # inputs: (B, N_in, D_in)
         # u_hat[b, i, o, d] = sum_e W[i, o, d, e] * inputs[b, i, e]
         # einsum keeps static shapes intact under tf.function tracing.
@@ -275,6 +396,12 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         # Score: (u_hat · q) / sqrt(D_out)
         # u_hat: (B, N_in, N_out, D_out); q: (1, 1, N_out, D_out)
         score = keras.ops.sum(u_hat * self.q, axis=-1)  # (B, N_in, N_out)
+        # R13: deliberately NOT `common.compute_attention_scale`. This site
+        # DIVIDES by sqrt(D_out); the helper returns the reciprocal 1/sqrt(D_out)
+        # for call sites that MULTIPLY. Swapping in the helper would change a
+        # divide into a multiply — a real (if tiny) numerics change, forbidden by
+        # this pass. Measured across 27 dims: `float(x) ** 0.5` differs from the
+        # helper's value for 26 of them, as it must (it is the reciprocal).
         score = score / float(self.dim_capsules) ** 0.5
 
         # Optional Top-K masking before softmax.
@@ -329,10 +456,26 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         return v
 
     # ------------------------------------------------------------------
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the output shape from stored config only.
+
+        :param input_shape: Input shape ``(batch, N_in, D_in)``. Only the batch
+            entry is used; the capsule axes come from the constructor arguments.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``(batch, num_capsules, dim_capsules)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return (input_shape[0], self.num_capsules, self.dim_capsules)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the full constructor configuration for serialization.
+
+        :return: Dictionary containing every ``__init__`` argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -365,13 +508,84 @@ class CapsuleBlockV2(keras.layers.Layer):
     without rescaling capsule magnitudes (which encode detection
     probability).
 
-    Args:
-        num_capsules: Number of output capsules.
-        dim_capsules: Dimension of each capsule vector.
-        dropout_rate: Dropout in ``[0.0, 1.0)``. Defaults to ``0.0``.
-        direction_only_norm: Whether to apply length-preserving LayerNorm
-            after the routing capsule. Defaults to ``False``.
-        **routing_kwargs: Forwarded to :class:`AttentionRoutingCapsule`.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input u: (B, N_in, D_in)
+                       │
+                       ▼
+            AttentionRoutingCapsule          # (B, N_out, D_out)
+                       │
+                       ▼  (if dropout_rate > 0)
+                    Dropout
+                       │
+                       ▼  (if direction_only_norm)
+            ┌──────────────────────────────────────────┐
+            │ mag       = ||x||                        │  magnitude kept
+            │ direction = x / mag                      │
+            │ direction = LayerNorm(direction)         │  pose normalized
+            │ direction = direction / ||direction||    │  re-unit-ized
+            │ x         = mag * direction              │
+            └──────────────────────────────────────────┘
+                       │
+                       ▼
+        Output v: (B, N_out, D_out)
+
+    The split-then-recombine box is what makes the normalizer
+    *length-preserving*: a plain
+    ``LayerNormalization`` on ``x`` would rescale ``||x||`` and destroy the
+    detection probability that the routing capsule just encoded in it.
+
+    :param num_capsules: Number of output capsules. Forwarded to
+        :class:`AttentionRoutingCapsule`, which validates it.
+    :type num_capsules: int
+    :param dim_capsules: Dimension of each output capsule vector. Forwarded to
+        :class:`AttentionRoutingCapsule`, which validates it.
+    :type dim_capsules: int
+    :param dropout_rate: Dropout applied to the routed capsules. Must be in
+        ``[0.0, 1.0)``. A value of ``0.0`` creates no Dropout sub-layer at all.
+        Defaults to ``0.0``.
+    :type dropout_rate: float
+    :param direction_only_norm: Whether to apply the length-preserving
+        direction-only ``LayerNormalization`` shown above. ``False`` creates no
+        normalization sub-layer. Must be a ``bool``. Defaults to ``False``.
+    :type direction_only_norm: bool
+    :param softmax_axis: Routing softmax axis, forwarded verbatim to
+        :class:`AttentionRoutingCapsule`. Defaults to ``"output"``.
+    :type softmax_axis: Literal["output", "input"]
+    :param top_k: Top-k routing sparsity, forwarded verbatim to
+        :class:`AttentionRoutingCapsule`. Defaults to ``None``.
+    :type top_k: Optional[int]
+    :param use_bias: Whether the routing capsule adds a learned bias to its
+        aggregate. Forwarded verbatim. Defaults to ``True``.
+    :type use_bias: bool
+    :param use_load_balancing: Whether the routing capsule attaches its auxiliary
+        importance loss during training. Forwarded verbatim. Defaults to
+        ``False``.
+    :type use_load_balancing: bool
+    :param load_balancing_weight: Weight on that auxiliary loss. Forwarded
+        verbatim. Defaults to ``0.01``.
+    :type load_balancing_weight: float
+    :param eps: Numerical-stability constant. Forwarded to the routing capsule
+        AND used locally under both square roots of the direction-only
+        normalizer. Defaults to ``1e-7``.
+    :type eps: float
+    :param kernel_initializer: Initializer for the routing capsule's ``W`` and
+        ``q``. Resolved here via ``keras.initializers.get`` and the resolved
+        object is what is forwarded. Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer forwarded to the routing
+        capsule. Defaults to ``None``.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments forwarded to the ``Layer`` base
+        class (``name``, ``dtype``, ...).
+    :type kwargs: Any
+
+    :raises ValueError: If ``dropout_rate`` is not in ``[0.0, 1.0)``.
+    :raises TypeError: If ``direction_only_norm`` is not a ``bool``.
+    :raises ValueError: From the wrapped :class:`AttentionRoutingCapsule`, for any
+        invalid routing argument (see its ``:raises:`` list).
     """
 
     def __init__(
@@ -436,7 +650,29 @@ class CapsuleBlockV2(keras.layers.Layer):
         else:
             self.layer_norm = None
 
-    def build(self, input_shape):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the routing capsule and, if configured, dropout and the norm.
+
+        Sub-layers are built explicitly and in computational order so that every
+        weight variable exists before Keras restores a checkpoint into them.
+
+        :param input_shape: Shape of the input capsule tensor,
+            ``(batch, N_in, D_in)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :raises ValueError: Propagated from the wrapped
+            :class:`AttentionRoutingCapsule` if the input is not rank 3 or the
+            input-capsule count is not static.
+
+        :return: ``None``.
+        :rtype: None
+        """
+        # Idempotency guard (rubric R7). See the identical note in
+        # AttentionRoutingCapsule.build — a second build() here would re-enter the
+        # sub-layer builds after weight restoration.
+        if self.built:
+            return
+
         self.routing.build(input_shape)
         out_shape = self.routing.compute_output_shape(input_shape)
         if self.dropout is not None:
@@ -450,6 +686,17 @@ class CapsuleBlockV2(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
+        """Route, optionally drop out, optionally normalize the pose direction.
+
+        :param inputs: Input capsule tensor of shape ``(B, N_in, D_in)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to the routing capsule,
+            the dropout layer and the normalizer.
+        :type training: Optional[bool]
+
+        :return: Output capsules of shape ``(B, N_out, D_out)``.
+        :rtype: keras.KerasTensor
+        """
         x = self.routing(inputs, training=training)
 
         if self.dropout is not None:
@@ -469,10 +716,29 @@ class CapsuleBlockV2(keras.layers.Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Delegate to the wrapped routing capsule.
+
+        Neither dropout nor the direction-only normalizer changes the shape, so
+        the block's output shape is exactly the routing capsule's.
+
+        :param input_shape: Input shape ``(batch, N_in, D_in)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``(batch, num_capsules, dim_capsules)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return self.routing.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the full constructor configuration for serialization.
+
+        :return: Dictionary containing every ``__init__`` argument, including the
+            routing arguments forwarded to :class:`AttentionRoutingCapsule`.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {

@@ -9,26 +9,37 @@ between different attention components. By doing so, it aims to produce more
 robust and contextually-aware attention distributions through a "routing-by-
 agreement" consensus.
 
-Architecturally, the layer first computes the standard scaled dot-product
-attention scores, which serve as initial "votes." These votes are then refined
-through two concurrent routing mechanisms:
+Architecture:
+    The layer first computes the standard scaled dot-product attention scores,
+    which serve as initial "votes." These votes are then refined through two
+    concurrent routing mechanisms:
 
-1.  **Vertical Routing (Head-wise):** For a single query token, the attention
-    distributions from all ``H`` heads are treated as low-level capsules.
-    Dynamic routing is then applied across these capsules, allowing different
-    "perspectives" captured by each head to influence one another and form
-    a consensus.
+    1.  **Vertical Routing (Head-wise):** For a single query token, the attention
+        distributions from all ``H`` heads are treated as low-level capsules.
+        Dynamic routing is then applied across these capsules, allowing different
+        "perspectives" captured by each head to influence one another and form
+        a consensus.
 
-2.  **Horizontal Routing (Token-wise):** For a given query token, the
-    attention scores from all source tokens are treated as input capsules.
-    The routing mechanism allows these source-token "perspectives" to agree
-    on a final attention distribution.
+    2.  **Horizontal Routing (Token-wise):** For a given query token, the
+        attention scores from all source tokens are treated as input capsules.
+        The routing mechanism allows these source-token "perspectives" to agree
+        on a final attention distribution.
 
-The **Dynamic Routing** algorithm iteratively refines coupling coefficients
-``c = softmax(b)`` between lower-level (initial scores) and higher-level
-(refined scores) capsules. Each iteration: (1) compute weighted sum ``s``,
-(2) squash via ``v = squash(s) = ||s||^2 / (1 + ||s||^2) * s / ||s||``,
-(3) update log-priors ``b`` by agreement (dot product of ``v`` and votes).
+    Both refinements are ADDITIVE on the logits — the layer computes
+    ``logits + vertical(logits) + horizontal(logits)`` and only then applies the
+    mask and the final probability function, so the routing never replaces the
+    attention distribution, it biases it.
+
+Foundational Mathematics:
+    The **Dynamic Routing** algorithm iteratively refines coupling coefficients
+    ``c = softmax(b)`` between lower-level (initial scores) and higher-level
+    (refined scores) capsules. Each iteration: (1) compute weighted sum ``s``,
+    (2) squash via ``v = squash(s) = ||s||^2 / (1 + ||s||^2) * s / ||s||``,
+    (3) update log-priors ``b`` by agreement (dot product of ``v`` and votes).
+
+    The squash non-linearity is norm-only: it rescales a vector without rotating
+    it, mapping ``||s|| -> ||s||^2 / (1 + ||s||^2) in [0, 1)``, which is what lets
+    a capsule length be read as a probability.
 
 References:
     - Sabour, Frosst, & Hinton, 2017. Dynamic Routing Between Capsules.
@@ -38,11 +49,17 @@ References:
 
 """
 
-import math
+# ---------------------------------------------------------------------
+
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .common import compute_attention_scale
 from ..activations.probability_output import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -175,13 +192,46 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     :param epsilon: Float, small constant for numerical stability in norm calculations.
         Must be positive. Defaults to 1e-8.
     :type epsilon: float
+    :param probability_type: String naming the probability function used at all
+        three softmax sites (final attention weights, routing coupling
+        coefficients, vertical-aggregation importance). Forwarded to
+        ``ProbabilityOutput``. Defaults to ``"softmax"``. The
+        ``"routing"``/``"deterministic_routing"``/``"hierarchical"``/
+        ``"hierarchical_routing"`` family is rejected in ``__init__``: those types
+        consume features rather than logits and reshape their output, so they
+        cannot stand in for a logits-to-coefficients softmax.
+    :type probability_type: str
+    :param probability_config: Optional configuration dictionary forwarded to
+        ``ProbabilityOutput`` as ``type_config``. Any ``"axis"`` key it contains is
+        OVERRIDDEN per site (``-1`` / ``-2`` / ``-1``) because the routing maths
+        depends on the axis; for the axis-agnostic ``"adaptive"`` family the key is
+        dropped instead. Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied to the per-head query
+        and key tensors before the dot product. Forwarded to
+        ``create_normalization_layer``; separate ``q_norm``/``k_norm`` instances are
+        created in ``build()``. ``None`` (default) disables QK normalization.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        ``create_normalization_layer`` when building those two norm layers.
+        Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
 
     :raises ValueError: If num_heads, key_dim, or value_dim is not positive.
     :raises ValueError: If dropout_rate is not in range [0, 1].
     :raises ValueError: If routing_iterations is not positive.
     :raises ValueError: If epsilon is not positive.
+    :raises ValueError: If probability_type names a routing/hierarchical variant.
+    :raises ValueError: From ``build()``, if the input is not 3D or its last
+        dimension is undefined.
     :raises ValueError: If embed_dim is not divisible by num_heads (when key_dim is None).
+    :raises ValueError: From ``call()``, if horizontal routing runs and the
+        sequence length is not statically known. Note: the raise fires whenever
+        ``use_horizontal_routing=True``, even for ``use_positional_routing=False``,
+        although the message only mentions positional routing — see the comment at
+        the raise site.
     """
 
     def __init__(
@@ -342,9 +392,31 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         self.actual_key_dim = self.key_dim if self.key_dim is not None else self.embed_dim // self.num_heads
         self.actual_value_dim = self.value_dim if self.value_dim is not None else self.actual_key_dim
         # DECISION plan_2026-06-14_33b77a7a/D-004: precompute 1/sqrt(actual_key_dim) in build() (resolved from input_shape; None in __init__). D-002 pattern; replaces per-call ops.sqrt.
-        self._inv_sqrt_key_dim = 1.0 / math.sqrt(float(self.actual_key_dim))
+        # R13: now sourced from `common.compute_attention_scale`, whose body is
+        # `1.0 / math.sqrt(float(head_dim))` — character-identical to the
+        # expression it replaces, and hex-probed identical across 27 head dims
+        # (0/27 mismatches). Still a Python float, still computed in build().
+        self._inv_sqrt_key_dim = compute_attention_scale(self.actual_key_dim)
 
-        # Validate dimension compatibility
+        # Validate dimension compatibility.
+        #
+        # R13/A4: this check deliberately does NOT adopt
+        # `common.validate_head_divisibility`. The helper's message would still
+        # satisfy the pinned regex in
+        # `tests/test_layers/test_attention/test_capsule_routing_attention.py:172`
+        # (`embed_dim \(127\) must be divisible by num_heads \(8\)`, reproducible
+        # with dim_name="embed_dim"), but it cannot carry the trailing
+        # "when key_dim is None" clause — and that clause is the whole point here:
+        # the constraint is CONDITIONAL, and a user who passed an explicit
+        # key_dim never hits it. Dropping the clause would degrade the diagnostic,
+        # which A4 forbids. Same reasoning as `linear_attention.py`'s conditional
+        # check (step 5 of this plan).
+        #
+        # Naming note: `embed_dim` is a LOCAL attribute derived from
+        # `input_shape[-1]` in build(), NOT a constructor keyword argument, so
+        # nothing about the public API depends on the name. It is left as-is
+        # anyway: it names the same quantity the error message and the tests
+        # already use.
         if self.key_dim is None and self.embed_dim % self.num_heads != 0:
             raise ValueError(
                 f"embed_dim ({self.embed_dim}) must be divisible by num_heads ({self.num_heads}) "
@@ -581,6 +653,23 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             attention_mask = ops.expand_dims(attention_mask, 1)
 
         # Apply mask (set masked positions to large negative value)
+        #
+        # fp16 note (rubric R13; measured under mixed_float16, not argued): this
+        # cast yields -inf in float16, since np.float16(-1e9) == -inf. The
+        # `ops.where` form below is structurally safe for the normal case — there
+        # is no `0 * -inf` product anywhere, and a softmax row that keeps at least
+        # one unmasked key still normalizes correctly with -inf entries. Probed
+        # with a 2D padding mask (2 of 6 keys masked) and a 3D causal mask under
+        # mixed_float16: 0 NaN out of 384 outputs in both cases.
+        #
+        # KNOWN DEFECT (documented, deliberately NOT fixed by this
+        # behavior-preserving pass): a FULLY-masked row is fp16-specific poison.
+        # An all-False mask row gives all -inf -> softmax -> NaN, measured
+        # 384/384 NaN under mixed_float16, while the SAME input in float32 gives
+        # 0/384 NaN (the finite -1e9 entries just produce a uniform, meaningless
+        # distribution). So fp16 turns a garbage-in/garbage-out row into a NaN
+        # that propagates through the whole batch. Callers must not hand this
+        # layer an all-masked query row under mixed precision.
         mask_value = ops.cast(-1e9, attention_logits.dtype)
         return ops.where(attention_mask, attention_logits, mask_value)
 
@@ -731,6 +820,15 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # Use the STATIC sequence-length so `range(...)` unrolls at trace time
         # (graph-safe). `ops.shape(...)[2]` returns a symbolic tensor under
         # tf.function, and `range(symbolic_tensor)` raises TypeError.
+        #
+        # KNOWN DEFECT (reported, deliberately NOT fixed here — behavior change):
+        # the guard below is OUTSIDE the `if self.use_positional_routing:` branch,
+        # so a dynamic sequence length is rejected even when positional routing is
+        # OFF, in which case the static length is never actually needed (the
+        # non-positional path is pure transpose/expand/repeat). The message also
+        # tells the user to "set use_positional_routing=False", advice this very
+        # code path does not honor. Moving the guard into the branch would change
+        # which inputs the layer accepts.
         seq_len = attention_weights.shape[2]
         if seq_len is None:
             raise ValueError(
