@@ -61,6 +61,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.attention.common import validate_head_divisibility
 from ..activations import resolve_activation_layer
 
 # ---------------------------------------------------------------------
@@ -218,8 +219,10 @@ class WaveFieldAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # Shared implementation. Its message is byte-identical to the local check this
+        # replaced — `f"dim ({dim}) must be divisible by num_heads ({num_heads})"` — which
+        # `tests/.../test_wave_field_attention.py:83` pins with a `pytest.raises(match=...)`.
+        validate_head_divisibility(dim, num_heads)
         if field_size <= 1:
             raise ValueError(f"field_size must be > 1, got {field_size}")
         if max_seq_len <= 0:
@@ -246,6 +249,13 @@ class WaveFieldAttention(keras.layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
+        # DELIBERATELY NOT `common.compute_attention_scale(self.head_dim)`. This is
+        # `sqrt(head_dim)`, NOT `1 / sqrt(head_dim)` — the inverse of every sibling layer's
+        # convention — and `call()` DIVIDES by it (`sigmoid(Q / self.scale)`), so the
+        # arithmetic is self-consistent as written. Whether that convention is intentional
+        # or a latent defect is an open question flagged for a separate investigation; this
+        # line is behavior-frozen until that is settled. Do NOT "unify" it with the shared
+        # helper: doing so would silently square the query-modulation temperature.
         self.scale = math.sqrt(self.head_dim)
         self._field_stride = float((field_size - 1) / max(max_seq_len - 1, 1))
 
@@ -608,11 +618,27 @@ class WaveFieldAttention(keras.layers.Layer):
     # shape inference + serialization
     # -----------------------------------------------------------------
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...],
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the output shape from stored configuration only.
+
+        :param input_shape: Input shape ``(batch, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: Output shape ``(batch, seq_len, dim)`` — identical to the input.
+        :rtype: Tuple[Optional[int], ...]
+        """
         # Output is always (B, N, dim) regardless of input last-dim resolution.
         return (input_shape[0], input_shape[1], self.dim)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the full constructor configuration for serialization.
+
+        :return: Config dict covering every ``__init__`` argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,

@@ -73,6 +73,20 @@ from dl_techniques.layers.norms.rms_norm import RMSNorm
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-07-27T130643-38c5646a/D-008
+# `package="dl_techniques.layers"` is the LONE deviation from this package's bare
+# `@keras.saving.register_keras_serializable()` house form (rubric R3). It is
+# DELIBERATELY LEFT AS-IS.
+#
+# WHAT NOT TO DO: do NOT "normalize" this to the bare form. The `package=` kwarg is not
+# cosmetic — it is half of the registry KEY. Keras registers the class as
+# `f"{package}>{name}"`, so this class is keyed `dl_techniques.layers>MMDiTJointAttention`
+# while the bare form would key it `Custom>MMDiTJointAttention`. Every already-saved
+# `.keras` file containing an SD3 MMDiT block stores the OLD key in its config; after the
+# change `keras.models.load_model` cannot resolve it and raises at load time. No test in
+# the suite loads a pre-existing checkpoint, so this breakage would ship silently.
+# Registry-neutrality is not provable here (it is provably FALSE), so the rubric yields.
+# See decisions.md D-008.
 @keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class MMDiTJointAttention(keras.layers.Layer):
     """SD3 MMDiT dual-stream joint attention (image + text).
@@ -82,6 +96,33 @@ class MMDiTJointAttention(keras.layers.Layer):
     streams along the sequence axis for a single joint scaled-dot-product
     attention, then splits the result back to the original per-stream lengths
     and projects each stream out.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        image (B, N_img, dim)              text (B, N_txt, dim)
+              │ to_q/to_k/to_v                    │ add_{q,k,v}_proj
+              │ reshape -> (B, H, N_img, hd)      │ reshape -> (B, H, N_txt, hd)
+              │ norm_q / norm_k (RMSNorm)         │ norm_added_q / norm_added_k
+              └────────────────┬──────────────────┘
+                               │ concat along seq axis
+                               ▼
+                    Q,K,V (B, H, N_img+N_txt, hd)
+                               │ softmax(Q·Kᵀ · head_dim^-0.5) · V
+                               ▼
+                    (B, N_img+N_txt, dim)
+                               │ split at N_img
+              ┌────────────────┴──────────────────┐
+              ▼                                   ▼
+           to_out                          to_add_out*
+        image_out (B, N_img, dim)          text_out (B, N_txt, dim)
+
+        (*) omitted entirely when context_pre_only=True — `call` then returns
+            the image stream alone, not a 2-element list.
+
+    The full flow, including the PyTorch reference semantics this port reproduces,
+    is in the module docstring above.
 
     :param dim: Model / embedding dimensionality. Must be divisible by
         ``num_heads``.
@@ -140,6 +181,13 @@ class MMDiTJointAttention(keras.layers.Layer):
             raise ValueError(
                 f"num_heads must be a positive integer, got {num_heads}"
             )
+        # R13 cross-reference: this check DELIBERATELY does not adopt
+        # `common.validate_head_divisibility`. The shared helper's message omits this
+        # one's TRAILING PERIOD, so adopting it would change the raised text. That text is
+        # cheap to change here but not free — a `pytest.raises(match=...)` elsewhere in the
+        # repo, or a downstream log matcher, could pin it, and this pass is text-preserving
+        # as well as behavior-preserving. Sibling that DOES adopt the helper (its message
+        # is byte-identical to the shared one): `wave_field_attention.py`.
         if dim % num_heads != 0:
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads})."
@@ -155,6 +203,12 @@ class MMDiTJointAttention(keras.layers.Layer):
         self.use_bias = bool(use_bias)
         self.context_pre_only = bool(context_pre_only)
         self.eps = float(eps)
+        # R13 cross-reference: DELIBERATELY not `common.compute_attention_scale(head_dim)`.
+        # That helper computes `1.0 / math.sqrt(float(head_dim))`, which is the same real
+        # number but NOT guaranteed to be the same float64 bit pattern as `head_dim ** -0.5`
+        # (different libm paths, last-ULP divergence). Swapping it is a numerics change,
+        # however small, and this pass forbids those. It is already a Python float computed
+        # in `__init__`, so the D-002 "never `ops.sqrt` in `call()`" intent is satisfied.
         self._scale = self.head_dim ** -0.5
 
         # --- image-stream projections (created here, built in build()) --

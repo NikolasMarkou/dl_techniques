@@ -65,7 +65,6 @@ References:
 
 """
 
-import math
 import keras
 from keras import layers, initializers, regularizers, ops
 from typing import Optional, Union, Tuple, Dict, Any
@@ -75,6 +74,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.attention.common import compute_attention_scale
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from ..activations import ProbabilityOutput, resolve_activation_layer
@@ -246,7 +246,12 @@ class GatedAttention(keras.layers.Layer):
         # ops.sqrt on a static int returns a backend tensor that can leak when
         # __init__ runs inside a symbolic scratch graph (the D-002 pattern; same
         # fix already applied to cross/diff/MLA). Do NOT revert to ops.sqrt here.
-        self.scale = 1.0 / math.sqrt(float(self.head_dim))
+        #
+        # The expression now lives in `common.compute_attention_scale`, which is
+        # `1.0 / math.sqrt(float(head_dim))` — byte-identical to what it replaced. The
+        # anchor above still governs: it is called HERE, in `__init__`, and returns a
+        # Python float. Do NOT move the call into `call()`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Following the Golden Rule: Create in __init__, Build in build()
@@ -402,6 +407,13 @@ class GatedAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
+        # R13 cross-reference: this check DELIBERATELY does not adopt
+        # `common.validate_head_divisibility`. It is CONDITIONAL (`head_dim is None`) and
+        # its message carries the trailing clause "when head_dim is None", which is the
+        # part that tells a caller how to fix it — supply an explicit `head_dim`. The
+        # shared helper emits the bare majority string and cannot express that clause, so
+        # adopting it here would silently degrade the diagnostic. Sibling implementation:
+        # `wave_field_attention.py`, which is unconditional and therefore does adopt it.
         if head_dim is None and dim % num_heads != 0:
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads}) when head_dim is None")
         if max_seq_len <= 0:
@@ -534,6 +546,16 @@ class GatedAttention(keras.layers.Layer):
                 mask = attention_mask  # Assume it's already broadcastable
 
             # Create additive mask (masked positions get -inf)
+            #
+            # R13 cross-reference: this site DELIBERATELY does not adopt
+            # `common.MASK_BIAS_VALUE` / `common.mask_dtype`. It uses the arithmetic form
+            # `(1 - keep) * -1e9` evaluated in the LOGITS dtype, whereas the sibling in
+            # `energy_attention.py` uses `ops.where(keep > 0, 0.0, BIAS)` evaluated in
+            # `mask_dtype(...)` (>= float32). Under `mixed_float16` the form here is
+            # `0 * -inf = NaN` at every UNMASKED position — the exact hazard documented at
+            # `common.MASK_BIAS_VALUE`. Swapping in the shared constant would NOT fix that
+            # (the form, not the value, is the bug) and changing the form IS a numerics
+            # change, which this behavior-preserving pass forbids. Flagged for a follow-up.
             additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
             scaled_attention_logits = scaled_attention_logits + additive_mask
 

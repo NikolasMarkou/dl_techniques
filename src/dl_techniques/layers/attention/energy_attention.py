@@ -16,7 +16,6 @@ autodiff oracle test ``test_gradient_oracle`` in
 """
 
 import keras
-import math
 from keras import ops, initializers
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -26,46 +25,43 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 
-# ---------------------------------------------------------------------
-
-# DECISION plan_2026-07-13_57c9833e/D-009
-# `-1e9` is NOT a dtype-independent "finite" number: `np.float16(-1e9) == -inf`. This
-# constant is therefore ONLY usable inside a float32 computation, and this module now
-# guarantees that by CONSTRUCTION — see `_MASK_COMPUTE_DTYPE` and `_project()` below, where
-# the whole logits -> bias -> softmax/logsumexp chain runs in float32 and is cast back to
-# the compute dtype at the end.
+# DECISION plan-2026-07-27T130643-38c5646a/D-007
+# These three names are a PUBLISHED PRIVATE CONTRACT, not local implementation detail.
+# `layers/transformers/energy_transformer.py:91` does
+# `from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_keep`
+# — a plain by-name `from ... import`, verified at `energy_transformer.py:88-91`.
 #
-# WHAT NOT TO DO (this bug SHIPPED once and was caught by an adversarial reviewer, and
-# LESSONS [I:4] had already recorded the identical failure mode in a different layer):
-#   * Do NOT apply this bias directly in the compute dtype. Under
-#     `mixed_precision.set_global_policy('mixed_float16')` it becomes `-inf`.
-#   * Do NOT restore the arithmetic form `mask_bias = (1 - keep) * _MASK_BIAS_VALUE`. At
-#     every UNMASKED position that is `0 * -inf = NaN` — which made EnergyAttention and
-#     EnergyTransformer emit 512/512 NaN under mixed_float16 with NO mask supplied. It is
-#     replaced by `ops.where(keep > 0, 0.0, _MASK_BIAS_VALUE)`, which CANNOT produce
-#     `0 * inf` at all: the failure mode is removed structurally, not merely numerically.
-#   * Do NOT "simplify" this into a per-dtype magic constant (e.g. `finfo(dtype).min / 2`).
-#     A dtype-dependent constant is a second thing to get wrong, and fp16's usable range is
-#     too narrow to both zero a softmax AND keep comfortable headroom.
-# See decisions.md D-009.
-_MASK_BIAS_VALUE = -1e9
+# WHAT NOT TO DO:
+#   * Do NOT delete `_MASK_BIAS_VALUE` / `_mask_dtype` from this module's namespace just
+#     because their bodies now live in `common.py`. `energy_transformer.py` imports two of
+#     them BY NAME and, until this plan's step 9 lands its guard test, NOTHING in the test
+#     suite fails when they vanish — `EnergyTransformer` simply stops importing, taking
+#     every ET model and trainer with it.
+#   * Do NOT "clean up" the aliasing by rewriting the import in `energy_transformer.py`:
+#     that file is outside this plan's scope, and the alias is the cheaper contract.
+#   * Do NOT re-point `_token_keep` at `common.py` — it was never extracted. It encodes
+#     the rank-2 `(B, N)` Keras-mask contract that is specific to the Energy Transformer
+#     family, not a generic attention primitive, and it stays DEFINED here (below).
+# See decisions.md D-007 (this plan) and D-002 (why the bodies moved to `common.py`).
+#
+# DECISION plan_2026-07-13_57c9833e/D-009 (preserved — many docstrings in this file say
+# "see the D-009 anchor at ``_MASK_BIAS_VALUE``" and this is that anchor).
+# `-1e9` is NOT a dtype-independent "finite" number: `np.float16(-1e9) == -inf`. It is
+# usable ONLY inside a float32-or-wider computation, which this module guarantees BY
+# CONSTRUCTION: the whole logits -> bias -> softmax/logsumexp chain runs in
+# `_mask_dtype(self.compute_dtype)` and is cast back to the compute dtype at the end.
+# The three standing prohibitions — never apply the bias in the compute dtype, never use
+# the arithmetic form `(1 - keep) * _MASK_BIAS_VALUE` (that is `0 * -inf = NaN` at every
+# UNMASKED position; use `ops.where(keep > 0, 0.0, _MASK_BIAS_VALUE)`), and never
+# "simplify" to a per-dtype magic constant — are stated in full at the definition site,
+# `common.py`'s `MASK_BIAS_VALUE`. See decisions.md D-009.
+from dl_techniques.layers.attention.common import (
+    MASK_BIAS_VALUE as _MASK_BIAS_VALUE,
+    mask_dtype as _mask_dtype,
+    compute_attention_scale as _compute_attention_scale,
+)
 
-
-def _mask_dtype(compute_dtype: str) -> str:
-    """Dtype in which the masked-softmax / logsumexp chain is evaluated.
-
-    Always AT LEAST float32, regardless of the global mixed-precision policy, so that
-    ``_MASK_BIAS_VALUE`` is finite by construction (D-009) and so the ``logsumexp`` is not
-    evaluated in fp16. A ``float64`` policy is honored rather than silently downcast.
-
-    :param compute_dtype: The layer's compute dtype (e.g. ``'float16'`` under
-        ``mixed_float16``).
-    :type compute_dtype: str
-
-    :return: ``'float64'`` if the layer already computes in float64, else ``'float32'``.
-    :rtype: str
-    """
-    return "float64" if compute_dtype == "float64" else "float32"
+# ---------------------------------------------------------------------
 
 
 def _token_keep(
@@ -141,6 +137,42 @@ class EnergyAttention(keras.layers.Layer):
     closed-form negative gradient, so that an :class:`EnergyTransformer` block can perform
     *provable gradient descent* on ``E_ATT + E_HN`` instead of running an opaque
     ``attn -> FFN`` residual stream.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input g: (B, N, D)
+               |
+               +-----------------------------+
+               |                             |
+               v                             v
+        w_key (Y,H,D)                 w_query (Y,H,D)
+        einsum -> K: (B,Y,H,N)        einsum -> Q: (B,Y,H,N)
+               |                             |
+               +--------------+--------------+
+                              v
+                    A = sum_y K*Q : (B,H,N,N)     # n = KEY, m = QUERY
+                              |
+                              v
+                    keep mask (B,1,N,N)           # diagonal dropped when
+                    additive bias -1e9            # attn_self=False; PAD tokens
+                    in mask_dtype (>= f32)        # dropped in BOTH roles
+                              |
+              +---------------+----------------+
+              |                                |
+              v                                v
+        E_ATT = -(1/beta) *              omega = softmax_n(beta * A)
+          sum_h,m logsumexp_n(beta*A)          : (B,H,N,N)
+              |                                |
+              v                                v
+        energy(g) -> (B,)                update(g) = -dE/dg
+                                          = einsum(w_query, K, omega)
+                                          + einsum(w_key,   Q, omega)
+                                          -> (B, N, D)   == call(g)
+
+        NOTE: no value matrix and no output projection exist. `call()` returns a
+        DESCENT DIRECTION, so a consumer ADDS `step_size * call(g)` to `g`.
 
     **Mathematics** (notation: ``B``=batch, ``N``=tokens, ``D``=``dim``, ``Y``=``head_dim``,
     ``H``=``num_heads``; ``n`` indexes a token in its **KEY** role, ``m`` in its **QUERY**
@@ -271,9 +303,13 @@ class EnergyAttention(keras.layers.Layer):
 
         # ----- resolved (non-config) derived values -----
         self._head_dim = int(resolved_head_dim)
+        # `_compute_attention_scale` is `1.0 / math.sqrt(float(head_dim))` — byte-identical
+        # to the expression it replaces. Called HERE, in `__init__`, never in `call()`:
+        # `self._beta` must stay a Python float so it folds into the traced graph as a
+        # constant (anchor `plan_2026-06-14_33b77a7a/D-002`).
         self._beta = (
             float(beta) if beta is not None
-            else 1.0 / math.sqrt(float(self._head_dim))
+            else _compute_attention_scale(self._head_dim)
         )
 
         # ----- weights are created in build() -----

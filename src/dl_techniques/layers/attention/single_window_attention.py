@@ -526,6 +526,16 @@ class SingleWindowAttention(keras.layers.Layer):
             )
             attn = attn + keras.ops.expand_dims(relative_position_bias, 0)
 
+        # R13 cross-reference: this mask site DELIBERATELY does not adopt
+        # `common.MASK_BIAS_VALUE` / `common.mask_dtype`. The sibling implementation in
+        # `energy_attention.py` (`_build_keep_mask` / `_project`) materializes the bias in
+        # `mask_dtype(compute_dtype)` (>= float32) via `ops.where(keep > 0, 0.0, BIAS)`;
+        # this one materializes it in `attn.dtype` via the arithmetic form
+        # `(1 - keep) * -1e9`. The two differ in BOTH dtype and op form, so swapping in the
+        # shared constant here would change fp16 behavior (`0 * -inf = NaN`), not just the
+        # spelling. Unifying them is a numerics change and is out of scope for this
+        # behavior-preserving pass; note that the `clip(attn, -30, 30)` two lines below
+        # currently masks the fp16 hazard. Flagged for a follow-up.
         broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
         inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
         additive_mask = (

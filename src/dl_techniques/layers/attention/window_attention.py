@@ -692,6 +692,23 @@ Available Factories:
 
 - `create_adaptive_softmax_window_attention`:
     Window attention with adaptive temperature softmax for better calibration.
+
+Public vs. internal surface:
+----------------------------
+Only the first TWO are public. `create_grid_window_attention` and
+`create_zigzag_window_attention` back the `'window'` and `'window_zigzag'` keys in
+`attention/factory.py` — the factory dispatches through these wrappers, NOT through the
+`WindowAttention` class directly, because each key carries a different
+`use_relative_position_bias` default that the class itself does not encode.
+
+`create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are
+INTENTIONALLY NOT public: they are neither exported from `attention/__init__.py` nor
+registered in `factory.py`, and their only callers in the repository are
+`tests/test_layers/test_attention/test_window_attention.py`. They exist as convenience
+constructors for the `attention_mode='kan_key'` and `probability_type='adaptive'`
+configurations. Do NOT register them in `factory.py` to "fix the inconsistency" — the
+registry surface is frozen, and adding keys changes the public API. Either configuration
+is reachable today by passing those kwargs to `WindowAttention` directly.
 """
 
 # ---------------------------------------------------------------------
@@ -782,6 +799,11 @@ def create_kan_key_window_attention(
     """
     Creates a window attention layer with a non-linear KAN Key projection.
 
+    **Intentionally non-public**: not exported from ``attention/__init__.py`` and not
+    registered in ``attention/factory.py``. Its only callers are in
+    ``tests/test_layers/test_attention/test_window_attention.py``. See the module-level
+    "Public vs. internal surface" note above.
+
     This factory configures `WindowAttention` to use a `KANLinear` layer for
     projecting the Key tensor. This allows for more expressive similarity
     matching compared to a standard linear projection.
@@ -823,6 +845,11 @@ def create_adaptive_softmax_window_attention(
 ) -> WindowAttention:
     """
     Creates a window attention layer with adaptive temperature softmax.
+
+    **Intentionally non-public**: not exported from ``attention/__init__.py`` and not
+    registered in ``attention/factory.py``. Its only callers are in
+    ``tests/test_layers/test_attention/test_window_attention.py``. See the module-level
+    "Public vs. internal surface" note above.
 
     This factory configures `WindowAttention` to use `AdaptiveTemperatureSoftmax`
     for normalization. This can improve model calibration and performance by
