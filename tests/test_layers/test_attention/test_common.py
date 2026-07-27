@@ -354,6 +354,211 @@ class TestApplyAttentionMaskDoesNoPolarityInference:
         np.testing.assert_allclose(out, ref, rtol=1e-6, atol=1e-6)
 
 
+class TestApplyAttentionMaskRescueAxis:
+    """The opt-in fully-masked-row rescue (step 4b, decisions.md D-008).
+
+    ``rescue_axis`` hoists into this helper the predicate-level rescue that
+    ``capsule_routing_attention.py`` used to own alone (D-006): a slice of ``keep``
+    that keeps NOTHING is treated as keeping EVERYTHING, so an all-``MASK_BIAS_VALUE``
+    row — ``-inf`` in fp16, hence ``softmax(all -inf) = 0/0 = NaN`` — is never FORMED.
+
+    Two properties matter as much as the rescue itself and are asserted here:
+
+    *   it is **opt-in**: ``rescue_axis=None`` (the default) must be byte-identical to
+        the pre-4b behavior, so no un-migrated call site changes silently;
+    *   the axis is **honored, not hardcoded** — ``test_a_non_last_rescue_axis_is_honored``
+        rescues along ``-2`` and would pass just as happily if the implementation
+        ignored the argument and always used ``-1``... which is exactly why it asserts
+        the ``-1`` answer is DIFFERENT.
+    """
+
+    @staticmethod
+    def _keep_with_a_dead_row():
+        """``(B, 1, N, N)`` float32 keep mask whose query row 0 keeps nothing."""
+        keep_np = np.ones((_B, 1, _N, _N), dtype="float32")
+        keep_np[:, :, 0, :] = 0.0
+        return keep_np
+
+    def test_the_default_does_not_rescue(self, dtype_policy):
+        """Opt-in, part 1: without ``rescue_axis`` the dead row is still fully biased."""
+        logits, logits_f32 = _as_compute(_logits(seed=11))
+        keep_np = self._keep_with_a_dead_row()
+        keep = ops.convert_to_tensor(keep_np)
+
+        out = ops.convert_to_numpy(apply_attention_mask(logits, keep)).astype("float32")
+
+        dead = out[:, :, 0, :]
+        expected = np.broadcast_to(
+            logits_f32[:, :, 0, :] + MASK_BIAS_VALUE, dead.shape
+        )
+        np.testing.assert_allclose(dead, expected, rtol=1e-6, atol=1e-6)
+
+    def test_the_default_is_byte_identical_to_the_explicit_no_rescue(self, dtype_policy):
+        """Opt-in, part 2: ``None`` is not merely 'close to' the old behavior."""
+        logits, _ = _as_compute(_logits(seed=12))
+        keep = ops.convert_to_tensor(self._keep_with_a_dead_row())
+
+        default = ops.convert_to_numpy(apply_attention_mask(logits, keep))
+        explicit = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=None)
+        )
+        np.testing.assert_array_equal(default, explicit)
+
+    def test_a_rescued_row_receives_no_bias_at_all(self, dtype_policy):
+        logits, logits_f32 = _as_compute(_logits(seed=13))
+        keep = ops.convert_to_tensor(self._keep_with_a_dead_row())
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        ).astype("float32")
+
+        assert np.all(np.isfinite(out)), (
+            f"{(~np.isfinite(out)).sum()}/{out.size} non-finite entries under "
+            f"{dtype_policy!r} — the rescue did not run"
+        )
+        np.testing.assert_allclose(
+            out[:, :, 0, :],
+            np.broadcast_to(logits_f32[:, :, 0, :], out[:, :, 0, :].shape),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_a_rescued_row_softmaxes_finitely_in_every_dtype(self, dtype_policy):
+        """The whole point: this is the assertion that is NaN without the rescue."""
+        logits, _ = _as_compute(_logits(seed=14))
+        keep = ops.convert_to_tensor(self._keep_with_a_dead_row())
+
+        probs = ops.convert_to_numpy(
+            ops.softmax(
+                apply_attention_mask(
+                    logits,
+                    keep,
+                    out_dtype=_compute_dtype(),      # the UNSAFE cast-back, on purpose
+                    rescue_axis=-1,
+                ),
+                axis=-1,
+            )
+        ).astype("float32")
+
+        assert np.all(np.isfinite(probs)), (
+            f"{(~np.isfinite(probs)).sum()} non-finite softmax entries for a "
+            f"fully-masked row under {dtype_policy!r}, WITH the rescue and the "
+            "compute-dtype cast-back that every batch-A site uses"
+        )
+        np.testing.assert_allclose(
+            probs[:, :, 0, :].sum(axis=-1), 1.0, rtol=1e-3, atol=1e-3
+        )
+
+    def test_rows_that_keep_something_are_untouched_by_the_rescue(self, dtype_policy):
+        """The rescue must be invisible to every non-degenerate row (bit-exact)."""
+        logits, _ = _as_compute(_logits(seed=15))
+        causal = np.tril(np.ones((_N, _N), dtype="float32"))[None, None, :, :]
+        keep = ops.convert_to_tensor(causal)     # row 0 keeps exactly one key: alive
+
+        without = ops.convert_to_numpy(apply_attention_mask(logits, keep))
+        with_rescue = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        )
+        np.testing.assert_array_equal(without, with_rescue)
+
+    def test_a_non_last_rescue_axis_is_honored(self, dtype_policy):
+        """The axis is caller-supplied, not inferred — proved by using a different one.
+
+        ``keep`` here has a dead COLUMN (key 0 kept by no query) and a dead ROW
+        (query 0 keeps no key). ``rescue_axis=-1`` must revive the row and leave the
+        column masked; ``rescue_axis=-2`` must do the opposite. An implementation
+        that ignored the argument would make these two identical.
+        """
+        logits, logits_f32 = _as_compute(_logits(seed=16))
+        keep_np = np.ones((_B, 1, _N, _N), dtype="float32")
+        keep_np[:, :, 0, :] = 0.0                 # dead query row
+        keep_np[:, :, :, 1] = 0.0                 # dead key column
+        keep = ops.convert_to_tensor(keep_np)
+
+        by_row = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        ).astype("float32")
+        by_col = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-2)
+        ).astype("float32")
+
+        # Row rescue: query row 0 is unbiased everywhere.
+        np.testing.assert_allclose(
+            by_row[:, :, 0, :],
+            np.broadcast_to(logits_f32[:, :, 0, :], by_row[:, :, 0, :].shape),
+            rtol=0, atol=0,
+        )
+        # ... while the dead column stays masked for every OTHER query.
+        assert np.all(by_row[:, :, 1:, 1] < MASK_BIAS_VALUE / 2.0)
+
+        # Column rescue: the mirror image.
+        np.testing.assert_allclose(
+            by_col[:, :, :, 1],
+            np.broadcast_to(logits_f32[:, :, :, 1], by_col[:, :, :, 1].shape),
+            rtol=0, atol=0,
+        )
+        assert np.all(by_col[:, :, 0, 2:] < MASK_BIAS_VALUE / 2.0)
+
+        assert not np.allclose(by_row, by_col), (
+            "anti-vacuity FAILED: rescue_axis=-1 and rescue_axis=-2 gave the same "
+            "answer, so this test cannot tell whether the axis is honored at all"
+        )
+
+    def test_the_rescue_operates_on_keeps_own_shape_before_broadcasting(
+        self, dtype_policy
+    ):
+        """A rank-4 ``(B, 1, 1, N)`` key mask that keeps nothing revives entirely."""
+        logits, logits_f32 = _as_compute(_logits(seed=17))
+        keep = ops.zeros((_B, 1, 1, _N), dtype="float32")
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        ).astype("float32")
+
+        np.testing.assert_allclose(out, logits_f32, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("keep_dtype", ["bool", "int32", "float32"])
+    def test_the_rescue_accepts_every_keep_dtype(self, dtype_policy, keep_dtype):
+        logits, logits_f32 = _as_compute(_logits(seed=18))
+        keep_np = self._keep_with_a_dead_row()
+        keep = ops.convert_to_tensor(keep_np.astype(keep_dtype))
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        ).astype("float32")
+
+        np.testing.assert_allclose(
+            out[:, :, 0, :],
+            np.broadcast_to(logits_f32[:, :, 0, :], out[:, :, 0, :].shape),
+            rtol=0, atol=0,
+        )
+
+    def test_the_rescue_is_graph_safe_under_tf_function_and_jit(self, dtype_policy):
+        """A rescue that only works eagerly is not a fix.
+
+        The rescue must contain NO data-dependent Python branch. This traces it under
+        ``tf.function`` with ``jit_compile=True`` and requires the compiled answer to
+        match the eager one exactly.
+        """
+        import tensorflow as tf
+
+        logits, _ = _as_compute(_logits(seed=19))
+        keep = ops.convert_to_tensor(self._keep_with_a_dead_row())
+
+        eager = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        ).astype("float32")
+
+        @tf.function(jit_compile=True)
+        def traced(x, k):
+            return apply_attention_mask(x, k, rescue_axis=-1)
+
+        compiled = ops.convert_to_numpy(traced(logits, keep)).astype("float32")
+
+        assert np.all(np.isfinite(compiled))
+        np.testing.assert_allclose(compiled, eager, rtol=1e-6, atol=1e-6)
+
+
 # ---------------------------------------------------------------------
 # The two pre-existing exports — regression cover only (they had no test file).
 # ---------------------------------------------------------------------

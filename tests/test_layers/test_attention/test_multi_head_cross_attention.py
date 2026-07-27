@@ -994,18 +994,21 @@ if __name__ == "__main__":
 # inside `common.mask_dtype(...)` (>= float32), so `0 * -inf` cannot be formed at
 # all. Each site keeps its own broadcast/cast order and its own polarity spelling.
 #
-# WHAT THIS FIX DOES **NOT** COVER (assumption A2, measured at step 4): a FULLY-MASKED
-# query row. The biased logits are cast back to the compute dtype at this site, so in
-# fp16 an all-masked row is all-`-inf` again and `softmax(all -inf)` is `0/0 = NaN`.
-# Casting back is not the problem and `out_dtype=None` would not help: the softmax
-# here is `self.attn_prob`, a Keras layer with autocasting ON, which drags a float32
-# tensor straight back to float16 (pinned by
+# FULLY-MASKED QUERY ROW (assumption A2 — FALSIFIED at step 4, remedied at step 4b).
+# A query row that keeps NOTHING used to make every logit in that row
+# `MASK_BIAS_VALUE`, which is `-inf` in float16, so `softmax(all -inf)` was `0/0 = NaN`
+# and the row lost its own output (measured at step 4: 128/128 in the degenerate row,
+# 0/8064 elsewhere — contained, but lost). Casting back was never the problem and
+# `out_dtype=None` would not have helped: the softmax here is `self.attn_prob`, a Keras
+# layer with autocasting ON, which drags a float32 tensor straight back to float16
+# (pinned by
 # `TestMultiHeadCrossAttentionMaskHazardIsReal::test_the_probability_sublayer_autocasts_a_float32_input`).
-# Removing that failure mode needs the predicate-level rescue used in
-# `capsule_routing_attention.py` (D-006), which is a SEMANTICS change on a degenerate
-# input and is deliberately not part of this step. What IS guaranteed, and asserted
-# below, is that the damage no longer spreads: every row that keeps >= 1 key stays
-# finite. Before the fix, one degenerate row NaN'd all 8192 outputs.
+# Step 4b therefore HOISTED `capsule_routing_attention.py`'s predicate-level rescue
+# (D-006) into the shared helper as the opt-in `rescue_axis=` argument, and this site
+# passes `rescue_axis=-1`: a row that keeps nothing is treated as keeping EVERYTHING, so
+# no all-`-inf` row is ever FORMED and the answer is finite and identical in every
+# dtype. ACCEPTED COST (user ruling, decisions.md D-008): a caller whose mask is wrong
+# now gets finite garbage instead of a loud NaN.
 #
 # ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not transfer:
 # this hazard is a per-ELEMENT dtype overflow of a constant multiplied by an exact
@@ -1245,52 +1248,70 @@ class TestMultiHeadCrossAttentionMixedPrecisionMask:
 
 
 class TestMultiHeadCrossAttentionFullyMaskedRow:
-    """Assumption A2 at this site, as an executable statement of what is guaranteed.
+    """Step 4b: a fully-masked query row is RESCUED, not merely contained.
 
-    A2 predicted that casting the biased logits back to the compute dtype is safe
-    here because every softmax row keeps at least one position. A caller CAN break
-    that by masking a whole query row, so the boundary is measured rather than
-    assumed. What this step guarantees — and what is asserted — is CONTAINMENT: rows
-    that keep >= 1 key stay finite even when a sibling row is degenerate. Before the
-    fix, one degenerate row made all 8192 outputs NaN.
+    Assumption A2 predicted that casting the biased logits back to the compute dtype
+    is safe here because every softmax row keeps at least one position. A caller CAN
+    break that by masking a whole query row, and step 4 MEASURED that it does: under
+    `mixed_float16` the degenerate row NaN'd its own 128 outputs (containment held —
+    0/8064 elsewhere — but the row itself was lost). Step 4b removes that boundary at
+    the source by passing `rescue_axis=-1` to `common.apply_attention_mask`: a row
+    that keeps NOTHING is treated as keeping EVERYTHING, so the all-`-inf` row is
+    never FORMED and no NaN gradient is created either.
 
-    The degenerate row's own value is deliberately NOT compared against the float32
-    control: in float32/float64 it is a uniform, meaningless distribution over all
-    keys (garbage in, garbage out), and its numeric value is genuinely dtype-
-    dependent. Fixing it needs the predicate-level rescue of
-    `capsule_routing_attention.py` (decisions.md D-006), which is a semantics change
-    outside this step.
+    Both tests below were observed FAILING on the step-4 code before the fix landed.
     """
 
-    def test_a_fully_masked_row_does_not_poison_the_rest_of_the_batch(
-        self, dtype_policy
-    ):
+    def test_a_fully_masked_row_is_finite_and_matches_float32(self, dtype_policy):
 
         layer = _mp_layer()
         out = _mp_forward(layer, _mp_input(), _mp_mask("degenerate"))
 
-        kept = np.delete(out, _MP_DEG_ROW, axis=1)
-        n_bad = int((~np.isfinite(kept)).sum())
+        n_bad = int((~np.isfinite(out)).sum())
         assert n_bad == 0, (
-            f"{n_bad}/{kept.size} non-finite entries in the rows that KEEP keys, "
-            f"under policy {dtype_policy!r} — a single degenerate query row is "
-            "still poisoning the whole batch"
+            f"{n_bad}/{out.size} non-finite output entries for a mask with a "
+            f"FULLY-MASKED query row, under policy {dtype_policy!r} — the "
+            "`rescue_axis=-1` rescue is not reaching this site"
         )
 
-        reference = np.delete(_float32_reference("degenerate"), _MP_DEG_ROW, axis=1)
+        reference = _float32_reference("degenerate")
         atol = _MP_ATOL[dtype_policy]
-        max_dev = float(np.abs(kept - reference).max())
+        max_dev = float(np.abs(out - reference).max())
         assert max_dev <= atol, (
-            f"the non-degenerate rows under {dtype_policy!r} deviate from the "
-            f"float32 control by {max_dev:.4g} > {atol:.4g}"
+            f"the degenerate-masked forward under {dtype_policy!r} deviates from the "
+            f"float32 control by {max_dev:.4g} > {atol:.4g} — this compares the WHOLE "
+            "output, including the rescued row"
         )
 
-        if dtype_policy != "mixed_float16":
-            assert np.isfinite(out[:, _MP_DEG_ROW]).all(), (
-                f"the fully-masked query row is not finite under {dtype_policy!r}, "
-                "where MASK_BIAS_VALUE is representable — that is a regression, not "
-                "the known fp16 boundary"
-            )
+    def test_the_rescued_row_behaves_as_if_it_kept_everything(self, dtype_policy):
+        """The rescue's SEMANTICS, not merely its finiteness.
+
+        The ``'degenerate'`` mask is all-ones except for query row ``_MP_DEG_ROW``,
+        which is blanked. "A row that keeps nothing is treated as keeping everything"
+        therefore makes it EQUIVALENT to the ``'all_ones'`` mask. That equivalence is
+        the convention this step chose — over zeroing the row, or a sentinel — so it
+        is asserted directly rather than inferred from a finiteness check.
+
+        ANTI-VACUITY: on the pre-4b code this assertion fails in **float32** too (the
+        degenerate row was a uniform average over all keys, not `softmax(unmasked
+        logits)`), so it can tell the two conventions apart and is not a restatement
+        of the finiteness test above.
+        """
+
+        degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
+        all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
+
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(degenerate - all_ones).max())
+        assert max_dev <= atol, (
+            f"under {dtype_policy!r} the 'degenerate' mask does not behave like the "
+            f"'all_ones' mask: max deviation {max_dev:.4g} > {atol:.4g}. A query row "
+            "that keeps nothing must be treated as keeping everything."
+        )
+        assert float(np.abs(all_ones).max()) > 0.0, (
+            "anti-vacuity FAILED: the all-ones-masked output is identically zero, so "
+            "the comparison above could not distinguish anything"
+        )
 
 
 class TestMultiHeadCrossAttentionMaskPolarity:

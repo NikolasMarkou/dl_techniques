@@ -631,12 +631,28 @@ class GroupedQueryAttention(keras.layers.Layer):
         #     silently undone and all that remains is a wider, slower add. Pinned by
         #     `TestGroupedQueryAttentionMaskHazardIsReal::
         #     test_the_probability_sublayer_autocasts_a_float32_input`.
-        #   * Rescuing a fully-masked row needs the PREDICATE-level fix used in
-        #     `capsule_routing_attention.py` (decisions.md D-006); it changes
-        #     semantics for that degenerate input and is not applied here.
+        #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
+        #     touch. It is handled by `rescue_axis=-1` below, not here.
         # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-008
+        # `rescue_axis=-1` (added at step 4b) IS the fully-masked-row fix, and it supersedes
+        # the "not applied here" note above: a query row that keeps NOTHING is treated as
+        # keeping EVERYTHING, so the all-`-inf` row is never FORMED and no NaN gradient is
+        # created either. `-1` is the KEY axis of THIS site's already-broadcast mask, passed
+        # explicitly because the helper never infers it (inferring an axis is the same class
+        # of silent mistake as inferring polarity).
+        #
+        # WHAT NOT TO DO: do NOT drop this argument to "get the loud NaN back" — the user
+        # ruled the finite-garbage semantics package-wide on 2026-07-28, and dropping it also
+        # restores the NaN GRADIENT on that row; do NOT move the rescue after the softmax
+        # (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward pass).
+        # The full argument lives at the D-008 anchor in `common.py`.
+        # See decisions.md D-008 (plan-2026-07-27T183600-b4ef45f0).
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
-        return apply_attention_mask(scores, mask, out_dtype=scores_dtype)
+        return apply_attention_mask(
+            scores, mask, out_dtype=scores_dtype, rescue_axis=-1
+        )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape, same as input shape.
