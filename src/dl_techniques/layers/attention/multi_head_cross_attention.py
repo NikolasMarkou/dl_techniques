@@ -60,7 +60,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale, validate_head_divisibility
+from .common import apply_attention_mask, compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -463,14 +463,6 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # A single implementation must pick one cast order, one rank probe and one
         # head-axis strategy, silently changing the other two call sites.
         #
-        # KNOWN DEFECT, deliberately left as-is here (out of scope for a
-        # behavior-preserving pass): the additive form below is
-        # `(1 - mask) * -1e9`, the exact arithmetic that `common.MASK_BIAS_VALUE`
-        # warns against — under `mixed_float16` `-1e9` becomes `-inf` and every
-        # UNMASKED position evaluates `0 * -inf = NaN`. The structurally safe form
-        # is `ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)` evaluated in
-        # `common.mask_dtype(...)`. Fixing it changes numerics under fp16, so it
-        # belongs to a follow-up plan, not to this one.
         attention_mask = ops.cast(attention_mask, scores.dtype)
 
         # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)
@@ -479,9 +471,38 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         elif len(attention_mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
             attention_mask = ops.expand_dims(attention_mask, 1)  # (batch, 1, query_seq, kv_seq)
 
-        # Apply mask: set masked positions to large negative value
-        mask_value = -1e9
-        return scores + (1.0 - attention_mask) * mask_value
+        # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
+        # `1 = keep` predicate (already cast to the scores dtype above, on its own
+        # untouched line), so it IS the keep predicate `apply_attention_mask` wants.
+        # Do NOT "normalize" it into a `> 0` comparison or invert it — the helper
+        # performs no polarity inference by design, so an inversion here raises
+        # nothing, changes no shape and stays finite; the layer would just attend to
+        # the padding. `TestMultiHeadCrossAttentionMaskPolarity` is the only guard
+        # that can see it.
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores return
+        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
+        # is `-inf` again. That is deliberate and is NOT the bug being fixed:
+        #   * The bug is `0 * -inf = NaN` at every UNMASKED position, produced by the
+        #     ARITHMETIC form this line replaces. `ops.where` inside `mask_dtype(...)`
+        #     removes that product structurally, and a row keeping >= 1 key softmaxes
+        #     correctly with `-inf` entries. MEASURED on unfixed HEAD
+        #     (B=2, N=64, D=64, H=4): an ALL-ONES mask — masking NOTHING — gave
+        #     8192/8192 NaN.
+        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
+        #     also rescue a FULLY-MASKED query row. It cannot: the next consumer is
+        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
+        #     float32 input inside its own `call()` as float16 — the promotion is
+        #     silently undone and all that remains is a wider, slower add. Pinned by
+        #     `TestMultiHeadCrossAttentionMaskHazardIsReal::
+        #     test_the_probability_sublayer_autocasts_a_float32_input`.
+        #   * Rescuing a fully-masked row needs the PREDICATE-level fix used in
+        #     `capsule_routing_attention.py` (decisions.md D-006); it changes
+        #     semantics for that degenerate input and is not applied here.
+        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        scores_dtype = keras.backend.standardize_dtype(scores.dtype)
+        return apply_attention_mask(scores, attention_mask, out_dtype=scores_dtype)
 
     def call(
             self,

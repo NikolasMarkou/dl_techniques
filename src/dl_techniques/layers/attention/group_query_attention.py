@@ -50,7 +50,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import compute_attention_scale, validate_head_divisibility
+from .common import apply_attention_mask, compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 from ..norms.factory import create_normalization_layer
@@ -594,11 +594,6 @@ class GroupedQueryAttention(keras.layers.Layer):
         # cast order, one rank probe, and either broadcast or repeat — silently
         # rewriting the traced graph of the two layers it did not come from.
         #
-        # KNOWN DEFECT, out of scope for this behavior-preserving pass: the additive
-        # form below is `(1 - mask) * -1e9`, which `common.MASK_BIAS_VALUE` warns
-        # against — under `mixed_float16` `-1e9` is `-inf` and unmasked positions
-        # evaluate `0 * -inf = NaN`. Safe form: `ops.where(mask > 0, 0.0,
-        # MASK_BIAS_VALUE)` inside `common.mask_dtype(...)`. Follow-up plan.
         mask_shape = ops.shape(mask)
 
         # Handle 2D padding mask (B, S)
@@ -612,8 +607,36 @@ class GroupedQueryAttention(keras.layers.Layer):
         if len(ops.shape(mask)) == 4 and ops.shape(mask)[1] == 1:
             mask = ops.repeat(mask, self.num_heads, axis=1)
 
-        additive_mask = (1.0 - ops.cast(mask, scores.dtype)) * -1e9
-        return scores + additive_mask
+        # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a `1 = keep`
+        # predicate, so it IS the keep predicate `apply_attention_mask` wants. Do NOT
+        # "normalize" it into a `> 0` comparison or invert it — the helper performs no
+        # polarity inference by design, so an inversion here raises nothing, changes
+        # no shape and stays finite; the layer would just attend to the padding.
+        # `TestGroupedQueryAttentionMaskPolarity` is the only guard that can see it.
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores return
+        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
+        # is `-inf` again. That is deliberate and is NOT the bug being fixed:
+        #   * The bug is `0 * -inf = NaN` at every UNMASKED position, produced by the
+        #     ARITHMETIC form this line replaces. `ops.where` inside `mask_dtype(...)`
+        #     removes that product structurally, and a row keeping >= 1 key softmaxes
+        #     correctly with `-inf` entries. MEASURED on unfixed HEAD
+        #     (B=2, N=64, D=64, H=4, kv=2): an ALL-ONES mask — masking NOTHING — gave
+        #     8192/8192 NaN.
+        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
+        #     also rescue a FULLY-MASKED row. It cannot: the next consumer is
+        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
+        #     float32 input inside its own `call()` as float16 — so the promotion is
+        #     silently undone and all that remains is a wider, slower add. Pinned by
+        #     `TestGroupedQueryAttentionMaskHazardIsReal::
+        #     test_the_probability_sublayer_autocasts_a_float32_input`.
+        #   * Rescuing a fully-masked row needs the PREDICATE-level fix used in
+        #     `capsule_routing_attention.py` (decisions.md D-006); it changes
+        #     semantics for that degenerate input and is not applied here.
+        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        scores_dtype = keras.backend.standardize_dtype(scores.dtype)
+        return apply_attention_mask(scores, mask, out_dtype=scores_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape, same as input shape.

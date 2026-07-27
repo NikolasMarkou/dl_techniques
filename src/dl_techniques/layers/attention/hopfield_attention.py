@@ -103,6 +103,7 @@ from typing import Optional, Tuple, Union, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .common import apply_attention_mask
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -539,37 +540,48 @@ class HopfieldAttention(keras.layers.Layer):
             if len(ops.shape(mask_tensor)) == 3:
                 mask_tensor = ops.expand_dims(mask_tensor, axis=1)
 
-            # Add large negative values to masked positions
+            # Add large negative values to masked positions.
             #
-            # KNOWN DEFECT — fp16 mask NaN (documented in place, deliberately NOT
-            # fixed by this behavior-preserving pass; the fix is a numerics change
-            # and belongs to a follow-up plan).
+            # THIS SITE'S MASK POLARITY, passed through verbatim: `mask_tensor` is a
+            # `1 = keep` predicate (already cast to the scores dtype above, on its own
+            # untouched line), so it IS the keep predicate `apply_attention_mask`
+            # wants. Do NOT "normalize" it into a `> 0` comparison or invert it — the
+            # helper performs no polarity inference by design, so an inversion here
+            # raises nothing, changes no shape and stays finite; the layer would just
+            # attend to the padding. `TestHopfieldAttentionMaskPolarity` is the only
+            # guard that can see it.
             #
-            # This is the ARITHMETIC mask form, the exact shape of the bug that
-            # already shipped once in `energy_attention.py` (see the WHAT-NOT-TO-DO
-            # block on `common.MASK_BIAS_VALUE`). Under
-            # `mixed_precision.set_global_policy('mixed_float16')`,
-            # `mask_tensor` is float16, so `-1e9` is materialized as float16 -inf
-            # (np.float16(-1e9) == -inf). At every UNMASKED position
-            # `(1.0 - mask) == 0`, and `0 * -inf == NaN`.
-            #
-            # Measured, not inferred (2x6x32 input, num_heads=4, key_dim=8, under
-            # mixed_float16):
-            #   * no mask supplied          -> 0/384 NaN   (this branch is skipped)
-            #   * partial 3D mask           -> 384/384 NaN
-            #   * ALL-ONES mask (nothing actually masked) -> 384/384 NaN
-            #   * same partial mask, float32 -> 0/384 NaN
-            # So under mixed precision ANY mask at all — including a vacuous
-            # all-ones one — destroys the whole batch. In float32 the code is
-            # correct.
-            #
-            # THE FIX (for the follow-up plan, do NOT apply here): use the
-            # structurally-safe select form instead of the arithmetic one, i.e.
-            # `ops.where(mask_tensor > 0, attention_scores, MASK_BIAS_VALUE)`
-            # evaluated in `common.mask_dtype(self.compute_dtype)`. `where` cannot
-            # produce a `0 * inf` product at all — the failure mode is removed
-            # structurally rather than numerically.
-            attention_scores = attention_scores + (1.0 - mask_tensor) * -1e9
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+            # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
+            # in the compute dtype (fp16 under `mixed_float16`), where
+            # `MASK_BIAS_VALUE` is `-inf` again. That is deliberate and is NOT the bug
+            # being fixed:
+            #   * The bug was the ARITHMETIC form this line replaces,
+            #     `attention_scores + (1.0 - mask_tensor) * -1e9`. In float16 `-1e9`
+            #     is `-inf` (np.float16(-1e9) == -inf) and `(1.0 - mask) == 0` at every
+            #     UNMASKED position, so the product is `0 * -inf = NaN` — the NaN
+            #     appears where nothing was masked. THIS WAS THE WORST SITE IN THE
+            #     PACKAGE: measured at (B=2, N=64, D=64, H=4, key_dim=16) under
+            #     `mixed_float16`, an ALL-ONES mask — one that masks NOTHING — gave
+            #     8192/8192 NaN, as did the padding and causal masks; float32 gave
+            #     0/8192 in every case. `ops.where` inside `mask_dtype(...)` cannot
+            #     form that product at all, so the failure mode is removed
+            #     structurally rather than numerically.
+            #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
+            #     also rescue a FULLY-MASKED query row. It cannot: the next consumer is
+            #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
+            #     float32 input inside its own `call()` as float16 — the promotion is
+            #     silently undone and all that remains is a wider, slower add. Pinned by
+            #     `TestHopfieldAttentionMaskHazardIsReal::
+            #     test_the_probability_sublayer_autocasts_a_float32_input`.
+            #   * Rescuing a fully-masked row needs the PREDICATE-level fix used in
+            #     `capsule_routing_attention.py` (decisions.md D-006); it changes
+            #     semantics for that degenerate input and is not applied here.
+            # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+            scores_dtype = keras.backend.standardize_dtype(attention_scores.dtype)
+            attention_scores = apply_attention_mask(
+                attention_scores, mask_tensor, out_dtype=scores_dtype
+            )
 
         attention_weights = self.attn_prob(attention_scores, training=training)
 

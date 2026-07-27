@@ -103,7 +103,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.attention.common import compute_attention_scale
+from dl_techniques.layers.attention.common import apply_attention_mask, compute_attention_scale
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from ..activations import ProbabilityOutput, resolve_activation_layer
@@ -607,19 +607,44 @@ class GatedAttention(keras.layers.Layer):
             else:
                 mask = attention_mask  # Assume it's already broadcastable
 
-            # Create additive mask (masked positions get -inf)
+            # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a
+            # `1 = keep` predicate, so it IS the keep predicate that
+            # `apply_attention_mask` wants. Do NOT "normalize" it into a `> 0`
+            # comparison or invert it: the helper performs no polarity inference by
+            # design, so an inversion here would raise nothing, change no shape and
+            # stay perfectly finite — the layer would simply attend to the padding.
+            # `TestGatedAttentionMaskPolarity` is the only guard that can see that.
             #
-            # R13 cross-reference: this site DELIBERATELY does not adopt
-            # `common.MASK_BIAS_VALUE` / `common.mask_dtype`. It uses the arithmetic form
-            # `(1 - keep) * -1e9` evaluated in the LOGITS dtype, whereas the sibling in
-            # `energy_attention.py` uses `ops.where(keep > 0, 0.0, BIAS)` evaluated in
-            # `mask_dtype(...)` (>= float32). Under `mixed_float16` the form here is
-            # `0 * -inf = NaN` at every UNMASKED position — the exact hazard documented at
-            # `common.MASK_BIAS_VALUE`. Swapping in the shared constant would NOT fix that
-            # (the form, not the value, is the bug) and changing the form IS a numerics
-            # change, which this behavior-preserving pass forbids. Flagged for a follow-up.
-            additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
-            scaled_attention_logits = scaled_attention_logits + additive_mask
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+            # `out_dtype` is pinned to the LOGITS' own dtype, i.e. the biased logits
+            # are cast back into the compute dtype (fp16 under `mixed_float16`),
+            # where `MASK_BIAS_VALUE` is `-inf` again. That looks like it throws the
+            # fix away. It does not, and the alternative does not help:
+            #   * The bug being fixed is `0 * -inf = NaN` at every UNMASKED position,
+            #     produced by the ARITHMETIC form this line replaces. `ops.where`
+            #     inside `mask_dtype(...)` removes that product structurally, and a
+            #     row that keeps >= 1 key softmaxes correctly with `-inf` entries.
+            #     MEASURED on unfixed HEAD (B=2, N=64, D=64, H=4): an ALL-ONES mask —
+            #     one that masks NOTHING — gave 8192/8192 NaN.
+            #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping
+            #     to also rescue a FULLY-MASKED row. It cannot: the next consumer is
+            #     `self.attn_prob`, a Keras layer with autocasting ON, which is
+            #     MEASURED to see a float32 input inside its own `call()` as float16.
+            #     The promotion is silently undone at that boundary, and the only
+            #     effect left would be a wider, slower add. Pinned by
+            #     `TestGatedAttentionMaskHazardIsReal::
+            #     test_the_probability_sublayer_autocasts_a_float32_input`.
+            #   * Rescuing a fully-masked row needs the PREDICATE-level fix used in
+            #     `capsule_routing_attention.py` (decisions.md D-006), which changes
+            #     semantics for that degenerate input and is deliberately not applied
+            #     to this production-consumed site here.
+            # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+            logits_dtype = keras.backend.standardize_dtype(
+                scaled_attention_logits.dtype
+            )
+            scaled_attention_logits = apply_attention_mask(
+                scaled_attention_logits, mask, out_dtype=logits_dtype
+            )
 
         # Parameterized attention-probability transform over the key dimension
         attention_weights = self.attn_prob(scaled_attention_logits)
