@@ -58,7 +58,11 @@ from keras import ops, layers, initializers, regularizers
 # Local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale, validate_head_divisibility
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    validate_head_divisibility,
+)
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -90,8 +94,11 @@ class RPCAttention(keras.layers.Layer):
     quantity ``self.scale`` — but it is reachable from user code and from
     subclasses, so renaming it is an API change, not a style fix.
 
-    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
-    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
+    **[REUSE]** The ``dim % num_heads`` check, the ``1 / sqrt(head_dim)``
+    temperature and the additive mask bias
+    (:func:`~dl_techniques.layers.attention.common.apply_attention_mask`, which
+    keeps the masked scores in ``>= float32`` so they can reach ``ops.svd``) all
+    come from :mod:`~dl_techniques.layers.attention.common`; score
     normalization comes from the shared
     :class:`~dl_techniques.layers.activations.ProbabilityOutput`; the optional Q/K
     norms come from
@@ -503,6 +510,12 @@ class RPCAttention(keras.layers.Layer):
         attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
         attention_scores = attention_scores * self.attention_scale
 
+        # The dtype the scores arrive in, captured BEFORE any mask-driven promotion.
+        # This is what the cast-back boundary below restores, which is what makes the
+        # no-mask path a bit-for-bit no-op (`ops.cast` to the dtype a tensor already
+        # has returns the tensor itself).
+        scores_dtype = keras.backend.standardize_dtype(attention_scores.dtype)
+
         # Apply mask if provided
         if mask is not None:
             # Broadcast mask to (batch, num_heads, seq_len, seq_len)
@@ -516,35 +529,62 @@ class RPCAttention(keras.layers.Layer):
             elif len(mask.shape) == 3:
                 mask = ops.expand_dims(mask, axis=1)
 
-            # R13 cross-reference: this site deliberately does NOT adopt
-            # `common.MASK_BIAS_VALUE` / `common.mask_dtype()`. Those two are a PAIR
-            # — the constant is only safe inside the dtype the helper returns —
-            # and adopting only the constant while leaving the cast at
-            # `attention_scores.dtype` would import the name without importing the
-            # guarantee. Adopting BOTH would move the whole PCP loop into float32,
-            # which is a dtype change on the forward path and is forbidden by this
-            # plan's behavior-preserving invariant. Left local, documented instead.
+            # The keep predicate is spelled `mask != 0` because THIS site spells
+            # masking `mask == 0` (every multiply-form sibling instead treats a
+            # `1 = keep` float mask). `apply_attention_mask` performs no polarity
+            # inference by design, so the polarity lives here, in one visible line.
+            # Inverting it would raise nothing, change no shape and stay finite —
+            # the layer would simply attend to the padding. `test_rpc_attention.py::
+            # TestRPCAttentionMaskPolarity` is the only guard that can see that.
             #
-            # KNOWN DEFECT (pre-existing, deliberately NOT fixed here — fixing it is
-            # a numerics change): under `mixed_float16` the compute dtype is fp16 and
-            # `np.float16(-1e9) == -inf`, so this cast yields literal `-inf` scores.
-            # Unlike the `(1 - mask) * -1e9` form catalogued elsewhere in this
-            # package, `ops.where` cannot produce `0 * -inf = NaN` directly — but the
-            # `-inf` entries then flow into `_pcp_decomposition`, whose `ops.svd` is
-            # NaN-poisoned by a single non-finite entry, so the whole masked forward
-            # pass returns NaN under a mixed-precision policy. No test exercises this
-            # layer under `mixed_float16`. Report, do not fix, in this plan.
-            attention_scores = ops.where(
-                mask == 0,
-                ops.cast(-1e9, dtype=attention_scores.dtype),
-                attention_scores
+            # `out_dtype` is deliberately LEFT AT ITS DEFAULT, so the biased scores
+            # stay in `mask_dtype(...)` (>= float32) all the way into the SVD below.
+            # See the D-005 anchor at the cast-back boundary for why that is the
+            # whole point of this site's fix.
+            attention_scores = apply_attention_mask(
+                attention_scores,
+                ops.not_equal(mask, 0),
             )
 
         # Perform PCP decomposition
         L, S = self._pcp_decomposition(attention_scores)
 
-        # Combine low-rank and sparse components
-        robust_attention_scores = L + S
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-005
+        # THE cast-back boundary. The masked score matrix is promoted to float32 by
+        # `apply_attention_mask` above and stays there through `_pcp_decomposition`;
+        # this single line brings it back to the compute dtype, AFTER the SVD and
+        # BEFORE the probability activation.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT move this cast ABOVE `_pcp_decomposition` (i.e. do not pass
+        #     `out_dtype=scores_dtype` to `apply_attention_mask`) to "keep the loop in
+        #     the compute dtype like before". Under `mixed_float16` that re-creates
+        #     `-inf` masked entries, and MEASURED on TF 2.18 + CUDA, `ops.svd` then
+        #     fails outright: `Could not find device for node: Svd[T=DT_HALF]` — the
+        #     op has NO float16 kernel (registered: CPU float/double/complex, GPU
+        #     float/double). Even where a half kernel exists (XLA), a single
+        #     non-finite entry NaN-poisons the entire decomposition. The promotion is
+        #     not a precision nicety; it is what makes a masked forward pass exist at
+        #     all under mixed precision.
+        #   * Do NOT "simplify" this away as redundant with Keras autocasting. It is
+        #     redundant only for the value it produces, not for the invariant it
+        #     states: the boundary is named here so the next reader sees exactly where
+        #     the float32 region ends, instead of discovering it inside
+        #     `ProbabilityOutput.__call__`.
+        #   * Do NOT replace `scores_dtype` with `self.compute_dtype`. `scores_dtype`
+        #     is captured from the tensor itself before masking, which is what makes
+        #     the NO-MASK path provably unchanged: `ops.cast` to a tensor's own dtype
+        #     returns that tensor, so an unmasked forward traces the same graph and
+        #     produces bit-identical output to the pre-fix implementation (verified).
+        #
+        # Known residual, NOT introduced here and deliberately out of scope: a
+        # FULLY-masked query row still becomes all-`-inf` after this cast under fp16,
+        # and its softmax is then NaN. That is the softmax-degenerate-row mechanism
+        # owned by `capsule_routing_attention.py`, not the `-inf`-into-`ops.svd`
+        # mechanism fixed here. Also unchanged: an fp16 forward with NO mask still
+        # hits the missing `Svd[T=DT_HALF]` kernel, because nothing promotes it.
+        # See decisions.md D-005 (plan-2026-07-27T183600-b4ef45f0).
+        robust_attention_scores = ops.cast(L + S, scores_dtype)
 
         # Apply probability activation to get attention weights
         attention_weights = self.attn_prob(robust_attention_scores)
