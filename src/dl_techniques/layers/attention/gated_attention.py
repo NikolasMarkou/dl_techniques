@@ -635,28 +635,31 @@ class GatedAttention(keras.layers.Layer):
             #     `TestGatedAttentionMaskHazardIsReal::
             #     test_the_probability_sublayer_autocasts_a_float32_input`.
             #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
-            #     touch. It is handled by `rescue_axis=-1` below, not here.
+            #     touch. It is handled by the rescue below (D-009), not here.
             # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
             #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-008
-            # `rescue_axis=-1` (added at step 4b) IS the fully-masked-row fix, and it supersedes
-            # the "not applied here" note above: a query row that keeps NOTHING is treated as
-            # keeping EVERYTHING, so the all-`-inf` row is never FORMED and no NaN gradient is
-            # created either. `-1` is the KEY axis of THIS site's already-broadcast mask, passed
-            # explicitly because the helper never infers it (inferring an axis is the same class
-            # of silent mistake as inferring polarity).
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
+            # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
+            # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
+            # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
+            # arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1` — step 4c flipped
+            # the step-4b opt-in default on the user's direction ("I care about correctness, not
+            # backwards compatibility"), so this site no longer spells the argument out. `-1` is
+            # correct here because THIS site's softmax (`self.attn_prob`) reduces over the KEY
+            # axis of the already-broadcast mask — checked, not assumed; a site whose softmax
+            # reduced elsewhere would have to name its axis explicitly.
             #
-            # WHAT NOT TO DO: do NOT drop this argument to "get the loud NaN back" — the user
-            # ruled the finite-garbage semantics package-wide on 2026-07-28, and dropping it also
-            # restores the NaN GRADIENT on that row; do NOT move the rescue after the softmax
-            # (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward pass).
-            # The full argument lives at the D-008 anchor in `common.py`.
-            # See decisions.md D-008 (plan-2026-07-27T183600-b4ef45f0).
+            # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
+            # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
+            # also restores the NaN GRADIENT on that row; do NOT move the rescue after the
+            # softmax (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward
+            # pass). The full argument lives at the D-009 / D-008 anchors in `common.py`.
+            # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
             logits_dtype = keras.backend.standardize_dtype(
                 scaled_attention_logits.dtype
             )
             scaled_attention_logits = apply_attention_mask(
-                scaled_attention_logits, mask, out_dtype=logits_dtype, rescue_axis=-1
+                scaled_attention_logits, mask, out_dtype=logits_dtype
             )
 
         # Parameterized attention-probability transform over the key dimension

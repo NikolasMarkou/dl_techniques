@@ -24,10 +24,10 @@ number you see in a sibling module came from here:
     (``energy_attention.py``) and incorrectly — as the ``0 * -inf = NaN`` arithmetic
     form — in ten others. It takes the **keep predicate itself** as an argument and
     performs NO polarity inference; see its docstring for why that is not negotiable.
-    Its opt-in ``rescue_axis`` argument is the second, separable hazard — a query row
-    that keeps NOTHING — and is likewise **caller-supplied, never inferred**. It
-    defaults to ``None`` (no rescue), so a site that does not ask for it is
-    byte-identical to the pre-``rescue_axis`` behavior.
+    Its ``rescue_axis`` argument addresses the second, separable hazard — a query row
+    that keeps NOTHING. It defaults to ``-1``, so the rescue is **ON by default**;
+    ``rescue_axis=None`` is the explicit opt-OUT, and a non-``-1`` axis must be named
+    explicitly by any site whose softmax reduces elsewhere.
 
 -   ``MASK_BIAS_VALUE`` / ``mask_dtype`` have exactly **ONE** importer:
     ``energy_attention.py``, under the legacy private aliases ``_MASK_BIAS_VALUE`` /
@@ -171,21 +171,14 @@ def mask_dtype(compute_dtype: str) -> str:
 # See decisions.md D-002 (plan-2026-07-27T183600-b4ef45f0) and D-002 at MASK_BIAS_VALUE above.
 #
 # DECISION plan-2026-07-27T183600-b4ef45f0/D-008
-# `rescue_axis` is the package-wide, OPT-IN fully-masked-row rescue. It was hoisted
-# here from `capsule_routing_attention.py` (D-006), which held the only copy, once
-# four more sites needed exactly the same expression.
+# `rescue_axis` is the package-wide fully-masked-row rescue. It was hoisted here from
+# `capsule_routing_attention.py` (D-006), which held the only copy, once four more
+# sites needed exactly the same expression.
 #
 # WHAT NOT TO DO, and why:
-#   * Do NOT let `rescue_axis` default to `-1`, and do NOT "helpfully" infer it from
-#     the rank of `logits`. Which axis a softmax reduces over is a property of the
-#     CALL SITE, not of this function: inferring it is the same class of mistake as
-#     inferring polarity — silent, shape-error-free, and wrong at the first site whose
-#     layout differs. It stays `None` by default so that every un-migrated call site
-#     keeps today's behavior BYTE-IDENTICALLY (the `rescue_axis is None` branch traces
-#     exactly the graph it traced before this parameter existed).
 #   * Do NOT add a SECOND helper for the rescue. That was an explicit STOP tripwire in
 #     this plan's Complexity Budget: the rescue is one `logical_or` on the predicate
-#     that only makes sense in the presence of the bias it guards, and five call sites
+#     that only makes sense in the presence of the bias it guards, and six call sites
 #     copying a two-line expression is the duplication this parameter exists to avoid.
 #   * Do NOT rescue AFTER the softmax with `ops.where(row_keeps_something, w, 0)`. The
 #     forward pass looks clean while the UNSELECTED branch still contributes `0 * NaN`
@@ -194,14 +187,38 @@ def mask_dtype(compute_dtype: str) -> str:
 #   * Do NOT branch on the data (`if ops.any(...)`). The rescue must be graph-safe
 #     under `@tf.function` / jit; the only Python-level branch here is on the static
 #     `rescue_axis` argument, which is known at trace time.
-# See decisions.md D-008 (plan-2026-07-27T183600-b4ef45f0) and D-006 (the local
-# original at capsule_routing_attention.py, now superseded by this parameter).
+#
+# DECISION plan-2026-07-27T183600-b4ef45f0/D-009
+# `rescue_axis` DEFAULTS TO `-1`: the rescue is ON, and `None` is the explicit
+# opt-OUT. This REVERSES the D-008 default. D-008 shipped it as opt-in (`None`)
+# purely so that un-migrated call sites stayed byte-identical; the user ruled on
+# 2026-07-28 that backwards compatibility is not what this package is optimizing for
+# ("I care about correctness"), so the correct behavior is now the one a site gets
+# for free and the NaN-producing behavior is the one it must ask for.
+#
+# WHAT NOT TO DO, and why:
+#   * Do NOT restore `rescue_axis=None` as the default "so nothing changes silently".
+#     That is exactly the hedge that was removed. A row keeping nothing yielding
+#     `softmax(all -inf) = 0/0 = NaN` is not a behavior worth preserving by default,
+#     and every site in this package reduces its softmax over `-1`.
+#   * Do NOT infer the axis from the rank or shape of `logits`. The DEFAULT is a
+#     documented constant, which is a different thing from inference: a site whose
+#     softmax reduces over some other axis MUST pass that axis explicitly, and a site
+#     that wants no rescue MUST pass `None`. Silently guessing per-tensor would be
+#     the same class of shape-error-free mistake as guessing polarity (I2).
+#   * Do NOT read the default as "the caller no longer owns the axis". It does — the
+#     default is only correct because all six current call sites were checked to
+#     softmax over the last axis; see each site's adoption comment.
+# ACCEPTED COST, stated plainly: a caller whose mask is wrong now gets finite garbage
+# instead of a loud NaN, at every site, in every dtype.
+# See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0) and D-006 (the
+# local original at capsule_routing_attention.py, superseded by this parameter).
 def apply_attention_mask(
         logits: Any,
         keep: Any,
         *,
         out_dtype: Optional[str] = None,
-        rescue_axis: Optional[int] = None,
+        rescue_axis: Optional[int] = -1,
 ) -> Any:
     """Add the additive attention-mask bias to ``logits`` in a dtype where it is finite.
 
@@ -210,6 +227,14 @@ def apply_attention_mask(
     logits -> bias -> softmax chain is evaluated in :func:`mask_dtype`, and the bias is
     built with ``ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` is impossible
     **structurally** and not merely by virtue of the dtype.
+
+    **Degenerate-row semantics (the default).** A slice of ``keep`` that keeps NOTHING
+    is treated as keeping EVERYTHING: it receives no bias at all, and its softmax is a
+    finite uniform-ish distribution over every key instead of ``softmax(all -inf) =
+    0/0 = NaN``. This is ON by default (``rescue_axis=-1``); ``rescue_axis=None`` opts
+    OUT and restores the un-rescued, NaN-capable behavior. The accepted cost of the
+    default is stated plainly: a caller whose mask is wrong gets finite garbage rather
+    than a loud NaN.
 
     This function is orthogonal to broadcasting: it does no ``expand_dims``, ``reshape``
     or ``repeat``. Each call site keeps its own (deliberately non-unified) broadcast and
@@ -233,12 +258,21 @@ def apply_attention_mask(
         and nothing but a softmax consumes the result).
     :type out_dtype: Optional[str]
     :param rescue_axis: Axis of ``keep`` along which the downstream softmax reduces
-        (the KEY axis — almost always ``-1``). ``None`` (the default) disables the
-        rescue and reproduces this function's original behavior exactly. When given,
-        a slice of ``keep`` along that axis that keeps NOTHING is treated as keeping
+        (the KEY axis). Defaults to ``-1``, i.e. **the rescue is ON**: a slice of
+        ``keep`` along the last axis that keeps NOTHING is treated as keeping
         EVERYTHING, so an all-``MASK_BIAS_VALUE`` row is never formed and
-        ``softmax(all -inf) = 0/0 = NaN`` becomes structurally impossible. The axis
-        is **caller-supplied and never inferred** — see the D-008 anchor above.
+        ``softmax(all -inf) = 0/0 = NaN`` is structurally impossible.
+
+        Pass ``rescue_axis=None`` to **opt OUT** — the un-rescued behavior, in which a
+        fully-masked row keeps its full ``MASK_BIAS_VALUE`` bias (finite in
+        :func:`mask_dtype`, ``NaN`` after a softmax once cast back to fp16). Opt out
+        only where a wrong mask should be a loud failure rather than finite garbage.
+
+        Pass an explicit axis where the downstream softmax does NOT reduce over the
+        last axis. The default is a documented constant, not an inference: this
+        function never looks at the rank or shape of ``logits`` to pick an axis.
+        See the D-009 anchor above.
+
         Note the rescue is evaluated on ``keep``'s OWN shape, before any broadcast
         against ``logits``, so a rank-2 ``(B, N)`` key mask expanded to ``(B, 1, 1, N)``
         is rescued per batch element, which is what "this mask keeps nothing" means

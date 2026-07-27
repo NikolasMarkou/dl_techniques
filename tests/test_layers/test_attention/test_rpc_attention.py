@@ -379,6 +379,7 @@ class TestRPCAttention:
 _MP_B, _MP_N, _MP_D, _MP_H = 2, 64, 32, 4
 _MP_ITER = 3                     # keep the SVD cost sane; 3 sweeps still call `ops.svd`
 _MP_KEEP = _MP_N // 2            # first half kept, second half masked
+_MP_DEG_ROW = 5                  # the query row the 'degenerate' mask blanks entirely
 _MP_SEED = 1234
 
 # Absolute tolerance for "this policy's forward agrees with the float32 control".
@@ -413,29 +414,27 @@ _MP_ATOL = {
 }
 
 # Largest change permitted on an UNMASKED query row when a MASKED position is
-# perturbed. MEASURED, not guessed:
+# perturbed. RE-MEASURED at step 4c, in BOTH TF32 regimes (`test_linear_attention.py`
+# disables TF32 process-globally at import time, so a figure measured in only one of
+# them is not a figure):
 #
-#     float32        0.0        in isolation; 1.1e-06 inside a full-suite session
-#     mixed_float16  0.000977   (= 2**-10, one fp16 ulp of the output — quantization)
-#     float64        0.0254
+#     policy          correct, TF32 on   correct, TF32 off   INVERTED control
+#     float32              0.0992             0.0988              18.71
+#     mixed_float16        0.1031             0.1047              18.70
+#     float64              0.0263             0.0263              18.70
 #
-# against a KEPT-position perturbation of 17.0 in all three. The float32 entry is
-# the reason its tolerance is 1e-3 rather than "exact": the masked score is
-# `logit + (-1e9)`, which rounds back to exactly `-1e9` in float32, so the two
-# score matrices ARE bit-identical — but the batched `ops.svd` that consumes them
-# is not bit-reproducible across a session (observed 0.0 running this file alone,
-# 1.1e-06 running the whole attention directory). 1e-3 sits three orders above
-# that noise and four orders below the 17.0 signal. The float64 entry is
-# the interesting one and is a real, if small, consequence of adopting the shared
-# helper: `common.apply_attention_mask` ADDS `MASK_BIAS_VALUE` where this site
-# previously REPLACED the score with it. In float32 the two are indistinguishable —
-# one ulp at 1e9 is 64, so `-1e9 + O(10)` rounds back to exactly `-1e9` and the
-# masked entry is a constant again — but float64 resolves the sum, so a masked
-# score varies with its (masked) token and the global SVD leaks ~1.5% of that back
-# into the unmasked rows. Recorded rather than papered over; the separation from a
-# genuine polarity inversion (which measures ~4.4, i.e. 170x larger, and is what
-# this test exists to catch) is not remotely threatened by it.
-_POLARITY_TOL = {"float32": 1e-3, "mixed_float16": 2e-3, "float64": 0.05}
+# with a KEPT-position perturbation of ~17.0 throughout.
+#
+# These are NOT an error budget — they are the leak the D-009 degenerate-row rescue
+# introduced at this site, and it is structural. Before the rescue the fully-masked
+# query rows of this test's outer-product mask were a literal `-1e9` constant and the
+# score matrix was EXACTLY invariant (measured 0.0, hence the old 1e-3 tolerance).
+# The rescue revives those rows, they attend to everything including the perturbed
+# token, and `_pcp_decomposition`'s GLOBAL SVD spreads that over every row. Exact
+# invariance is not recoverable here (see the class docstring), so 0.3 is used
+# uniformly: ~3x above the worst measurement and ~62x below the inverted-polarity
+# control, and the test asserts that ratio directly rather than trusting the constant.
+_POLARITY_TOL = {"float32": 0.3, "mixed_float16": 0.3, "float64": 0.3}
 
 _F32_REFERENCE = {}
 
@@ -453,8 +452,14 @@ def _mp_mask(kind):
     ``'all_ones'`` masks nothing (the shape of the hopfield catastrophe),
     ``'padding'`` is a rank-2 ``(B, N)`` key-axis mask (exercises the layer's
     rank-2 expand branch), ``'causal'`` is a rank-3 ``(B, N, N)`` lower-triangular
-    mask. None of the three produces a fully-masked query row — that degenerate
-    case belongs to a different mechanism (see the polarity test's docstring).
+    mask. None of those three produces a fully-masked query row.
+
+    ``'degenerate'`` (added at step 4c) is the fourth: a rank-3 mask that is all
+    ones EXCEPT query row ``_MP_DEG_ROW``, which keeps nothing. It is deliberately
+    all-ones elsewhere so that the rescue's convention ("a row that keeps nothing
+    keeps everything") makes it EXACTLY equivalent to ``'all_ones'`` — an equality
+    the global PCP/SVD cannot fudge. It is NOT added to the parametrized lists that
+    use :data:`_MP_ATOL`; it has its own class below.
     """
     if kind == "all_ones":
         return np.ones((_MP_B, _MP_N), dtype="float32")
@@ -467,6 +472,10 @@ def _mp_mask(kind):
             np.tril(np.ones((_MP_N, _MP_N), dtype="float32")),
             (_MP_B, _MP_N, _MP_N),
         ).copy()
+    if kind == "degenerate":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, _MP_DEG_ROW, :] = 0.0
+        return m
     raise ValueError(f"unknown mask kind {kind!r}")
 
 
@@ -717,6 +726,81 @@ class TestRPCAttentionSVDPath:
         )
 
 
+# Largest deviation permitted between the 'degenerate'-masked forward and the
+# 'all_ones'-masked forward. Post-rescue the two keep predicates are IDENTICAL
+# (all-True), so the score matrices handed to `ops.svd` are bit-identical and the
+# only slack is the batched SVD's own non-reproducibility across calls in a session
+# (measured elsewhere in this file at 1.1e-06 in a full-directory run).
+_DEG_TOL = {"float32": 1e-4, "mixed_float16": 0.05, "float64": 1e-4}
+
+
+class TestRPCAttentionFullyMaskedRow:
+    """Step 4c: this site adopts the package-wide degenerate-row rescue.
+
+    Step 4b deliberately left `rpc_attention.py` out of the rescue on
+    backwards-compatibility grounds; step 4c removed that hedge (user direction:
+    "I care about correctness, not backwards compatibility"), and the rescue is now
+    the DEFAULT of `common.apply_attention_mask`, which this site calls with no
+    `rescue_axis` argument at all.
+
+    Note this site was never NaN for a degenerate row: D-005 keeps its masked chain
+    at >= float32 all the way into `ops.svd`, so an all-`-1e9` row was already finite
+    (a uniform distribution over all keys). The step-4c point is not finiteness, it is
+    ONE UNIFORM SEMANTICS across the package — a row that keeps nothing keeps
+    everything — and that is a real, measurable change here, asserted below.
+
+    Both tests were observed FAILING on the step-4b code.
+    """
+
+    def test_the_rescued_row_behaves_as_if_it_kept_everything(self, dtype_policy):
+        """The rescue's SEMANTICS, at the strongest form this site allows.
+
+        The `'degenerate'` mask is all-ones except for one blanked query row, so
+        "keeps nothing = keeps everything" makes its keep predicate IDENTICAL to the
+        `'all_ones'` mask's. The whole forward — including the global PCP/SVD, which
+        spreads any residual difference over every row — must therefore agree.
+
+        ANTI-VACUITY: on the step-4b code this fails in FLOAT32 (not merely fp16),
+        because the blanked row was a genuine all-`-1e9` row whose SVD contribution
+        shifts the entire output. It can tell the two conventions apart.
+        """
+        layer = _mp_layer()
+        x = ops.convert_to_tensor(_mp_input())
+
+        degenerate = _numpy(layer(x, mask=ops.convert_to_tensor(_mp_mask("degenerate"))))
+        all_ones = _numpy(layer(x, mask=ops.convert_to_tensor(_mp_mask("all_ones"))))
+
+        assert np.isfinite(degenerate).all(), (
+            f"{(~np.isfinite(degenerate)).sum()}/{degenerate.size} non-finite entries "
+            f"for a mask with a FULLY-MASKED query row under {dtype_policy!r}"
+        )
+
+        tolerance = _DEG_TOL[dtype_policy]
+        max_dev = float(np.abs(degenerate - all_ones).max())
+        assert max_dev <= tolerance, (
+            f"under {dtype_policy!r} the 'degenerate' mask does not behave like the "
+            f"'all_ones' mask: max deviation {max_dev:.6g} > {tolerance:.6g}. A query "
+            "row that keeps nothing must be treated as keeping everything."
+        )
+        assert float(np.abs(all_ones).max()) > 0.0, (
+            "anti-vacuity FAILED: the all-ones-masked output is identically zero, so "
+            "the comparison above could not distinguish anything"
+        )
+
+    def test_the_degenerate_mask_really_has_exactly_one_fully_masked_row(self):
+        """Anti-vacuity for the test above: the hazard must actually be present."""
+        mask = _mp_mask("degenerate")
+        dead_rows = np.flatnonzero((mask[0] == 0).all(axis=-1))
+        assert dead_rows.tolist() == [_MP_DEG_ROW], (
+            f"expected exactly query row {_MP_DEG_ROW} to be fully masked, got "
+            f"{dead_rows.tolist()}"
+        )
+        assert (mask == 0).sum() == _MP_B * _MP_N, (
+            "the 'degenerate' mask must be all-ones apart from the one blanked row, "
+            "otherwise it is not equivalent to 'all_ones' under the rescue"
+        )
+
+
 class TestRPCAttentionMaskPolarity:
     """SC6: the mask must suppress the MASKED positions, not the kept ones.
 
@@ -727,13 +811,35 @@ class TestRPCAttentionMaskPolarity:
     Why the mask here is the rank-3 OUTER PRODUCT ``keep_i * keep_j`` rather than
     the rank-2 key-axis mask used above: ``_pcp_decomposition`` is a GLOBAL matrix
     factorization, so perturbing token ``p`` perturbs the unmasked query ROW ``p``
-    of the score matrix, and the SVD spreads that change over every row. Masking
-    the row as well as the column makes the whole score matrix invariant to the
-    perturbation, which is what turns "a masked key has no influence" into an
-    exactly-measurable statement (measured 0.0 on unmodified float32 HEAD).
-    Its side effect is that the masked query rows are fully masked — a degenerate
-    softmax row, a DIFFERENT mechanism owned by another step — so the assertions
-    below are restricted to the unmasked query rows.
+    of the score matrix, and the SVD spreads that change over every row. Masking the
+    row as well as the column makes the score matrix far less sensitive to the
+    perturbation, which is what makes "a masked key has no influence" measurable at
+    all. Its side effect is that the masked query rows are fully masked, so the
+    assertions below are restricted to the unmasked query rows.
+
+    **Step 4c changed what this test can promise, and the number it asserts.** Before
+    the degenerate-row rescue became the default (D-009), a fully-masked row was a
+    literal constant (``-1e9`` in every entry, since a float32 ``-1e9 + O(10)`` rounds
+    back to ``-1e9``), so the score matrix was EXACTLY invariant and ``delta_masked``
+    measured 0.0. The rescue revives those rows, they attend to everything including
+    the perturbed token, and the global SVD leaks that back: MEASURED 0.099 (float32),
+    0.105 (mixed_float16), 0.026 (float64).
+
+    Exact invariance is not recoverable at this site: any row whose query vector is
+    ``q_p`` varies with token ``p`` unless the whole row is masked, and the whole row
+    can no longer be masked. Two consequences shape the assertions:
+
+    *   the tolerance is a MEASURED leak (see :data:`_POLARITY_TOL`), not an error
+        budget, so the test also carries an **inverted-polarity control measured in
+        the same call**: an actually-inverted mask moves the same rows by ~18.7, and
+        the assertion is on the RATIO. A ratio cannot be quietly widened into
+        vacuity the way an absolute tolerance can;
+    *   a variant that keeps each masked query attending to itself
+        (``mask[:, i, i] = 1``) was tried and REJECTED: it measures 0.0 with TF32 on
+        and 0.082 with TF32 off, i.e. its apparent exactness is a TF32 rounding
+        artifact. The plain outer product is stable across both regimes (0.0992 vs
+        0.0988), which matters because ``test_linear_attention.py`` disables TF32
+        process-globally at import time.
     """
 
     def test_a_masked_position_has_no_influence_on_unmasked_query_rows(
@@ -746,10 +852,14 @@ class TestRPCAttentionMaskPolarity:
         ).copy()
 
         layer = _mp_layer()
-        mask_tensor = ops.convert_to_tensor(mask)
 
-        def forward(array):
-            return _numpy(layer(ops.convert_to_tensor(array), mask=mask_tensor))
+        def forward(array, mask_array):
+            return _numpy(
+                layer(
+                    ops.convert_to_tensor(array),
+                    mask=ops.convert_to_tensor(mask_array),
+                )
+            )
 
         base = _mp_input()
         perturbed_masked = base.copy()
@@ -758,9 +868,14 @@ class TestRPCAttentionMaskPolarity:
         perturbed_kept[:, 3, :] += 5.0                       # a KEPT position
 
         try:
-            out_base = forward(base)
-            out_masked = forward(perturbed_masked)
-            out_kept = forward(perturbed_kept)
+            out_base = forward(base, mask)
+            out_masked = forward(perturbed_masked, mask)
+            out_kept = forward(perturbed_kept, mask)
+            # The CONTROL: the same experiment run with the polarity actually
+            # inverted, which is the bug this test exists to catch.
+            inverted = 1.0 - mask
+            inv_base = forward(base, inverted)
+            inv_masked = forward(perturbed_masked, inverted)
         except Exception as exc:                              # noqa: BLE001
             pytest.fail(
                 f"masked forward RAISED under policy {dtype_policy!r}: "
@@ -775,12 +890,20 @@ class TestRPCAttentionMaskPolarity:
 
         delta_masked = float(np.abs(out_masked[:, rows] - out_base[:, rows]).max())
         delta_kept = float(np.abs(out_kept[:, rows] - out_base[:, rows]).max())
+        delta_inverted = float(np.abs(inv_masked[:, rows] - inv_base[:, rows]).max())
         tolerance = _POLARITY_TOL[dtype_policy]
 
         assert delta_masked <= tolerance, (
             f"perturbing a MASKED position changed the unmasked query rows by "
             f"{delta_masked:.6g} > {tolerance:.6g} under policy {dtype_policy!r} — the "
             "mask polarity is INVERTED (the layer is attending to the padding)"
+        )
+        assert delta_inverted >= 20.0 * max(delta_masked, tolerance), (
+            f"the inverted-polarity CONTROL moved the same rows by only "
+            f"{delta_inverted:.6g}, less than 20x the correct-polarity leak "
+            f"{delta_masked:.6g} / tolerance {tolerance:.6g} under {dtype_policy!r}. "
+            "The tolerance above is then too loose to distinguish correct masking "
+            "from inverted masking, and must be re-derived rather than widened."
         )
         assert delta_kept > 0.1, (
             f"perturbing a KEPT position changed the output by only {delta_kept:.6g}; "

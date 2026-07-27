@@ -890,8 +890,9 @@ if __name__ == "__main__":
 # (pinned by
 # `TestHopfieldAttentionMaskHazardIsReal::test_the_probability_sublayer_autocasts_a_float32_input`).
 # Step 4b therefore HOISTED `capsule_routing_attention.py`'s predicate-level rescue
-# (D-006) into the shared helper as the opt-in `rescue_axis=` argument, and this site
-# passes `rescue_axis=-1`: a row that keeps nothing is treated as keeping EVERYTHING, so
+# (D-006) into the shared helper as the `rescue_axis=` argument, and step 4c made it the
+# helper's DEFAULT (D-009), so this site gets it without asking: a row that keeps nothing
+# is treated as keeping EVERYTHING, so
 # no all-`-inf` row is ever FORMED and the answer is finite and identical in every
 # dtype. ACCEPTED COST (user ruling, decisions.md D-008): a caller whose mask is wrong
 # now gets finite garbage instead of a loud NaN.
@@ -1141,7 +1142,7 @@ class TestHopfieldAttentionFullyMaskedRow:
     break that by masking a whole query row, and step 4 MEASURED that it does: under
     `mixed_float16` the degenerate row NaN'd its own 128 outputs (containment held —
     0/8064 elsewhere — but the row itself was lost). Step 4b removes that boundary at
-    the source by passing `rescue_axis=-1` to `common.apply_attention_mask`: a row
+    the source via `common.apply_attention_mask`'s default `rescue_axis=-1`: a row
     that keeps NOTHING is treated as keeping EVERYTHING, so the all-`-inf` row is
     never FORMED and no NaN gradient is created either.
 
@@ -1157,7 +1158,7 @@ class TestHopfieldAttentionFullyMaskedRow:
         assert n_bad == 0, (
             f"{n_bad}/{out.size} non-finite output entries for a mask with a "
             f"FULLY-MASKED query row, under policy {dtype_policy!r} — the "
-            "`rescue_axis=-1` rescue is not reaching this site"
+            "degenerate-row rescue is not reaching this site"
         )
 
         reference = _float32_reference("degenerate")

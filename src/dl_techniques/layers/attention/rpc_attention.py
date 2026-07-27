@@ -541,6 +541,31 @@ class RPCAttention(keras.layers.Layer):
             # stay in `mask_dtype(...)` (>= float32) all the way into the SVD below.
             # See the D-005 anchor at the cast-back boundary for why that is the
             # whole point of this site's fix.
+            #
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
+            # `rescue_axis` is ALSO left at its default, which since step 4c means the
+            # degenerate-row rescue is ON here: a query row that keeps NOTHING is
+            # treated as keeping EVERYTHING. Step 4b had deliberately excluded this
+            # site to keep it byte-identical; the user removed that hedge on
+            # 2026-07-28 ("I care about correctness, not backwards compatibility"),
+            # and one uniform semantics across the package is the point.
+            #
+            # This is NOT cosmetic here, contrary to the "rpc runs in float32 so it
+            # was already finite" reading. MEASURED at step 4c with a rank-3 mask that
+            # blanks exactly one query row: under `mixed_float16` the pre-4c forward
+            # returned 64/4096 NON-FINITE outputs — the all-`-1e9` row survives the
+            # SVD but the cast-back boundary below turns it into all-`-inf`, and
+            # `self.attn_prob` softmaxes that to NaN. In float32 and float64 it was
+            # finite but WRONG-BY-CONVENTION: because `_pcp_decomposition` is a GLOBAL
+            # factorization, one all-`-1e9` row shifted the ENTIRE output (measured
+            # max deviation 0.710 in float32, 0.0293 in float64 against an all-ones
+            # mask that the rescue makes it equivalent to).
+            #
+            # WHAT NOT TO DO: do NOT pass `rescue_axis=None` here to restore the old
+            # numbers. `-1` is correct because `self.attn_prob` reduces over the KEY
+            # axis of the already-expanded mask. Guarded by
+            # `test_rpc_attention.py::TestRPCAttentionFullyMaskedRow`.
+            # See decisions.md D-009 (plan-2026-07-27T183600-b4ef45f0).
             attention_scores = apply_attention_mask(
                 attention_scores,
                 ops.not_equal(mask, 0),
@@ -577,12 +602,13 @@ class RPCAttention(keras.layers.Layer):
         #     returns that tensor, so an unmasked forward traces the same graph and
         #     produces bit-identical output to the pre-fix implementation (verified).
         #
-        # Known residual, NOT introduced here and deliberately out of scope: a
-        # FULLY-masked query row still becomes all-`-inf` after this cast under fp16,
-        # and its softmax is then NaN. That is the softmax-degenerate-row mechanism
-        # owned by `capsule_routing_attention.py`, not the `-inf`-into-`ops.svd`
-        # mechanism fixed here. Also unchanged: an fp16 forward with NO mask still
-        # hits the missing `Svd[T=DT_HALF]` kernel, because nothing promotes it.
+        # The FULLY-masked query row used to be a known residual here — it became
+        # all-`-inf` at exactly this cast under fp16 and its softmax was NaN. That is
+        # FIXED as of step 4c, not by this boundary but by the degenerate-row rescue
+        # now defaulted on in `apply_attention_mask` above (D-009): the all-`-1e9` row
+        # is never formed, so there is nothing for this cast to overflow. Still
+        # unchanged: an fp16 forward with NO mask hits the missing `Svd[T=DT_HALF]`
+        # kernel, because nothing promotes it.
         # See decisions.md D-005 (plan-2026-07-27T183600-b4ef45f0).
         robust_attention_scores = ops.cast(L + S, scores_dtype)
 

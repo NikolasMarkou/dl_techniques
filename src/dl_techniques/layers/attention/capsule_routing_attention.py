@@ -676,11 +676,12 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         keep = ops.cast(attention_mask, "bool")
 
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-006
-        # (SUPERSEDED IN FORM, NOT IN SUBSTANCE, by D-008 at step 4b: the rescue that
-        # used to be spelled out HERE as a local `logical_or` now lives inside
-        # `apply_attention_mask` and is requested by the `rescue_axis=-1` argument
-        # below. There is exactly ONE implementation of it in the package; this site
-        # is where it was designed and measured, so the argument stays here.)
+        # (SUPERSEDED IN FORM, NOT IN SUBSTANCE, by D-008 at step 4b and D-009 at
+        # step 4c: the rescue that used to be spelled out HERE as a local `logical_or`
+        # now lives inside `apply_attention_mask`, whose `rescue_axis` DEFAULTS to
+        # `-1`, so the call below asks for nothing. There is exactly ONE implementation
+        # of it in the package; this site is where it was designed and measured, so the
+        # reasoning stays here.)
         #
         # THE degenerate-row rescue: a query row that keeps NOTHING is treated as
         # keeping EVERYTHING. It looks like dead defensive code — it is not. It is
@@ -724,12 +725,14 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # identical across dtypes, which is what makes the fp16 and float32 paths
         # agree at all. Rows that keep >= 1 key are untouched — verified
         # bit-identical in float32 for a padding and a causal mask.
-        # `-1` is the KEY axis of the already-broadcast `(B, H, Q, K)` mask, and it is
-        # supplied EXPLICITLY: `apply_attention_mask` never infers which axis its
-        # caller's softmax reduces over, for the same reason it never infers polarity.
-        # See decisions.md D-006 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        # The rescued axis is `-1`, the KEY axis of the already-broadcast
+        # `(B, H, Q, K)` mask, which is what this site's softmax reduces over —
+        # checked, not assumed. Since step 4c that is `apply_attention_mask`'s DEFAULT,
+        # so no `rescue_axis` argument appears below; passing `None` would opt OUT and
+        # bring the fp16 NaN (and its NaN gradient) back.
+        # See decisions.md D-006, D-008 and D-009 (plan-2026-07-27T183600-b4ef45f0).
         return apply_attention_mask(
-            attention_logits, keep, out_dtype=logits_dtype, rescue_axis=-1
+            attention_logits, keep, out_dtype=logits_dtype
         )
 
     def _squash(self, vectors: keras.KerasTensor) -> keras.KerasTensor:
