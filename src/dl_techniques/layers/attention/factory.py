@@ -18,6 +18,48 @@ Key Features:
     - Support for both dictionary-based and direct configuration
     - Integration with the dl_techniques logging system
     - Complete compatibility with Keras 3 serialization
+
+FROZEN PUBLIC SURFACE
+---------------------
+`ATTENTION_REGISTRY`'s key set, the `AttentionType` literals, and every entry's
+`required_params` / `optional_params` are **public API** consumed by config-driven
+callers (`layers/transformers/adaln_zero.py`, `models/bias_free_denoisers/bfconvunext.py`,
+`models/fastvlm/`, `models/dino/`, `models/gemma/`) and asserted by
+`tests/test_layers/test_factory_registry_drift.py`. Adding, renaming, or removing any of
+them is a breaking change, not a cleanup. Docstrings and comments in this module may be
+improved freely; the data above may not.
+
+Registry entries whose 'class' is NOT a class
+---------------------------------------------
+Two of the 31 entries map to module-level FUNCTIONS rather than layer classes:
+
+    'window'         -> create_grid_window_attention    (window_attention.py)
+    'window_zigzag'  -> create_zigzag_window_attention  (window_attention.py)
+
+Both wrappers construct a `WindowAttention` locked to one `partition_mode` ('grid' /
+'zigzag') carrying that mode's `use_relative_position_bias` default — a distinction the
+class itself does not encode, which is exactly why the keys point at the wrappers.
+Consequence: the general `WindowAttention` class, the one whose `partition_mode` the
+caller chooses, has **no factory key of its own** and must be imported directly
+(`from dl_techniques.layers.attention import WindowAttention`).
+
+`window_attention.py` also defines `create_kan_key_window_attention` and
+`create_adaptive_softmax_window_attention`. They are **intentionally non-public**:
+registered here by neither key nor import, absent from `attention/__init__.py`, and
+called only by `tests/test_layers/test_attention/test_window_attention.py`. Both
+configurations are reachable by passing `attention_mode='kan_key'` /
+`probability_type='adaptive'` to `WindowAttention`. Do not register them "for
+consistency" — that grows the frozen surface above.
+
+Known shape of `validate_attention_config` (documented, not a defect to fix here)
+--------------------------------------------------------------------------------
+The numeric checks in `validate_attention_config` below are a single flat allowlist of
+parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly to all 31
+types, not per-type schemas. A parameter therefore gets range-checked purely because of
+what it is called, and a type-specific constraint (e.g. one type's `window_size` upper
+bound, or a parameter two types interpret differently) cannot be expressed. Per-type
+schemas would be the correct shape; converting is out of scope for a behavior-preserving
+pass and would change raised message text that tests match on.
 """
 
 import keras
@@ -864,6 +906,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'Wave Field Attention (damped-wave FFT field convolution)'
     },
 
+    # NOTE: 'class' here is a FUNCTION, not a layer class — see "Registry entries whose
+    # 'class' is NOT a class" in the module docstring. The wrapper pins
+    # partition_mode='grid'. `WindowAttention` itself has no key of its own.
     'window': {
         'class': create_grid_window_attention,
         'description': (
@@ -900,6 +945,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'complexity': 'O(W²) per window vs O(n²) global attention',
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
     },
+    # NOTE: also a FUNCTION, pinning partition_mode='zigzag' (and defaulting
+    # use_relative_position_bias to False, unlike 'window' above).
     'window_zigzag': {
         'class': create_zigzag_window_attention,
         'description': (
@@ -1182,6 +1229,12 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             f"Required: {required}, Provided: {list(kwargs.keys())}"
         )
 
+    # NOTE (documented shape, not fixed here): everything below is a FLAT ALLOWLIST OF
+    # PARAMETER NAMES applied uniformly to all 31 attention types — there are no per-type
+    # schemas. A parameter is range-checked because of its NAME, wherever it appears, and
+    # a type-specific bound cannot be expressed. Per-type schemas would be the right
+    # shape; the conversion is out of scope for a behavior-preserving pass because it
+    # changes raised message text that tests match on.
     # Validate positive integer parameters
     positive_int_params = [
         'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',

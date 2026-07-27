@@ -852,5 +852,69 @@ class TestFactoryIntegration:
         assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
 
+class TestPrivateReExportContract:
+    """
+    Guard for the published PRIVATE cross-file contract at the ``# DECISION
+    plan-2026-07-27T130643-38c5646a/D-007`` anchor in ``energy_attention.py``.
+
+    THE EXTERNAL IMPORTER is ``src/dl_techniques/layers/transformers/energy_transformer.py``
+    (line 91)::
+
+        from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_keep
+
+    ``_MASK_BIAS_VALUE`` and ``_mask_dtype`` are ALIASES: their bodies live in
+    ``attention/common.py`` (as ``MASK_BIAS_VALUE`` / ``mask_dtype``) so the fp16 mask
+    rule has exactly one definition, and they are re-exported here under their original
+    private names purely so the by-name import above keeps resolving. ``_token_keep`` is
+    still DEFINED here — it encodes the rank-2 ``(B, N)`` Keras-mask contract specific to
+    the Energy Transformer family and was deliberately not extracted.
+
+    Why this test exists at all: per ``plans/LESSONS.md``, "a ``# DECISION`` anchor that
+    documents a forbidden action is a comment, not a guard, unless a test can actually
+    fail when the action happens". Before this test, deleting any of the three names broke
+    ``EnergyTransformer``, ``HopfieldNetwork`` and every ET model/trainer at IMPORT time
+    with ZERO test failures anywhere in the suite. Proven RED at plan step 9 by removing
+    one alias.
+    """
+
+    def test_private_names_importable_from_energy_attention(self):
+        # Exercise the EXACT import form energy_transformer.py:91 uses, plus the constant.
+        # Done via importlib rather than a module-level import so a break surfaces as a
+        # named test FAILURE, not as a collection error that buries the reason.
+        import importlib
+
+        mod = importlib.import_module(
+            "dl_techniques.layers.attention.energy_attention"
+        )
+        for name in ("_mask_dtype", "_token_keep", "_MASK_BIAS_VALUE"):
+            assert hasattr(mod, name), (
+                f"'{name}' is gone from dl_techniques.layers.attention.energy_attention. "
+                "This BREAKS energy_transformer.py:91's by-name import and takes "
+                "EnergyTransformer, HopfieldNetwork and every ET model/trainer down at "
+                "import time. See the D-007 anchor in energy_attention.py -- if the body "
+                "moved to common.py, re-export the alias; do not delete the name."
+            )
+
+        # And the literal statement, so an alias that exists but is not importable
+        # (e.g. shadowed by a local binding) is also caught.
+        from dl_techniques.layers.attention.energy_attention import (  # noqa: F401
+            _mask_dtype,
+            _token_keep,
+            _MASK_BIAS_VALUE,
+        )
+
+        assert callable(_mask_dtype)
+        assert callable(_token_keep)
+        assert _MASK_BIAS_VALUE < 0.0
+
+    def test_energy_transformer_still_imports(self):
+        # The actual downstream victim. Fails with ImportError if the contract breaks.
+        from dl_techniques.layers.transformers.energy_transformer import (  # noqa: F401
+            EnergyTransformer,
+        )
+
+        assert EnergyTransformer is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
