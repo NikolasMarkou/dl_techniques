@@ -2,6 +2,11 @@
 
 Comprehensive model analysis framework for evaluating trained Keras models. Provides weight health diagnostics, calibration metrics, information flow analysis, spectral analysis, and training dynamics insights.
 
+## Theory
+
+- `SETOL.md` -   **SETOL** (Semi-Empirical Theory of Learning) provides a first-principles theoretical foundation for understanding how deep neural networks learn and generalize. It unifies concepts from Statistical Mechanics (StatMech), Heavy-Tailed Random Matrix Theory (RMT), and quantum-chemistry-inspired approaches to strongly correlated systems.
+- `CORRELATION_TRAPS.md` - Neural networks learn by encoding correlations from training data into their weight matrices. **Correlation Traps** represent a pathological failure mode where this encoding process breaks down, creating spurious large-magnitude weights that harm generalization rather than help it.
+
 ## Architecture
 
 - `model_analyzer.py` — Main `ModelAnalyzer` orchestrator that delegates to specialized analyzers
