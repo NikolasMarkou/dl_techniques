@@ -394,21 +394,29 @@ class FNetFourierTransform(keras.layers.Layer):
             ``(batch_size, sequence_length, hidden_dim)``.
         :rtype: keras.KerasTensor
         """
-        # Convert real input to complex representation
+        # Convert real input to complex representation. The trailing axis of size 2
+        # is the (real, imaginary) pair — this layer carries complex numbers as an
+        # explicit last dimension rather than a complex dtype, because `keras.ops`
+        # has no backend-agnostic complex tensor.
+        # Shape: (B, S, H) -> (B, S, H) [zeros]
         zeros_like_input = ops.zeros_like(inputs)
+        # Shape: (B, S, H) + (B, S, H) -> (B, S, H, 2)
         inputs_complex = ops.stack([inputs, zeros_like_input], axis=-1)
 
         # Apply first DFT along sequence dimension
+        # Shape: (B, S, H, 2) -> (B, S, H, 2)   [contracts axis -2 against (S, S)]
         after_seq_dft = self._apply_dft_along_axis(
             inputs_complex, self.dft_matrix_seq, axis=-2
         )
 
         # Apply second DFT along hidden dimension
+        # Shape: (B, S, H, 2) -> (B, S, H, 2)   [contracts axis -1 against (H, H)]
         after_hidden_dft = self._apply_dft_along_axis(
             after_seq_dft, self.dft_matrix_hidden, axis=-1
         )
 
         # Extract real part as final result
+        # Shape: (B, S, H, 2) -> (B, S, H)
         output = after_hidden_dft[..., 0]
 
         # Apply mask to zero out padded tokens after mixing.
@@ -421,6 +429,7 @@ class FNetFourierTransform(keras.layers.Layer):
         # OWN outputs are zeroed. Do not "unify" this with the additive mask helper.
         if attention_mask is not None:
             # Expand mask from [batch, seq_len] to [batch, seq_len, 1]
+            # Shape: (B, S) -> (B, S, 1)   [broadcasts over H]
             mask_expanded = ops.expand_dims(attention_mask, axis=-1)
             # Ensure mask is same dtype and multiply
             output *= ops.cast(mask_expanded, output.dtype)

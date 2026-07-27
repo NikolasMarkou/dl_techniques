@@ -52,7 +52,7 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 ### Code Style
 - Python 3.11+ with comprehensive type hints
 - Docstrings carry mathematical formulations where relevant. **Two styles are in use — match the package you are editing, do not convert files wholesale:**
-  - **Sphinx/reST (`:param:` / `:type:` / `:raises:`)** is the convention in `layers/` (245 of 283 modules), and is *mandatory* in `layers/attention/`, where all 33 modules use it and `channel_attention.py` is the reference exemplar.
+  - **Sphinx/reST (`:param:` / `:type:` / `:raises:`)** is the convention in `layers/` (245 of 283 modules), and is *mandatory* in `layers/attention/`, where all 34 modules use it and `channel_attention.py` is the reference exemplar (the count moved 33 -> 34 when `common.py` was added).
   - **Google-style (`Args:`)** remains the convention in `models/`, `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/`, and `visualization/`.
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 - `__init__.py` files either export a curated public API (with `__all__`) or are empty (in which case import from submodules directly) — see `layers/CLAUDE.md` for which is which in `layers/`

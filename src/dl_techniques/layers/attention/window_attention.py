@@ -11,6 +11,46 @@ according to the chosen mode, and computes self-attention within each local
 window. This approach maintains linear complexity with respect to sequence
 length while offering different locality biases.
 
+Architecture:
+    One pipeline, one branch. Both partition modes share the same five-stage
+    shape, and differ only in stage 3 — which tokens end up in a window
+    together:
+
+    1.  **Grid formation.** The 1D sequence ``(B, N, dim)`` is padded up to
+        ``H*W`` and reshaped to a 2D grid ``(B, H, W, dim)``. A 1D sequence is
+        used as the public interface (rather than a 2D map) so the layer drops
+        into sequence models; the 2D grid is an internal device for defining
+        locality.
+    2.  **Window padding.** The grid is padded so both spatial extents are
+        divisible by ``window_size``. All padding introduced in stages 1-2 is
+        stripped again in stage 5, so the layer is shape-preserving end to end.
+    3.  **Partitioning — the only real difference between the modes.**
+        ``'grid'`` takes contiguous ``window_size x window_size`` tiles (the
+        Swin convention: spatially adjacent tokens attend together).
+        ``'zigzag'`` instead groups tokens that are proximate along a zigzag
+        traversal of the grid, giving a frequency-proximate locality bias — the
+        useful choice when the sequence's neighbours in *index* space matter
+        more than its neighbours in the synthetic 2D layout.
+    4.  **Per-window attention.** Each window is handed to
+        :class:`SingleWindowAttention`, which owns the QKV projection, optional
+        QK-normalization, relative position bias and probability output. This
+        layer contributes no attention math of its own — it is a partitioning
+        wrapper, which is why the two modes can share it.
+    5.  **Reverse and unpad.** Windows are merged back to the grid, the grid is
+        flattened back to a sequence, and every token added by stages 1-2 is
+        dropped.
+
+    The two ASCII flows below trace stages 1-5 concretely for each mode.
+
+Foundational Mathematics:
+    Full self-attention over ``N`` tokens costs ``O(N^2)``. Restricting
+    attention to non-overlapping windows of ``M = window_size ** 2`` tokens
+    leaves ``N / M`` independent ``O(M^2)`` problems, i.e. ``O(N * M)`` total —
+    linear in ``N`` for fixed ``M``. The price is that information cannot cross
+    a window boundary within one layer; both modes address this the same way a
+    Swin stack does, by relying on the *caller* to alternate partitions (or
+    shift them) between layers rather than by widening any single window.
+
 ================================================
 Partition Mode 1: 'grid' (Swin Transformer-style)
 ================================================
@@ -268,7 +308,7 @@ class WindowAttention(keras.layers.Layer):
             Union[str, keras.regularizers.Regularizer]
         ] = None,
         **kwargs: Any,
-    ):
+    ) -> None:
         super().__init__(**kwargs)
 
         # Validate probability_type: score-level routing variants are not

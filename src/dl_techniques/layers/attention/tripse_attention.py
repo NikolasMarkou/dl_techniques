@@ -62,6 +62,26 @@ References:
       Attention Module". WACV.
     - Hu, J., Shen, L., & Sun, G. (2018). "Squeeze-and-Excitation Networks".
       CVPR.
+
+Rubric R6 — accepted deviation (constructor validation is ABSENT here):
+    None of the five public classes in this module (:class:`TripletAttentionBranch`,
+    :class:`TripSE1`, :class:`TripSE2`, :class:`TripSE3`, :class:`TripSE4`) raise
+    ``ValueError`` from ``__init__``. ``reduction_ratio``, ``kernel_size`` and
+    ``permute_pattern`` are all accepted unchecked; a ``reduction_ratio`` of ``0``
+    or a negative ``kernel_size`` will surface later as a Keras/Conv2D error, not
+    as a named argument error at the construction site.
+
+    This is recorded as a **deviation, not a pass**, and it is deliberately NOT
+    fixed by plan ``plan-2026-07-27T130643-38c5646a``. That plan's governing
+    invariant is behavior preservation: adding a ``raise ValueError`` where none
+    exists today is a real behavior change — code that constructs
+    ``TripSE1(reduction_ratio=0.0)`` currently succeeds and would start failing.
+    Adding validation is a correctness improvement, but it belongs to a plan that
+    is allowed to change behavior, together with the tests that pin the new
+    messages. See ``decisions.md`` D-012 of that plan.
+
+    WHAT NOT TO DO: do not add the validation "while you are in here". Either do
+    it as its own change, with tests, or leave it documented as it is.
 """
 
 # ---------------------------------------------------------------------
@@ -146,6 +166,11 @@ class TripletAttentionBranch(layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: From ``build()``, if the input shape is not 4D.
+
+    .. note::
+       **Rubric R6 deviation** — this ``__init__`` performs NO argument
+       validation. See the "Rubric R6 — accepted deviation" section of the
+       module docstring for why that is recorded rather than fixed.
     """
 
     def __init__(
@@ -346,6 +371,11 @@ class TripSE1(layers.Layer):
         gate activation layer's constructor. Defaults to ``None``.
     :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    .. note::
+       **Rubric R6 deviation** — this ``__init__`` performs NO argument
+       validation. See the "Rubric R6 — accepted deviation" section of the
+       module docstring for why that is recorded rather than fixed.
     """
 
     def __init__(
@@ -505,6 +535,11 @@ class TripSE2(layers.Layer):
         gate activation layer's constructor. Defaults to ``None``.
     :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    .. note::
+       **Rubric R6 deviation** — this ``__init__`` performs NO argument
+       validation. See the "Rubric R6 — accepted deviation" section of the
+       module docstring for why that is recorded rather than fixed.
     """
 
     def __init__(
@@ -717,6 +752,11 @@ class TripSE3(layers.Layer):
         gate activation layer's constructor. Defaults to ``None``.
     :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    .. note::
+       **Rubric R6 deviation** — this ``__init__`` performs NO argument
+       validation. See the "Rubric R6 — accepted deviation" section of the
+       module docstring for why that is recorded rather than fixed.
     """
 
     def __init__(
@@ -1092,6 +1132,11 @@ class TripSE4(layers.Layer):
         the SE bottleneck activation layer's constructor. Defaults to ``None``.
     :type se_reduction_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    .. note::
+       **Rubric R6 deviation** — this ``__init__`` performs NO argument
+       validation. See the "Rubric R6 — accepted deviation" section of the
+       module docstring for why that is recorded rather than fixed.
     """
 
     def __init__(

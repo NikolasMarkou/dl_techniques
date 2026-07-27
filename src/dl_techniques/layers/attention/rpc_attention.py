@@ -592,6 +592,7 @@ class RPCAttention(keras.layers.Layer):
 
         # Reshape to multi-head format
         # Shape: (batch, num_heads, seq_len, head_dim)
+        # Shape: (B, N, dim) -> (B, N, H, head_dim) -> (B, H, N, head_dim)  [q, k, v]
         q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
         q = ops.transpose(q, (0, 2, 1, 3))
 
@@ -607,6 +608,7 @@ class RPCAttention(keras.layers.Layer):
             k = self.k_norm(k)
 
         # Compute robust attention with PCP decomposition
+        # Shape: 3x (B, H, N, head_dim) -> (B, H, N, head_dim)
         attention_output = self._compute_attention(q, k, v, mask)
 
         # For returning attention scores if requested
@@ -620,16 +622,19 @@ class RPCAttention(keras.layers.Layer):
             # to the caller do not correspond to the weights that produced `output`
             # whenever a mask is supplied. Reported, not fixed, in this plan.
             # Recompute attention scores for output
+            # Shape: (B, H, N, head_dim) @ (B, H, head_dim, N) -> (B, H, N, N)
             attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
             attention_scores = attention_scores * self.attention_scale
             L, S = self._pcp_decomposition(attention_scores)
             attention_weights = self.attn_prob(L + S)
 
         # Reshape back to (batch, seq_len, dim)
+        # Shape: (B, H, N, head_dim) -> (B, N, H, head_dim) -> (B, N, dim)
         attention_output = ops.transpose(attention_output, (0, 2, 1, 3))
         attention_output = ops.reshape(attention_output, (batch_size, seq_len, self.dim))
 
         # Apply output projection
+        # Shape: (B, N, dim) -> (B, N, dim)
         output = self.to_out(attention_output)
 
         # Apply dropout if specified

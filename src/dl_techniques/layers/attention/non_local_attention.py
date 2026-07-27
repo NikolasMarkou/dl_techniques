@@ -12,6 +12,71 @@ complex scenes and objects.
 It functions as a self-attention block tailored for 4D image-like tensors
 (batch, height, width, channels).
 
+Architecture:
+    A non-local block over a 4D ``(B, H, W, C)`` feature map. Note that this
+    implementation is **not** a bare residual add-on: it front-loads a depthwise
+    convolution and ends with its own output projection, so it behaves as a
+    self-contained block rather than as an identity-at-init insert.
+
+    1.  **Depthwise spatial pre-mixing.** The input passes through a
+        ``kernel_size`` :class:`DepthwiseConv2D` (default ``(7, 7)``, ``padding
+        ='same'``), an intermediate activation, and — when ``output_norm_type`` is
+        set (default ``"batch_norm"``) — a spatial normalization. This gives each
+        token a local receptive field before any global mixing happens.
+
+    2.  **Three 1x1 projections to a shared embedded dim.** ``query_conv``,
+        ``key_conv`` and ``value_conv`` all emit ``key_value_channels``. In
+        ``attention_mode='dot_product'`` that equals ``attention_channels``; in the
+        default ``'gaussian'`` mode it is ``max(1, attention_channels // 8)``,
+        matching the original paper's reduction (see the ``D-002`` anchor at the
+        assignment — Q@Kᵀ needs a matched contraction dim, so the reduction cannot
+        be applied to only one of them). The key projection carries a second
+        activation.
+
+    3.  **Spatial flattening.** Each projection is reshaped from
+        ``(B, H, W, C_kv)`` to ``(B, H*W, C_kv)``, turning every pixel into a token.
+        This is what makes the block *non-local*: the score matrix is
+        ``(B, H*W, H*W)`` and therefore quadratic in spatial resolution — the
+        block's dominant cost.
+
+    4.  **Scoring.** Optional QK-normalization (``qk_norm_type``) is applied to the
+        flattened query and key, then ``Q @ Kᵀ``. Scaling by
+        ``common.compute_attention_scale(key_value_channels)`` is applied **only in
+        ``dot_product`` mode**; ``gaussian`` mode is deliberately left unscaled to
+        preserve the behavior of the ``keras.layers.Attention(use_scale=False)``
+        this layer replaced. An optional additive ``attention_mask`` is added, and
+        :class:`ProbabilityOutput` (``probability_type`` / ``probability_config``)
+        converts scores to weights, followed by optional attention dropout.
+
+    5.  **Aggregation and output projection.** The weights aggregate the flattened
+        values, the result is reshaped back to ``(B, H, W, C_kv)``, and passed
+        through ``output_conv`` + ``output_activation_layer`` + optional dropout.
+        Those two sub-layers alone are created lazily in ``build()`` because their
+        filter count defaults to the RUNTIME input channel count — the package's
+        one documented R6 exception (see the ``D-003`` anchor in ``build()``).
+
+Foundational Mathematics:
+    For an input feature map ``x`` with positions ``i`` (output) and ``j`` (all
+    other positions), the generic non-local operation is::
+
+        y_i = (1 / C(x)) * sum_j f(x_i, x_j) * g(x_j)
+
+    With ``f`` an exponentiated dot product in an embedding space and ``C(x)`` its
+    sum over ``j``, ``f / C(x)`` is exactly a softmax over ``j`` — the *embedded
+    Gaussian* instantiation. Writing ``theta``, ``phi``, ``g`` for the query/key/
+    value 1x1 convolutions, ``W_z`` for the output convolution and ``h`` for the
+    depthwise pre-mixing stage::
+
+        u        = norm( act( DepthwiseConv(x) ) )
+        s_ij     = theta(u)_i^T phi(u)_j            ( * 1/sqrt(d_kv) iff dot_product )
+        alpha_ij = ProbabilityOutput_j( s_ij + mask_ij )
+        y_i      = sum_j alpha_ij * g(u)_j
+        z        = act_out( W_z(y) )
+
+    ``ProbabilityOutput`` defaults to softmax, which recovers the paper's embedded
+    Gaussian; other ``probability_type`` values substitute a different normalizer
+    for the same slot.
+
 Score-to-probability conversion is delegated to :class:`ProbabilityOutput`
 via ``probability_type`` / ``probability_config``. Optional QK-normalization
 (``qk_norm_type``) applies a normalization layer independently to the query

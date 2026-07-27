@@ -13,7 +13,54 @@ of values. The gradient is hand-coded in closed form (``keras.ops`` only, no aut
 forbidden in ``src/`` — see decisions.md D-001). Its correctness rests entirely on the
 autodiff oracle test ``test_gradient_oracle`` in
 ``tests/test_layers/test_attention/test_energy_attention.py``.
+
+Architecture:
+    The module is a *descent-direction generator*, not a token mixer. Three free
+    functions sit above the layer, and the layer itself has two public faces:
+
+    1.  **Mask plumbing (module level).** ``_token_keep`` validates and casts the
+        rank-2 ``(B, N)`` Keras-propagated per-token validity mask — the single home
+        of that contract, with four call sites spanning this module and
+        ``layers/transformers/energy_transformer.py``. ``_symmetric_token_keep``
+        expands it to a ``(B, 1, N, N)`` keep tensor that removes a masked token from
+        BOTH the key role and the query role. ``_MASK_BIAS_VALUE`` / ``_mask_dtype``
+        are aliased re-exports of ``common.py`` (see the D-007 anchor below).
+
+    2.  **:meth:`EnergyAttention.energy` — the forward face.** Layer-normed tokens
+        ``g`` are projected by two bias-free weights ``w_key`` and ``w_query`` into
+        per-head keys and queries, scored, masked, and reduced by a ``logsumexp`` over
+        the key axis into a single SCALAR energy per batch element. There is **no
+        value matrix and no output projection** — nothing is ever "read out" of the
+        tokens.
+
+    3.  **:meth:`EnergyAttention.call` — the gradient face.** Returns
+        ``-dE_ATT/dg``, hand-derived in closed form with ``keras.ops`` only. The
+        softmax that appears here is the *derivative* of the ``logsumexp`` in
+        ``energy()``, not a separately-designed attention distribution — which is why
+        the two methods must be edited as a pair and why ``test_gradient_oracle`` is
+        the only thing standing between this file and a silently wrong descent
+        direction.
+
+Foundational Mathematics:
+    For layer-normed tokens ``g`` (shape ``(B, N, D)``), heads ``h``, key/query
+    projections ``K = w_key g`` and ``Q = w_query g``, and inverse temperature
+    ``beta = 1/sqrt(head_dim)``::
+
+        E_ATT(g) = -(1/beta) * sum_{h,q} logsumexp_k ( beta * K[h,k] . Q[h,q] )
+
+    The layer's ``call()`` returns ``-dE_ATT/dg``, so stacking blocks that each add
+    this output to their token state performs gradient descent on the total energy.
+    The ``logsumexp`` is the softmax's potential function: differentiating it is what
+    produces the familiar attention weights, rather than the weights being posited
+    first and an energy reverse-engineered afterwards.
+
+References:
+    - Hoover, Liang, Pham, Panda, Strobelt, Zaki, Chau, Krotov (2023).
+      "Energy Transformer". NeurIPS 2023. (https://arxiv.org/abs/2302.07253) —
+      equations (3)-(4).
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from keras import ops, initializers

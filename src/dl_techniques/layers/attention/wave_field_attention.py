@@ -182,6 +182,33 @@ class WaveFieldAttention(keras.layers.Layer):
     :param coupling_noise_stddev: Std-dev of Gaussian noise added to the
         identity-initialized head coupling matrix.
     :type coupling_noise_stddev: float
+    :param coupling_seed: Seed for the ``_IdentityPlusNoise`` initializer of
+        ``field_coupling``. ``None`` (the default) draws from the global Keras
+        RNG, so reproducibility then depends on ``keras.utils.set_random_seed``;
+        passing an explicit int makes a rebuild-from-config deterministic on its
+        own. This exists because the coupling matrix used to be initialized with
+        ``np.random.randn``, which is not serializable — see the
+        ``plan_2026-05-07_47199c68/D-002`` anchor in ``build()``.
+    :type coupling_seed: Optional[int]
+    :param query_modulation_activation_type: Activation applied to ``q / scale``
+        to form the query-dependent gather modulation, resolved through
+        ``activations.factory``. Defaults to ``"sigmoid"``. This is the ``[0, 1]``
+        mask deciding *which dimensions of the propagated field each token reads*
+        — distinct from ``gate_activation_type``, which is computed from the raw
+        input rather than from a projection.
+    :type query_modulation_activation_type: str
+    :param query_modulation_activation_args: Optional keyword arguments forwarded
+        to the query-modulation activation layer's constructor. ``None`` means
+        that layer's defaults.
+    :type query_modulation_activation_args: Optional[Dict[str, Any]]
+    :param gate_activation_type: Activation applied to ``gate_proj(inputs)`` to
+        form the content-dependent output gate, resolved through
+        ``activations.factory``. Defaults to ``"sigmoid"``; combined with a
+        positive ``gate_bias_init`` this starts the gate open.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to the gate
+        activation layer's constructor. ``None`` means that layer's defaults.
+    :type gate_activation_args: Optional[Dict[str, Any]]
     :param kernel_initializer: Initializer for projection kernels.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for projection biases.
@@ -249,6 +276,7 @@ class WaveFieldAttention(keras.layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
+        # DECISION plan-2026-07-27T130643-38c5646a/D-015
         # DELIBERATELY NOT `common.compute_attention_scale(self.head_dim)`. This is
         # `sqrt(head_dim)`, NOT `1 / sqrt(head_dim)` — the inverse of every sibling layer's
         # convention — and `call()` DIVIDES by it (`sigmoid(Q / self.scale)`), so the
@@ -256,6 +284,15 @@ class WaveFieldAttention(keras.layers.Layer):
         # or a latent defect is an open question flagged for a separate investigation; this
         # line is behavior-frozen until that is settled. Do NOT "unify" it with the shared
         # helper: doing so would silently square the query-modulation temperature.
+        #
+        # HONESTY NOTE (added step 10): this anchor is a COMMENT, NOT A GUARD. No test
+        # fails if a future editor swaps in the shared helper — the value would change
+        # from sqrt(d) to 1/sqrt(d) and every wave_field test would still pass, because
+        # none of them pins the scale or an absolute output value. Per `plans/LESSONS.md`
+        # ("an anchor is a comment, not a guard, unless a test can fail"), the FIRST item
+        # of any follow-up work on this file is a test that pins
+        # `layer.scale == math.sqrt(head_dim)`, whichever way the open question is
+        # eventually settled.
         self.scale = math.sqrt(self.head_dim)
         self._field_stride = float((field_size - 1) / max(max_seq_len - 1, 1))
 

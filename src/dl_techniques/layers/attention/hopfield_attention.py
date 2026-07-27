@@ -91,6 +91,8 @@ References:
         arXiv:2008.02217.
 """
 
+# ---------------------------------------------------------------------
+
 import math
 import keras
 from keras import ops
@@ -625,11 +627,14 @@ class HopfieldAttention(keras.layers.Layer):
         key_len = ops.shape(key)[1]
 
         # Linear projections using built sub-layers
+        # Shape: (B, N_q, D) -> (B, N_q, H*key_dim); key/value -> (B, N_k, H*key_dim)
+        #        and (B, N_k, H*value_dim) respectively
         query_proj = self.query_dense(query)
         key_proj = self.key_dense(key)
         value_proj = self.value_dense(value)
 
         # Reshape to multi-head attention format
+        # Shape: (B, N_q, H*key_dim) -> (B, N_q, H, key_dim)  [key/value analogous]
         query_proj = ops.reshape(
             query_proj,
             (batch_size, query_len, self.num_heads, self.key_dim)
@@ -644,6 +649,7 @@ class HopfieldAttention(keras.layers.Layer):
         )
 
         # Transpose to (batch, num_heads, seq_len, dim)
+        # Shape: (B, N, H, d) -> (B, H, N, d)  [all three]
         query_proj = ops.transpose(query_proj, [0, 2, 1, 3])
         key_proj = ops.transpose(key_proj, [0, 2, 1, 3])
         value_proj = ops.transpose(value_proj, [0, 2, 1, 3])
@@ -681,13 +687,19 @@ class HopfieldAttention(keras.layers.Layer):
             # Update the query for the next iteration (skipped after the final
             # step). This implements the iterative Hopfield dynamics.
             if update_step < self.update_steps_max:
+                # Shape: (B, H, N_q, N_k) @ (B, H, N_k, key_dim) -> (B, H, N_q, key_dim)
+                # The updated query re-enters the loop in the SAME shape it left, which
+                # is what makes the bounded iteration well-formed.
                 current_query = ops.matmul(attention_weights, key_proj)
 
         # Reshape output back to original format
+        # Shape: (B, H, N_q, value_dim) -> (B, N_q, H, value_dim)
         output = ops.transpose(output, [0, 2, 1, 3])  # (batch, seq_len, num_heads, value_dim)
+        # Shape: (B, N_q, H, value_dim) -> (B, N_q, H*value_dim)
         output = ops.reshape(output, (batch_size, query_len, self.num_heads * self.value_dim))
 
         # Final output projection
+        # Shape: (B, N_q, H*value_dim) -> (B, N_q, output_dim)
         output = self.output_dense(output)
 
         if return_attention_scores:

@@ -7,7 +7,7 @@ commonly found in state-of-the-art large language models. It is designed
 for improved training stability, expressiveness, and the effective encoding of
 sequential information.
 
-Architecture and Foundational Mathematics:
+Architecture:
 The layer's architecture augments the standard scaled dot-product attention
 with three key concepts: Rotary Position Embedding (RoPE) for relative
 positional awareness, RMSNorm for efficient normalization, and an output
@@ -53,6 +53,33 @@ gating mechanism for dynamic information flow control.
     learn to dynamically control the flow of information through the layer,
     selectively amplifying or attenuating features from the attention output.
 
+Foundational Mathematics:
+    Composing the four stages above, for input ``x`` at positions ``m``, ``n``,
+    with ``R_m`` the RoPE rotation for position ``m`` (applied to the first
+    ``rope_percentage`` of each head's dimensions only)::
+
+        u         = W_in x                                        [input linear]
+        Q, K, V   = norm_q(W_q u), norm_k(W_k u), norm_v(W_v u)   [RMSNorm by default]
+        q_m, k_n  = R_m Q_m, R_n K_n
+        s_mn      = (q_m . k_n) / sqrt(head_dim)
+        A_m       = sum_n prob_n(s_mn) V_n
+        A'_m      = W_o A_m        [only when attention_dim != dim; else identity]
+        out_m     = sigmoid(W_g A'_m) ⊗ A'_m
+
+    Two properties make this composition work. ``R_m`` is orthogonal, so
+    ``q_m . k_n = Q_m^T R_m^T R_n K_n`` depends on ``m - n`` alone — relative
+    position for free, with no positional term added to the residual stream. And
+    the gate is computed from ``A'`` itself, i.e. it is a self-gate: the layer
+    decides how much of its OWN output to emit, on a per-feature basis, so a head
+    that produced nothing useful can be attenuated at the exit rather than having
+    to be routed around downstream.
+
+    The normalizer written ``prob`` above is softmax by default but is pluggable
+    via ``probability_type`` / ``probability_config``; ``norm_q``/``norm_k``/
+    ``norm_v`` via ``qk_norm_type`` / ``qk_norm_kwargs``; and the ``sigmoid`` via
+    ``gate_activation_type`` / ``gate_activation_args`` — note that leaving the
+    ``[0, 1]`` range turns the gate from an attenuator into a rescaler.
+
 References:
   - "Attention Is All You Need" (Vaswani et al., 2017)
     https://arxiv.org/abs/1706.03762
@@ -64,6 +91,8 @@ References:
     (Touvron et al., 2023) https://arxiv.org/abs/2302.13971
 
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from keras import layers, initializers, regularizers, ops
@@ -165,6 +194,37 @@ class GatedAttention(keras.layers.Layer):
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param probability_type: Strategy used by :class:`ProbabilityOutput` to turn
+        raw attention scores into weights. Defaults to ``"softmax"``, which
+        reproduces standard attention. The score-level routing/hierarchical
+        variants (``"routing"``, ``"deterministic_routing"``, ``"hierarchical"``,
+        ``"hierarchical_routing"``) are **rejected at construction time**: they
+        alter the shape/semantics of their input in ways this layer does not
+        support.
+    :type probability_type: str
+    :param probability_config: Optional keyword arguments forwarded to the
+        :class:`ProbabilityOutput` constructor (as its ``type_config``). ``None``
+        means the strategy's own defaults.
+    :type probability_config: Dict[str, Any] or None
+    :param qk_norm_type: Normalization applied independently to ``Q`` and ``K``
+        before the score matmul, resolved through ``norms.factory``. Defaults to
+        ``"zero_centered_rms_norm"`` — this layer normalizes Q/K/V rather than
+        pre-normalizing the block input, so this is an architectural default, not
+        a tweak. Pass a different registered normalization name to change it.
+    :type qk_norm_type: str
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to the
+        QK-normalization layer's constructor. ``None`` means that layer's
+        defaults.
+    :type qk_norm_kwargs: Dict[str, Any] or None
+    :param gate_activation_type: Activation applied to the gate projection,
+        resolved through ``activations.factory``. Defaults to ``"sigmoid"``,
+        which is what makes the gate a ``[0, 1]`` per-feature multiplier; any
+        substitute that leaves the ``[0, 1]`` range changes the gate from an
+        attenuator into a rescaler.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to the gate
+        activation layer's constructor. ``None`` means that layer's defaults.
+    :type gate_activation_args: Dict[str, Any] or None
     :param kwargs: Additional arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``dim`` is not positive or not divisible by
@@ -174,6 +234,8 @@ class GatedAttention(keras.layers.Layer):
     :raises ValueError: If ``rope_percentage`` is not in ``(0, 1]``.
     :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
     :raises ValueError: If ``max_seq_len`` is not positive.
+    :raises ValueError: If ``probability_type`` is one of the four disallowed
+        score-level routing/hierarchical strategies listed above.
     """
 
     def __init__(
@@ -595,6 +657,7 @@ class GatedAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Input linear projection
+        # Shape: (B, S, dim) -> (B, S, dim)
         x = self.input_linear(inputs, training=training)
 
         # Get batch and sequence dimensions dynamically
@@ -602,6 +665,8 @@ class GatedAttention(keras.layers.Layer):
         seq_len = ops.shape(x)[1]
 
         # Generate Q, K, V projections
+        # Shape: (B, S, dim) -> (B, S, attention_dim) each, where
+        #        attention_dim = num_heads * head_dim (may differ from dim)
         q = self.q_linear(x, training=training)  # [batch, seq, attention_dim]
         k = self.k_linear(x, training=training)  # [batch, seq, attention_dim]
         v = self.v_linear(x, training=training)  # [batch, seq, attention_dim]
@@ -613,6 +678,7 @@ class GatedAttention(keras.layers.Layer):
 
         # Reshape for multi-head attention and RoPE
         # [batch, seq, attention_dim] -> [batch, seq, num_heads, head_dim]
+        # Shape: (B, S, attention_dim) -> (B, S, H, head_dim)
         q_reshaped = ops.reshape(q_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
         k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
         v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
@@ -622,11 +688,13 @@ class GatedAttention(keras.layers.Layer):
         k_rope = self.rope(k_reshaped, training=training)
 
         # Apply scaled dot-product attention
+        # Shape: 3x (B, S, H, head_dim) -> (B, S, H, head_dim)
         attention_output = self.scaled_dot_product_attention(
             q_rope, k_rope, v_reshaped, attention_mask=attention_mask, training=training
         )
 
         # Reshape back to [batch, seq, attention_dim]
+        # Shape: (B, S, H, head_dim) -> (B, S, attention_dim)
         attention_output = ops.reshape(
             attention_output, (batch_size, seq_len, self.attention_dim)
         )
@@ -634,9 +702,11 @@ class GatedAttention(keras.layers.Layer):
         # TRICKY POINT: Project to original dim if needed
         # This is necessary when attention_dim != dim (custom head_dim case)
         if self.output_proj is not None:
+            # Shape: (B, S, attention_dim) -> (B, S, dim)
             attention_output = self.output_proj(attention_output, training=training)
 
         # Output gating mechanism (parameterized activation, defaults to sigmoid)
+        # Shape: (B, S, dim) -> (B, S, dim); elementwise, no shape change
         gate_logits = self.output_gate_linear(attention_output, training=training)
         gate = self.gate_activation(gate_logits, training=training)
         gated_output = gate * attention_output

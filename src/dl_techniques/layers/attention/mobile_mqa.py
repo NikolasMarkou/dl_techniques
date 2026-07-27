@@ -161,6 +161,25 @@ class MobileMQA(GroupedQueryAttention):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any,
     ) -> None:
+        # RUBRIC R6 — ACCEPTED DEVIATION, recorded rather than "fixed".
+        # This `__init__` contains no `raise ValueError` of its own, and that is
+        # deliberate: EVERY constrained argument it accepts is validated one frame
+        # down, by `GroupedQueryAttention._validate_inputs` (see
+        # `group_query_attention.py:374-400`), which raises on non-positive `dim`,
+        # non-positive `num_heads`, and `dim % num_heads != 0`. The two arguments
+        # this subclass adds on top are `use_downsampling` (a plain bool — no range
+        # to check) and the initializer/regularizer pair (validated by Keras when
+        # resolved).
+        #
+        # WHAT NOT TO DO: do NOT "restore R6 conformance" by adding a local
+        # `if dim <= 0: raise ValueError(...)` here. It would duplicate the parent's
+        # check, and — more importantly — it would raise a DIFFERENT message string
+        # BEFORE the parent's, which is exactly the kind of silent
+        # `pytest.raises(..., match=...)` breakage assumption A4 of
+        # plan-2026-07-27T130643-38c5646a exists to prevent. If MobileMQA ever grows
+        # a constrained argument of its own, validate THAT argument here and leave
+        # the inherited three alone.
+        #
         # Enforce MQA configuration (num_kv_heads=1) and disable RoPE
         # Use bias=True to match standard Mobile/CNN conventions (vs GQA default False)
         kwargs['dim'] = dim

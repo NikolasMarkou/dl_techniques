@@ -22,7 +22,7 @@ text tokens attend to each other (and themselves) in one shared attention, which
 is the structural difference from a single-stream DiT. The layer owns only the
 projection + norm + SDPA math; AdaLN modulation lives in the surrounding block.
 
-**Architecture**
+Architecture:
 
 ::
 
@@ -59,6 +59,8 @@ PyTorch reference semantics (diffusers ``JointAttnProcessor2_0``, paging strippe
     img, txt = split(out, [N_img, N_txt], dim=seq)
     img = to_out(img); txt = to_add_out(txt)  # txt dropped if context_pre_only
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -364,6 +366,9 @@ class MMDiTJointAttention(keras.layers.Layer):
             txt_k = self.norm_added_k(txt_k, training=training)
 
         # --- joint attention: concat image + text along the seq axis ----
+        # Shape: (B, H, N_img, hd) + (B, H, N_txt, hd) -> (B, H, N_img+N_txt, hd)
+        # This concat IS the "joint" in joint attention: after it there is a single
+        # attention problem, so image tokens can attend to text tokens and vice versa.
         q = keras.ops.concatenate([img_q, txt_q], axis=2)
         k = keras.ops.concatenate([img_k, txt_k], axis=2)
         v = keras.ops.concatenate([img_v, txt_v], axis=2)
@@ -378,6 +383,7 @@ class MMDiTJointAttention(keras.layers.Layer):
         # pipeline, not in this stateless layer. Also: SDPA is computed manually
         # with keras.ops (no fused op) for backend portability and bf16 safety,
         # mirroring ideogram4_attention. See decisions.md D-004.
+        # Shape: (B, H, N, hd) @ (B, H, hd, N) -> (B, H, N, N),  N = N_img + N_txt
         scores = keras.ops.matmul(
             q, keras.ops.transpose(k, (0, 1, 3, 2))
         )
@@ -388,18 +394,22 @@ class MMDiTJointAttention(keras.layers.Layer):
             keras.ops.cast(scores, "float32"), axis=-1
         )
         attn = keras.ops.cast(attn, v.dtype)
+        # Shape: (B, H, N, N) @ (B, H, N, hd) -> (B, H, N, hd)
         out = keras.ops.matmul(attn, v)  # (B, heads, N_img+N_txt, head_dim)
 
         # --- merge heads -> (B, N_img+N_txt, dim) -----------------------
         out_shape = keras.ops.shape(out)
         batch, total_len = out_shape[0], out_shape[2]
+        # Shape: (B, H, N, hd) -> (B, N, H, hd) -> (B, N, dim)
         out = keras.ops.transpose(out, (0, 2, 1, 3))
         out = keras.ops.reshape(out, (batch, total_len, self.dim))
 
         # --- split back to per-stream lengths ---------------------------
+        # Shape: (B, N_img+N_txt, dim) -> (B, N_img, dim) and (B, N_txt, dim)
         image_out = out[:, :n_img, :]
         text_out = out[:, n_img:, :]
 
+        # Shape: (B, N_img, dim) -> (B, N_img, dim)
         image_out = self.to_out(image_out)
 
         if self.context_pre_only:

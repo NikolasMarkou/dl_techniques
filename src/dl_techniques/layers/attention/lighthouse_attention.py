@@ -9,49 +9,72 @@ context; Lighthouse instead spends precision where the content warrants it,
 resolving salient history at token granularity and the remainder through
 progressively coarser summaries.
 
-Architecturally, the single ``N x N`` score matrix is replaced by a *pyramid* of
-pooled representations plus a sparse, content-selected read over that pyramid.
-The mechanism proceeds in five stages:
+Architecture:
+    The single ``N x N`` score matrix is replaced by a *pyramid* of pooled
+    representations plus a sparse, content-selected read over that pyramid.
+    The mechanism proceeds in five stages:
 
--   **Pyramid construction.** Q, K and V are projected once and mean-pooled into
-    ``num_levels`` levels with branching factor ``pooling_factor``. Level 0 is
-    the base sequence at full resolution; level ``l`` holds ``N / p^l`` entries,
-    each summarising a window of ``p^l`` consecutive tokens. Concatenating the
-    levels yields ``S_pyr = sum_l N / p^l`` candidate entries per sequence.
--   **Scoring.** Every candidate receives a per-head L2-norm score. The norms
-    ``||Q||`` and ``||K||`` are taken on the *raw* level-0 projections and
-    *max-pooled* up the pyramid rather than recomputed on the pooled tensors, so
-    a window inherits the salience of its most prominent token. The two terms are
-    combined per entry by a max (the joint QK / KQ score) and reduced over heads
-    into a single ``(B, S_pyr)`` map.
--   **Selection.** Two index sets are retained. A *mandatory* set, fixed at build
-    time, holds every coarsest-level entry plus the leading level-0 entries, and
-    together these guarantee at least one contributor at every base position. A
-    *discretionary* set of ``top_k`` entries is then chosen by score from the
-    remaining candidates. The union is sorted by causal position, restoring
-    temporal order.
--   **Sub-attention.** Q, K and V are gathered at the selected indices and a
-    single causal scaled dot-product attention runs over the resulting
-    sub-sequence. Because the indices are sorted by causal position, an ordinary
-    lower-triangular mask over the gathered scores reproduces causality with
-    respect to the original sequence.
--   **Scatter-back.** Each entry's output is written to the base positions its
-    window covers, offset by a causal shift of ``p^l - 1``. That shift is what
-    makes coarse entries safe: a level-``l`` summary contributes only at or after
-    the last token it pooled, so no future information leaks backwards.
-    Accumulation uses ``keras.ops.segment_sum``, which is deterministic and needs
-    no floating-point atomics.
+    -   **Pyramid construction.** Q, K and V are projected once and mean-pooled
+        into ``num_levels`` levels with branching factor ``pooling_factor``.
+        Level 0 is the base sequence at full resolution; level ``l`` holds
+        ``N / p^l`` entries, each summarising a window of ``p^l`` consecutive
+        tokens. Concatenating the levels yields ``S_pyr = sum_l N / p^l``
+        candidate entries per sequence.
+    -   **Scoring.** Every candidate receives a per-head L2-norm score. The norms
+        ``||Q||`` and ``||K||`` are taken on the *raw* level-0 projections and
+        *max-pooled* up the pyramid rather than recomputed on the pooled tensors,
+        so a window inherits the salience of its most prominent token. The two
+        terms are combined per entry by a max (the joint QK / KQ score) and
+        reduced over heads into a single ``(B, S_pyr)`` map.
+    -   **Selection.** Two index sets are retained. A *mandatory* set, fixed at
+        build time, holds every coarsest-level entry plus the leading level-0
+        entries, and together these guarantee at least one contributor at every
+        base position. A *discretionary* set of ``top_k`` entries is then chosen
+        by score from the remaining candidates. The union is sorted by causal
+        position, restoring temporal order.
+    -   **Sub-attention.** Q, K and V are gathered at the selected indices and a
+        single causal scaled dot-product attention runs over the resulting
+        sub-sequence. Because the indices are sorted by causal position, an
+        ordinary lower-triangular mask over the gathered scores reproduces
+        causality with respect to the original sequence.
+    -   **Scatter-back.** Each entry's output is written to the base positions its
+        window covers, offset by a causal shift of ``p^l - 1``. That shift is what
+        makes coarse entries safe: a level-``l`` summary contributes only at or
+        after the last token it pooled, so no future information leaks backwards.
+        Accumulation uses ``keras.ops.segment_sum``, which is deterministic and
+        needs no floating-point atomics.
 
-The gathered sub-sequence has the static length
-``S = N/p^(L-1) + (p^(L-1) - 1) + top_k``, so attention costs
-``O(S^2 * d)`` with an additional ``O(N)`` for pooling, scoring and scatter. The
-trade-off is that any interaction not covered by a selected entry is served, if
-at all, by a coarse mean rather than an exact token.
+    .. warning::
+       Stage five is where this layer is currently **BROKEN**. Two of its tests
+       (``test_causality``, ``test_initialization_defaults``) plus two
+       ``test_factory_registry_drift.py`` cases fail on a genuine causality
+       defect — perturbing the last input token changes outputs at positions
+       ``< N // 2``. This description states the DESIGN, not the measured
+       behavior. See the ``D-009`` anchor above the class.
 
-A ``full_attention`` flag (set at construction, or toggled at runtime via
-``set_full_attention``) bypasses the pyramid entirely and runs plain causal
-attention over the full sequence. This exists for two-stage training, in which a
-model pretrained with sparse reads is resumed on dense attention.
+    A ``full_attention`` flag (set at construction, or toggled at runtime via
+    ``set_full_attention``) bypasses the pyramid entirely and runs plain causal
+    attention over the full sequence. This exists for two-stage training, in
+    which a model pretrained with sparse reads is resumed on dense attention.
+
+Foundational Mathematics:
+    The gathered sub-sequence has the static length::
+
+        S = N / p^(L-1)  +  (p^(L-1) - 1)  +  top_k
+            \\_________/     \\___________/     \\____/
+            coarsest level   prefix cover    discretionary
+
+    so attention costs ``O(S^2 * d)`` with an additional ``O(N)`` for pooling,
+    scoring and scatter — versus ``O(N^2 * d)`` for dense attention. Since ``S``
+    does not grow with ``N`` except through the ``N / p^(L-1)`` term, the pyramid
+    converts the quadratic term into one that shrinks geometrically with depth.
+
+    The trade-off is stated exactly: any interaction not covered by a selected
+    entry is served, if at all, by a coarse MEAN of its window rather than by the
+    exact token. Increasing ``top_k`` buys back exactness linearly; increasing
+    ``num_levels`` buys back cost geometrically. The mandatory set exists so that
+    the approximation is never a *hole* — every base position always has at least
+    one contributor, however coarse.
 
 # DECISION plan_2026-05-17_8babb636/D-001
 PORT COMPROMISES (vs. CUDA/Triton reference kernels):
@@ -108,6 +131,8 @@ References:
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 import numpy as np
@@ -384,40 +409,59 @@ class LighthouseAttention(keras.layers.Layer):
     ``Wo``, running a single causal SDPA over all ``N`` positions.
 
     :param dim: Model dimension (hidden size). Must be positive.
+    :type dim: int
     :param num_heads: Number of attention heads. Must be positive and
         divide ``dim`` unless ``head_dim`` is explicitly set.
+    :type num_heads: int
     :param head_dim: Dimension per head. If ``None``, ``head_dim = dim //
         num_heads``. Defaults to ``None``.
+    :type head_dim: Optional[int]
     :param num_levels: Number of pyramid levels (``L``). Defaults to 3.
+    :type num_levels: int
     :param pooling_factor: Branching factor per level (``p``). Defaults to 4.
+    :type pooling_factor: int
     :param top_k: Discretionary pyramid entries selected per batch element, on
         top of the mandatory set. Defaults to 1536. Clipped at build time to the
         number of non-mandatory candidates.
+    :type top_k: int
     :param scorer: Scorer type. Only ``"norm"`` supported (port compromise).
+    :type scorer: str
     :param score_head_reduction: How the per-head scores collapse to the single
         shared index set, ``"mean"`` or ``"max"``. Defaults to ``"mean"``;
         ``"max"`` lets one outlier head dictate selection for all heads.
+    :type score_head_reduction: str
     :param full_attention: If ``True``, bypass pyramid path → plain causal
         SDPA over the full sequence. Defaults to ``False``.
+    :type full_attention: bool
     :param qk_norm_type: Norm layer type applied to Q, K *after* scoring, or
         ``None`` to disable. Defaults to ``None``: the paper's scorer ranks
         ``||Q||`` and ``||K||``, and RMSNorm makes both near-constant across
         positions, so normalising before the scorer erases the selection signal
         (DECISION D-004(a)).
+    :type qk_norm_type: Optional[str]
     :param qk_norm_kwargs: Optional kwargs forwarded to the norm
         factory. Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param probability_type: Score-normalization strategy applied to the
         attention logits via :class:`ProbabilityOutput`. Defaults to
         ``"softmax"``. Routing / hierarchical types are not supported.
+    :type probability_type: str
     :param probability_config: Optional kwargs forwarded to
         :class:`ProbabilityOutput`. Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
     :param use_bias: Use bias in Dense projections. Defaults to ``False``.
+    :type use_bias: bool
     :param kernel_initializer: Initializer for Dense kernels.
         Defaults to ``"glorot_uniform"``.
+    :type kernel_initializer: Union[str, initializers.Initializer]
     :param bias_initializer: Initializer for biases. Defaults to ``"zeros"``.
+    :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Optional kernel regularizer.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
     :param dropout_rate: Dropout applied to the normalized attention weights in
         both the pyramid and full-attention paths. Defaults to 0.0.
+    :type dropout_rate: float
+    :param kwargs: Additional arguments for the ``Layer`` base class.
 
     :raises ValueError: If any argument is invalid.
 

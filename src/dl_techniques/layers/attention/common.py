@@ -1,11 +1,45 @@
 """
 Shared primitives for the ``layers/attention`` package.
 
-This module is the single home for the small, provably-identical pieces that were
-previously re-derived in a dozen attention modules: the additive attention-mask bias
-constant, the dtype in which a masked softmax must be evaluated, the
-``dim % num_heads`` divisibility check, and the softmax temperature
-(``1 / sqrt(head_dim)``).
+This module is the shared home for four small pieces that were previously re-derived
+across the package: the additive attention-mask bias constant, the dtype in which a
+masked softmax must be evaluated, the ``dim % num_heads`` divisibility check, and the
+softmax temperature (``1 / sqrt(head_dim)``).
+
+Adoption is **deliberately partial, and unevenly so** — read this before assuming a
+number you see in a sibling module came from here:
+
+-   ``validate_head_divisibility`` (11 importers) and ``compute_attention_scale``
+    (14 importers) ARE genuinely consolidated. Where a module declines them, it says
+    so in a comment naming the measurement — e.g. ``progressive_focused_attention.py``
+    and ``mmdit_joint_attention.py`` both keep ``head_dim ** -0.5``, which is NOT
+    bit-identical to ``compute_attention_scale`` (it mismatches in the last ULP for
+    218 of head_dim 1..1024, including 32 and 128).
+
+-   ``MASK_BIAS_VALUE`` / ``mask_dtype`` have exactly **ONE** importer:
+    ``energy_attention.py``, under the legacy private aliases ``_MASK_BIAS_VALUE`` /
+    ``_mask_dtype`` (see the D-007 anchor there). **Fourteen other modules** still
+    carry a LOCAL ``-1e9``-family value, counted mechanically at step 10 with
+    comments and docstrings stripped: ``attention_routing_capsule``,
+    ``capsule_routing``, ``differential``, ``gated``, ``group_query``, ``hopfield``,
+    ``ideogram4`` (as ``_MASK_NEG``), ``lighthouse`` (a per-dtype TABLE, the most
+    careful form in the package), ``multi_head_cross``, ``multi_head_latent``,
+    ``progressive_focused``, ``ring``, ``rpc``, ``single_window``.
+
+    *(That count corrects the "9 other modules" figure recorded in D-011 at step 9,
+    which was read off a grep that also matched prose. The direction of the error
+    matters: consolidation here is even less complete than the decision log claimed.)*
+
+    That is not an oversight and it is not laziness. Each of those sites was probed
+    individually and found NOT behavior-identical to this pair: they differ in cast
+    order, in the arithmetic-versus-``ops.where`` form, and several of them are the
+    systemic ``0 * -inf = NaN`` fp16 sites documented in place as known defects
+    (``hopfield_attention.py`` NaNs the ENTIRE batch under ``mixed_float16`` given an
+    all-ones mask — measured, 512/512). Making them adopt this constant is therefore a
+    *numerics change*, not a rename, and it is reserved for the follow-up plan that is
+    allowed to change behavior. Until then, these two exports are a documentation
+    consolidation with one consumer, honestly charged as such in that plan's
+    ``decisions.md`` D-011.
 
 Architecture:
     Deliberately **flat**: four module-level names, no classes, no registry, no Keras

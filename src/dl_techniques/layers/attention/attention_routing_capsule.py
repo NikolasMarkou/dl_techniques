@@ -238,10 +238,32 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         :return: ``None``.
         :rtype: None
         """
-        # Idempotency guard (rubric R7, matching the package-wide sweep in commit
-        # 1cdd4767). Without it a second build() — functional-API reuse, or
-        # from_config() followed by a rebuild — calls add_weight() again and
-        # orphans the already-restored W / q / bias variables.
+        # DECISION plan-2026-07-27T130643-38c5646a/D-013
+        # This guard, and its twin in CapsuleBlockV2.build below, are the ONE
+        # executable change plan-2026-07-27T130643-38c5646a made to a forward-adjacent
+        # path. That plan's invariant 1 is "identical numerics, no executable change";
+        # these two `if self.built: return` lines are its single, deliberate carve-out.
+        #
+        # WHY IT IS SAFE: on the ONLY path any test or production caller exercises —
+        # one build() per layer instance — the guard is unreachable, because
+        # `self.built` is False on entry and `super().build()` sets it on the way out.
+        # It can only fire on a SECOND build(), which today does the wrong thing: it
+        # re-enters the three add_weight() calls below (W, q, bias) and orphans the
+        # variables Keras has already restored into. So the guard changes behavior
+        # only in the case that was already broken.
+        #
+        # WHY IT WAS ADDED AT ALL: this file predates the package-wide sweep in commit
+        # 1cdd4767, which added exactly this guard to 29 other build() methods. It was
+        # the only attention module still missing it (the plan predicted the gap was in
+        # `ideogram4_attention.py` — that prediction was wrong; ideogram4 already had
+        # it).
+        #
+        # WHAT NOT TO DO: do not remove it to "restore byte-identity" with the
+        # pre-plan file. The correct record is that the exception is charged in
+        # decisions.md D-013, not that the guard is reverted.
+        #
+        # NOT COVERED BY ANY TEST, in either direction: the capsnet suite only ever
+        # builds once. See decisions.md D-013.
         if self.built:
             return
 
@@ -667,9 +689,11 @@ class CapsuleBlockV2(keras.layers.Layer):
         :return: ``None``.
         :rtype: None
         """
-        # Idempotency guard (rubric R7). See the identical note in
-        # AttentionRoutingCapsule.build — a second build() here would re-enter the
-        # sub-layer builds after weight restoration.
+        # DECISION plan-2026-07-27T130643-38c5646a/D-013 (second of two)
+        # Idempotency guard (rubric R7). See the full rationale at the identical guard
+        # in AttentionRoutingCapsule.build above — a second build() here would re-enter
+        # the sub-layer builds after weight restoration. Same invariant-1 carve-out,
+        # same lack of test coverage in either direction.
         if self.built:
             return
 

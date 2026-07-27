@@ -9,25 +9,48 @@ probability output strategy applied to the attention scores. Internal padding
 ensures every window reaches ``window_size ** 2`` tokens before attention is
 computed, and the padded positions are stripped from the output.
 
-Architecturally, the layer follows the scaled dot-product attention formula
-``Attention(Q, K, V) = prob(Q K^T / sqrt(d_k) + bias) V``, where ``prob`` is
-a configurable :class:`ProbabilityOutput` strategy and ``bias`` is an optional
-learnable relative position bias indexed by intra-window 2D coordinates. The
-relative position bias table follows the Swin Transformer convention.
+Architecture:
+    The layer is one Swin-style window's worth of attention, made configurable
+    along two independent axes (how ``K`` is projected, and how scores become
+    probabilities) instead of being forked into separate classes.
 
-The layer supports two projection modes:
--   **linear**: a single fused dense layer produces ``Q``, ``K``, ``V``.
--   **kan_key**: separate dense layers produce ``Q`` and ``V``, while ``K``
-    is produced by a KAN linear layer to inject a non-linear key projection.
+    1.  **Projection.** Two mutually exclusive modes:
 
-Score-to-probability conversion is delegated to :class:`ProbabilityOutput`
-via ``probability_type`` / ``probability_config``. Score-level routing
-strategies (``routing``, ``deterministic_routing``, ``hierarchical``,
-``hierarchical_routing``) are rejected at construction time, as they are
-not appropriate normalizations for raw attention scores in this layer.
+        -   **linear**: a single fused dense layer produces ``Q``, ``K``, ``V``.
+        -   **kan_key**: separate dense layers produce ``Q`` and ``V``, while ``K``
+            is produced by a KAN linear layer to inject a non-linear key
+            projection.
 
-Optional QK-normalization (``qk_norm_type``) applies a normalization layer
-to ``Q`` and ``K`` before the score matmul, stabilising attention logits.
+    2.  **Padding to a full window.** Internal padding ensures every window
+        reaches ``window_size ** 2`` tokens before attention is computed, and the
+        padded positions are stripped from the output. Callers therefore never
+        have to pre-pad, and a partial trailing window is handled without a
+        separate code path.
+
+    3.  **Scoring.** Optional QK-normalization (``qk_norm_type``) applies a
+        normalization layer to ``Q`` and ``K`` before the score matmul,
+        stabilising attention logits. An optional learnable relative position
+        bias, indexed by intra-window 2D coordinates and following the Swin
+        Transformer convention, is added to the scores.
+
+    4.  **Probability output.** Score-to-probability conversion is delegated to
+        :class:`ProbabilityOutput` via ``probability_type`` /
+        ``probability_config``. Score-level routing strategies (``routing``,
+        ``deterministic_routing``, ``hierarchical``, ``hierarchical_routing``) are
+        rejected at construction time, as they are not appropriate normalizations
+        for raw attention scores in this layer.
+
+Foundational Mathematics:
+    The layer follows the scaled dot-product attention formula::
+
+        Attention(Q, K, V) = prob( Q K^T / sqrt(d_k) + bias ) V
+
+    where ``prob`` is the configurable :class:`ProbabilityOutput` strategy and
+    ``bias`` is the optional relative position bias. Restricting the sum to one
+    window of ``M = window_size ** 2`` tokens is what turns global attention's
+    ``O(N^2)`` cost into ``O(N * M)`` for an image of ``N`` tokens: the bias table
+    is indexed by relative coordinate, so it has ``(2M_s - 1)^2`` entries for
+    window side ``M_s`` rather than one entry per absolute position pair.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
@@ -36,6 +59,8 @@ References:
       (https://arxiv.org/abs/1706.03762)
 
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
@@ -458,10 +483,12 @@ class SingleWindowAttention(keras.layers.Layer):
         N_target = self.window_size * self.window_size
 
         padding_amount = N_target - N_actual
+        # Shape: (B, N_actual, dim) -> (B, N_target, dim), N_target = window_size**2
         padded_inputs = keras.ops.pad(
             inputs, [[0, 0], [0, padding_amount], [0, 0]]
         )
 
+        # Shape: (B, N_actual) + (B, padding_amount) -> (B, N_target)
         internal_padding_mask = keras.ops.concatenate(
             [
                 keras.ops.ones((B_actual, N_actual), dtype="int32"),
@@ -472,6 +499,7 @@ class SingleWindowAttention(keras.layers.Layer):
 
         final_attention_mask = internal_padding_mask
         if attention_mask is not None:
+            # Shape: (B, N_actual) -> (B, N_target)
             padded_user_mask = keras.ops.pad(
                 attention_mask, [[0, 0], [0, padding_amount]]
             )
@@ -482,16 +510,21 @@ class SingleWindowAttention(keras.layers.Layer):
 
         B, N, C = keras.ops.shape(padded_inputs)
         if self.attention_mode == "linear":
+            # Shape: (B, N, dim) -> (B, N, 3*dim)
             qkv = self.qkv(padded_inputs, training=training)
+            # Shape: (B, N, 3*dim) -> (B, N, 3, H, head_dim)
             qkv = keras.ops.reshape(
                 qkv, (B, N, 3, self.num_heads, self.head_dim)
             )
+            # Shape: (B, N, 3, H, head_dim) -> (3, B, H, N, head_dim)
             qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
+            # Shape: (3, B, H, N, head_dim) -> 3x (B, H, N, head_dim)
             q, k, v = qkv[0], qkv[1], qkv[2]
         else:
             q_proj = self.query(padded_inputs, training=training)
             k_proj = self.key(padded_inputs, training=training)
             v_proj = self.value(padded_inputs, training=training)
+            # Shape: (B, N, dim) -> (B, N, H, head_dim) -> (B, H, N, head_dim), each
             q = keras.ops.transpose(
                 keras.ops.reshape(q_proj, (B, N, self.num_heads, self.head_dim)),
                 (0, 2, 1, 3),
@@ -510,20 +543,26 @@ class SingleWindowAttention(keras.layers.Layer):
             k = self.k_norm(k, training=training)
 
         q = q * self.scale
+        # Shape: (B, H, N, head_dim) @ (B, H, head_dim, N) -> (B, H, N, N)
         attn = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
         if self.use_relative_position_bias:
+            # Shape: table (2*Ws-1)^2 x H, gathered by (N_target*N_target,) index
+            #        -> (N_target*N_target, H)
             relative_position_bias = keras.ops.take(
                 self.relative_position_bias_table,
                 keras.ops.reshape(self.relative_position_index, (-1,)),
                 axis=0,
             )
+            # Shape: (N_target*N_target, H) -> (N_target, N_target, H)
             relative_position_bias = keras.ops.reshape(
                 relative_position_bias, (N_target, N_target, -1)
             )
+            # Shape: (N_target, N_target, H) -> (H, N_target, N_target)
             relative_position_bias = keras.ops.transpose(
                 relative_position_bias, (2, 0, 1)
             )
+            # Shape: (B, H, N, N) + (1, H, N, N) -> (B, H, N, N)
             attn = attn + keras.ops.expand_dims(relative_position_bias, 0)
 
         # R13 cross-reference: this mask site DELIBERATELY does not adopt
@@ -536,6 +575,7 @@ class SingleWindowAttention(keras.layers.Layer):
         # spelling. Unifying them is a numerics change and is out of scope for this
         # behavior-preserving pass; note that the `clip(attn, -30, 30)` two lines below
         # currently masks the fp16 hazard. Flagged for a follow-up.
+        # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis]
         broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
         inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
         additive_mask = (
@@ -549,11 +589,16 @@ class SingleWindowAttention(keras.layers.Layer):
 
         if self.attn_dropout is not None:
             attn = self.attn_dropout(attn, training=training)
+        # Shape: (B, H, N, N) @ (B, H, N, head_dim) -> (B, H, N, head_dim)
         x = keras.ops.matmul(attn, v)
+        # Shape: (B, H, N, head_dim) -> (B, N, H, head_dim)
         x = keras.ops.transpose(x, (0, 2, 1, 3))
+        # Shape: (B, N, H, head_dim) -> (B, N, dim)
         x = keras.ops.reshape(x, (B, N, C))
+        # Shape: (B, N, dim) -> (B, N, dim)
         x = self.proj(x, training=training)
 
+        # Shape: (B, N_target, dim) -> (B, N_actual, dim)  [strip stage-1 padding]
         output = x[:, :N_actual, :]
         return output
 
