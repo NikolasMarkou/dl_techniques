@@ -22,7 +22,51 @@ multi-head self-attention block specialized for the Ideogram4 packed-sequence Di
 - **SDPA**: scaled dot-product attention is computed manually with ``keras.ops``
   (matmul, scale by ``1/sqrt(head_dim)``, add mask, softmax, matmul v), then the
   output is projected by a bias-free ``Dense(hidden_size)``.
+
+Architecture:
+    A single fused ``Dense(3 * hidden_size, use_bias=False)`` produces q / k / v in
+    one matmul, which is reshaped to ``(B, L, 3, H, D)`` and sliced. q and k pass
+    through two independent :class:`RMSNorm` instances over ``head_dim``, then
+    receive mRoPE from caller-supplied ``cos`` / ``sin`` tables. Scores are formed
+    manually, biased by an additive block-diagonal segment mask, normalized with
+    ``keras.ops.softmax``, applied to v, and projected back by a bias-free
+    ``Dense(hidden_size)``.
+
+    Two structural properties are load-bearing:
+
+    -   The layer does **not** own the mRoPE layer. ``cos`` / ``sin`` are call
+        arguments produced upstream by ``Ideogram4MRoPE``, so one rope table is
+        computed once per forward pass and shared by every block.
+    -   Masking is ADDITIVE, not a boolean keep-mask handed to a fused SDPA op.
+        See the ``plan_2026-06-12_59a18a10/D-004`` anchor in :meth:`call`.
+
+Foundational Mathematics:
+    For head ``h`` with per-head dimension ``D = hidden_size / H``::
+
+        q, k, v   = split( W_qkv x ,  3 )              # fused projection
+        q_hat     = RMSNorm(q) ,   k_hat = RMSNorm(k)  # per-head, over D
+        q~, k~    = mRoPE(q_hat, k_hat ; cos, sin)     # rotary injection
+        S_ij      = (q~_i . k~_j) / sqrt(D)  +  M_ij
+        M_ij      = 0                if segment_id_i == segment_id_j
+                    -1e9             otherwise
+        out_i     = sum_j softmax_j(S_ij) v_j
+
+    RMS QK-norm rescales each query/key to a fixed L2 radius before the dot
+    product, which bounds ``|S_ij|`` independently of the activation scale and is
+    what keeps the logits stable without a learned temperature. The mask is added
+    in the *logit* domain rather than multiplied in the probability domain, so
+    ``softmax`` remains a proper distribution over each token's own segment.
+
+References:
+    - Vaswani et al. (2017). "Attention Is All You Need". NeurIPS.
+      (https://arxiv.org/abs/1706.03762)
+    - Zhang & Sennrich (2019). "Root Mean Square Layer Normalization". NeurIPS.
+      (https://arxiv.org/abs/1910.07467)
+    - Su et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
+      Embedding". (https://arxiv.org/abs/2104.09864)
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from typing import Any, Dict, Optional, Tuple
@@ -32,12 +76,31 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .common import compute_attention_scale, validate_head_divisibility
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.embedding.multi_axis_rope import apply_rotary_pos_emb
 
 # ---------------------------------------------------------------------
 
 # Large-negative fill for masked-out (cross-segment) attention logits.
+#
+# R13 cross-reference: numerically the same magnitude as `common.MASK_BIAS_VALUE`,
+# and deliberately NOT replaced by it. The shared constant carries a contract —
+# materialize the bias in `common.mask_dtype(...)`, never in the layer's compute
+# dtype — that this layer does not follow: it casts straight to `scores.dtype`.
+# Importing the name without porting the dtype discipline would advertise a safety
+# guarantee the code does not implement.
+#
+# That said, this layer is NOT exposed to the systemic fp16 mask-NaN hazard
+# catalogued elsewhere in this package, and the reason is structural rather than
+# lucky. `call()` uses the `ops.where(same_segment, 0.0, -1e9)` form, not the
+# arithmetic `scores + (1 - mask) * -1e9` form. Under `mixed_float16` the cast makes
+# this constant `-inf`, but `where` never multiplies it by zero, so `0 * -inf = NaN`
+# cannot arise. The softmax is then well-defined because the DIAGONAL is always
+# same-segment, so every row keeps at least one finite (0.0) entry and the
+# max-subtraction inside softmax stays finite. Verified empirically in fp16, not
+# reasoned about on paper: bias `[0, 0, -inf, -inf]` -> softmax
+# `[0.269, 0.731, 0, 0]`. Do NOT "modernize" this into the arithmetic form.
 _MASK_NEG = -1e9
 
 
@@ -51,6 +114,69 @@ class Ideogram4Attention(keras.layers.Layer):
     block-diagonal in ``segment_ids`` (tokens attend only within their own
     segment).
 
+    **[REUSE]** The ``hidden_size % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common`; the QK-norms
+    are the repository :class:`~dl_techniques.layers.norms.rms_norm.RMSNorm` and the
+    rotary injection is the shared
+    :func:`~dl_techniques.layers.embedding.multi_axis_rope.apply_rotary_pos_emb`.
+    Nothing here re-implements a primitive that already exists in the package.
+
+    **Architecture Overview:**
+
+    Shapes use ``B`` = batch, ``L`` = packed sequence length, ``H`` = num_heads,
+    ``D`` = head_dim = ``hidden_size / num_heads``.
+
+    .. code-block:: text
+
+                 x [B, L, hidden]      segment_ids [B, L]      cos/sin [B, L, D]
+                        │                      │                      │
+                        ▼                      │                      │
+              ┌───────────────────┐            │                      │
+              │ Dense(3*hidden)   │            │                      │
+              │ fused QKV, no bias│            │                      │
+              └─────────┬─────────┘            │                      │
+                        ▼                      │                      │
+              reshape [B, L, 3, H, D]          │                      │
+                        │                      │                      │
+              ┌─────────┼─────────┐            │                      │
+              ▼         ▼         ▼            │                      │
+              q         k         v            │                      │
+              │         │         │            │                      │
+              ▼         ▼         │            │                      │
+          RMSNorm   RMSNorm       │            │                      │
+          (norm_q)  (norm_k)      │            │                      │
+              │         │         │            │                      │
+              └────┬────┘         │            │                      │
+                   ▼              │            │                      │
+          transpose -> [B,H,L,D]  │            │                      │
+                   │              │            │                      │
+                   ▼              │            │                      │
+          apply_rotary_pos_emb ◄──┼────────────┼──────────────────────┘
+                   │              │            │
+                   ▼              │            ▼
+          q~ @ k~^T / sqrt(D)     │   seg_i == seg_j  ->  0.0
+             [B, H, L, L]         │   else            -> -1e9
+                   │              │            │
+                   └──────┬───────┼────────────┘
+                          ▼       │
+                    scores + mask │
+                          │       │
+                          ▼       │
+                       softmax    │
+                          │       │
+                          └───┬───┘
+                              ▼
+                       attn @ v  [B, H, L, D]
+                              │
+                              ▼
+                    merge heads [B, L, hidden]
+                              │
+                              ▼
+                    Dense(hidden), no bias
+                              │
+                              ▼
+                        Output [B, L, hidden]
+
     :param hidden_size: Model / embedding dimensionality. Must be divisible by
         ``num_heads``.
     :type hidden_size: int
@@ -60,9 +186,20 @@ class Ideogram4Attention(keras.layers.Layer):
         (matching the PyTorch reference).
     :type eps: float
     :param kwargs: Additional ``keras.layers.Layer`` arguments.
+    :type kwargs: Any
 
-    :raises ValueError: If ``hidden_size`` is not divisible by ``num_heads``,
-        or if either is not a positive integer.
+    :raises ValueError: If ``hidden_size`` is not a positive integer.
+    :raises ValueError: If ``num_heads`` is not a positive integer.
+    :raises ValueError: If ``hidden_size`` is not divisible by ``num_heads``.
+    :raises ValueError: If ``eps`` is not positive.
+    :raises ValueError: From ``build()``, if the input is not 3D or its last
+        dimension is not ``hidden_size``.
+
+    .. warning::
+        **No padding-mask argument.** Masking is driven entirely by
+        ``segment_ids``; there is no ``attention_mask`` parameter. Padding must be
+        expressed by giving pad tokens their own segment id, otherwise they are
+        attended to as ordinary tokens of whichever segment they were assigned.
 
     Input/Output:
         ``call(x, segment_ids, cos, sin)`` with
@@ -98,11 +235,14 @@ class Ideogram4Attention(keras.layers.Layer):
             raise ValueError(
                 f"num_heads must be a positive integer, got {num_heads}"
             )
-        if hidden_size % num_heads != 0:
-            raise ValueError(
-                f"hidden_size ({hidden_size}) must be divisible by "
-                f"num_heads ({num_heads})."
-            )
+        # R13/A4: adopts the shared validator. Its message is character-identical
+        # to what stood here apart from the trailing full stop, and
+        # `test_ideogram4_attention.py` pins no `pytest.raises(match=...)` on it
+        # (checked before the swap), so no diagnostic regresses. `dim_name` keeps
+        # this layer naming its OWN constructor argument.
+        validate_head_divisibility(
+            hidden_size, num_heads, dim_name="hidden_size"
+        )
         if eps <= 0:
             raise ValueError(f"eps must be positive, got {eps}")
 
@@ -111,7 +251,14 @@ class Ideogram4Attention(keras.layers.Layer):
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.eps = float(eps)
-        self._inv_sqrt_dim = 1.0 / (self.head_dim ** 0.5)
+        # R13: was `1.0 / (self.head_dim ** 0.5)`. Verified rather than assumed
+        # before swapping — `.hex()` compared against the helper across 27 realistic
+        # head dims (1..512), 0 mismatches, so this is a bit-identical rename, not a
+        # numerics change. (Note the neighbouring form `head_dim ** -0.5` is NOT
+        # bit-identical: it differs in the last ULP for 16 of those 27 dims. The two
+        # spellings are not interchangeable.) Still a Python float computed in
+        # `__init__`, never in `call()`, per `plan_2026-06-14_33b77a7a/D-002`.
+        self._inv_sqrt_dim = compute_attention_scale(self.head_dim)
 
         # --- sub-layers (created here, built in build()) ---------------
         self.qkv = keras.layers.Dense(

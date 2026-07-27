@@ -27,11 +27,42 @@ two tiers come from separate projections, which lets the layer learn a distinct
 "read from summary" behaviour for spokes and a "build the summary" behaviour for
 hubs.
 
-The complexity reduction follows directly: standard self-attention is
-``O(N^2 * d)``, whereas anchor attention is
-``O(K^2 * d + (N - K) * K * d) ~ O(N * K * d)`` when ``K << N``. For ``K=32`` and
-``N=4096`` this is roughly a 128x reduction in attention computation, at the cost
-of forcing all long-range interaction through a ``K``-dimensional bottleneck.
+Architecture:
+    Q, K and V come from three ``Dense`` projections, plus a **fourth** ``Dense``
+    (``query_token_proj``) used only by the spoke tokens. In hierarchical mode the
+    anchor queries and the spoke queries are concatenated along the sequence axis in
+    original token order and scored against the anchor keys alone, producing an
+    ``(N, K)`` score matrix instead of ``(N, N)``. Because the concatenation
+    preserves token order, the output needs no re-scatter.
+
+    Two structural properties are load-bearing:
+
+    -   The mode is a **call** argument (``num_anchor_tokens``), not constructor
+        state, so it is absent from ``get_config()``. A reloaded model runs in
+        standard mode unless the caller passes the argument again.
+    -   Hierarchical mode requires a statically-known sequence length; see the
+        ``plan_2026-06-14_ab855e7e/D-002`` anchor in ``_hierarchical_attention``.
+
+Foundational Mathematics:
+    Write ``A`` for the anchor block (the first ``K`` tokens) and ``Q`` for the
+    remaining ``N - K``. Standard attention factorizes token ``i``'s output as a
+    convex combination over all ``N`` values. Anchor attention restricts the support
+    of that combination to the ``K`` anchor values::
+
+        out_i = sum_{j in A} softmax_j( q_i . k_j / sqrt(d) ) v_j
+
+    with ``q_i = W_q x_i`` for ``i in A`` and ``q_i = W_q' x_i`` for ``i in Q``.
+    Every path between two non-anchor tokens is therefore length 2 through the
+    anchor set, which is exactly the hub-and-spoke structure: the anchors form a
+    rank-``K`` bottleneck through which all long-range information must pass. The
+    layer's expressive limit follows directly — no interaction that cannot be
+    represented in the span of ``K`` value vectors survives.
+
+    The complexity reduction follows just as directly: standard self-attention is
+    ``O(N^2 * d)``, whereas anchor attention is
+    ``O(K^2 * d + (N - K) * K * d) ~ O(N * K * d)`` when ``K << N``. For ``K=32`` and
+    ``N=4096`` this is roughly a 128x reduction in attention computation, at the cost
+    of forcing all long-range interaction through that ``K``-dimensional bottleneck.
 
 References:
     - Beltagy, I., et al. (2020). "Longformer: The Long-Document Transformer".
@@ -40,8 +71,9 @@ References:
       Permutation-Invariant Neural Networks". (https://arxiv.org/abs/1810.00825)
 """
 
+# ---------------------------------------------------------------------
+
 import keras
-import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Any, Dict, Tuple, Union
 
@@ -49,6 +81,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from .common import compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 
 # ---------------------------------------------------------------------
@@ -177,11 +210,27 @@ class AnchorAttention(keras.layers.Layer):
         Q_all concatenates [Q_a ; Q_q] in original token order, so the K rows
         of the output belong to the anchors and no re-scatter is needed.
 
+    **[NO MASK ARGUMENT — intentional carve-out, not an omission]** ``call()`` takes
+    ``(x, num_anchor_tokens=None, training=None)`` and has **no** ``attention_mask``
+    parameter. This is a frozen part of the public signature, adjacent to the
+    ``factory.py`` D-007 carve-out that pins the non-standard ``call()`` signatures in
+    this package: adding a mask argument would change the call contract for every
+    consumer and for the factory's dispatch. Do NOT "restore parity" with the MHA
+    family by bolting one on. The consequence, stated plainly so no caller is
+    surprised: anchors are chosen POSITIONALLY (the first ``K`` elements), so a
+    right-padded batch is safe, while a **left-padded batch promotes padding tokens
+    into the global summary** and silently corrupts every spoke's read. Pre-trim or
+    right-pad. If real masking is needed, that is a new layer or a follow-up plan, not
+    an in-place signature edit.
+
+    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
+    normalization is the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput`.
+
     **Known limitations:**
 
-    - No ``attention_mask`` support. Anchors are chosen positionally (the first
-      ``K`` elements), so a right-padded batch is safe but a left-padded batch
-      would promote padding to the global summary. Pre-trim or right-pad inputs.
+    - No ``attention_mask`` support — see the carve-out block above.
     - ``num_anchor_tokens`` is a call argument, not constructor state, and is
       therefore absent from ``get_config()``. A reloaded model runs in standard
       mode unless the caller passes the argument again.
@@ -230,6 +279,13 @@ class AnchorAttention(keras.layers.Layer):
     :raises ValueError: If dim, num_heads or head_dim are not positive.
     :raises ValueError: If dim is not divisible by num_heads.
     :raises ValueError: If dropout_rate is outside [0.0, 1.0].
+    :raises ValueError: From ``build()``, if the input is not 3D or its last
+        dimension does not match ``dim``.
+    :raises ValueError: From ``call()``, if ``num_anchor_tokens`` is set but not
+        positive.
+    :raises ValueError: From ``call()`` in hierarchical mode, if the input's
+        sequence dimension is not statically known (see the
+        ``plan_2026-06-14_ab855e7e/D-002`` anchor).
     """
 
     def __init__(
@@ -262,10 +318,11 @@ class AnchorAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(
-                f"dim ({dim}) must be divisible by num_heads ({num_heads})"
-            )
+        # R13/A4: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the regex pinned at `test_anchor_attention.py:96`
+        # (`match="must be divisible"`) still matches and the diagnostic is
+        # byte-unchanged. Checked before the swap, not assumed.
+        validate_head_divisibility(dim, num_heads)
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
         if not (0.0 <= dropout_rate <= 1.0):
@@ -293,8 +350,15 @@ class AnchorAttention(keras.layers.Layer):
         # use this value, never `dim`, or a custom head_dim silently mis-packs.
         self.inner_dim = self.num_heads * self.head_dim
 
-        # Scaling factor: 1/sqrt(d_k)
-        self.scale = 1.0 / np.sqrt(float(self.head_dim))
+        # Scaling factor: 1/sqrt(d_k).
+        # R13: was `1.0 / np.sqrt(float(self.head_dim))`. Verified rather than
+        # assumed before swapping — `.hex()` compared against the helper across 27
+        # realistic head dims (1..512), 0 mismatches, so this is a bit-identical
+        # rename and not a numerics change. Adopting also removes this file's only
+        # numpy dependency (the import is dropped above). Still a Python float
+        # computed in `__init__`, never in `call()`, per
+        # `plan_2026-06-14_33b77a7a/D-002`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # ---------------------------------------------------------------------
         # Create sub-layers

@@ -19,13 +19,60 @@ This implementation uses **manual scaled dot-product attention** rather than two
 probability normalization customizable via :class:`ProbabilityOutput` and exposes an
 optional QK-norm hook applied independently to each stream's Q/K projections.
 
+Architecture:
+    Five separate ``Dense`` projections produce ``Q1, K1, Q2, K2`` and a single
+    **shared** ``V``. Each ``(Q, K)`` pair drives an independent SDPA stream with its
+    own optional QK-norm, its own :class:`ProbabilityOutput` instance and its own
+    attention dropout, but both streams read the same ``V``. The two contexts are
+    combined by ``out1 - lambda * out2``, merged across heads, projected and dropped
+    out.
+
+    Two structural properties are load-bearing:
+
+    -   ``V`` is shared, not duplicated. The two streams differ only in *where* they
+        look, never in *what* they read, which is what makes their difference a
+        noise cancellation rather than an arbitrary linear combination of two
+        unrelated attentions.
+    -   ``layer_idx`` is a **call** argument, not constructor state, so it is absent
+        from ``get_config()``. It only feeds the lambda schedule.
+
+Foundational Mathematics:
+    With ``s = 1 / sqrt(d_head)`` and a shared value matrix ``V``::
+
+        A1 = P(Q1 K1^T s) ,   A2 = P(Q2 K2^T s)
+        out = (A1 - lambda * A2) V
+
+    Both streams multiply the same ``V``, so the operator applied to the values is
+    the single matrix ``A1 - lambda * A2``. Its rows sum to ``1 - lambda`` rather
+    than ``1``: the mechanism is deliberately **not** a convex combination, and that
+    is the point. Any key ``j`` that both streams attend to equally contributes
+    ``(1 - lambda) * A1_ij``, i.e. is attenuated, while a key that only the first
+    stream selects keeps its full weight. Common-mode attention — the diffuse,
+    context-independent mass that ordinary softmax attention spreads over irrelevant
+    tokens — is therefore subtracted out, in exact analogy to a differential
+    amplifier rejecting common-mode voltage.
+
+    The mixing coefficient is scheduled by depth::
+
+        lambda(l) = clip( (0.8 - 0.6 * exp(-0.3 * max(l - 1, 0))) * lambda_learned,
+                          0.1, 0.9 )
+
+    which starts shallow layers near 0.2 and saturates deep layers near 0.8, so
+    cancellation strengthens with depth. The clip is a training-stability guard: at
+    ``lambda -> 1`` the operator's rows sum to zero and the residual stream loses its
+    DC component.
+
 References:
     Ye, T., Dong, L., Xia, Y., Sun, Y., Zhu, Y., Huang, G., & Wei, F.
     "DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context
-    while canceling noise"
+    while canceling noise". (https://arxiv.org/abs/2410.05258)
+
+    Vaswani et al. (2017). "Attention Is All You Need". NeurIPS.
+    (https://arxiv.org/abs/1706.03762)
 """
 
-import math
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
@@ -35,6 +82,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .common import compute_attention_scale
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -63,6 +111,26 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     types (softmax / sparsemax / threshmax / adaptive). Two separate instances are
     used so that per-site debugging and weight inspection remains
     straightforward.
+
+    **[EXTRA CALL ARGUMENT — intentional, frozen]** ``call()`` takes an extra
+    positional ``layer_idx: int = 0`` between ``attention_mask`` and ``training``:
+    ``call(inputs, attention_mask=None, layer_idx=0, training=None)``. It selects the
+    depth-dependent lambda schedule and is a **call** argument rather than
+    constructor state, so it is deliberately absent from ``get_config()`` — a
+    reloaded layer defaults to ``layer_idx=0`` unless the caller passes it again.
+    Do NOT move it into ``__init__`` or drop it to match the package's standard
+    signature: a stack of these layers must pass its own depth, and the signature is
+    part of the public contract.
+
+    **[REUSE]** The ``1 / sqrt(head_dim)`` temperature comes from
+    :mod:`~dl_techniques.layers.attention.common`; score normalization is the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput` and the optional
+    QK-norms come from
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`. Note that
+    this layer has **no** ``dim % num_heads`` check to share: ``head_dim`` is an
+    explicit required constructor argument here, so ``dim`` and
+    ``num_heads * head_dim`` are independent and the output projection reconciles
+    them.
 
     **Architecture Overview:**
 
@@ -159,6 +227,13 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     :raises ValueError: If head_dim is not positive.
     :raises ValueError: If dropout rates are not between 0 and 1.
     :raises ValueError: If lambda_init is not between 0 and 1.
+    :raises ValueError: If ``probability_type`` is a routing / hierarchical variant
+        (those consume features and require a fixed ``output_dim``, which is
+        incompatible with score logits whose last axis is the kv sequence length).
+    :raises ValueError: If sub-layer construction fails for any reason — the
+        underlying exception is logged and re-raised as a ``ValueError``.
+    :raises ValueError: From ``build()``, if the input is not 3D or its last
+        dimension does not match ``dim``.
     """
 
     def __init__(
@@ -243,7 +318,14 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # Scale factor for scaled dot-product attention.
         # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
         # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
-        self.scale = 1.0 / math.sqrt(float(self.head_dim))
+        #
+        # R13: was written out as `1.0 / math.sqrt(float(self.head_dim))`, which is
+        # the shared helper's body character-for-character — the swap is a rename,
+        # not a numerics change. Re-confirmed with `.hex()` across 27 realistic head
+        # dims (1..512) rather than trusted by inspection. Still a Python float
+        # computed in `__init__`, never in `call()`, per
+        # `plan_2026-06-14_33b77a7a/D-002`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         try:
@@ -448,12 +530,39 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         :type attention_mask: keras.KerasTensor
         :return: Masked scores tensor with same shape as input scores.
         :rtype: keras.KerasTensor
+
+        .. warning::
+            **KNOWN DEFECT — systemic fp16 mask-NaN hazard (reported, not fixed).**
+            The arithmetic form below is the eighth catalogued instance of this bug
+            in ``layers/attention`` (siblings: ``single_window``, ``gated``,
+            ``multi_head_cross``, ``multi_head_latent``, ``group_query``, ``ring``,
+            and ``rpc`` via a different mechanism). ``attention_mask`` is cast to
+            ``scores.dtype``; under ``mixed_precision.set_global_policy('mixed_float16')``
+            that dtype is fp16, where ``np.float16(-1e9) == -inf``. At every
+            **unmasked** position ``(1.0 - 1.0) * -inf`` is ``0 * -inf = NaN``, so
+            supplying any mask under a mixed-precision policy poisons the entire
+            output — while supplying no mask is fine, which is exactly what makes it
+            hard to notice. The form is the bug, not the constant: swapping in
+            :data:`~dl_techniques.layers.attention.common.MASK_BIAS_VALUE` would not
+            fix it. The structural fix is
+            ``ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)`` evaluated in
+            :func:`~dl_techniques.layers.attention.common.mask_dtype`, which cannot
+            produce ``0 * inf`` at all. No test exercises this layer under a
+            mixed_float16 policy. Left in place deliberately: the fix is a
+            dtype/op-form change on the forward path, i.e. a behavior change, and the
+            pass that wrote this note is behavior-preserving.
         """
         attention_mask = ops.cast(attention_mask, scores.dtype)
         if len(attention_mask.shape) == 2:
             attention_mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
         elif len(attention_mask.shape) == 3:
             attention_mask = ops.expand_dims(attention_mask, 1)
+        # R13: NOT unified with the sibling `_apply_attention_mask` bodies in
+        # `multi_head_cross_attention.py` / `multi_head_latent_attention.py` /
+        # `group_query_attention.py`. Those were diffed line-by-line in step 4 of the
+        # normalization plan and found to differ in cast order and rank-probe form,
+        # so a shared helper would change op ordering somewhere. Left local, with the
+        # hazard documented above rather than papered over.
         mask_value = -1e9
         return scores + (1.0 - attention_mask) * mask_value
 

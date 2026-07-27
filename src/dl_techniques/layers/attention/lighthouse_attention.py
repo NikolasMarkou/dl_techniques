@@ -259,6 +259,40 @@ def _compute_mandatory_indices(
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-07-27T130643-38c5646a/D-009
+# THIS LAYER IS KNOWN-RED. It ships with a real, reproduced causality defect:
+# perturbing the LAST input token changes outputs at positions `< N // 2` by up to
+# 2.58 absolute. Four tests fail on that defect and are the authoritative red
+# baseline of the `layers/attention` normalization plan:
+#     tests/test_layers/test_attention/test_lighthouse_attention.py
+#         ::TestLighthouseAttention::test_causality
+#         ::TestLighthouseAttention::test_initialization_defaults
+#     tests/test_layers/test_factory_registry_drift.py
+#         ::test_registry_declares_every_constructor_param[attention:lighthouse]
+#         ::test_registry_optional_defaults_match_constructor_defaults[attention:lighthouse]
+#
+# The defect is DELIBERATELY OUT OF SCOPE for the normalization plan that placed
+# this anchor. That plan is behavior-preserving by hard invariant; fixing causality
+# is a numerics change, and mixing a behavior fix into a structure pass would make
+# every subsequent regression comparison ambiguous ("did the refactor break it, or
+# did the fix move it?"). A follow-up plan owns the fix.
+#
+# WHAT NOT TO DO:
+#   * Do NOT "fix" the causality bug opportunistically inside a docs/style pass.
+#     The correct sequence is: close the structure pass, then open a behavior plan
+#     whose gate can distinguish a causality fix from a refactor regression.
+#   * Do NOT treat those 4 failing test ids as noise, skip them, xfail them, or
+#     relax their assertions to make a run look green. They are the only signal
+#     that the defect still exists.
+#   * Do NOT read a sudden PASS on any of the 4 as good news during a
+#     behavior-preserving pass — an unexpected green means behavior moved and is a
+#     STOP condition, exactly like an unexpected red.
+#   * Suspect surfaces for the eventual fix (recorded, NOT acted on here): the
+#     causal-shift arithmetic in `_compute_scatter_targets` / `_compute_causal_positions`
+#     and the mandatory-index prefix in `_compute_mandatory_indices`. Verify, do not
+#     assume — these are leads, not a diagnosis.
+# See decisions.md D-009 (plan-2026-07-27T130643-38c5646a) and D-003 of the same plan.
+
 
 @keras.saving.register_keras_serializable()
 class LighthouseAttention(keras.layers.Layer):
@@ -400,6 +434,19 @@ class LighthouseAttention(keras.layers.Layer):
         case). A static *batch* dimension is not required but does let
         ``segment_sum`` receive a concrete ``num_segments``, which ``jax.jit``
         needs.
+
+    .. warning::
+        **Known causality defect — this layer is not currently causal.**
+        Perturbing the last input token changes outputs at positions ``< N // 2``
+        by up to 2.58 absolute, so the scatter-back path leaks future information
+        backwards despite the ``p^l - 1`` causal shift described above. Two tests
+        in ``test_lighthouse_attention.py`` (``test_causality``,
+        ``test_initialization_defaults``) and two parametrized cases in
+        ``test_factory_registry_drift.py`` fail on this and are expected to fail.
+        Do **not** use this layer where causality is load-bearing (autoregressive
+        decoding, next-token training) until the defect is fixed. See the
+        ``# DECISION plan-2026-07-27T130643-38c5646a/D-009`` anchor above the class
+        for why the fix is sequenced into a separate plan rather than applied here.
     """
 
     def __init__(
