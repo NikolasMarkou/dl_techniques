@@ -1,10 +1,11 @@
 """
 Shared primitives for the ``layers/attention`` package.
 
-This module is the shared home for four small pieces that were previously re-derived
+This module is the shared home for five small pieces that were previously re-derived
 across the package: the additive attention-mask bias constant, the dtype in which a
-masked softmax must be evaluated, the ``dim % num_heads`` divisibility check, and the
-softmax temperature (``1 / sqrt(head_dim)``).
+masked softmax must be evaluated, the fp16-safe bias *application* itself, the
+``dim % num_heads`` divisibility check, and the softmax temperature
+(``1 / sqrt(head_dim)``).
 
 Adoption is **deliberately partial, and unevenly so** — read this before assuming a
 number you see in a sibling module came from here:
@@ -15,6 +16,14 @@ number you see in a sibling module came from here:
     and ``mmdit_joint_attention.py`` both keep ``head_dim ** -0.5``, which is NOT
     bit-identical to ``compute_attention_scale`` (it mismatches in the last ULP for
     218 of head_dim 1..1024, including 32 and 128).
+
+-   ``apply_attention_mask`` (added by ``plan-2026-07-27T183600-b4ef45f0``) is the *behavioral*
+    counterpart to the pair below: it performs the ``ops.where`` bias application that
+    ``MASK_BIAS_VALUE`` / ``mask_dtype`` only describe. It exists because the same
+    three-line incantation was hand-written correctly in exactly one module
+    (``energy_attention.py``) and incorrectly — as the ``0 * -inf = NaN`` arithmetic
+    form — in ten others. It takes the **keep predicate itself** as an argument and
+    performs NO polarity inference; see its docstring for why that is not negotiable.
 
 -   ``MASK_BIAS_VALUE`` / ``mask_dtype`` have exactly **ONE** importer:
     ``energy_attention.py``, under the legacy private aliases ``_MASK_BIAS_VALUE`` /
@@ -42,7 +51,7 @@ number you see in a sibling module came from here:
     ``decisions.md`` D-011.
 
 Architecture:
-    Deliberately **flat**: four module-level names, no classes, no registry, no Keras
+    Deliberately **flat**: five module-level names, no classes, no registry, no Keras
     serialization registration. Nothing here is a layer, and nothing here holds state.
     A Keras layer imports these the same way it imports ``math`` — they are helpers,
     not a base class. Keeping the module free of classes is what stops a shared-helper
@@ -51,6 +60,8 @@ Architecture:
     1.  **Masking** — ``MASK_BIAS_VALUE`` together with ``mask_dtype()`` form a pair.
         The constant is only safe inside the dtype the helper returns; using one
         without the other reintroduces the fp16 overflow documented below.
+        ``apply_attention_mask()`` bundles that pairing into a single call so a call
+        site cannot use one half without the other.
 
     2.  **Validation** — ``validate_head_divisibility()`` centralizes a check that was
         written 19 times with 6 slightly different message spellings. Its parameter
@@ -81,6 +92,10 @@ References:
 # ---------------------------------------------------------------------
 
 import math
+from typing import Any, Optional
+
+import keras
+from keras import ops
 
 # ---------------------------------------------------------------------
 
@@ -125,6 +140,84 @@ def mask_dtype(compute_dtype: str) -> str:
     :rtype: str
     """
     return "float64" if compute_dtype == "float64" else "float32"
+
+
+# DECISION plan-2026-07-27T183600-b4ef45f0/D-002
+# The `keep` argument is the KEEP PREDICATE, supplied verbatim by the call site. This
+# function performs NO polarity inference, and a `mask_is_inverted=`-style flag must
+# never be added.
+#
+# WHAT NOT TO DO, and why:
+#   * Do NOT infer the polarity from the mask (e.g. always assume `mask > 0` means
+#     "keep"). The ten call sites do NOT agree: `rpc_attention.py` spells its predicate
+#     `mask == 0`, `capsule_routing_attention.py` passes a raw boolean, and the other
+#     eight multiply a `1 = keep` float mask. Guessing wrong INVERTS masking — the layer
+#     then attends only to padding and ignores real content — with no shape error, no
+#     exception, and a finite output that a finiteness test happily accepts. Taking the
+#     predicate as an argument puts the polarity in each site's own one-line diff.
+#   * Do NOT make `out_dtype` default to the compute dtype ("cast back at the end").
+#     Casting `-1e9` back into fp16 makes it `-inf` again. That is harmless where every
+#     softmax row keeps >= 1 position, but it is EXACTLY the live defect at
+#     `rpc_attention.py` (the `-inf` reaches `ops.svd`, which NaN-poisons the whole
+#     decomposition) and at `capsule_routing_attention.py` (a fully-masked row becomes
+#     all-`-inf` -> NaN). The safe behavior is the default; the unsafe one must be
+#     spelled out at the call site where a reader can see it.
+#   * Do NOT reintroduce the arithmetic form `logits + (1 - keep) * MASK_BIAS_VALUE`
+#     (see the MASK_BIAS_VALUE anchor above) or a per-dtype sentinel table.
+# See decisions.md D-002 (plan-2026-07-27T183600-b4ef45f0) and D-002 at MASK_BIAS_VALUE above.
+def apply_attention_mask(
+        logits: Any,
+        keep: Any,
+        *,
+        out_dtype: Optional[str] = None,
+) -> Any:
+    """Add the additive attention-mask bias to ``logits`` in a dtype where it is finite.
+
+    Generalizes the one hand-written-correct instance of this pattern in the package
+    (``energy_attention.py``, anchor ``plan_2026-07-13_57c9833e/D-009``): the whole
+    logits -> bias -> softmax chain is evaluated in :func:`mask_dtype`, and the bias is
+    built with ``ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` is impossible
+    **structurally** and not merely by virtue of the dtype.
+
+    This function is orthogonal to broadcasting: it does no ``expand_dims``, ``reshape``
+    or ``repeat``. Each call site keeps its own (deliberately non-unified) broadcast and
+    cast order and passes an already-broadcastable ``keep``.
+
+    :param logits: Pre-softmax attention scores, any shape, any float dtype. Cast up to
+        ``mask_dtype(...)`` internally; the caller's tensor is not modified.
+    :type logits: keras.KerasTensor
+    :param keep: The **keep predicate**, supplied by the call site: any tensor
+        broadcastable against ``logits`` whose nonzero / ``True`` entries mean "attend
+        to this position". Bool, integer and float masks are all accepted (compared as
+        ``> 0`` after casting). NO polarity inference is performed — a site whose mask
+        spells masking as ``mask == 0`` passes its own inverted expression, and a site
+        holding a boolean keep-mask passes it straight through.
+    :type keep: keras.KerasTensor
+    :param out_dtype: Dtype of the returned tensor. ``None`` (the default) returns
+        ``mask_dtype(...)`` — the SAFE choice, which keeps the biased logits out of
+        fp16 so that even a fully-masked row stays finite. Pass the compute dtype
+        explicitly ONLY where the downstream consumer has been verified safe with
+        ``-inf`` entries (i.e. every softmax row provably keeps at least one position
+        and nothing but a softmax consumes the result).
+    :type out_dtype: Optional[str]
+
+    :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
+        ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
+    :rtype: keras.KerasTensor
+    """
+    md = mask_dtype(keras.backend.standardize_dtype(logits.dtype))
+    x = ops.cast(logits, md)
+    # Both `where` branches are tensors IN `md`: a bare Python `0.0` / `-1e9` pair is
+    # promoted to float32 and then collides with float64 logits under a float64 policy.
+    bias = ops.where(
+        ops.cast(keep, md) > 0.0,
+        ops.zeros_like(x),
+        ops.full_like(x, MASK_BIAS_VALUE),
+    )
+    biased = x + bias
+    if out_dtype is not None:
+        biased = ops.cast(biased, out_dtype)
+    return biased
 
 
 def validate_head_divisibility(
