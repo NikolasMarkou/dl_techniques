@@ -59,7 +59,7 @@ from keras import ops, layers, initializers, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale
+from .common import apply_attention_mask, compute_attention_scale
 from ..activations.probability_output import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -557,7 +557,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional attention mask tensor. Can be
             ``(batch_size, seq_len)`` for padding mask or
-            ``(batch_size, seq_len, seq_len)`` for causal/custom mask.
+            ``(batch_size, seq_len, seq_len)`` for causal/custom mask. It is a KEEP
+            predicate (``True`` / nonzero = attend). A query row that keeps nothing
+            is rescued and treated as keeping everything, in every dtype — see the
+            D-006 anchor in :meth:`_apply_attention_mask`.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating training mode for dropout.
         :type training: Optional[bool]
@@ -639,9 +642,12 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         :param attention_logits: Attention logits of shape
             ``(batch, num_heads, seq_len, seq_len)``.
         :type attention_logits: keras.KerasTensor
-        :param attention_mask: Attention mask tensor.
+        :param attention_mask: Attention mask tensor. Interpreted as a KEEP
+            predicate: ``True`` / nonzero means "attend to this position". A query
+            row that keeps NOTHING is rescued and treated as keeping everything —
+            see the D-006 anchor below.
         :type attention_mask: keras.KerasTensor
-        :return: Masked attention logits.
+        :return: Masked attention logits, in the same dtype as ``attention_logits``.
         :rtype: keras.KerasTensor
         """
         # Expand mask to match attention shape
@@ -652,26 +658,70 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             # (batch, seq_len, seq_len) -> (batch, 1, seq_len, seq_len)
             attention_mask = ops.expand_dims(attention_mask, 1)
 
-        # Apply mask (set masked positions to large negative value)
+        # The dtype the logits arrive in, captured before the helper's internal
+        # promotion to `mask_dtype(...)`, so the return dtype of this method is
+        # exactly what it always was.
+        logits_dtype = keras.backend.standardize_dtype(attention_logits.dtype)
+
+        # THIS SITE'S MASK POLARITY, passed through verbatim. Unlike the eight
+        # multiply-form siblings (`1 = keep` floats) and unlike `rpc_attention.py`
+        # (which spells masking `mask == 0`), the mask here is used DIRECTLY as a
+        # boolean keep predicate, with no comparison at all. `ops.cast(..., 'bool')`
+        # is the identity for a bool mask and maps nonzero -> True otherwise, which
+        # is the same rule `ops.where` applied before. Do NOT "normalize" this into
+        # a `> 0` comparison: `apply_attention_mask` performs no polarity inference
+        # by design, so an inversion here would raise nothing, change no shape and
+        # stay finite — the layer would simply attend to the padding.
+        # `TestCapsuleRoutingMaskPolarity` is the only guard that can see that.
+        keep = ops.cast(attention_mask, "bool")
+
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-006
+        # THE degenerate-row rescue: a query row that keeps NOTHING is treated as
+        # keeping EVERYTHING. It looks like dead defensive code — it is not. It is
+        # the entire fix for this site, and it must stay in the PREDICATE.
         #
-        # fp16 note (rubric R13; measured under mixed_float16, not argued): this
-        # cast yields -inf in float16, since np.float16(-1e9) == -inf. The
-        # `ops.where` form below is structurally safe for the normal case — there
-        # is no `0 * -inf` product anywhere, and a softmax row that keeps at least
-        # one unmasked key still normalizes correctly with -inf entries. Probed
-        # with a 2D padding mask (2 of 6 keys masked) and a 3D causal mask under
-        # mixed_float16: 0 NaN out of 384 outputs in both cases.
+        # The bug it removes: an all-False mask row makes every logit in that row
+        # `MASK_BIAS_VALUE`, which is `-inf` in float16 (np.float16(-1e9) == -inf),
+        # and `softmax(all -inf)` is `0/0 = NaN`. MEASURED on unfixed HEAD at
+        # (B=2, N=32, D=64, H=4, key_dim=16) with ONE fully-masked query row:
+        # 128/4096 NaN under `mixed_float16` versus 0/4096 in float32, where the
+        # finite `-1e9` entries merely produce a uniform, meaningless distribution.
         #
-        # KNOWN DEFECT (documented, deliberately NOT fixed by this
-        # behavior-preserving pass): a FULLY-masked row is fp16-specific poison.
-        # An all-False mask row gives all -inf -> softmax -> NaN, measured
-        # 384/384 NaN under mixed_float16, while the SAME input in float32 gives
-        # 0/384 NaN (the finite -1e9 entries just produce a uniform, meaningless
-        # distribution). So fp16 turns a garbage-in/garbage-out row into a NaN
-        # that propagates through the whole batch. Callers must not hand this
-        # layer an all-masked query row under mixed precision.
-        mask_value = ops.cast(-1e9, attention_logits.dtype)
-        return ops.where(attention_mask, attention_logits, mask_value)
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT "fix" this with dtype alone by dropping the rescue and letting
+        #     `apply_attention_mask` keep the biased logits in `mask_dtype(...)`
+        #     (>= float32), the way `rpc_attention.py` does. It does not work HERE:
+        #     the softmax at this site is `self.attn_prob_attention`, a Keras LAYER
+        #     with autocasting ON. MEASURED under `mixed_float16`: a float32 tensor
+        #     handed to it is seen INSIDE its `call()` as float16, and a fully-masked
+        #     float32 `-1e9` row fed straight to it still returns 8/8 NaN. The
+        #     promotion is silently undone at the layer boundary. Pinned as an
+        #     executable assertion by `TestCapsuleRoutingMaskHazardIsReal::
+        #     test_the_probability_sublayer_autocasts_a_float32_input`.
+        #   * Do NOT mask the NaN AFTER the softmax with
+        #     `ops.where(row_keeps_something, attention_weights, 0)`. The forward
+        #     pass would look clean while the UNSELECTED branch still contributes
+        #     `0 * NaN` in the backward pass — trading a visible forward NaN for an
+        #     invisible NaN gradient. Rescuing in the predicate never forms the NaN
+        #     in the first place; the failure mode is removed structurally.
+        #   * Do NOT reach for a per-dtype sentinel (`-6e4` in fp16, as
+        #     `lighthouse_attention.py` does). `common.py`'s own docstring rules it
+        #     out, and it would not help anyway: a row of equal finite sentinels is
+        #     still the uniform-garbage row, just spelled with a second constant to
+        #     get wrong.
+        #
+        # ACCEPTED SEMANTIC CHANGE, in every dtype and not only fp16: a fully-masked
+        # row previously produced a UNIFORM distribution over all keys (float32) or
+        # NaN (fp16); it now produces `softmax(unmasked logits)` for that row. Both
+        # of the old answers are garbage-in/garbage-out for an input that asks the
+        # layer to attend to nothing; the new one is finite in every dtype and
+        # identical across dtypes, which is what makes the fp16 and float32 paths
+        # agree at all. Rows that keep >= 1 key are untouched — verified
+        # bit-identical in float32 for a padding and a causal mask.
+        # See decisions.md D-006 (plan-2026-07-27T183600-b4ef45f0).
+        keep = ops.logical_or(keep, ops.logical_not(ops.any(keep, axis=-1, keepdims=True)))
+
+        return apply_attention_mask(attention_logits, keep, out_dtype=logits_dtype)
 
     def _squash(self, vectors: keras.KerasTensor) -> keras.KerasTensor:
         """

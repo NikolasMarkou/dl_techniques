@@ -935,3 +935,477 @@ class TestCapsuleRoutingSelfAttention:
         assert id(layer.key_dense) == k_id
         assert id(layer.value_dense) == v_id
         assert id(layer.output_dense) == o_id
+
+# ---------------------------------------------------------------------
+# Mixed-precision mask tests (plan-2026-07-27-b4ef45f0, step 3)
+# ---------------------------------------------------------------------
+#
+# WHAT IS BEING GUARDED HERE, and why it is a DIFFERENT mechanism from the
+# `0 * -inf = NaN` family fixed at the other nine mask sites in this package.
+#
+# `_apply_attention_mask` already used the structurally-safe `ops.where` form:
+# there is no `(1 - keep) * -1e9` product anywhere, so no unmasked position can
+# ever become `0 * -inf`. What it did NOT survive is a FULLY-MASKED QUERY ROW.
+# `ops.cast(-1e9, 'float16')` is `-inf` (np.float16(-1e9) == -inf), so a row whose
+# mask is all-False becomes all-`-inf`, and `softmax(all -inf)` is `0/0 = NaN`.
+# In float32 the same row is finite: `-1e9` is representable, every entry is equal,
+# and the softmax returns a uniform — meaningless, but finite. Garbage in, garbage
+# out rather than garbage in, whole-tensor NaN out.
+#
+# MEASURED on unfixed HEAD (B=2, N=32, D=64, H=4, key_dim=16, one fully-masked
+# query row), GPU 1 / TF 2.18:
+#
+#     policy           degenerate mask      padding mask     causal mask
+#     float32              0/4096 NaN         0/4096           0/4096
+#     mixed_float16      128/4096 NaN         0/4096           0/4096
+#
+# 128 = 2 batches x 1 query row x 64 features: the NaN is confined to the
+# degenerate row's own output (the earlier in-source note's "384/384, the whole
+# batch" figure came from an entirely-masked input, not a single bad row). It is
+# still fatal in training — one NaN row NaNs every gradient.
+#
+# WHY A DTYPE-ONLY FIX CANNOT WORK HERE (assumption A4, MEASURED not argued).
+# The softmax at this site is `self.attn_prob_attention`, a Keras LAYER, and Keras
+# autocasting is on: probed under `mixed_float16`, a float32 tensor handed to
+# `attn_prob_attention.__call__` is seen INSIDE its `call()` as float16, and a
+# fully-masked float32 `-1e9` row fed straight to it still returns 8/8 NaN. So
+# keeping the biased logits in `mask_dtype(...)` — which is what fixes
+# `rpc_attention.py` — is silently undone at this layer boundary.
+# `TestCapsuleRoutingMaskHazardIsReal::test_the_probability_sublayer_autocasts_a_
+# float32_input` pins that measurement as an executable assertion, so the
+# justification for the predicate-level rescue cannot rot.
+#
+# Anti-vacuity note on sizes. The reduction-size trap (`plans/LESSONS.md`: `N = 7`
+# once hid an fp16 `-inf` that only appeared at `N >= 512`) does not transfer: the
+# hazard here is a per-ELEMENT dtype overflow of a constant followed by a
+# degenerate softmax ROW, neither of which needs a long reduction to appear. It is
+# nevertheless asserted reachable rather than assumed — see
+# `TestCapsuleRoutingMaskHazardIsReal`, which checks that the policy really selects
+# float16 compute, that `float16(MASK_BIAS_VALUE)` really is `-inf`, and that the
+# degenerate mask really contains exactly one all-False query row while the other
+# two masks contain none.
+
+from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
+
+_MP_B, _MP_N, _MP_D, _MP_H, _MP_KD = 2, 32, 64, 4, 16
+_MP_DEG_ROW = 5                  # the query row the degenerate mask blanks entirely
+_MP_KEEP = _MP_N // 2            # first half kept, second half masked (padding mask)
+_MP_SEED = 1234
+
+# Absolute tolerance for "this policy's forward agrees with the float32 control".
+#
+# These are NOT an fp16 error budget. MEASURED on unmodified HEAD (i.e. BEFORE the
+# degenerate-row fix, so they describe the layer, not the change), with
+# byte-identical weights, max |policy - float32| against an output absmax of ~7:
+#
+#     mask          mixed_float16      float64      float32 (re-run)
+#     degenerate       0.01473          0.008319          0.0
+#     padding          0.01232          0.005866          0.0
+#     causal           0.00981          0.007013          0.0
+#
+# THE FLOAT64 COLUMN IS A TF32 MEASUREMENT, and that is not a footnote — it is a
+# factor of ~1500. The numbers above were taken running THIS FILE ALONE, where
+# TensorFloat-32 tensor-core matmul is enabled (the Ampere+ default, ~1e-3 relative
+# precision for a float32 matmul). Running the whole `tests/test_layers/
+# test_attention/` directory, the SAME measurement gives 3e-06 / 5.5e-06 / 6e-06,
+# because `test_linear_attention.py` calls
+# `tf.config.experimental.enable_tensor_float_32_execution(False)` AT IMPORT TIME —
+# process-globally, for the rest of the session, for every test file collected
+# alongside it. So this layer is ~0.1% "dtype-sensitive" under TF32 and ~1e-6
+# dtype-sensitive in true fp32; the routing loop (three iterations of `_squash`,
+# which divides by `sqrt(squared_norm + epsilon)` with `epsilon = 1e-8`, added back
+# onto the logits before a softmax) amplifies whatever the matmul gave it.
+#
+# The tolerances must therefore hold in BOTH regimes, so they are set from the
+# WORSE (TF32-on) one. `TestCapsuleRoutingConditioning` pins the justification and
+# is itself TF32-aware, so it cannot be satisfied by silently widening a number.
+# The load-bearing guards for this step are finiteness of the degenerate row and
+# the polarity tests, not this comparison. `float32` compares against a control
+# computed the same way and is exact (measured 0.0 in both regimes), so its entry
+# stays at 1e-6.
+_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.05, "float64": 0.05}
+
+
+def _mp_input():
+    """Deterministic ``(B, N, D)`` float32 input, shared by every test below."""
+    return np.random.default_rng(7).standard_normal(
+        (_MP_B, _MP_N, _MP_D)
+    ).astype("float32")
+
+
+def _mp_mask(kind):
+    """One of the boolean masks these tests need, as a numpy ``bool`` array.
+
+    ``'degenerate'`` is a rank-3 ``(B, N, N)`` mask that keeps everything EXCEPT
+    query row ``_MP_DEG_ROW``, which is masked entirely — the fully-masked row this
+    step exists to rescue. ``'padding'`` is a rank-2 ``(B, N)`` key-axis mask
+    (exercises the layer's rank-2 expand branch) and ``'causal'`` is a rank-3
+    lower-triangular mask; NEITHER of those two has a fully-masked row, so they are
+    the no-regression controls — the fix must leave them alone.
+    """
+    if kind == "degenerate":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype=bool)
+        m[:, _MP_DEG_ROW, :] = False
+        return m
+    if kind == "padding":
+        m = np.ones((_MP_B, _MP_N), dtype=bool)
+        m[:, _MP_KEEP:] = False
+        return m
+    if kind == "causal":
+        return np.broadcast_to(
+            np.tril(np.ones((_MP_N, _MP_N), dtype=bool)), (_MP_B, _MP_N, _MP_N)
+        ).copy()
+    raise ValueError(f"unknown mask kind {kind!r}")
+
+
+def _mp_layer(**kwargs):
+    """A built layer whose weights are byte-identical under every dtype policy.
+
+    Seeding the initializers is NOT sufficient: a ``glorot_uniform`` draw under a
+    ``float64`` policy differs from the same-seed draw under ``float32`` (the
+    initializer samples in the VARIABLE dtype), so a float64-vs-float32 comparison
+    on seeded-but-not-set weights measures the initializer, not the code under
+    test. Explicit float32 arrays are assigned instead.
+    """
+    layer = CapsuleRoutingSelfAttention(num_heads=_MP_H, key_dim=_MP_KD, **kwargs)
+    layer.build((_MP_B, _MP_N, _MP_D))
+    rng = np.random.default_rng(_MP_SEED)
+    layer.set_weights(
+        [(rng.standard_normal(w.shape) * 0.2).astype("float32") for w in layer.weights]
+    )
+    return layer
+
+
+_F32_REFERENCE = {}
+
+
+def _float32_reference(kind):
+    """Masked float32 output for ``kind``, memoized, under an explicit policy.
+
+    This is the CONTROL every mixed-precision assertion compares against. It sets
+    and restores the policy itself, so it is valid whichever parametrization of
+    ``dtype_policy`` happens to reach it first.
+    """
+    if kind not in _F32_REFERENCE:
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float32")
+        try:
+            layer = _mp_layer()
+            out = layer(
+                ops.convert_to_tensor(_mp_input()),
+                attention_mask=ops.convert_to_tensor(_mp_mask(kind)),
+            )
+            _F32_REFERENCE[kind] = ops.convert_to_numpy(out).astype("float32")
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+    return _F32_REFERENCE[kind]
+
+
+def _numpy(tensor):
+    return ops.convert_to_numpy(tensor).astype("float32")
+
+
+class TestCapsuleRoutingMaskHazardIsReal:
+    """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
+
+    def test_policy_really_selects_float16_compute(self, dtype_policy):
+        expected = {
+            "float32": "float32",
+            "mixed_float16": "float16",
+            "float64": "float64",
+        }[dtype_policy]
+        assert keras.mixed_precision.global_policy().compute_dtype == expected
+
+    def test_mask_bias_value_overflows_in_the_compute_dtype(self):
+        with np.errstate(over="ignore"):
+            assert np.isneginf(np.float16(MASK_BIAS_VALUE)), (
+                "anti-vacuity FAILED: float16(MASK_BIAS_VALUE) is not -inf, so the "
+                "degenerate-row hazard this module guards is not reproducible here."
+            )
+
+    def test_the_degenerate_mask_really_has_exactly_one_fully_masked_row(self):
+        degenerate = _mp_mask("degenerate")
+        empty_rows = (~degenerate).all(axis=-1)
+        assert int(empty_rows.sum()) == _MP_B, (
+            f"expected exactly one fully-masked query row per batch element, got "
+            f"{int(empty_rows.sum())} across {_MP_B} batch elements"
+        )
+        assert empty_rows[:, _MP_DEG_ROW].all()
+
+    def test_the_control_masks_have_no_fully_masked_row(self):
+        for kind in ("padding", "causal"):
+            mask = _mp_mask(kind)
+            if mask.ndim == 2:
+                mask = mask[:, None, :]
+            assert not (~mask).all(axis=-1).any(), (
+                f"the {kind!r} control mask contains a fully-masked row, so it no "
+                "longer isolates the no-regression case from the degenerate one"
+            )
+            assert (~mask).sum() > 0, (
+                f"the {kind!r} control mask masks nothing; it cannot detect a "
+                "regression in the masking code"
+            )
+
+    def test_the_probability_sublayer_autocasts_a_float32_input(self, dtype_policy):
+        """Assumption A4, as an executable assertion rather than a claim.
+
+        The whole reason this site needs a rescue IN THE PREDICATE — rather than
+        the dtype-only fix that works at ``rpc_attention.py`` — is that the softmax
+        here lives inside a Keras layer with autocasting enabled, which drags a
+        carefully-promoted float32 tensor straight back down to float16. If Keras
+        ever stops doing that, this test fails and the rescue can be revisited.
+        """
+        layer = _mp_layer()
+        prob = layer.attn_prob_attention
+        assert getattr(prob, "autocast", False) is True
+
+        seen = {}
+        original = prob.call
+
+        def spy(x, *args, **kwargs):
+            seen["dtype"] = keras.backend.standardize_dtype(x.dtype)
+            return original(x, *args, **kwargs)
+
+        prob.call = spy
+        try:
+            prob(ops.convert_to_tensor(
+                np.zeros((1, _MP_H, 4, 4), dtype="float32")
+            ))
+        finally:
+            prob.call = original
+
+        expected = keras.mixed_precision.global_policy().compute_dtype
+        assert seen["dtype"] == expected, (
+            f"a float32 tensor entering `attn_prob_attention` was seen inside its "
+            f"call() as {seen['dtype']!r}, not the compute dtype {expected!r}"
+        )
+
+
+class TestCapsuleRoutingDegenerateRow:
+    """SC4: a FULLY-masked query row must stay finite under ``mixed_float16``."""
+
+    def test_fully_masked_row_is_finite_and_matches_float32(self, dtype_policy):
+        layer = _mp_layer()
+        out = _numpy(
+            layer(
+                ops.convert_to_tensor(_mp_input()),
+                attention_mask=ops.convert_to_tensor(_mp_mask("degenerate")),
+            )
+        )
+
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a mask with one "
+            f"fully-masked query row under policy {dtype_policy!r}"
+        )
+        # The row itself, not merely the tensor total: a whole-tensor count could be
+        # satisfied by a fix that happened to zero the row instead of computing it.
+        assert np.isfinite(out[:, _MP_DEG_ROW]).all(), (
+            f"the fully-masked query row {_MP_DEG_ROW} is not finite under policy "
+            f"{dtype_policy!r}"
+        )
+        assert float(np.abs(out[:, _MP_DEG_ROW]).max()) > 0.0, (
+            "the degenerate row is finite but identically zero — that is a different "
+            "convention from the float32 behavior this criterion asks for"
+        )
+
+        reference = _float32_reference("degenerate")
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"degenerate-row forward under {dtype_policy!r} deviates from the "
+            f"float32 control by {max_dev:.4g} > {atol:.4g}"
+        )
+        assert float(np.abs(out).max()) > 0.5 * float(np.abs(reference).max()), (
+            f"output absmax {np.abs(out).max():.4g} collapsed relative to the "
+            f"float32 control {np.abs(reference).max():.4g}"
+        )
+
+
+class TestCapsuleRoutingPartialMaskNoRegression:
+    """The masks that were ALREADY fine must stay bit-for-bit fine.
+
+    The degenerate-row rescue changes the keep predicate, so it could in principle
+    alter rows that were never degenerate. These two masks have no fully-masked row
+    (asserted above), so the rescue must be completely inert for them.
+    """
+
+    @pytest.mark.parametrize("kind", ["padding", "causal"])
+    def test_partial_mask_is_finite_and_matches_float32(self, dtype_policy, kind):
+        layer = _mp_layer()
+        out = _numpy(
+            layer(
+                ops.convert_to_tensor(_mp_input()),
+                attention_mask=ops.convert_to_tensor(_mp_mask(kind)),
+            )
+        )
+
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a {kind!r} mask under "
+            f"policy {dtype_policy!r}"
+        )
+
+        reference = _float32_reference(kind)
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"{kind!r} mask under {dtype_policy!r} deviates from the float32 control "
+            f"by {max_dev:.4g} > {atol:.4g}"
+        )
+
+
+class TestCapsuleRoutingConditioning:
+    """Pins the JUSTIFICATION for the loose entries in :data:`_MP_ATOL`.
+
+    This test manages its own policies (it needs two) and touches no fp16. It
+    exists so the masked-path tolerances above cannot silently become either
+    unnecessary (someone tightens the routing loop's conditioning) or insufficient
+    (it gets worse): it re-measures the float32-vs-float64 divergence of the same
+    forward pass and asserts the tolerance brackets it.
+
+    It is TF32-AWARE, because the quantity it measures is not a property of this
+    layer alone. `tf.config.experimental.enable_tensor_float_32_execution(False)`
+    is a PROCESS-GLOBAL switch that `test_linear_attention.py` flips at import time,
+    so the identical measurement reads 0.0083 when this file runs alone (TF32 on,
+    the GPU default) and 6e-06 when the attention directory runs as a session (TF32
+    off). A single hard-coded lower bound here would therefore pass in isolation and
+    fail in the gate — which is exactly what happened when it was first written.
+    """
+
+    @pytest.mark.parametrize("kind", ["degenerate", "padding", "causal"])
+    def test_the_float32_float64_divergence_justifies_the_tolerance(self, kind):
+        def forward(policy):
+            previous = keras.mixed_precision.global_policy().name
+            keras.mixed_precision.set_global_policy(policy)
+            try:
+                layer = _mp_layer()
+                return ops.convert_to_numpy(
+                    layer(
+                        ops.convert_to_tensor(_mp_input()),
+                        attention_mask=ops.convert_to_tensor(_mp_mask(kind)),
+                    )
+                ).astype("float64")
+            finally:
+                keras.mixed_precision.set_global_policy(previous)
+
+        divergence = float(np.abs(forward("float32") - forward("float64")).max())
+        budget = _MP_ATOL["float64"]
+
+        assert divergence <= budget, (
+            f"the float32-vs-float64 divergence of a {kind!r}-masked forward is "
+            f"{divergence:.4g}, which EXCEEDS the tolerance {budget:.4g} the "
+            "agreement tests rely on; re-derive the tolerances"
+        )
+        if tf.config.experimental.tensor_float_32_execution_enabled():
+            # TF32 matmul (~1e-3 relative). Measured 0.0059 - 0.0083 across the
+            # three masks; this is the regime `_MP_ATOL['float64']` is sized for.
+            floor = 1e-4
+            regime = "TF32-enabled"
+        else:
+            # True fp32 matmul. Measured 2.9e-06 - 6.0e-06. The floor is only
+            # asserting that the two policies really did compute something
+            # different — a divergence of exactly 0.0 would mean the float64
+            # policy never took effect and this test is measuring nothing.
+            floor = 1e-7
+            regime = "TF32-disabled"
+        assert divergence > floor, (
+            f"a {kind!r}-masked forward is now better conditioned than expected in "
+            f"the {regime} regime ({divergence:.4g} <= {floor:.4g}); either the "
+            f"float64 policy is not taking effect, or the loose {budget:.4g} float64 "
+            "tolerance is no longer justified and must be tightened"
+        )
+
+
+class TestCapsuleRoutingMaskPolarity:
+    """SC6: the mask must suppress the MASKED positions, not the kept ones.
+
+    A polarity inversion at this site — passing ``~mask`` where ``mask`` is meant —
+    raises nothing, changes no shape and leaves the output perfectly finite. Only
+    an influence test can see it. MEASURED on unmodified HEAD by handing the layer
+    ``~mask``: perturbing a "masked" token then moves the kept query rows by 27.0
+    (no-routing config) / 30.0 (default config) instead of 0.0 / 0.48 — so the
+    assertions below have a 156x / 63x margin against a real inversion.
+
+    The two tests differ in ONE thing, deliberately:
+
+    *   ``..._with_routing_disabled`` is the exact statement: with both routing
+        paths off, ``routing_output`` IS the raw logits, so masking key column ``p``
+        removes token ``p``'s influence on every kept query row exactly. Measured
+        0.0 under all three policies.
+    *   ``..._in_the_default_routing_config`` is the shipped configuration, where
+        the same statement can only hold approximately — and that residual is a
+        property of capsule routing, NOT of the mask. Both routing paths run BEFORE
+        the mask is applied (``call()``: routing is computed from the unmasked
+        logits and added to them), and ``_squash`` normalizes over the KEY axis, so
+        a masked column contributes to the routed value of every kept column.
+        Measured 0.48 against a kept-token influence of 27.9.
+    """
+
+    @staticmethod
+    def _influence(layer, mask):
+        base_input = _mp_input()
+        perturbed_masked = base_input.copy()
+        perturbed_masked[:, _MP_KEEP + 3, :] += 5.0      # a MASKED token
+        perturbed_kept = base_input.copy()
+        perturbed_kept[:, 3, :] += 5.0                   # a KEPT token
+
+        mask_tensor = ops.convert_to_tensor(mask)
+
+        def forward(array):
+            return ops.convert_to_numpy(
+                layer(ops.convert_to_tensor(array), attention_mask=mask_tensor)
+            ).astype("float64")
+
+        rows = slice(0, _MP_KEEP)
+        base = forward(base_input)
+        assert np.isfinite(base[:, rows]).all(), (
+            "the kept query rows are not finite; the comparison below would be "
+            "meaningless"
+        )
+        delta_masked = float(np.abs(forward(perturbed_masked)[:, rows] - base[:, rows]).max())
+        delta_kept = float(np.abs(forward(perturbed_kept)[:, rows] - base[:, rows]).max())
+        return delta_masked, delta_kept
+
+    @staticmethod
+    def _padding_mask():
+        mask = np.ones((_MP_B, _MP_N), dtype=bool)
+        mask[:, _MP_KEEP:] = False
+        return mask
+
+    def test_a_masked_token_has_no_influence_with_routing_disabled(self, dtype_policy):
+        layer = _mp_layer(
+            use_vertical_routing=False, use_horizontal_routing=False
+        )
+        delta_masked, delta_kept = self._influence(layer, self._padding_mask())
+
+        # Measured EXACTLY 0.0 under all three policies. The 1e-3 budget is
+        # session-noise headroom (see `test_rpc_attention.py`, where a batched op
+        # measured 0.0 in isolation and 1.1e-06 inside the full suite); it still
+        # sits four orders of magnitude below the 27.0 signal.
+        assert delta_masked <= 1e-3, (
+            f"perturbing a MASKED token changed the kept query rows by "
+            f"{delta_masked:.6g} under policy {dtype_policy!r} — with routing "
+            "disabled this must be exact, so the mask polarity is INVERTED (the "
+            "layer is attending to the padding)"
+        )
+        assert delta_kept > 1.0, (
+            f"perturbing a KEPT token changed the output by only {delta_kept:.6g}; "
+            "the test is vacuous — the layer is ignoring its input"
+        )
+
+    def test_a_masked_token_barely_influences_the_default_routing_config(
+        self, dtype_policy
+    ):
+        layer = _mp_layer()
+        delta_masked, delta_kept = self._influence(layer, self._padding_mask())
+
+        assert delta_masked <= 1.0, (
+            f"perturbing a MASKED token changed the kept query rows by "
+            f"{delta_masked:.6g} under policy {dtype_policy!r} (measured 0.48 on "
+            "correct code, 30.0 with an INVERTED mask)"
+        )
+        assert delta_kept > 20.0 * delta_masked, (
+            f"masked influence {delta_masked:.6g} is not decisively smaller than "
+            f"kept influence {delta_kept:.6g}"
+        )
