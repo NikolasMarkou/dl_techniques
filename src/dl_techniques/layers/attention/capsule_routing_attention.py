@@ -227,11 +227,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     :raises ValueError: From ``build()``, if the input is not 3D or its last
         dimension is undefined.
     :raises ValueError: If embed_dim is not divisible by num_heads (when key_dim is None).
-    :raises ValueError: From ``call()``, if horizontal routing runs and the
-        sequence length is not statically known. Note: the raise fires whenever
-        ``use_horizontal_routing=True``, even for ``use_positional_routing=False``,
-        although the message only mentions positional routing — see the comment at
-        the raise site.
+    :raises ValueError: From ``call()``, if POSITIONAL horizontal routing runs
+        (``use_horizontal_routing=True`` and ``use_positional_routing=True``) and
+        the sequence length is not statically known. The non-positional horizontal
+        path does not need a static length and accepts a dynamic one.
     """
 
     def __init__(
@@ -882,25 +881,38 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # Use the STATIC sequence-length so `range(...)` unrolls at trace time
         # (graph-safe). `ops.shape(...)[2]` returns a symbolic tensor under
         # tf.function, and `range(symbolic_tensor)` raises TypeError.
-        #
-        # KNOWN DEFECT (reported, deliberately NOT fixed here — behavior change):
-        # the guard below is OUTSIDE the `if self.use_positional_routing:` branch,
-        # so a dynamic sequence length is rejected even when positional routing is
-        # OFF, in which case the static length is never actually needed (the
-        # non-positional path is pure transpose/expand/repeat). The message also
-        # tells the user to "set use_positional_routing=False", advice this very
-        # code path does not honor. Moving the guard into the branch would change
-        # which inputs the layer accepts.
         seq_len = attention_weights.shape[2]
-        if seq_len is None:
-            raise ValueError(
-                "CapsuleRoutingSelfAttention positional routing "
-                "(use_positional_routing=True) requires a statically-known "
-                "sequence length; got None. Build with a concrete seq_len or "
-                "set use_positional_routing=False."
-            )
 
         if self.use_positional_routing:
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-014
+            # This guard USED TO SIT OUTSIDE this branch, so it fired for every
+            # `use_horizontal_routing=True` layer — including the
+            # `use_positional_routing=False` path below, which never reads
+            # `seq_len` at all (it is pure transpose / expand_dims / repeat and is
+            # fully dynamic-length safe). The message even advised
+            # "set use_positional_routing=False", advice the guard's own placement
+            # made useless: taking it still raised.
+            # WHAT NOT TO DO: do NOT hoist this back out "so the failure is
+            # earlier / uniform". The static length is a requirement of the
+            # `for l in range(seq_len)` unroll BELOW and of nothing else; hoisting
+            # it rejects inputs this layer can compute perfectly well, and makes
+            # the diagnostic name a flag it does not gate. The message now names
+            # `use_horizontal_routing` too, because turning positional routing off
+            # is now a genuine remedy and the reader needs both levers.
+            # ACCEPTED COST: this WIDENS the accepted input set — a dynamic
+            # sequence length with `use_horizontal_routing=True,
+            # use_positional_routing=False` used to raise and now runs.
+            # See decisions.md D-014 (plan-2026-07-27T183600-b4ef45f0).
+            if seq_len is None:
+                raise ValueError(
+                    "CapsuleRoutingSelfAttention positional routing "
+                    "(use_horizontal_routing=True and "
+                    "use_positional_routing=True) requires a statically-known "
+                    "sequence length; got None. Build with a concrete seq_len, "
+                    "or set use_positional_routing=False — the non-positional "
+                    "horizontal path does not need a static length."
+                )
+
             # Apply positional constraints: each position can only route from previous positions
             routed_rows = []
 

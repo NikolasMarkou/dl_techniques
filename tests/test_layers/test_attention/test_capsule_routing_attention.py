@@ -1409,3 +1409,142 @@ class TestCapsuleRoutingMaskPolarity:
             f"masked influence {delta_masked:.6g} is not decisively smaller than "
             f"kept influence {delta_kept:.6g}"
         )
+
+
+# ==============================================================================
+# Step 7 (b) — the static-`seq_len` guard fires only where the static length is
+# actually needed.
+#
+# `plan-2026-07-27T183600-b4ef45f0` D-014. The guard used to sit OUTSIDE the
+# `if self.use_positional_routing:` branch, so it rejected a dynamic sequence
+# length for EVERY `use_horizontal_routing=True` layer — including the
+# non-positional path, which is pure transpose / expand_dims / repeat and reads
+# `seq_len` nowhere. The message even advised "set use_positional_routing=False",
+# advice the guard's own placement made useless.
+#
+# PROVEN RED on the unfixed code (`04caa0e7`):
+# `test_dynamic_seq_len_with_non_positional_horizontal_routing_succeeds` failed
+# with `ValueError: CapsuleRoutingSelfAttention positional routing
+# (use_positional_routing=True) requires a statically-known sequence length; got
+# None. ...` raised from `_horizontal_routing` — i.e. the layer refused an input
+# it can compute, quoting a flag that was NOT set.
+#
+# This WIDENS the accepted input set. The other half of the pair — the positional
+# case, which genuinely needs the static length — must still raise, and the
+# pre-existing
+# `test_graph_mode_positional_routing_symbolic_seqlen_raises` (which matches
+# r"statically-known sequence length") must stay green; the reworded message keeps
+# that phrase verbatim for exactly that reason.
+# ==============================================================================
+
+
+class TestCapsuleRoutingStaticSeqLenGuardPlacement:
+    """D-014: the guard belongs to positional routing, not to horizontal routing."""
+
+    @staticmethod
+    def _layer(positional):
+        return CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,
+            use_horizontal_routing=True,
+            use_positional_routing=positional,
+        )
+
+    @staticmethod
+    def _traced(layer):
+        """A `tf.function` whose sequence dimension is statically UNKNOWN."""
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, 64], tf.float32)])
+        def fwd(t):
+            return layer(t, training=False)
+
+        return fwd
+
+    def test_dynamic_seq_len_with_non_positional_horizontal_routing_succeeds(self):
+        """THE widening. Raises on unfixed code; must run and produce real numbers."""
+        layer = self._layer(positional=False)
+        concrete = keras.random.normal([2, 8, 64], seed=99)
+        _ = layer(concrete)  # build eagerly so the Dense sub-layers exist
+
+        out = self._traced(layer)(tf.convert_to_tensor(concrete))
+        out = ops.convert_to_numpy(out)
+
+        assert out.shape == (2, 8, 64)
+        assert np.isfinite(out).all(), (
+            "the newly-accepted dynamic-length path produced non-finite output; "
+            "widening the contract must not ship a broken path"
+        )
+        # ANTI-VACUITY: a layer that silently returned its input, or zeros, would
+        # satisfy the shape+finite assertions above.
+        assert float(np.abs(out).max()) > 1e-3
+
+    def test_the_dynamic_trace_really_has_an_unknown_sequence_length(self):
+        """ANTI-VACUITY for the test above: if the trace kept a static length, it
+        would exercise the ordinary path and prove nothing about the guard."""
+        seen = {}
+        layer = self._layer(positional=False)
+        _ = layer(keras.random.normal([2, 8, 64], seed=99))
+
+        original = layer._horizontal_routing
+
+        def spy(attention_weights):
+            seen["static_len"] = attention_weights.shape[2]
+            return original(attention_weights)
+
+        layer._horizontal_routing = spy
+        try:
+            self._traced(layer)(tf.convert_to_tensor(
+                keras.random.normal([2, 8, 64], seed=99)
+            ))
+        finally:
+            layer._horizontal_routing = original
+
+        assert seen.get("static_len", "missing") is None, (
+            "`_horizontal_routing` saw a STATIC sequence length "
+            f"({seen.get('static_len')!r}) under the symbolic trace, so the guard "
+            "under test was never reachable"
+        )
+
+    def test_dynamic_seq_len_with_positional_routing_still_raises(self):
+        """The half that must NOT change: positional routing unrolls
+        `for l in range(seq_len)` and genuinely cannot run without a static N."""
+        layer = self._layer(positional=True)
+        _ = layer(keras.random.normal([2, 8, 64], seed=99))
+
+        with pytest.raises(ValueError, match=r"statically-known sequence length"):
+            self._traced(layer)(tf.convert_to_tensor(
+                keras.random.normal([2, 8, 64], seed=99)
+            ))
+
+    def test_the_message_names_the_flags_that_actually_gate_it(self):
+        """The original message advised a flag the guard's placement ignored.
+
+        `plans/LESSONS.md` I:3 — grep the target test file's existing
+        `pytest.raises(match=...)` strings before choosing message text. The only
+        pre-existing matcher on this raise is
+        r"statically-known sequence length" (used by
+        `test_graph_mode_positional_routing_symbolic_seqlen_raises` above), which
+        the reworded text preserves verbatim.
+        """
+        layer = self._layer(positional=True)
+        _ = layer(keras.random.normal([2, 8, 64], seed=99))
+
+        with pytest.raises(ValueError) as excinfo:
+            self._traced(layer)(tf.convert_to_tensor(
+                keras.random.normal([2, 8, 64], seed=99)
+            ))
+        message = str(excinfo.value)
+
+        assert "use_horizontal_routing=True" in message, (
+            "the diagnostic does not name `use_horizontal_routing`, the flag that "
+            "puts the caller on this code path at all"
+        )
+        assert "use_positional_routing=True" in message, (
+            "the diagnostic does not name `use_positional_routing`, the flag that "
+            "actually gates the guard"
+        )
+        assert "set use_positional_routing=False" in message, (
+            "the diagnostic no longer offers the remedy that now genuinely works"
+        )
+        assert "statically-known sequence length" in message

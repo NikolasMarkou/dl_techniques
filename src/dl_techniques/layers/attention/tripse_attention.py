@@ -275,7 +275,28 @@ class TripletAttentionBranch(layers.Layer):
         # 3. Attention Map Generation
         attention = self.conv(pooled)
         attention = self.batch_norm(attention, training=training)
-        attention = self.sigmoid(attention)
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015
+        # `training=` is forwarded EXPLICITLY even though Keras 3 also propagates
+        # it implicitly. MEASURED (keras/src/layers/layer.py:841-853): when a
+        # sub-layer is called without the kwarg, `Layer.__call__` fills it from
+        # `call_context.training` — so with the plain `'sigmoid'` gate, and with a
+        # custom one, the un-forwarded call still saw the right value in all six
+        # scenarios probed (training True / False / None, eager and `model.fit`).
+        # The gap is NOT "stateless activations make it a no-op", as the finding
+        # claimed; it is that `CallContext.training` is a SINGLE MUTABLE SLOT that
+        # every nested `__call__` overwrites and NOBODY restores on exit
+        # (`_maybe_reset_call_context` only clears it for the entry layer). So one
+        # sibling sub-layer that forces `training=False` on a child of its own — a
+        # frozen-BN wrapper, a teacher/EMA branch — POISONS the ambient value for
+        # every later un-forwarded call in the same outer call. Injecting exactly
+        # that at `self.batch_norm` MEASURED this gate receiving `False` while the
+        # branch was called with `training=True`; with the explicit kwarg it
+        # receives `True`. Pinned by `TestTripSETrainingIsForwardedExplicitly`.
+        # WHAT NOT TO DO: do NOT drop this back to `self.sigmoid(attention)` on the
+        # grounds that "Keras propagates it anyway" — that is true only while no
+        # sibling has poisoned the context, which this layer cannot know.
+        # See decisions.md D-015 (plan-2026-07-27T183600-b4ef45f0).
+        attention = self.sigmoid(attention, training=training)
 
         # 4. Apply Attention
         # x shape: (B, D1, D2, D3), attention shape: (B, D1, D2, 1)
@@ -1034,7 +1055,14 @@ class _SEWeights(layers.Layer):
         x = self.global_pool(inputs)
         # Excitation (MLP)
         x = self.conv_reduce(x, training=training)
-        x = self.reduction_activation(x)
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 (second site, same
+        # argument): the bottleneck activation is the only sub-layer in this
+        # method that was NOT handed `training=`, so it was the only one reading
+        # the poisonable ambient `CallContext.training` instead of this call's own
+        # value. Injecting a context-poisoning `global_pool` MEASURED it receiving
+        # `False` while `_SEWeights` was called with `training=True`. Do NOT revert
+        # to `self.reduction_activation(x)`. See decisions.md D-015.
+        x = self.reduction_activation(x, training=training)
         logits = self.conv_restore(x, training=training)
         # Return logits (pre-sigmoid) for addition in TripSE4
         return logits

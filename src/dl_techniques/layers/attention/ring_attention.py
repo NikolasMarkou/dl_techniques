@@ -70,6 +70,20 @@ from .common import (
 )
 from ..norms.factory import create_normalization_layer
 
+# ---------------------------------------------------------------------
+
+#: Diagnostic for an ``attention_mask`` whose rank this layer cannot dispatch on.
+#: Held as a module constant because it is raised from TWO places — once up front
+#: in :meth:`RingAttention._blockwise_attention` (fail fast, before any block work)
+#: and once as the ``else`` of the in-loop rank dispatch, which is what structurally
+#: guarantees ``mask_slice`` can never be read unbound again. Keep the two in sync
+#: by keeping them one string.
+_UNSUPPORTED_MASK_RANK = (
+    "RingAttention supports attention_mask of rank 2 "
+    "(batch, seq_len) key-padding, rank 3 (batch, seq_len, seq_len) or rank 4 "
+    "(batch, num_heads, seq_len, seq_len); got rank {rank}."
+)
+
 
 # ---------------------------------------------------------------------
 
@@ -198,6 +212,8 @@ class RingAttention(keras.layers.Layer):
     :raises ValueError: If dropout_rate is not between 0.0 and 1.0.
     :raises ValueError: From ``call()``, if the input's sequence dimension is not
         statically known (see the ``[STATIC SEQUENCE LENGTH]`` note above).
+    :raises ValueError: From ``call()``, if ``attention_mask`` has a rank other
+        than 2, 3 or 4.
     """
 
     def __init__(
@@ -378,9 +394,11 @@ class RingAttention(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode. Affects dropout behavior.
         :type training: Optional[bool]
-        :param attention_mask: Optional attention mask of shape
-            ``(batch_size, seq_len, seq_len)`` or
-            ``(batch_size, 1, seq_len, seq_len)``.
+        :param attention_mask: Optional attention mask, ``1 = keep``. Rank 2
+            ``(batch_size, seq_len)`` is a key-padding mask shared by every query
+            row; rank 3 ``(batch_size, seq_len, seq_len)`` and rank 4
+            ``(batch_size, num_heads, seq_len, seq_len)`` are per-query-position.
+            Any other rank raises ``ValueError``.
         :type attention_mask: Optional[keras.KerasTensor]
         :param return_attention_weights: Whether to return attention weights.
             Always returns ``None`` due to blockwise processing.
@@ -548,6 +566,25 @@ class RingAttention(keras.layers.Layer):
         # See decisions.md D-011 (plan-2026-07-27T183600-b4ef45f0).
         state_dtype = keras.backend.standardize_dtype(queries.dtype)
         if attention_mask is not None:
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-013
+            # The rank is validated ONCE, HERE, before any block work and before
+            # the rescue below — not only inside the loop. A rank this layer
+            # cannot dispatch on used to fall through both branches of the in-loop
+            # `if/elif` and surface as `UnboundLocalError: cannot access local
+            # variable 'mask_slice'` on the FIRST (q_block 0, kv_block 0)
+            # iteration. Validating up front means the caller gets a named
+            # `ValueError` naming the ranks that ARE supported, before a single
+            # matmul runs.
+            # WHAT NOT TO DO: do NOT delete the `else: raise` at the in-loop
+            # dispatch on the grounds that this check makes it unreachable. That
+            # `else` is the STRUCTURAL guarantee that `mask_slice` cannot be read
+            # unbound; a future rank added here but not there would re-create
+            # exactly the defect this fixes, silently and only on the masked path.
+            # See decisions.md D-013 (plan-2026-07-27T183600-b4ef45f0).
+            mask_rank = len(ops.shape(attention_mask))
+            if mask_rank not in (2, 3, 4):
+                raise ValueError(_UNSUPPORTED_MASK_RANK.format(rank=mask_rank))
+
             state_dtype = mask_dtype(state_dtype)
             # THIS SITE'S MASK POLARITY, passed through verbatim: `1 = keep`. The
             # rescue is spelled on the PREDICATE, exactly as `apply_attention_mask`
@@ -556,6 +593,12 @@ class RingAttention(keras.layers.Layer):
             # than extracted because a rescue-only helper in `common.py` is a named
             # STOP tripwire for this plan, and the parameter cannot express
             # "reduce over an axis the caller has split into tiles".
+            # This runs AFTER the rank check above and BEFORE the loop, so every
+            # supported rank gets the IDENTICAL rescue: `axis=-1` is the key axis
+            # for rank 2 `(batch, seq_len)`, rank 3 `(batch, seq_q, seq_k)` and
+            # rank 4 `(batch, heads, seq_q, seq_k)` alike. For rank 2 the reduction
+            # is per batch item rather than per query row, which is the same thing
+            # — every query row shares one key mask.
             _keep = ops.cast(attention_mask, state_dtype) > 0.0
             _keep = ops.logical_or(
                 _keep,
@@ -603,15 +646,16 @@ class RingAttention(keras.layers.Layer):
 
                 # Apply attention mask if provided
                 #
-                # KNOWN DEFECT #1 (pre-existing, deliberately NOT fixed here — the
-                # fix is a numerics/control-flow change): the rank dispatch below
-                # handles rank 3 and rank 4 only. A rank-2 `(batch, seq_len)`
-                # padding mask — the shape most Keras callers produce, and the shape
-                # `rpc_attention.py` explicitly supports — falls through BOTH
-                # branches, leaving `mask_slice` unbound and raising
-                # `UnboundLocalError` (or, on the second loop iteration, silently
-                # reusing the PREVIOUS block's slice) instead of a clear
-                # `ValueError`. Reported, not fixed, in this plan.
+                # DEFECT #1 — FIXED (plan-2026-07-27T183600-b4ef45f0, step 7).
+                # The dispatch below used to handle rank 3 and rank 4 only, with no
+                # `else`. A rank-2 `(batch, seq_len)` key-padding mask — the shape
+                # most Keras callers produce, and the shape `rpc_attention.py`
+                # explicitly supports — fell through BOTH branches, leaving
+                # `mask_slice` unbound; MEASURED, that raised `UnboundLocalError:
+                # cannot access local variable 'mask_slice'` on the FIRST
+                # (q_block 0, kv_block 0) iteration. It now has its own branch, and
+                # the `else` below makes an unbound read impossible by construction.
+                # See the D-013 anchor above the pre-loop rank check.
                 #
                 # DEFECT #2 — FIXED (plan-2026-07-27T183600-b4ef45f0, step 5). The
                 # bias used to be the arithmetic form `(1.0 - mask_slice) * -1e9`
@@ -626,7 +670,19 @@ class RingAttention(keras.layers.Layer):
                 # other adoption in the package.
                 if attention_mask is not None:
                     # Extract relevant portion of mask for these blocks
-                    if len(ops.shape(attention_mask)) == 3:
+                    if len(ops.shape(attention_mask)) == 2:
+                        # (batch, seq_len) key-padding -> slice the KEY axis only
+                        # and expand to (batch, 1, 1, kv_block_size). The two size-1
+                        # axes broadcast over heads and over the query block inside
+                        # `apply_attention_mask`, which is what keeps this layer's
+                        # mask memory O(N) instead of the O(N^2) a caller would pay
+                        # by pre-expanding to rank 3 — the whole reason RingAttention
+                        # exists. Numerically it is EXACTLY the rank-3/rank-4 result
+                        # (pinned by `TestRingAttentionRank2MaskDispatch`).
+                        mask_slice = attention_mask[:, kv_start:kv_end]
+                        mask_slice = ops.expand_dims(mask_slice, axis=1)
+                        mask_slice = ops.expand_dims(mask_slice, axis=1)
+                    elif len(ops.shape(attention_mask)) == 3:
                         # (batch, seq_len, seq_len) -> extract block region
                         mask_slice = attention_mask[:, q_start:q_end, kv_start:kv_end]
                         # Expand for heads: (batch, 1, q_block_size, kv_block_size)
@@ -635,6 +691,16 @@ class RingAttention(keras.layers.Layer):
                     elif len(ops.shape(attention_mask)) == 4:
                         # (batch, num_heads, seq_len, seq_len) -> extract block region
                         mask_slice = attention_mask[:, :, q_start:q_end, kv_start:kv_end]
+                    else:
+                        # Unreachable via `call()` — the pre-loop check above already
+                        # rejected every other rank. Kept anyway: this `else` is what
+                        # makes an unbound `mask_slice` read structurally impossible,
+                        # which is the actual defect being fixed. Do NOT delete it.
+                        raise ValueError(
+                            _UNSUPPORTED_MASK_RANK.format(
+                                rank=len(ops.shape(attention_mask))
+                            )
+                        )
 
                     # Convert mask to additive form: 0 -> MASK_BIAS_VALUE, 1 -> 0.
                     # `mask_slice` is this site's `1 = keep` predicate, passed

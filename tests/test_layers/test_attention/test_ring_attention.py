@@ -679,21 +679,223 @@ class TestRingAttentionMaskedGraphSafety:
         )
 
 
-class TestRingAttentionRank2MaskIsStillAKnownDefect:
-    """Step 7 territory, pinned here so step 5 cannot silently change it.
+def _mp_rank2_mask():
+    """A rank-2 ``(batch, seq_len)`` KEY-padding mask, ``1 = keep``.
 
-    A rank-2 `(batch, seq_len)` padding mask falls through BOTH branches of the
-    rank dispatch, leaving `mask_slice` unbound. Step 5 touches only the bias
-    expression, the accumulation dtype and one pre-loop rescue, so this must still
-    raise afterwards. Step 7 replaces it with a rank-2 branch plus a named
-    `ValueError`, at which point this test is expected to fail and be rewritten.
+    Blanks the SECOND half of the keys, so it masks a lot and is not vacuous.
+    """
+    m = np.ones((_MP_B, _MP_N), dtype="float32")
+    m[:, _MP_KEEP:] = 0.0
+    return m
+
+
+def _rank2_as_rank3(mask2):
+    """The rank-3 mask a caller would have had to write by hand instead.
+
+    ``m3[b, q, k] = m2[b, k]`` for every query row ``q`` — the definition of a
+    key-padding mask.
+    """
+    return np.broadcast_to(
+        mask2[:, None, :], (mask2.shape[0], _MP_N, mask2.shape[1])
+    ).copy()
+
+
+def _rank2_as_rank4(mask2):
+    """Same mask again, at rank 4 ``(batch, num_heads, seq_q, seq_k)``."""
+    return np.broadcast_to(
+        mask2[:, None, None, :], (mask2.shape[0], _MP_H, _MP_N, mask2.shape[1])
+    ).copy()
+
+
+class TestRingAttentionRank2MaskDispatch:
+    """Step 7 (a). The FLIPPED form of the old
+    `TestRingAttentionRank2MaskIsStillAKnownDefect`.
+
+    Until step 7 this module PINNED the defect: a rank-2 `(batch, seq_len)`
+    key-padding mask — the shape most Keras callers produce — fell through both
+    branches of the in-loop rank dispatch, leaving `mask_slice` unbound.
+
+    PROVEN RED on the unfixed code (`04caa0e7`): every equivalence test below
+    ended in
+    `UnboundLocalError: cannot access local variable 'mask_slice' where it is not
+    associated with a value`, raised from `ring_attention.py` on the FIRST
+    (q_block 0, kv_block 0) iteration — and `test_an_unsupported_rank_raises...`
+    ended in `Failed: DID NOT RAISE <class 'ValueError'>` because a rank-5 mask hit
+    the same `UnboundLocalError` instead of a named diagnostic.
+
+    The load-bearing assertion here is NOT "it no longer crashes" — that is
+    satisfied by any expansion, including a wrong one. It is that the rank-2 result
+    is NUMERICALLY IDENTICAL to the same mask pre-expanded to rank 3 and to rank 4,
+    which is the only thing that distinguishes a correct broadcast from one that
+    silently masks the wrong axis.
     """
 
-    def test_a_rank_2_mask_still_raises_unbound_local_error(self):
+    def test_a_rank_2_mask_no_longer_raises_unbound_local_error(self):
+        """The literal defect, kept as its own named assertion."""
         layer = _mp_layer()
-        mask = np.ones((_MP_B, _MP_N), dtype="float32")
-        with pytest.raises(UnboundLocalError):
+        out = _mp_forward(layer, _mp_input(), _mp_rank2_mask())
+        assert out.shape == (_MP_B, _MP_N, _MP_DIM)
+        assert np.isfinite(out).all()
+
+    def test_the_rank_2_mask_really_masks_something(self):
+        """ANTI-VACUITY. If the rank-2 mask changed nothing, every equivalence
+        assertion below would hold for a mask that was silently ignored."""
+        layer = _mp_layer()
+        masked = _mp_forward(layer, _mp_input(), _mp_rank2_mask())
+        unmasked = _mp_forward(layer, _mp_input(), None)
+        assert float(np.abs(masked - unmasked).max()) > 0.1, (
+            "the rank-2 mask does not change the output at all — it is being "
+            "ignored, and the equivalence tests below are vacuous"
+        )
+
+    @pytest.mark.parametrize("expand", ["rank3", "rank4"])
+    def test_a_rank_2_mask_equals_the_same_mask_pre_expanded(
+        self, dtype_policy, expand
+    ):
+        """THE assertion: rank 2 is the same computation, not merely a running one.
+
+        A rank-2 mask is expanded to `(batch, 1, 1, kv_block)` per tile rather than
+        materialized at `(batch, seq, seq)`, which keeps this layer's mask memory
+        O(N). That is only legitimate if the numbers come out identical.
+        """
+        mask2 = _mp_rank2_mask()
+        expanded = _rank2_as_rank3(mask2) if expand == "rank3" else _rank2_as_rank4(mask2)
+
+        got = _mp_forward(_mp_layer(), _mp_input(), mask2)
+        want = _mp_forward(_mp_layer(), _mp_input(), expanded)
+
+        # A WITHIN-policy comparison of two spellings of one mask: the tolerance is
+        # not `_MP_ATOL` (which budgets a CROSS-dtype comparison against float32).
+        # The two paths differ only in broadcasting, so they should agree to the
+        # dtype's own noise floor.
+        tol = {"float32": 1e-6, "mixed_float16": 1e-3, "float64": 1e-12}[dtype_policy]
+        max_dev = float(np.abs(got - want).max())
+        assert max_dev <= tol, (
+            f"a rank-2 (batch, seq_len) mask disagrees with the SAME mask "
+            f"pre-expanded to {expand} by {max_dev:.4g} > {tol:.4g} under "
+            f"{dtype_policy!r} — the rank-2 branch broadcasts over the wrong axis"
+        )
+        assert np.isfinite(got).all()
+
+    def test_a_rank_2_mask_matches_the_pre_expanded_form_under_jit(self):
+        """The masked ring path is jit-compiled in production; the new branch adds
+        two `expand_dims` inside the already-unrolled loop and must not break it."""
+        layer = _mp_layer()
+        x = keras.ops.convert_to_tensor(_mp_input())
+        mask2 = _mp_rank2_mask()
+
+        @tf.function(jit_compile=True)
+        def compiled(inputs, mask):
+            return layer(inputs, attention_mask=mask)
+
+        jitted = keras.ops.convert_to_numpy(
+            compiled(x, keras.ops.convert_to_tensor(mask2))
+        ).astype("float64")
+        eager_rank3 = _mp_forward(layer, _mp_input(), _rank2_as_rank3(mask2))
+
+        assert np.isfinite(jitted).all()
+        # Flat tolerance for the same reason as
+        # `TestRingAttentionMaskedGraphSafety`: XLA reassociates the blockwise
+        # accumulation and may pick TF32 matmuls where eager does not (MEASURED
+        # 0.0151 eager-vs-jit on this layer at float32).
+        max_dev = float(np.abs(jitted - eager_rank3).max())
+        assert max_dev <= 0.05, (
+            f"the jit-compiled rank-2 masked forward deviates from the eager "
+            f"pre-expanded rank-3 forward by {max_dev:.4g}"
+        )
+
+    def test_a_rank_2_mask_that_keeps_nothing_is_rescued(self):
+        """The D-011 pre-loop rescue must cover rank 2 too.
+
+        For a rank-2 mask `axis=-1` is the KEY axis, so "keeps nothing" is
+        per-batch-item rather than per-query-row — the same thing, since every
+        query row shares one key mask. The rescued result must equal an all-ones
+        mask, exactly as at the other five rescue sites.
+        """
+        layer = _mp_layer()
+        dead = np.zeros((_MP_B, _MP_N), dtype="float32")
+        rescued = _mp_forward(layer, _mp_input(), dead)
+        all_ones = _mp_forward(layer, _mp_input(), np.ones((_MP_B, _MP_N), "float32"))
+        assert np.isfinite(rescued).all()
+        assert float(np.abs(rescued - all_ones).max()) <= 1e-6, (
+            "an all-zero rank-2 mask does not behave like an all-ones one; the "
+            "pre-loop rescue does not reach the rank-2 path"
+        )
+
+    def test_a_rank_2_mask_preserves_polarity(self):
+        """SC6 for the new branch: the MASKED keys must be the suppressed ones.
+
+        The comparison is restricted to the query rows `0 .. _MP_KEEP` exactly as
+        `TestRingAttentionMaskPolarity` does. A rank-2 mask masks KEYS, not
+        queries, so the masked token's OWN query row legitimately moves when that
+        token is perturbed — measured 7.75 — and reading the whole output would
+        make this test fail on correct code.
+        """
+        layer = _mp_layer()
+        mask = _mp_rank2_mask()
+        base_input = _mp_input()
+        rows = slice(0, _MP_KEEP)
+
+        perturbed_masked = base_input.copy()
+        perturbed_masked[:, _MP_KEEP + 3, :] += 5.0
+        perturbed_kept = base_input.copy()
+        perturbed_kept[:, 3, :] += 5.0
+
+        base = _mp_forward(layer, base_input, mask)[:, rows]
+        delta_masked = float(np.abs(
+            _mp_forward(layer, perturbed_masked, mask)[:, rows] - base).max())
+        delta_kept = float(np.abs(
+            _mp_forward(layer, perturbed_kept, mask)[:, rows] - base).max())
+        inverted_base = _mp_forward(layer, base_input, 1.0 - mask)[:, rows]
+        inverted = float(np.abs(
+            _mp_forward(layer, perturbed_masked, 1.0 - mask)[:, rows]
+            - inverted_base).max())
+
+        assert delta_kept > 0.5, f"vacuous: a KEPT token moved it by {delta_kept:.6g}"
+        assert inverted > 0.5, (
+            f"the INVERTED-polarity control moved the output by only {inverted:.6g}"
+        )
+        assert delta_masked <= 1e-3, (
+            f"perturbing a MASKED key moved the output by {delta_masked:.6g} — the "
+            f"rank-2 mask polarity is inverted (control: {inverted:.6g})"
+        )
+
+    @pytest.mark.parametrize("rank", [1, 5])
+    def test_an_unsupported_rank_raises_a_named_value_error(self, rank):
+        """No rank may reach the in-loop dispatch unhandled ever again.
+
+        Pre-fix a rank-5 mask produced `UnboundLocalError` from deep inside the
+        block loop; rank 1 produced the same. Both must now be a named
+        `ValueError` naming the ranks that ARE supported.
+        """
+        layer = _mp_layer()
+        shape = (_MP_N,) if rank == 1 else (_MP_B, 1, _MP_H, _MP_N, _MP_N)
+        mask = np.ones(shape, dtype="float32")
+        with pytest.raises(ValueError, match=r"attention_mask of rank 2"):
             layer(
                 keras.ops.convert_to_tensor(_mp_input()),
                 attention_mask=keras.ops.convert_to_tensor(mask),
             )
+
+    def test_the_rank_dispatch_has_no_unbound_fallthrough(self):
+        """Structural guard, not a behavioral one.
+
+        The defect was an `if/elif` with no `else`. A future rank added to the
+        pre-loop validation but not to the in-loop dispatch would re-create it
+        exactly. Assert the `else: raise` is still there in the source.
+        """
+        import inspect
+        from dl_techniques.layers.attention import ring_attention
+
+        source = inspect.getsource(RingAttention._blockwise_attention)
+        assert "_UNSUPPORTED_MASK_RANK" in source, (
+            "the in-loop rank dispatch no longer raises on an unhandled rank; "
+            "`mask_slice` can be read unbound again"
+        )
+        assert source.count("_UNSUPPORTED_MASK_RANK") >= 2, (
+            "the rank diagnostic is raised from fewer than two places — either "
+            "the pre-loop fail-fast check or the in-loop `else` was deleted"
+        )
+        assert ring_attention._UNSUPPORTED_MASK_RANK.format(rank=7).endswith(
+            "got rank 7."
+        )

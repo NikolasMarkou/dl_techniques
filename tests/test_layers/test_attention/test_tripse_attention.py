@@ -589,3 +589,289 @@ class TestTripSEIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+# ==============================================================================
+# Step 7 (c) — `training=` is forwarded EXPLICITLY to the two sub-layers that
+# never received it: `TripletAttentionBranch.sigmoid` and
+# `_SEWeights.reduction_activation`.
+#
+# `plan-2026-07-27T183600-b4ef45f0` D-015.
+#
+# WHAT THE INJECTION CAN AND CANNOT SEE — read this before adding a test here.
+#
+# Keras 3 has TWO channels by which a sub-layer learns the training mode:
+#   (1) the EXPLICIT `training=` kwarg the parent passes, and
+#   (2) the AMBIENT `CallContext.training`, which `Layer.__call__` fills in
+#       automatically when the kwarg is absent
+#       (keras/src/layers/layer.py:841-853).
+# A probe activation that merely RECORDS what it received therefore CANNOT
+# distinguish fixed from unfixed code: MEASURED on the unfixed source, an
+# un-forwarded gate still saw `True` under `training=True`, `False` under
+# `training=False`, `None` under neither, and `True` under `model.fit` — six
+# scenarios, six correct values, via channel (2) alone. That is exactly the trap
+# `plans/LESSONS.md` I:5 names: a `call()`-only injection into shared code passes
+# every test when the guard reads a different accessor than the path under test.
+# It also means the finding's framing of this defect ("only bites if the
+# activation has real training-mode behavior") is WRONG — with channel (2) intact
+# it does not bite at all.
+#
+# Channel (2) is nonetheless UNSOUND, and that is the real defect:
+# `CallContext.training` is a SINGLE MUTABLE SLOT (keras/src/layers/layer.py:851
+# writes it on every nested `__call__`; `_maybe_reset_call_context` at :1501 only
+# clears it for the OUTERMOST entry layer, so nested calls never restore it).
+# One sibling sub-layer that forces a different `training` on a child of its own —
+# a frozen-BN wrapper, a teacher/EMA branch, a layer that evaluates something in
+# inference mode — poisons the ambient value for every LATER un-forwarded call in
+# the same outer call.
+#
+# The injection below is therefore a POISONER plus a PROBE:
+#   * `_ContextPoisoner` wraps a real sub-layer and, after delegating, calls a
+#     dead child with `training=False`, which is what makes channel (2) lie.
+#     It is installed at the one sub-layer that runs BETWEEN the parent's entry
+#     and the activation under test — `batch_norm` for `TripletAttentionBranch`,
+#     `global_pool` for `_SEWeights`.
+#   * `StrictTrainingActivation` is installed through the CONSTRUCTOR's activation
+#     argument (`gate_activation_type` / `activation`) via a temporary
+#     `ACTIVATION_REGISTRY` entry, and RAISES unless it receives `training=True`.
+# With the poisoner in place the probe can see channel (1) and only channel (1).
+#
+# PROVEN RED on the unfixed code (`04caa0e7`), both sites:
+#   `AssertionError: dead-component injection FIRED: 'gate_activation' received
+#    training=False, but the enclosing layer was called with training=True.`
+# and the corresponding `'reduction_activation' received training=False` — with
+# the un-poisoned control test PASSING in the same run, which is what proves the
+# poisoner (not the probe) is what makes the gap observable.
+# ==============================================================================
+
+import dl_techniques.layers.activations.factory as _act_factory
+from dl_techniques.layers.attention.tripse_attention import _SEWeights
+
+_PROBE_KEY = "__tripse_strict_training_probe__"
+
+
+@keras.saving.register_keras_serializable()
+class StrictTrainingActivation(keras.layers.Layer):
+    """Dead component: an activation that REFUSES to run outside training mode.
+
+    A stand-in for any activation with genuine training-mode behavior (internal
+    dropout, an internal BN, a stochastic gate). It is an identity numerically, so
+    it cannot change the layer's output — the only thing it can do is fire.
+    """
+
+    def call(self, inputs, training=None):
+        if training is not True:
+            raise AssertionError(
+                f"dead-component injection FIRED: {self.name!r} received "
+                f"training={training!r}, but the enclosing layer was called with "
+                f"training=True. The explicit `training=` kwarg is missing at "
+                f"this call site and the ambient CallContext has been poisoned."
+            )
+        return inputs
+
+
+@keras.saving.register_keras_serializable()
+class _DeadChild(keras.layers.Layer):
+    """A sub-layer that exists only to be called with an explicit `training`."""
+
+    def call(self, inputs, training=None):
+        return inputs
+
+
+@keras.saving.register_keras_serializable()
+class _ContextPoisoner(keras.layers.Layer):
+    """Delegates to `inner`, then poisons `CallContext.training` with `False`.
+
+    Models the real hazard: a sibling sub-layer that evaluates something of its
+    own in inference mode. Numerically transparent — it returns exactly what
+    `inner` returned.
+    """
+
+    def __init__(self, inner, **kwargs):
+        super().__init__(**kwargs)
+        self.inner = inner
+        self.dead_child = _DeadChild()
+
+    def build(self, input_shape):
+        self.inner.build(input_shape)
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        outputs = self.inner(inputs, training=training)
+        self.dead_child(outputs, training=False)
+        return outputs
+
+    def compute_output_shape(self, input_shape):
+        return self.inner.compute_output_shape(input_shape)
+
+
+@pytest.fixture
+def strict_activation_registered():
+    """Register `StrictTrainingActivation` under `_PROBE_KEY` for one test.
+
+    Installing it through `ACTIVATION_REGISTRY` is what lets the injection enter
+    via the layers' own CONSTRUCTOR arguments (`gate_activation_type=` /
+    `activation=`) instead of by patching a built attribute.
+    """
+    _act_factory.ACTIVATION_REGISTRY[_PROBE_KEY] = {
+        "class": StrictTrainingActivation,
+        "description": "test-only strict training probe",
+        "required_params": [],
+        "optional_params": {},
+        "use_case": "proven-RED injection for training= forwarding",
+    }
+    try:
+        yield _PROBE_KEY
+    finally:
+        _act_factory.ACTIVATION_REGISTRY.pop(_PROBE_KEY, None)
+
+
+class TestTripSETrainingIsForwardedExplicitly:
+    """D-015. Read the block comment above before touching these."""
+
+    SHAPE = (2, 8, 8, 4)
+
+    def _input(self):
+        return np.random.default_rng(11).standard_normal(self.SHAPE).astype("float32")
+
+    # -- the mechanism the whole test class depends on ----------------------
+
+    def test_the_ambient_training_context_is_a_single_poisonable_slot(self):
+        """ANTI-VACUITY / mechanism check.
+
+        If Keras ever restores `CallContext.training` on nested exit, the poisoner
+        stops working and every test below silently becomes vacuous. Assert the
+        poison mechanism directly, on a layer of our own.
+        """
+        seen = []
+
+        class Observer(keras.layers.Layer):
+            def call(self, inputs, training=None):
+                seen.append(training)
+                return inputs
+
+        class Outer(keras.layers.Layer):
+            def __init__(self):
+                super().__init__()
+                self.poisoner = _ContextPoisoner(_DeadChild())
+                self.observer = Observer()
+
+            def call(self, inputs, training=None):
+                x = self.poisoner(inputs, training=training)
+                return self.observer(x)  # deliberately NOT forwarded
+
+        Outer()(self._input(), training=True)
+        assert seen and seen[-1] is False, (
+            "the ambient CallContext was NOT poisoned (observer saw "
+            f"{seen!r}); the dead-component injection below cannot fire and the "
+            "proven-RED evidence for this defect is no longer reproducible"
+        )
+
+    def test_without_the_poisoner_the_ambient_channel_already_delivers(self):
+        """The CONTROL that names what the injection cannot see.
+
+        Un-poisoned, an un-forwarded sub-layer still receives the right value via
+        `CallContext`. This test passes on fixed AND unfixed code — by design. It
+        is here so nobody mistakes the injection below for evidence that Keras
+        fails to propagate.
+        """
+        seen = []
+
+        class Observer(keras.layers.Layer):
+            def call(self, inputs, training=None):
+                seen.append(training)
+                return inputs
+
+        class Outer(keras.layers.Layer):
+            def __init__(self):
+                super().__init__()
+                self.observer = Observer()
+
+            def call(self, inputs, training=None):
+                return self.observer(inputs)  # not forwarded
+
+        Outer()(self._input(), training=True)
+        # `seen[-1]`, not `seen == [True]`: building the outer layer can run one
+        # extra shape-inference call with `training=None` before the real one.
+        assert seen and seen[-1] is True, (
+            f"an un-forwarded sub-layer did NOT receive the ambient training "
+            f"value (saw {seen!r}); Keras' automatic propagation has changed and "
+            "the whole framing of D-015 needs re-measuring"
+        )
+        assert False not in seen
+
+    # -- site 1: TripletAttentionBranch.sigmoid ------------------------------
+
+    def test_branch_gate_activation_receives_training(
+        self, strict_activation_registered
+    ):
+        """RED pre-fix: `'gate_activation' received training=False`.
+
+        The poisoner replaces `batch_norm`, the only sub-layer between
+        `TripletAttentionBranch.call`'s entry and the gate activation.
+        """
+        layer = TripletAttentionBranch(
+            gate_activation_type=strict_activation_registered
+        )
+        layer.batch_norm = _ContextPoisoner(keras.layers.BatchNormalization())
+
+        out = layer(self._input(), training=True)
+        assert out.shape == self.SHAPE
+
+    def test_branch_gate_activation_is_reached_at_all(
+        self, strict_activation_registered
+    ):
+        """ANTI-VACUITY: the strict activation must actually be on the path.
+
+        Called with `training=False`, the probe MUST fire — proving the test above
+        would have caught a `training=False` leak rather than skipping the gate.
+        """
+        layer = TripletAttentionBranch(
+            gate_activation_type=strict_activation_registered
+        )
+        with pytest.raises(AssertionError, match=r"dead-component injection FIRED"):
+            layer(self._input(), training=False)
+
+    # -- site 2: _SEWeights.reduction_activation -----------------------------
+
+    def test_se_weights_reduction_activation_receives_training(
+        self, strict_activation_registered
+    ):
+        """RED pre-fix: `'reduction_activation' received training=False`.
+
+        The poisoner replaces `global_pool`, which runs before the bottleneck
+        activation and is created in `__init__` (so it can be swapped pre-build).
+        """
+        layer = _SEWeights(activation=strict_activation_registered)
+        layer.global_pool = _ContextPoisoner(
+            keras.layers.GlobalAveragePooling2D(keepdims=True)
+        )
+
+        out = layer(self._input(), training=True)
+        assert tuple(out.shape) == (self.SHAPE[0], 1, 1, self.SHAPE[-1])
+
+    def test_se_weights_reduction_activation_is_reached_at_all(
+        self, strict_activation_registered
+    ):
+        """ANTI-VACUITY twin of the test above."""
+        layer = _SEWeights(activation=strict_activation_registered)
+        with pytest.raises(AssertionError, match=r"dead-component injection FIRED"):
+            layer(self._input(), training=False)
+
+    # -- the fix must not change numerics ------------------------------------
+
+    @pytest.mark.parametrize("training", [True, False])
+    def test_forwarding_does_not_change_the_output_with_a_stateless_gate(
+        self, training
+    ):
+        """With the shipped `'sigmoid'` gate the fix is provably a no-op.
+
+        The explicit kwarg only matters once the ambient channel has been
+        poisoned; with a stateless activation and an un-poisoned context the
+        numbers are unchanged, which is what makes this fix safe to ship.
+        """
+        x = self._input()
+        branch = TripletAttentionBranch()
+        out = keras.ops.convert_to_numpy(branch(x, training=training))
+        assert np.isfinite(out).all()
+        assert out.shape == self.SHAPE
