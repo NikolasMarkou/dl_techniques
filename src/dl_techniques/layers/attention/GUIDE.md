@@ -35,6 +35,14 @@ To resolve inconsistencies found in legacy layers, strictly adhere to these para
 | **Query Projection** | `query_proj` | `w_q`, `q_dense`, `q_linear` |
 | **Output Projection** | `output_proj` | `w_o`, `o_dense`, `proj_dense` |
 
+> **Carve-out — `channels` in the CNN family.** The table above governs *model dimensions*. The
+> CNN-family layers (`channel`, `spatial`, `cbam`, `non_local`, `tripse1..4`) legitimately keep
+> `channels`, because their argument is a real **channel count** of a `(batch, H, W, channels)`
+> feature map, not a model/embedding dimension. This is an intentional, documented exception
+> (`README.md`, "Available Attention Types" and "Layer-Specific Parameters"), it is part of the
+> frozen factory surface, and it is **not** to be renamed. The general rule stands for every
+> sequence-shaped layer.
+
 ### Standard Constructor Signature
 ```python
 def __init__(
@@ -131,6 +139,99 @@ Never hardcode `LayerNormalization`.
 from dl_techniques.layers.norms import create_normalization_layer
 self.norm = create_normalization_layer('layer_norm', axis=-1)
 ```
+
+### 3.5. What lives in `common.py`
+
+`dl_techniques/layers/attention/common.py` is this package's single home for the small,
+provably-identical primitives that were previously re-derived across a dozen modules. It is
+deliberately **flat**: four module-level names, **no classes, no registry, no Keras
+registration**. Import from it the way you would import `math`.
+
+```python
+from .common import (
+    MASK_BIAS_VALUE,
+    mask_dtype,
+    validate_head_divisibility,
+    compute_attention_scale,
+)
+```
+
+Each entry below states its contract **and its limits**. The limits are not stylistic advice —
+each one was established by measurement during the normalization sweep, and several sites
+legitimately decline to adopt a helper for the reasons given.
+
+#### `compute_attention_scale(head_dim) -> float`
+
+Returns the softmax temperature `1 / sqrt(head_dim)` as a plain **Python float**.
+
+*   **Call it from `__init__` or `build()`, NEVER from `call()`.** The Python scalar folds into
+    the traced graph as a constant; computing it per call with `keras.ops.sqrt` adds a live op
+    to every forward pass for a value fixed at construction time. Standing anchor
+    `plan_2026-06-14_33b77a7a/D-002`.
+*   **Adoption requires a bit-identity probe, not algebraic reasoning.** `1/sqrt(x)` has several
+    spellings in the wild and they are *not* all bit-identical. Measured across 27 realistic head
+    dims:
+
+    | Existing spelling | Bit-identical to the helper? |
+    | :--- | :--- |
+    | `1.0 / math.sqrt(float(x))` | yes (0/27 mismatches) |
+    | `1.0 / np.sqrt(x)` | yes (0/27 mismatches) |
+    | `1.0 / (x ** 0.5)` | yes (0/27 mismatches) |
+    | `x ** -0.5` | **NO — 16/27 last-ULP mismatches**, including `x = 2, 8, 32, 128` |
+
+    `1.0 / (x ** 0.5)` performs a correctly-rounded square root followed by a correctly-rounded
+    division; `x ** -0.5` goes through `pow` with a negative exponent and rounds once. Different
+    rounding path, not a different formula. Family-resemblance reasoning ("both use `**`, so both
+    must behave the same") gives the wrong answer here. **Probe before you swap.**
+*   **Reciprocal only.** The helper computes `1/sqrt(d)` — a value the logits are *multiplied* by.
+    A layer storing `self.scale = sqrt(head_dim)` and later **dividing** by it uses the opposite
+    convention and must not adopt the helper without rewriting its `call()`.
+    (`wave_field_attention.py` is such a site and is intentionally left alone.)
+
+#### `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)`
+
+Raises `ValueError` when `dim % num_heads != 0`. The `dim_name` / `num_heads_name` keywords let
+each call site name **its own** constructor arguments (`hidden_size`, `embed_dim`, ...) in the
+message while sharing one implementation.
+
+*   **Do NOT adopt where the local check is conditional.** Several layers only validate when
+    `head_dim is None` (i.e. when the head dimension is being derived); an unconditional helper
+    call changes which inputs raise.
+*   **Do NOT adopt where the local message carries a trailing clause telling the caller the actual
+    fix** (e.g. "... or pass `head_dim` explicitly"). That clause is the useful half of the
+    message.
+*   Four files declined on exactly these grounds and carry a cross-reference comment instead:
+    `gated_attention.py`, `linear_attention.py`, `progressive_focused_attention.py`,
+    `capsule_routing_attention.py`.
+*   Tests use `pytest.raises(..., match=...)`. Grep the file's test module for `match=` before
+    swapping a message.
+
+#### `MASK_BIAS_VALUE` + `mask_dtype(compute_dtype)`
+
+A **pair**. `MASK_BIAS_VALUE = -1e9` is the additive bias applied to masked logits;
+`mask_dtype()` returns the dtype the masked softmax/logsumexp chain must be evaluated in
+(`float32`, or `float64` if the layer already computes there). Using the constant without the
+dtype helper reintroduces the hazard it exists to prevent.
+
+*   **fp16 hazard:** `np.float16(-1e9) == -inf` (verified, not assumed). Materialize the bias in
+    `mask_dtype(...)`, run logits → bias → softmax there, and cast back at the end.
+*   **Adopting the shared *constant* does not make a mask site safe.** The arithmetic form is
+    itself the bug:
+
+    ```python
+    # ❌ WRONG — under mixed_float16, -1e9 -> -inf, so every UNMASKED position
+    #            evaluates 0 * -inf = NaN. The whole output goes NaN even when
+    #            the supplied mask masks nothing at all.
+    scores = scores + (1.0 - mask) * MASK_BIAS_VALUE
+
+    # ✅ CORRECT — cannot produce 0 * inf at all; the failure mode is removed
+    #             structurally, not merely numerically.
+    scores = scores + keras.ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)
+    ```
+
+    Nine sites in this package still use the wrong form. They are documented in place as known
+    defects rather than silently "fixed", because correcting them is a behavior change. Do not
+    copy them into a new layer.
 
 ---
 
@@ -235,9 +336,20 @@ When adding a new layer, you must update `dl_techniques/layers/attention/factory
 ## 7. Migration of Legacy Layers
 
 If refactoring an existing layer found in the codebase:
-1.  Rename `channels` -> `dim`.
+1.  Rename `channels` -> `dim` — **except** in the CNN family (`channel`, `spatial`, `cbam`,
+    `non_local`, `tripse*`), where `channels` is a real channel count and is a deliberate,
+    frozen carve-out. See the note under section 2's naming table.
 2.  Replace manual `BatchNormalization` with `create_normalization_layer`.
 3.  **Replace manual `Softmax` calls with `ProbabilityOutput` (defaulting to 'softmax').**
 4.  **Replace manual RoPE math with `create_embedding_layer('rope')`**.
-5.  Extract repeated masking logic to `utils.py`.
+5.  Adopt the shared masking / validation / scale primitives from `common.py` (section 3.5)
+    instead of re-deriving them — **but only after checking that adoption is behavior-neutral
+    at your call site**, per the limits documented there.
 6.  Ensure `build()` builds *all* sub-layers.
+
+**Known deferred de-duplication:** seven modules each hand-roll their own Q/K/V head
+reshape + scaled-dot-product scoring. A shared `split_heads` / `merge_heads` /
+`scaled_dot_product_attention` helper is the largest remaining extraction opportunity in this
+package, but the seven implementations differ in reshape/transpose **order**, so unifying them
+changes op ordering and therefore numerics. It is intentionally not in `common.py`; it needs a
+plan that is allowed to change behavior and verifies per-file numeric equivalence.

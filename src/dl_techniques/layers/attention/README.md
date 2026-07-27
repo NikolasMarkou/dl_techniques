@@ -46,6 +46,35 @@ The following layers are supported by the factory system with automated paramete
 
 [^win]: The `window` and `window_zigzag` registry entries dispatch through the factory functions `create_grid_window_attention` / `create_zigzag_window_attention` (which set the partitioning mode); the instance they return is a `WindowAttention` layer.
 
+### Window-attention factory facts
+
+Three details of the window family are easy to get wrong; they are stated here explicitly because
+they are the frozen reality of the registry, not accidents to be "tidied":
+
+- **The general `WindowAttention` class has no factory key of its own.** `ATTENTION_REGISTRY['window']['class']` and `['window_zigzag']['class']` are the module-level **wrapper functions** `create_grid_window_attention` and `create_zigzag_window_attention` (defined in `window_attention.py`), not the class. Each wrapper fixes the partitioning mode and returns a `WindowAttention` instance. To construct the class with an arbitrary configuration, import it directly (`from dl_techniques.layers.attention import WindowAttention`).
+- **`SingleWindowAttention` *is* factory-registered**, under the key `single_window`, with `'class': SingleWindowAttention` — it is a normal registry entry, not a direct-instantiation-only layer.
+- **`create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are test-only.** They live in `window_attention.py` and are exercised only by `tests/test_layers/test_attention/test_window_attention.py`. They are intentionally **not** registered in the factory and **not** exported from the package `__init__.py`; they are convenience constructors for tests, not part of the public surface.
+
+### Shared primitives (`common.py`)
+
+`dl_techniques/layers/attention/common.py` is the package's single home for the small primitives
+that every attention layer needs. It holds exactly four module-level names — **no classes, no
+registry entries, no Keras serialization registration**:
+
+| Name | Purpose |
+|------|---------|
+| `MASK_BIAS_VALUE` | The additive `-1e9` bias applied to masked attention logits. |
+| `mask_dtype(compute_dtype)` | The dtype a masked softmax/logsumexp chain must run in (at least `float32`), so the bias stays finite under `mixed_float16`. |
+| `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)` | The `dim % num_heads` constructor precondition, with per-call-site argument naming in the error message. |
+| `compute_attention_scale(head_dim) -> float` | The softmax temperature `1 / sqrt(head_dim)` as a plain Python `float`, to be computed in `__init__`/`build` and never in `call()`. |
+
+It is an implementation detail of the package (not re-exported from `__init__.py`); layers import
+it as `from .common import ...`. **`GUIDE.md` section 3.5 documents the contract *and the limits*
+of each entry** — in particular that `MASK_BIAS_VALUE` is only safe together with `mask_dtype()`
+and the `keras.ops.where` mask form, and that adopting `compute_attention_scale` at an existing
+site requires a bit-identity probe (`x ** -0.5` is *not* bit-identical to it). Read that section
+before adopting any of them at a new call site.
+
 ## Call-signature caveats
 
 The factory (`create_attention_layer`) is **construction-only** — it standardizes how layers are *built*, not how they are *called*. Most layers follow the standard self-attention call signature `call(inputs, attention_mask=None, training=None)`, but seven layers deviate for intentional, architectural reasons. These are documented (not "fixed"): renaming them would break serialized configs and existing call sites. When invoking these layers directly, use their native signatures:

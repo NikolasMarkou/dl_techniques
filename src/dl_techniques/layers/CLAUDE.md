@@ -108,7 +108,19 @@ Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsu
 
 ## Conventions
 
-- `__init__.py` is empty — import from submodules directly (e.g., `from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention`)
+- **`__init__.py` policy varies by subpackage — check before assuming.** The `layers/__init__.py` root *is* empty, but most subpackages are **not**:
+  - **Curated re-export modules with `__all__`** (import the public name straight from the subpackage): `activations`, `attention` (42 names), `embedding`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers`.
+
+    ```python
+    from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer
+    ```
+  - **Empty** (import from the submodule directly): `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, and the top-level standalone layer modules.
+
+    ```python
+    from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork
+    ```
+  - Submodule imports keep working in both cases (e.g. `from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention`); for a subpackage with an `__all__`, prefer the package-level import.
+- Docstrings in `layers/` use **Sphinx/reST** (`:param:` / `:type:` / `:raises:`), not Google `Args:` — this differs from `models/` and most other top-level packages. In `attention/` it is mandatory; `attention/channel_attention.py` is the reference exemplar.
 - Subpackages with `factory.py` support config-driven layer construction
 - All layers must implement `get_config()` for Keras serialization
 - Layers follow Keras 3 custom layer patterns: `__init__`, `build`, `call`, `get_config`
