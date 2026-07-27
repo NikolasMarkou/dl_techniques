@@ -7,8 +7,9 @@ the standard mechanism with an optional adaptive temperature softmax, which
 dynamically adjusts the sharpness of the attention distribution based on
 the input, potentially improving model calibration and performance.
 
-The layer's architecture is designed for flexibility. It can function in
-two primary configurations determined by the inputs:
+Architecture:
+    The layer is designed for flexibility. It can function in two primary
+    configurations determined by the inputs:
 
 1.  **Cross-Attention:** When provided with distinct ``query`` and ``kv_input``
     tensors, it performs cross-attention. This is an asymmetric setup
@@ -24,15 +25,20 @@ two primary configurations determined by the inputs:
     projection matrix to generate Q, K, and V. This is a parameter-
     efficient variant suitable for standard transformer blocks.
 
-The core of this layer is the scaled dot-product attention mechanism
-with an optional adaptive temperature ``T`` that is a function of the input:
+    Neither the score-normalization strategy nor the optional QK-norm is
+    implemented here: both are delegated to shared components — see the
+    ``[REUSE]`` note on the class below.
 
-    ``Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V``
+Foundational Mathematics:
+    The core of this layer is the scaled dot-product attention mechanism
+    with an optional adaptive temperature ``T`` that is a function of the input::
 
-The adaptive temperature ``T`` is determined dynamically based on the
-entropy of the pre-softmax attention scores for each query. High entropy
-(uniform scores) yields low temperature to sharpen the distribution, while
-low entropy (peaked scores) yields high temperature to soften it.
+        Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V
+
+    The adaptive temperature ``T`` is determined dynamically based on the
+    entropy of the pre-softmax attention scores for each query. High entropy
+    (uniform scores) yields low temperature to sharpen the distribution, while
+    low entropy (peaked scores) yields high temperature to soften it.
 
 References:
     - The scaled dot-product attention mechanism was introduced in:
@@ -44,7 +50,8 @@ References:
       Knowledge in a Neural Network".
 """
 
-import math
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List
@@ -53,6 +60,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
+from .common import compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -74,6 +82,24 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     follows: ``Attention(Q, K, V) = Normalize(Q @ K^T / sqrt(d_k)) @ V`` where
     Normalize is either standard softmax, adaptive temperature softmax, or hierarchical
     routing probabilities.
+
+    **[REUSE]** Two responsibilities are delegated rather than reimplemented:
+
+    -   Score normalization goes through the shared
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` layer, so
+        ``softmax`` / ``sparsemax`` / ``threshmax`` / ``adaptive`` are one
+        constructor string apart and their implementations are tested once, in
+        one place. Do not add an inline ``ops.softmax`` fast path: it would
+        bypass ``ProbabilityOutput``'s build/serialization contract and silently
+        ignore ``probability_config``.
+    -   Optional QK-norm layers come from
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`,
+        giving this layer all 18 registered norm types for free.
+
+    This class is in turn the shared engine for two thin facades —
+    ``multi_head_attention.MultiHeadAttention`` (self-attention preset) and
+    ``perceiver_attention.PerceiverAttention`` (cross-attention preset). Any
+    change to ``call()``'s semantics is a change to all three.
 
     **Architecture Overview:**
 
@@ -205,8 +231,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the regex pinned at
+        # test_multi_head_cross_attention.py:587 still matches and no diagnostic
+        # detail is lost. Position in the validation sequence is unchanged.
+        validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
@@ -234,7 +263,13 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # leaks out of scope ("<tf.Tensor '.../truediv:0'> is out of scope").
         # head_dim is a static int, so a plain float is correct and bit-identical
         # at the call site (cast/multiply rounds to the same float32). See D-002.
-        self.scale = 1.0 / math.sqrt(float(self.head_dim))
+        #
+        # R13: the expression above now lives in `common.compute_attention_scale`,
+        # which IS `1.0 / math.sqrt(float(head_dim))` — verified repr-identical for
+        # every realistic head_dim, so the stored float is unchanged. The anchor
+        # above still governs: the helper returns a Python `float` and is called
+        # from `__init__`, never from `call()`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE sub-layers based on projection strategy
         dense_kwargs = {
@@ -322,6 +357,21 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # Robustly determine if input_shape is a list of shapes (cross-attention)
         # or a single shape (self-attention). This works across backends.
+        #
+        # R13 cross-reference — this three-line predicate is duplicated, on purpose,
+        # in THREE subtly different spellings across the package. They are NOT
+        # interchangeable and must not be unified into one helper:
+        #   * here (and in `compute_output_shape` below): rejects an element that is
+        #     `int`/`None`, i.e. an "is this NOT a serialized scalar shape" test;
+        #   * `multi_head_latent_attention.py:build/compute_output_shape`: requires
+        #     the element to be `(list, tuple)` — the complementary positive test,
+        #     which classifies e.g. a numpy shape element differently;
+        #   * `perceiver_attention.py::build._is_list_of_shapes`: the positive test
+        #     AND it also accepts a `tuple` container, and it carries the
+        #     `plan_2026-06-14_7734bacd/D-003` anti-regression rationale explaining
+        #     which serialized form broke the `.keras` round-trip.
+        # Collapsing them would swap one file's classification of an edge-case
+        # input for another's — a behavior change disguised as de-duplication.
         is_list_of_shapes = (
             isinstance(input_shape, list) and
             len(input_shape) > 0 and
@@ -394,6 +444,33 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         :return: Masked scores tensor with same shape as input scores.
         :rtype: keras.KerasTensor
         """
+        # R13 cross-reference — this helper is deliberately NOT shared.
+        #
+        # Three near-twins exist in this package and NONE of them is textually
+        # equivalent to another, so unifying them would change op order or dtype
+        # handling, which the behavior-preserving contract forbids:
+        #
+        #   * `multi_head_latent_attention.py::MultiHeadLatentAttention.
+        #     _apply_attention_mask` — same broadcast RESULT, but it casts AFTER
+        #     expanding (this one casts FIRST) and probes rank with
+        #     `len(ops.shape(mask))` rather than `len(mask.shape)`.
+        #   * `group_query_attention.py::GroupedQueryAttention._apply_mask` — uses
+        #     `ops.reshape` (not a double `expand_dims`) for the 2D case, and then
+        #     materializes the head axis with an explicit `ops.repeat` to
+        #     `num_heads` instead of relying on broadcast.
+        #
+        # WHAT NOT TO DO: do not "obviously" merge these into one common.py helper.
+        # A single implementation must pick one cast order, one rank probe and one
+        # head-axis strategy, silently changing the other two call sites.
+        #
+        # KNOWN DEFECT, deliberately left as-is here (out of scope for a
+        # behavior-preserving pass): the additive form below is
+        # `(1 - mask) * -1e9`, the exact arithmetic that `common.MASK_BIAS_VALUE`
+        # warns against — under `mixed_float16` `-1e9` becomes `-inf` and every
+        # UNMASKED position evaluates `0 * -inf = NaN`. The structurally safe form
+        # is `ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)` evaluated in
+        # `common.mask_dtype(...)`. Fixing it changes numerics under fp16, so it
+        # belongs to a follow-up plan, not to this one.
         attention_mask = ops.cast(attention_mask, scores.dtype)
 
         # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)

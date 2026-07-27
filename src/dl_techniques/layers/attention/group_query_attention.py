@@ -5,15 +5,28 @@ This module implements Grouped Query Attention, an efficient attention mechanism
 reduces the computational and memory requirements of multi-head attention by sharing
 key and value projections across multiple query heads while maintaining model quality.
 
-Standard Multi-Head Attention uses ``num_heads`` query, key, and value projections.
-Grouped Query Attention reduces this to ``num_heads`` query projections but only
-``num_kv_heads`` key and value projections (where ``num_kv_heads < num_heads``),
-creating groups where ``group_size = num_heads // num_kv_heads``. Each K,V pair
-is shared across ``group_size`` query heads by repeating along the head dimension.
+Architecture:
+    Standard Multi-Head Attention uses ``num_heads`` query, key, and value
+    projections. Grouped Query Attention reduces this to ``num_heads`` query
+    projections but only ``num_kv_heads`` key and value projections (where
+    ``num_kv_heads < num_heads``), creating groups where
+    ``group_size = num_heads // num_kv_heads``. Each K,V pair is shared across
+    ``group_size`` query heads by repeating along the head dimension.
 
-The attention computation follows:
-``Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V``
-with optional Rotary Position Embeddings (RoPE) applied to Q and K before scoring.
+    RoPE, score normalization and the optional QK-norm are shared components,
+    not local implementations — see the ``[REUSE]`` note on the class below.
+    This class is also the base of ``mobile_mqa.MobileMQA``.
+
+Foundational Mathematics:
+    The attention computation follows::
+
+        Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
+
+    with optional Rotary Position Embeddings (RoPE) applied to Q and K before
+    scoring, and ``d_k = dim // num_heads``. The KV cache shrinks by exactly
+    ``num_heads / num_kv_heads`` because only the ``num_kv_heads`` distinct K,V
+    heads are stored; the repeat to ``num_heads`` happens at score time and is
+    never materialized in the cache.
 
 References:
     - Ainslie, J., et al. (2023). "GQA: Training Generalized Multi-Query Transformer
@@ -26,7 +39,8 @@ References:
       Embedding." https://arxiv.org/abs/2104.09864 (RoPE integration)
 """
 
-import math
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Optional, Union, Any, Dict, Tuple
@@ -36,6 +50,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .common import compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 from ..norms.factory import create_normalization_layer
@@ -55,6 +70,22 @@ class GroupedQueryAttention(keras.layers.Layer):
     each K,V pair is shared across ``group_size = num_heads // num_kv_heads`` query heads.
     This reduces memory usage for K,V caches in autoregressive generation while
     maintaining most of the representational power of full multi-head attention.
+
+    **[REUSE]** Three responsibilities are delegated rather than reimplemented:
+
+    -   Rotary position embeddings come from the shared
+        :class:`~dl_techniques.layers.embedding.rotary_position_embedding.RotaryPositionEmbedding`.
+    -   Score normalization goes through the shared
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` layer, so
+        ``probability_type`` selects softmax / sparsemax / adaptive without any
+        branching in ``call()``.
+    -   Optional QK-norm layers come from
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
+
+    ``mobile_mqa.MobileMQA`` subclasses this layer. It reuses ``w_q``/``w_k``/
+    ``w_v``/``w_o``, ``self.scale``, ``self.attn_prob``, ``self.dropout`` and this
+    class's ``compute_output_shape()``, and overrides only ``call()``. Changing
+    any of those attribute NAMES is a breaking change for the subclass.
 
     **Architecture Overview:**
 
@@ -131,7 +162,34 @@ class GroupedQueryAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param probability_type: String identifier for the attention-score
+        normalization strategy, forwarded to :class:`ProbabilityOutput` as its
+        ``probability_type``. One of ``"softmax"``, ``"sparsemax"``,
+        ``"threshmax"``, ``"adaptive"`` and their aliases. Defaults to
+        ``"softmax"``. Routing/hierarchical variants are rejected: they consume
+        features rather than logits.
+    :type probability_type: str
+    :param probability_config: Optional dictionary forwarded to
+        :class:`ProbabilityOutput` as ``type_config``. Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied per-head to Q and K
+        before scoring, forwarded to :func:`create_normalization_layer`. K is
+        normalized in its native ``num_kv_heads`` shape, before grouping. ``None``
+        disables QK-norm. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` for both Q and K norms.
+        Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer parent class.
+
+    :raises ValueError: If ``dim``, ``num_heads``, ``num_kv_heads``,
+        ``max_seq_len`` or ``rope_theta`` is not positive.
+    :raises ValueError: If ``dim`` is not divisible by ``num_heads``, or if
+        ``num_heads`` is not divisible by ``num_kv_heads``.
+    :raises ValueError: If ``dropout_rate`` or ``rope_percentage`` is outside
+        ``[0, 1]``.
+    :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
     """
 
     def __init__(
@@ -199,7 +257,13 @@ class GroupedQueryAttention(keras.layers.Layer):
         # DECISION plan_2026-06-14_ab855e7e/D-001: static attention scale as a
         # Python float (math.sqrt, NOT ops.sqrt on a cast scalar — D-002 pattern).
         # Inherited by MobileMQA. Do NOT revert to ops.sqrt.
-        self.scale = 1.0 / math.sqrt(float(self.head_dim))
+        #
+        # R13: the expression now lives in `common.compute_attention_scale`, which IS
+        # `1.0 / math.sqrt(float(head_dim))` — verified repr-identical for every
+        # realistic head_dim, so `self.scale` is bit-identical and `MobileMQA`, which
+        # reads this attribute in its own `call()`, is unaffected. The anchor above
+        # still governs: Python float, computed in `__init__`, never in `call()`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__
         self.w_q = keras.layers.Dense(
@@ -316,8 +380,18 @@ class GroupedQueryAttention(keras.layers.Layer):
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if rope_theta <= 0:
             raise ValueError(f"rope_theta must be positive, got {rope_theta}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the regex pinned at test_group_query_attention.py:113
+        # (and, via inheritance, test_mobile_mqa.py:119) still matches.
+        validate_head_divisibility(dim, num_heads)
+        # The check below is a DIFFERENT invariant and stays local on purpose: it is
+        # about how many query heads share one K,V head (the "grouping" in GQA), not
+        # about splitting a model dimension into heads. `common.
+        # validate_head_divisibility` documents a head-SPLIT precondition
+        # (`(..., dim) -> (..., num_heads, dim // num_heads)`); routing this through
+        # it would make that documented contract untrue for a saved line, and its
+        # `*_name` kwargs would produce the same text anyway. Pinned at
+        # test_group_query_attention.py:117.
         if num_heads % num_kv_heads != 0:
             raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
         if not 0.0 <= dropout_rate <= 1.0:
@@ -501,6 +575,30 @@ class GroupedQueryAttention(keras.layers.Layer):
         :return: Masked scores tensor.
         :rtype: keras.KerasTensor
         """
+        # R13 cross-reference — this helper is deliberately NOT shared.
+        #
+        # It is the THIRD variant of mask broadcasting in this package and the most
+        # different of the three:
+        #   * `multi_head_cross_attention.py::_apply_attention_mask` — casts first,
+        #     then a double `ops.expand_dims` for the 2D case, and relies on
+        #     broadcasting over the head axis;
+        #   * `multi_head_latent_attention.py::_apply_attention_mask` — expands
+        #     first, casts after, probes rank with `len(ops.shape(mask))`;
+        #   * HERE — `ops.reshape` (not `expand_dims`) for the 2D case, and then an
+        #     explicit `ops.repeat` that MATERIALIZES the head axis to `num_heads`
+        #     instead of broadcasting it. That repeat is a real extra op with a real
+        #     memory cost; it exists because 4D inputs arrive with a flattened
+        #     `H*W` sequence axis and broadcast alone proved fragile there.
+        #
+        # WHAT NOT TO DO: do not unify the three. Any single body must choose one
+        # cast order, one rank probe, and either broadcast or repeat — silently
+        # rewriting the traced graph of the two layers it did not come from.
+        #
+        # KNOWN DEFECT, out of scope for this behavior-preserving pass: the additive
+        # form below is `(1 - mask) * -1e9`, which `common.MASK_BIAS_VALUE` warns
+        # against — under `mixed_float16` `-1e9` is `-inf` and unmasked positions
+        # evaluate `0 * -inf = NaN`. Safe form: `ops.where(mask > 0, 0.0,
+        # MASK_BIAS_VALUE)` inside `common.mask_dtype(...)`. Follow-up plan.
         mask_shape = ops.shape(mask)
 
         # Handle 2D padding mask (B, S)

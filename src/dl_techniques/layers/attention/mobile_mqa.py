@@ -6,21 +6,46 @@ version of Grouped Query Attention (GQA) optimized for mobile and edge hardware.
 It inherits the core projection and attention logic from GQA but introduces
 vision-specific optimizations.
 
-Key Features & Differences from Standard GQA:
-1.  **Multi-Query Structure**: Forces `num_kv_heads=1`. All query heads share a
-    single key/value head, minimizing memory bandwidth for K/V loading.
-2.  **Spatial Downsampling**: Optional depthwise convolution on K/V feature maps
-    *before* attention. This reduces the sequence length of the key/value pairs,
-    lowering the attention complexity from O(N^2) to O(N*M).
-3.  **Learnable Residual**: Uses a specialized residual connection
-    `x + lambda * Attention(x)` with a learnable scalar `lambda` initialized to 1.
-4.  **No RoPE**: MobileMQA typically relies on explicit positional embeddings or
-    CNN-induced locality, so Rotary Position Embeddings are disabled by default.
+Architecture:
+    Key Features & Differences from Standard GQA:
+
+    1.  **Multi-Query Structure**: Forces ``num_kv_heads=1``. All query heads
+        share a single key/value head, minimizing memory bandwidth for K/V
+        loading.
+    2.  **Spatial Downsampling**: Optional depthwise convolution on K/V feature
+        maps *before* attention. This reduces the sequence length of the
+        key/value pairs, lowering the attention complexity from O(N^2) to
+        O(N*M).
+    3.  **Learnable Residual**: Uses a specialized residual connection
+        ``x + lambda * Attention(x)`` with a learnable scalar ``lambda``
+        initialized to 1.
+    4.  **No RoPE**: MobileMQA typically relies on explicit positional
+        embeddings or CNN-induced locality, so Rotary Position Embeddings are
+        disabled by default.
+
+    Everything else — the four ``Dense`` projections, the precomputed attention
+    scale, the ``ProbabilityOutput`` normalizer, the attention dropout and
+    ``compute_output_shape()`` — is INHERITED from ``GroupedQueryAttention``;
+    see the ``[REUSE]`` note on the class below.
+
+Foundational Mathematics:
+    With ``num_kv_heads = 1`` the grouped-query formulation collapses to
+    multi-query attention: a single K,V head broadcast to all ``num_heads``
+    query heads::
+
+        Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
+        output             = x + lambda * W_o( Attention(x) )
+
+    Optional stride-2 depthwise downsampling shortens the key/value sequence
+    from ``N = H*W`` to ``M = ceil(H/2)*ceil(W/2) ~ N/4``, so the score matrix
+    is ``(N, M)`` rather than ``(N, N)``.
 
 References:
     - Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need."
     - Rombach et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models."
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from keras import ops
@@ -44,6 +69,27 @@ class MobileMQA(GroupedQueryAttention):
     downsampling for Key/Value projections via depthwise convolution, and
     uses a learnable lambda-scaled residual connection
     ``output = input + lambda * Attention(input)``.
+
+    **[REUSE] / rubric R8 footnote — this class has NO local
+    ``compute_output_shape()``, on purpose.**
+
+    It inherits ``GroupedQueryAttention.compute_output_shape()``, which returns
+    ``tuple(input_shape)``. That is exactly right here and is not an accident of
+    omission: MobileMQA's output is ``inputs + lambda * attention_output``, an
+    addition against ``inputs``, so the output shape is the input shape *by
+    construction* — optional K/V downsampling shortens only the key/value
+    sequence, never the query sequence, and ``w_o`` projects back to ``dim``.
+
+    WHAT NOT TO DO: do not add a redundant override that re-derives
+    ``tuple(input_shape)``. A second copy is a second thing to keep in sync with
+    the parent for zero behavioral gain — and if the parent's shape contract ever
+    changes, the silently-shadowing override is what would break.
+
+    Also inherited and deliberately not re-created: ``w_q``/``w_k``/``w_v``/``w_o``,
+    ``self.scale`` (the precomputed Python-float attention scale),
+    ``self.attn_prob``, ``self.dropout`` and the optional ``q_norm``/``k_norm``.
+    Only ``call()`` is overridden, plus a ``downsample`` conv and the ``lambda``
+    weight added here.
 
     **Architecture Overview:**
 
@@ -97,7 +143,13 @@ class MobileMQA(GroupedQueryAttention):
     :param kernel_regularizer: Optional regularizer for kernels.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param kwargs: Additional arguments passed to
-        ``GroupedQueryAttention``.
+        ``GroupedQueryAttention``. Note that ``num_kv_heads`` and
+        ``rope_percentage`` are overwritten unconditionally (to ``1`` and ``0.0``)
+        and ``use_bias`` defaults to ``True`` here, not ``False`` as in the parent.
+
+    :raises ValueError: Propagated from ``GroupedQueryAttention.__init__`` if
+        ``dim`` or ``num_heads`` is not positive, or if ``dim`` is not divisible
+        by ``num_heads``.
     """
 
     def __init__(
@@ -291,11 +343,17 @@ class MobileMQA(GroupedQueryAttention):
         :rtype: dict
         """
         config = super().get_config()
-        # Remove GQA-specific fields that we hardcoded/derived to avoid duplication in init
-        # or keep them if we want full transparency.
-        # Ideally, we only return what __init__ accepts.
 
-        # Filter out parameters set by the subclass __init__
+        # Drop the two parent keys this subclass HARDCODES in __init__
+        # (`num_kv_heads=1`, `rope_percentage=0.0`). They are not accepted as
+        # constructor arguments here, so leaving them in the config would make
+        # `from_config(get_config())` raise a duplicate-keyword TypeError — the
+        # parent's `__init__` receives them via the `kwargs` dict this class
+        # populates, and a config-supplied copy would collide.
+        #
+        # WHAT NOT TO DO: do not "restore transparency" by keeping them. The key
+        # SET of this config is part of the frozen serialization surface; adding
+        # keys breaks every existing `.keras` checkpoint's round-trip.
         params_to_remove = ['num_kv_heads', 'rope_percentage']
         for param in params_to_remove:
             config.pop(param, None)

@@ -8,42 +8,56 @@ representation for a given element. This allows the model to capture complex,
 long-range dependencies and contextual relationships within the input data,
 regardless of the distance between elements.
 
-Architecturally, the process is built upon the scaled dot-product attention
-mechanism. For each element in the input sequence, three vectors are derived
-through learned linear projections: a Query (Q), a Key (K), and a Value (V).
--   The **Query** vector represents the current element's request for
-    information.
--   The **Key** vector represents what information each element in the
-    sequence has to offer.
--   The **Value** vector represents the content of each element that will be
-    aggregated.
+Architecture:
+    The process is built upon the scaled dot-product attention mechanism. For
+    each element in the input sequence, three vectors are derived through
+    learned linear projections: a Query (Q), a Key (K), and a Value (V).
 
-The core mathematical operation computes a compatibility score between the
-Query of one element and the Key of every other element in the sequence via a
-dot product. These scores are then scaled and passed through a softmax
-function to create a set of attention weights---a probability distribution
-indicating how much attention the current element should pay to every other
-element. The final output for the current element is a weighted sum of all
-Value vectors in the sequence, using the computed attention weights.
+    -   The **Query** vector represents the current element's request for
+        information.
+    -   The **Key** vector represents what information each element in the
+        sequence has to offer.
+    -   The **Value** vector represents the content of each element that will
+        be aggregated.
 
-The formula is: ``Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V``
+    The "multi-head" aspect enhances this mechanism's power. Instead of a
+    single set of Q, K, V projections, the input is projected into multiple
+    (``h``) lower-dimensional subspaces. Scaled dot-product attention is then
+    performed in parallel within each of these "heads." This allows the model
+    to jointly attend to information from different representation subspaces
+    at different positions. For example, one head might learn to focus on
+    syntactic relationships, while another focuses on semantic similarity. The
+    outputs from all heads are then concatenated and passed through a final
+    linear projection to produce the final result. This parallel structure
+    enables the model to capture a richer and more diverse set of
+    relationships within the data.
 
-The "multi-head" aspect enhances this mechanism's power. Instead of a single
-set of Q, K, V projections, the input is projected into multiple (``h``) lower-
-dimensional subspaces. Scaled dot-product attention is then performed in
-parallel within each of these "heads." This allows the model to jointly attend
-to information from different representation subspaces at different positions.
-For example, one head might learn to focus on syntactic relationships, while
-another focuses on semantic similarity. The outputs from all heads are then
-concatenated and passed through a final linear projection to produce the final
-result. This parallel structure enables the model to capture a richer and more
-diverse set of relationships within the data.
+    **This module owns no attention math of its own.** It is a thin,
+    self-attention-shaped facade over ``MultiHeadCrossAttention``; see the
+    ``[REUSE]`` note on the class below.
+
+Foundational Mathematics:
+    The core operation computes a compatibility score between the Query of one
+    element and the Key of every other element in the sequence via a dot
+    product. These scores are then scaled and passed through a softmax
+    function to create a set of attention weights --- a probability
+    distribution indicating how much attention the current element should pay
+    to every other element. The final output for the current element is a
+    weighted sum of all Value vectors in the sequence::
+
+        Attention(Q, K, V) = softmax( (Q K^T) / sqrt(d_k) ) V
+
+    with ``d_k = dim // num_heads``. The ``1/sqrt(d_k)`` factor keeps the
+    logit variance independent of head width, which is what stops the softmax
+    from saturating (and its gradient from vanishing) as ``d_k`` grows.
 
 References:
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
 
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
@@ -52,6 +66,7 @@ from typing import Optional, Tuple, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 
 # ---------------------------------------------------------------------
@@ -65,6 +80,22 @@ class MultiHeadAttention(keras.layers.Layer):
     the more general ``MultiHeadCrossAttention`` layer. It demonstrates the wrapper
     pattern for creating specialized interfaces while maintaining robust serialization
     and leveraging existing, well-tested implementations.
+
+    **[REUSE] This class contains no attention arithmetic.** Every projection,
+    score, mask application, probability normalization and output projection is
+    performed by the single ``MultiHeadCrossAttention`` sub-layer created in
+    ``__init__``, invoked with ``kv_input=None`` (self-attention) and
+    ``shared_qk_projections=True`` (one fused QKV ``Dense`` instead of three).
+    ``build()`` only validates the input rank and forwards; ``call()`` is a
+    one-expression delegation; ``compute_output_shape()`` is the identity.
+
+    WHAT NOT TO DO: do not inline a copy of the QKV/score/softmax pipeline here
+    "for clarity" or "to avoid a layer of indirection". Two independent copies of
+    scaled dot-product attention would immediately drift (the sibling already
+    carries QK-norm, ``ProbabilityOutput`` strategies and an mask-broadcast
+    helper), and every ``.keras`` checkpoint of this layer stores the nested
+    ``cross_attention`` sub-layer's weights under that name — flattening the
+    wrapper is a silent checkpoint break, not a refactor.
 
     The self-attention computation follows: ``Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V``
     where Q, K, and V are all derived from the same input via learned linear projections.
@@ -122,10 +153,33 @@ class MultiHeadAttention(keras.layers.Layer):
     :param use_bias: Boolean, whether to use bias in dense layers.
         Defaults to False.
     :type use_bias: bool
+    :param probability_type: String identifier for the attention-score
+        normalization strategy, forwarded unchanged to the wrapped
+        ``MultiHeadCrossAttention`` (and from there to
+        :class:`ProbabilityOutput`). One of ``"softmax"``, ``"sparsemax"``,
+        ``"threshmax"``, ``"adaptive"`` and their aliases. Defaults to
+        ``"softmax"``. ``"routing"``/``"hierarchical"`` are rejected by the
+        wrapped layer, so they raise from this constructor too.
+    :type probability_type: str
+    :param probability_config: Optional dictionary forwarded to the
+        :class:`ProbabilityOutput` strategy as ``type_config`` (e.g.
+        ``min_temp``/``max_temp`` for ``"adaptive"``). Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied to the Q and K
+        projections before scoring (QK-norm), forwarded to
+        :func:`create_normalization_layer` by the wrapped layer. ``None``
+        disables QK-norm. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` when the Q/K norms are constructed.
+        Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional layer arguments.
 
     :raises ValueError: If dim is not divisible by num_heads.
     :raises ValueError: If parameters are invalid (negative values, etc.).
+    :raises ValueError: From ``build()``, if the input is not 3D or its trailing
+        dimension does not equal ``dim``.
     """
 
     def __init__(
@@ -147,8 +201,13 @@ class MultiHeadAttention(keras.layers.Layer):
         # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here (`dim (63) must be divisible by num_heads (8)`), so the
+        # regex pinned at test_multi_head_attention.py:82 still matches and no
+        # diagnostic detail is lost. The check ORDER is preserved deliberately: this
+        # runs BEFORE the `num_heads <= 0` guard, exactly as before, because Python's
+        # `%` on a negative modulus does not raise and callers have seen this ordering.
+        validate_head_divisibility(dim, num_heads)
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if not (0.0 <= dropout_rate <= 1.0):
@@ -241,6 +300,9 @@ class MultiHeadAttention(keras.layers.Layer):
         :return: Attention output tensor of shape ``(batch_size, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
+        # Shape: (B, seq, dim) -> (B, seq, dim)
+        # Pure delegation — no arithmetic happens in this frame. See the [REUSE]
+        # note on the class docstring.
         return self.cross_attention(
             query_input=inputs,
             kv_input=None,  # Self-attention: kv_input=None

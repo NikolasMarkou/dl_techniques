@@ -7,11 +7,28 @@ function is to create a scalable information bottleneck, enabling a deep
 transformer model to process very large and high-dimensional inputs (like
 images or audio) without incurring quadratic computational complexity.
 
-The key innovation is decoupling the processing network's depth from the
-input data's size via an asymmetric attention mechanism between a small,
-fixed-size latent array (queries) and a large, variable-size data array
-(keys and values). The resulting attention matrix has shape ``(N, M)``
-with complexity ``O(N * M)`` instead of ``O(M^2)``, where ``N << M``.
+Architecture:
+    The key innovation is decoupling the processing network's depth from the
+    input data's size via an asymmetric attention mechanism between a small,
+    fixed-size latent array (queries) and a large, variable-size data array
+    (keys and values).
+
+    **This module owns no attention math of its own.** It is a thin,
+    cross-attention-shaped facade over ``MultiHeadCrossAttention``; see the
+    ``[REUSE]`` note on the class below.
+
+Foundational Mathematics:
+    With a latent array ``X_lat`` of ``N`` rows and a data array ``X_data`` of
+    ``M`` rows::
+
+        Q = X_lat  W_q,   K = X_data W_k,   V = X_data W_v
+        Output    = softmax( Q K^T / sqrt(d_k) ) V
+
+    The resulting attention matrix has shape ``(N, M)`` with complexity
+    ``O(N * M)`` instead of ``O(M^2)``, where ``N << M``. Because ``N`` is fixed
+    by the architecture rather than by the input, stacking depth costs
+    ``O(N^2)`` per self-attention block regardless of how large ``M`` is — that
+    decoupling is the whole point of the bottleneck.
 
 References:
     - Jaegle, A., et al. (2021). "Perceiver: General Perception with
@@ -21,6 +38,8 @@ References:
     - Vaswani, A., et al. (2017). "Attention Is All You Need".
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
 
@@ -28,6 +47,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
+from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 
 # ---------------------------------------------------------------------
@@ -44,6 +64,23 @@ class PerceiverAttention(keras.layers.Layer):
     ``MultiHeadCrossAttention`` with ``shared_qk_projections=False`` to provide
     a specialized Perceiver interface with separate projections for maximum
     cross-modal flexibility.
+
+    **[REUSE] This class contains no attention arithmetic.** Every projection,
+    score, mask application, probability normalization and output projection is
+    performed by the single ``MultiHeadCrossAttention`` sub-layer created in
+    ``__init__``, with ``shared_qk_projections=False`` so the query path and the
+    key/value path get independent weights (required — they see different
+    tensors). ``build()`` only disambiguates and validates shapes; ``call()`` is a
+    one-expression delegation.
+
+    Its sibling facade over the same engine is
+    ``multi_head_attention.MultiHeadAttention``, which presets the
+    self-attention configuration instead.
+
+    WHAT NOT TO DO: do not inline the QKV/score/softmax pipeline here. The
+    wrapper's nested ``cross_attention`` sub-layer name is baked into every
+    saved ``.keras`` checkpoint of this layer, so flattening it is a silent
+    checkpoint break rather than a refactor.
 
     **Architecture Overview:**
 
@@ -92,6 +129,24 @@ class PerceiverAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param probability_type: String identifier for the attention-score
+        normalization strategy, forwarded unchanged to the wrapped
+        ``MultiHeadCrossAttention``. One of ``"softmax"``, ``"sparsemax"``,
+        ``"threshmax"``, ``"adaptive"`` and their aliases. Defaults to
+        ``"softmax"``. Routing/hierarchical variants are rejected by the wrapped
+        layer and therefore raise from this constructor too.
+    :type probability_type: str
+    :param probability_config: Optional dictionary forwarded to the
+        :class:`ProbabilityOutput` strategy as ``type_config``.
+        Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied to Q and K before
+        scoring (QK-norm), forwarded to :func:`create_normalization_layer` by the
+        wrapped layer. ``None`` disables QK-norm. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` for the Q/K norms. Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
 
@@ -123,8 +178,11 @@ class PerceiverAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the `match="must be divisible"` regex pinned at
+        # test_perceiver_attention.py:69 still matches and no diagnostic detail is
+        # lost. Position in the validation sequence is unchanged.
+        validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
@@ -148,6 +206,14 @@ class PerceiverAttention(keras.layers.Layer):
             dim=self.dim,
             num_heads=self.num_heads,
             dropout_rate=self.dropout_rate,  # Note: parameter name is 'dropout' in MultiHeadCrossAttention
+            # ^ STALE as of this normalization pass, kept verbatim per rubric R12:
+            #   `MultiHeadCrossAttention.__init__` today spells the argument
+            #   `dropout_rate`, matching this layer, so the asymmetry the note warns
+            #   about no longer exists. Verified against
+            #   `multi_head_cross_attention.py::MultiHeadCrossAttention.__init__`.
+            #   The note is retained (not deleted) because it records why the keyword
+            #   is passed explicitly rather than splatted, and because argument NAMES
+            #   in this batch are frozen public API.
             shared_qk_projections=False,  # Separate projections for cross-attention flexibility
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -184,6 +250,20 @@ class PerceiverAttention(keras.layers.Layer):
         # the `.keras` round-trip (ValueError "got 3"). A genuine multi-input
         # list has elements that are themselves shapes (list/tuple). See
         # decisions.md D-003.
+        #
+        # R13 cross-reference (added by the normalization pass; the anchor above is
+        # preserved verbatim): two sibling spellings of this predicate exist and are
+        # NOT interchangeable —
+        #   * `multi_head_cross_attention.py::build/compute_output_shape` uses the
+        #     complementary NEGATIVE form (`not isinstance(s[0], (int, type(None)))`)
+        #     and accepts only a `list` container;
+        #   * `multi_head_latent_attention.py::build/compute_output_shape` uses the
+        #     positive form but, like the above, only a `list` container.
+        # This one is the most permissive (accepts a `tuple` container too) and is
+        # the only one carrying the D-003 round-trip rationale. Do not unify them
+        # into a shared helper: each classifies serialized-shape edge cases
+        # differently, so one body would silently change two other layers' build
+        # paths.
         def _is_list_of_shapes(s: Any) -> bool:
             return (
                 isinstance(s, (list, tuple))
@@ -258,6 +338,15 @@ class PerceiverAttention(keras.layers.Layer):
         :return: Output shape tuple, same as query input shape.
         :rtype: Tuple[Optional[int], ...]
         """
+        # KNOWN INCONSISTENCY with build() above, reported and deliberately NOT
+        # fixed by this behavior-preserving pass: this is the naive
+        # `isinstance(list)` branch that the `plan_2026-06-14_7734bacd/D-003`
+        # anchor in build() warns against. A single 3D shape that Keras serialized
+        # to a plain list (e.g. `[None, 8, 32]`) is classified here as a
+        # list-of-shapes, so this returns `None` (element 0) instead of the shape.
+        # Aligning it with build()'s `_is_list_of_shapes` would CHANGE the returned
+        # value for that input, which is a behavior change and therefore out of
+        # scope here; it is logged as a follow-up defect.
         if isinstance(input_shape, list):
             return input_shape[0]  # Same as query input shape
         else:
