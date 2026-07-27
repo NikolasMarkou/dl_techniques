@@ -13,6 +13,39 @@ The core idea replaces the explicit ``(Q @ K^T) @ V`` computation with
 from ``O(N^2 * d)`` to ``O(N * r * d)`` where ``r`` is the number of
 random features.
 
+Architecture:
+    A single ``Dense(3 * dim)`` produces Q, K and V, which are reshaped to
+    ``(batch, num_heads, seq_len, head_dim)``. A random Gaussian projection
+    matrix maps each head's Q and K into an ``nb_features``-dimensional
+    trigonometric feature space, after which matmul associativity is used to
+    contract ``phi(K)^T V`` first (non-causal path) or a prefix ``cumsum`` of the
+    same outer product (causal path). The ``N x N`` attention matrix is never
+    materialized. Heads are merged and projected back to ``dim``.
+
+    Two properties of this file are load-bearing and deliberately NOT normalized
+    away by the package-wide style pass:
+
+    -   ``call()`` takes **no** ``attention_mask`` argument. That is intentional
+        and frozen; see the ``[FROZEN SIGNATURE]`` note on the class below.
+    -   The softmax temperature is precomputed once in ``__init__`` as a Python
+        float (anchor ``plan_2026-06-14_33b77a7a/D-001`` at
+        ``_create_projection_matrix``), never recomputed with ``ops.sqrt`` in
+        ``call()``.
+
+Foundational Mathematics:
+    FAVOR+ replaces the softmax kernel with an explicit feature map ``phi`` whose
+    inner product approximates the exponential kernel in expectation::
+
+        exp(q . k) ~ E[ <phi(q), phi(k)> ]
+
+    Attention then becomes a ratio of two contractions that are both linear in
+    the sequence length::
+
+        O = phi(Q) (phi(K)^T V) / ( phi(Q) (phi(K)^T 1_N) )
+
+    Contracting ``phi(K)^T V`` first yields an ``(r, d)`` state, so the total cost
+    is ``O(N * r * d)`` rather than ``O(N^2 * d)``.
+
 References:
     - Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
       "Rethinking Attention with Performers".
@@ -22,9 +55,14 @@ References:
 
 import math
 import keras
-import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .common import compute_attention_scale, validate_head_divisibility
 
 # ---------------------------------------------------------------------
 
@@ -42,6 +80,23 @@ class PerformerAttention(keras.layers.Layer):
     the ``N x N`` attention matrix. The feature map uses trigonometric random
     projections: ``phi(x) = (1/sqrt(r)) [cos(w_i . x), sin(w_i . x)]``
     scaled by ``exp(-||x||^2 / 2)``.
+
+    **[FROZEN SIGNATURE — D-007 carve-out]** ``call()`` accepts
+    ``(inputs, training, return_attention_scores)`` and deliberately has **no**
+    ``attention_mask`` / ``mask`` parameter, unlike most siblings in this package.
+    This is recorded as an intentional inconsistency by the standing anchor
+    ``plan_2026-06-14_0c5d4a21/D-007`` at ``factory.py:939-944``, which explicitly
+    places both this signature and ``rpc_attention.RPCAttention.call``'s ``mask=``
+    spelling out of scope for normalization passes. **Do NOT "fix" this** by adding
+    a mask parameter or renaming one: the factory dispatches on the exact argument
+    names, and adding a silently-ignored ``attention_mask`` would be worse than an
+    honest absence — callers would believe padding was handled when it is not.
+    Causal masking IS supported, but only via the ``causal=True`` constructor flag,
+    which selects the prefix-``cumsum`` path in ``_linear_attention``.
+
+    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common` rather than
+    being re-derived here; see the R13 notes in ``__init__``.
 
     **Architecture Overview:**
 
@@ -113,6 +168,13 @@ class PerformerAttention(keras.layers.Layer):
     :type bias_regularizer: Optional[regularizers.Regularizer]
     :param kwargs: Additional arguments for Layer base class.
     :type kwargs: Any
+
+    :raises ValueError: If ``dim``, ``num_heads`` or ``nb_features`` is not
+        positive.
+    :raises ValueError: If ``dim`` is not divisible by ``num_heads``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0, 1]``.
+    :raises ValueError: From ``build()``, if the input is not 3D or its trailing
+        dimension does not equal ``dim``.
     """
 
     def __init__(
@@ -137,8 +199,11 @@ class PerformerAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here (`dim (D) must be divisible by num_heads (H)`), so the
+        # regex pinned at test_performer_attention.py:80 still matches and the
+        # diagnostic is unchanged.
+        validate_head_divisibility(dim, num_heads)
         if nb_features <= 0:
             raise ValueError(f"nb_features must be positive, got {nb_features}")
         if not 0.0 <= dropout_rate <= 1.0:
@@ -161,7 +226,19 @@ class PerformerAttention(keras.layers.Layer):
 
         # Computed attributes
         self.head_dim = dim // num_heads
-        self.scale = 1.0 / np.sqrt(self.head_dim)
+        # R13: was `1.0 / np.sqrt(self.head_dim)`. Adopting the shared helper was
+        # gated on an EXPLICIT equality probe rather than on the two expressions
+        # "looking the same": `float(1.0/np.sqrt(d)).hex()` was compared against
+        # `common.compute_attention_scale(d).hex()` for 27 realistic head dims
+        # (1..512) and matched on every one. (Step 2 of this plan proved the
+        # analogous `head_dim ** -0.5` form is NOT bit-identical, so this check is
+        # not a formality.) The only difference is the Python-level type —
+        # `np.float64` instead of `float` — and `np.float64` IS a subclass of
+        # `float`, is never serialized (`scale` is not a `get_config()` key), and is
+        # converted to the tensor dtype identically by every `keras.ops` call.
+        # The D-001 anchor at `_create_projection_matrix` still governs: a Python
+        # scalar computed ONCE in `__init__`, never `ops.sqrt` inside `call()`.
+        self.scale = compute_attention_scale(self.head_dim)
         self._feature_scale = math.sqrt(2.0 / float(self.nb_features))
 
         # Create sub-layers in __init__

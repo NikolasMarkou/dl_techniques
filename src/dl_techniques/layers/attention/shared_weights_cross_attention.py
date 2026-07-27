@@ -10,6 +10,44 @@ cross-attend: ``Out_A = Attention(Q_A, K_B, V_B)`` and
 ``Out_B = Attention(Q_B, K_A, V_A)``. This weight sharing forces both
 modalities into a common semantic space, similar to Siamese networks.
 
+Architecture:
+    Both modalities arrive **already concatenated** along the sequence axis in a
+    single tensor; the ``split_sizes`` argument of ``call()`` — not the layer
+    config — says where the boundary is. One shared ``Dense(3 * dim)`` produces Q,
+    K and V for every token at once, which is what makes the projections shared by
+    construction rather than by a weight-tying trick. The per-modality slices then
+    cross-attend, and the two results are concatenated back into the original
+    layout before a single output projection.
+
+    Two layouts are supported, selected by the LENGTH of ``split_sizes``:
+
+    -   length 2 — plain bidirectional cross-attention, every token of A attends
+        to all of B and vice versa. When the two modalities happen to be the same
+        length, an equivalent batch-stacked fast path is taken.
+    -   length 4 — anchor/query hierarchy, where each modality is split into
+        anchors and queries and ALL tokens attend only to the opposing modality's
+        anchors. This turns the cost from ``|A| x |B|`` into
+        ``|A| x anchors_B + |B| x anchors_A``, i.e. the anchors act as a
+        communication bottleneck.
+
+    Note that ``call()`` accepts an ``attention_mask`` which is currently unused;
+    see the ``[UNUSED ARGUMENT]`` note on the class below.
+
+Foundational Mathematics:
+    With one shared projection triple ``(f_q, f_k, f_v)`` applied to both
+    modalities, the bidirectional cross-attention is::
+
+        Out_A = softmax( f_q(X_A) f_k(X_B)^T / sqrt(d_k) ) f_v(X_B)
+        Out_B = softmax( f_q(X_B) f_k(X_A)^T / sqrt(d_k) ) f_v(X_A)
+
+    Sharing ``f_q``, ``f_k`` and ``f_v`` across modalities is what forces a common
+    semantic space: the score ``f_q(x_a) . f_k(x_b)`` is only large when the two
+    tokens land near each other under a SINGLE learned map, so the two modalities
+    cannot drift into mutually-unintelligible embeddings the way independent
+    per-modality projections allow. This is the Siamese-network argument applied to
+    attention, and it also cuts the projection parameter count in half relative to
+    per-modality projections.
+
 References:
     - Vaswani, A., et al. (2017). "Attention Is All You Need".
     - Bromley, J., et al. (1994). "Signature verification using a Siamese
@@ -20,7 +58,6 @@ References:
 
 # ---------------------------------------------------------------------
 
-import math
 import keras
 from keras import ops
 from typing import Any, List, Union, Tuple, Optional, Dict
@@ -29,6 +66,7 @@ from typing import Any, List, Union, Tuple, Optional, Dict
 # Local imports
 # ---------------------------------------------------------------------
 
+from .common import compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -46,6 +84,28 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     vice versa. Optionally supports an anchor-query hierarchy where each modality
     is split into anchors and queries, and all tokens attend only to the opposing
     modality's anchors for efficient bottleneck communication.
+
+    **[UNUSED ARGUMENT — do not mistake for working masking]** ``call()`` accepts
+    ``attention_mask`` and never reads it: neither ``_two_modality_attention`` nor
+    ``_anchor_query_attention`` takes a mask parameter, so no masking is applied
+    anywhere on the forward path. Padded tokens contribute their full weight to
+    every score. The argument is left in place because removing it is a public
+    ``call()`` signature change (out of scope for a normalization pass), but do NOT
+    read its presence as a masking guarantee. Same class of footgun as
+    ``linear_attention.LinearAttention``'s ignored ``mask=``.
+
+    **[STATIC SHAPES]** ``call()`` reads ``inputs.shape[1]`` and compares it
+    against ``sum(split_sizes)``, so the sequence dimension must be statically
+    known. The batch dimension stays dynamic (every reshape uses ``-1`` there).
+
+    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
+    normalization goes through ONE shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput` instance reused at
+    all five attention sites (its ``call()`` is purely functional on the score
+    tensor, so a single instance is safe); the optional Q/K norms come from
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` and are
+    themselves shared across both streams, matching this layer's theme.
 
     **Architecture Overview:**
 
@@ -102,12 +162,37 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param probability_type: String identifier for the attention-score
+        normalization strategy, forwarded to
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` as its
+        ``probability_type``. Defaults to ``"softmax"``. Routing/hierarchical
+        variants are rejected: they consume features rather than logits.
+    :type probability_type: str
+    :param probability_config: Optional dictionary forwarded to
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` as
+        ``type_config``. Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied per-head to Q and K
+        before splitting by modality, forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`. The
+        SAME two norm layers serve both streams. ``None`` disables QK-norm.
+        Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` for
+        both the Q and K norms. Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
 
     :raises ValueError: If dim is not divisible by num_heads.
     :raises ValueError: If dim or num_heads are not positive.
     :raises ValueError: If dropout_rate is not between 0 and 1.
+    :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
+    :raises ValueError: From ``build()``, if the input is not 3D or its trailing
+        dimension does not equal ``dim``.
+    :raises ValueError: From ``call()``, if ``split_sizes`` is not a list/tuple of
+        length 2 or 4, or if its entries do not sum to the sequence length.
     """
 
     def __init__(
@@ -133,8 +218,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the regex pinned at
+        # test_shared_weights_cross_attention.py:121 still matches and the
+        # diagnostic is unchanged.
+        validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if probability_type in (
@@ -166,7 +254,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # Scale factor for attention scores.
         # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
         # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
-        self.scale = 1.0 / math.sqrt(float(self.head_dim))
+        #
+        # R13: the expression that stood here, `1.0 / math.sqrt(float(head_dim))`,
+        # is character-for-character the body of `common.compute_attention_scale`,
+        # so this is the cleanest adoption in the batch. Still probed rather than
+        # assumed: `.hex()` compared across 27 realistic head dims (1..512), all
+        # equal. It remains a Python float computed in `__init__`, never in
+        # `call()`, which is exactly what the D-002 note above requires.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.qkv_dense = keras.layers.Dense(
@@ -280,7 +375,12 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             ``[mod_a_len, mod_b_len]`` or length 4 for anchor-query mode
             ``[mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query]``.
         :type split_sizes: Union[List[int], Tuple[int, ...]]
-        :param attention_mask: Optional attention mask tensor.
+        :param attention_mask: **Accepted and never read.** No masking is applied
+            anywhere on this layer's forward path — neither
+            ``_two_modality_attention`` nor ``_anchor_query_attention`` takes a mask
+            parameter, so padded tokens contribute their full weight to every
+            score. Kept only because removing it is a public signature change. See
+            the ``[UNUSED ARGUMENT]`` note in the class docstring.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Whether in training mode.
         :type training: Optional[bool]
@@ -288,6 +388,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         :return: Output tensor with cross-attended features, same shape as input.
         :rtype: keras.KerasTensor
         """
+        # NOTE: `attention_mask` is intentionally NOT forwarded to either attention
+        # helper below — it is dead. Do NOT "wire it up" as part of a style pass:
+        # implementing it means deciding how a mask over the CONCATENATED sequence
+        # slices onto each cross-attention pair (and, in anchor/query mode, onto the
+        # anchor sub-slices), which is a behavior change needing its own tests.
         if not isinstance(split_sizes, (list, tuple)):
             raise ValueError("split_sizes must be a list or tuple")
 
@@ -475,11 +580,16 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         """
         return input_shape
 
-    def get_config(self) -> dict[str, Any]:
+    def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
+        R9: the annotation is ``Dict[str, Any]`` (``typing.Dict``), matching every
+        other module in this package. The lowercase builtin-generic ``dict[str,
+        Any]`` that stood here was the sole occurrence in the package. This is a
+        TYPE-HINT-only change — the returned key set is untouched.
+
         :return: Dictionary containing all configuration parameters.
-        :rtype: dict[str, Any]
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

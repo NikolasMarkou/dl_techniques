@@ -8,43 +8,74 @@ approach provides a computationally efficient alternative for mixing
 information across a sequence, avoiding the quadratic complexity of
 self-attention.
 
-Architecture and Foundational Mathematics:
-The FNet block operates on the principle that the primary role of the
-self-attention layer is to mix tokens, enabling each position in the
-sequence to gather information from all other positions. The authors of FNet
-demonstrate that this mixing can be effectively and efficiently approximated
-by a much simpler linear transformation: the Discrete Fourier Transform (DFT).
+Architecture:
+    The FNet block operates on the principle that the primary role of the
+    self-attention layer is to mix tokens, enabling each position in the
+    sequence to gather information from all other positions. The authors of FNet
+    demonstrate that this mixing can be effectively and efficiently approximated
+    by a much simpler linear transformation: the Discrete Fourier Transform (DFT).
 
-The architecture treats the input tensor of shape `(sequence_length,
-hidden_dim)` as a 2D signal. It then applies a 2D DFT by performing two
-sequential 1D DFTs:
-1.  A 1D DFT is applied along the sequence dimension.
-2.  A 1D DFT is applied along the hidden (feature) dimension.
+    The architecture treats the input tensor of shape ``(sequence_length,
+    hidden_dim)`` as a 2D signal. It then applies a 2D DFT by performing two
+    sequential 1D DFTs:
 
-Mathematically, the DFT decomposes a signal into its constituent frequencies.
-By applying it across both sequence and hidden dimensions, the layer
-transforms the entire input into the frequency domain and back (implicitly,
-by taking the real part of the output). This process ensures that every
-element in the output tensor is a linear combination of every element in the
-input tensor, thus achieving a global receptive field analogous to
-self-attention.
+    1.  A 1D DFT is applied along the sequence dimension.
+    2.  A 1D DFT is applied along the hidden (feature) dimension.
 
-The key insight is that this simple, parameter-free linear mixing is
-sufficient to achieve strong performance on a variety of NLP tasks, while
-being more memory efficient than self-attention (no learnable projections,
-no materialized S x S attention matrix). Note on complexity: this layer
-implements the DFT via cached DFT-matrix multiplication, which costs
-O(S^2 * D + S * D^2) per token-mixing step (two complex matmuls), NOT the
-O(N log N) of a true Fast Fourier Transform. A real FFT-based path is not
-implemented here. The original FNet paper attributes its O(N log N) figure
-to an FFT implementation; the matrix path traded that asymptotic for
-hardware simplicity and exact serializable DFT weights.
+    **This is NOT a QKV attention layer.** It lives in the ``attention/`` package
+    because it is a drop-in replacement for a self-attention sublayer, but it has
+    no queries, keys or values, no learnable projections, and no score matrix. The
+    package-wide rubric items that concern attention specifically — the
+    ``1 / sqrt(head_dim)`` softmax temperature, the ``dim % num_heads``
+    divisibility precondition, and the additive ``-1e9`` mask bias — therefore have
+    no counterpart here and are **not applicable**, rather than missing. Nothing
+    from ``common.py`` is imported for exactly that reason.
+
+    Masking is correspondingly different in kind: because there is no softmax to
+    bias, ``attention_mask`` is applied by MULTIPLYING padded positions to zero
+    AFTER mixing. Note the consequence — padded tokens still contribute to the
+    mixed values of the real tokens; only their own outputs are zeroed.
+
+    The layer is parameter-free in the learnable sense: its only weights are the
+    two constant DFT matrices, created as ``trainable=False`` variables so they
+    round-trip through ``.keras`` serialization instead of being rebuilt.
+
+Foundational Mathematics:
+    The DFT decomposes a signal into its constituent frequencies. By applying it
+    across both sequence and hidden dimensions, the layer transforms the entire
+    input into the frequency domain and back (implicitly, by taking the real part
+    of the output)::
+
+        output = Re( F_S @ X @ F_D ),   (F_N)_{nk} = exp(-2*pi*i*n*k/N) / sqrt(N)
+
+    Because each DFT matrix is dense, every element of the output is a linear
+    combination of every element of the input — a global receptive field, achieved
+    with a fixed, unlearned mixing matrix instead of a data-dependent one. The
+    ``1/sqrt(N)`` factor (``normalize_dft=True``) makes the transform unitary, so
+    it preserves signal energy and does not amplify activations with sequence
+    length.
+
+    The key insight is that this simple, parameter-free linear mixing is
+    sufficient to achieve strong performance on a variety of NLP tasks, while
+    being more memory efficient than self-attention (no learnable projections,
+    no materialized S x S attention matrix).
+
+    Note on complexity: this layer implements the DFT via cached DFT-matrix
+    multiplication, which costs ``O(S^2 * D + S * D^2)`` per token-mixing step
+    (two complex matmuls), NOT the ``O(N log N)`` of a true Fast Fourier
+    Transform. A real FFT-based path is not implemented here. The original FNet
+    paper attributes its ``O(N log N)`` figure to an FFT implementation; the matrix
+    path traded that asymptotic for hardware simplicity and exact serializable DFT
+    weights. See the ``plan_2026-06-14_0c5d4a21/D-006`` anchor in ``__init__``
+    before attempting to "fix" this.
 
 References:
   - "FNet: Mixing Tokens with Fourier Transforms" (Lee-Thorp et al., 2021)
     https://arxiv.org/abs/2105.03824
 
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 import numpy as np
@@ -76,6 +107,32 @@ class FNetFourierTransform(keras.layers.Layer):
     ``(B, S, D)`` (two complex matmuls), NOT the ``O(N log N)`` of a true
     FFT. The asymptotically faster FFT path is **not implemented**; see the
     ``implementation`` parameter.
+
+    **[NOT A QKV ATTENTION LAYER]** This is a token MIXER, not an attention
+    mechanism: no queries, keys or values, no learnable projections, no score
+    matrix. The attention-specific rubric items applied to its siblings — the
+    ``1 / sqrt(head_dim)`` softmax temperature, the ``dim % num_heads``
+    divisibility precondition, the additive ``-1e9`` mask bias and its fp16 hazard
+    — have no counterpart here and are **not applicable** rather than missing. The
+    module therefore imports nothing from
+    :mod:`~dl_techniques.layers.attention.common`, and that absence is deliberate.
+
+    **[MASKING SEMANTICS DIFFER]** With no softmax to bias, ``attention_mask`` is
+    applied MULTIPLICATIVELY and only AFTER mixing. Padded positions still
+    contribute to the mixed values of the real tokens; only the padded tokens' own
+    outputs are zeroed. Do not assume the usual "masked tokens are invisible"
+    guarantee holds here — it does not.
+
+    **[FORWARD PATH IS PURE ``keras.ops``]** ``numpy`` appears in this module only
+    inside ``_create_dft_matrix``, which runs once at ``build()`` time to
+    materialize a constant initializer. No ``numpy``, ``tf.`` or backend-specific
+    call exists anywhere in ``call()``. Note in particular that the complex DFT is
+    hand-rolled over a trailing real/imag pair rather than routed through
+    ``keras.ops.fft2``: ``fft2`` exists but takes and returns a ``(real, imag)``
+    TUPLE of tensors, which cannot be stored as a single serializable weight, and
+    it computes the transform on the fly rather than from cached matrices. The
+    matrix formulation is what makes the DFT an exact, saved, round-trippable
+    weight. This is a design choice, not an unmigrated ``tf.`` exception.
 
     **Architecture Overview:**
 
@@ -122,8 +179,11 @@ class FNetFourierTransform(keras.layers.Layer):
         DFT matrices for energy preservation and numerical stability.
         Defaults to ``True``.
     :type normalize_dft: bool
-    :param epsilon: Small constant for numerical stability.
-        Defaults to ``1e-12``.
+    :param epsilon: Nominally a small constant for numerical stability. **It is
+        currently validated, stored and serialized but never read on the forward
+        path** — no division or logarithm in this layer needs a floor. It is kept
+        because it is a ``get_config()`` key and dropping it would break existing
+        checkpoints. Defaults to ``1e-12``.
     :type epsilon: float
     :param kwargs: Additional arguments for the ``Layer`` base class.
 
@@ -164,6 +224,12 @@ class FNetFourierTransform(keras.layers.Layer):
                 "DFT path (identical output). Use implementation='matrix' to "
                 "silence this warning."
             )
+        # KNOWN DEAD PARAMETER (pre-existing, deliberately NOT changed here):
+        # `epsilon` is validated, stored and serialized but never read by
+        # `build()`, `call()` or any helper — this layer has no division or log
+        # that needs a floor. It cannot simply be deleted: it is a `get_config()`
+        # key, so removing it breaks `load_model` on every existing checkpoint.
+        # Documented rather than removed; see the `:param epsilon:` note above.
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
@@ -238,6 +304,11 @@ class FNetFourierTransform(keras.layers.Layer):
             ``(size, size, 2)``.
         :rtype: keras.Variable
         """
+        # `numpy` is used here and ONLY here: this runs once at build() time to
+        # produce a constant initializer, never on the forward path, so R10's
+        # "keras.ops only" rule is satisfied. Building the constant with numpy
+        # keeps it a plain host array that `keras.initializers.Constant` can
+        # embed directly.
         norm_factor = 1.0 / np.sqrt(size) if self.normalize_dft else 1.0
         n = np.arange(size, dtype=np.float32)[:, np.newaxis]
         k = np.arange(size, dtype=np.float32)[np.newaxis, :]
@@ -340,7 +411,14 @@ class FNetFourierTransform(keras.layers.Layer):
         # Extract real part as final result
         output = after_hidden_dft[..., 0]
 
-        # Apply mask to zero out padded tokens after mixing
+        # Apply mask to zero out padded tokens after mixing.
+        #
+        # This is MULTIPLICATIVE and POST-hoc, unlike the additive `-1e9` pre-softmax
+        # bias used everywhere else in this package (`common.MASK_BIAS_VALUE`).
+        # There is no softmax here to bias, so nothing from `common` applies. The
+        # consequence is worth stating plainly: padded tokens are NOT excluded from
+        # the mixing — they contribute to every real token's output — and only their
+        # OWN outputs are zeroed. Do not "unify" this with the additive mask helper.
         if attention_mask is not None:
             # Expand mask from [batch, seq_len] to [batch, seq_len, 1]
             mask_expanded = ops.expand_dims(attention_mask, axis=-1)

@@ -14,7 +14,21 @@ additive-Gaussian ``residual = sigma^2 * score`` identity:
    ``alpha > 0`` (verified numerically by a seq-shaped probe; target rel-err
    ``< 1e-4``).
 
-**The math.** Standard attention ``softmax(Q K^T / sqrt(d)) V`` is O(N^2) AND
+Architecture:
+    Three bias-free ``Dense`` projections produce Q, K and V, which are reshaped to
+    ``(B, H, N, head_dim)``. A positively-homogeneous non-negative feature map
+    ``phi`` is applied to Q and K only (V is untouched), after which matmul
+    associativity contracts the key side FIRST into a ``(d, d)`` state, so no
+    ``N x N`` tensor is ever allocated. A mandatory normalizer divides the result,
+    and the heads are merged and projected back to ``dim`` — again bias-free.
+
+    There is **no softmax, no normalization layer, and no additive constant**
+    anywhere on that path, and there is **no masking stage at all**. Both are
+    deliberate: the first is what preserves degree-1 homogeneity, the second is
+    the layer's principal footgun and is documented as a warning on the class.
+
+**Foundational Mathematics (the math).** Standard attention
+``softmax(Q K^T / sqrt(d)) V`` is O(N^2) AND
 non-homogeneous (softmax is temperature-sensitive: ``softmax(alpha z) !=
 softmax(z)``). Linear attention replaces the softmax exponential kernel with an
 explicit, non-negative feature map ``phi`` and exploits matmul associativity::
@@ -94,6 +108,23 @@ class LinearAttention(keras.layers.Layer):
     (``f(alpha x) = alpha f(x)`` for ``alpha > 0``). See the module docstring for
     the full derivation (F-W2) and the eps resolution (F-W3, decisions.md D-001).
 
+    .. warning::
+
+       **``mask=`` IS ACCEPTED AND SILENTLY IGNORED.** ``call()`` takes a ``mask``
+       argument purely so this layer is drop-in interchangeable with its siblings,
+       then discards it (``del mask`` on the first line). v1 is non-causal and
+       unmasked: there is no masking stage anywhere on the forward path. Padded
+       tokens therefore contribute their full weight to both the ``kv`` state and
+       the normalizer ``z``, so a padded batch produces DIFFERENT outputs for the
+       real tokens than the same batch without padding — silently, with no error
+       and no warning.
+
+       This asymmetry is easy to miss because the argument exists and is typed.
+       Concretely: do NOT use this layer for variable-length / padded sequence
+       data, and do NOT use it where causality is required. Its intended home is
+       the fixed-size, fully-populated, non-causal bias-free denoiser stack. If you
+       need masking here, implement it — do not assume the parameter already does.
+
     **Homogeneity scope / limitations (honest caveats):**
 
     - **Feature-map / scale band.** Degree-1 homogeneity is *exact* for ``'relu'``
@@ -106,6 +137,9 @@ class LinearAttention(keras.layers.Layer):
     - **Masking.** ``mask=`` is currently **IGNORED** (v1 is non-causal and
       unmasked). Padded tokens still contribute to the ``kv`` state and the
       normalizer; do not rely on this layer for correct masked/padded results.
+      See the warning above — this is the single most dangerous property of this
+      layer and is stated three times on purpose (here, in the warning, and in
+      ``call()``).
     - **Training mode.** Homogeneity is a ``training=False`` / ``dropout_rate=0``
       property. With ``dropout_rate>0`` at ``training=True`` the output is
       stochastic (Dropout is applied after ``output_proj``) and thus not
@@ -115,17 +149,67 @@ class LinearAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input [B, N, dim]
-          -> Dense query_proj/key_proj/value_proj (bias-free) -> Q,K,V [B, N, inner]
-          -> reshape/transpose -> [B, H, N, head_dim]
-          -> phi(Q), phi(K)  (positively homogeneous, non-negative)
-          -> kv    = einsum('bhnd,bhne->bhde', phi_k, v)     [B, H, d, d]
-             k_sum = sum(phi_k, axis=2)                      [B, H, d]
-             num   = einsum('bhnd,bhde->bhne', phi_q, kv)    [B, H, N, d]
-             z     = einsum('bhnd,bhd->bhn',  phi_q, k_sum)  [B, H, N]
-          -> input-scaled eps (D-001): denom = z + epsilon * mean_j(z)
-          -> out = num / denom                               [B, H, N, d]
-          -> merge heads -> Dense output_proj (bias-free)    [B, N, dim]
+        ┌──────────────────────────────────────────────────────────────┐
+        │                       LinearAttention                        │
+        │                                                              │
+        │   Input [B, N, dim]                                          │
+        │          │                                                   │
+        │          ├─────────────┬─────────────┐                       │
+        │          ▼             ▼             ▼                       │
+        │   ┌────────────┐ ┌────────────┐ ┌────────────┐               │
+        │   │ query_proj │ │  key_proj  │ │ value_proj │  bias-free    │
+        │   │ Dense(inn) │ │ Dense(inn) │ │ Dense(inn) │  (no beta)    │
+        │   └─────┬──────┘ └─────┬──────┘ └─────┬──────┘               │
+        │         ▼              ▼              ▼                      │
+        │   reshape + transpose -> [B, H, N, d]  (d = head_dim)        │
+        │         │              │              │                      │
+        │         ▼              ▼              │                      │
+        │   ┌────────────┐ ┌────────────┐       │                      │
+        │   │   phi(Q)   │ │   phi(K)   │       │  phi = relu /        │
+        │   │  degree p  │ │  degree p  │       │  relu^2 / abs        │
+        │   └─────┬──────┘ └─────┬──────┘       │  (>= 0, homogeneous) │
+        │         │              │              │                      │
+        │         │              └──────┬───────┘                      │
+        │         │                     ▼                              │
+        │         │      kv    = einsum('bhnd,bhne->bhde', phi_k, v)   │
+        │         │              [B, H, d, d]        degree p+1        │
+        │         │      k_sum = sum(phi_k, axis=2)                    │
+        │         │              [B, H, d]           degree p          │
+        │         │                     │                              │
+        │         ├─────────────────────┤                              │
+        │         ▼                     ▼                              │
+        │   num = einsum(         z = einsum(                          │
+        │     'bhnd,bhde->bhne',    'bhnd,bhd->bhn',                   │
+        │      phi_q, kv)            phi_q, k_sum)                     │
+        │   [B, H, N, d]           [B, H, N]                           │
+        │   degree 2p+1            degree 2p, >= 0                     │
+        │         │                     │                              │
+        │         │                     ▼                              │
+        │         │        ┌──────────────────────────────┐            │
+        │         │        │ input-scaled eps  (D-001)    │            │
+        │         │        │ denom = z + eps * mean_j(z)  │            │
+        │         │        │ (same degree as z -> exact   │            │
+        │         │        │  degree-1; a FIXED +1e-6     │            │
+        │         │        │  would break it)             │            │
+        │         │        └──────────────┬───────────────┘            │
+        │         └────────────┬──────────┘                            │
+        │                      ▼                                       │
+        │            out = num / denom   [B, H, N, d]   degree 1       │
+        │            (divide forced to float32, then cast back)        │
+        │                      │                                       │
+        │                      ▼                                       │
+        │            merge heads -> [B, N, inner_dim]                  │
+        │                      │                                       │
+        │                      ▼                                       │
+        │            ┌────────────────────┐                            │
+        │            │ output_proj Dense  │  bias-free                 │
+        │            └─────────┬──────────┘                            │
+        │                      ▼                                       │
+        │            Output [B, N, dim]                                │
+        │                                                              │
+        │   NOTE: `mask=` is accepted and SILENTLY DISCARDED — there is │
+        │   no masking stage anywhere in this diagram (v1).            │
+        └──────────────────────────────────────────────────────────────┘
 
     :param dim: Model dimensionality (input and output feature size). Must be
         positive. If ``head_dim`` is None, must be divisible by ``num_heads``.
@@ -163,6 +247,17 @@ class LinearAttention(keras.layers.Layer):
     :type bias_regularizer: Optional[regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
     :type kwargs: Any
+
+    :raises ValueError: If ``dim`` or ``num_heads`` is not positive, or if
+        ``head_dim`` is given and not positive.
+    :raises ValueError: If ``head_dim`` is ``None`` and ``dim`` is not divisible by
+        ``num_heads``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0, 1]`` or ``epsilon``
+        is negative.
+    :raises ValueError: If ``feature_map`` is one of the forbidden
+        non-homogeneous maps, or is not a supported map.
+    :raises ValueError: From ``build()``, if the input is not 3D or its trailing
+        dimension does not equal ``dim``.
     """
 
     def __init__(
@@ -187,6 +282,26 @@ class LinearAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
+        # R13 / A4 DECLINE: this check deliberately does NOT adopt
+        # `common.validate_head_divisibility()`, for two independent reasons.
+        #
+        # 1. It is CONDITIONAL. The divisibility precondition only applies in the
+        #    `head_dim is None` branch; when `head_dim` is given explicitly, the
+        #    inner dim is `num_heads * head_dim` and `dim % num_heads` is
+        #    irrelevant. The shared helper is unconditional and has no way to
+        #    express that guard, so adopting it would require keeping the `if`
+        #    outside anyway — saving nothing while splitting one rule across two
+        #    places.
+        # 2. The trailing clause `"when head_dim is None"` carries the actual FIX
+        #    INSTRUCTION: it tells the user they can either change `dim`/`num_heads`
+        #    OR pass an explicit `head_dim`. The helper's message stops at
+        #    `"...must be divisible by num_heads (H)"` and would silently drop that
+        #    second, cheaper remedy. Message text is diagnostics; degrading it to
+        #    save three lines is a bad trade. Same judgment as the
+        #    `gated_attention.py` decline in step 2 of this plan.
+        #
+        # `test_linear_attention.py:115` pins only `"must be divisible"`, so the
+        # regex is not what forces this decision — the diagnostic quality is.
         if head_dim is None and dim % num_heads != 0:
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads}) "
@@ -344,11 +459,21 @@ class LinearAttention(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode (affects dropout only).
         :type training: Optional[bool]
-        :param mask: Unused in v1 (accepted for API uniformity).
+        :param mask: **Accepted and SILENTLY DISCARDED.** Present only so this
+            layer's signature matches its siblings'; v1 has no masking stage, so
+            padded tokens still contribute to the ``kv`` state and to the
+            normalizer ``z``. Passing a mask here does nothing and reports nothing.
+            See the ``warning`` block in the class docstring.
         :type mask: Optional[keras.KerasTensor]
         :return: Output tensor of shape ``(batch, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
+        # `del mask` is deliberate and is the ONLY handling this argument gets:
+        # binding it to nothing makes the discard explicit at the top of the
+        # function rather than leaving a reader to scan the body for a use that
+        # does not exist. Do NOT silently start honoring `mask` here without also
+        # removing the warnings in the class docstring and the diagram note — a
+        # half-implemented mask is worse than a documented no-op.
         del mask  # v1 is non-causal and unmasked; accepted only for API uniformity.
 
         batch_size = ops.shape(inputs)[0]

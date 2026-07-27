@@ -8,6 +8,40 @@ attention by computing the attention matrix in smaller, fixed-size blocks,
 reducing memory from ``O(N^2)`` to ``O(block_size^2)`` while maintaining
 exact mathematical equivalence through online softmax computation.
 
+Architecture:
+    Q, K and V come from three separate ``Dense`` projections and are reshaped to
+    ``(batch, num_heads, seq_len, head_dim)``. The sequence is then cut into
+    ``ceil(seq_len / block_size)`` blocks and a doubly-nested Python loop walks
+    every (query block, key/value block) pair, maintaining per-query running
+    ``max`` / ``sum`` / output accumulators. Only one ``block_size x block_size``
+    score tile exists at a time.
+
+    Two structural properties are load-bearing and must survive any future
+    style pass:
+
+    -   The sequence length is read **statically** as a Python ``int``, not via
+        ``ops.shape``, because ``range(num_blocks)`` needs a concrete count under
+        ``@tf.function``/jit. See the ``plan_2026-06-14_ab855e7e/D-002`` anchor in
+        ``_blockwise_attention``.
+    -   No ``probability_type`` hook is exposed. The online softmax is tied to the
+        exponential normalizer; see the ``[NO PROBABILITY HOOK]`` note on the
+        class below.
+
+Foundational Mathematics:
+    Ring/online attention is the streaming form of the softmax. For a fixed query
+    block, after absorbing key/value block ``j`` the running state ``(m, l, O)``
+    satisfies::
+
+        m_new = max(m, max_j S_ij)
+        l_new = l * exp(m - m_new) + sum_j exp(S_ij - m_new)
+        O_new = O * exp(m - m_new) + exp(S_ij - m_new) V_j
+
+    The common rescaling factor ``exp(m - m_new)`` retroactively re-bases every
+    previously accumulated term onto the new maximum, so the final ``O / l`` is
+    algebraically **identical** to a single global ``softmax(S) V`` — this is an
+    exact reformulation, not an approximation. The max-subtraction is what keeps
+    ``exp`` from overflowing, exactly as in the standard stable softmax.
+
 References:
     - Liu, H., et al. (2023). "Ring Attention with Blockwise Transformers for
       Near-Infinite Context."
@@ -17,7 +51,8 @@ References:
       Attention with IO-Awareness."
 """
 
-import math
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Optional, Union, Any, Dict, Tuple
@@ -27,6 +62,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .common import compute_attention_scale, validate_head_divisibility
 from ..norms.factory import create_normalization_layer
 
 
@@ -46,6 +82,30 @@ class RingAttention(keras.layers.Layer):
     ``l_new = l_prev * exp(m_prev - m_new) + sum(exp(S_ij - m_new))``.
     The final output is ``O / l``, which is mathematically identical to standard
     attention without ever materializing the full ``N x N`` attention matrix.
+
+    **[NO PROBABILITY HOOK — intentional constraint, not an omission]** Unlike most
+    siblings in this package, this layer exposes no ``probability_type`` /
+    ``probability_config`` pair and does not use the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput`. That is a
+    mathematical constraint, not an oversight: the blockwise loop never
+    materializes a full score row, so it can only use a normalizer that admits a
+    *streaming* form. The exponential normalizer does — its running ``(max, sum)``
+    recurrence is exactly what makes this layer exact — whereas sparsemax,
+    threshmax and adaptive-softmax need the whole row at once and have no
+    equivalent online update. Adding the hook would either break exactness or
+    silently force full materialization, defeating the layer's entire purpose. The
+    same statement is repeated in ``_blockwise_attention`` next to the loop it
+    constrains; keep both.
+
+    **[STATIC SEQUENCE LENGTH]** ``call()`` requires a statically-known sequence
+    dimension and raises ``ValueError`` when it is ``None``. The block count feeds
+    a Python ``range()``, which cannot consume a traced tensor. The batch dimension
+    stays fully dynamic.
+
+    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common`; the
+    optional Q/K norms come from
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
 
     **Architecture Overview:**
 
@@ -116,12 +176,23 @@ class RingAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param qk_norm_type: Optional normalization type applied per-head to Q and K
+        once, before the blockwise loop, forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
+        ``None`` disables QK-norm. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` for
+        both the Q and K norms. Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer parent class.
     :type kwargs: Any
 
     :raises ValueError: If dim is not positive or not divisible by num_heads.
     :raises ValueError: If num_heads or block_size are not positive.
     :raises ValueError: If dropout_rate is not between 0.0 and 1.0.
+    :raises ValueError: From ``call()``, if the input's sequence dimension is not
+        statically known (see the ``[STATIC SEQUENCE LENGTH]`` note above).
     """
 
     def __init__(
@@ -159,7 +230,12 @@ class RingAttention(keras.layers.Layer):
 
         # Derived parameters
         self.head_dim = self.dim // self.num_heads
-        self.scale = 1.0 / math.sqrt(self.head_dim)
+        # R13: was `1.0 / math.sqrt(self.head_dim)`, which is exactly the shared
+        # helper's body (`math.sqrt(int)` and `math.sqrt(float(int))` are the same
+        # double). Verified rather than assumed: `.hex()` compared across 27
+        # realistic head dims (1..512), all equal. Still a Python float computed in
+        # `__init__` and never in `call()`, per `plan_2026-06-14_33b77a7a/D-002`.
+        self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.w_q = keras.layers.Dense(
@@ -246,8 +322,10 @@ class RingAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if block_size <= 0:
             raise ValueError(f"block_size must be positive, got {block_size}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. Its message is character-for-character
+        # what stood here, so the regex pinned at test_ring_attention.py:82 still
+        # matches and the diagnostic is unchanged.
+        validate_head_divisibility(dim, num_heads)
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
@@ -400,6 +478,13 @@ class RingAttention(keras.layers.Layer):
         # running max/sum statistics that are mathematically tied to the
         # exponential normalizer; alternatives like sparsemax or threshmax do
         # not admit an equivalent streaming form and would break exactness.
+        #
+        # This is a CONSTRAINT, not a missing feature. Do NOT "restore parity"
+        # with the rest of the package by wiring in `ProbabilityOutput` here: any
+        # non-exponential normalizer needs the whole score row at once, which
+        # would force full `N x N` materialization and destroy the only reason
+        # this layer exists. The same statement is on the class docstring under
+        # `[NO PROBABILITY HOOK]`; keep both in sync.
 
         # Accumulate per-block outputs in a Python list, concatenated after the
         # loop. NOTE: do NOT reassemble via ops.slice_update — on the TF backend
@@ -446,6 +531,29 @@ class RingAttention(keras.layers.Layer):
                 scores = ops.matmul(q_block, ops.transpose(k_block, (0, 1, 3, 2)))
 
                 # Apply attention mask if provided
+                #
+                # KNOWN DEFECT #1 (pre-existing, deliberately NOT fixed here — the
+                # fix is a numerics/control-flow change): the rank dispatch below
+                # handles rank 3 and rank 4 only. A rank-2 `(batch, seq_len)`
+                # padding mask — the shape most Keras callers produce, and the shape
+                # `rpc_attention.py` explicitly supports — falls through BOTH
+                # branches, leaving `mask_slice` unbound and raising
+                # `UnboundLocalError` (or, on the second loop iteration, silently
+                # reusing the PREVIOUS block's slice) instead of a clear
+                # `ValueError`. Reported, not fixed, in this plan.
+                #
+                # KNOWN DEFECT #2 (pre-existing, deliberately NOT fixed here — it is
+                # a dtype change on the forward path): this is the systemic fp16
+                # mask hazard catalogued across this package. `mask_slice` is cast to
+                # `scores.dtype`, and under `mixed_float16` that dtype is fp16 where
+                # `np.float16(-1e9) == -inf`. At every UNMASKED position the
+                # arithmetic form `(1.0 - mask_slice) * -1e9` is then `0 * -inf`,
+                # which is `NaN` — so supplying a mask under a mixed-precision policy
+                # poisons the whole output, and supplying no mask is fine. The
+                # structural fix is `common.MASK_BIAS_VALUE` + `common.mask_dtype()`
+                # + an `ops.where` form (see `common.py`'s D-002 block), which cannot
+                # produce `0 * inf` at all. No test exercises this layer under
+                # `mixed_float16`. Reported, not fixed, in this plan.
                 if attention_mask is not None:
                     # Extract relevant portion of mask for these blocks
                     if len(ops.shape(attention_mask)) == 3:

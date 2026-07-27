@@ -9,6 +9,40 @@ solving ``min_{L,S} ||L||_* + lambda ||S||_1  s.t.  A = L + S``. The
 robust attention is then ``softmax(L + S) V``, providing resilience
 against noise and adversarial perturbations.
 
+Architecture:
+    A single ``Dense(3 * dim)`` produces Q, K and V, reshaped to
+    ``(batch, num_heads, seq_len, head_dim)``. The scaled score matrix is then run
+    through ``max_pcp_iter`` fixed sweeps of alternating minimization — a singular
+    value thresholding step for ``L`` and a soft-thresholding step for ``S`` — and
+    the recombined ``L + S`` is normalized by the shared ``ProbabilityOutput``
+    layer before being applied to ``V``.
+
+    The iteration count is a Python constant, not a convergence test: early
+    stopping was deliberately removed so the loop unrolls identically under graph
+    tracing. Cost is therefore ``max_pcp_iter`` batched SVDs of an ``S x S``
+    matrix per forward pass, which makes this layer far more expensive than plain
+    scaled dot-product attention and unsuitable for long sequences.
+
+    ``call()``'s mask parameter is spelled ``mask=``, not ``attention_mask=``; see
+    the ``[FROZEN SIGNATURE]`` note on the class below.
+
+Foundational Mathematics:
+    Principal Component Pursuit recovers a low-rank ``L`` and a sparse ``S`` from
+    their sum by solving the convex relaxation::
+
+        min_{L,S}  ||L||_*  +  lambda ||S||_1     s.t.  A = L + S
+
+    where ``||.||_*`` is the nuclear norm (sum of singular values). The two
+    proximal operators used by the alternating sweeps are::
+
+        L = SVT_tau(A - S) = U diag(max(sigma - tau, 0)) V^H
+        S = soft_lambda(A - L) = sign(A - L) max(|A - L| - lambda, 0)
+
+    Applied to attention logits, ``L`` captures the global, low-rank co-occurrence
+    structure and ``S`` absorbs localized outliers, so an adversarial perturbation
+    concentrated on a few token pairs is routed into ``S`` instead of distorting
+    the whole softmax.
+
 References:
     - Candes, E. J., Li, X., Ma, Y., & Wright, J. (2011). "Robust
       Principal Component Analysis?". Journal of the ACM.
@@ -17,7 +51,6 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
@@ -25,6 +58,7 @@ from keras import ops, layers, initializers, regularizers
 # Local imports
 # ---------------------------------------------------------------------
 
+from .common import compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -42,6 +76,26 @@ class RPCAttention(keras.layers.Layer):
     The sparse component uses soft thresholding:
     ``S = sign(A - L) max(|A - L| - lambda, 0)``. After ``max_pcp_iter``
     iterations, the robust attention output is ``softmax(L + S) V``.
+
+    **[FROZEN SIGNATURE — D-007 carve-out]** ``call()``'s mask parameter is named
+    ``mask``, not ``attention_mask`` as in most siblings. This inconsistency is
+    intentional and is recorded by the standing anchor
+    ``plan_2026-06-14_0c5d4a21/D-007`` at ``factory.py:939-944``, which places this
+    spelling (and ``performer_attention.PerformerAttention.call``'s complete
+    absence of a mask argument) out of scope for normalization passes. **Do NOT
+    rename it**: the factory and existing callers pass it by keyword.
+
+    The public attribute ``self.attention_scale`` is likewise frozen. It is the
+    only occurrence of that name in the package — every sibling calls the same
+    quantity ``self.scale`` — but it is reachable from user code and from
+    subclasses, so renaming it is an API change, not a style fix.
+
+    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
+    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
+    normalization comes from the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput`; the optional Q/K
+    norms come from
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
 
     **Architecture Overview:**
 
@@ -116,8 +170,35 @@ class RPCAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for projection biases.
     :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param probability_type: String identifier for the attention-score
+        normalization strategy, forwarded to
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` as its
+        ``probability_type``. Defaults to ``"softmax"``. Routing/hierarchical
+        variants are rejected: they consume features rather than logits.
+    :type probability_type: str
+    :param probability_config: Optional dictionary forwarded to
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput` as
+        ``type_config``. Defaults to ``None``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied per-head to Q and K
+        before the robust scoring loop, forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
+        ``None`` disables QK-norm. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` for
+        both the Q and K norms. Defaults to ``None``.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments for Layer base class.
     :type kwargs: Any
+
+    :raises ValueError: If ``dim``, ``num_heads``, ``lambda_sparse``,
+        ``max_pcp_iter`` or ``svd_threshold`` is not positive.
+    :raises ValueError: If ``dim`` is not divisible by ``num_heads``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0, 1]``.
+    :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
+    :raises ValueError: From ``build()``, if the input is not 3D or its trailing
+        dimension does not equal ``dim``.
     """
 
     def __init__(
@@ -146,8 +227,11 @@ class RPCAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # R13: adopts the shared validator. `test_rpc_attention.py:82` pins the FULL
+        # message with a regex (`dim \(63\) must be divisible by num_heads \(8\)`),
+        # and the helper's default `*_name` kwargs reproduce that text
+        # character-for-character, so the pinned regex still matches.
+        validate_head_divisibility(dim, num_heads)
         if lambda_sparse <= 0:
             raise ValueError(f"lambda_sparse must be positive, got {lambda_sparse}")
         if max_pcp_iter <= 0:
@@ -188,7 +272,20 @@ class RPCAttention(keras.layers.Layer):
 
         # Computed attributes
         self.head_dim = dim // num_heads
-        self.attention_scale = 1.0 / np.sqrt(self.head_dim)
+        # R13: was `1.0 / np.sqrt(self.head_dim)`. Adoption was gated on an explicit
+        # equality probe, not on the two expressions looking alike:
+        # `float(1.0/np.sqrt(d)).hex()` matched `compute_attention_scale(d).hex()`
+        # for 27 realistic head dims (1..512). (Step 2 of this plan proved the
+        # `head_dim ** -0.5` form is NOT bit-identical, so the probe is load-bearing.)
+        # The only change is the Python-level type, `np.float64` -> `float`;
+        # `np.float64` is a `float` subclass, this value is not a `get_config()` key,
+        # and `keras.ops` converts either to the tensor dtype identically.
+        #
+        # ATTRIBUTE NAME IS FROZEN: it stays `attention_scale`, not `scale`. It is
+        # the only such spelling in the package but it is public-ish surface (see
+        # the frozen-signature note in the class docstring). The D-002 rule still
+        # holds: a Python float computed in `__init__`, never `ops.sqrt` in `call()`.
+        self.attention_scale = compute_attention_scale(self.head_dim)
 
         # Create sub-layers in __init__
         # Q, K, V projection layer
@@ -419,6 +516,24 @@ class RPCAttention(keras.layers.Layer):
             elif len(mask.shape) == 3:
                 mask = ops.expand_dims(mask, axis=1)
 
+            # R13 cross-reference: this site deliberately does NOT adopt
+            # `common.MASK_BIAS_VALUE` / `common.mask_dtype()`. Those two are a PAIR
+            # — the constant is only safe inside the dtype the helper returns —
+            # and adopting only the constant while leaving the cast at
+            # `attention_scores.dtype` would import the name without importing the
+            # guarantee. Adopting BOTH would move the whole PCP loop into float32,
+            # which is a dtype change on the forward path and is forbidden by this
+            # plan's behavior-preserving invariant. Left local, documented instead.
+            #
+            # KNOWN DEFECT (pre-existing, deliberately NOT fixed here — fixing it is
+            # a numerics change): under `mixed_float16` the compute dtype is fp16 and
+            # `np.float16(-1e9) == -inf`, so this cast yields literal `-inf` scores.
+            # Unlike the `(1 - mask) * -1e9` form catalogued elsewhere in this
+            # package, `ops.where` cannot produce `0 * -inf = NaN` directly — but the
+            # `-inf` entries then flow into `_pcp_decomposition`, whose `ops.svd` is
+            # NaN-poisoned by a single non-finite entry, so the whole masked forward
+            # pass returns NaN under a mixed-precision policy. No test exercises this
+            # layer under `mixed_float16`. Report, do not fix, in this plan.
             attention_scores = ops.where(
                 mask == 0,
                 ops.cast(-1e9, dtype=attention_scores.dtype),
@@ -497,6 +612,13 @@ class RPCAttention(keras.layers.Layer):
         # For returning attention scores if requested
         attention_weights = None
         if return_attention_scores:
+            # KNOWN DEFECT (pre-existing, deliberately NOT fixed here — the fix is a
+            # numerics change AND a restructuring of `_compute_attention`): this
+            # branch re-runs the ENTIRE PCP decomposition, i.e. `max_pcp_iter` more
+            # batched SVDs, roughly doubling the cost of the forward pass. Worse, it
+            # recomputes the scores WITHOUT applying `mask`, so the weights returned
+            # to the caller do not correspond to the weights that produced `output`
+            # whenever a mask is supplied. Reported, not fixed, in this plan.
             # Recompute attention scores for output
             attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
             attention_scores = attention_scores * self.attention_scale
