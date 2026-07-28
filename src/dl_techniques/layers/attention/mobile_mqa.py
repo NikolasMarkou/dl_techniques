@@ -95,38 +95,39 @@ class MobileMQA(GroupedQueryAttention):
 
     .. code-block:: text
 
-        Input [B, H, W, C]
-              │
-              ├───────────────────┬──────────────┐
-              ▼                   ▼              ▼
-        ┌──────────┐       ┌──────────┐   ┌──────────┐
-        │  W_q     │       │  W_k     │   │  W_v     │
-        │  Dense   │       │  Dense   │   │  Dense   │
-        └────┬─────┘       └────┬─────┘   └────┬─────┘
-             │                  │              │
-             │           (Optional DW Conv    (Optional DW Conv
-             │            stride=2)            stride=2)
-             │                  │              │
-             ▼                  ▼              ▼
-        Flatten [B,HW,H,D] Flatten [B,M,1,D] Flatten [B,M,1,D]
-             │                  │              │
-             │           Broadcast to H heads  │
-             │                  │              │
-             ▼                  ▼              ▼
-        ┌──────────────────────────────────────────┐
-        │     Scaled Dot-Product Attention         │
-        │     softmax(QK^T / √d_k) · V             │
-        └─────────────────────┬────────────────────┘
-                              ▼
-                     Reshape [B, H, W, C]
-                              ▼
-                     ┌──────────────┐
-                     │   W_output   │
-                     └──────┬───────┘
-                            ▼
-                   Input + λ · Output
-                            ▼
-                     Output [B, H, W, C]
+        ┌─────────────────────────────────────────────────────────────────┐
+        │     MobileMQA — one shared KV head, lambda-scaled residual      │
+        │                                                                 │
+        │  Input [B, H, W, C] — a spatial map, not a sequence             │
+        │                             ▼                                   │
+        │  w_q / w_k / w_v   (Dense projections inherited from GQA)       │
+        │                             ▼                                   │
+        │  optional stride-2 DepthwiseConv2D on K and V ONLY.  Q stays    │
+        │  full-resolution, so the score matrix is (N x M), M ~ N/4       │
+        │                             ▼                                   │
+        │  flatten space ► q [B, num_heads, N, d]    k, v [B, 1, M, d]    │
+        │                             ▼                                   │
+        │  optional q_norm / k_norm  (inherited)                          │
+        │                             ▼                                   │
+        │  ops.repeat(k, v, num_heads, axis=1) — the ONE kv head is       │
+        │  broadcast to every query head; num_kv_heads is hardcoded to    │
+        │  1 here, which is what makes this multi-QUERY attention         │
+        │                             ▼                                   │
+        │  S = q · kᵀ * scale ► attn_prob(S) ► dropout ► A · v            │
+        │                             ▼                                   │
+        │  transpose ► reshape [B, H, W, C] ► w_o                         │
+        │                             ▼                                   │
+        │  Output = inputs + lambda_param * w_o(...)                      │
+        │  — a LEARNABLE scalar residual (lambda initialized to 1.0),     │
+        │  not a plain skip connection.  This is the layer's signature.   │
+        │                             ▼                                   │
+        │  Output [B, H, W, C]                                            │
+        │                                                                 │
+        │  attention_mask is accepted and NEVER applied — there is no     │
+        │  mask code on this path, so padding keeps its full weight.      │
+        │  return_attention_weights=True also returns A [B, H, N, M].     │
+        └─────────────────────────────────────────────────────────────────┘
+
 
     :param dim: Input/output dimension. Must be positive and divisible
         by ``num_heads``.

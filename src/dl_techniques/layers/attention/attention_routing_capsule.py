@@ -91,24 +91,36 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input u: (B, N_in, D_in)
-                       │
-                       ▼
-              u_hat = W @ u_i        # (B, N_in, N_out, D_out)
-                       │
-                       ▼
-              score = (u_hat · q_j) / sqrt(D_out)   # (B, N_in, N_out)
-                       │
-                       ▼  (optional Top-K mask)
-              a = softmax(score, axis=output|input)
-                       │
-                       ▼
-              s = sum_i (a * u_hat) (+ bias)        # (B, N_out, D_out)
-                       │
-                       ▼  decoupled output
-              mag       = sigmoid(prob_head(s))     # (B, N_out, 1)
-              direction = s / (||s|| + eps)         # (B, N_out, D_out)
-              v         = mag * direction           # (B, N_out, D_out)
+        ┌─────────────────────────────────────────────────────────────────┐
+        │     AttentionRoutingCapsule — single-step attention routing     │
+        │                                                                 │
+        │  Input u [B, N_in, D_in] — N_in must be STATIC: W is indexed    │
+        │  per input capsule, and build() raises if it is None.           │
+        │                             ▼                                   │
+        │  u_hat = einsum('iode,bie->biod', W, u)   a pose transform,     │
+        │          W     [N_in, N_out, D_out, D_in]  NOT a Q/K/V          │
+        │          u_hat [B, N_in, N_out, D_out]     projection           │
+        │                             ▼                                   │
+        │  score = sum_d(u_hat · q) / sqrt(D_out)   q [1,1,N_out,D_out]   │
+        │          [B, N_in, N_out]  (a DIVIDE, not a reciprocal mult)    │
+        │                             ▼                                   │
+        │  optional top_k: where(score >= kth, score, -1e9), taken on     │
+        │  the SAME axis the softmax reduces — so no row is all-masked    │
+        │                             ▼                                   │
+        │  a = softmax(score, axis=2 'output' | axis=1 'input')           │
+        │                             ▼                                   │
+        │  s = sum_i (a · u_hat)  (+ bias)           [B, N_out, D_out]    │
+        │                             ▼                                   │
+        │  decoupled output — length and pose are learned separately:     │
+        │    direction = s / (||s|| + eps)           unit pose vector     │
+        │    mag       = sigmoid(prob_head(s))       Dense(1) over D_out  │
+        │    v         = mag * direction             ||v|| ∈ (0, 1)       │
+        │                             ▼                                   │
+        │  Output v [B, N_out, D_out]                                     │
+        │                                                                 │
+        │  No heads, no residual, no mask argument.  When training and    │
+        │  use_load_balancing: add_loss(weight · cv²(usage)) as well.     │
+        └─────────────────────────────────────────────────────────────────┘
 
     :param num_capsules: Number of output capsules ``N_out``. Must be positive.
     :type num_capsules: int
@@ -534,30 +546,30 @@ class CapsuleBlockV2(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input u: (B, N_in, D_in)
-                       │
-                       ▼
-            AttentionRoutingCapsule          # (B, N_out, D_out)
-                       │
-                       ▼  (if dropout_rate > 0)
-                    Dropout
-                       │
-                       ▼  (if direction_only_norm)
-            ┌──────────────────────────────────────────┐
-            │ mag       = ||x||                        │  magnitude kept
-            │ direction = x / mag                      │
-            │ direction = LayerNorm(direction)         │  pose normalized
-            │ direction = direction / ||direction||    │  re-unit-ized
-            │ x         = mag * direction              │
-            └──────────────────────────────────────────┘
-                       │
-                       ▼
-        Output v: (B, N_out, D_out)
-
-    The split-then-recombine box is what makes the normalizer
-    *length-preserving*: a plain
-    ``LayerNormalization`` on ``x`` would rescale ``||x||`` and destroy the
-    detection probability that the routing capsule just encoded in it.
+        ┌─────────────────────────────────────────────────────────────────┐
+        │    CapsuleBlockV2 — routing + dropout + direction-only norm     │
+        │                                                                 │
+        │  Input u [B, N_in, D_in]                                        │
+        │                             ▼                                   │
+        │  AttentionRoutingCapsule ('block_routing')  [B, N_out, D_out]   │
+        │  — the box above; every routing argument is forwarded to it     │
+        │                             ▼                                   │
+        │  Dropout        only if dropout_rate > 0 (else no sub-layer)    │
+        │                             ▼                                   │
+        │  direction-only LayerNormalization, only if the flag is set.    │
+        │  This split/recombine is what keeps the block LENGTH-           │
+        │  PRESERVING:                                                    │
+        │    mag = ||x||                     magnitude held aside         │
+        │    dir = x / mag                                                │
+        │    dir = LayerNorm(dir)            pose normalized ...          │
+        │    dir = dir / ||dir||             ... then re-unit-ized        │
+        │    x   = mag * dir                 magnitude restored           │
+        │                             ▼                                   │
+        │  Output v [B, N_out, D_out]                                     │
+        │                                                                 │
+        │  A plain LayerNorm on x would rescale ||x|| and destroy the     │
+        │  detection probability the routing capsule just encoded in it.  │
+        └─────────────────────────────────────────────────────────────────┘
 
     :param num_capsules: Number of output capsules. Forwarded to
         :class:`AttentionRoutingCapsule`, which validates it.

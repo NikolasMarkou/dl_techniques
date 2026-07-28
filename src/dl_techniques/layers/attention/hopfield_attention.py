@@ -56,22 +56,26 @@ This layer generalizes that concept by allowing for multiple (`update_steps_max 
 iterative updates, enabling it to function as a true associative memory that
 converges to stable fixed-points (attractors).
 
-Convergence Criteria:
----------------------
-The iterative update process, which runs when `update_steps_max > 0`,
-terminates based on one of the following conditions:
+Iteration Count (there is no convergence test):
+----------------------------------------------
+The update process runs a **fixed** number of steps. `call()` executes a plain
+bounded Python `for update_step in range(update_steps_max + 1)`, so:
 
-1.  **Maximum Steps Reached:** The loop hard-stops after completing the number
-    of iterations specified by `update_steps_max`. This acts as a safeguard
-    to control computation time and prevent infinite loops.
+1.  **The step count is a Python constant fixed at trace time.** The loop body
+    runs `update_steps_max + 1` times on every forward pass — always, for every
+    input. `update_steps_max=0` therefore means one ordinary attention step with
+    the query never updated.
 
-2.  **State Convergence:** The network is considered to have converged if the
-    change between consecutive states becomes negligibly small. This is
-    measured by calculating the **Frobenius norm** of the difference between
-    the attention matrix of the current step and the previous step. If this
-    norm falls below the threshold defined by `update_steps_eps`, the
-    iteration stops. This indicates that the system has settled into a
-    stable fixed-point attractor.
+2.  **There is NO data-dependent early exit.** An earlier version stopped once
+    the Frobenius norm of the change in the attention matrix fell below
+    `update_steps_eps`; that test was removed because it required a Python
+    `bool()` on a traced tensor, which raises under `@tf.function` / jit. See the
+    anchored comment in `call()`. `update_steps_eps` is still accepted and
+    serialized for API/checkpoint compatibility, but nothing on the forward path
+    reads it.
+
+Whether the state has actually settled into a fixed-point attractor is therefore
+not observed by the layer; the caller chooses `update_steps_max` accordingly.
 
 Foundational Mathematics:
     The update rule is the gradient-descent step of the modern Hopfield energy
@@ -125,10 +129,12 @@ class HopfieldAttention(keras.layers.Layer):
 
     Implements a content-addressable associative memory using scaled dot-product
     attention as the update rule. When ``update_steps_max=0``, behaves as
-    standard single-step attention. When ``update_steps_max > 0``, iteratively
-    refines the query state ``xi_{t+1} = softmax(xi_t K^T / sqrt(d_k)) V``
-    until convergence (Frobenius norm of attention difference below
-    ``update_steps_eps``) or maximum iterations are reached.
+    standard single-step attention. When ``update_steps_max > 0``, the query
+    state is refined by ``xi_{t+1} = A_t K`` with
+    ``A_t = attn_prob(xi_t K^T / sqrt(d_k))``, inside a bounded Python ``for``
+    loop over ``update_steps_max + 1`` steps. That loop always runs to
+    completion: there is no convergence test and no data-dependent early exit
+    (see the ``update_steps_eps`` note below).
 
     **Architecture Overview:**
 

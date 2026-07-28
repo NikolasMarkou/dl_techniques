@@ -121,61 +121,46 @@ class Ideogram4Attention(keras.layers.Layer):
     :func:`~dl_techniques.layers.embedding.multi_axis_rope.apply_rotary_pos_emb`.
     Nothing here re-implements a primitive that already exists in the package.
 
-    **Architecture Overview:**
+    Shapes below use ``B`` = batch, ``L`` = packed sequence length,
+    ``H`` = num_heads, ``D`` = head_dim = ``hidden_size / num_heads``.
 
-    Shapes use ``B`` = batch, ``L`` = packed sequence length, ``H`` = num_heads,
-    ``D`` = head_dim = ``hidden_size / num_heads``.
+    **Architecture Overview:**
 
     .. code-block:: text
 
-                 x [B, L, hidden]      segment_ids [B, L]      cos/sin [B, L, D]
-                        │                      │                      │
-                        ▼                      │                      │
-              ┌───────────────────┐            │                      │
-              │ Dense(3*hidden)   │            │                      │
-              │ fused QKV, no bias│            │                      │
-              └─────────┬─────────┘            │                      │
-                        ▼                      │                      │
-              reshape [B, L, 3, H, D]          │                      │
-                        │                      │                      │
-              ┌─────────┼─────────┐            │                      │
-              ▼         ▼         ▼            │                      │
-              q         k         v            │                      │
-              │         │         │            │                      │
-              ▼         ▼         │            │                      │
-          RMSNorm   RMSNorm       │            │                      │
-          (norm_q)  (norm_k)      │            │                      │
-              │         │         │            │                      │
-              └────┬────┘         │            │                      │
-                   ▼              │            │                      │
-          transpose -> [B,H,L,D]  │            │                      │
-                   │              │            │                      │
-                   ▼              │            │                      │
-          apply_rotary_pos_emb ◄──┼────────────┼──────────────────────┘
-                   │              │            │
-                   ▼              │            ▼
-          q~ @ k~^T / sqrt(D)     │   seg_i == seg_j  ->  0.0
-             [B, H, L, L]         │   else            -> -1e9
-                   │              │            │
-                   └──────┬───────┼────────────┘
-                          ▼       │
-                    scores + mask │
-                          │       │
-                          ▼       │
-                       softmax    │
-                          │       │
-                          └───┬───┘
-                              ▼
-                       attn @ v  [B, H, L, D]
-                              │
-                              ▼
-                    merge heads [B, L, hidden]
-                              │
-                              ▼
-                    Dense(hidden), no bias
-                              │
-                              ▼
-                        Output [B, L, hidden]
+        ┌─────────────────────────────────────────────────────────────────┐
+        │   Ideogram4Attention — packed self-attention, segment-masked    │
+        │                                                                 │
+        │  x [B, L, hidden]    segment_ids [B, L]    cos/sin [B, L, D]    │
+        │  — segment_ids and the mRoPE tables are CALL ARGUMENTS: this    │
+        │  layer owns no rope sub-layer, the transformer passes them in.  │
+        │                             ▼                                   │
+        │  Dense(3*hidden, no bias) ► reshape [B,L,3,H,D] ► q, k, v       │
+        │                             ▼                                   │
+        │  RMSNorm(norm_q) on q,  RMSNorm(norm_k) on k   — per head,      │
+        │  over D.  v is NOT normalized.                                  │
+        │                             ▼                                   │
+        │  transpose q, k, v ► [B, H, L, D]                               │
+        │                             ▼                                   │
+        │  apply_rotary_pos_emb(q, k, cos, sin)   ◄── mRoPE injected      │
+        │                             ▼                                   │
+        │  S = q~ · k~ᵀ * (1/sqrt(D))                     [B, H, L, L]    │
+        │                             ▼                                   │
+        │  block-diagonal segment mask, built INLINE (deliberately not    │
+        │  the common mask helper):                                       │
+        │    M = where(seg_i == seg_j, 0.0, -1e9)       [B, 1, L, L]      │
+        │    S = S + M   ► ADDITIVE, so softmax stays a distribution      │
+        │                ► the diagonal is always same-segment, so no     │
+        │                  row is all -1e9 even when fp16 makes it -inf   │
+        │                             ▼                                   │
+        │  softmax(S, axis=-1) ► · v ► merge heads [B, L, hidden]         │
+        │                             ▼                                   │
+        │  Dense(hidden, no bias) ► Output [B, L, hidden]                 │
+        │                                                                 │
+        │  There is NO attention_mask parameter.  Padding must be given   │
+        │  its own segment id or it is attended to as a normal token.     │
+        └─────────────────────────────────────────────────────────────────┘
+
 
     :param hidden_size: Model / embedding dimensionality. Must be divisible by
         ``num_heads``.

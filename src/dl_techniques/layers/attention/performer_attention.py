@@ -102,40 +102,41 @@ class PerformerAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────┐
-        │ Input [B, seq_len, dim]       │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Dense(3 * dim) → Q, K, V      │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Multi-Head Reshape            │
-        │ [B, heads, seq_len, head_dim] │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Random Feature Projection     │
-        │ phi(Q), phi(K)                │
-        │ [B, heads, seq_len, nb_feat]  │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Linear Attention              │
-        │ KV = phi(K)^T V               │
-        │ Z  = phi(Q) sum(phi(K))       │
-        │ Out = phi(Q) KV / Z           │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Concatenate Heads & Project   │
-        │ Dense(dim)                    │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Output [B, seq_len, dim]      │
-        └───────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────────┐
+        │     PerformerAttention — FAVOR+ features, no (N x N) matrix     │
+        │                                                                 │
+        │  Input [B, N, dim]                                              │
+        │                             ▼                                   │
+        │  Dense(3*dim) ► split 3 ► heads    q, k, v [B, H, N, d_h]       │
+        │                             ▼                                   │
+        │  q = q * (1/sqrt(d_h))  — the scale is applied BEFORE the       │
+        │  feature map, not after a score matmul: there is no score       │
+        │                             ▼                                   │
+        │  projection matrix, REDRAWN ON EVERY CALL from                  │
+        │  keras.random.normal(seed=None)  [H, F/2, d_h],  then           │
+        │  * ortho_scaling * scale — that is a plain scalar multiply;     │
+        │  nothing here orthogonalizes, despite the FAVOR+ name           │
+        │                             ▼                                   │
+        │  phi(x) = max(0, [cos(xWᵀ), sin(xWᵀ)] * feature_scale)          │
+        │           [B, H, N, F];  phi(q) is additionally scaled by       │
+        │           exp(-||q||² / 2), phi(k) is not                       │
+        │                             ▼                                   │
+        │  fork on the causal flag.  The (N x N) matrix is NEVER formed   │
+        │  in either branch — associativity keeps this O(N · F · d_h):    │
+        │    causal=False   KV = phi(k)ᵀ · v            [B, H, F, d_h]    │
+        │                   z  = phi(q) · sum_n phi(k)  + 1e-6            │
+        │    causal=True    KV = cumsum_n(phi(k) ⊗ v)   prefix state      │
+        │                   z  = phi(q) · cumsum_n phi(k)  + 1e-6         │
+        │                             ▼                                   │
+        │  out = (phi(q) · KV) / z ► merge heads ► Dense(dim) ► dropout   │
+        │                             ▼                                   │
+        │  Output [B, N, dim]                                             │
+        │                                                                 │
+        │  call() has NO mask argument at all (frozen signature); the     │
+        │  only masking is the causal=True constructor flag above.        │
+        │  return_attention_scores=True returns (output, None).           │
+        └─────────────────────────────────────────────────────────────────┘
+
 
     :param dim: Model dimensionality. Must be positive and divisible by num_heads.
     :type dim: int

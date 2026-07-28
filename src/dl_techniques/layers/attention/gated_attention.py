@@ -125,44 +125,43 @@ class GatedAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input [B, S, dim]
-              │
-              ▼
-        ┌──────────────┐
-        │ Input Linear │
-        └──────┬───────┘
-               │
-        ┌──────┼──────────────────────┐
-        ▼      ▼                      ▼
-      ┌────┐ ┌────┐               ┌────┐
-      │W_q │ │W_k │               │W_v │
-      └──┬─┘ └──┬─┘               └──┬─┘
-         ▼      ▼                    ▼
-      ┌──────┐┌──────┐          ┌──────┐
-      │RMSNrm││RMSNrm│          │RMSNrm│
-      └──┬───┘└──┬───┘          └──┬───┘
-         ▼       ▼                 │
-      ┌──────┐┌──────┐             │
-      │ RoPE ││ RoPE │             │
-      └──┬───┘└──┬───┘             │
-         ▼       ▼                 ▼
-        ┌─────────────────────────────┐
-        │  Scaled Dot-Product Attn    │
-        │  softmax(QK^T/√d_k) · V     │
-        └──────────────┬──────────────┘
-                       ▼
-              (Optional Output Proj)
-                       │
-              ┌────────┼────────┐
-              ▼                 ▼
-        ┌───────────┐    ┌──────────┐
-        │ W_gate    │    │ Identity │
-        │ + Sigmoid │    │          │
-        └─────┬─────┘    └────┬─────┘
-              │               │
-              └───── ⊗ ───────┘
-                     ▼
-              Output [B, S, dim]
+        ┌─────────────────────────────────────────────────────────────────┐
+        │   GatedAttention — RMS-normed QKV, partial RoPE, output gate    │
+        │                                                                 │
+        │  Input [B, S, dim]  ►  input_linear Dense(dim)  ►  x            │
+        │                             ▼                                   │
+        │     q = W_q(x)          k = W_k(x)          v = W_v(x)          │
+        │         ▼                   ▼                   ▼               │
+        │       q_norm              k_norm              v_norm            │
+        │  zero-centered RMSNorm on ALL THREE, over attention_dim and     │
+        │  BEFORE the head reshape (V is normed too, unlike siblings)     │
+        │         ▼                   ▼                   ▼               │
+        │     reshape to [B, S, H, head_dim]  (each of the three)         │
+        │         ▼                   ▼                   │               │
+        │      RoPE(q)             RoPE(k)                │  partial      │
+        │         │                   │                   │  RoPE on      │
+        │         └─────────┬─────────┘                   │  Q, K only    │
+        │                   ▼                             ▼               │
+        │  scaled_dot_product_attention() — a method of this class:       │
+        │    transpose to [B, H, S, d] ► S = q · kᵀ * (1/sqrt(d))         │
+        │    if attention_mask: apply_attention_mask(S, mask) with the    │
+        │      1 = keep predicate passed through VERBATIM; a row that     │
+        │      keeps nothing is rescued on probability_config's axis      │
+        │    A = attn_prob(S)  — ProbabilityOutput: softmax by default,   │
+        │                        but configurable                         │
+        │    A = dropout(A) if training  ►  out = A · v  ►  transpose     │
+        │                             ▼                                   │
+        │  reshape [B, S, attention_dim] ► output_proj, but ONLY when     │
+        │  attention_dim != dim (otherwise there is no such sub-layer)    │
+        │                             ▼                                   │
+        │  output gating fork — the gate is computed FROM the attention   │
+        │  output y, not from the layer input:                            │
+        │    gate   = gate_activation(output_gate_linear(y))   sigmoid    │
+        │    Output = gate * y                                 default    │
+        │                             ▼                                   │
+        │  Output [B, S, dim]                                             │
+        └─────────────────────────────────────────────────────────────────┘
+
 
     :param dim: Model dimension size. Must be positive and divisible by
         ``num_heads`` if ``head_dim`` is not specified.

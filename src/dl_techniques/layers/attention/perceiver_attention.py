@@ -112,32 +112,39 @@ class PerceiverAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌──────────────────────────┐   ┌──────────────────────────┐
-        │ Query Input              │   │ KV Input                 │
-        │ [B, Q_seq, dim]          │   │ [B, KV_seq, dim]         │
-        └────────────┬─────────────┘   └────────────┬─────────────┘
-                     │                              │
-                     ▼                              ▼
-        ┌────────────────────────────────────────────────────────┐
-        │           MultiHeadCrossAttention                      │
-        │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-        │  │ Q_proj   │  │ K_proj   │  │ V_proj   │              │
-        │  │ (query)  │  │ (kv)     │  │ (kv)     │              │
-        │  └────┬─────┘  └────┬─────┘  └────┬─────┘              │
-        │       ▼             ▼             ▼                    │
-        │  ┌─────────────────────────────────────────┐           │
-        │  │ Cross-Attention(Q, K, V)                │           │
-        │  │ softmax(Q K^T / sqrt(d_k)) V            │           │
-        │  └──────────────────┬──────────────────────┘           │
-        │                     ▼                                  │
-        │  ┌─────────────────────────────────────────┐           │
-        │  │ Output Projection                       │           │
-        │  └──────────────────┬──────────────────────┘           │
-        └─────────────────────┼──────────────────────────────────┘
-                              ▼
-        ┌─────────────────────────────────────────────┐
-        │ Output [B, Q_seq, dim]                      │
-        └─────────────────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────────┐
+        │    PerceiverAttention — facade over MultiHeadCrossAttention     │
+        │                                                                 │
+        │  This class owns NO attention arithmetic.  call() is a single   │
+        │  expression that forwards to one sub-layer.                     │
+        │                                                                 │
+        │  latent query_input [B, N, dim]      kv_input [B, M, dim]       │
+        │  N is fixed by the architecture, M varies with the input —      │
+        │  that asymmetry IS the bottleneck: cost is O(N · M), not        │
+        │  O(M²), and stacking depth stays independent of M.              │
+        │         │                                   │                   │
+        │         └─────────────────┬─────────────────┘                   │
+        │                           ▼                                     │
+        │  ┌───────────────────────────────────────────────────┐          │
+        │  │ self.cross_attention : MultiHeadCrossAttention    │          │
+        │  │ constructed in __init__ with                      │          │
+        │  │ shared_qk_projections=False, so the query path    │          │
+        │  │ and the key/value path get independent weights    │          │
+        │  │                                                   │          │
+        │  │ Q/K/V projection, QK-norm, scaled scores, mask,   │          │
+        │  │ probability, dropout, · V, merge heads and the    │          │
+        │  │ output projection ALL happen in there — see       │          │
+        │  │ that class's own diagram; do not re-derive it     │          │
+        │  └───────────────────────────────────────────────────┘          │
+        │                           ▼                                     │
+        │  Output [B, N, dim]  (query-shaped)                             │
+        │                                                                 │
+        │  kv_input=None falls through to self-attention inside the       │
+        │  hub.  build() only disambiguates and validates shapes.         │
+        │  Do not flatten the sub-layer away: its nested name is baked    │
+        │  into every saved .keras checkpoint of this class.              │
+        └─────────────────────────────────────────────────────────────────┘
+
 
     :param dim: Input/output dimension. Must be positive and divisible by num_heads.
     :type dim: int
