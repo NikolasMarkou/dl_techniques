@@ -115,33 +115,25 @@ class TripletAttentionBranch(layers.Layer):
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │  Input (B, H, W, C)          │
-        └─────────────┬────────────────┘
-                      ▼
-        ┌──────────────────────────────┐
-        │  Permute axes                │
-        │  (B, D1, D2, D3)             │
-        └─────────────┬────────────────┘
-                      ▼
-        ┌──────────────────────────────┐
-        │  Z-Pool: mean + max on D3    │
-        │  ─► (B, D1, D2, 2)           │
-        └─────────────┬────────────────┘
-                      ▼
-        ┌──────────────────────────────┐
-        │  Conv2D ─► BN ─► Sigmoid     │
-        │  ─► (B, D1, D2, 1)           │
-        └─────────────┬────────────────┘
-                      ▼
-        ┌──────────────────────────────┐
-        │  x_permuted * attention_map  │
-        └─────────────┬────────────────┘
-                      ▼
-        ┌──────────────────────────────┐
-        │  Inverse Permute             │
-        │  Output (B, H, W, C)         │
-        └──────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │    TripletAttentionBranch — one rotated-plane spatial gate    │
+        │                                                               │
+        │   The single reusable branch: rotate one plane forward, build │
+        │   a spatial gate from it, apply it, rotate back.              │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               ▼                               │
+        │      permute axes (one of 3 patterns)  ►  x [B,D1,D2,D3]      │
+        │                               ▼                               │
+        │       Z-pool over D3: concat(mean, max)  ►  [B,D1,D2,2]       │
+        │                               ▼                               │
+        │       Conv2D(k) ► BatchNorm ► gate activation (sigmoid)       │
+        │                 attention map  [B, D1, D2, 1]                 │
+        │                               ▼                               │
+        │       x * attention map   (broadcast over the D3 axis)        │
+        │                               ▼                               │
+        │           inverse permute  ►  Output  [B, H, W, C]            │
+        └───────────────────────────────────────────────────────────────┘
 
     :param kernel_size: Kernel size for the spatial convolution.
     :type kernel_size: int
@@ -350,27 +342,30 @@ class TripSE1(layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────────┐
-        │  Input (B, H, W, C)               │
-        └──────┬─────────┬─────────┬────────┘
-               ▼         ▼         ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Branch   │ │ Branch   │ │ Branch   │
-        │ H-W      │ │ C-W      │ │ H-C      │
-        └────┬─────┘ └────┬─────┘ └────┬─────┘
-             └─────┬──────┴──────┬─────┘
-                   ▼             ▼
-        ┌──────────────────────────────────┐
-        │  Element-wise Sum                │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Squeeze-and-Excitation          │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output (B, H, W, C)             │
-        └──────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │     TripSE1 — three gated branches, SUM, then a single SE     │
+        │                                                               │
+        │   Fusion topology 1 of 4 — POST-fusion SE: branches are gated │
+        │   independently, SUMMED, and ONE SE block sees only the sum.  │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               │                               │
+        │            ┌──────────────────┼──────────────────┐            │
+        │            ▼                  ▼                  ▼            │
+        │        H-W plane          C-W plane          H-C plane        │
+        │            ▼                  ▼                  ▼            │
+        │   ┌─ every branch is a TripletAttentionBranch ─────────────┐  │
+        │   │ permute ► Z-pool ► Conv2D ► BN ► sigmoid  = gate       │  │
+        │   │      ▼                                                 │  │
+        │   │ x * gate  ►  inverse permute   (no SE anywhere inside) │  │
+        │   └───────────────────────────┬────────────────────────────┘  │
+        │                               ▼                               │
+        │         element-wise SUM (+) of the 3 branch outputs          │
+        │                               ▼                               │
+        │    Squeeze-and-Excitation   — ONE block, AFTER the fusion     │
+        │                               ▼                               │
+        │                     Output  [B, H, W, C]                      │
+        └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -515,26 +510,32 @@ class TripSE2(layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────────┐
-        │  Input (B, H, W, C)               │
-        └──────┬─────────┬─────────┬────────┘
-               ▼         ▼         ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Permute  │ │ Permute  │ │ Permute  │
-        │ + SE     │ │ + SE     │ │ + SE     │
-        │ + ZPool  │ │ + ZPool  │ │ + ZPool  │
-        │ + Conv   │ │ + Conv   │ │ + Conv   │
-        │ + InvPrm │ │ + InvPrm │ │ + InvPrm │
-        └────┬─────┘ └────┬─────┘ └────┬─────┘
-             └─────┬──────┴──────┬─────┘
-                   ▼             ▼
-        ┌──────────────────────────────────┐
-        │  Average of 3 branches           │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output (B, H, W, C)             │
-        └──────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │   TripSE2 — per-branch SE first, gate second, then AVERAGE    │
+        │                                                               │
+        │   Fusion topology 2 of 4 — PRE-process SE: every branch owns  │
+        │   its own SE, applied BEFORE the gate; outputs are AVERAGED.  │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               │                               │
+        │            ┌──────────────────┼──────────────────┐            │
+        │            ▼                  ▼                  ▼            │
+        │        H-W plane          C-W plane          H-C plane        │
+        │            ▼                  ▼                  ▼            │
+        │   ┌─ every branch, SE first then gate ─────────────────────┐  │
+        │   │ permute  ►  x  [B, D1, D2, D3]                         │  │
+        │   │      ▼                                                 │  │
+        │   │ SE block  ►  x_se        (channel recalibration FIRST) │  │
+        │   │      ▼                                                 │  │
+        │   │ Z-pool(x_se) ► Conv2D ► BN ► sigmoid  = spatial gate   │  │
+        │   │      ▼                                                 │  │
+        │   │ x_se * gate  ►  inverse permute                        │  │
+        │   └───────────────────────────┬────────────────────────────┘  │
+        │                               ▼                               │
+        │          AVERAGE of the 3 branch outputs   (sum / 3)          │
+        │                               ▼                               │
+        │       Output  [B, H, W, C]     — no SE after the fusion       │
+        └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -731,27 +732,38 @@ class TripSE3(layers.Layer):
 
     .. code-block:: text
 
-        ┌────────────────────────────────────┐
-        │  Input (B, H, W, C)                │
-        └──────┬─────────┬─────────┬─────────┘
-               ▼         ▼         ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Permute  │ │ Permute  │ │ Permute  │
-        │ ┌──┬──┐  │ │ ┌──┬──┐  │ │ ┌──┬──┐  │
-        │ │SE│Sp│  │ │ │SE│Sp│  │ │ │SE│Sp│  │
-        │ └──┴──┘  │ │ └──┴──┘  │ │ └──┴──┘  │
-        │ SE*Sp    │ │ SE*Sp    │ │ SE*Sp    │
-        │ InvPerm  │ │ InvPerm  │ │ InvPerm  │
-        └────┬─────┘ └────┬─────┘ └────┬─────┘
-             └─────┬──────┴──────┬─────┘
-                   ▼             ▼
-        ┌──────────────────────────────────┐
-        │  Average of 3 branches           │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output (B, H, W, C)             │
-        └──────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │  TripSE3 — per-branch SE and gate in PARALLEL, then AVERAGE   │
+        │                                                               │
+        │   Fusion topology 3 of 4 — PARALLEL: the channel and spatial  │
+        │   paths both read the SAME x, are MULTIPLIED, then AVERAGED.  │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               │                               │
+        │            ┌──────────────────┼──────────────────┐            │
+        │            ▼                  ▼                  ▼            │
+        │        H-W plane          C-W plane          H-C plane        │
+        │            ▼                  ▼                  ▼            │
+        │   ┌─ every branch, two parallel paths ─────────────────────┐  │
+        │   │ permute  ►  x  [B, D1, D2, D3]                         │  │
+        │   │       │        (both paths read this SAME x)           │  │
+        │   │       ├──────────────────────┐                         │  │
+        │   │       ▼                      ▼                         │  │
+        │   │ SE block(x)             Z-pool(x) ► Conv2D             │  │
+        │   │ x_se_scaled             ► BN ► sigmoid                 │  │
+        │   │ [B, D1, D2, D3]         att_spatial [B, D1, D2, 1]     │  │
+        │   │       │                      │                         │  │
+        │   │       └──────────┬───────────┘                         │  │
+        │   │                  ▼   element-wise MULTIPLY             │  │
+        │   │       x_se_scaled × att_spatial                        │  │
+        │   │                  ▼                                     │  │
+        │   │       inverse permute                                  │  │
+        │   └───────────────────────────┬────────────────────────────┘  │
+        │                               ▼                               │
+        │          AVERAGE of the 3 branch outputs   (sum / 3)          │
+        │                               ▼                               │
+        │       Output  [B, H, W, C]     — no SE after the fusion       │
+        └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -942,23 +954,23 @@ class _SEWeights(layers.Layer):
 
     .. code-block:: text
 
-        ┌────────────────────┐
-        │  Input (B, H, W, C)│
-        └────────┬───────────┘
-                 ▼
-        ┌────────────────────┐
-        │  GAP ─► (B,1,1,C)  │
-        └────────┬───────────┘
-                 ▼
-        ┌────────────────────┐
-        │  Conv1x1 reduce    │
-        │  ─► activation     │
-        │  ─► Conv1x1 restore│
-        └────────┬───────────┘
-                 ▼
-        ┌────────────────────┐
-        │  Logits (B,1,1,C)  │
-        └────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │    _SEWeights — SE channel logits, pre-sigmoid, no scaling    │
+        │                                                               │
+        │   SE without the gating: it returns PRE-sigmoid channel logits│
+        │   so TripSE4 can add them to spatial logits in logit space.   │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               ▼                               │
+        │             global average pool  ►  [B, 1, 1, C]              │
+        │                               ▼                               │
+        │      Conv1x1 reduce (C/r) ► activation ► Conv1x1 restore      │
+        │                               ▼                               │
+        │             Output = channel LOGITS  [B, 1, 1, C]             │
+        │                                                               │
+        │   No sigmoid, and no multiply by the input: that is exactly   │
+        │   separates it from a full Squeeze-and-Excitation block.      │
+        └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: Bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -1103,33 +1115,44 @@ class TripSE4(layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │  Input (B, H, W, C)                 │
-        └──────┬─────────┬─────────┬──────────┘
-               ▼         ▼         ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Permute  │ │ Permute  │ │ Permute  │
-        │ ┌──────┐ │ │ ┌──────┐ │ │ ┌──────┐ │
-        │ │Spat. │ │ │ │Spat. │ │ │ │Spat. │ │
-        │ │logits│ │ │ │logits│ │ │ │logits│ │
-        │ └──┬───┘ │ │ └──┬───┘ │ │ └──┬───┘ │
-        │ ┌──────┐ │ │ ┌──────┐ │ │ ┌──────┐ │
-        │ │Chan. │ │ │ │Chan. │ │ │ │Chan. │ │
-        │ │logits│ │ │ │logits│ │ │ │logits│ │
-        │ └──┬───┘ │ │ └──┬───┘ │ │ └──┬───┘ │
-        │  Add+Sig │ │  Add+Sig │ │  Add+Sig │
-        │  *input  │ │  *input  │ │  *input  │
-        │  InvPerm │ │  InvPerm │ │  InvPerm │
-        └────┬─────┘ └────┬─────┘ └────┬─────┘
-             └─────┬──────┴──────┬─────┘
-                   ▼             ▼
-        ┌──────────────────────────────────┐
-        │  Sum + Final SE Block            │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output (B, H, W, C)             │
-        └──────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────┐
+        │      TripSE4 — logit-space fusion, SUM, then a final SE       │
+        │                                                               │
+        │   Fusion topology 4 of 4 — LOGIT-space fusion: spatial and    │
+        │   channel logits are ADDED before a SINGLE sigmoid (one true  │
+        │   3-D gate); the branches are SUMMED, then a final SE closes. │
+        │                                                               │
+        │                      Input  [B, H, W, C]                      │
+        │                               │                               │
+        │            ┌──────────────────┼──────────────────┐            │
+        │            ▼                  ▼                  ▼            │
+        │        H-W plane          C-W plane          H-C plane        │
+        │            ▼                  ▼                  ▼            │
+        │   ┌─ every branch, add in logit space ─────────────────────┐  │
+        │   │ permute  ►  x  [B, D1, D2, D3]                         │  │
+        │   │       │                                                │  │
+        │   │       ├──────────────────────┐                         │  │
+        │   │       ▼                      ▼                         │  │
+        │   │ Z-pool(x) ► Conv2D      _SEWeights(x)                  │  │
+        │   │ ► BN   (NO sigmoid)     (NO sigmoid)                   │  │
+        │   │ logits_spatial          logits_channel                 │  │
+        │   │ [B, D1, D2, 1]          [B, 1, 1, D3]                  │  │
+        │   │       │                      │                         │  │
+        │   │       └──────────┬───────────┘                         │  │
+        │   │                  ▼   broadcast ADD, in LOGIT space     │  │
+        │   │       fused logits  [B, D1, D2, D3]                    │  │
+        │   │                  ▼                                     │  │
+        │   │       ONE sigmoid  ►  3-D attention tensor             │  │
+        │   │                  ▼                                     │  │
+        │   │       x × attention_3d  ►  inverse permute             │  │
+        │   └───────────────────────────┬────────────────────────────┘  │
+        │                               ▼                               │
+        │         element-wise SUM (+) of the 3 branch outputs          │
+        │                               ▼                               │
+        │              final Squeeze-and-Excitation block               │
+        │                               ▼                               │
+        │                     Output  [B, H, W, C]                      │
+        └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float

@@ -114,101 +114,79 @@ class AnchorAttention(keras.layers.Layer):
 
     **Architecture Overview:**
 
-    Shapes use ``B`` = batch, ``N`` = seq_len, ``K`` = num_anchor_tokens,
-    ``H`` = num_heads, ``d`` = head_dim. The merged-head width ``H*d`` equals
-    ``dim`` unless ``head_dim`` is set explicitly.
-
     .. code-block:: text
 
-        Standard mode  (num_anchor_tokens=None)
-        Every token supplies a key and a value, so the score matrix is N x N.
+        ┌─────────────────────────────────────────────────────────────────┐
+        │    AnchorAttention — standard mode (num_anchor_tokens=None)     │
+        │                                                                 │
+        │   All N tokens supply Q, K and V  ►  score matrix is N x N.     │
+        │                                                                 │
+        │   Input  x  [B, N, dim]                                         │
+        │        │                                                        │
+        │        ├───────────────┬───────────────┐                        │
+        │        ▼               ▼               ▼                        │
+        │     Q Proj          K Proj          V Proj                      │
+        │    [B,H,N,d]       [B,H,N,d]       [B,H,N,d]                    │
+        │        └───────┬───────┘               │                        │
+        │                ▼                       │                        │
+        │ Q @ Kᵀ · 1/sqrt(d) ► [B,H,N,N]         │                        │
+        │                ▼                       │                        │
+        │ Probability activation ► Dropout       │                        │
+        │                └───────────┬───────────┘                        │
+        │                            ▼                                    │
+        │            weights @ V  ►  [B,H,N,d]                            │
+        │                            ▼                                    │
+        │     merge heads ► [B, N, H*d] ► output projection               │
+        │                            ▼                                    │
+        │                  Output  [B, N, dim]                            │
+        └─────────────────────────────────────────────────────────────────┘
 
-                 Input  [B, N, dim]
-                          │
-                ┌─────────┼─────────┐
-                ▼         ▼         ▼
-             Q Proj    K Proj    V Proj
-                │         │         │
-                ▼         ▼         ▼
-            [B,H,N,d] [B,H,N,d] [B,H,N,d]
-                │         │         │
-                └────┬────┘         │
-                     ▼              │
-             Q @ K^T / sqrt(d)      │
-                 [B,H,N,N]          │
-                     │              │
-                     ▼              │
-          Probability activation    │
-                     │              │
-                     ▼              │
-                  Dropout           │
-                     │              │
-                     └───────┬──────┘
-                             ▼
-                        weights @ V
-                         [B,H,N,d]
-                             │
-                             ▼
-                        merge heads
-                         [B,N,H*d]
-                             │
-                             ▼
-                     Output projection
-                             │
-                             ▼
-                    Output  [B, N, dim]
+        ┌─────────────────────────────────────────────────────────────────┐
+        │    AnchorAttention — hierarchical mode (num_anchor_tokens=K)    │
+        │                                                                 │
+        │   Only the K anchors supply keys and values, so the score       │
+        │   matrix is N x K. Query tokens contribute a query and NOTHING  │
+        │   else: no K and no V is ever computed for them.                │
+        │                                                                 │
+        │   Input  x  [B, N, dim]                                         │
+        │        │                                                        │
+        │        ├────────────────────────────────┐  positional split     │
+        │        ▼                                ▼                       │
+        │   Anchors  x[:, :K]             Queries  x[:, K:]               │
+        │        │                                │                       │
+        │        ├──────────┬──────────┐          │                       │
+        │        ▼          ▼          ▼          ▼                       │
+        │     K Proj     V Proj     Q Proj   Q-token Proj                 │
+        │      K_a        V_a        Q_a          Q_q                     │
+        │   [B,H,K,d]  [B,H,K,d]  [B,H,K,d] [B,H,N-K,d]                   │
+        │        │          │          │          │                       │
+        │        │          │          └────┬─────┘                       │
+        │        │          │               ▼                             │
+        │        │          │      Q_all = concat[Q_a ; Q_q]              │
+        │        │          │           [B,H,N,d]                         │
+        │        │          │               │                             │
+        │        │          │   token order preserved, so the anchors     │
+        │        │          │   keep the first K output rows and no       │
+        │        │          │   re-scatter is needed                      │
+        │        │          │               │                             │
+        │        └──────────┼──────┬────────┘                             │
+        │                   │      ▼                                      │
+        │                   │  scores = Q_all @ K_aᵀ · 1/sqrt(d)          │
+        │                   │         [B,H,N,K]                           │
+        │                   │      ▼                                      │
+        │                   │  Probability activation ► Dropout           │
+        │                   └───┬──┘                                      │
+        │                       ▼                                         │
+        │          weights @ V_a  ►  [B,H,N,d]                            │
+        │                       ▼                                         │
+        │     merge heads ► [B, N, H*d] ► output projection               │
+        │                       ▼                                         │
+        │               Output  [B, N, dim]                               │
+        └─────────────────────────────────────────────────────────────────┘
 
-
-        Hierarchical mode  (num_anchor_tokens=K > 0)
-        Only anchors supply keys and values, so the score matrix is N x K.
-        Query tokens contribute a query and nothing else: that is the bottleneck.
-
-                          Input  [B, N, dim]
-                                   │
-                      ┌────────────┴────────────┐
-                      ▼                         ▼
-              Anchors  x[:, :K]         Queries  x[:, K:]
-                      │                         │
-            ┌─────────┼─────────┐               │
-            ▼         ▼         ▼               ▼
-          K Proj    V Proj    Q Proj       Q-token Proj
-            │         │         │               │
-            ▼         ▼         ▼               ▼
-           K_a       V_a       Q_a             Q_q
-        [B,H,K,d] [B,H,K,d] [B,H,K,d]      [B,H,N-K,d]
-            │         │         │               │
-            │         │         └───────┬───────┘
-            │         │                 ▼
-            │         │         Q_all  [B,H,N,d]
-            │         │                 │
-            └─────────┼─────────────┬───┘
-                      │             ▼
-                      │  Q_all @ K_a^T / sqrt(d)
-                      │         [B,H,N,K]
-                      │             │
-                      │             ▼
-                      │  Probability activation
-                      │             │
-                      │             ▼
-                      │          Dropout
-                      │             │
-                      └──────┬──────┘
-                             ▼
-                       weights @ V_a
-                         [B,H,N,d]
-                             │
-                             ▼
-                        merge heads
-                         [B,N,H*d]
-                             │
-                             ▼
-                     Output projection
-                             │
-                             ▼
-                    Output  [B, N, dim]
-
-        Q_all concatenates [Q_a ; Q_q] in original token order, so the K rows
-        of the output belong to the anchors and no re-scatter is needed.
+    Shapes use ``B`` = batch, ``N`` = seq_len, ``K`` = num_anchor_tokens,
+    ``H`` = num_heads, ``d`` = head_dim. The merged-head width ``H*d``
+    equals ``dim`` unless ``head_dim`` is set explicitly.
 
     **[NO MASK ARGUMENT — intentional carve-out, not an omission]** ``call()`` takes
     ``(x, num_anchor_tokens=None, training=None)`` and has **no** ``attention_mask``

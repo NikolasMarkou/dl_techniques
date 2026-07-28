@@ -338,72 +338,63 @@ class LighthouseAttention(keras.layers.Layer):
 
     **Architecture Overview:**
 
-    Shapes use ``B`` = batch, ``N`` = seq_len, ``H`` = num_heads,
-    ``D`` = head_dim, ``L`` = num_levels, ``p`` = pooling_factor,
-    ``S_pyr`` = sum_l N/p^l, and ``S`` = N/p^(L-1) + (p^(L-1) - 1) + top_k.
-
     .. code-block:: text
 
-                           Input: x  (B, N, dim)
-                                     │
-                                     ▼
-            ┌────────────────────────────────────────────────────┐
-            │  Wq / Wk / Wv                                      │
-            │  Q_raw, K_raw, V              (B, N, H, D)         │
-            └──────────┬───────────────────────────┬─────────────┘
-                       │  raw Q, K                 │  Q, K, V
-                       ▼                           ▼
-            ┌──────────────────────┐  ┌──────────────────────────┐
-            │  SELECTOR            │  │  TRUNK                   │
-            │                      │  │                          │
-            │  ||Q_raw||_2  and    │  │  q_norm / k_norm         │
-            │  ||K_raw||_2  at     │  │  (optional, and never    │
-            │  level 0 only        │  │   before the scorer)     │
-            │                      │  │                          │
-            │  max-pool up the     │  │  Pyramid pool:           │
-            │  pyramid   (Eq. 5)   │  │  mean over p^l,          │
-            │                      │  │  l = 0 .. L-1            │
-            │  max(s_QK, s_KQ),    │  │                          │
-            │  reduce over H       │  │  Q_pyr K_pyr V_pyr       │
-            │  ->  s  (B, S_pyr)   │  │  (B, S_pyr, H, D)        │
-            │                      │  └────────────┬─────────────┘
-            │                      │               │
-            │  top_k over the      │               │
-            │  NON-mandatory       │               │
-            │  candidates only     │               │
-            │                      │               │
-            │  U  mandatory set    │               │
-            │  (all coarsest +     │               │
-            │   level-0 prefix)    │               │
-            │                      │               │
-            │  sort by causal pos  │               │
-            │  i p^l + p^l - 1     │               │
-            └──────────┬───────────┘               │
-                       │  I  (B, S)                │
-                       └─────────────┬─────────────┘
-                                     ▼
-                       ┌───────────────────────────┐
-                       │  Gather at I              │
-                       │  (B, S, H, D)             │
-                       └─────────────┬─────────────┘
-                                     ▼
-                       ┌───────────────────────────┐
-                       │  Causal SDPA over S       │
-                       │  triangular mask is exact │
-                       │  because I is sorted      │
-                       └─────────────┬─────────────┘
-                                     ▼
-                       ┌───────────────────────────┐
-                       │  Scatter back             │
-                       │  targets i p^l+p^l-1+k    │
-                       │  segment_sum, fan-in <= L │
-                       └─────────────┬─────────────┘
-                                     ▼
-                       ┌───────────────────────────┐
-                       │            Wo             │
-                       └─────────────┬─────────────┘
-                                     ▼
-                            Output: (B, N, dim)
+        ┌───────────────────────────────────────────────────────────────────┐
+        │    LighthouseAttention — pyramid select, causal SDPA, scatter     │
+        │                                                                   │
+        │                     Input  x  [B, N, dim]                         │
+        │                               ▼                                   │
+        │        Wq / Wk / Wv  ►  Q_raw, K_raw, V  [B, N, H, D]             │
+        │                               │                                   │
+        │                ┌──────────────┴───────────────┐                   │
+        │                │ raw Q, K             Q, K, V │                   │
+        │                ▼                              ▼                   │
+        │  ┌───────────────────────────┐  ┌────────────────────────────┐    │
+        │  │ SELECTOR                  │  │ TRUNK                      │    │
+        │  │ ||Q_raw|| and ||K_raw||   │  │ q_norm / k_norm (optional, │    │
+        │  │ taken at LEVEL 0 ONLY     │  │ and never seen by the      │    │
+        │  │                           │  │ SELECTOR)                  │    │
+        │  │         ▼                 │  │          ▼                 │    │
+        │  │ MAX-pool them up the      │  │ MEAN-pool up the pyramid   │    │
+        │  │ pyramid (Eq. 5) — NEVER   │  │ l = 0..L-1, window p^l     │    │
+        │  │ recomputed on pooled Q/K  │  │ (level 0 is an identity    │    │
+        │  │                           │  │ copy)                      │    │
+        │  │         ▼                 │  │          ▼                 │    │
+        │  │ max(s_QK, s_KQ), then     │  │ Q_pyr  K_pyr  V_pyr        │    │
+        │  │ mean or max over H        │  │ [B, S_pyr, H, D]           │    │
+        │  │ s  [B, S_pyr]             │  └─────────────┬──────────────┘    │
+        │  │         ▼                 │                │                   │
+        │  │ top_k over the NON-       │                │                   │
+        │  │ mandatory pool only,      │                │                   │
+        │  │ UNION the mandatory set   │                │                   │
+        │  │ (EVERY coarsest-level     │                │                   │
+        │  │ entry + level-0 prefix    │                │                   │
+        │  │ 0..F-2)                   │                │                   │
+        │  │         ▼                 │                │                   │
+        │  │ argsort by causal pos     │                │                   │
+        │  │ t = i·p^l + p^l - 1       │                │                   │
+        │  └─────────────┬─────────────┘                │                   │
+        │                │ I  [B, S] — ONE index        │                   │
+        │                │ set shared by ALL heads      │                   │
+        │                └──────────────┬───────────────┘                   │
+        │                               ▼                                   │
+        │         gather pyramid entries at I  ►  [B, S, H, D]              │
+        │                               ▼                                   │
+        │        causal SDPA over S: triangular mask, attn_prob,            │
+        │         dropout — exact because I is causally sorted              │
+        │                               ▼                                   │
+        │        scatter back via segment_sum to base positions             │
+        │        i·p^l + p^l - 1 + k; fan-in <= L, contributions            │
+        │            are SUMMED and NOT normalised by fan-in                │
+        │                               ▼                                   │
+        │                  Wo  ►  Output  [B, N, dim]                       │
+        └───────────────────────────────────────────────────────────────────┘
+
+    Shapes use ``B`` = batch, ``N`` = seq_len, ``H`` = num_heads,
+    ``D`` = head_dim, ``L`` = num_levels, ``p`` = pooling_factor,
+    ``F`` = p^(L-1), ``S_pyr`` = sum_l N/p^l, and
+    ``S`` = N/F + (F - 1) + top_k.
 
     ``full_attention=True`` bypasses everything between the projections and
     ``Wo``, running a single causal SDPA over all ``N`` positions.

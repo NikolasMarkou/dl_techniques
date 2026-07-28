@@ -189,37 +189,43 @@ class EnergyAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input g: (B, N, D)
-               |
-               +-----------------------------+
-               |                             |
-               v                             v
-        w_key (Y,H,D)                 w_query (Y,H,D)
-        einsum -> K: (B,Y,H,N)        einsum -> Q: (B,Y,H,N)
-               |                             |
-               +--------------+--------------+
-                              v
-                    A = sum_y K*Q : (B,H,N,N)     # n = KEY, m = QUERY
-                              |
-                              v
-                    keep mask (B,1,N,N)           # diagonal dropped when
-                    additive bias -1e9            # attn_self=False; PAD tokens
-                    in mask_dtype (>= f32)        # dropped in BOTH roles
-                              |
-              +---------------+----------------+
-              |                                |
-              v                                v
-        E_ATT = -(1/beta) *              omega = softmax_n(beta * A)
-          sum_h,m logsumexp_n(beta*A)          : (B,H,N,N)
-              |                                |
-              v                                v
-        energy(g) -> (B,)                update(g) = -dE/dg
-                                          = einsum(w_query, K, omega)
-                                          + einsum(w_key,   Q, omega)
-                                          -> (B, N, D)   == call(g)
-
-        NOTE: no value matrix and no output projection exist. `call()` returns a
-        DESCENT DIRECTION, so a consumer ADDS `step_size * call(g)` to `g`.
+        ┌───────────────────────────────────────────────────────────────────────────┐
+        │       EnergyAttention — scalar energy and its closed-form gradient        │
+        │                                                                           │
+        │   NO value matrix and NO output projection exist anywhere in this         │
+        │   layer. call(g) returns a DESCENT DIRECTION -dE/dg, so a consumer        │
+        │   ADDS step_size * call(g) to g.                                          │
+        │                                                                           │
+        │                       Input  g  [B, N, D]                                 │
+        │                                │                                          │
+        │             ┌──────────────────┴──────────────────┐                       │
+        │             ▼                                     ▼                       │
+        │       w_key  (Y,H,D)                       w_query  (Y,H,D)               │
+        │       einsum ► K  [B,Y,H,N]                einsum ► Q  [B,Y,H,N]          │
+        │       (bias-free)                          (bias-free)                    │
+        │             │                                     │                       │
+        │             └──────────────────┬──────────────────┘                       │
+        │                                ▼                                          │
+        │               A = sum_y K·Q  [B,H,N,N]    n = KEY, m = QUERY              │
+        │                                ▼                                          │
+        │               keep mask [B,1,N,N] ► additive -1e9 bias in                 │
+        │               mask_dtype (>= f32). The diagonal is dropped when           │
+        │               attn_self=False; PAD tokens drop in BOTH roles.             │
+        │                                │                                          │
+        │         ┌──────────────────────┴──────────────────────┐                   │
+        │         ▼                                             ▼                   │
+        │  E_ATT = -(1/beta) ·                   omega = softmax_n(beta·A),         │
+        │    sum_h,m logsumexp_n(beta·A)         then · keep   [B,H,N,N]            │
+        │         │                                             ▼                   │
+        │         │                              optional · W_hat (eq. 25           │
+        │         │                              weighted adjacency, Branch A)      │
+        │         │                              ►  omega_eff                       │
+        │         ▼                                             ▼                   │
+        │  energy(g)  ►  [B,]                    update(g) = -dE/dg                 │
+        │  a diagnostic trace only —               = einsum(w_query, K, omega)      │
+        │  it never drives the state               + einsum(w_key,   Q, omega)      │
+        │  update                                  ►  [B, N, D]  == call(g)         │
+        └───────────────────────────────────────────────────────────────────────────┘
 
     **Mathematics** (notation: ``B``=batch, ``N``=tokens, ``D``=``dim``, ``Y``=``head_dim``,
     ``H``=``num_heads``; ``n`` indexes a token in its **KEY** role, ``m`` in its **QUERY**
