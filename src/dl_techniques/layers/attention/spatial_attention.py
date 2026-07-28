@@ -29,8 +29,8 @@ Architecture:
         layer (typically with a large 7x7 kernel) is then applied to this
         concatenated map. This convolution learns to identify important
         spatial regions based on the aggregated channel information. The
-        final output is passed through a sigmoid function to produce a
-        normalized attention map.
+        final output is passed through the gate activation (a sigmoid by
+        default) to produce a normalized attention map.
 
 Foundational Mathematics:
     The spatial attention map `M_s` for an input feature map `F` is computed
@@ -46,9 +46,10 @@ Foundational Mathematics:
     -   `f^k` represents a 2D convolution with a single filter of kernel
         size `k x k` (e.g., 7x7). This operation effectively acts as a
         spatial feature detector.
-    -   `σ` is the sigmoid activation function, which scales the output to
-        the range `[0, 1]`, making it suitable for use as a multiplicative
-        attention mask.
+    -   `σ` is the gate activation, sigmoid by default, which scales the
+        output to the range `[0, 1]`, making it suitable for use as a
+        multiplicative attention mask; a different choice changes that
+        guarantee.
 
 References:
     - The foundational paper for this module:
@@ -75,8 +76,8 @@ class SpatialAttention(keras.layers.Layer):
     Implements the spatial attention mechanism from the Convolutional Block
     Attention Module (CBAM). The module compresses channel information via
     parallel average and max pooling along the channel axis, concatenates the
-    resulting 2D maps, and applies a convolution with sigmoid activation to
-    produce a spatial attention mask via
+    resulting 2D maps, and applies a convolution with a gate activation
+    (sigmoid by default) to produce a spatial attention mask via
     ``M_s(F) = sigma(f^{k x k}([AvgPool(F); MaxPool(F)]))``.
 
     **Architecture Overview:**
@@ -88,7 +89,7 @@ class SpatialAttention(keras.layers.Layer):
         │                                                       │
         │   Input [B, H, W, C]                                  │
         │  attention_mask is accepted but IGNORED on this path  │
-        │  (no masking code; input keeps its full weight).      │
+        │  (no masking code; every position is gated equally).  │
         │          │                                            │
         │          ├──────────────┬────────────────┐            │
         │          ▼              ▼                             │
@@ -109,7 +110,7 @@ class SpatialAttention(keras.layers.Layer):
         │   └─────────────────────┬───────────────────────┘     │
         │  (Sigmoid shown is default; configurable via ctor arg)│
         │                         ▼                             │
-        │   Output [B, H, W, 1]  (attention map ∈ [0, 1])       │
+        │   Output [B, H, W, 1] (map ∈ [0,1] w/ default sigmoid)│
         └───────────────────────────────────────────────────────┘
 
     :param kernel_size: Size of the convolution kernel. Must be odd and
@@ -256,7 +257,9 @@ class SpatialAttention(keras.layers.Layer):
             or inference mode.
         :type training: bool or None
         :return: Spatial attention map of shape
-            ``(batch_size, height, width, 1)`` with values in ``[0, 1]``.
+            ``(batch_size, height, width, 1)``, with values in ``[0, 1]``
+            under the default ``'sigmoid'`` gate; another
+            ``gate_activation_type`` changes that range.
         :rtype: keras.KerasTensor
         """
         # Apply channel-wise pooling to compress channel information
