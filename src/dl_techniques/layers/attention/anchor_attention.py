@@ -148,6 +148,8 @@ class AnchorAttention(keras.layers.Layer):
         │   matrix is N x K. Query tokens contribute a query and NOTHING  │
         │   else: no K and no V is ever computed for them.                │
         │                                                                 │
+        │  NOTE: num_anchor_tokens >= seq_len silently falls back to      │
+        │  full N x N self-attention (_standard_attention, no anchors).   │
         │   Input  x  [B, N, dim]                                         │
         │        │                                                        │
         │        ├────────────────────────────────┐  positional split     │
