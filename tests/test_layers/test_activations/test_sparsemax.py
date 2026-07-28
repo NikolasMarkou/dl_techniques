@@ -381,6 +381,55 @@ class TestSparsemax:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
+    def test_overflowed_all_finite_row_fails_loudly_not_silently(self) -> None:
+        """An all-finite row whose cumsum overflows must return NaN, never a
+        plausible finite number.
+
+        This asserts SHIPPED behaviour (the loudness guard), not an aspiration.
+
+        Rationale: replacing the arithmetic gather with ``ops.where`` removed a
+        ``-inf * 0.0`` product that had been manufacturing a NaN which
+        INCIDENTALLY MASKED Defect B. Without the guard this exact input
+        returns ``nan=0, sum=16.94`` where the correct sum is ``1.0`` — a wrong
+        answer with no alarm attached. The layer does NOT compute Defect B
+        correctly (see ``test_defect_b_overflow_born_inf_admitted_to_support``);
+        it is merely required to be LOUD about getting it wrong.
+
+        The predicate is the load-bearing part, so the legitimate masked case is
+        asserted here too: a masked row HAS ``-inf`` in its input and must never
+        be poisoned.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            k = 4096
+            z = np.full((1, k), -16.95, dtype=np.float32)
+            z[:, 0] = 0.0
+            assert np.isfinite(z).all(), "premise: the INPUT is entirely finite"
+
+            out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
+
+            assert np.isnan(out).all(), (
+                "loudness guard did not fire: an all-finite row whose z_cumsum "
+                "overflowed float16 returned a finite (and WRONG) answer instead "
+                f"of NaN; nan={int(np.isnan(out).sum())}/{out.size}, "
+                f"sum={float(np.nan_to_num(out).sum())} (correct sum is 1.0)"
+            )
+
+            # The guard must NOT poison a legitimately masked row.
+            masked = np.array([[2.0, 1.0, -np.inf, -np.inf]], dtype=np.float32)
+            m_out = ops.convert_to_numpy(Sparsemax()(masked)).astype(np.float64)
+            np.testing.assert_array_equal(
+                m_out,
+                np.array([[1.0, 0.0, 0.0, 0.0]]),
+                err_msg=(
+                    "loudness guard poisoned a LEGITIMATE masked row; its input "
+                    "carries -inf, so the all-finite predicate must exclude it"
+                ),
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
 
 # ---------------------------------------------------------------------
 # SCOPE PINS for the four OPEN defects.
@@ -422,7 +471,12 @@ class TestSparsemaxOpenDefects:
             "the support because support = 1 + finite - (-inf) = +inf > 0. "
             "Measured at spread 16.95, mixed_float16, K=4096, with NO -inf in "
             "the input: k_z = 1863 where the exact answer is 1, sum(out) = "
-            "16.95. Remove this marker when beta fixes it."
+            "16.95. NOTE the failure MODE moved: this case now fails on the "
+            "FINITENESS assertion (nan=4096), not on sum(out)=16.9375, because "
+            "the loudness guard forces tau to NaN for an all-finite row whose "
+            "z_cumsum overflowed. The answer is still wrong; it is now loud "
+            "again (see test_overflowed_all_finite_row_fails_loudly_not_"
+            "silently). Remove this marker when beta fixes it."
         ),
     )
     def test_defect_b_overflow_born_inf_admitted_to_support(self) -> None:
@@ -510,14 +564,20 @@ class TestSparsemaxOpenDefects:
         strict=True,
         reason=(
             "Defect E (sparsemax.py:~225, OPEN, deferred to the follow-up "
-            "'beta' plan; the NASTIEST of the four): k_z = ops.sum(support_mask) "
-            "accumulates in the compute dtype and hits float16's integer wall — "
-            "2051 -> 2052, which selects a masked position whose z_cumsum is "
-            "-inf, so tau = -inf and the row dies. The M2 ops.where fix CANNOT "
+            "'beta' plan): k_z = ops.sum(support_mask) accumulates in the "
+            "compute dtype and hits float16's integer wall — measured on the "
+            "TF/GPU tree reduction: 2049 -> 2048, 2051 -> 2052, 4095 -> 4096 "
+            "(2050 / 3000 / 4094 are exact). The 2051 -> 2052 overshoot selects "
+            "a MASKED position whose z_cumsum is -inf, so tau = -inf and the row "
+            "dies (nan=2045, inf=2051 at K=4096). The M2 ops.where fix CANNOT "
             "help here: the -inf sits at the SELECTED index, not at a masked-out "
-            "one. (At 4095 -> 4096 the index is OUT OF RANGE for depth 4096 and "
-            "the layer returns a SILENTLY WRONG FINITE answer instead.) "
-            "Remove this marker when beta fixes it."
+            "one, and the loudness guard cannot either (this input CARRIES -inf, "
+            "so it is correctly not poisoned). An earlier version of this string "
+            "claimed 4095 -> 4096 indexes OUT OF RANGE for depth 4096; that claim "
+            "is FALSE (4095 is a valid index) and was deleted — no end-to-end "
+            "input reaching an out-of-range one-hot was constructible, since "
+            "every such K raises Defect C first. Remove this marker when beta "
+            "fixes it."
         ),
     )
     def test_defect_e_fp16_support_count_overshoots_into_a_masked_index(self) -> None:
