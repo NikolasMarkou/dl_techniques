@@ -58,6 +58,102 @@ def _sparsemax_reference(z: np.ndarray) -> np.ndarray:
     return out
 
 
+# ---------------------------------------------------------------------
+# Oracle tolerance for assertion (b) — DERIVED, not fitted.
+#
+# WHY THIS EXISTS.  Iteration 1 of this test file used a FLAT
+# ``atol = rtol = 1e-3`` for all three dtype policies, justified as "the
+# documented TF32 noise floor".  That is a float32-derived number, and applying
+# it unexamined to ``mixed_float16`` demands precision BELOW float16's own
+# representable resolution: the bar could never be met, so it measured nothing.
+# (It shipped unvalidated because the property test aborts at its first grid
+# point, so assertion (b) never executed in the intended-RED run.)
+#
+# ERROR PROPAGATION.  The layer computes ``out_i = max(z_i - tau, 0)`` with
+# ``tau = (S - 1) / k_z`` and ``S = cumsum(sort(z))[k_z - 1]``, all in the
+# compute dtype.  ``out_i`` is a difference of two quantities of magnitude up to
+# ``M = max|z_finite|`` (``|z_i| <= M`` and ``tau <= max(z) <= M``), so its
+# absolute resolution is ``ulp(M)`` — it is a CANCELLATION, and no amount of
+# correctness in the layer buys precision finer than one representable step at
+# scale ``M``.  Counting the roundings that survive to the output, each bounded
+# by half the local spacing:
+#
+#   0.5 ulp(M)  rounding ``z_i`` into the compute dtype (the input is float32);
+#   1.0 ulp(M)  one rounding of a cumsum partial sum.  A partial sum has
+#               magnitude up to ``k_z * M``, so its own spacing is up to
+#               ``2 * k_z * ulp(M)`` (the factor 2 is binade misalignment
+#               between ``k_z * M`` and ``M``); ``tau`` then DIVIDES by
+#               ``k_z``, restoring the scale, so the contribution is
+#               ``0.5 * 2 * ulp(M) = 1.0 ulp(M)``;
+#   1.0 ulp(M)  rounding of ``S - 1.0``, by the same magnitude-and-divide
+#               argument;
+#   0.5 ulp(M)  rounding of the division ``/ k_z`` (result ``|tau| <= M``);
+#   0.5 ulp(M)  rounding of the subtraction ``z_i - tau`` (result ``<= M``).
+#
+# Sum = 3.5 ulp(M); rounded up to the next integer, ``_ULP_BUDGET = 4``.
+# ``sort``, ``flip`` and the one-hot selection are exact and contribute nothing.
+#
+# THIS BOUND IS DELIBERATELY STRICTER THAN WORST-CASE THEORY.  A rigorous
+# forward bound on a ``k_z``-term cumsum is ``O(k_z)`` ulp, which at K = 512
+# would permit a completely wrong answer and would be a vacuous assertion.  We
+# charge ONE representative accumulation rounding instead, on the basis that the
+# per-step errors partially cancel rather than add coherently.  The consequence
+# is that this test FAILS if the layer's accumulation error ever starts growing
+# with ``k`` — which is the point.  The constant is derived from the arithmetic
+# above; it is NOT fitted to observed error (measured worst case over this
+# file's grid is 1.685 ulp under ``mixed_float16``, i.e. the bound carries a
+# 2.4x margin).
+#
+# float32 and float64 are NOT loosened: ``_TF32_ATOL_FLOOR`` is a FLOOR, and at
+# these grids ``4 * ulp(M)`` is ~4e-6 (float32) / ~7e-15 (float64), far below
+# it, so both keep exactly today's 1e-3 bar.  Only float16, whose ``4 * ulp(M)``
+# exceeds 1e-3 for every ``M >= 0.5``, is governed by the derived term.
+# ---------------------------------------------------------------------
+
+#: Flat absolute floor, retained for float32/float64: the documented TF32
+#: precision floor (`test_linear_attention.py:37` disables TF32
+#: process-globally at import, so the same assertion runs in two regimes).
+_TF32_ATOL_FLOOR = 1e-3
+
+#: Ulp of ``max|z_finite|`` allowed between layer and oracle. Derived above.
+_ULP_BUDGET = 4.0
+
+_NUMPY_DTYPE = {
+    "float16": np.float16,
+    "bfloat16": None,  # np has no bfloat16; not used by this file's grid.
+    "float32": np.float32,
+    "float64": np.float64,
+}
+
+
+def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
+    """Absolute tolerance for the layer-vs-oracle comparison on inputs ``z``.
+
+    Returns ``max(_TF32_ATOL_FLOOR, _ULP_BUDGET * ulp(max|z_finite|))``
+    evaluated in the layer's OUTPUT dtype. See the derivation above.
+
+    :param z: The logit batch handed to the layer (may contain ``-inf``).
+    :type z: np.ndarray
+    :param output_dtype: Name of the layer's output dtype, e.g. ``'float16'``.
+    :type output_dtype: str
+
+    :return: Absolute tolerance for ``np.testing.assert_allclose``.
+    :rtype: float
+    """
+    np_dtype = _NUMPY_DTYPE[output_dtype]
+    assert np_dtype is not None, f"no numpy dtype for {output_dtype!r}"
+    finite = np.asarray(z)[np.isfinite(z)]
+    assert finite.size > 0, "batch is fully masked; that case is out of scope"
+    max_abs = float(np.max(np.abs(finite)))
+    ulp = float(np.spacing(np.asarray(max_abs, dtype=np_dtype)))
+    return max(_TF32_ATOL_FLOOR, _ULP_BUDGET * ulp)
+
+
+def _output_dtype() -> str:
+    """The dtype a default-constructed layer emits under the global policy."""
+    return keras.mixed_precision.global_policy().compute_dtype
+
+
 def _partially_masked_row_batch(
     width: int,
     masked_fraction: float,
@@ -148,10 +244,12 @@ class TestSparsemax:
     # -----------------------------------------------------------------
     # `-inf` (attention-mask) coverage.
     #
-    # Tolerance is FIXED at atol=rtol=1e-3: that is the documented TF32
-    # precision floor (see `test_linear_attention.py:37`, which disables TF32
-    # process-globally at import). Tightening it would make these tests
-    # collection-order dependent.
+    # Assertion (b)'s absolute tolerance comes from `_oracle_atol` — a DERIVED,
+    # dtype-aware bound (see the error-propagation derivation at module scope).
+    # It is `max(1e-3, 4 * ulp(max|z_finite|))` in the OUTPUT dtype: float32
+    # and float64 keep exactly the historical 1e-3 TF32 floor; float16 gets the
+    # ulp-scaled term, because a flat 1e-3 demands precision below float16's
+    # representable resolution and can therefore never pass.
     # -----------------------------------------------------------------
 
     @pytest.mark.parametrize("compute_dtype", ["float32", "mixed_float16"])
@@ -176,10 +274,19 @@ class TestSparsemax:
                 f"(n={n}, dtype={compute_dtype}); nan_count={nan_count}/{out.size}"
             )
 
-            # (b) Secondary correctness check against the float64 oracle.
+            # (b) Secondary correctness check against the float64 oracle, at a
+            #     tolerance DERIVED from the output dtype's resolution.
             ref = _sparsemax_reference(z)
+            atol = _oracle_atol(z, _output_dtype())
             np.testing.assert_allclose(
-                out.astype(np.float64), ref, atol=1e-3, rtol=1e-3
+                out.astype(np.float64),
+                ref,
+                atol=atol,
+                rtol=1e-3,
+                err_msg=(
+                    f"sparsemax != float64 oracle (n={n}, dtype={compute_dtype}, "
+                    f"derived atol={atol:.3e})"
+                ),
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -221,13 +328,20 @@ class TestSparsemax:
                     collected.append((label, out.astype(np.float64), z))
 
         # (b) secondary correctness check, only reachable once (a) held everywhere.
+        #     Tolerance is DERIVED per grid point from the output dtype's
+        #     resolution — see `_oracle_atol` and its derivation.
+        out_dtype = _output_dtype()
         for label, out, z in collected:
+            atol = _oracle_atol(z, out_dtype)
             np.testing.assert_allclose(
                 out,
                 _sparsemax_reference(z),
-                atol=1e-3,
+                atol=atol,
                 rtol=1e-3,
-                err_msg=f"sparsemax != float64 oracle ({label})",
+                err_msg=(
+                    f"sparsemax != float64 oracle ({label}, "
+                    f"derived atol={atol:.3e})"
+                ),
             )
 
     def test_attention_integration_sparsemax_fp16_no_nan(self) -> None:
