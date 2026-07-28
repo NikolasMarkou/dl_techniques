@@ -296,19 +296,38 @@ class Sparsemax(keras.layers.Layer):
         #         threshold.
         #       - Defect D (line ~220): round-off absorbs the literal `1.0`, so
         #         `support == 0` everywhere, `k_z == 0`, `one_hot(-1)` is
-        #         all-zero, `tau = -inf` and the output is all `+inf`.
-        #         Measured float32 onset 1.68e7 (K=4) / 7.77e7 (K=512).
-        #       - Defect E (line ~225), the nastiest: `k_z = ops.sum(...)`
-        #         accumulates in the compute dtype and hits the same integer
-        #         wall. fp16 2051 -> 2052, and 4095 -> 4096, which is OUT OF
-        #         RANGE for depth 4096 and yields an all-zero one-hot, i.e. a
-        #         SILENTLY WRONG FINITE ANSWER: no NaN, no raise.
+        #         all-zero and `tau = -inf`. On an ALL-FINITE row the output is
+        #         then all `+inf`; on a row that ALSO carries an `-inf` mask the
+        #         masked slots compute `-inf - (-inf)` and the row returns NaN.
+        #         Measured onsets (K=4, 2 of 4 masked for the NaN route):
+        #         float32 |z| >= 1.68e7 (7.77e7 at K=512), fp16 |z| >= 2048,
+        #         bf16 |z| >= 300.
+        #       - Defect E (line ~225): `k_z = ops.sum(support_mask)` accumulates
+        #         in the compute dtype and hits the same integer wall. Measured
+        #         under fp16 on the TF/GPU tree reduction: 2049 -> 2048,
+        #         2051 -> 2052, 4095 -> 4096 (2050 / 3000 / 4094 are exact).
+        #         The 2051 -> 2052 overshoot selects a MASKED position whose
+        #         `z_cumsum` is `-inf`, so `tau = -inf` and the row dies
+        #         (measured: nan=2045, inf=2051 at K=4096).
+        #         An earlier revision of this anchor also claimed that the
+        #         4095 -> 4096 overshoot indexes OUT OF RANGE for depth 4096 and
+        #         yields a silently wrong finite answer. That claim was FALSE and
+        #         has been DELETED: 4095 is a valid index into depth 4096, and no
+        #         end-to-end input reaching an out-of-range one-hot could be
+        #         constructed (every K where the index would truly overrun raises
+        #         Defect C first). Do not reinstate it without a repro.
+        #     Every onset quoted above is reduction-order dependent: they were
+        #     measured on the TensorFlow GPU tree reduction, and a sequential
+        #     accumulation moves them. Treat a non-reproduction on another
+        #     backend as a different measurement, not as absence of the defect.
         #
-        # (c) THIS LINE CANNOT HELP DEFECT E. For Defect E the `-inf` sits at
-        #     the SELECTED index, not at a masked-out one, so `ops.where`
-        #     selects it and `tau` is `-inf` regardless of how the selection is
-        #     spelled. Fixing E requires widening the reduction dtype, not
-        #     re-spelling this expression.
+        # (c) THIS LINE CANNOT HELP DEFECT E OR DEFECT D. In both, the `-inf`
+        #     reaches `tau` ITSELF — for E it sits at the SELECTED index, for D
+        #     it is manufactured by `k_z == 0` — rather than at a masked-out
+        #     operand of this selection, so `ops.where` cannot exclude it and
+        #     `tau` is `-inf` regardless of how the selection is spelled. Fixing
+        #     E and D requires widening the reduction dtype (and, for D,
+        #     subtracting the row max), not re-spelling this expression.
         #
         # (d) OUTPUT PRECISION under fp16 is ~1 ulp of `max|z|` (measured worst
         #     case 1.685 ulp over the committed property grid), because
@@ -317,6 +336,32 @@ class Sparsemax(keras.layers.Layer):
         #     than fixed. Subtracting the row max before the cumsum (exact:
         #     sparsemax is shift-invariant) takes the same grid from 86/128 to
         #     0/128 violations — deferred to the follow-up plan, not done here.
+        #
+        # (e) THE LOUDNESS GUARD (the three lines just before the projection,
+        #     below). Replacing the arithmetic gather with `ops.where` above
+        #     removed a `-inf * 0.0` product that, on Defect-B inputs, had been
+        #     manufacturing a NaN which INCIDENTALLY MASKED B's wrong answer.
+        #     Measured on `full((1, 4096), -16.95)` with `z[0, 0] = 0.0` (all
+        #     finite, `mixed_float16`): before, `nan=4096`; after, `nan=0,
+        #     sum=16.94` where the correct sum is 1.0 — a loud failure turned
+        #     silent. The guard restores loudness:
+        #       WHAT IT DOES: if a row's INPUT is entirely finite yet its
+        #       `z_cumsum` contains a non-finite value, that row has OVERFLOWED
+        #       the compute dtype, its `k_z` is meaningless, and its `tau` is
+        #       forced to NaN so the whole row fails visibly. The predicate is
+        #       the load-bearing part: a LEGITIMATELY masked row HAS `-inf` in
+        #       its input, so it is never poisoned (measured: `[2, 1, -inf,
+        #       -inf]` still gives `[1, 0, 0, 0]`, err 0.0, float32 and fp16).
+        #       WHAT IT DOES NOT DO: it does not FIX any of B/C/D/E — the answer
+        #       is still wrong, it is merely no longer quiet. It does not fire
+        #       for Defect D (measured float32 K=4 at 1.68e7: the cumsum stays
+        #       finite, so the output is `+inf` exactly as before the guard),
+        #       nor for Defect C (which raises), nor for Defect E (whose input
+        #       carries `-inf`). It is bit-identical on every well-behaved row
+        #       (measured `max|diff| == 0.0` over 41 cases / 34,513 values in
+        #       float32 and float64). Rows it DOES restore to loud: all-finite
+        #       float32 `1e37` (K=512) and `3e38` (K=4), and float64 `1e307`
+        #       (K=512) — all NaN again, matching pre-`ops.where` behaviour.
         # ---------------------------------------------------------------
         # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
         # where the one-hot is set, substitute an exact zero everywhere else,
@@ -333,6 +378,16 @@ class Sparsemax(keras.layers.Layer):
         # Calculate Tau (Threshold)
         # tau = (sum(z_support) - 1) / |support|
         tau = (z_cumsum_at_k - 1.0) / k_z
+
+        # LOUDNESS GUARD — see clause (e) of the D-017 anchor above.
+        # A row whose INPUT is entirely finite but whose `z_cumsum` went
+        # non-finite has OVERFLOWED the compute dtype: its `k_z` is wrong and
+        # its answer is garbage, so it must fail LOUDLY (NaN) rather than
+        # return a plausible finite number. A legitimately masked row HAS
+        # `-inf` in its input, so it is never poisoned by this predicate.
+        finite_in = ops.all(ops.isfinite(inputs_2d), axis=-1, keepdims=True)
+        ovf = ops.any(ops.logical_not(ops.isfinite(z_cumsum)), axis=-1, keepdims=True)
+        tau = ops.where(ops.logical_and(finite_in, ovf), ops.full_like(tau, float("nan")), tau)
 
         # Projection: P = max(0, z - tau)
         # This naturally sets elements outside the support to exactly zero.
