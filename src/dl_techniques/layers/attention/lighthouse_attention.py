@@ -464,8 +464,8 @@ class LighthouseAttention(keras.layers.Layer):
     .. note::
         **Call-signature contract.** ``call()`` accepts only ``(inputs,
         training=None)`` — there is **no** ``attention_mask`` parameter
-        (causality is enforced internally via the causal sort key and the
-        scatter-back shift). Additionally, the layer requires a
+        (masking is internal, never caller-supplied; see the known
+        causality defect above). Additionally, the layer requires a
         **statically-known sequence length**: the pyramid index buffers are
         constructed in ``build()`` from the concrete ``N`` of ``input_shape``.
         If the layer is built with a dynamic / ``None`` sequence dimension,
