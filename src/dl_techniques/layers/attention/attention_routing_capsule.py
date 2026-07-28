@@ -385,8 +385,8 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         #
         # WHAT NOT TO DO: do not rewrite this as the arithmetic form
         # `score + (1 - keep) * -1e9`. That form is the one that DOES produce
-        # `0 * -inf = NaN` in fp16, and it is a live defect elsewhere in this
-        # package (see the KNOWN DEFECT block in `hopfield_attention.py`).
+        # `0 * -inf = NaN` in fp16. It WAS a live defect at ten sites in this
+        # package; all ten now call `common.apply_attention_mask` instead.
         neg_inf = keras.ops.cast(-1e9, score.dtype)
         masked = keras.ops.where(keep, score, neg_inf)
         return masked

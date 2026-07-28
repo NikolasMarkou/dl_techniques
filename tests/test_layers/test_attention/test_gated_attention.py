@@ -708,7 +708,14 @@ _MP_SEED = 1234
 # mixed_float16 0.00081, against an output absmax of 0.66 (up to
 # 2.19 once a mask is applied). The entries below carry ~10x headroom on that.
 # float32 compares against a control computed the same way and is exact.
-_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.01}
+#
+# The `float64` entry was added at step 5b, when the RoPE float64 defect was fixed
+# and these parametrizations stopped skipping. Sized the SAME way and in the WORSE
+# of the two TF32 regimes (TF32 ON, i.e. this file run alone — `test_linear_attention`
+# disables TF32 process-globally at import time, which makes the identical
+# measurement much smaller inside the directory gate): measured no-mask
+# float64-vs-float32 0.000666, masked up to 0.00176.
+_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.01, "float64": 0.01}
 
 # `float64` is EXCLUDED from the mask tests at this site, and that exclusion is itself
 # pinned by `TestGatedAttentionFloat64IsASeparatePreExistingDefect` below: under a float64
@@ -904,13 +911,6 @@ class TestGatedAttentionMixedPrecisionMask:
 
     @pytest.mark.parametrize("kind", ["all_ones", "padding", "causal"])
     def test_masked_forward_is_finite_and_matches_float32(self, dtype_policy, kind):
-        if dtype_policy == "float64":
-            pytest.skip(
-                "float64 raises inside RotaryPositionEmbedding regardless of masking "
-                "(pre-existing, pinned by "
-                "TestGatedAttentionFloat64IsASeparatePreExistingDefect)"
-            )
-
         layer = _mp_layer()
         out = _mp_forward(layer, _mp_input(), _mp_mask(kind))
 
@@ -949,13 +949,6 @@ class TestGatedAttentionFullyMaskedRow:
     """
 
     def test_a_fully_masked_row_is_finite_and_matches_float32(self, dtype_policy):
-        if dtype_policy == "float64":
-            pytest.skip(
-                "float64 raises inside RotaryPositionEmbedding regardless of masking "
-                "(pre-existing, pinned by "
-                "TestGatedAttentionFloat64IsASeparatePreExistingDefect)"
-            )
-
         layer = _mp_layer()
         out = _mp_forward(layer, _mp_input(), _mp_mask("degenerate"))
 
@@ -989,13 +982,6 @@ class TestGatedAttentionFullyMaskedRow:
         logits)`), so it can tell the two conventions apart and is not a restatement
         of the finiteness test above.
         """
-        if dtype_policy == "float64":
-            pytest.skip(
-                "float64 raises inside RotaryPositionEmbedding regardless of masking "
-                "(pre-existing, pinned by "
-                "TestGatedAttentionFloat64IsASeparatePreExistingDefect)"
-            )
-
         degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
         all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
 
@@ -1053,13 +1039,6 @@ class TestGatedAttentionMaskPolarity:
         return delta_masked, delta_kept
 
     def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
-        if dtype_policy == "float64":
-            pytest.skip(
-                "float64 raises inside RotaryPositionEmbedding regardless of masking "
-                "(pre-existing, pinned by "
-                "TestGatedAttentionFloat64IsASeparatePreExistingDefect)"
-            )
-
         layer = _mp_layer()
         delta_masked, delta_kept = self._influence(layer, _mp_mask("padding"))
 
@@ -1078,23 +1057,53 @@ class TestGatedAttentionMaskPolarity:
         )
 
 
-class TestGatedAttentionFloat64IsASeparatePreExistingDefect:
-    """Pins the reason the mask tests above skip ``float64`` at this site.
+class TestGatedAttentionFloat64RunsThroughRoPE:
+    """FLIPPED at step 5b. This class used to assert a RAISE.
 
-    Under a ``float64`` global policy this layer raises inside
-    :class:`RotaryPositionEmbedding` — with **no mask supplied** — because the cached
-    cos/sin buffer stays float32 while the projected queries are float64. It has
-    nothing to do with the attention mask and is not fixed by this step; this test
-    exists so the skip above is a DOCUMENTED exclusion rather than a silent one, and
-    so it turns red the day someone fixes RoPE.
+    Until step 5b, a ``float64`` global policy made this layer raise inside
+    :class:`RotaryPositionEmbedding` — with **no mask supplied** — because the
+    cached cos/sin tables were hard-coded to ``float32`` while the projected
+    queries were ``float64``::
+
+        InvalidArgumentError: Exception encountered when calling
+        RotaryPositionEmbedding.call().
+        cannot compute Mul as input #1(zero-based) was expected to be a double
+        tensor but is a float tensor
+
+    Every ``float64`` parametrization of the mask tests above skipped for that
+    reason. `RotaryPositionEmbedding._create_rope_cache` now builds the tables in
+    ``variable_dtype`` and `_apply_rope_rotation` casts them to the input's dtype,
+    so those skips are gone and this class asserts the forward instead.
     """
 
-    def test_float64_policy_raises_in_rope_even_without_a_mask(self):
+    def test_the_float64_forward_runs_through_rope_without_a_mask(self):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float64")
+        try:
+            out = _mp_forward(_mp_layer(), _mp_input(), None)
+            assert np.isfinite(out).all(), (
+                "the float64 UNMASKED forward is not finite"
+            )
+            assert float(np.abs(out).max()) > 0.0
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_the_rope_tables_are_float64_under_a_float64_policy(self):
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("float64")
         try:
             layer = _mp_layer()
-            with pytest.raises(Exception, match="double tensor but is a float tensor"):
-                _mp_forward(layer, _mp_input(), None)
+            rope = getattr(layer, "rope", None)
+            assert rope is not None, (
+                "no RotaryPositionEmbedding found on this layer; the guard below "
+                "would be vacuous"
+            )
+            assert keras.backend.standardize_dtype(
+                rope.cos_cached.dtype
+            ) == "float64", (
+                "the RoPE cos/sin cache must be stored at the layer's "
+                "variable_dtype — a float32 cache under a float64 policy is the "
+                "exact defect this class used to pin"
+            )
         finally:
             keras.mixed_precision.set_global_policy(previous)

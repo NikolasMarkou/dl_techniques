@@ -1082,12 +1082,12 @@ if __name__ == "__main__":
 # deliberately NOT unified, see the R13 note in the source) and its own `1 = keep`
 # polarity spelling, both byte-untouched.
 #
-# FLOAT64 IS A SEPARATE, PRE-EXISTING DEFECT and is skipped below rather than
-# silently dropped: under a `float64` policy this layer RAISES inside
-# `RotaryPositionEmbedding` with NO mask supplied at all (the cached cos/sin buffer
-# stays float32). That is the same defect step 4 pinned at `gated_attention.py` and
-# `group_query_attention.py`; `TestMultiHeadLatentAttentionFloat64IsASeparatePreExistingDefect`
-# pins it here so the skip turns red the day RoPE is fixed.
+# FLOAT64 WAS A SEPARATE, PRE-EXISTING DEFECT — fixed at step 5b. Under a `float64`
+# policy this layer used to RAISE inside `RotaryPositionEmbedding` with NO mask
+# supplied at all, because the cached cos/sin tables were hard-coded to float32.
+# The same defect hit `gated_attention.py` and `group_query_attention.py`. The
+# tables are now built in `variable_dtype`, the `_skip_float64` helper is gone, and
+# `TestMultiHeadLatentAttentionFloat64RunsThroughRoPE` is the FLIPPED guard.
 #
 # ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not
 # transfer: this hazard is a per-ELEMENT dtype overflow of a constant multiplied by
@@ -1198,15 +1198,6 @@ def _float32_reference(kind):
     return _F32_REFERENCE[kind]
 
 
-def _skip_float64(dtype_policy):
-    if dtype_policy == "float64":
-        pytest.skip(
-            "float64 raises inside RotaryPositionEmbedding at this layer with NO "
-            "mask at all — a pre-existing defect unrelated to masking, pinned by "
-            "TestMultiHeadLatentAttentionFloat64IsASeparatePreExistingDefect"
-        )
-
-
 class TestMultiHeadLatentAttentionMaskHazardIsReal:
     """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
 
@@ -1272,25 +1263,51 @@ class TestMultiHeadLatentAttentionMaskHazardIsReal:
         assert seen["dtype"] == expected
 
 
-class TestMultiHeadLatentAttentionFloat64IsASeparatePreExistingDefect:
-    """The float64 skips above are documented, not silent.
+class TestMultiHeadLatentAttentionFloat64RunsThroughRoPE:
+    """FLIPPED at step 5b. This class used to assert a RAISE.
 
-    This layer RAISES under a `float64` policy with NO mask supplied, inside
-    `RotaryPositionEmbedding` — the cached cos/sin buffer stays float32. Same
-    defect step 4 pinned at `gated_attention.py` / `group_query_attention.py`.
-    Carried to the Tier-4 brief. When RoPE is fixed this test fails and the
-    `_skip_float64` calls should be deleted.
+    Until step 5b this layer RAISED under a `float64` policy with NO mask
+    supplied, inside `RotaryPositionEmbedding`, because the cached cos/sin tables
+    were hard-coded to float32 while the projected queries were float64::
+
+        InvalidArgumentError: Exception encountered when calling
+        RotaryPositionEmbedding.call().
+        cannot compute Mul as input #1(zero-based) was expected to be a double
+        tensor but is a float tensor
+
+    Every `float64` parametrization above skipped for that reason
+    (`_skip_float64`, deleted). `RotaryPositionEmbedding._create_rope_cache` now
+    builds the tables in `variable_dtype` and `_apply_rope_rotation` casts them to
+    the input's dtype, so this class asserts the forward instead.
     """
 
-    def test_float64_policy_raises_in_rope_even_without_a_mask(self):
+    def test_the_float64_forward_runs_through_rope_without_a_mask(self):
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("float64")
         try:
-            with pytest.raises(Exception) as excinfo:
-                _mp_forward(_mp_layer(), _mp_input(), None)
-            assert "RotaryPositionEmbedding" in str(excinfo.value), (
-                f"the float64 failure is no longer the RoPE dtype defect: "
-                f"{str(excinfo.value)[:200]}"
+            out = _mp_forward(_mp_layer(), _mp_input(), None)
+            assert np.isfinite(out).all(), (
+                "the float64 UNMASKED forward is not finite"
+            )
+            assert float(np.abs(out).max()) > 0.0
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_the_rope_tables_are_float64_under_a_float64_policy(self):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float64")
+        try:
+            rope = getattr(_mp_layer(), "rope", None)
+            assert rope is not None, (
+                "no RotaryPositionEmbedding found on this layer; the guard below "
+                "would be vacuous"
+            )
+            assert keras.backend.standardize_dtype(
+                rope.cos_cached.dtype
+            ) == "float64", (
+                "the RoPE cos/sin cache must be stored at the layer's "
+                "variable_dtype — a float32 cache under a float64 policy is the "
+                "exact defect this class used to pin"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -1301,7 +1318,6 @@ class TestMultiHeadLatentAttentionMixedPrecisionMask:
 
     @pytest.mark.parametrize("kind", ["all_ones", "padding", "causal"])
     def test_masked_forward_is_finite_and_matches_float32(self, dtype_policy, kind):
-        _skip_float64(dtype_policy)
         out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask(kind))
 
         n_bad = int((~np.isfinite(out)).sum())
@@ -1324,7 +1340,6 @@ class TestMultiHeadLatentAttentionFullyMaskedRow:
     """A fully-masked query row is RESCUED (decisions.md D-008 / D-009)."""
 
     def test_a_fully_masked_row_is_finite_and_matches_float32(self, dtype_policy):
-        _skip_float64(dtype_policy)
         out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
 
         n_bad = int((~np.isfinite(out)).sum())
@@ -1348,7 +1363,6 @@ class TestMultiHeadLatentAttentionFullyMaskedRow:
         degenerate row was a uniform average over all keys), so it can tell the two
         conventions apart and is not a restatement of the finiteness test above.
         """
-        _skip_float64(dtype_policy)
         degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
         all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
 
@@ -1387,7 +1401,6 @@ class TestMultiHeadLatentAttentionMaskPolarity:
         return delta_masked, delta_kept
 
     def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
-        _skip_float64(dtype_policy)
         mask = _mp_mask("padding")
         delta_masked, delta_kept = self._influence(_mp_layer(), mask)
         inverted, _ = self._influence(_mp_layer(), 1.0 - mask)

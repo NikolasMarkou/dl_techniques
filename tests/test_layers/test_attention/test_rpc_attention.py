@@ -619,6 +619,70 @@ class TestRPCAttentionMixedPrecisionMask:
         )
 
 
+class TestRPCAttentionNoMaskFp16IsAMissingBackendKernel:
+    """Step 5b: pins finding (c) — the ONE fp16 path this plan deliberately did
+    not fix, and the reason it is not a repo defect.
+
+    ``ops.svd`` has no ``float16`` kernel outside XLA on this backend (registered:
+    ``XLA_CPU_JIT`` / ``XLA_GPU_JIT`` float/double/half, ``CPU`` float/double/
+    complex, ``GPU`` float/double). Consequences, all asserted below rather than
+    described:
+
+    * The **UNMASKED** fp16 forward RAISES ``Svd[T=DT_HALF]``. Nothing promotes it,
+      and promoting it would change no-mask numerics for every existing caller.
+    * The **MASKED** fp16 forward SUCCEEDS, because ``apply_attention_mask``'s
+      default ``out_dtype`` keeps the biased scores in ``mask_dtype(...)``
+      (D-005), which has an SVD kernel. So this is provably NOT a masking bug —
+      masking is what rescues it.
+    * ``float32`` and ``float64`` are unaffected in both cases.
+
+    If TF ever ships a non-XLA fp16 ``Svd`` kernel, the first test here fails and
+    the ``.. warning::`` block in ``rpc_attention.py``'s class docstring plus the
+    Tier-4 brief entry should be deleted.
+    """
+
+    def test_the_unmasked_fp16_forward_raises_on_the_missing_svd_kernel(self):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            layer = _mp_layer()
+            with pytest.raises(Exception) as excinfo:
+                _numpy(layer(ops.convert_to_tensor(_mp_input()), mask=None))
+            message = str(excinfo.value)
+            assert "Svd" in message, (
+                "the fp16 no-mask failure is no longer the missing SVD kernel: "
+                f"{message[:300]}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_a_mask_is_what_makes_the_fp16_forward_possible(self):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            layer = _mp_layer()
+            out = _numpy(layer(
+                ops.convert_to_tensor(_mp_input()),
+                mask=ops.convert_to_tensor(_mp_mask("all_ones")),
+            ))
+            assert np.isfinite(out).all(), (
+                "the MASKED fp16 forward must succeed — the mask bias promotes the "
+                "scores to mask_dtype(...) before the SVD sees them (D-005)"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", ["float32", "float64"])
+    def test_the_unmasked_forward_is_fine_in_every_other_policy(self, policy):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            out = _numpy(_mp_layer()(ops.convert_to_tensor(_mp_input()), mask=None))
+            assert np.isfinite(out).all()
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
 class TestRPCAttentionConditioning:
     """Pins the JUSTIFICATION for the loose tolerances in :data:`_MP_ATOL`.
 

@@ -25,34 +25,45 @@ number you see in a sibling module came from here:
     form — in ten others. It takes the **keep predicate itself** as an argument and
     performs NO polarity inference; see its docstring for why that is not negotiable.
     Its ``rescue_axis`` argument addresses the second, separable hazard — a query row
-    that keeps NOTHING. It defaults to ``-1``, so the rescue is **ON by default**;
-    ``rescue_axis=None`` is the explicit opt-OUT, and a non-``-1`` axis must be named
-    explicitly by any site whose softmax reduces elsewhere.
+    that keeps NOTHING, whose all-``MASK_BIAS_VALUE`` logits softmax to ``NaN`` in
+    fp16 and to meaningless uniform garbage in float32. The convention the rescue
+    installs is: **a slice that keeps nothing is treated as keeping everything**, so
+    such a row returns ``softmax(unbiased logits)`` and is finite and identical in
+    float16 / float32 / float64. ``rescue_axis`` names the axis the CALLER's softmax
+    reduces over; it defaults to ``-1``, so the rescue is **ON by default**.
+    ``rescue_axis=None`` is the explicit, documented opt-OUT (``ring_attention.py``
+    is the one site that takes it — a per-tile rescue there would read every
+    entirely-masked tile as degenerate and un-mask the FUTURE under a causal mask,
+    measured at 24.14; it rescues once over the full key axis before its block loop
+    instead). A site whose softmax reduces over some other axis must name that axis
+    explicitly — the axis is never inferred, for the same reason polarity is never
+    inferred.
 
--   ``MASK_BIAS_VALUE`` / ``mask_dtype`` have exactly **ONE** importer:
-    ``energy_attention.py``, under the legacy private aliases ``_MASK_BIAS_VALUE`` /
-    ``_mask_dtype`` (see the D-007 anchor there). **Fourteen other modules** still
-    carry a LOCAL ``-1e9``-family value, counted mechanically at step 10 with
-    comments and docstrings stripped: ``attention_routing_capsule``,
+-   ``MASK_BIAS_VALUE`` / ``mask_dtype`` are **no longer single-use.** After
+    ``plan-2026-07-27T183600-b4ef45f0`` they are reached — directly or through
+    ``apply_attention_mask`` — by every masked layer in the package except four.
+    ``energy_attention.py`` still imports the pair directly under the legacy private
+    aliases ``_MASK_BIAS_VALUE`` / ``_mask_dtype`` (the D-007 contract; do not remove
+    those aliases). Ten modules migrated to ``apply_attention_mask``:
     ``capsule_routing``, ``differential``, ``gated``, ``group_query``, ``hopfield``,
-    ``ideogram4`` (as ``_MASK_NEG``), ``lighthouse`` (a per-dtype TABLE, the most
-    careful form in the package), ``multi_head_cross``, ``multi_head_latent``,
-    ``progressive_focused``, ``ring``, ``rpc``, ``single_window``.
+    ``multi_head_cross``, ``multi_head_latent``, ``ring``, ``rpc``, ``single_window``.
 
-    *(That count corrects the "9 other modules" figure recorded in D-011 at step 9,
-    which was read off a grep that also matched prose. The direction of the error
-    matters: consolidation here is even less complete than the decision log claimed.)*
+    **Exactly FOUR modules still carry a LOCAL ``-1e9``-family value**, counted
+    mechanically with comments and docstrings stripped:
 
-    That is not an oversight and it is not laziness. Each of those sites was probed
-    individually and found NOT behavior-identical to this pair: they differ in cast
-    order, in the arithmetic-versus-``ops.where`` form, and several of them are the
-    systemic ``0 * -inf = NaN`` fp16 sites documented in place as known defects
-    (``hopfield_attention.py`` NaNs the ENTIRE batch under ``mixed_float16`` given an
-    all-ones mask — measured, 512/512). Making them adopt this constant is therefore a
-    *numerics change*, not a rename, and it is reserved for the follow-up plan that is
-    allowed to change behavior. Until then, these two exports are a documentation
-    consolidation with one consumer, honestly charged as such in that plan's
-    ``decisions.md`` D-011.
+    * ``attention_routing_capsule.py:390`` — ``ops.where``-form and the ``-inf`` is
+      provably harmless at that site; deliberately left byte-unchanged.
+    * ``ideogram4_attention.py`` (``_MASK_NEG``) — ``ops.where``-form with an
+      explicit cast; structurally safe.
+    * ``lighthouse_attention.py`` (``_MASK_SENTINEL``, a per-dtype TABLE) — the most
+      careful form in the package, but a second thing to keep correct; out of scope
+      (prior D-009).
+    * ``progressive_focused_attention.py:870`` — a dead ``'threshold'`` branch.
+
+    *(This corrects two earlier figures in this same docstring: the "9 other modules"
+    of D-011 and the "fourteen other modules" recorded at step 10 of the previous
+    plan. The step-10 count was right at the time it was taken; ten of those fourteen
+    have since migrated.)*
 
 Architecture:
     Deliberately **flat**: five module-level names, no classes, no registry, no Keras
@@ -161,10 +172,12 @@ def mask_dtype(compute_dtype: str) -> str:
 #     predicate as an argument puts the polarity in each site's own one-line diff.
 #   * Do NOT make `out_dtype` default to the compute dtype ("cast back at the end").
 #     Casting `-1e9` back into fp16 makes it `-inf` again. That is harmless where every
-#     softmax row keeps >= 1 position, but it is EXACTLY the live defect at
-#     `rpc_attention.py` (the `-inf` reaches `ops.svd`, which NaN-poisons the whole
-#     decomposition) and at `capsule_routing_attention.py` (a fully-masked row becomes
-#     all-`-inf` -> NaN). The safe behavior is the default; the unsafe one must be
+#     softmax row keeps >= 1 position, but it is EXACTLY the defect this helper was
+#     written to remove at `rpc_attention.py` (the `-inf` reaches `ops.svd`, which
+#     NaN-poisons the whole decomposition) and at `capsule_routing_attention.py` (a
+#     fully-masked row becomes all-`-inf` -> NaN). Both are fixed BECAUSE of this
+#     default, and both regress the moment it changes. The safe behavior is the
+#     default; the unsafe one must be
 #     spelled out at the call site where a reader can see it.
 #   * Do NOT reintroduce the arithmetic form `logits + (1 - keep) * MASK_BIAS_VALUE`
 #     (see the MASK_BIAS_VALUE anchor above) or a per-dtype sentinel table.

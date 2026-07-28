@@ -144,13 +144,14 @@ self.norm = create_normalization_layer('layer_norm', axis=-1)
 
 `dl_techniques/layers/attention/common.py` is this package's single home for the small,
 provably-identical primitives that were previously re-derived across a dozen modules. It is
-deliberately **flat**: four module-level names, **no classes, no registry, no Keras
+deliberately **flat**: five module-level names, **no classes, no registry, no Keras
 registration**. Import from it the way you would import `math`.
 
 ```python
 from .common import (
     MASK_BIAS_VALUE,
     mask_dtype,
+    apply_attention_mask,
     validate_head_divisibility,
     compute_attention_scale,
 )
@@ -229,9 +230,59 @@ dtype helper reintroduces the hazard it exists to prevent.
     scores = scores + keras.ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)
     ```
 
-    Nine sites in this package still use the wrong form. They are documented in place as known
-    defects rather than silently "fixed", because correcting them is a behavior change. Do not
-    copy them into a new layer.
+    **You should not be writing either line by hand.** As of
+    `plan-2026-07-27T183600-b4ef45f0` the ten sites that carried the wrong form have all
+    migrated to `apply_attention_mask` (below), which is the prescribed way to apply an
+    attention mask in this package. `MASK_BIAS_VALUE` / `mask_dtype` remain exported for
+    `energy_attention.py`'s private-alias contract and for a site that genuinely needs to build
+    a bias by hand.
+
+#### `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)`
+
+**The prescribed way to apply an attention mask.** It performs the `ops.where` bias
+application that `MASK_BIAS_VALUE` / `mask_dtype` only describe, inside `mask_dtype(...)`,
+so the `0 * -inf = NaN` product cannot be formed at all.
+
+```python
+from .common import apply_attention_mask
+
+# `mask` is this site's own already-broadcast `1 = keep` mask. Its own
+# expand_dims / reshape / repeat / cast sequence is unchanged and stays above.
+scores = apply_attention_mask(scores, mask, out_dtype=scores_dtype)
+```
+
+*   **Polarity is the CALLER's job — the helper never infers it.** `keep` is the *keep
+    predicate*: any tensor broadcastable to `logits` whose nonzero/True entries mean "attend
+    here". Pass your site's own spelling **verbatim**. `rpc_attention.py` spells it
+    `ops.not_equal(mask, 0)` because its native convention is `mask == 0` means masked;
+    `capsule_routing_attention.py` passes a raw boolean straight through; the other eight pass
+    their `1 = keep` float mask. A uniform `mask > 0` rewrite **inverts** masking at two of the
+    ten sites with **no shape error and no exception** — the layer then attends only to padding
+    and a finiteness test happily passes. That is why the predicate is an argument.
+*   **`out_dtype=None` (the default) returns in `mask_dtype(...)`,** keeping the whole
+    logits → bias → softmax chain at ≥ float32. Pass the compute dtype explicitly only where the
+    downstream consumer is verified safe with `-inf` entries — which is the common case, because
+    a `keras.layers` softmax sub-layer with `autocast=True` would drag a float32 tensor back to
+    float16 anyway.
+*   **`rescue_axis=-1` (the default) turns on the degenerate-row rescue:** a slice of the key
+    axis that keeps NOTHING is treated as keeping EVERYTHING, so no all-`-inf` softmax row is
+    ever formed. `rescue_axis=None` is the explicit opt-out. The axis is **never inferred** — a
+    softmax that reduces elsewhere must name its own axis, for the same reason polarity is not
+    inferred.
+*   **Counter-example, and the reason the axis is explicit: `ring_attention.py`.** Its online
+    softmax processes one key-axis *tile* at a time, so inside the loop a "row" is a tile, not
+    the full key axis. A per-tile `rescue_axis=-1` reads every entirely-masked tile as
+    degenerate and **un-masks the future** under a causal mask — measured by injection at
+    **24.14** movement in a query block that should not have been able to see the perturbed
+    token, while every finiteness test in the module still passed. Ring therefore passes
+    `rescue_axis=None` per tile and rescues **once, over the full key axis, before** its block
+    loop.
+*   **Do not add a second masking helper to `common.py`.** The rescue lives inside this one
+    function precisely so there is exactly one implementation; a sibling helper is a named STOP
+    condition in that plan's complexity budget.
+*   **One measured exception to "just adopt it":** the helper *adds* the bias. A site that
+    previously *replaced* the score with `-1e9` is indistinguishable in float32/float16 (one ULP
+    at 1e9 is 64) but differs in float64. That bit the `rpc_attention.py` migration; see D-005.
 
 ---
 

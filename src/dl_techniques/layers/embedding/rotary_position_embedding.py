@@ -216,7 +216,46 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_rope_cache(self) -> None:
-        """Create and cache cos/sin lookup tables for rotary embeddings."""
+        """Create and cache cos/sin lookup tables for rotary embeddings.
+
+        .. note::
+            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b).** The tables used to
+            be hard-coded to ``dtype='float32'``. Under a ``float64`` global policy
+            the layer therefore raised on its very first forward pass, with no mask
+            and no unusual input:
+            ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
+            expected to be a double tensor but is a float tensor`` (from
+            ``x1 * cos`` in :meth:`_apply_rope_rotation`), taking
+            ``GatedAttention``, ``GroupedQueryAttention`` and
+            ``MultiHeadLatentAttention`` down with it.
+
+            The tables are now built in ``self.variable_dtype``, which is
+            ``float32`` under both the ``float32`` and the ``mixed_float16``
+            policies (so those two are byte-unchanged) and ``float64`` under a
+            ``float64`` policy. Do NOT use ``compute_dtype`` here: under
+            ``mixed_float16`` that would store the tables in ``float16``, where the
+            high-frequency entries of a long ``max_seq_len`` table lose most of
+            their precision — mixed precision deliberately keeps variables wide and
+            autocasts them on read.
+        """
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-016
+        # Build the tables at the precision this layer stores VARIABLES at, not at
+        # the compute dtype and not at a hard-coded 'float32'.
+        #
+        # WHAT NOT TO DO:
+        #   * Do NOT restore `dtype='float32'`. That is the defect: under a float64
+        #     policy the rotation `x1 * cos` raised `InvalidArgumentError: cannot
+        #     compute Mul ... expected to be a double tensor but is a float tensor`
+        #     on the FIRST forward pass, with no mask and nothing unusual, taking
+        #     GatedAttention / GroupedQueryAttention / MultiHeadLatentAttention with
+        #     it. Measured 2026-07-28, TF 2.18 / CUDA.
+        #   * Do NOT use `self.compute_dtype`. Under `mixed_float16` that stores the
+        #     tables in float16, where the high-frequency entries of a long
+        #     `max_seq_len` table lose most of their precision. Mixed precision
+        #     deliberately keeps variables wide and autocasts them on READ.
+        # See decisions.md D-016.
+        cache_dtype = self.variable_dtype
+
         # Calculate frequency dimension (half of rope_dim for complex pairs)
         freq_dim = self.rope_dim // 2
 
@@ -228,26 +267,26 @@ class RotaryPositionEmbedding(keras.layers.Layer):
                 shape=(self.max_seq_len, 1),
                 initializer='zeros',
                 trainable=False,
-                dtype='float32'
+                dtype=cache_dtype
             )
             self.sin_cached = self.add_weight(
                 name='sin_cached',
                 shape=(self.max_seq_len, 1),
                 initializer='zeros',
                 trainable=False,
-                dtype='float32'
+                dtype=cache_dtype
             )
             return
 
         # Create frequency tensor: 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
         inv_freq = 1.0 / (
             self.rope_theta ** (
-                keras.ops.arange(0, freq_dim, dtype='float32') * 2.0 / self.rope_dim
+                keras.ops.arange(0, freq_dim, dtype=cache_dtype) * 2.0 / self.rope_dim
             )
         )
 
         # Position indices: [0, 1, 2, ..., max_seq_len-1]
-        positions = keras.ops.arange(self.max_seq_len, dtype='float32')
+        positions = keras.ops.arange(self.max_seq_len, dtype=cache_dtype)
 
         # Outer product to get all position-frequency combinations
         # Shape: (max_seq_len, freq_dim)
@@ -263,14 +302,14 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             shape=cos_table.shape,
             initializer='zeros',
             trainable=False,
-            dtype='float32'
+            dtype=cache_dtype
         )
         self.sin_cached = self.add_weight(
             name='sin_cached',
             shape=sin_table.shape,
             initializer='zeros',
             trainable=False,
-            dtype='float32'
+            dtype=cache_dtype
         )
 
         # Assign the computed values
@@ -330,9 +369,18 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         x_rope = x[..., :self.rope_dim]     # Apply RoPE to these dimensions
         x_pass = x[..., self.rope_dim:]     # Pass these through unchanged
 
-        # Get cached cos/sin values for current sequence length
-        cos = self.cos_cached[:seq_len]     # Shape: (seq_len, rope_dim // 2)
-        sin = self.sin_cached[:seq_len]     # Shape: (seq_len, rope_dim // 2)
+        # Get cached cos/sin values for current sequence length.
+        #
+        # FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b): the cast is what makes
+        # the rotation below dtype-agreement-safe STRUCTURALLY rather than by
+        # relying on Keras' variable autocasting to fire. `x` is the caller's
+        # tensor; the tables are variables. Under `mixed_float16` autocast already
+        # brought them to `float16`, so this cast is an identity; under any policy
+        # or caller where it does not fire, `x1 * cos` would raise
+        # `InvalidArgumentError: cannot compute Mul ...` instead of silently
+        # promoting. Cast the TABLE to the input, never the input to the table.
+        cos = keras.ops.cast(self.cos_cached[:seq_len], x.dtype)  # (seq_len, rope_dim // 2)
+        sin = keras.ops.cast(self.sin_cached[:seq_len], x.dtype)  # (seq_len, rope_dim // 2)
 
         # Reshape x_rope to separate complex pairs
         # From: (batch, heads, seq_len, rope_dim)

@@ -481,27 +481,26 @@ if __name__ == "__main__":
 # UNMASKED position `(1.0 - mask) == 0`, so the product is `0 * -inf = NaN`. The
 # layer's own docstring called this "the eighth catalogued instance" of the bug.
 #
-# THE TESTS BELOW ARE SPLIT IN TWO, AND THE REASON IS A SEPARATE PRE-EXISTING
-# DEFECT — measured at step 5, not previously catalogued:
+# THE TESTS BELOW ARE SPLIT IN TWO, AND THE REASON WAS A SEPARATE DTYPE DEFECT —
+# measured at step 5, FIXED at step 5b:
 #
-#     THIS LAYER CANNOT RUN AT ALL UNDER `mixed_float16` OR `float64`, WITH NO MASK
-#     SUPPLIED. `get_lambda()` builds `lambda_val` via `ops.cast(layer_idx,
-#     "float32")`, and `call()` then evaluates `out1 - lambda_val * out2` where
-#     `out2` is in the compute dtype:
+#     THIS LAYER COULD NOT RUN AT ALL UNDER `mixed_float16` OR `float64`, WITH NO
+#     MASK SUPPLIED. `get_lambda()` built its schedule via `ops.cast(layer_idx,
+#     "float32")`, so `call()`'s `out1 - lambda_val * out2` raised
 #         InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
 #         expected to be a float tensor but is a half tensor
-#     It is a one-token fix (`ops.cast(lambda_val, out2.dtype)`) but it lives on a
-#     DIFFERENT expression than this step's mask bias, so it is REPORTED and PINNED
-#     here rather than absorbed — the same treatment step 2 gave `ops.svd`'s missing
-#     fp16 kernel at `rpc_attention.py` and step 4 gave the RoPE float64 defect at
-#     `gated`/`group_query`. See
-#     `TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect`.
+#     under `mixed_float16`, and `get_lambda` itself raised `... but is a double
+#     tensor` under `float64` (where `lambda_param` is a float64 variable).
+#     Step 5b evaluates the schedule in `variable_dtype` and casts it to the
+#     streams' dtype in `call()`. `TestDifferentialAttentionLambdaDtype` is the
+#     FLIPPED form of the guard that used to assert those raises, and every
+#     layer-level test below now runs under all three policies instead of skipping.
 #
-# Consequently the fp16 evidence for the MASK fix is taken at the level of the
-# method that was actually changed, `_apply_attention_mask`, driven with real fp16
-# score tensors (`TestDifferentialAttentionMaskBiasExpression`). That is where the
-# `0 * -inf` product lived, so the test is targeted rather than incidental; the
-# layer-level tests then cover float32 semantics end to end.
+# The split is KEPT anyway, because the two levels prove different things: the
+# expression-level tests (`TestDifferentialAttentionMaskBiasExpression`) drive
+# `_apply_attention_mask` with real fp16 score tensors, i.e. exactly where the
+# `0 * -inf` product lived, and are therefore targeted rather than incidental;
+# the layer-level tests then cover end-to-end semantics in every policy.
 #
 # ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not
 # transfer: this hazard is a per-ELEMENT dtype overflow of a constant multiplied by
@@ -592,16 +591,6 @@ def _softmax_f64(x):
     return e / e.sum(axis=-1, keepdims=True)
 
 
-def _skip_non_float32(dtype_policy):
-    if dtype_policy != "float32":
-        pytest.skip(
-            f"{dtype_policy} raises in `get_lambda`'s float32 `lambda_val` times a "
-            "compute-dtype tensor, with NO mask at all — a pre-existing defect on a "
-            "different expression, pinned by "
-            "TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect"
-        )
-
-
 class TestDifferentialAttentionMaskHazardIsReal:
     """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
 
@@ -641,30 +630,58 @@ class TestDifferentialAttentionMaskHazardIsReal:
         assert int(empty.sum()) == _MP_B and bool(empty[:, _MP_DEG_ROW].all())
 
 
-class TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect:
-    """The non-float32 skips above are documented, not silent.
+class TestDifferentialAttentionLambdaDtype:
+    """Step 5b: the layer RUNS under every policy, with and without a mask.
 
-    MEASURED at step 5 with `attention_mask=None`: this layer raises under BOTH
-    `mixed_float16` and `float64` because `get_lambda()` returns a float32 tensor
-    that `call()` multiplies with a compute-dtype tensor. Reported for follow-up
-    with the exact remedy (`ops.cast(lambda_val, out2.dtype)`); when it is applied
-    this test fails and the `_skip_non_float32` calls should be deleted.
+    Until step 5b it did not. `get_lambda()` hard-coded its schedule to `float32`,
+    so with `attention_mask=None` and nothing else unusual the layer raised
+    `InvalidArgumentError: cannot compute Mul as input #1(zero-based) was expected
+    to be a float tensor but is a half tensor` under `mixed_float16` (at
+    `out1 - lambda_val * out2`) and `... but is a double tensor` under `float64`
+    (inside `get_lambda` itself, where `lambda_param` is a `float64` variable).
+    This class is the FLIPPED form of the guard that used to assert those raises;
+    it is what makes the non-float32 parametrizations of every test below real
+    rather than skipped.
     """
 
-    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
-    def test_the_layer_raises_on_a_dtype_mismatch_even_without_a_mask(self, policy):
-        previous = keras.mixed_precision.global_policy().name
-        keras.mixed_precision.set_global_policy(policy)
-        try:
-            with pytest.raises(Exception) as excinfo:
-                _mp_forward(_mp_layer(), _mp_input(), None)
-            message = str(excinfo.value)
-            assert "cannot compute Mul" in message, (
-                f"the {policy} failure is no longer the lambda dtype mismatch: "
-                f"{message[:200]}"
-            )
-        finally:
-            keras.mixed_precision.set_global_policy(previous)
+    def test_the_unmasked_forward_runs_and_is_finite(self, dtype_policy):
+        out = _mp_forward(_mp_layer(), _mp_input(), None)
+        assert np.isfinite(out).all(), (
+            f"the UNMASKED forward is not finite under {dtype_policy!r}"
+        )
+        assert float(np.abs(out).max()) > 0.0
+
+    def test_get_lambda_is_produced_in_the_variable_dtype(self, dtype_policy):
+        expected = {
+            "float32": "float32",
+            "mixed_float16": "float32",
+            "float64": "float64",
+        }[dtype_policy]
+        layer = _mp_layer()
+        lambda_val = layer.get_lambda(0)
+        assert keras.backend.standardize_dtype(lambda_val.dtype) == expected, (
+            "the lambda schedule must be evaluated at the precision "
+            "`lambda_param` is STORED at, not at the compute dtype: under "
+            "`mixed_float16` a float16 schedule would round the 0.1/0.9 clip "
+            "bounds, and under `float64` a float32 schedule would truncate a "
+            "float64 parameter"
+        )
+        assert keras.backend.standardize_dtype(
+            layer.lambda_param.dtype
+        ) == expected
+
+    def test_the_lambda_value_is_the_same_number_in_every_policy(self, dtype_policy):
+        layer = _mp_layer()
+        value = float(keras.ops.convert_to_numpy(layer.get_lambda(0)))
+        param = float(keras.ops.convert_to_numpy(layer.lambda_param)[0])
+        # layer_idx=0 -> max(0 - 1, 0) = 0 -> exp(0) = 1 -> 0.8 - 0.6 = 0.2
+        expected = min(max(0.2 * param, 0.1), 0.9)
+        assert abs(value - expected) <= 1e-6, (
+            f"the lambda SCHEDULE moved under {dtype_policy!r}: {value:.8g} vs "
+            f"{expected:.8g}. The step-5b dtype fix must not change the number "
+            "this layer computes."
+        )
+        assert 0.1 <= value <= 0.9
 
 
 class TestDifferentialAttentionMaskBiasExpression:
@@ -774,11 +791,14 @@ class TestDifferentialAttentionMaskBiasExpression:
 
 
 class TestDifferentialAttentionMaskedForward:
-    """End-to-end float32 semantics (the only policy this layer survives today)."""
+    """End-to-end masked semantics, in EVERY policy since step 5b.
+
+    These used to skip everything but `float32` (`_skip_non_float32`, deleted at
+    step 5b) because the layer raised on the unrelated `get_lambda` dtype defect.
+    """
 
     @pytest.mark.parametrize("kind", ["all_ones", "padding", "causal", "degenerate"])
     def test_masked_forward_is_finite(self, dtype_policy, kind):
-        _skip_non_float32(dtype_policy)
         out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask(kind))
         n_bad = int((~np.isfinite(out)).sum())
         assert n_bad == 0, (
@@ -787,7 +807,6 @@ class TestDifferentialAttentionMaskedForward:
         )
 
     def test_the_rescued_row_behaves_as_if_it_kept_everything(self, dtype_policy):
-        _skip_non_float32(dtype_policy)
         degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
         all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
         max_dev = float(np.abs(degenerate - all_ones).max())
@@ -798,7 +817,6 @@ class TestDifferentialAttentionMaskedForward:
         assert float(np.abs(all_ones).max()) > 0.0
 
     def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
-        _skip_non_float32(dtype_policy)
         mask = _mp_mask("padding")
 
         def influence(mask_used):

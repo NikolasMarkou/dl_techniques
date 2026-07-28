@@ -495,19 +495,61 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         :param layer_idx: Integer, index of the layer in the network stack (0-based).
             Used to compute layer-dependent lambda initialization.
         :type layer_idx: int
-        :return: Tensor containing the computed lambda value, bounded between 0.1 and 0.9.
+        :return: Tensor containing the computed lambda value, bounded between 0.1
+            and 0.9, in this layer's ``variable_dtype`` (i.e. the dtype of
+            ``lambda_param`` itself). :meth:`call` casts it to the dtype of the
+            attention streams before combining them.
         :rtype: keras.KerasTensor
+
+        .. note::
+            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b).** The schedule used
+            to be hard-coded to ``float32`` (``ops.cast(layer_idx, "float32")``),
+            which made this layer unable to run under ANY non-``float32`` policy,
+            with or without a mask:
+
+            * under ``float64`` the multiply on the next line raised
+              ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
+              expected to be a float tensor but is a double tensor``, because
+              ``lambda_param`` is created in ``variable_dtype`` (``float64``);
+            * under ``mixed_float16`` it survived here but then raised at
+              ``out1 - lambda_val * out2`` in :meth:`call`, with ``... but is a half
+              tensor``.
+
+            The schedule is now evaluated in ``variable_dtype`` — the dtype
+            ``lambda_param`` actually has, so it is ``float32`` under both
+            ``float32`` and ``mixed_float16`` (bit-identical to the old behavior)
+            and ``float64`` under a ``float64`` policy (full precision, rather than
+            a ``float32`` schedule silently truncating a ``float64`` parameter).
+            Do NOT "simplify" this to ``self.compute_dtype``: under
+            ``mixed_float16`` that would evaluate the schedule in ``float16`` and
+            round the clip bounds, changing the layer's numerics for no benefit.
         """
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-016
+        # Evaluate the whole schedule in the dtype `lambda_param` actually has.
+        #
+        # WHAT NOT TO DO:
+        #   * Do NOT restore the hard-coded `"float32"`. It made this layer unable
+        #     to run under `mixed_float16` OR `float64` at all, with or without a
+        #     mask (see the note in this method's docstring for both verbatim
+        #     raises).
+        #   * Do NOT use `self.compute_dtype` instead. Under `mixed_float16` that
+        #     evaluates the schedule in float16 and rounds the 0.1 / 0.9 clip
+        #     bounds, changing the number this layer computes for no benefit. The
+        #     narrowing to the compute dtype belongs at the ONE place the value is
+        #     consumed, in `call()`.
+        # See decisions.md D-016.
+        dtype = self.variable_dtype
+
         # Layer-dependent initialization following the paper
         # lambda_init = 0.8 - 0.6*exp(-0.3*(layer_idx - 1))
-        layer_factor = ops.cast(layer_idx, dtype="float32")
+        layer_factor = ops.cast(layer_idx, dtype=dtype)
         exp_term = ops.exp(-0.3 * ops.maximum(layer_factor - 1.0, 0.0))
         layer_dependent_init = 0.8 - 0.6 * exp_term
 
         # Apply learned lambda parameter as multiplicative factor
         # Clip to ensure training stability
         lambda_val = ops.clip(
-            layer_dependent_init * self.lambda_param[0],
+            layer_dependent_init * ops.cast(self.lambda_param[0], dtype),
             0.1,
             0.9,
         )
@@ -543,19 +585,14 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             :func:`~dl_techniques.layers.attention.common.mask_dtype`, so the product
             cannot be formed at all.
 
-        .. warning::
-            **A SEPARATE, STILL-OPEN DEFECT keeps this layer from running under
-            ``mixed_float16`` or ``float64`` AT ALL, with or without a mask.**
-            :meth:`get_lambda` builds ``lambda_val`` via ``ops.cast(layer_idx,
-            "float32")`` and :meth:`call` then evaluates ``out1 - lambda_val * out2``
-            with ``out2`` in the compute dtype, which raises
-            ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
-            expected to be a float tensor but is a half tensor``. Measured at step 5
-            with ``attention_mask=None``, so it is independent of masking. The remedy
-            is one cast (``ops.cast(lambda_val, out2.dtype)``) but it lives on a
-            different expression than the mask bias, so it was reported rather than
-            absorbed into that step; pinned by
-            ``TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect``.
+        .. note::
+            **ALSO FIXED (same plan, step 5b).** A separate dtype defect used to keep
+            this layer from running under ``mixed_float16`` or ``float64`` AT ALL,
+            with or without a mask: :meth:`get_lambda` hard-coded its schedule to
+            ``float32``. That is now evaluated in ``variable_dtype`` and cast to the
+            streams' dtype in :meth:`call`; see the notes at those two sites. All
+            three policies are exercised end-to-end by the mask tests in
+            ``tests/test_layers/test_attention/test_differential_attention.py``.
         """
         attention_mask = ops.cast(attention_mask, scores.dtype)
         if len(attention_mask.shape) == 2:
@@ -715,7 +752,15 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         )
 
         # Compute layer-dependent lambda value (same schedule as original).
-        lambda_val = self.get_lambda(layer_idx)
+        #
+        # FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b): `get_lambda` returns
+        # the schedule in `variable_dtype`, which under `mixed_float16` is
+        # `float32` while `out2` is `float16`. Combining them without this cast
+        # raised `InvalidArgumentError: cannot compute Mul as input #1(zero-based)
+        # was expected to be a float tensor but is a half tensor` — with NO mask
+        # supplied, so the layer could not run under mixed precision at all. The
+        # cast is an identity under `float32` and `float64`.
+        lambda_val = ops.cast(self.get_lambda(layer_idx), out2.dtype)
 
         # Differential attention: SDPA1 - lambda*SDPA2
         diff = out1 - lambda_val * out2

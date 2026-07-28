@@ -58,22 +58,40 @@ they are the frozen reality of the registry, not accidents to be "tidied":
 ### Shared primitives (`common.py`)
 
 `dl_techniques/layers/attention/common.py` is the package's single home for the small primitives
-that every attention layer needs. It holds exactly four module-level names — **no classes, no
+that every attention layer needs. It holds exactly five module-level names — **no classes, no
 registry entries, no Keras serialization registration**:
 
 | Name | Purpose |
 |------|---------|
 | `MASK_BIAS_VALUE` | The additive `-1e9` bias applied to masked attention logits. |
 | `mask_dtype(compute_dtype)` | The dtype a masked softmax/logsumexp chain must run in (at least `float32`), so the bias stays finite under `mixed_float16`. |
+| `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)` | **The prescribed way to apply an attention mask.** Applies the bias with `ops.where` inside `mask_dtype(...)`, so the `0 * -inf = NaN` product cannot be formed. Ten layers use it. |
 | `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)` | The `dim % num_heads` constructor precondition, with per-call-site argument naming in the error message. |
 | `compute_attention_scale(head_dim) -> float` | The softmax temperature `1 / sqrt(head_dim)` as a plain Python `float`, to be computed in `__init__`/`build` and never in `call()`. |
+
+Two things about `apply_attention_mask` that are easy to get wrong, and that it deliberately will
+**not** decide for you:
+
+- **Polarity is per call site.** `keep` is the *keep predicate*; the helper performs no polarity
+  inference. Pass your site's own spelling verbatim (`rpc_attention` passes
+  `ops.not_equal(mask, 0)`, `capsule_routing_attention` passes a raw boolean, the rest pass their
+  `1 = keep` float mask). A uniform `mask > 0` rewrite inverts masking at two of the ten sites
+  with no shape error and no exception.
+- **`rescue_axis` is the axis YOUR softmax reduces over.** It defaults to `-1`, which turns on the
+  degenerate-row rescue (a slice that keeps nothing is treated as keeping everything, so no
+  all-`-inf` softmax row is ever formed); `None` is the explicit opt-out. It is never inferred.
+  `ring_attention` is the counter-example that forces this: inside its blockwise online softmax a
+  "row" is one key-axis *tile*, so a per-tile `rescue_axis=-1` would un-mask the **future** under a
+  causal mask (measured at 24.14 by injection, with every finiteness test still passing). Ring
+  therefore opts out per tile and rescues once over the full key axis before its block loop.
 
 It is an implementation detail of the package (not re-exported from `__init__.py`); layers import
 it as `from .common import ...`. **`GUIDE.md` section 3.5 documents the contract *and the limits*
 of each entry** — in particular that `MASK_BIAS_VALUE` is only safe together with `mask_dtype()`
-and the `keras.ops.where` mask form, and that adopting `compute_attention_scale` at an existing
-site requires a bit-identity probe (`x ** -0.5` is *not* bit-identical to it). Read that section
-before adopting any of them at a new call site.
+and the `keras.ops.where` mask form, that `apply_attention_mask` *adds* rather than *replaces* the
+bias (a float64-visible difference at a site that previously replaced it), and that adopting
+`compute_attention_scale` at an existing site requires a bit-identity probe (`x ** -0.5` is *not*
+bit-identical to it). Read that section before adopting any of them at a new call site.
 
 ## Call-signature caveats
 

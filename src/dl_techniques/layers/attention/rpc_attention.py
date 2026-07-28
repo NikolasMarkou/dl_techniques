@@ -104,6 +104,36 @@ class RPCAttention(keras.layers.Layer):
     norms come from
     :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
 
+    .. warning::
+        **This layer cannot run under a ``mixed_float16`` policy on this backend,
+        and that is a missing backend kernel rather than a defect in this file.**
+        MEASURED on TF 2.18 / CUDA / RTX 4070 (plan-2026-07-27T183600-b4ef45f0,
+        steps 2 and 5b): ``ops.svd`` has NO float16 kernel outside XLA, so the
+        first ``ops.svd`` inside :meth:`_pcp_decomposition` raises::
+
+            NotFoundError: Could not find device for node:
+            {{node Svd}} = Svd[T=DT_HALF, ...]
+            All kernels registered for op Svd:
+              device='XLA_CPU_JIT'; T in [DT_FLOAT, DT_DOUBLE, DT_HALF]
+              device='XLA_GPU_JIT'; T in [DT_FLOAT, DT_DOUBLE, DT_HALF]
+              device='CPU';         T in [DT_FLOAT] / [DT_DOUBLE] / complex
+              device='GPU';         T in [DT_DOUBLE] / [DT_FLOAT]
+
+        Specifics, because they are easy to get wrong:
+
+        * It raises **with or without an ``attention_mask``** — this is not a
+          masking bug. A MASKED fp16 forward happens to survive, because the mask
+          bias is applied in ``mask_dtype(...)`` (see the D-005 boundary below) and
+          the promoted scores then have a float32 SVD kernel. The **unmasked** fp16
+          forward has nothing to promote it and dies.
+        * XLA/``jit_compile=True`` is the ONLY path on which an fp16 ``Svd`` kernel
+          exists at all (``XLA_*_JIT`` above).
+        * Promoting the UNMASKED path too would change no-mask numerics for every
+          existing caller, which is why it was not done here.
+
+        ``float32`` and ``float64`` policies are fully supported. Carried to the
+        Tier-4 brief (``research/2026_attention_open_design_questions.md``).
+
     **Architecture Overview:**
 
     .. code-block:: text
