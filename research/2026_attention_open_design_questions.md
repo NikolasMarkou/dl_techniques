@@ -1241,6 +1241,85 @@ catalogue.
 
 ---
 
+# Group F — Added at step 10 (adversarial review of this plan)
+
+## Q16 — `attention_routing_capsule` shares ONE initializer INSTANCE across three weights
+
+**Current behavior.** `src/dl_techniques/layers/attention/attention_routing_capsule.py`
+stores `self.kernel_initializer = keras.initializers.get(kernel_initializer)` — an
+*object* — in `__init__`, and then hands that same object to three consumers: the routing
+weight `W`, the query vector `q`, and (since step 6 of this plan, which fixed the
+`prob_head` `Dense` receiving the default initializer instead of the caller's) the
+`prob_head` `Dense`. Keras initializers are callables, not per-variable state, so nothing
+raises and nothing is shape-mismatched.
+
+**The question.** A *seeded* initializer is stateful in exactly the way that matters here.
+`keras.initializers.GlorotUniform(seed=42)` reproduces the SAME draw on every call, so the
+three weights above are no longer independent samples: whatever correlation the shared
+seed induces is baked into the layer at build time. For the default `"glorot_uniform"`
+string this is invisible (each `get()` result is unseeded and draws fresh), which is why
+no test sees it — and it is why this is a design question rather than a defect report.
+
+**Options.**
+
+1. **Leave it and document it** (one sentence in the `kernel_initializer` docstring:
+   "a seeded initializer instance is shared across `W`, `q` and `prob_head`, so their
+   draws will be identical"). Cheapest; makes the behavior findable by the next reader.
+2. **Deep-copy per consumer** — `keras.initializers.get(self.kernel_initializer.get_config())`
+   or `copy.deepcopy` at each use site. Restores independence, but a copied *seeded*
+   initializer still reproduces the same draw, so this only helps if the copies are also
+   re-seeded, which changes what a user asking for `seed=42` gets.
+3. **Store the SPEC, not the instance** — keep `kernel_initializer` as the raw argument and
+   call `keras.initializers.get(...)` separately at each use. Same outcome as (2) for
+   strings, same non-outcome for a passed instance, and it partially undoes the
+   `regularizers.get()` canonicalization that step 6 deliberately added.
+
+**Blast radius.** `attention_routing_capsule.py` and its `CapsuleBlockV2` wrapper only;
+consumers are the CapsNet v2 model suite (`tests/test_models/test_capsnet/`) and the
+`'attention_routing_capsule'` factory key. No `get_config()` key changes under any option
+(I5 held), so no checkpoint compatibility question arises.
+
+**Recommendation.** Option 1. The correlated-draw effect requires a caller to pass a
+*seeded instance* — an uncommon, deliberate act — and options 2 and 3 both make the
+seeding contract *less* predictable than sharing does, while adding a copy at every use
+site. Reported by the step-10 adversarial review as NOTE-level (N10) and explicitly
+carried here rather than fixed, because it is a call about what a shared seed should
+*mean*, not a bug with a right answer.
+
+---
+
+## Q17 — `probability_type`s other than `softmax` have never been exercised WITH a mask
+
+**Current behavior.** `ProbabilityOutput` (`layers/activations/probability_output.py`)
+dispatches to `Softmax`, `Sparsemax`, `ThreshMax`, `AdaptiveTemperatureSoftmax` and the
+routing layers; the eight mask sites hand it biased logits containing `MASK_BIAS_VALUE`
+(and, after the `out_dtype` cast-back, `-inf` under `mixed_float16`). Every measurement in
+this plan — and every one in the step-10 review — used the DEFAULT `softmax`.
+
+**The question.** `sparsemax` and `threshmax` do not consume `-inf` the way a softmax
+does: sparsemax sorts and thresholds, and a `-inf` participates in a cumulative sum;
+threshmax renormalizes after a cut. Whether the `-1e9`/`-inf` bias produces exactly-zero
+weight at masked positions under those strategies is UNMEASURED. Step 10 closed the
+adjacent hole for the softmax `axis` — `rescue_axis` is now derived from
+`probability_config` (D-017) — which makes this the remaining unexplored dimension of the
+same public surface.
+
+**Options.** (1) Measure all four types x four mask kinds x three policies at one site and
+record the result; (2) restrict `probability_type` at the mask sites the way
+`capsule_routing` and `window_attention` already restrict theirs, if a type is found to
+break masking; (3) leave unmeasured and documented.
+
+**Blast radius.** Every `probability_type`-carrying attention layer (eight mask sites).
+No code change is implied until (1) is done.
+
+**Recommendation.** Option 1, as a small standalone measurement plan. It is cheap
+(one parametrized test file), it is the kind of gap that a finiteness-only suite cannot
+see, and the plan that introduced `apply_attention_mask` has already demonstrated that
+this exact class of question — "is the claim true for the non-default configuration?" —
+is where its defects have actually been.
+
+---
+
 ## Sources
 
 - `src/dl_techniques/layers/attention/` at commit `58232e63` (every `file.py:line` in this

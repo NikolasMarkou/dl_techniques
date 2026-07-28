@@ -635,9 +635,23 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # The fully-masked-row rescue arrives via `apply_attention_mask`'s DEFAULT
         # `rescue_axis=-1`: a query row that keeps NOTHING is treated as keeping
         # EVERYTHING, so the all-`-inf` row is never FORMED and no NaN gradient is
-        # created either. `-1` is correct here because both streams' softmaxes
-        # (`attn_prob_1` / `attn_prob_2`) reduce over the KEY axis of the
-        # already-broadcast mask — checked, not assumed.
+        # created either.
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
+        # The axis is DERIVED from this layer's own `probability_config` rather than
+        # left to the helper's `-1` default. BOTH streams' softmaxes (`attn_prob_1` /
+        # `attn_prob_2`) are built from that one config, so one derivation covers both.
+        # `ProbabilityOutput` reads its softmax `axis` from `type_config`
+        # (`activations/probability_output.py:180`) and this layer forwards
+        # `probability_config` VERBATIM, so a caller can move the reduction axis and the
+        # pre-step-10 "checked, not assumed" claim held only for the DEFAULT config.
+        # MEASURED at the sibling `gated_attention` under `mixed_float16` with
+        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192 non-finite.
+        # WHAT NOT TO DO: do NOT restore a bare `-1` (correct only while the caller
+        # leaves the config alone) and do NOT read this as the rank/shape INFERENCE the
+        # D-009 anchor in `common.py` forbids — this reads the site's own declared
+        # config. The full argument lives at the D-017 anchors in `common.py` and
+        # `gated_attention.py`. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
         #
         # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" —
         # the user ruled the finite-garbage semantics package-wide on 2026-07-28, and
@@ -648,6 +662,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             scores,
             attention_mask,
             out_dtype=keras.backend.standardize_dtype(scores.dtype),
+            rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 
     def _project_to_heads(

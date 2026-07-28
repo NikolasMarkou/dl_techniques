@@ -37,7 +37,12 @@ number you see in a sibling module came from here:
     measured at 24.14; it rescues once over the full key axis before its block loop
     instead). A site whose softmax reduces over some other axis must name that axis
     explicitly — the axis is never inferred, for the same reason polarity is never
-    inferred.
+    inferred. Seven of the ten adopters therefore DERIVE the axis from their own
+    ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors) rather
+    than inheriting the ``-1`` default; ``capsule_routing`` pins the axis in
+    ``__init__`` instead, and ``ring`` opts out. A ``keep`` whose extent along the
+    named axis is statically 1 is REJECTED — it cannot mask anything, because softmax
+    is invariant to a constant shift of the axis it reduces over (D-017).
 
 -   ``MASK_BIAS_VALUE`` / ``mask_dtype`` are **no longer single-use.** After
     ``plan-2026-07-27T183600-b4ef45f0`` they are reached — directly or through
@@ -220,12 +225,55 @@ def mask_dtype(compute_dtype: str) -> str:
 #     that wants no rescue MUST pass `None`. Silently guessing per-tensor would be
 #     the same class of shape-error-free mistake as guessing polarity (I2).
 #   * Do NOT read the default as "the caller no longer owns the axis". It does — the
-#     default is only correct because all six current call sites were checked to
-#     softmax over the last axis; see each site's adoption comment.
+#     default is only correct for a site whose softmax reduces over the LAST axis.
+#     TEN modules now adopt this helper and NINE take the rescue (`ring_attention.py`
+#     opts out per tile, D-011). Six of them build that softmax from a user-supplied
+#     `probability_config`, whose `axis` key `ProbabilityOutput` honors
+#     (`activations/probability_output.py:180`), so those sites DERIVE `rescue_axis`
+#     from their own config instead of inheriting this default — see D-017 and each
+#     site's adoption comment.
 # ACCEPTED COST, stated plainly: a caller whose mask is wrong now gets finite garbage
 # instead of a loud NaN, at every site, in every dtype.
 # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0) and D-006 (the
 # local original at capsule_routing_attention.py, superseded by this parameter).
+#
+# DECISION plan-2026-07-27T183600-b4ef45f0/D-017
+# A `keep` that is BROADCAST across `rescue_axis` — statically size 1 there while
+# `logits` is statically longer — is REJECTED with a `ValueError`. It is never
+# silently accepted and never silently "rescued".
+#
+# WHY, measured: softmax is invariant to a constant shift of the row it reduces over,
+# so an additive bias that is CONSTANT along the reduced axis cannot mask anything, in
+# any implementation. A size-1 `rescue_axis` is exactly that case, so such a mask is
+# always a caller mistake (a query-axis mask passed where a key-axis mask was
+# expected, or a mask that was never broadcast). MEASURED at `GatedAttention` in
+# float32 with a `(B, H, Q, 1)` mask blanking query rows 5+: the output was
+# BIT-IDENTICAL (maxdiff 0.0) to a no-op all-ones mask, while the pre-plan arithmetic
+# form differed by 1.849 — and that 1.849 was not masking either, it was the uniform
+# distribution you get once `logits + -1e9` rounds every entry of the row to the same
+# float (the ulp at 1e9 is 64). Both answers are wrong; only one of them is loud.
+#
+# WHAT NOT TO DO, and why:
+#   * Do NOT "just skip the rescue when the axis is size 1". That RE-CREATES the
+#     all-`MASK_BIAS_VALUE` row this helper exists to prevent: cast back to fp16 it is
+#     all-`-inf`, and its softmax is the whole-batch NaN of D-002/D-008. Skipping
+#     restores the NaN; rejecting reports the caller's actual error.
+#   * Do NOT downgrade this to a warning or a log line. The mask provably has NO
+#     effect, so every number the caller reads afterwards was computed as if no mask
+#     had been passed at all.
+#   * Do NOT extend the check to `rescue_axis=None`. With the opt-out the caller has
+#     named no softmax axis, so the helper has no basis for deciding which axis must
+#     carry information — `ring_attention.py` passes per-TILE slices there (D-011).
+#   * Do NOT make the check dynamic or data-dependent. It reads the STATIC shape only;
+#     a trace-time-unknown (`None`) extent is accepted and left to the caller, because
+#     branching on tensor DATA would break D-008's graph-safety guarantee.
+#   * Do NOT simplify the condition to "`keep` is size 1 along the axis". The test is
+#     BROADCAST — size 1 in `keep` while `logits` is genuinely longer. A length-1 key
+#     axis (both size 1) is an ordinary single-token sequence and must keep working:
+#     rejecting it broke `test_text_decoder.py::test_single_token_input`, which was
+#     caught by the consumer gate and is now pinned by
+#     `test_common.py::test_a_genuinely_length_one_axis_is_not_rejected`.
+# See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
 def apply_attention_mask(
         logits: Any,
         keep: Any,
@@ -262,6 +310,19 @@ def apply_attention_mask(
         ``> 0`` after casting). NO polarity inference is performed — a site whose mask
         spells masking as ``mask == 0`` passes its own inverted expression, and a site
         holding a boolean keep-mask passes it straight through.
+
+        **PRECONDITION: ``keep`` must be BINARY** (``{0, 1}`` / ``{False, True}``).
+        The comparison is ``> 0``, so a graded value such as ``0.5`` is FULL KEEP —
+        it receives no bias at all. This is a deliberate difference from the
+        arithmetic form ``logits + (1 - m) * MASK_BIAS_VALUE`` that this helper
+        replaced, which interpolated (``m = 0.5`` gave ``-5e8``, i.e. effectively
+        masked). MEASURED at ``GatedAttention`` in float32 with a masked half of
+        ``0.5``: this helper reproduces the ALL-ONES output exactly while the old
+        form reproduced the HARD-mask output exactly, a difference of 1.81. Soft
+        masking is **not** a supported mode and must not be added: an additive
+        ``-inf``-scale bias has no meaningful partial value, and a per-element
+        interpolation is the very ``0 * -inf`` arithmetic the D-002 anchor forbids.
+        Pinned by ``test_common.py::TestApplyAttentionMaskAssumesABinaryKeep``.
     :type keep: keras.KerasTensor
     :param out_dtype: Dtype of the returned tensor. ``None`` (the default) returns
         ``mask_dtype(...)`` — the SAFE choice, which keeps the biased logits out of
@@ -292,6 +353,18 @@ def apply_attention_mask(
         for that layout.
     :type rescue_axis: Optional[int]
 
+    :raises ValueError: If ``keep`` is **broadcast across** ``rescue_axis`` — i.e. its
+        static extent there is 1 while ``logits`` is statically longer. Such a
+        predicate is constant along the axis the caller's softmax reduces over, and
+        softmax is invariant to a constant shift of that axis, so the mask provably
+        cannot mask anything whatever the implementation does. This is a hard error
+        rather than a silent no-op because it is a shape-error-free caller mistake:
+        a query-axis mask supplied where a key-axis mask was expected, or a mask
+        that was never broadcast. NOT raised when ``rescue_axis`` is ``None`` (no
+        softmax axis was named), when the extent is unknown at trace time, or when
+        ``logits`` is itself size 1 along that axis (an ordinary single-token
+        sequence). See the D-017 anchor above.
+
     :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
     :rtype: keras.KerasTensor
@@ -300,6 +373,32 @@ def apply_attention_mask(
     x = ops.cast(logits, md)
     kept = ops.cast(keep, md) > 0.0
     if rescue_axis is not None:
+        # D-017. STATIC shapes only, and deliberately inline: a second module-level
+        # helper in this file is a named STOP tripwire of the plan that wrote it. The
+        # condition is BROADCAST, not size: `keep` is rejected only when it is
+        # size 1 along the reduced axis WHILE `logits` is genuinely longer there. A
+        # length-1 key axis (`logits` size 1 too) is an ordinary single-token
+        # sequence, not a mistake — measured: `TextDecoder` feeds exactly that, and
+        # rejecting it broke `test_text_decoder.py::test_single_token_input`.
+        keep_shape = tuple(getattr(keep, "shape", ()) or ())
+        logits_shape = tuple(getattr(logits, "shape", ()) or ())
+        if (
+                -len(keep_shape) <= rescue_axis < len(keep_shape)
+                and -len(logits_shape) <= rescue_axis < len(logits_shape)
+                and keep_shape[rescue_axis] == 1
+                and logits_shape[rescue_axis] not in (1, None)
+        ):
+            raise ValueError(
+                f"apply_attention_mask: `keep` has shape {keep_shape}, whose extent "
+                f"along rescue_axis={rescue_axis} is size 1, while `logits` has "
+                f"shape {logits_shape} — so the predicate is BROADCAST across the "
+                "axis the caller's softmax reduces over. Softmax is invariant to a "
+                "constant shift of the axis it reduces over, so such a mask cannot "
+                "mask anything and would be silently ignored. Broadcast the mask "
+                "along the softmax axis, pass the axis this site's softmax actually "
+                "reduces over as `rescue_axis=`, or pass `rescue_axis=None` to opt "
+                "out of the fully-masked-slice rescue entirely."
+            )
         # A row that keeps nothing keeps everything. Graph-safe: `rescue_axis` is a
         # Python argument fixed at trace time, and the tensor-level expression has no
         # data-dependent control flow.

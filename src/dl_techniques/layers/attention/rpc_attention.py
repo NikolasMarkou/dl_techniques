@@ -548,8 +548,9 @@ class RPCAttention(keras.layers.Layer):
 
         # Apply mask if provided
         if mask is not None:
-            # Broadcast mask to (batch, num_heads, seq_len, seq_len)
-            mask_shape = ops.shape(mask)
+            # Broadcast mask to (batch, num_heads, seq_len, seq_len). The dispatch
+            # below reads the STATIC rank (`len(mask.shape)`); a dynamic `ops.shape`
+            # call here was left dead by the step-2 rewrite and removed at step 10.
 
             # Case 1: Mask is (batch, seq_len) -> Expand to (batch, 1, 1, seq_len)
             if len(mask.shape) == 2:
@@ -592,13 +593,27 @@ class RPCAttention(keras.layers.Layer):
             # mask that the rescue makes it equivalent to).
             #
             # WHAT NOT TO DO: do NOT pass `rescue_axis=None` here to restore the old
-            # numbers. `-1` is correct because `self.attn_prob` reduces over the KEY
-            # axis of the already-expanded mask. Guarded by
+            # numbers. Guarded by
             # `test_rpc_attention.py::TestRPCAttentionFullyMaskedRow`.
             # See decisions.md D-009 (plan-2026-07-27T183600-b4ef45f0).
+            #
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
+            # The axis is DERIVED from this layer's own `probability_config` rather than
+            # left to the helper's `-1` default: `ProbabilityOutput` reads its softmax
+            # `axis` from `type_config` (`activations/probability_output.py:180`) and
+            # this layer forwards `probability_config` VERBATIM, so a caller can move
+            # the reduction axis and the pre-step-10 "`-1` is correct because
+            # `self.attn_prob` reduces over the KEY axis" claim held only for the
+            # DEFAULT config. MEASURED at the sibling `gated_attention` under
+            # `mixed_float16` with `probability_config={"axis": -2}` and a dead KEY
+            # COLUMN: 8192/8192 non-finite. WHAT NOT TO DO: do NOT restore a bare `-1`,
+            # and do NOT read this as the rank/shape INFERENCE the D-009 anchor in
+            # `common.py` forbids — this reads the site's own declared config.
+            # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
             attention_scores = apply_attention_mask(
                 attention_scores,
                 ops.not_equal(mask, 0),
+                rescue_axis=(self.probability_config or {}).get("axis", -1),
             )
 
         # Perform PCP decomposition

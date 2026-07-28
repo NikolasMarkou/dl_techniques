@@ -729,6 +729,15 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # checked, not assumed. Since step 4c that is `apply_attention_mask`'s DEFAULT,
         # so no `rescue_axis` argument appears below; passing `None` would opt OUT and
         # bring the fp16 NaN (and its NaN gradient) back.
+        #
+        # This is the ONE `probability_config`-carrying site in the package that does
+        # NOT have to DERIVE its rescue axis from that config (D-017), and the reason is
+        # structural rather than lucky: `__init__`'s `_site_config` OVERRIDES any
+        # caller-supplied `"axis"` per probability site, pinning `attn_prob_attention`
+        # to `axis=-1` (routing is `-2`, aggregation `-1`), because the routing math
+        # depends on those axes. So `-1` here is not an assumption about the caller's
+        # config — it is enforced a few hundred lines above. If that override is ever
+        # relaxed, this call MUST start deriving its axis like its seven siblings do.
         # See decisions.md D-006, D-008 and D-009 (plan-2026-07-27T183600-b4ef45f0).
         return apply_attention_mask(
             attention_logits, keep, out_dtype=logits_dtype

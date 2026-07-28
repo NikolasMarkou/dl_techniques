@@ -627,11 +627,24 @@ class SingleWindowAttention(keras.layers.Layer):
         # The fully-masked-slice rescue arrives via `apply_attention_mask`'s DEFAULT
         # `rescue_axis=-1`: a slice of the mask that keeps NOTHING is treated as
         # keeping EVERYTHING, so an all-`-inf` row is never FORMED and no NaN
-        # gradient is created either. `-1` is correct here because this site's
-        # softmax (`self.attn_prob`) reduces over the KEY axis of the already-
-        # broadcast `(B, 1, 1, N)` mask — checked, not assumed. Note the mask has no
-        # QUERY axis at this site, so "keeps nothing" means "this batch element
-        # keeps no key at all".
+        # gradient is created either. Note the mask has no QUERY axis at this site,
+        # so "keeps nothing" means "this batch element keeps no key at all".
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
+        # The axis is DERIVED from this layer's own `probability_config` rather than
+        # left to the helper's `-1` default: `ProbabilityOutput` reads its softmax
+        # `axis` from `type_config` (`activations/probability_output.py:180`) and this
+        # layer forwards `probability_config` VERBATIM, so a caller can move the
+        # reduction axis and the pre-step-10 "checked, not assumed" claim held only for
+        # the DEFAULT config. MEASURED at the sibling `gated_attention` under
+        # `mixed_float16` with `probability_config={"axis": -2}` and a dead KEY COLUMN:
+        # 8192/8192 non-finite. This site is also the one where the D-017 size-1
+        # rejection is most visible: its mask is ALWAYS reshaped to `(B, 1, 1, N)`, so a
+        # caller configuring `axis=-2` (a softmax over queries) now gets a named
+        # `ValueError` rather than a mask that cannot mask. WHAT NOT TO DO: do NOT
+        # restore a bare `-1`, and do NOT read this as the rank/shape INFERENCE the
+        # D-009 anchor in `common.py` forbids — this reads the site's own declared
+        # config. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
         #
         # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back"
         # — the user ruled the finite-garbage semantics package-wide on 2026-07-28,
@@ -644,6 +657,7 @@ class SingleWindowAttention(keras.layers.Layer):
             attn,
             broadcast_mask,
             out_dtype=keras.backend.standardize_dtype(attn.dtype),
+            rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 
         attn = self.attn_prob(attn, training=training)

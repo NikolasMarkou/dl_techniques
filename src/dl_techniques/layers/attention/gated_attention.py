@@ -642,12 +642,36 @@ class GatedAttention(keras.layers.Layer):
             # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
             # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
             # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
-            # arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1` — step 4c flipped
+            # arrives via `apply_attention_mask`'s `rescue_axis` — step 4c flipped
             # the step-4b opt-in default on the user's direction ("I care about correctness, not
-            # backwards compatibility"), so this site no longer spells the argument out. `-1` is
-            # correct here because THIS site's softmax (`self.attn_prob`) reduces over the KEY
-            # axis of the already-broadcast mask — checked, not assumed; a site whose softmax
-            # reduced elsewhere would have to name its axis explicitly.
+            # backwards compatibility").
+            #
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
+            # The axis is DERIVED from this layer's own `probability_config`, not inherited
+            # from the helper's `-1` default. `ProbabilityOutput` reads its softmax `axis`
+            # from `type_config` (`activations/probability_output.py:180`) and
+            # `__init__` forwards `probability_config` VERBATIM (see the `self.attn_prob`
+            # construction), so a caller CAN move the reduction axis, and the pre-step-10
+            # claim that "`-1` is correct because this site reduces over the KEY axis —
+            # checked, not assumed" was true only for the DEFAULT config. MEASURED on the
+            # pre-step-10 code under `mixed_float16` with `probability_config={"axis": -2}`
+            # and a rank-3 mask blanking one KEY COLUMN: 8192/8192 non-finite outputs
+            # (float32 control 0/8192) — the whole-batch NaN class this plan set out to
+            # eliminate, alive at a supported public configuration, because the rescue was
+            # looking down the wrong axis.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT restore a bare `-1` "because every site reduces over keys". This
+            #     site does so ONLY while the caller leaves `probability_config` alone.
+            #   * Do NOT read this as the axis INFERENCE that the D-009 anchor in
+            #     `common.py` forbids. Inference means guessing from a tensor's rank or
+            #     shape; this reads the site's OWN declared configuration — the same dict
+            #     the softmax itself is built from — which is the opposite.
+            #   * Do NOT "helpfully" fall back to `-1` when the configured axis makes the
+            #     mask degenerate. `apply_attention_mask` REJECTS a size-1 rescue axis
+            #     (D-017) precisely so that combination is loud; e.g. `axis=-2` plus a
+            #     rank-2 key-padding mask now raises instead of returning 8192/8192 NaN.
+            # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
             #
             # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
             # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
@@ -659,7 +683,10 @@ class GatedAttention(keras.layers.Layer):
                 scaled_attention_logits.dtype
             )
             scaled_attention_logits = apply_attention_mask(
-                scaled_attention_logits, mask, out_dtype=logits_dtype
+                scaled_attention_logits,
+                mask,
+                out_dtype=logits_dtype,
+                rescue_axis=(self.probability_config or {}).get("axis", -1),
             )
 
         # Parameterized attention-probability transform over the key dimension

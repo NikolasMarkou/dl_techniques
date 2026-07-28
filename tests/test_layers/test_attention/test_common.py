@@ -603,6 +603,210 @@ class TestApplyAttentionMaskRescueAxis:
         np.testing.assert_allclose(compiled, eager, rtol=1e-6, atol=1e-6)
 
 
+class TestApplyAttentionMaskRejectsASizeOneRescueAxis:
+    """A ``keep`` that is CONSTANT along the softmax-reduced axis is rejected (D-017).
+
+    This class exists because of a MEASURED silent-un-masking report: with a
+    ``(B, H, Q, 1)`` keep predicate the rescue
+    ``kept OR NOT any(kept, axis=-1, keepdims=True)`` is all-``True``, so the mask has
+    no effect whatsoever and a ``GatedAttention`` forward came back **bit-identical
+    (maxdiff 0.0) to a no-op all-ones mask**.
+
+    The diagnosis matters more than the symptom, and it is asserted rather than
+    asserted-about in :meth:`test_a_mask_constant_along_the_reduced_axis_cannot_mask`:
+    softmax is invariant to a CONSTANT shift of the row it reduces over, so an
+    additive bias that is constant along that axis is mathematically a NO-OP. The
+    all-``True`` rescue is not "the identity by accident" — it is the correct rescue
+    (every row keeps nothing, therefore every row keeps everything). What is wrong is
+    the CALLER: such a mask can never mask anything, in any implementation, so it is
+    a shape-error-free mistake (a query-axis mask passed where a key-axis mask was
+    expected, or a mask that was never broadcast). Since step 10 the helper says so.
+    """
+
+    def test_a_size_one_rescue_axis_raises(self):
+        """The C1 guard: a keep whose rescue axis is statically 1 is a hard error."""
+        logits = ops.convert_to_tensor(
+            np.arange(6, dtype="float32").reshape(2, 3)
+        )
+        keep = ops.convert_to_tensor(np.array([[1.0], [0.0]], dtype="float32"))
+
+        with pytest.raises(ValueError, match=r"rescue_axis.*size 1"):
+            apply_attention_mask(logits, keep)
+
+    def test_a_rank_4_query_only_mask_raises(self):
+        """The exact layout the reviewer measured: ``(B, H, Q, 1)``."""
+        logits, _ = _as_compute(_logits(seed=41))
+        keep_np = np.ones((_B, _H, _N, 1), dtype="float32")
+        keep_np[:, :, 5:, :] = 0.0
+
+        with pytest.raises(ValueError, match=r"rescue_axis"):
+            apply_attention_mask(logits, ops.convert_to_tensor(keep_np))
+
+    def test_a_mask_constant_along_the_reduced_axis_cannot_mask(self):
+        """WHY the raise is correct, measured — not asserted as taste.
+
+        Softmax is shift-invariant, so biasing a whole reduced row by a constant is a
+        mathematical no-op. With a REPRESENTABLE constant that is exactly what
+        happens (identical probabilities). With ``MASK_BIAS_VALUE`` the row's own
+        differences are annihilated by float32 rounding — the ulp at ``1e9`` is 64 —
+        so the pre-step-10 output was not "masking", it was a uniform distribution,
+        i.e. finite garbage either way.
+        """
+        row = np.array([[0.0, 1.0, 2.0]], dtype="float32")
+        base = ops.convert_to_numpy(
+            keras.activations.softmax(ops.convert_to_tensor(row))
+        )
+        shifted = ops.convert_to_numpy(
+            keras.activations.softmax(ops.convert_to_tensor(row - 30.0))
+        )
+        saturated = ops.convert_to_numpy(
+            keras.activations.softmax(
+                ops.convert_to_tensor(row + np.float32(MASK_BIAS_VALUE))
+            )
+        )
+
+        np.testing.assert_allclose(shifted, base, rtol=0, atol=0)
+        np.testing.assert_allclose(
+            saturated, np.full_like(saturated, 1.0 / 3.0), rtol=0, atol=1e-6
+        )
+
+    def test_the_explicit_opt_out_still_accepts_a_size_one_axis(self):
+        """``rescue_axis=None`` names NO softmax axis, so the helper cannot judge.
+
+        This is what keeps ``ring_attention.py``'s per-tile opt-out (D-011) working:
+        the guard fires only when the caller has told the helper which axis its
+        softmax reduces over.
+        """
+        logits = ops.convert_to_tensor(
+            np.arange(6, dtype="float32").reshape(2, 3)
+        )
+        keep = ops.convert_to_tensor(np.array([[1.0], [0.0]], dtype="float32"))
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=None)
+        )
+        np.testing.assert_allclose(out[0], [0.0, 1.0, 2.0])
+        np.testing.assert_allclose(
+            out[1], np.full(3, 3.0 + MASK_BIAS_VALUE, dtype="float32"), rtol=1e-6
+        )
+
+    def test_a_size_one_axis_that_is_not_the_rescue_axis_is_accepted(self):
+        """Only the NAMED axis is checked — broadcasting over heads stays legal."""
+        logits, _ = _as_compute(_logits(seed=42))
+        keep = ops.convert_to_tensor(np.ones((_B, 1, _N, _N), dtype="float32"))
+
+        out = ops.convert_to_numpy(apply_attention_mask(logits, keep))
+        assert np.all(np.isfinite(out))
+
+    def test_a_genuinely_length_one_axis_is_not_rejected(self):
+        """A single-token sequence is ordinary input, not a caller mistake.
+
+        The rejected condition is BROADCAST (size 1 in ``keep`` while ``logits`` is
+        longer), not size. A first draft of this guard tested size alone and broke
+        ``tests/test_layers/test_transformers/test_text_decoder.py::
+        TestTextDecoder::test_single_token_input``, where a one-token decode builds a
+        ``(1, 1, 1)`` causal mask against ``(1, H, 1, 1)`` logits — caught by the
+        consumer gate, not by this file, which is why the case is pinned here now.
+        """
+        logits = ops.convert_to_tensor(np.zeros((1, 4, 1, 1), dtype="float32"))
+        keep = ops.convert_to_tensor(np.ones((1, 1, 1, 1), dtype="float32"))
+
+        out = ops.convert_to_numpy(apply_attention_mask(logits, keep))
+        assert np.all(np.isfinite(out))
+        np.testing.assert_allclose(out, np.zeros((1, 4, 1, 1)), rtol=0, atol=0)
+
+    def test_a_masked_single_key_is_rescued_rather_than_rejected(self):
+        """The same shape with the single key MASKED: rescued, still not an error."""
+        logits = ops.convert_to_tensor(np.full((1, 2, 1, 1), 3.0, dtype="float32"))
+        keep = ops.convert_to_tensor(np.zeros((1, 1, 1, 1), dtype="float32"))
+
+        out = ops.convert_to_numpy(apply_attention_mask(logits, keep))
+        np.testing.assert_allclose(out, np.full((1, 2, 1, 1), 3.0), rtol=0, atol=0)
+
+    def test_a_dynamic_rescue_axis_length_is_not_rejected(self):
+        """A ``None`` (trace-time-unknown) axis length cannot be judged, so it passes.
+
+        The guard is STATIC by construction: it must never become a data-dependent
+        branch (D-008 forbids that — the rescue has to stay graph-safe).
+        """
+        import tensorflow as tf
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([2, None], tf.float32),
+                tf.TensorSpec([2, None], tf.float32),
+            ]
+        )
+        def traced(x, k):
+            return apply_attention_mask(x, k)
+
+        out = ops.convert_to_numpy(
+            traced(
+                tf.constant(np.arange(6, dtype="float32").reshape(2, 3)),
+                tf.constant(np.array([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], "float32")),
+            )
+        )
+        assert np.all(np.isfinite(out))
+        np.testing.assert_allclose(out[1], [3.0, 4.0, 5.0], rtol=1e-6)
+
+
+class TestApplyAttentionMaskAssumesABinaryKeep:
+    """``keep`` is a BINARY predicate; a fractional value means KEEP (W3).
+
+    The replaced arithmetic form ``logits + (1 - m) * MASK_BIAS_VALUE`` interpolated:
+    ``m = 0.5`` produced ``-5e8``, which is "masked" for every practical purpose.
+    ``ops.where(cast(keep) > 0, ...)`` does not interpolate, so the same input is now
+    FULL KEEP. MEASURED at ``GatedAttention`` in float32 with a masked half of 0.5:
+    the new output equals the ALL-ONES output exactly, the old one equalled the HARD
+    mask exactly, and the two differ by 1.81 — while the binary control is
+    bit-identical. That is a deliberate, documented semantics change and NOT a
+    soft-mask feature; these tests pin it so it cannot drift back silently.
+    """
+
+    def test_a_fractional_keep_is_full_keep(self):
+        logits, logits_f32 = _as_compute(_logits(seed=43))
+        keep = ops.convert_to_tensor(
+            np.full((_B, 1, _N, _N), 0.5, dtype="float32")
+        )
+
+        out = ops.convert_to_numpy(apply_attention_mask(logits, keep)).astype(
+            "float32"
+        )
+        np.testing.assert_allclose(
+            out,
+            np.broadcast_to(logits_f32, out.shape),
+            rtol=0,
+            atol=0,
+            err_msg=(
+                "a fractional keep value must be FULL KEEP (unbiased); it must "
+                "never be interpolated into a partial bias"
+            ),
+        )
+
+    def test_only_exactly_zero_and_negative_values_mask(self):
+        logits = ops.convert_to_tensor(
+            np.zeros((1, 4), dtype="float32")
+        )
+        keep = ops.convert_to_tensor(
+            np.array([[1.0, 0.5, 0.0, -1.0]], dtype="float32")
+        )
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=None)
+        )
+        np.testing.assert_allclose(
+            out, [[0.0, 0.0, MASK_BIAS_VALUE, MASK_BIAS_VALUE]], rtol=1e-6
+        )
+
+    def test_the_binary_precondition_is_documented(self):
+        """The precondition must be stated where a caller reads it, not only here."""
+        doc = apply_attention_mask.__doc__ or ""
+        assert "binary" in doc.lower(), (
+            "`apply_attention_mask` must state its BINARY-keep precondition in its "
+            "own docstring — a graded mask is silently treated as full keep"
+        )
+
+
 # ---------------------------------------------------------------------
 # The two pre-existing exports — regression cover only (they had no test file).
 # ---------------------------------------------------------------------

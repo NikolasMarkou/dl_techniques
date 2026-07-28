@@ -1107,3 +1107,129 @@ class TestGatedAttentionFloat64RunsThroughRoPE:
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# Step 10 (adversarial-review completion fix). Two silent-semantics gaps that no
+# finiteness, polarity or bit-identity test in this file could see, both MEASURED
+# on the shipped code before these guards were written.
+# ---------------------------------------------------------------------
+
+
+class TestGatedAttentionRejectsAQueryOnlyMask:
+    """A ``(B, H, Q, 1)`` mask reaches the helper untouched and is now REJECTED.
+
+    ``_apply_attention``'s rank dispatch ends in ``else: mask = attention_mask
+    # Assume it's already broadcastable``, so a rank-4 mask is handed to
+    ``apply_attention_mask`` exactly as supplied. When its LAST axis is 1 the
+    predicate is constant along the axis ``self.attn_prob`` reduces over, which is
+    mathematically a no-op for a softmax.
+
+    MEASURED on the pre-step-10 code (float32, ``GatedAttention(dim=64,
+    num_heads=4)``, ``(2, 4, 16, 1)`` mask blanking query rows 5+): the output was
+    **bit-identical (maxdiff 0.0)** to a no-op all-ones mask, i.e. the mask was
+    silently and completely ignored, while the pre-plan arithmetic form differed by
+    1.849 (a uniform-attention artifact, not masking — see
+    ``test_common.py::TestApplyAttentionMaskRejectsASizeOneRescueAxis``). The caller
+    now gets a named error instead of a wrong answer.
+    """
+
+    @staticmethod
+    def _query_only_mask():
+        mask = np.ones((_MP_B, _MP_H, _MP_N, 1), dtype="float32")
+        mask[:, :, _MP_DEG_ROW:, :] = 0.0
+        return mask
+
+    def test_a_query_only_rank_4_mask_raises(self):
+        layer = _mp_layer()
+        with pytest.raises(ValueError, match=r"rescue_axis.*size 1"):
+            _mp_forward(layer, _mp_input(), self._query_only_mask())
+
+    def test_a_key_axis_rank_4_mask_is_still_accepted_and_still_masks(self):
+        """Anti-vacuity: the guard rejects the degenerate LAYOUT, not rank 4.
+
+        A rank-4 mask whose last axis is the KEY axis must still work AND still
+        mask — asserted semantically (perturbing a masked key must not move the
+        kept rows), never merely by finiteness.
+        """
+        layer = _mp_layer()
+        array = _mp_input()
+        mask = np.ones((_MP_B, 1, _MP_N, _MP_N), dtype="float32")
+        mask[:, :, :, _MP_KEEP:] = 0.0
+
+        base = _mp_forward(layer, array, mask)
+        assert np.isfinite(base).all()
+
+        perturbed = array.copy()
+        perturbed[:, _MP_KEEP + 1, :] += 25.0
+        moved = _mp_forward(layer, perturbed, mask)
+
+        delta = float(np.abs(moved[:, :_MP_KEEP, :] - base[:, :_MP_KEEP, :]).max())
+        assert delta <= 1e-4, (
+            f"perturbing a MASKED key moved the kept rows by {delta:.6g} — the "
+            "rank-4 key-axis mask is not masking"
+        )
+
+
+class TestGatedAttentionRescueFollowsTheConfiguredProbabilityAxis:
+    """The rescue axis is derived from ``probability_config['axis']`` (W2).
+
+    ``ProbabilityOutput`` reads ``axis`` from its ``type_config``
+    (``probability_output.py:180``) and this layer forwards ``probability_config``
+    verbatim, so the softmax does NOT always reduce over the last axis. The
+    per-site D-009 anchor used to claim ``-1`` was "checked, not assumed" — true
+    only for the DEFAULT config.
+
+    MEASURED on the pre-step-10 code under ``mixed_float16`` with
+    ``probability_config={"axis": -2}``: a rank-3 mask blanking one KEY COLUMN gave
+    **2048/2048 non-finite** outputs (float32 control 0/2048), i.e. the whole-batch
+    NaN class this plan set out to eliminate survived at a supported public
+    configuration, because the rescue was looking down the wrong axis.
+    """
+
+    @staticmethod
+    def _dead_column_mask():
+        mask = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        mask[:, :, 3] = 0.0
+        return mask
+
+    def test_a_dead_column_is_rescued_when_the_softmax_reduces_over_queries(
+        self, dtype_policy
+    ):
+        layer = _mp_layer(probability_config={"axis": -2})
+        out = _mp_forward(layer, _mp_input(), self._dead_column_mask())
+
+        non_finite = int((~np.isfinite(out)).sum())
+        assert non_finite == 0, (
+            f"{non_finite}/{out.size} non-finite outputs under {dtype_policy!r} "
+            "with probability_config={'axis': -2} and a fully-masked KEY COLUMN — "
+            "the rescue is not following the configured softmax axis"
+        )
+
+    def test_a_key_mask_that_is_constant_over_queries_raises_under_axis_minus_2(
+        self,
+    ):
+        """The C1 guard and the W2 derivation compose.
+
+        With ``axis=-2`` the softmax reduces over QUERIES, so a rank-2 ``(B, N)``
+        key-padding mask — broadcast to ``(B, 1, 1, N)`` — is constant along the
+        reduced axis and cannot mask anything. Pre-step-10 that configuration
+        returned 2048/2048 NaN under ``mixed_float16``; it is now a named error.
+        """
+        layer = _mp_layer(probability_config={"axis": -2})
+        mask = np.ones((_MP_B, _MP_N), dtype="float32")
+        mask[:, _MP_KEEP:] = 0.0
+
+        with pytest.raises(ValueError, match=r"rescue_axis.*size 1"):
+            _mp_forward(layer, _mp_input(), mask)
+
+    def test_the_default_config_still_rescues_over_the_key_axis(self, dtype_policy):
+        """Anti-vacuity: the derivation must not move the DEFAULT behavior."""
+        layer = _mp_layer()
+        out = _mp_forward(layer, _mp_input(), _mp_mask("degenerate"))
+        assert np.isfinite(out).all()
+        np.testing.assert_allclose(
+            out,
+            _float32_reference("degenerate"),
+            atol=_MP_ATOL[dtype_policy],
+        )
