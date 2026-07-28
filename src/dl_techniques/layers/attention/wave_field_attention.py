@@ -30,7 +30,7 @@ Architecture:
     8. Content-dependent gating: ``output *= sigmoid(gate_proj(x))``
     9. Output projection + optional dropout
 
-Causality (CONDITIONAL — read this before using the layer autoregressively):
+Causality (NOT GUARANTEED — read this before using the layer autoregressively):
     The left-aligned kernel ``k(t) = exp(-alpha*t) * cos(omega*t + phi)``
     for ``t >= 0`` ensures convolution output at field position g depends
     only on field positions <= g, and the coupling matrix mixes across
@@ -39,23 +39,22 @@ Causality (CONDITIONAL — read this before using the layer autoregressively):
 
     TOKEN-level causality is NOT guaranteed and must not be relied on.
     Token indices map monotonically to field positions
-    (token i -> i * field_stride), but that map is not injective and the
-    bilinear scatter/gather spans two cells (``idx_lo`` and
-    ``idx_lo + 1``, see ``_build_scatter_gather_matrices``).
+    (token i -> i * field_stride), and the bilinear scatter/gather spans
+    two cells (``idx_lo`` and ``idx_lo + 1``, see
+    ``_build_scatter_gather_matrices``).
 
     Measured leak (randomly initialized layer, one perturbed token of
     magnitude 100 appended to an 8-token input; the value is the change
     induced on the OTHER tokens' outputs). Some configurations measure
     clean and others leak badly::
 
-        field_size=12, max_seq_len=11  ->  731.6
-        field_size=13, max_seq_len=11  ->  793.5
-        field_size=16, max_seq_len=11  ->  2e-4   (float noise)
-        field_size=22, max_seq_len=11  ->  2e-4   (float noise)
-        field_size=16, max_seq_len=16  ->  4e-4   (float noise)
+        field_size=12, max_seq_len=11  ->  O(1e2)-O(1e3)
+        field_size=13, max_seq_len=11  ->  O(1e2)-O(1e3)
+        field_size=16, max_seq_len=11  ->  O(1e-4)   (float noise)
+        field_size=22, max_seq_len=11  ->  O(1e-4)   (float noise)
+        field_size=16, max_seq_len=16  ->  O(1e-4)   (float noise)
 
-    The mechanism is not characterised, and the measured leak is not
-    predicted by ``field_stride`` alone: no sufficient condition on
+    The mechanism is not characterised: no sufficient condition on
     ``field_size`` / ``max_seq_len`` is offered here.
 
     Do NOT rely on this layer for autoregressive decoding.
@@ -141,9 +140,9 @@ class WaveFieldAttention(keras.layers.Layer):
     field position ``g`` depends only on field positions ``<= g``. That is
     causality **on the field grid only**: token-level (autoregressive)
     causality is NOT guaranteed and must not be relied on. Some
-    configurations measure clean and others leak badly (a leak of 731.6 at
-    ``field_size=12, max_seq_len=11``); no sufficient condition is offered
-    — see the module docstring's Causality section for the measured table.
+    configurations measure clean and others leak badly; no sufficient
+    condition is offered — see the module docstring's Causality section
+    for the measured table.
     Complexity is ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the field
     grid size.
 
@@ -173,10 +172,10 @@ class WaveFieldAttention(keras.layers.Layer):
         │   L1-normalised, LEFT-ALIGNED ► causal ON THE FIELD     │
         │   GRID ONLY. TOKEN-level causality is NOT guaranteed    │
         │   and must NOT be relied on: some configs measure       │
-        │   clean, others leak badly (731.6 at field_size=12,     │
-        │   max_seq_len=11). Mechanism not characterised, and     │
-        │   no sufficient condition is offered — see the module   │
-        │   docstring's Causality section.                        │
+        │   clean, others leak badly. Mechanism not               │
+        │   characterised, and no sufficient condition is         │
+        │   offered — see the module docstring's Causality        │
+        │   section.                                              │
         │                            ▼                            │
         │   cross-head coupling: einsum with softmax(field_       │
         │   coupling) — a softmax over a LEARNED (H, H) matrix,   │

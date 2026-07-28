@@ -45,12 +45,11 @@ Architecture:
         needs no floating-point atomics.
 
     .. warning::
-       Stage five is where this layer is currently **BROKEN**. Two of its tests
-       (``test_causality``, ``test_initialization_defaults``) plus two
-       ``test_factory_registry_drift.py`` cases fail on a genuine causality
-       defect — perturbing the last input token changes outputs at positions
-       ``< N // 2``. This description states the DESIGN, not the measured
-       behavior. See the ``D-009`` anchor above the class.
+       This layer is currently **BROKEN**: perturbing the last input token
+       changes outputs at positions ``< N // 2``. The MECHANISM IS NOT
+       DIAGNOSED. This description states the DESIGN, not the measured
+       behavior. See the ``D-009`` anchor above the class for the known-red
+       tests.
 
     A ``full_attention`` flag (set at construction, or toggled at runtime via
     ``set_full_attention``) bypasses the pyramid entirely and runs plain causal
@@ -388,7 +387,7 @@ class LighthouseAttention(keras.layers.Layer):
         │                               ▼                                   │
         │        causal SDPA over S: triangular mask, attn_prob,            │
         │         dropout — exact over S, since I is causally sorted        │
-        │         (but see the KNOWN DEFECT at the top of this box)         │
+        │         (but see the KNOWN-RED notice at the top of this box)     │
         │                               ▼                                   │
         │        scatter back via segment_sum to base positions             │
         │        i·p^l + p^l - 1 + k; fan-in <= L, contributions            │
@@ -478,16 +477,13 @@ class LighthouseAttention(keras.layers.Layer):
 
     .. warning::
         **Known causality defect — this layer is not currently causal.**
-        Perturbing the last input token changes outputs at positions ``< N // 2``
-        by up to 2.58 absolute, so the scatter-back path leaks future information
-        backwards despite the ``p^l - 1`` causal shift described above. Two tests
-        in ``test_lighthouse_attention.py`` (``test_causality``,
-        ``test_initialization_defaults``) and two parametrized cases in
-        ``test_factory_registry_drift.py`` fail on this and are expected to fail.
+        Perturbing the last input token changes outputs at positions ``< N // 2``.
+        The MECHANISM IS NOT DIAGNOSED.
         Do **not** use this layer where causality is load-bearing (autoregressive
         decoding, next-token training) until the defect is fixed. See the
         ``# DECISION plan-2026-07-27T130643-38c5646a/D-009`` anchor above the class
-        for why the fix is sequenced into a separate plan rather than applied here.
+        for the known-red tests and for why the fix is sequenced into a separate
+        plan rather than applied here.
     """
 
     def __init__(
