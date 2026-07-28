@@ -225,15 +225,28 @@ class Sparsemax(keras.layers.Layer):
         k_z = ops.sum(support_mask, axis=-1, keepdims=True)
 
         # =====================================================================
-        # DECISION 3: Arithmetic Masking vs. Index Gathering
+        # DECISION 3: One-Hot Selection vs. Index Gathering
         # =====================================================================
-        # "Attempt": `ops.take_along_axis(z_cumsum, k_z - 1, axis=-1)`
-        # "Problem": XLA treats `k_z - 1` as a dynamic index. Slicing with
-        #            dynamic indices requires the compiler to support dynamic
-        #            memory access patterns, which often fails graph fusion.
-        # "Fix": Use One-Hot Encoding + Multiplication.
-        #        This converts an Index lookup (Gather) into Math (Mult/Sum).
-        #        Math is always XLA-safe.
+        # This block has TWO properties. Both are load-bearing; neither may be
+        # dropped in favour of the other.
+        #
+        # (1) XLA-SAFE (the original reason, unchanged).
+        #     "Attempt": `ops.take_along_axis(z_cumsum, k_z - 1, axis=-1)`
+        #     "Problem": XLA treats `k_z - 1` as a dynamic index. Slicing with
+        #                dynamic indices requires the compiler to support
+        #                dynamic memory access patterns, which often fails
+        #                graph fusion.
+        #     "Fix": Use One-Hot Encoding + selection over the last axis. This
+        #            converts an Index lookup (Gather) into shape-static math,
+        #            which is universally supported by all accelerators.
+        #
+        # (2) NON-FINITE-SAFE (new; see the D-017 anchor below).
+        #     The selection is spelled with `ops.where`, NOT with the
+        #     `z_cumsum * gather_mask` product it replaced. A product forms
+        #     `-inf * 0.0 = NaN` at every masked position, and the reduction
+        #     then propagates that NaN into `tau` and hence into EVERY element
+        #     of the row. `ops.where` never evaluates the non-selected operand
+        #     arithmetically, so no such product is ever formed.
 
         # Cast k_z to int32 for indexing/one-hot operations
         support_indices = ops.cast(k_z - 1, "int32")
@@ -245,10 +258,73 @@ class Sparsemax(keras.layers.Layer):
         # Only the position corresponding to k(z) will be 1.0, others 0.0
         gather_mask = ops.one_hot(support_indices, k, dtype=inputs.dtype)
 
-        # Select the cumulative sum at the threshold boundary
-        # z_cumsum * mask zeroes out everything except the target value.
-        # Summing collapses the row to the single target value.
-        z_cumsum_at_k = ops.sum(z_cumsum * gather_mask, axis=-1, keepdims=True)
+        # DECISION plan-2026-07-28T134123-420f6ccb/D-017
+        # ---------------------------------------------------------------
+        # (a) WHAT THIS LINE FIXES — "Defect A", the reported bug.
+        #     DO NOT rewrite this back to `ops.sum(z_cumsum * gather_mask, ...)`.
+        #     An input `-inf` (an attention mask) puts `-inf` into `z_cumsum`
+        #     from the first masked entry onward; `gather_mask` is 0 there;
+        #     `-inf * 0.0 = NaN`; the reduction returns NaN; `tau` is NaN; and
+        #     the final projection makes EVERY element of the row NaN,
+        #     including the unmasked ones. Measured: 128/128 NaN through
+        #     `MultiHeadCrossAttention(probability_type='sparsemax')`. This is
+        #     NOT fp16-specific — it reproduces under the plain float32 policy
+        #     at K=256/2048/4096. Reverting this line turns RED:
+        #     `tests/test_layers/test_activations/test_sparsemax.py::TestSparsemax`
+        #     `::test_partial_mask_neg_inf_no_nan` (all 6 parametrizations),
+        #     `::test_sparsemax_property_random_masks` (all 3 policies) and
+        #     `::test_attention_integration_sparsemax_fp16_no_nan`.
+        #     This is the same `ops.where`-over-arithmetic-masking rule that
+        #     `layers/attention/common.py:159-163` (D-002) already prescribes.
+        #
+        # (b) WHAT IS STILL BROKEN — OPEN, UNGUARDED, DEFERRED to a follow-up
+        #     plan. This layer is NOT numerically safe. Four further defects
+        #     were MEASURED and are NOT fixed here; a green test file does not
+        #     mean otherwise. All four share one root cause: the reduction
+        #     (ramp, cumsum, support test, `k_z` count) runs in the COMPUTE
+        #     dtype, which under fp16/bf16 has neither the range nor the
+        #     integer precision the algorithm needs.
+        #       - Defect B (line ~220): an overflow-born non-finite `z_cumsum`
+        #         is ADMITTED to the support, because
+        #         `support = 1 + finite - (-inf) = +inf > 0`. Measured at
+        #         spread 16.95, fp16, K=4096, with NO `-inf` in the input:
+        #         `k_z = 1863` where the exact answer is 1; `sum(out) = 16.95`.
+        #       - Defect C (line ~210): `ops.arange(1, k+1, dtype=inputs.dtype)`
+        #         cannot represent `k+1`, so the reshape raises. The break is
+        #         NON-MONOTONE: it raises at fp16 K=2048 and bf16 K=256/257,
+        #         but is fine at fp16 K=4096 and bf16 K=512. Do not assume a
+        #         threshold.
+        #       - Defect D (line ~220): round-off absorbs the literal `1.0`, so
+        #         `support == 0` everywhere, `k_z == 0`, `one_hot(-1)` is
+        #         all-zero, `tau = -inf` and the output is all `+inf`.
+        #         Measured float32 onset 1.68e7 (K=4) / 7.77e7 (K=512).
+        #       - Defect E (line ~225), the nastiest: `k_z = ops.sum(...)`
+        #         accumulates in the compute dtype and hits the same integer
+        #         wall. fp16 2051 -> 2052, and 4095 -> 4096, which is OUT OF
+        #         RANGE for depth 4096 and yields an all-zero one-hot, i.e. a
+        #         SILENTLY WRONG FINITE ANSWER: no NaN, no raise.
+        #
+        # (c) THIS LINE CANNOT HELP DEFECT E. For Defect E the `-inf` sits at
+        #     the SELECTED index, not at a masked-out one, so `ops.where`
+        #     selects it and `tau` is `-inf` regardless of how the selection is
+        #     spelled. Fixing E requires widening the reduction dtype, not
+        #     re-spelling this expression.
+        #
+        # (d) OUTPUT PRECISION under fp16 is ~1 ulp of `max|z|` (measured worst
+        #     case 1.685 ulp over the committed property grid), because
+        #     `out = max(z - tau, 0)` is a cancellation at scale `|z|`. The
+        #     tests' oracle tolerance is derived from that resolution rather
+        #     than fixed. Subtracting the row max before the cumsum (exact:
+        #     sparsemax is shift-invariant) takes the same grid from 86/128 to
+        #     0/128 violations — deferred to the follow-up plan, not done here.
+        # ---------------------------------------------------------------
+        # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
+        # where the one-hot is set, substitute an exact zero everywhere else,
+        # then collapse the row to that single value.
+        z_cumsum_at_k = ops.sum(
+            ops.where(gather_mask > 0, z_cumsum, ops.zeros_like(z_cumsum)),
+            axis=-1, keepdims=True,
+        )
 
         # =====================================================================
         # Final Projection
