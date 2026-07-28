@@ -92,7 +92,7 @@ class GroupedQueryAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────────────────────────┐
-        │                  GroupedQueryAttention                       │
+        │                    GroupedQueryAttention                     │
         │                                                              │
         │  Input [B, seq, dim] or [B, H, W, dim]                       │
         │         │                                                    │

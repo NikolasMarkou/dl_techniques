@@ -8,9 +8,10 @@ The core of the layer is the scaled dot-product attention mechanism from the
 Transformer architecture, which serves as the update rule for the network's
 state. Unlike a standard attention layer, which performs a single, feed-forward
 computation, this layer can apply the attention mechanism iteratively. An
-initial query (a "probe" or noisy pattern) is repeatedly refined until it
-converges to one of the stored patterns (the "memories"), which are represented
-by the Key-Value pairs.
+initial query (a "probe" or noisy pattern) is repeatedly refined toward the
+stored patterns (the "memories"), which are represented by the Key-Value pairs.
+The refinement runs a fixed number of steps (``update_steps_max + 1``); the
+layer never tests for convergence and has no data-dependent early exit.
 
 Architecture:
     Projections and head-splitting are exactly a standard multi-head attention
@@ -45,7 +46,7 @@ The fundamental difference is the computational flow:
 
 | Feature                | Standard Transformer Attention      | Modern Hopfield Network (This Layer)    |
 |:-----------------------|:------------------------------------|:----------------------------------------|
-| **Computational Flow** | Single-step, feed-forward           | Iterative, recurrent until convergence  |
+| **Computational Flow** | Single-step, feed-forward           | Iterative, recurrent; fixed step count  |
 | **Primary Goal**       | Contextual information weighting    | Associative pattern retrieval & cleaning|
 | **Mechanism**          | `output = attention(Q, K, V)`       | `state_t+1 = attention(state_t, K, V)`  |
 | **Query (Q)**          | Static input representation         | Dynamic state vector that evolves       |
@@ -54,7 +55,8 @@ In essence, a standard transformer attention layer performs a single update
 step (`update_steps_max=0` in this implementation) of a modern Hopfield network.
 This layer generalizes that concept by allowing for multiple (`update_steps_max > 0`)
 iterative updates, enabling it to function as a true associative memory that
-converges to stable fixed-points (attractors).
+moves toward stable fixed-points (attractors) -- though the layer runs a fixed
+step count and never tests whether such a point has actually been reached.
 
 Iteration Count (there is no convergence test):
 ----------------------------------------------

@@ -100,7 +100,7 @@ class SingleWindowAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────────────────────────┐
-        │              SingleWindowAttention                    │
+        │                 SingleWindowAttention                 │
         │                                                       │
         │   Input [B, N_actual, dim]                            │
         │          │                                            │

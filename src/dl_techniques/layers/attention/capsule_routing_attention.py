@@ -106,7 +106,7 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────────┐
-        │              CapsuleRoutingSelfAttention                    │
+        │                 CapsuleRoutingSelfAttention                 │
         │                                                             │
         │  Input [B, seq, embed_dim]                                  │
         │         │                                                   │

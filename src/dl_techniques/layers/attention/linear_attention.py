@@ -207,8 +207,8 @@ class LinearAttention(keras.layers.Layer):
         │                      ▼                                       │
         │            Output [B, N, dim]                                │
         │                                                              │
-        │   NOTE: `mask=` is accepted and SILENTLY DISCARDED — there is │
-        │   no masking stage anywhere in this diagram (v1).            │
+        │   NOTE: `mask=` is accepted and SILENTLY DISCARDED — there   │
+        │   is no masking stage anywhere in this diagram (v1).         │
         └──────────────────────────────────────────────────────────────┘
 
     :param dim: Model dimensionality (input and output feature size). Must be

@@ -84,7 +84,7 @@ class SpatialAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────────────────────────┐
-        │                  SpatialAttention                     │
+        │                   SpatialAttention                    │
         │                                                       │
         │   Input [B, H, W, C]                                  │
         │          │                                            │
