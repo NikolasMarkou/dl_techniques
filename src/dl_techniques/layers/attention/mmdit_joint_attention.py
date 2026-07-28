@@ -26,25 +26,36 @@ Architecture:
 
 ::
 
-    hidden_states (B, N_img, dim)        encoder_hidden_states (B, N_txt, dim)
-          │                                        │
-    to_q/to_k/to_v (Dense dim)            add_q_proj/add_k_proj/add_v_proj (Dense dim)
-          │ reshape (B, H, N_img, hd)              │ reshape (B, H, N_txt, hd)
-    norm_q / norm_k (RMSNorm head_dim)    norm_added_q / norm_added_k (RMSNorm head_dim)
-          └──────────────┬─────────────────────────┘
-                         │  concat along seq axis (axis=2)
-                         ▼
-              Q,K,V : (B, H, N_img+N_txt, hd)
-                         │  scores = Q·Kᵀ · head_dim^-0.5
-                         │  softmax (float32) · V
-                         ▼
-              out : (B, H, N_img+N_txt, hd) -> (B, N_img+N_txt, dim)
-                         │  split at N_img
-          ┌──────────────┴─────────────────────────┐
-    image_out (B, N_img, dim)             text_out (B, N_txt, dim)
-          │ to_out (Dense dim)                     │ to_add_out (Dense dim)*
-          ▼                                        ▼
-    image_out                              text_out  (*omitted if context_pre_only)
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │    MMDiTJointAttention — dual-stream joint attention (module view)    │
+    │                                                                       │
+    │  image stream (B, N_img, dim)     text stream (B, N_txt, dim)         │
+    │        │ to_q / to_k / to_v             │ add_q_proj / add_k_proj     │
+    │        │ Dense(dim), reshape            │ / add_v_proj, reshape       │
+    │        │ ► (B, H, N_img, hd)            │ ► (B, H, N_txt, hd)         │
+    │        │ norm_q / norm_k (RMSNorm)      │ norm_added_q / norm_added_k │
+    │        │   over head_dim, if qk_norm    │   over head_dim, if qk_norm │
+    │        └───────────────┬────────────────┘                             │
+    │                        │  JOIN: concatenate on the sequence           │
+    │                        │  axis (axis=2) — this is the 'joint'         │
+    │                        ▼                                              │
+    │        Q, K, V  (B, H, N_img+N_txt, hd)                               │
+    │                        │  scores = Q · Kᵀ · head_dim^-0.5             │
+    │                        │  softmax in float32, cast back, · V          │
+    │                        ▼                                              │
+    │        merge heads ► (B, N_img+N_txt, dim)                            │
+    │                        │  FORK: split at N_img                        │
+    │        ┌───────────────┴────────────────┐                             │
+    │        ▼                                ▼                             │
+    │  to_out (Dense dim)               to_add_out (Dense dim)              │
+    │  image_out (B, N_img, dim)        text_out (B, N_txt, dim)            │
+    │                                                                       │
+    │  context_pre_only=True: to_add_out is never created and call()        │
+    │  returns image_out alone, not a 2-element list.                       │
+    │  No attention mask is accepted anywhere on this forward path,         │
+    │  and the PyTorch source's paging / KV-cache is deliberately           │
+    │  dropped (see the # DECISION anchor in call()).                       │
+    └───────────────────────────────────────────────────────────────────────┘
 
 When ``context_pre_only`` is True (the final MMDiT block discards the text path),
 ``to_add_out`` is not created and ``call`` returns only the image stream.
@@ -103,25 +114,30 @@ class MMDiTJointAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        image (B, N_img, dim)              text (B, N_txt, dim)
-              │ to_q/to_k/to_v                    │ add_{q,k,v}_proj
-              │ reshape -> (B, H, N_img, hd)      │ reshape -> (B, H, N_txt, hd)
-              │ norm_q / norm_k (RMSNorm)         │ norm_added_q / norm_added_k
-              └────────────────┬──────────────────┘
-                               │ concat along seq axis
-                               ▼
-                    Q,K,V (B, H, N_img+N_txt, hd)
-                               │ softmax(Q·Kᵀ · head_dim^-0.5) · V
-                               ▼
-                    (B, N_img+N_txt, dim)
-                               │ split at N_img
-              ┌────────────────┴──────────────────┐
-              ▼                                   ▼
-           to_out                          to_add_out*
-        image_out (B, N_img, dim)          text_out (B, N_txt, dim)
-
-        (*) omitted entirely when context_pre_only=True — `call` then returns
-            the image stream alone, not a 2-element list.
+        ┌─────────────────────────────────────────────────────────────────────┐
+        │                         MMDiTJointAttention                         │
+        │                                                                     │
+        │  image (B, N_img, dim)          text (B, N_txt, dim)                │
+        │        │ to_q/to_k/to_v               │ add_{q,k,v}_proj            │
+        │        │ reshape ► (B,H,N_img,hd)     │ reshape ► (B,H,N_txt,hd)    │
+        │        │ norm_q / norm_k              │ norm_added_q / norm_added_k │
+        │        └──────────────┬───────────────┘                             │
+        │                       │ concat on the sequence axis                 │
+        │                       ▼                                             │
+        │        Q, K, V  (B, H, N_img+N_txt, hd)                             │
+        │                       │ softmax(Q · Kᵀ · head_dim^-0.5) · V         │
+        │                       ▼                                             │
+        │        merge heads ► (B, N_img+N_txt, dim)                          │
+        │                       │ split at N_img                              │
+        │        ┌──────────────┴───────────────┐                             │
+        │        ▼                              ▼                             │
+        │     to_out                       to_add_out *                       │
+        │  image_out (B, N_img, dim)       text_out (B, N_txt, dim)           │
+        │                                                                     │
+        │  (*) omitted entirely when context_pre_only=True — call()           │
+        │      then returns the image stream alone, not a 2-element           │
+        │      list.  This layer accepts no attention mask.                   │
+        └─────────────────────────────────────────────────────────────────────┘
 
     The full flow, including the PyTorch reference semantics this port reproduces,
     is in the module docstring above.

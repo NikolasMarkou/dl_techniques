@@ -111,40 +111,49 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌────────────────────────────────────────────────┐
-        │ Input [B, total_seq, dim]                      │
-        │ (concatenated Modality A + Modality B tokens)  │
-        └───────────────────────┬────────────────────────┘
-                                ▼
-        ┌────────────────────────────────────────────────┐
-        │ Shared QKV Dense(dim * 3)                      │
-        │ → Q, K, V [B, heads, total_seq, head_dim]      │
-        └───────────────────────┬────────────────────────┘
-                                ▼
-        ┌────────────────────────────────────────────────┐
-        │ Split by modality (using split_sizes)          │
-        ├──────────────────┬─────────────────────────────┤
-        │ Q_A, K_A, V_A   │  Q_B, K_B, V_B               │
-        └────────┬─────────┴────────────┬────────────────┘
-                 │                      │
-                 ▼                      ▼
-        ┌────────────────┐    ┌──────────────────┐
-        │ Cross-Attend   │    │ Cross-Attend     │
-        │ Q_A → K_B, V_B │    │ Q_B → K_A, V_A   │
-        └───────┬────────┘    └────────┬─────────┘
-                │                      │
-                ▼                      ▼
-        ┌────────────────────────────────────────────────┐
-        │ Concatenate → [B, total_seq, dim]              │
-        └───────────────────────┬────────────────────────┘
-                                ▼
-        ┌────────────────────────────────────────────────┐
-        │ Output Projection Dense(dim)                   │
-        └───────────────────────┬────────────────────────┘
-                                ▼
-        ┌────────────────────────────────────────────────┐
-        │ Output [B, total_seq, dim]                     │
-        └────────────────────────────────────────────────┘
+        ┌────────────────────────────────────────────────────────────────────┐
+        │                    SharedWeightsCrossAttention                     │
+        │                                                                    │
+        │  Input [B, total_seq, dim] — the modality streams ALREADY          │
+        │  concatenated on the sequence axis.  split_sizes is a call()       │
+        │  argument (not a config field) and says where the cuts are.        │
+        │                                 ▼                                  │
+        │  ONE shared qkv_dense(dim*3) over the WHOLE sequence               │
+        │  ► Q, K, V  [B, H, total_seq, head_dim]                            │
+        │                                 ▼                                  │
+        │  optional q_norm / k_norm — the SAME norm layers for both          │
+        │  streams; this sharing is what the class is named for              │
+        │                                 ▼                                  │
+        │  fork on len(split_sizes)                                          │
+        │                                 │                                  │
+        │                ┌────────────────┴────────────────┐                 │
+        │            len == 2                          len == 4              │
+        │                ▼                                 ▼                 │
+        │  ┌──────────────────────────┐    ┌───────────────────────────────┐ │
+        │  │ _two_modality_attention  │    │ _anchor_query_attention       │ │
+        │  │                          │    │                               │ │
+        │  │ split Q, K, V into A | B │    │ split into A_anchor, A_query, │ │
+        │  │ Q_A ► K_B, V_B           │    │ B_anchor, B_query             │ │
+        │  │ Q_B ► K_A, V_A           │    │ ALL of A (anchors+queries)    │ │
+        │  │                          │    │   ► B's ANCHOR K, V only      │ │
+        │  │ equal-size fast path     │    │ ALL of B (anchors+queries)    │ │
+        │  │ stacks the two           │    │   ► A's ANCHOR K, V only      │ │
+        │  │ directions on the        │    │                               │ │
+        │  │ BATCH axis instead       │    │ so a query token is attended  │ │
+        │  │                          │    │ FROM but never attended TO    │ │
+        │  └─────────────┬────────────┘    └───────────────┬───────────────┘ │
+        │                └────────────────┬────────────────┘                 │
+        │                                 ▼                                  │
+        │  each direction: scores · scale ► attn_prob (ONE shared            │
+        │  ProbabilityOutput instance) ► dropout ► · V                       │
+        │                                 ▼                                  │
+        │  concat on the seq axis ► merge heads ► proj_dense(dim)            │
+        │                                 ▼                                  │
+        │  Output [B, total_seq, dim]                                        │
+        │                                                                    │
+        │  attention_mask is accepted and NEVER read — neither helper        │
+        │  takes a mask, so padded tokens keep their full weight.            │
+        └────────────────────────────────────────────────────────────────────┘
 
     :param dim: Input/output dimension. Must be positive and divisible by num_heads.
     :type dim: int

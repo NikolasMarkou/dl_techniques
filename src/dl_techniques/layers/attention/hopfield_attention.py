@@ -15,21 +15,29 @@ by the Key-Value pairs.
 Architecture:
     Projections and head-splitting are exactly a standard multi-head attention
     block; the difference is that the attention step is applied in a bounded
-    loop, feeding its own output back in as the next query::
+    loop, feeding its own output back in as the next query.
 
-        [Q, K, V] -> Dense x3 -> heads -> (optional Q/K norm)
-                                            │
-                        ┌───────────────────▼───────────────────┐
-                        │  repeat update_steps_max + 1 times:   │
-                        │    A   = prob(Q K^T / sqrt(d_k))      │
-                        │    out = A V                          │
-                        │    Q   = A K      (skipped on last)   │
-                        └───────────────────┬───────────────────┘
-                                            ▼
-                             merge heads -> Dense -> output
+::
 
-    ``update_steps_max=0`` runs the loop body exactly once and never updates the
-    query, which is ordinary single-step attention.
+    ┌─────────────────────────────────────────────────────────────┐
+    │      HopfieldAttention — bounded query-refinement loop      │
+    │                                                             │
+    │  [Q, K, V] ► Dense x3 ► heads ► optional Q/K norm           │
+    │                     ▼                                       │
+    │  ┌── repeat update_steps_max + 1 times ────────────────┐    │
+    │  │   A   = attn_prob(Q · Kᵀ / sqrt(key_dim))           │    │
+    │  │   out = A · V                                       │    │
+    │  │   Q   = A · K      ◄── loop-back onto the query;    │    │
+    │  │                        skipped on the final step    │    │
+    │  └─────────────────────────────────────────────────────┘    │
+    │                     ▼                                       │
+    │  merge heads ► output_dense ► Output (B, N_q, dim)          │
+    │                                                             │
+    │  update_steps_max=0 runs the body exactly once and never    │
+    │  updates the query — ordinary single-step attention.        │
+    │  The loop is a plain bounded Python range(): the count is   │
+    │  fixed at trace time and there is no data-dependent exit.   │
+    └─────────────────────────────────────────────────────────────┘
 
 Difference from Standard Transformer Attention:
 ---------------------------------------------
@@ -126,44 +134,43 @@ class HopfieldAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input(s) [B, S, D]
-              │
-              ├── (self-attn: Q=K=V=Input)
-              │   or
-              ├── [Query, Key, Value]
-              │
-              ▼
-        ┌───────────┬───────────┬────────────┐
-        │  W_query  │  W_key    │  W_value   │
-        │  Dense    │  Dense    │  Dense     │
-        └─────┬─────┘─────┬─────┘─────┬──────┘
-              ▼           ▼           ▼
-          Reshape     Reshape     Reshape
-        [B,H,Sq,Dk] [B,H,Sk,Dk] [B,H,Sk,Dv]
-              │           │           │
-              ▼           ▼           │
-        (Optional LayerNorm)          │
-              │           │           │
-              ▼           ▼           ▼
-        ┌─────────────────────────────────┐
-        │   Iterative Hopfield Update     │
-        │   ┌───────────────────────┐     │
-        │   │ scores = Q·K^T/√d_k   │◄──┐ │
-        │   │ attn = softmax(scores)│   │ │
-        │   │ out = attn · V        │   │ │
-        │   │ Q_new = attn · K      │───┘ │
-        │   │ (repeat until conv.)  │     │
-        │   └───────────────────────┘     │
-        └──────────────┬──────────────────┘
-                       ▼
-                 Reshape → [B, Sq, H*Dv]
-                       ▼
-                 ┌───────────┐
-                 │  W_output │
-                 │  Dense    │
-                 └─────┬─────┘
-                       ▼
-                 Output [B, Sq, D]
+        ┌─────────────────────────────────────────────────────────────────┐
+        │                        HopfieldAttention                        │
+        │                                                                 │
+        │  Input(s) [B, S, D] — one tensor (Q=K=V) for self-attention,    │
+        │  or a 2-/3-element list [query, key, value] for cross-attention │
+        │                            ▼                                    │
+        │  query_dense / key_dense / value_dense ► reshape ► transpose    │
+        │  Q (B,H,N_q,key_dim)  K (B,H,N_k,key_dim)  V (B,H,N_k,val_dim)  │
+        │                            ▼                                    │
+        │  optional q_norm / k_norm  (applied ONCE, before the loop)      │
+        │                            ▼                                    │
+        │  ┌── for step in range(update_steps_max + 1) ───────────────┐   │
+        │  │    S = Q · Kᵀ / sqrt(key_dim)      (a DIVIDE, not a      │   │
+        │  │                                     reciprocal multiply) │   │
+        │  │    S = apply_attention_mask(S, keep)  — only if a mask   │   │
+        │  │        is given; a row that keeps NOTHING is rescued,    │   │
+        │  │        on the axis taken from probability_config         │   │
+        │  │    A = attn_prob(S)   (ProbabilityOutput: softmax by     │   │
+        │  │                        default, but configurable)        │   │
+        │  │    A = dropout(A)                                        │   │
+        │  │    out = A · V                                           │   │
+        │  │    Q = A · K     ◄── the loop-back that makes this a     │   │
+        │  │                      Hopfield update; skipped on the     │   │
+        │  │                      final step                          │   │
+        │  └──────────────────────────────────────────────────────────┘   │
+        │                            ▼                                    │
+        │  transpose ► reshape to [B, N_q, H*value_dim]                   │
+        │                            ▼                                    │
+        │  output_dense ► Output [B, N_q, D]                              │
+        │  (return_attention_scores=True also returns the LAST A)         │
+        │                                                                 │
+        │  The iteration count is FIXED at update_steps_max + 1 Python    │
+        │  steps. There is no data-dependent early exit: the              │
+        │  convergence test was removed because a Python bool() on a      │
+        │  traced tensor breaks graph mode.  update_steps_max=0           │
+        │  degenerates to ordinary one-shot attention.                    │
+        └─────────────────────────────────────────────────────────────────┘
 
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int

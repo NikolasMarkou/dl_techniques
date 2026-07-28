@@ -105,9 +105,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Cross-Attention Mode (separate projections):
-
         ┌───────────────────────────────────────────────────────────────┐
+        │          Cross-Attention Mode (separate projections)          │
         │                                                               │
         │  Query Input [B, Q_seq, D] ──► Q_proj ──► Q [B, H, Q_seq, D_h]│
         │                                             │                 │
@@ -131,9 +130,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         │                                  Output [B, Q_seq, D]         │
         └───────────────────────────────────────────────────────────────┘
 
-        Self-Attention Mode (shared projections):
-
         ┌───────────────────────────────────────────────────────────────┐
+        │           Self-Attention Mode (shared projections)            │
         │                                                               │
         │  Input [B, seq, D] ──► QKV_proj ──► Q, K, V [B, H, seq, D_h]  │
         │                                        │                      │

@@ -57,31 +57,38 @@ Partition Mode 1: 'grid' (Swin Transformer-style)
 
 Complete Architecture Flow (`partition_mode='grid'`)::
 
-    INPUT: 1D Sequence [batch, N, dim]
-      │
-      ├─ Step 1: Grid Formation (Pad N → H×W, Reshape)
-      ↓
-    2D Grid [batch, H, W, dim]
-      │
-      ├─ Step 2: Window Padding (Pad grid to be divisible by window_size)
-      ↓
-    Padded Grid [batch, H_pad, W_pad, dim]
-      │
-      ├─ Step 3: Window Partitioning (Split into non-overlapping windows)
-      ↓
-    Windows [batch×num_windows, ws², dim]
-      │
-      ├─ Step 4: Local Self-Attention (With relative position bias)
-      ↓
-    Attended Windows [batch×num_windows, ws², dim]
-      │
-      ├─ Step 5: Window Merging (Reverse partition)
-      ↓
-    Grid [batch, H_pad, W_pad, dim]
-      │
-      ├─ Step 6: Unpad & Flatten (Restore original sequence)
-      ↓
-    OUTPUT: 1D Sequence [batch, N, dim]
+    ┌─────────────────────────────────────────────────────────────┐
+    │ WindowAttention — partition_mode='grid' (Swin-style tiles)  │
+    │                                                             │
+    │  INPUT: 1-D sequence  [B, N, dim]                           │
+    │                      ▼                                      │
+    │  1. grid formation — pad N up to N_grid = H*W and reshape   │
+    │     to a 2-D grid.  H = W = ceil(sqrt(N)).                  │
+    │     grid [B, H, W, dim]                                     │
+    │                      ▼                                      │
+    │  2. window padding — pad H and W up to a multiple of        │
+    │     window_size.   padded grid [B, H_pad, W_pad, dim]       │
+    │                      ▼                                      │
+    │  3. window partition — contiguous ws x ws tiles, so         │
+    │     spatially adjacent tokens attend together.              │
+    │     windows [B*num_win, ws^2, dim]                          │
+    │                      ▼                                      │
+    │  4. SingleWindowAttention on every window.  ALL of the      │
+    │     attention math (QKV, QK-norm, relative position         │
+    │     bias, ProbabilityOutput) lives there — this layer       │
+    │     is a partitioning wrapper and owns none of it.          │
+    │                      ▼                                      │
+    │  5. window reverse — merge the tiles back to the grid       │
+    │                      ▼                                      │
+    │  6. unpad — slice [:H, :W], reshape to [B, N_grid, dim],    │
+    │     slice to N                                              │
+    │                      ▼                                      │
+    │  OUTPUT: 1-D sequence  [B, N, dim]                          │
+    │                                                             │
+    │  an optional mask takes the identical pad ► reshape ►       │
+    │  pad ► partition path and rides into each window with       │
+    │  its tokens.                                                │
+    └─────────────────────────────────────────────────────────────┘
 
 ================================================
 Partition Mode 2: 'zigzag' (Frequency Locality)
@@ -89,31 +96,36 @@ Partition Mode 2: 'zigzag' (Frequency Locality)
 
 Complete Architecture Flow (`partition_mode='zigzag'`)::
 
-    INPUT: 1D Sequence [batch, N, dim]
-      │
-      ├─ Step 1: Grid Formation (Pad N → H×W)
-      ↓
-    Grid Sequence [batch, H×W, dim]
-      │
-      ├─ Step 2: Zigzag Reordering (Group frequency-proximate tokens)
-      ↓
-    Zigzag Sequence [batch, H×W, dim]
-      │
-      ├─ Step 3: Window Partitioning (Split reordered sequence into windows)
-      ↓
-    Windows [batch×num_windows, win_size², dim]
-      │
-      ├─ Step 4: Local Self-Attention (Relative position bias often disabled)
-      ↓
-    Attended Windows [batch×num_windows, win_size², dim]
-      │
-      ├─ Step 5: Inverse Zigzag (Restore grid order)
-      ↓
-    Grid Sequence [batch, H×W, dim]
-      │
-      ├─ Step 6: Unpad (Restore original sequence length)
-      ↓
-    OUTPUT: 1D Sequence [batch, N, dim]
+    ┌─────────────────────────────────────────────────────────────┐
+    │ WindowAttention — partition_mode='zigzag' (freq. locality)  │
+    │                                                             │
+    │  INPUT: 1-D sequence  [B, N, dim]                           │
+    │                      ▼                                      │
+    │  1. grid formation — pad N up to N_grid = H*W.  This        │
+    │     path stays 1-D: there is no reshape to a 2-D map.       │
+    │                      ▼                                      │
+    │  2. zigzag reorder — take(x, zigzag_indices, axis=1),       │
+    │     grouping tokens that are proximate along a zigzag       │
+    │     traversal of the notional grid.                         │
+    │                      ▼                                      │
+    │  3. window partition — pad to a multiple of the window      │
+    │     length ws^2, then reshape.                              │
+    │     windows [B*num_win, ws^2, dim]                          │
+    │                      ▼                                      │
+    │  4. SingleWindowAttention on every window (relative         │
+    │     position bias is usually disabled on this path).        │
+    │                      ▼                                      │
+    │  5. merge windows, slice back to N_grid                     │
+    │                      ▼                                      │
+    │  6. inverse zigzag — take(x, inverse_zigzag_indices),       │
+    │     then slice to N                                         │
+    │                      ▼                                      │
+    │  OUTPUT: 1-D sequence  [B, N, dim]                          │
+    │                                                             │
+    │  an optional mask is padded, reordered and partitioned      │
+    │  the same way and rides into each window with its           │
+    │  tokens.                                                    │
+    └─────────────────────────────────────────────────────────────┘
 
 Complexity Analysis
 -------------------
@@ -179,30 +191,22 @@ class WindowAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────┐
-        │  Input: 1-D Sequence (B, N, dim)          │
-        └───────────────────┬───────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Pad N ─► Reshape to 2-D grid / zigzag    │
-        └───────────────────┬───────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Partition into non-overlapping windows   │
-        │  (B*num_win, ws^2, dim)                   │
-        └───────────────────┬───────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  SingleWindowAttention per window         │
-        └───────────────────┬───────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Merge windows ─► Unpad / inverse zigzag  │
-        └───────────────────┬───────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Output: 1-D Sequence (B, N, dim)         │
-        └───────────────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │                     WindowAttention                     │
+        │                                                         │
+        │  Input: 1-D sequence  (B, N, dim)                       │
+        │                     ▼                                   │
+        │  pad N ► reshape to a 2-D grid  /  zigzag reorder       │
+        │                     ▼                                   │
+        │  partition into non-overlapping windows                 │
+        │  (B*num_win, ws^2, dim)                                 │
+        │                     ▼                                   │
+        │  SingleWindowAttention per window                       │
+        │                     ▼                                   │
+        │  merge windows ► unpad / inverse zigzag                 │
+        │                     ▼                                   │
+        │  Output: 1-D sequence  (B, N, dim)                      │
+        └─────────────────────────────────────────────────────────┘
 
     :param dim: Dimension of the input tokens (channels).
     :type dim: int
