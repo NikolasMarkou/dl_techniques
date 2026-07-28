@@ -105,6 +105,7 @@ class ChannelAttention(keras.layers.Layer):
         │   ├───────────────┤    ├───────────────┤                │
         │   │ Dense(C)      │    │ Dense(C)      │                │
         │   └───────┬───────┘    └───────┬───────┘                │
+        │  ReLU shown is default; configurable via ctor argument  │
         │           │                    │                        │
         │           └──────── Add ───────┘                        │
         │                    │                                    │
