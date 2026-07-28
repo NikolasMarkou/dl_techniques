@@ -969,7 +969,7 @@ class _SEWeights(layers.Layer):
         │             Output = channel LOGITS  [B, 1, 1, C]             │
         │                                                               │
         │   No sigmoid, and no multiply by the input: that is exactly   │
-        │   separates it from a full Squeeze-and-Excitation block.      │
+        │   what separates it from a full Squeeze-and-Excitation block. │
         └───────────────────────────────────────────────────────────────┘
 
     :param reduction_ratio: Bottleneck reduction ratio.
