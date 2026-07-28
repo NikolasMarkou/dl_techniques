@@ -239,6 +239,8 @@ dtype helper reintroduces the hazard it exists to prevent.
 
 #### `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)`
 
+*Signature note: `rescue_axis` is `int | Sequence[int] | None`; `-1` is the default, `None` the opt-out.*
+
 **The prescribed way to apply an attention mask.** It performs the `ops.where` bias
 application that `MASK_BIAS_VALUE` / `mask_dtype` only describe, inside `mask_dtype(...)`,
 so the `0 * -inf = NaN` product cannot be formed at all.
@@ -268,7 +270,20 @@ scores = apply_attention_mask(scores, mask, out_dtype=scores_dtype)
     axis that keeps NOTHING is treated as keeping EVERYTHING, so no all-`-inf` softmax row is
     ever formed. `rescue_axis=None` is the explicit opt-out. The axis is **never inferred** — a
     softmax that reduces elsewhere must name its own axis, for the same reason polarity is not
-    inferred.
+    inferred. `rescue_axis` may be an `int` **or a tuple/list of ints** (`keras.layers.Softmax`
+    accepts a tuple `axis`), in which case the rescue is *joint* over those axes — a whole
+    reduced block that keeps nothing keeps everything (D-018).
+*   **A `keep` that cannot mask is a `ValueError`, not a silent no-op (D-017).** If `keep` is
+    statically size 1 along *every* named `rescue_axis` while `logits` is longer there, the bias
+    is constant along the axis the softmax reduces over — and softmax is invariant to a constant
+    shift of that axis, so the mask provably has no effect *in any implementation*. That layout
+    (a `(B, H, Q, 1)` query-axis mask where a key-axis mask was expected) now raises. A genuinely
+    length-1 key axis — single-token decode, `logits` size 1 too — is ordinary input and is not
+    rejected, and neither is an extent that is unknown at trace time, so the guard is a
+    static-shape diagnostic rather than a runtime contract.
+*   **The count of adopters lives in exactly one place.** `common.py`'s module docstring carries
+    it together with the two `grep` commands that derive it, pinned by
+    `test_common.py::TestTheAdopterCountsAreMechanical`. Do not restate it here or in an anchor.
 *   **Counter-example, and the reason the axis is explicit: `ring_attention.py`.** Its online
     softmax processes one key-axis *tile* at a time, so inside the loop a "row" is a tile, not
     the full key axis. A per-tile `rescue_axis=-1` reads every entirely-masked tile as

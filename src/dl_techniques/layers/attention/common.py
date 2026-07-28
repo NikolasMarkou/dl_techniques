@@ -1,4 +1,4 @@
-"""
+r"""
 Shared primitives for the ``layers/attention`` package.
 
 This module is the shared home for five small pieces that were previously re-derived
@@ -37,12 +37,35 @@ number you see in a sibling module came from here:
     measured at 24.14; it rescues once over the full key axis before its block loop
     instead). A site whose softmax reduces over some other axis must name that axis
     explicitly — the axis is never inferred, for the same reason polarity is never
-    inferred. Seven of the ten adopters therefore DERIVE the axis from their own
+    inferred. **EIGHT of the TEN adopters** therefore DERIVE the axis from their own
     ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors) rather
-    than inheriting the ``-1`` default; ``capsule_routing`` pins the axis in
-    ``__init__`` instead, and ``ring`` opts out. A ``keep`` whose extent along the
-    named axis is statically 1 is REJECTED — it cannot mask anything, because softmax
-    is invariant to a constant shift of the axis it reduces over (D-017).
+    than inheriting the ``-1`` default; of the remaining two, ``capsule_routing`` PINS
+    the axis in ``__init__`` (its ``_site_config`` overrides any caller value, so there
+    is nothing to derive) and ``ring`` OPTS OUT per tile (``rescue_axis=None``, D-011).
+    A ``keep`` whose extent along every named axis is statically 1 while ``logits`` is
+    longer is REJECTED — it cannot mask anything, because softmax is invariant to a
+    constant shift of the axis it reduces over (D-017). ``rescue_axis`` may also be a
+    TUPLE of axes, in which case the rescue and that rejection are JOINT over them
+    (D-018).
+
+    **Both counts above are MECHANICAL — re-derive them in one command each, from the
+    repository root, and never hand-edit one without the other**::
+
+        # 10 adopters (files calling the module-level helper; excludes this file's
+        # own definition and the private `self._apply_attention_mask` wrappers):
+        grep -rlE '(^|[^._[:alnum:]])apply_attention_mask\(' \
+            src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
+
+        # 8 of them derive the axis from their own probability_config:
+        grep -rl 'rescue_axis=(self.probability_config' \
+            src/dl_techniques/layers/attention/*.py | wc -l
+
+    These two numbers previously drifted THREE ways at once across this docstring, the
+    D-009 anchor below and the plan's own records, so they are now stated ONCE (here)
+    and pinned executably by ``test_common.py::TestTheAdopterCountsAreMechanical``,
+    which runs exactly the greps above and fails if this paragraph disagrees with the
+    source. Anything else that needs the number cites this paragraph rather than
+    repeating it.
 
 -   ``MASK_BIAS_VALUE`` / ``mask_dtype`` are **no longer single-use.** After
     ``plan-2026-07-27T183600-b4ef45f0`` they are reached — directly or through
@@ -112,7 +135,7 @@ References:
 # ---------------------------------------------------------------------
 
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Union
 
 import keras
 from keras import ops
@@ -226,12 +249,16 @@ def mask_dtype(compute_dtype: str) -> str:
 #     the same class of shape-error-free mistake as guessing polarity (I2).
 #   * Do NOT read the default as "the caller no longer owns the axis". It does — the
 #     default is only correct for a site whose softmax reduces over the LAST axis.
-#     TEN modules now adopt this helper and NINE take the rescue (`ring_attention.py`
-#     opts out per tile, D-011). Six of them build that softmax from a user-supplied
-#     `probability_config`, whose `axis` key `ProbabilityOutput` honors
+#     Most adopters build that softmax from a user-supplied `probability_config`,
+#     whose `axis` key `ProbabilityOutput` honors
 #     (`activations/probability_output.py:180`), so those sites DERIVE `rescue_axis`
 #     from their own config instead of inheriting this default — see D-017 and each
 #     site's adoption comment.
+#   * Do NOT restate the adopter/deriver COUNTS here. They live in exactly one place,
+#     the module docstring's "MECHANICAL" paragraph, with the two greps that produce
+#     them; a live DECISION anchor carrying a stale number is the one place a wrong
+#     count actively misleads, and this anchor previously said "Six" while the
+#     docstring said "Seven" and the true answer was eight.
 # ACCEPTED COST, stated plainly: a caller whose mask is wrong now gets finite garbage
 # instead of a loud NaN, at every site, in every dtype.
 # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0) and D-006 (the
@@ -274,12 +301,46 @@ def mask_dtype(compute_dtype: str) -> str:
 #     caught by the consumer gate and is now pinned by
 #     `test_common.py::test_a_genuinely_length_one_axis_is_not_rejected`.
 # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+#
+# DECISION plan-2026-07-27T183600-b4ef45f0/D-018
+# `rescue_axis` accepts a TUPLE/LIST of axes, and the D-017 rejection above is
+# evaluated JOINTLY over them. It is normalized to `axes` on the first line of the
+# `rescue_axis is not None` branch so that nothing downstream can compare an `int`
+# against a tuple.
+#
+# WHY, measured: `keras.layers.Softmax` accepts a tuple `axis`, and every site that
+# DERIVES `rescue_axis` from its own `probability_config` (D-017 (b)) forwards
+# `type_config` VERBATIM. So `probability_config={"axis": (1, 2)}` — a configuration
+# that RAN before D-017 landed, when the axis was the hard-coded `-1` — reached the
+# bounds check as a tuple and died with
+# `TypeError: '<=' not supported between instances of 'int' and 'tuple'`, naming
+# neither the parameter nor the cause. D-017's own lesson generalizes: the value space
+# of a config key is larger than the type the reader assumed.
+#
+# WHAT NOT TO DO, and why:
+#   * Do NOT reject a multi-axis config instead of supporting it. A tuple axis is
+#     legal Keras and the deriving sites have no way to opt out of forwarding it, so
+#     rejecting would make a valid softmax unusable at every deriving site. The
+#     generalization is EXACT, not a best effort — see the next two bullets.
+#   * Do NOT rescue per-axis (`any` over one axis at a time, or a `-1` fallback). A
+#     softmax over `(1, 2)` reduces the JOINT block, so "keeps nothing" is a property
+#     of the block; a per-axis rescue un-masks rows whose block still keeps something
+#     elsewhere, which is silent OVER-permission. One `ops.any(kept, axis=axes)` is
+#     the whole rescue. Pinned by
+#     `test_a_per_axis_rescue_would_over_unmask_and_is_not_what_ships`.
+#   * Do NOT change the D-017 rejection to fire when ANY named axis is broadcast. The
+#     bias is a no-op only when it is constant over the ENTIRE reduced block; a `keep`
+#     that is size 1 over heads but varies over queries still masks. Hence `all(...)`,
+#     pinned by `test_broadcast_across_only_some_named_axes_is_accepted`.
+#   * Do NOT let a junk axis fall through to a backend error. A non-int element or an
+#     empty tuple raises a `ValueError` naming `rescue_axis`.
+# See decisions.md D-018 (plan-2026-07-27T183600-b4ef45f0).
 def apply_attention_mask(
         logits: Any,
         keep: Any,
         *,
         out_dtype: Optional[str] = None,
-        rescue_axis: Optional[int] = -1,
+        rescue_axis: Optional[Union[int, Sequence[int]]] = -1,
 ) -> Any:
     """Add the additive attention-mask bias to ``logits`` in a dtype where it is finite.
 
@@ -351,19 +412,30 @@ def apply_attention_mask(
         against ``logits``, so a rank-2 ``(B, N)`` key mask expanded to ``(B, 1, 1, N)``
         is rescued per batch element, which is what "this mask keeps nothing" means
         for that layout.
-    :type rescue_axis: Optional[int]
 
+        A **tuple/list of axes** is also accepted, because ``keras.layers.Softmax``
+        accepts one and the deriving sites forward it verbatim. The rescue is then
+        JOINT over those axes — a whole reduced BLOCK that keeps nothing keeps
+        everything — which is the exact generalization, not an approximation. See
+        the D-018 anchor above.
+    :type rescue_axis: Optional[Union[int, Sequence[int]]]
+
+    :raises ValueError: If ``rescue_axis`` is neither ``None``, an ``int``, nor a
+        non-empty tuple/list of ``int``. The message names the parameter; an internal
+        ``TypeError`` from comparing an ``int`` against a tuple is never an acceptable
+        outcome (D-018).
     :raises ValueError: If ``keep`` is **broadcast across** ``rescue_axis`` — i.e. its
-        static extent there is 1 while ``logits`` is statically longer. Such a
-        predicate is constant along the axis the caller's softmax reduces over, and
-        softmax is invariant to a constant shift of that axis, so the mask provably
-        cannot mask anything whatever the implementation does. This is a hard error
-        rather than a silent no-op because it is a shape-error-free caller mistake:
-        a query-axis mask supplied where a key-axis mask was expected, or a mask
-        that was never broadcast. NOT raised when ``rescue_axis`` is ``None`` (no
-        softmax axis was named), when the extent is unknown at trace time, or when
+        static extent there is 1 while ``logits`` is statically longer, along EVERY
+        named axis. Such a predicate is constant over the block the caller's softmax
+        reduces over, and softmax is invariant to a constant shift of that block, so
+        the mask provably cannot mask anything whatever the implementation does. This
+        is a hard error rather than a silent no-op because it is a shape-error-free
+        caller mistake: a query-axis mask supplied where a key-axis mask was expected,
+        or a mask that was never broadcast. NOT raised when ``rescue_axis`` is ``None``
+        (no softmax axis was named), when the extent is unknown at trace time, when
         ``logits`` is itself size 1 along that axis (an ordinary single-token
-        sequence). See the D-017 anchor above.
+        sequence), or — for a multi-axis softmax — when ``keep`` varies along at least
+        one of the named axes. See the D-017 and D-018 anchors above.
 
     :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
@@ -373,6 +445,20 @@ def apply_attention_mask(
     x = ops.cast(logits, md)
     kept = ops.cast(keep, md) > 0.0
     if rescue_axis is not None:
+        # D-018. `keras.layers.Softmax` accepts a TUPLE axis and `ProbabilityOutput`
+        # forwards `type_config` verbatim, so a deriving site (D-017 (b)) can hand us
+        # `(1, 2)`. Normalize to a tuple of axes ONCE, here, so nothing below can
+        # compare an int against a tuple — that comparison was a raw `TypeError`.
+        axes = tuple(rescue_axis) if isinstance(rescue_axis, (tuple, list)) else (rescue_axis,)
+        if not axes or not all(
+                isinstance(a, int) and not isinstance(a, bool) for a in axes
+        ):
+            raise ValueError(
+                f"apply_attention_mask: rescue_axis={rescue_axis!r} is not an axis. "
+                "Pass an int, a non-empty tuple/list of ints (the axes the caller's "
+                "softmax reduces over, as `keras.layers.Softmax` spells them), or "
+                "None to opt out of the fully-masked-slice rescue."
+            )
         # D-017. STATIC shapes only, and deliberately inline: a second module-level
         # helper in this file is a named STOP tripwire of the plan that wrote it. The
         # condition is BROADCAST, not size: `keep` is rejected only when it is
@@ -380,13 +466,17 @@ def apply_attention_mask(
         # length-1 key axis (`logits` size 1 too) is an ordinary single-token
         # sequence, not a mistake — measured: `TextDecoder` feeds exactly that, and
         # rejecting it broke `test_text_decoder.py::test_single_token_input`.
+        # For a MULTI-axis softmax the reduction is JOINT, so the mask is a no-op only
+        # when it is broadcast along EVERY named axis: varying along even one of them
+        # still perturbs the joint block. Hence `all(...)`, not `any(...)` (D-018).
         keep_shape = tuple(getattr(keep, "shape", ()) or ())
         logits_shape = tuple(getattr(logits, "shape", ()) or ())
-        if (
-                -len(keep_shape) <= rescue_axis < len(keep_shape)
-                and -len(logits_shape) <= rescue_axis < len(logits_shape)
-                and keep_shape[rescue_axis] == 1
-                and logits_shape[rescue_axis] not in (1, None)
+        if all(
+                -len(keep_shape) <= a < len(keep_shape)
+                and -len(logits_shape) <= a < len(logits_shape)
+                and keep_shape[a] == 1
+                and logits_shape[a] not in (1, None)
+                for a in axes
         ):
             raise ValueError(
                 f"apply_attention_mask: `keep` has shape {keep_shape}, whose extent "
@@ -399,12 +489,21 @@ def apply_attention_mask(
                 "reduces over as `rescue_axis=`, or pass `rescue_axis=None` to opt "
                 "out of the fully-masked-slice rescue entirely."
             )
-        # A row that keeps nothing keeps everything. Graph-safe: `rescue_axis` is a
-        # Python argument fixed at trace time, and the tensor-level expression has no
-        # data-dependent control flow.
+        # A row that keeps nothing keeps everything — and for a multi-axis softmax a
+        # "row" is the JOINT block over `axes`, which is what a single `ops.any` over
+        # the whole tuple computes. Graph-safe: `rescue_axis` is a Python argument
+        # fixed at trace time, and the tensor-level expression has no data-dependent
+        # control flow. The bare int is passed through unchanged when there is one
+        # axis, so the single-axis graph is byte-identical to the pre-D-018 one.
         kept = ops.logical_or(
             kept,
-            ops.logical_not(ops.any(kept, axis=rescue_axis, keepdims=True)),
+            ops.logical_not(
+                ops.any(
+                    kept,
+                    axis=axes[0] if len(axes) == 1 else axes,
+                    keepdims=True,
+                )
+            ),
         )
     # Both `where` branches are tensors IN `md`: a bare Python `0.0` / `-1e9` pair is
     # promoted to float32 and then collides with float64 logits under a float64 policy.

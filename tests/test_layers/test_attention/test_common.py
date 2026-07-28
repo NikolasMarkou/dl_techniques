@@ -750,6 +750,179 @@ class TestApplyAttentionMaskRejectsASizeOneRescueAxis:
         np.testing.assert_allclose(out[1], [3.0, 4.0, 5.0], rtol=1e-6)
 
 
+class TestApplyAttentionMaskAcceptsAMultiAxisRescueAxis:
+    """A TUPLE ``rescue_axis`` is a legal softmax axis and must not be a ``TypeError``.
+
+    ``keras.layers.Softmax`` accepts a tuple ``axis`` and ``ProbabilityOutput``
+    forwards ``type_config`` verbatim (``activations/probability_output.py:180``), so
+    the eight sites that DERIVE ``rescue_axis`` from their own ``probability_config``
+    (D-017) can hand this function a tuple. Before this class existed, that reached the
+    D-017 bounds check as a tuple and raised, verbatim::
+
+        TypeError: '<=' not supported between instances of 'int' and 'tuple'
+
+    from ``common.py``'s ``-len(keep_shape) <= rescue_axis`` — a config that had run
+    before step 10 (the rescue axis was hard-coded ``-1`` then). A ``TypeError`` from an
+    internal comparison is the one outcome that is definitely wrong: it names neither
+    the parameter nor the cause.
+
+    The shipped answer GENERALIZES rather than rejects, because the generalization is
+    exact: a softmax over axes ``(1, 2)`` reduces over the JOINT block, so
+    "a slice that keeps nothing keeps everything" means the joint block, and
+    "the predicate is constant along the reduced axis" means constant along EVERY
+    named axis. See D-018.
+    """
+
+    def test_a_tuple_rescue_axis_is_not_a_type_error(self):
+        """RED before D-018: this raised ``TypeError`` from the bounds comparison."""
+        logits = ops.convert_to_tensor(
+            np.zeros((2, 3, 4, 5), dtype="float32")
+        )
+        keep = ops.convert_to_tensor(np.ones((2, 3, 4, 5), dtype="float32"))
+
+        out = apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    def test_a_tuple_axis_rescues_over_the_joint_block(self):
+        """The rescue is JOINT, not per-axis: a dead ``(axis1, axis2)`` block revives.
+
+        Batch item 0's whole ``(3, 4)`` block at key 0 is masked, so it keeps nothing
+        under a softmax reducing over ``(1, 2)`` and must receive NO bias. Batch item 1
+        keeps one position in that block, so the rest of it stays masked.
+        """
+        logits = ops.convert_to_tensor(np.zeros((2, 3, 4, 2), dtype="float32"))
+        keep_np = np.ones((2, 3, 4, 2), dtype="float32")
+        keep_np[0, :, :, 0] = 0.0            # batch 0, key 0: the whole block is dead
+        keep_np[1, :, :, 0] = 0.0
+        keep_np[1, 0, 0, 0] = 1.0            # batch 1, key 0: one survivor
+        keep = ops.convert_to_tensor(keep_np)
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+        )
+
+        # Rescued: the dead block gets no bias at all.
+        np.testing.assert_allclose(out[0, :, :, 0], np.zeros((3, 4)), rtol=0, atol=0)
+        # Not rescued: only the single survivor is unbiased.
+        assert out[1, 0, 0, 0] == 0.0
+        assert np.all(out[1, 1:, :, 0] == np.float32(MASK_BIAS_VALUE))
+        # The unreduced key axis is untouched in both.
+        np.testing.assert_allclose(out[:, :, :, 1], np.zeros((2, 3, 4)), rtol=0, atol=0)
+
+    def test_a_per_axis_rescue_would_over_unmask_and_is_not_what_ships(self):
+        """Anti-vacuity for the joint rescue: ``rescue_axis=-1`` gives a DIFFERENT answer.
+
+        Without this control the joint-rescue test could pass for the wrong reason.
+        Here ONE ``(head, query)`` position masks both of its keys while the joint
+        ``(1, 2)`` block still keeps plenty elsewhere. The joint rescue therefore
+        leaves that position masked — correctly, the block is not dead — whereas a
+        naive last-axis rescue un-masks it. That is the silent OVER-permission the
+        joint form avoids.
+        """
+        logits = ops.convert_to_tensor(np.zeros((2, 3, 4, 2), dtype="float32"))
+        keep_np = np.ones((2, 3, 4, 2), dtype="float32")
+        keep_np[1, 1, 2, :] = 0.0
+        keep = ops.convert_to_tensor(keep_np)
+
+        joint = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+        )
+        per_axis = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=-1)
+        )
+        assert not np.allclose(joint, per_axis)
+
+    def test_a_list_axis_is_accepted_like_a_tuple(self):
+        """``[1, 2]`` and ``(1, 2)`` are the same softmax axis and must agree."""
+        logits = ops.convert_to_tensor(np.zeros((2, 3, 4, 2), dtype="float32"))
+        keep_np = np.ones((2, 3, 4, 2), dtype="float32")
+        keep_np[0, :, :, 0] = 0.0
+        keep = ops.convert_to_tensor(keep_np)
+
+        as_tuple = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+        )
+        as_list = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=[1, 2])
+        )
+        np.testing.assert_allclose(as_list, as_tuple, rtol=0, atol=0)
+
+    def test_a_single_element_tuple_matches_the_bare_int(self):
+        """``(-1,)`` must trace to the same numbers as ``-1``."""
+        logits, _ = _as_compute(_logits(seed=77))
+        keep_np = np.ones((_B, _H, _N, _N), dtype="float32")
+        keep_np[:, :, :, 300:] = 0.0
+        keep = ops.convert_to_tensor(keep_np)
+
+        bare = ops.convert_to_numpy(apply_attention_mask(logits, keep, rescue_axis=-1))
+        tup = ops.convert_to_numpy(apply_attention_mask(logits, keep, rescue_axis=(-1,)))
+        np.testing.assert_allclose(tup, bare, rtol=0, atol=0)
+
+    def test_broadcast_across_every_named_axis_raises_a_named_value_error(self):
+        """The D-017 rejection generalizes: constant along ALL reduced axes is a no-op.
+
+        This is the exact consumer layout the review measured — a rank-2 key-padding
+        mask expanded to ``(B, 1, 1, N)`` at a site whose softmax reduces over
+        ``(1, 2)``. The bias is then constant across the whole reduced block, so it
+        cannot mask; the error must NAME ``rescue_axis``, not be a ``TypeError``.
+        """
+        logits = ops.convert_to_tensor(np.zeros((2, 3, 4, 5), dtype="float32"))
+        keep = ops.convert_to_tensor(np.ones((2, 1, 1, 5), dtype="float32"))
+
+        with pytest.raises(ValueError, match=r"rescue_axis=\(1, 2\).*size 1"):
+            apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+
+    def test_broadcast_across_only_some_named_axes_is_accepted(self):
+        """Size 1 along ONE reduced axis still masks, so it must NOT be rejected.
+
+        ``keep`` is size 1 over heads (axis 1) but varies over queries (axis 2), so the
+        bias is not constant over the joint block and the mask does real work. A guard
+        that fired per-axis would reject a legitimate caller here.
+        """
+        logits = ops.convert_to_tensor(np.zeros((2, 3, 4, 5), dtype="float32"))
+        keep_np = np.ones((2, 1, 4, 5), dtype="float32")
+        keep_np[:, :, 2:, :] = 0.0
+        keep = ops.convert_to_tensor(keep_np)
+
+        out = ops.convert_to_numpy(
+            apply_attention_mask(logits, keep, rescue_axis=(1, 2))
+        )
+        assert np.all(out[:, :, :2, :] == 0.0)
+        assert np.all(out[:, :, 2:, :] == np.float32(MASK_BIAS_VALUE))
+
+    def test_a_non_integer_axis_is_a_named_value_error(self):
+        """A junk axis must be diagnosed by name, never by an internal ``TypeError``."""
+        logits = ops.convert_to_tensor(np.zeros((2, 3), dtype="float32"))
+        keep = ops.convert_to_tensor(np.ones((2, 3), dtype="float32"))
+
+        with pytest.raises(ValueError, match=r"rescue_axis"):
+            apply_attention_mask(logits, keep, rescue_axis="last")
+        with pytest.raises(ValueError, match=r"rescue_axis"):
+            apply_attention_mask(logits, keep, rescue_axis=())
+
+    def test_the_consumer_path_no_longer_type_errors(self):
+        """End to end at a DERIVING site (D-017 (b)), which is how the crash was found.
+
+        ``GatedAttention(probability_config={"axis": (1, 2)})`` forwards the tuple to
+        ``ProbabilityOutput`` AND derives ``rescue_axis`` from it. With a rank-2 mask
+        (expanded to ``(B, 1, 1, N)``) the predicate is constant over the reduced
+        block, so the right answer is the named ``ValueError`` — previously a
+        ``TypeError`` from a comparison inside ``common.py``.
+        """
+        from dl_techniques.layers.attention.gated_attention import GatedAttention
+
+        layer = GatedAttention(
+            dim=32, num_heads=4, probability_config={"axis": (1, 2)}
+        )
+        x = ops.convert_to_tensor(
+            np.random.default_rng(3).standard_normal((2, 6, 32)).astype("float32")
+        )
+        mask = ops.convert_to_tensor(np.ones((2, 6), dtype="float32"))
+
+        with pytest.raises(ValueError, match=r"rescue_axis"):
+            layer(x, attention_mask=mask)
+
+
 class TestApplyAttentionMaskAssumesABinaryKeep:
     """``keep`` is a BINARY predicate; a fractional value means KEEP (W3).
 
@@ -810,6 +983,107 @@ class TestApplyAttentionMaskAssumesABinaryKeep:
 # ---------------------------------------------------------------------
 # The two pre-existing exports — regression cover only (they had no test file).
 # ---------------------------------------------------------------------
+
+
+class TestTheAdopterCountsAreMechanical:
+    """The counts in ``common.py``'s docstring are DERIVED, not remembered.
+
+    History: the same two numbers drifted three ways at once — the module docstring
+    said "Seven of the ten adopters", the live ``D-009`` anchor said "Six of them",
+    and the plan's own decision log said "seven", while the source said **eight**.
+    The commit that claimed to fix the stale count reintroduced it. Prose cannot be
+    kept in lockstep by hand, so the count now has exactly one home and this test
+    re-derives it from the source on every run.
+
+    The predicates are the ones written verbatim in the docstring, so a reader can
+    reproduce them with ``grep`` in one command.
+    """
+
+    @staticmethod
+    def _attention_sources():
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        return sorted(p for p in pkg.glob("*.py") if p.name != "__init__.py")
+
+    def _counts(self):
+        import re
+
+        call = re.compile(r"(^|[^._0-9A-Za-z])apply_attention_mask\(")
+        adopters, derivers = [], []
+        for path in self._attention_sources():
+            if path.name == "common.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(call.search(line) for line in text.splitlines()):
+                adopters.append(path.name)
+            if "rescue_axis=(self.probability_config" in text:
+                derivers.append(path.name)
+        return adopters, derivers
+
+    def test_there_are_exactly_ten_adopters_and_eight_derive_the_axis(self):
+        adopters, derivers = self._counts()
+        assert len(adopters) == 10, f"adopters drifted: {adopters}"
+        assert len(derivers) == 8, f"derivers drifted: {derivers}"
+        assert set(derivers) <= set(adopters)
+
+    def test_the_two_non_deriving_adopters_are_the_documented_ones(self):
+        """``capsule_routing`` PINS its axis; ``ring`` OPTS OUT. Nothing else."""
+        adopters, derivers = self._counts()
+        assert set(adopters) - set(derivers) == {
+            "capsule_routing_attention.py",
+            "ring_attention.py",
+        }
+
+    def test_the_module_docstring_states_the_derived_numbers(self):
+        """The prose must agree with the source, or this fails loudly.
+
+        This is the anti-drift half: the docstring is the single home of the count,
+        so it is the thing that has to be checked against the mechanical derivation.
+        """
+        import dl_techniques.layers.attention.common as common_mod
+
+        adopters, derivers = self._counts()
+        doc = common_mod.__doc__
+        words = {6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN"}
+        assert f"**{words[len(derivers)]} of the {words[len(adopters)]} adopters**" in doc, (
+            "common.py's module docstring no longer states the mechanically-derived "
+            f"counts ({len(derivers)} of {len(adopters)}). Update the "
+            "'MECHANICAL' paragraph — and only that paragraph."
+        )
+
+    def test_no_live_decision_anchor_restates_a_count(self):
+        """A stale number inside a ``# DECISION`` anchor is the worst place for one.
+
+        The D-009 anchor used to say "Six of them build that softmax from a
+        user-supplied ``probability_config``" while the truth was eight. Anchors now
+        cite the docstring paragraph instead of repeating a number.
+        """
+        import pathlib
+        import re
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        source = pathlib.Path(common_mod.__file__).read_text(encoding="utf-8")
+        anchor_region = source.split("def apply_attention_mask(")[0]
+        comment_lines = [
+            ln for ln in anchor_region.splitlines() if ln.lstrip().startswith("#")
+        ]
+        offenders = [
+            ln
+            for ln in comment_lines
+            if re.search(
+                r"\b(six|seven|eight|nine|ten)\b\s+(of\s+them|modules|adopters|sites)",
+                ln,
+                re.IGNORECASE,
+            )
+        ]
+        assert not offenders, (
+            "a DECISION anchor restates an adopter count; cite the docstring's "
+            f"MECHANICAL paragraph instead: {offenders}"
+        )
 
 
 class TestPreExistingExports:

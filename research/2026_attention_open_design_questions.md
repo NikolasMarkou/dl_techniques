@@ -39,6 +39,7 @@
    - [Q14 — Dead constructor parameters that are also `get_config()` keys](#q14--dead-constructor-parameters-that-are-also-get_config-keys)
    - [Q15 — `LighthouseAttention` is the package's known-red pair](#q15--lighthouseattention-is-the-packages-known-red-pair)
 9. [Corrections to prior findings](#9-corrections-to-prior-findings)
+10. [Worked example — a measurement that read as a defect and was not](#10-worked-example--a-measurement-that-read-as-a-defect-and-was-not)
 
 ---
 
@@ -1292,7 +1293,8 @@ carried here rather than fixed, because it is a call about what a shared seed sh
 
 **Current behavior.** `ProbabilityOutput` (`layers/activations/probability_output.py`)
 dispatches to `Softmax`, `Sparsemax`, `ThreshMax`, `AdaptiveTemperatureSoftmax` and the
-routing layers; the eight mask sites hand it biased logits containing `MASK_BIAS_VALUE`
+routing layers; the mask sites that build their probability layer from a
+`probability_config` hand it biased logits containing `MASK_BIAS_VALUE`
 (and, after the `out_dtype` cast-back, `-inf` under `mixed_float16`). Every measurement in
 this plan — and every one in the step-10 review — used the DEFAULT `softmax`.
 
@@ -1309,14 +1311,81 @@ record the result; (2) restrict `probability_type` at the mask sites the way
 `capsule_routing` and `window_attention` already restrict theirs, if a type is found to
 break masking; (3) leave unmeasured and documented.
 
-**Blast radius.** Every `probability_type`-carrying attention layer (eight mask sites).
-No code change is implied until (1) is done.
+**Blast radius.** Every `probability_type`-carrying attention layer. (The exact adopter
+count is derived mechanically in `common.py`'s module docstring — do not restate it here;
+see the worked example in section 10.) No code change is implied until (1) is done.
 
 **Recommendation.** Option 1, as a small standalone measurement plan. It is cheap
 (one parametrized test file), it is the kind of gap that a finiteness-only suite cannot
 see, and the plan that introduced `apply_attention_mask` has already demonstrated that
 this exact class of question — "is the claim true for the non-default configuration?" —
 is where its defects have actually been.
+
+---
+
+## 10. Worked example — a measurement that read as a defect and was not
+
+This section records an adjudication rather than a question, because the reasoning
+generalizes and the next person to measure a mask is going to hit it.
+
+**What was claimed.** An adversarial review of the `apply_attention_mask` work filed a
+CRITICAL: the package-wide degenerate-row rescue (D-008/D-009) makes a caller's mask
+*vanish*. The evidence looked airtight and was correctly measured. With a `(B, H, Q, 1)`
+keep predicate — a mask that varies over QUERIES and is size 1 over KEYS — a float32
+`GatedAttention` forward came back **bit-identical (maxdiff 0.0)** to a forward with a
+no-op all-ones mask, whereas the pre-plan arithmetic bias form gave a **1.849** different
+answer on the same input. Same weights, same input, same mask; the fix changed the number
+to "as if no mask had been passed". The stated diagnosis was that `ops.any` over a size-1
+axis is the identity, so the rescue un-masks every row.
+
+**What was actually true.** Both readings of that pair of numbers were wrong, and
+re-deriving from the mathematics rather than from the delta is what settled it.
+
+1.  **A keep predicate that is constant along the softmax-reduced axis cannot mask
+    anything, in ANY implementation.** Softmax is invariant to a constant shift of the
+    axis it reduces over: `softmax(x - c·1) = softmax(x)`. A `(B, H, Q, 1)` predicate
+    produces a bias of `-1e9` at EVERY key of a "masked" query row, i.e. exactly such a
+    constant shift. Measured on 4x16 random logits, `max|softmax(x - 30) - softmax(x)|`
+    is `1.64e-07`; the same shift-invariance holds for `Sparsemax` (`1.85e-06`) and
+    `ThreshMax` (`2.68e-07`), so it is not a softmax-only accident. The `0.0` was the
+    mathematically correct answer, not a symptom.
+2.  **The `1.849` was not masking either — it was float32 destroying the row.** The ulp of
+    float32 at `1e9` is 64, so `(x - 1e9).astype(float32)` has **one distinct value**
+    across a 16-wide row of ordinary logits, and `max|softmax(x - 1e9) - uniform|` is
+    **exactly 0.0**. The pre-plan code was returning a uniform distribution over all keys
+    on those rows. It looked like masking only because it differed from the unmasked
+    output.
+
+So the delta between "before" and "after" was a delta between two different flavours of
+garbage, and the size of that delta carried no information about whether masking was
+happening.
+
+**What was nonetheless real, and what shipped.** The caller's mask had no effect and
+nothing said so. That is a genuine hazard — a query-axis mask supplied where a key-axis
+mask was expected is a shape-error-free mistake — so `apply_attention_mask` now REJECTS
+it with a named `ValueError` (D-017), and the review's own original recommendation
+("skip the rescue when the axis is size 1") was measured to be worse: skipping re-forms
+the all-`MASK_BIAS_VALUE` row, which is `-inf` in fp16, whose softmax is the whole-batch
+NaN the work existed to remove. The severity was also wrong: this was a diagnostic gap
+(WARNING), not a correctness regression (CRITICAL). D-018 later generalized the guard to
+a tuple `rescue_axis`, since `keras.layers.Softmax` accepts one.
+
+**The transferable lessons.**
+
+*   **A predicate that is constant along the axis a normalizer reduces over is a no-op.**
+    Before attributing a masking effect to an implementation, check whether the mask
+    varies along the reduced axis at all. If it does not, no implementation can help,
+    and the correct response is to reject the input rather than to "fix" the math.
+*   **A large before/after delta is not evidence that the "before" was working.** A
+    `-1e9`-scale additive bias in float32 annihilates the row's own information content
+    (ulp 64 at 1e9), and in float16 it is `-inf` outright. When comparing a masking
+    change, add a control that shows the pre-change output was *itself* meaningful —
+    e.g. that its masked-row distribution is not uniform — or the comparison measures
+    nothing. This is the same trap as `plans/LESSONS.md` "guards must be proven RED":
+    a number that moves is not a number that means something.
+*   **Re-derive before escalating.** Both the reviewer and the executor reached the right
+    answer only by working the algebra independently of the measurement that prompted it.
+    The measurement was correct in every digit; the inference from it was not.
 
 ---
 
