@@ -89,7 +89,7 @@ class SpatialAttention(keras.layers.Layer):
         │                                                       │
         │   Input [B, H, W, C]                                  │
         │  attention_mask is accepted but IGNORED on this path  │
-        │  (no masking code; every position is gated equally).  │
+        │  (no masking code; nothing is suppressed by the mask).│
         │          │                                            │
         │          ├──────────────┬────────────────┐            │
         │          ▼              ▼                             │
@@ -110,7 +110,7 @@ class SpatialAttention(keras.layers.Layer):
         │   └─────────────────────┬───────────────────────┘     │
         │  (Sigmoid shown is default; configurable via ctor arg)│
         │                         ▼                             │
-        │   Output [B, H, W, 1] (map ∈ [0,1] w/ default sigmoid)│
+        │   Output [B, H, W, 1]  (map ∈ [0,1], default sigmoid) │
         └───────────────────────────────────────────────────────┘
 
     :param kernel_size: Size of the convolution kernel. Must be odd and

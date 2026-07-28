@@ -116,8 +116,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         │                               scores = Q @ K^T / sqrt(d_k)    │
         │                                             │                 │
         │  Mask [B, Q_seq, KV_seq] ──────────────► [+ mask]             │
-        │  NOTE: mask bias is built with ops.where, never (1-m)*BIAS.   │
-        │  A fully-masked row gets NO bias: it attends to every key.    │
+        │  NOTE: bias BUILT by ops.where, not (1-keep)*MASK_BIAS_VALUE. │
+        │  A fully-masked row gets NO bias: its RAW scores are used.    │
         │                                             │                 │
         │                                             ▼                 │
         │                               AdaptiveSoftmax / Softmax       │
@@ -141,8 +141,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         │                          scores = Q @ K^T / sqrt(d_k)         │
         │                                        │                      │
         │  Mask [B, seq, seq] ──────────────► [+ mask]                  │
-        │  NOTE: mask bias is built with ops.where, never (1-m)*BIAS.   │
-        │  A fully-masked row gets NO bias: it attends to every key.    │
+        │  NOTE: bias BUILT by ops.where, not (1-keep)*MASK_BIAS_VALUE. │
+        │  A fully-masked row gets NO bias: its RAW scores are used.    │
         │                                        │                      │
         │                                        ▼                      │
         │                          AdaptiveSoftmax / Softmax            │

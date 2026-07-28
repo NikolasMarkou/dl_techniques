@@ -133,7 +133,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         │      │                                                      │       │
         │      │  scores = (Q_nope @ K_nope^T) + (Q_pe @ K_pe^T)      │       │
         │      │  scores = scores * scale                             │       │
-        │      │  weights = P(scores+mask); P=softmax, no routing/hier│       │
+        │      │  weights = softmax(scores + mask); op is configurable│       │
         │      │  output = weights @ V                                │       │
         │      └──────────────────────────┬───────────────────────────┘       │
         │                                 │                                   │
