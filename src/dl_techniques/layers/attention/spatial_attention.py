@@ -87,6 +87,8 @@ class SpatialAttention(keras.layers.Layer):
         │                   SpatialAttention                    │
         │                                                       │
         │   Input [B, H, W, C]                                  │
+        │  attention_mask is accepted but IGNORED on this path  │
+        │  (no masking code; input keeps its full weight).      │
         │          │                                            │
         │          ├──────────────┬────────────────┐            │
         │          ▼              ▼                             │
@@ -105,6 +107,7 @@ class SpatialAttention(keras.layers.Layer):
         │   ┌─────────────────────────────────────────────┐     │
         │   │ Conv2D(kernel=k×k, filters=1) + Sigmoid     │     │
         │   └─────────────────────┬───────────────────────┘     │
+        │  (Sigmoid shown is default; configurable via ctor arg)│
         │                         ▼                             │
         │   Output [B, H, W, 1]  (attention map ∈ [0, 1])       │
         └───────────────────────────────────────────────────────┘
