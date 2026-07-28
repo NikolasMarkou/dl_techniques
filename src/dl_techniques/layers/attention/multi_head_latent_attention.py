@@ -120,11 +120,16 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         │      ┌───────────────┐                         │           │        │
         │      │ Split Q into  │                         ▼           ▼        │
         │      │ Q_nope, Q_pe  │                    K_nope, V    K_pe via     │
-        │      └───────┬───────┘                         │     separate proj  │
-        │              │                                 │        + RoPE      │
+        │      │ Q_pe ► + RoPE │                         │     separate proj  │
+        │      └───────┬───────┘                         │        + RoPE      │
+        │              │                                 │           │        │
         │              ▼                                 ▼           │        │
         │      ┌──────────────────────────────────────────────────────┐       │
         │      │              ATTENTION COMPUTATION                   │       │
+        │      │                                                      │       │
+        │      │  BOTH Q_pe and K_pe are rotated (call() applies RoPE │       │
+        │      │  to each on consecutive lines). K_pe is ONE shared   │       │
+        │      │  rotary head, (B, 1, S_kv, d), broadcast over all H. │       │
         │      │                                                      │       │
         │      │  scores = (Q_nope @ K_nope^T) + (Q_pe @ K_pe^T)      │       │
         │      │  scores = scores * scale                             │       │

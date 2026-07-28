@@ -161,7 +161,9 @@ class FNetFourierTransform(keras.layers.Layer):
         │   │ Extract real part: Re(X'')                  │       │
         │   └──────────────────────┬──────────────────────┘       │
         │                          ▼                              │
-        │       [if mask] zero out padded positions               │
+        │       [if mask] MULTIPLICATIVE, POST-mix: zeroes only   │
+        │       the padded tokens' OWN rows. Padded tokens still  │
+        │       contribute to every real token's mix.             │
         │                          │                              │
         │                          ▼                              │
         │   Output [B, S, D]                                      │

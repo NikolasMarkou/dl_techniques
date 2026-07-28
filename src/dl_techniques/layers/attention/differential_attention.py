@@ -142,7 +142,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         │  Input [B, L, D]                                        │
         │         │                                               │
         │         ▼                                               │
-        │   QKV projection -> Q1, K1, Q2, K2, V (shared)          │
+        │   5 separate Dense -> Q1, K1, Q2, K2, V  (V is SHARED   │
+        │   by both streams; there is NO fused QKV matmul)        │
         │         │                                               │
         │   ┌─────┴───────────────┬──────────────────┐            │
         │   ▼                     ▼                  ▼            │
@@ -155,7 +156,14 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         │ scores1 = Q1@K1^T/√d   scores2 = Q2@K2^T/√d│            │
         │   │                     │                  │            │
         │   ▼                     ▼                  │            │
+        │ [+ attention_mask]   [+ attention_mask]    │            │
+        │  (one mask, both streams; keep-predicate)  │            │
+        │   │                     │                  │            │
+        │   ▼                     ▼                  │            │
         │ attn_prob_1          attn_prob_2           │            │
+        │   │                     │                  │            │
+        │   ▼                     ▼                  │            │
+        │ attn_dropout_1       attn_dropout_2 (opt)  │            │
         │   │                     │                  │            │
         │   └──── @V ──┐   ┌── @V ┘                  │            │
         │              ▼   ▼                                      │

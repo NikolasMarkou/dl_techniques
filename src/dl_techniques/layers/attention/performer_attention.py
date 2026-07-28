@@ -114,8 +114,11 @@ class PerformerAttention(keras.layers.Layer):
         │                             ▼                                   │
         │  projection matrix, REDRAWN ON EVERY CALL from                  │
         │  keras.random.normal(seed=None)  [H, F/2, d_h],  then           │
-        │  * ortho_scaling * scale — that is a plain scalar multiply;     │
-        │  nothing here orthogonalizes, despite the FAVOR+ name           │
+        │  * ortho_scaling ONLY IF ortho_scaling > 0 — and it DEFAULTS    │
+        │  to 0.0, so at default settings that multiply is SKIPPED        │
+        │  entirely; then * scale unconditionally. Even when applied,     │
+        │  * ortho_scaling is a plain scalar multiply: nothing here       │
+        │  orthogonalizes, despite the FAVOR+ name                        │
         │                             ▼                                   │
         │  phi(x) = max(0, [cos(xWᵀ), sin(xWᵀ)] * feature_scale)          │
         │           [B, H, N, F];  phi(q) is additionally scaled by       │

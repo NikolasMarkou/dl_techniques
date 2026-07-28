@@ -11,9 +11,11 @@ Changes from V3.5 Keras port:
       Q acts as a learned per-token feature selector on propagated
       information, distinct from the input-based gate.
     - **Padding mask support**: ``attention_mask`` argument ``(B, N)``
-      zeros out deposits from padded tokens and masks final output. Causal masking
-      is inherent to the left-aligned kernel (output at field position g
-      depends only on positions <= g).
+      zeros out deposits from padded tokens and masks final output. The
+      left-aligned kernel is causal *on the field grid* (output at field
+      position g depends only on field positions <= g); see the Causality
+      section below for why that does NOT imply token-level causality when
+      the field compresses.
     - **coupling_noise_stddev fixed**: now actually used in
       ``field_coupling`` initialisation (identity + Gaussian noise),
       matching the PyTorch original.
@@ -29,13 +31,29 @@ Architecture:
     8. Content-dependent gating: ``output *= sigmoid(gate_proj(x))``
     9. Output projection + optional dropout
 
-Causality:
+Causality (CONDITIONAL — read this before using the layer autoregressively):
     The left-aligned kernel ``k(t) = exp(-alpha*t) * cos(omega*t + phi)``
     for ``t >= 0`` ensures convolution output at field position g depends
-    only on field positions <= g. Since token indices map monotonically
-    to field positions (token i -> i * stride), this guarantees causal
-    information flow without explicit masking. The coupling matrix mixes
-    across heads at the *same* spatial position, preserving causality.
+    only on field positions <= g, and the coupling matrix mixes across
+    heads at the *same* spatial position, so the FIELD-GRID computation is
+    causal. Token indices map monotonically to field positions
+    (token i -> i * field_stride), but that monotone map is NOT injective
+    when the field compresses.
+
+    TOKEN-level causality therefore holds only when ``field_stride >= 1``,
+    i.e. ``field_size >= max_seq_len``. With ``field_stride < 1`` — the
+    compressing configuration this layer is designed for — the bilinear
+    scatter/gather straddles two cells (``idx_lo`` and ``idx_lo + 1``, see
+    ``_build_scatter_gather_matrices``) and ``scatter_mat`` is the
+    transpose of ``gather_mat``, so a LATER token deposits into a cell an
+    EARLIER token reads. Measured (randomly initialized layer, one
+    perturbed token of magnitude 100 appended to an 8-token input): the
+    change induced on the OTHER tokens' outputs is O(1e3) at
+    ``field_stride`` 0.125 and 0.5, versus O(1e-4) — i.e. float noise —
+    at ``field_stride = 1.0``.
+
+    Do NOT rely on this layer for autoregressive decoding unless
+    ``field_size >= max_seq_len``.
 
 Complexity:
     O(N*D + G*log(G)*H*D_h)
@@ -115,9 +133,14 @@ class WaveFieldAttention(keras.layers.Layer):
 
     The damped-wave kernel ``k_h(t) = exp(-alpha*t) * cos(omega*t + phi)``
     for ``t >= 0`` is causal (left-aligned), so the convolution output at
-    field position ``g`` depends only on positions ``<= g``, providing
-    autoregressive information flow without explicit masking. Complexity is
-    ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the field grid size.
+    field position ``g`` depends only on field positions ``<= g``. That is
+    causality **on the field grid only**: token-level (autoregressive)
+    causality additionally requires ``field_stride >= 1``, i.e.
+    ``field_size >= max_seq_len``. Under a compressing field the bilinear
+    scatter/gather lets a later token deposit into a cell an earlier token
+    reads — see the module docstring's Causality section for the measured
+    leak. Complexity is ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the
+    field grid size.
 
     **Architecture Overview:**
 
@@ -142,7 +165,12 @@ class WaveFieldAttention(keras.layers.Layer):
         │                            ▼                            │
         │   FFT damped-wave convolution, one kernel per head:     │
         │   k_h(t) = exp(-softplus(a_h)·t) · cos(w_h·t + p_h),    │
-        │   L1-normalised, LEFT-ALIGNED ► inherently causal       │
+        │   L1-normalised, LEFT-ALIGNED ► causal ON THE FIELD     │
+        │   GRID. TOKEN-level causality holds ONLY when           │
+        │   field_stride >= 1 (field_size >= max_seq_len). A      │
+        │   COMPRESSING field is NOT token-causal: the bilinear   │
+        │   scatter/gather reads cell idx_lo + 1, so a LATER      │
+        │   token leaks backwards into an EARLIER one (measured)  │
         │                            ▼                            │
         │   cross-head coupling: einsum with softmax(field_       │
         │   coupling) — a softmax over a LEARNED (H, H) matrix,   │
