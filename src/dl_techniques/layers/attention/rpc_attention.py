@@ -138,50 +138,43 @@ class RPCAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────┐
-        │ Input [B, seq_len, dim]       │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Dense(3*dim) → Q, K, V        │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Multi-Head Reshape            │
-        │ [B, heads, seq_len, head_dim] │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ A = Q K^T * scale             │
-        │ [B, heads, seq_len, seq_len]  │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────────────┐
-        │ PCP Decomposition (iterative):        │
-        │ ┌───────────────────────────────────┐ │
-        │ │ L = SVT(A - S, tau)   (low-rank)  │ │
-        │ │ S = soft(A - L, lambda) (sparse)  │ │
-        │ └───────────────────────────────────┘ │
-        │ Repeat max_pcp_iter times             │
-        └──────────────┬────────────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Robust Attn = softmax(L + S)  │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Output = Attn @ V             │
-        │ Reshape → [B, seq_len, dim]   │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Dense(dim) output projection  │
-        │ + Dropout (optional)          │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Output [B, seq_len, dim]      │
-        └───────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │     RPCAttention — Robust PCA in place of a softmax     │
+        │                                                         │
+        │   The score matrix is split into a LOW-RANK L plus a    │
+        │   SPARSE S by iterative Principal Component Pursuit     │
+        │   before any probability is taken. Not softmax(Q Kᵀ) V. │
+        │                                                         │
+        │                   Input  [B, S, dim]                    │
+        │                            ▼                            │
+        │    to_qkv Dense(3*dim) ► split 3 ► heads [B,H,S,d_h]    │
+        │                            ▼                            │
+        │                optional q_norm / k_norm                 │
+        │                            ▼                            │
+        │       A = Q Kᵀ * attention_scale     [B, H, S, S]       │
+        │                            ▼                            │
+        │   mask (if given): expand rank 2/3, keep = (mask != 0), │
+        │   additive bias in float32 (the SVD has no fp16 kernel),│
+        │   degenerate rows rescued on the probability axis       │
+        │                            ▼                            │
+        │  ┌── repeat max_pcp_iter times ──────────────────────┐  │
+        │  │  L = SVT(A - S, svd_threshold)   batched ops.svd  │  │
+        │  │  S = soft(A - L, lambda_sparse)  shrinkage        │  │
+        │  │  (no early stop — fixed count, graph-safe)        │  │
+        │  └───────────────────────────────────────────────────┘  │
+        │                            ▼                            │
+        │         cast (L + S) back to the compute dtype          │
+        │                            ▼                            │
+        │      attn = attn_prob(L + S)   (ProbabilityOutput)      │
+        │                            ▼                            │
+        │     out = attn @ V ► merge heads ► to_out ► dropout     │
+        │                            ▼                            │
+        │                   Output  [B, S, dim]                   │
+        │                                                         │
+        │   KNOWN DEFECT: return_attention_scores=True re-runs the│
+        │   WHOLE PCP on scores that were never masked, so the    │
+        │   returned weights need not match the returned output.  │
+        └─────────────────────────────────────────────────────────┘
 
     :param dim: Model dimensionality. Must be positive and divisible by num_heads.
     :type dim: int

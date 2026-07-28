@@ -130,50 +130,46 @@ class RingAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────┐
-        │ Input [B, seq_len, dim]       │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Q = W_q(X), K = W_k(X),       │
-        │ V = W_v(X)                    │
-        │ [B, heads, seq_len, head_dim] │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Split into blocks of size B_s │
-        │ Q_blocks, K_blocks, V_blocks  │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────────────┐
-        │ For each Q_block_i:                   │
-        │ ┌───────────────────────────────────┐ │
-        │ │ Init: m=-inf, l=0, O=0            │ │
-        │ ├───────────────────────────────────┤ │
-        │ │ For each (K_j, V_j):              │ │
-        │ │  S = Q_i @ K_j^T * scale          │ │
-        │ │  m_new = max(m, max(S))           │ │
-        │ │  O = O * exp(m-m_new)             │ │
-        │ │      + exp(S-m_new) @ V_j         │ │
-        │ │  l = l * exp(m-m_new)             │ │
-        │ │      + sum(exp(S-m_new))          │ │
-        │ │  m = m_new                        │ │
-        │ └───────────────────────────────────┘ │
-        │ Output_i = O / l                      │
-        └──────────────┬────────────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Concatenate block outputs     │
-        │ Reshape → [B, seq_len, dim]   │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ W_o output projection         │
-        └──────────────┬────────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ Output [B, seq_len, dim]      │
-        └───────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │   RingAttention — blockwise online-softmax attention    │
+        │                                                         │
+        │   Flash/Ring-style blockwise attention: the (N x N)     │
+        │   score matrix is NEVER materialized. Needs a static    │
+        │   seq_len (the block count is a Python int).            │
+        │                                                         │
+        │                   Input  [B, S, dim]                    │
+        │                            ▼                            │
+        │        W_q / W_k / W_v  ►  heads  [B, H, S, d_h]        │
+        │                            ▼                            │
+        │    optional q_norm / k_norm  (once, before blocking)    │
+        │                            ▼                            │
+        │                      q = q * scale                      │
+        │                            ▼                            │
+        │   mask (if given): validate rank 2/3/4, then rescue a   │
+        │   row that keeps NOTHING — once, OVER THE FULL KEY      │
+        │   AXIS, before the loop. Never per tile: a per-tile     │
+        │   rescue un-masks the future under a causal mask.       │
+        │                            ▼                            │
+        │  ┌── for q_block in range(num_blocks) ───────────────┐  │
+        │  │  m = -inf,   l = 0,   O = 0                       │  │
+        │  │  for kv_block in range(num_blocks):               │  │
+        │  │    S  = q_blk @ k_blkᵀ            (one tile only) │  │
+        │  │    S  = S + mask bias  (rescue_axis=None)         │  │
+        │  │    m' = max(m, rowmax(S))                         │  │
+        │  │    O  = O*exp(m-m') + exp(S-m') @ v_blk           │  │
+        │  │    l  = l*exp(m-m') + rowsum(exp(S-m'))           │  │
+        │  │    m  = m'                                        │  │
+        │  │  block_out = O / l                                │  │
+        │  └───────────────────────────────────────────────────┘  │
+        │                            ▼                            │
+        │   concatenate the block outputs on the sequence axis    │
+        │   (Python list + ops.concatenate, NOT slice_update)     │
+        │                            ▼                            │
+        │       merge heads  ►  W_o  ►  Output  [B, S, dim]       │
+        │                                                         │
+        │   return_attention_weights=True gives (output, None):   │
+        │   the weights are never materialized, so there is none. │
+        └─────────────────────────────────────────────────────────┘
 
     :param dim: Input/output dimension (embedding size). Must be positive and
         divisible by num_heads.

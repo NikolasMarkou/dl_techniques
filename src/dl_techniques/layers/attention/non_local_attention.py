@@ -126,48 +126,43 @@ class NonLocalAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────┐
-        │   Input [B, H, W, C]        │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │ DepthwiseConv2D(kernel_size)│
-        │ + OutputNorm (optional)     │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │  1x1 Conv2D Projections     │
-        ├─────────┬─────────┬─────────┤
-        │ Q_proj  │ K_proj  │ V_proj  │
-        └────┬────┴────┬────┴────┬────┘
-             ▼         ▼         ▼
-        ┌────────────────────────────┐
-        │ Reshape (H,W) → (H*W)      │
-        │ Q [B, H*W, d_kv]           │
-        │ K [B, H*W, d_kv]           │
-        │ V [B, H*W, d_kv]           │
-        └─────────────┬──────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │ (optional) q_norm / k_norm  │
-        │ scores = Q K^T (/ sqrt(d_k))│
-        │ attn = ProbabilityOutput(.) │
-        │ out  = attn @ V             │
-        │ → [B, H*W, d_kv]            │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │ Reshape → [B, H, W, d_kv]   │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │ Output Conv2D 1x1           │
-        │ + Dropout (optional)        │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │ Output [B, H, W, out_ch]    │
-        └─────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │    NonLocalAttention — single-head spatial attention    │
+        │                                                         │
+        │   Convolutional pre-processing, then ONE flat attention │
+        │   over all H*W spatial positions. There is no multi-head│
+        │   split — a single (H*W) x (H*W) map is materialized.   │
+        │                                                         │
+        │                   Input  [B, H, W, C]                   │
+        │                            ▼                            │
+        │       DepthwiseConv2D(kernel_size)  ►  activation       │
+        │                            ▼                            │
+        │    optional output_norm   (spatial, before the 1x1s)    │
+        │                            ▼                            │
+        │   1x1 Conv2D projections                                │
+        │     ├─► Q  [B, H, W, d_kv]                              │
+        │     ├─► K  [B, H, W, d_kv]  ►  its own activation       │
+        │     └─► V  [B, H, W, d_kv]                              │
+        │                            ▼                            │
+        │     flatten (H, W) ► H*W    Q, K, V  [B, H*W, d_kv]     │
+        │                            ▼                            │
+        │                optional q_norm / k_norm                 │
+        │                            ▼                            │
+        │   scores = Q Kᵀ   [B, H*W, H*W]                         │
+        │     * 1/sqrt(d_kv)  ONLY when attention_mode is         │
+        │     'dot_product';  'gaussian' leaves it UNSCALED       │
+        │                            ▼                            │
+        │    + attention_mask  (ADDITIVE: 0 keeps, -big masks)    │
+        │                            ▼                            │
+        │    attn = attn_prob(scores) ► optional attn dropout     │
+        │                            ▼                            │
+        │   out = attn @ V  [B, H*W, d_kv] ► reshape to (H, W)    │
+        │                            ▼                            │
+        │     output Conv2D 1x1 ► output activation ► dropout     │
+        │                            ▼                            │
+        │   Output  [B, H, W, output_channels]                    │
+        │   (output_channels may differ from the input C)         │
+        └─────────────────────────────────────────────────────────┘
 
     :param attention_channels: Number of channels in the attention mechanism.
         Must be positive.

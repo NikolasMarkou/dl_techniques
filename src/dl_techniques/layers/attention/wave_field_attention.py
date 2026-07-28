@@ -123,47 +123,41 @@ class WaveFieldAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌──────────────────────────────────┐
-        │  Input (B, N, D)                 │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  QKV Projection ─► Q, K, V       │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Deposit: V * ||K|| onto field   │
-        │  (bilinear scatter)              │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  FFT damped-wave convolution     │
-        │  (per-head causal kernels)       │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Multi-field coupling (head mix) │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Bilinear gather from field      │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Query modulation: sigmoid(Q/s)  │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Content gate: sigmoid(gate(x))  │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output projection + dropout     │
-        └────────────┬─────────────────────┘
-                     ▼
-        ┌──────────────────────────────────┐
-        │  Output (B, N, D)                │
-        └──────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │  WaveFieldAttention — FFT wave field, no score softmax  │
+        │                                                         │
+        │   No Q Kᵀ score matrix, and no softmax over tokens.     │
+        │   Information travels through a shared 1-D field grid by│
+        │   damped-wave convolution, and TWO separate gates apply.│
+        │                                                         │
+        │                    Input  [B, N, D]                     │
+        │                            ▼                            │
+        │   qkv_proj ► split 3 ► heads  Q, K, V  [B, H, N, D_h]   │
+        │                            ▼                            │
+        │   deposit = V * ||K||   (the key MAGNITUDE replaces the │
+        │   score); an optional (B, N) mask zeroes whole deposits │
+        │                            ▼                            │
+        │   scatter onto the field grid   ►  [B, H, G, D_h]       │
+        │   (bilinear scatter_mat, einsum "gn,bhnd->bhgd")        │
+        │                            ▼                            │
+        │   FFT damped-wave convolution, one kernel per head:     │
+        │   k_h(t) = exp(-softplus(a_h)·t) · cos(w_h·t + p_h),    │
+        │   L1-normalised, LEFT-ALIGNED ► inherently causal       │
+        │                            ▼                            │
+        │   cross-head coupling: einsum with softmax(field_       │
+        │   coupling) — a softmax over a LEARNED (H, H) matrix,   │
+        │   never over token scores                               │
+        │                            ▼                            │
+        │   gather back to tokens (gather_mat)  [B, H, N, D_h]    │
+        │                            ▼                            │
+        │      GATE 1 — query modulation:  * act(Q / scale)       │
+        │                            ▼                            │
+        │    GATE 2 — content gate:       * act(gate_proj(x))     │
+        │                            ▼                            │
+        │   merge heads ► output_proj ► re-apply mask ► dropout   │
+        │                            ▼                            │
+        │                    Output  [B, N, D]                    │
+        └─────────────────────────────────────────────────────────┘
 
     :param dim: Model dimension (must be divisible by ``num_heads``).
     :type dim: int

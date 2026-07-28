@@ -132,59 +132,49 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────┐
-        │ Input [B, H, W, C]              │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Cyclic Shift (if shift_size > 0)│
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Window Partition                │
-        │ → [B*nW, ws, ws, C]             │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ QKV Projection Dense(3*C)       │
-        │ → Q, K, V per head              │
-        │ [B*nW, heads, ws^2, head_dim]   │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ LePE: DepthwiseConv2D on V      │
-        │ (optional local pos. encoding)  │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Attn Scores = Q @ K^T * scale   │
-        │ + SW-MSA mask (if shifted)      │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Progressive Focusing:           │
-        │ scores = scores * prev_attn_map │
-        │ + Sparsity (optional)           │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ softmax → Attn Weights          │
-        │ + Dropout (optional)            │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Output = Attn @ V               │
-        │ → Output Projection Dense(C)    │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Window Reverse + Unshift        │
-        └────────────────┬────────────────┘
-                         ▼
-        ┌─────────────────────────────────┐
-        │ Output [B, H, W, C]             │
-        │ + Attention Map for next layer  │
-        └─────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────┐
+        │   ProgressiveFocusedAttention — one layer of a chain    │
+        │                                                         │
+        │   Windowed (SW-)MSA whose SCORES are re-weighted by the │
+        │   PREVIOUS layer's attention map, and whose own weights │
+        │   become the NEXT layer's prev_attn_map.                │
+        │                                                         │
+        │   Inputs:  x [B, H, W, C]                               │
+        │            prev_attn_map  (optional; None on layer 1)   │
+        │                            ▼                            │
+        │    cyclic roll by -shift_size   (if shift_size > 0)     │
+        │                            ▼                            │
+        │      window partition ► flatten  [B*nW, ws*ws, C]       │
+        │                            ▼                            │
+        │    qkv Dense(3C) ► Q, K, V  [B*nW, heads, ws², d_h]     │
+        │                            ▼                            │
+        │                optional q_norm / k_norm                 │
+        │                            ▼                            │
+        │   optional LePE: DWConv2D on V, added back (V + LePE)   │
+        │                            ▼                            │
+        │                    A = Q Kᵀ * scale                     │
+        │                            ▼                            │
+        │     + SW-MSA additive mask  (shifted windows only)      │
+        │                            ▼                            │
+        │   PROGRESSIVE FOCUSING   ◄── prev_attn_map              │
+        │   A = A * prev_attn_map  (plain Hadamard product on the │
+        │   PRE-probability scores; identity when it is None)     │
+        │                            ▼                            │
+        │   _apply_sparsity(A, prev_attn_map)  —  INERT: the      │
+        │   constructor rejects every sparsity_mode but 'none',   │
+        │   so this is a pass-through, not an optional stage.     │
+        │                            ▼                            │
+        │        attn = attn_prob(A)  ►  attention dropout        │
+        │                            ▼                            │
+        │      out = attn @ V ► merge ► proj ► proj dropout       │
+        │                            ▼                            │
+        │       window reverse  ►  roll back by +shift_size       │
+        │                            ▼                            │
+        │   ALWAYS returns a TUPLE:                               │
+        │     (output [B,H,W,C],  attn [B*nW, heads, ws², ws²])   │
+        │     └─► attn is fed back in as the next layer's         │
+        │         prev_attn_map — that recurrence IS the layer.   │
+        └─────────────────────────────────────────────────────────┘
 
     :param dim: Embedding dimension (number of channels).
     :type dim: int
