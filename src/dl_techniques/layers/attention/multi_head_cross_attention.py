@@ -492,6 +492,21 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         #     correctly with `-inf` entries. MEASURED on unfixed HEAD
         #     (B=2, N=64, D=64, H=4): an ALL-ONES mask — masking NOTHING — gave
         #     8192/8192 NaN.
+        #     SCOPE OF THAT CLAIM (correction, plan-2026-07-28T134123-420f6ccb/R-A):
+        #     "a row keeping >= 1 key survives the `-inf` entries" was verified for
+        #     `probability_type='softmax'` ONLY — the measurement above and the tests
+        #     that pin it all use the default softmax path. It is NOT a property of
+        #     this line, and it does NOT generalise to every `probability_type`:
+        #     `probability_type='sparsemax'` returned all-`NaN` on exactly such a row
+        #     until the D-017 fix in `layers/activations/sparsemax.py`. Handing `-inf`
+        #     to the probability sub-layer is therefore a CONTRACT ON THAT SUB-LAYER,
+        #     which each one must meet for itself.
+        #     This says nothing about whether any given `probability_type` is fully
+        #     non-finite-safe, and this layer does not make it so. `Sparsemax` in
+        #     particular still carries FOUR measured, OPEN, UNGUARDED defects; read the
+        #     `# DECISION plan-2026-07-28T134123-420f6ccb/D-017` anchor in
+        #     `layers/activations/sparsemax.py` for the open set before assuming
+        #     otherwise.
         #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
         #     also rescue a FULLY-MASKED query row. It cannot: the next consumer is
         #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
