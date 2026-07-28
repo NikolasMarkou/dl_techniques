@@ -343,11 +343,10 @@ class LighthouseAttention(keras.layers.Layer):
         ┌───────────────────────────────────────────────────────────────────┐
         │    LighthouseAttention — pyramid select, causal SDPA, scatter     │
         │                                                                   │
-        │  KNOWN DEFECT (reproduced, still RED): the scatter-back path      │
-        │  LEAKS FUTURE INFORMATION — perturbing the LAST input token       │
-        │  moves outputs at positions < N // 2 by up to 2.58 absolute, so   │
-        │  this layer is NOT causal today despite the p^l - 1 shift drawn   │
-        │  below. See the anchor above the class and its 2 failing tests.   │
+        │  KNOWN-RED, reproduced: this layer is NOT causal today —          │
+        │  perturbing the LAST input token moves outputs at positions       │
+        │  < N // 2 by up to 2.58 absolute. The MECHANISM IS NOT            │
+        │  DIAGNOSED; see the DECISION anchor above the class.              │
         │                                                                   │
         │                     Input  x  [B, N, dim]                         │
         │                               ▼                                   │

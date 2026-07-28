@@ -14,8 +14,7 @@ Changes from V3.5 Keras port:
       zeros out deposits from padded tokens and masks final output. The
       left-aligned kernel is causal *on the field grid* (output at field
       position g depends only on field positions <= g); see the Causality
-      section below for why that does NOT imply token-level causality when
-      the field compresses.
+      section below for why that does NOT imply token-level causality.
     - **coupling_noise_stddev fixed**: now actually used in
       ``field_coupling`` initialisation (identity + Gaussian noise),
       matching the PyTorch original.
@@ -36,24 +35,30 @@ Causality (CONDITIONAL — read this before using the layer autoregressively):
     for ``t >= 0`` ensures convolution output at field position g depends
     only on field positions <= g, and the coupling matrix mixes across
     heads at the *same* spatial position, so the FIELD-GRID computation is
-    causal. Token indices map monotonically to field positions
-    (token i -> i * field_stride), but that monotone map is NOT injective
-    when the field compresses.
+    causal.
 
-    TOKEN-level causality therefore holds only when ``field_stride >= 1``,
-    i.e. ``field_size >= max_seq_len``. With ``field_stride < 1`` — the
-    compressing configuration this layer is designed for — the bilinear
-    scatter/gather straddles two cells (``idx_lo`` and ``idx_lo + 1``, see
-    ``_build_scatter_gather_matrices``) and ``scatter_mat`` is the
-    transpose of ``gather_mat``, so a LATER token deposits into a cell an
-    EARLIER token reads. Measured (randomly initialized layer, one
-    perturbed token of magnitude 100 appended to an 8-token input): the
-    change induced on the OTHER tokens' outputs is O(1e3) at
-    ``field_stride`` 0.125 and 0.5, versus O(1e-4) — i.e. float noise —
-    at ``field_stride = 1.0``.
+    TOKEN-level causality is NOT guaranteed and must not be relied on.
+    Token indices map monotonically to field positions
+    (token i -> i * field_stride), but that map is not injective and the
+    bilinear scatter/gather spans two cells (``idx_lo`` and
+    ``idx_lo + 1``, see ``_build_scatter_gather_matrices``).
 
-    Do NOT rely on this layer for autoregressive decoding unless
-    ``field_size >= max_seq_len``.
+    Measured leak (randomly initialized layer, one perturbed token of
+    magnitude 100 appended to an 8-token input; the value is the change
+    induced on the OTHER tokens' outputs). Some configurations measure
+    clean and others leak badly::
+
+        field_size=12, max_seq_len=11  ->  731.6
+        field_size=13, max_seq_len=11  ->  793.5
+        field_size=16, max_seq_len=11  ->  2e-4   (float noise)
+        field_size=22, max_seq_len=11  ->  2e-4   (float noise)
+        field_size=16, max_seq_len=16  ->  4e-4   (float noise)
+
+    The mechanism is not characterised, and the measured leak is not
+    predicted by ``field_stride`` alone: no sufficient condition on
+    ``field_size`` / ``max_seq_len`` is offered here.
+
+    Do NOT rely on this layer for autoregressive decoding.
 
 Complexity:
     O(N*D + G*log(G)*H*D_h)
@@ -135,12 +140,12 @@ class WaveFieldAttention(keras.layers.Layer):
     for ``t >= 0`` is causal (left-aligned), so the convolution output at
     field position ``g`` depends only on field positions ``<= g``. That is
     causality **on the field grid only**: token-level (autoregressive)
-    causality additionally requires ``field_stride >= 1``, i.e.
-    ``field_size >= max_seq_len``. Under a compressing field the bilinear
-    scatter/gather lets a later token deposit into a cell an earlier token
-    reads — see the module docstring's Causality section for the measured
-    leak. Complexity is ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the
-    field grid size.
+    causality is NOT guaranteed and must not be relied on. Some
+    configurations measure clean and others leak badly (a leak of 731.6 at
+    ``field_size=12, max_seq_len=11``); no sufficient condition is offered
+    — see the module docstring's Causality section for the measured table.
+    Complexity is ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the field
+    grid size.
 
     **Architecture Overview:**
 
@@ -166,11 +171,12 @@ class WaveFieldAttention(keras.layers.Layer):
         │   FFT damped-wave convolution, one kernel per head:     │
         │   k_h(t) = exp(-softplus(a_h)·t) · cos(w_h·t + p_h),    │
         │   L1-normalised, LEFT-ALIGNED ► causal ON THE FIELD     │
-        │   GRID. TOKEN-level causality holds ONLY when           │
-        │   field_stride >= 1 (field_size >= max_seq_len). A      │
-        │   COMPRESSING field is NOT token-causal: the bilinear   │
-        │   scatter/gather reads cell idx_lo + 1, so a LATER      │
-        │   token leaks backwards into an EARLIER one (measured)  │
+        │   GRID ONLY. TOKEN-level causality is NOT guaranteed    │
+        │   and must NOT be relied on: some configs measure       │
+        │   clean, others leak badly (731.6 at field_size=12,     │
+        │   max_seq_len=11). Mechanism not characterised, and     │
+        │   no sufficient condition is offered — see the module   │
+        │   docstring's Causality section.                        │
         │                            ▼                            │
         │   cross-head coupling: einsum with softmax(field_       │
         │   coupling) — a softmax over a LEARNED (H, H) matrix,   │
