@@ -1,4 +1,17 @@
-"""Tests for the Sparsemax activation layer."""
+"""Tests for the Sparsemax activation layer.
+
+.. warning::
+
+   **THIS FILE BEING GREEN DOES NOT MEAN SPARSEMAX IS NUMERICALLY CORRECT.**
+   The work that produced these tests closed **Defect A only** — the
+   ``0 * -inf = NaN`` arithmetic gather that made a partially ``-inf``-masked
+   row return all-``NaN``.  Four further defects (**B**, **C**, **D**, **E**)
+   were MEASURED and remain **OPEN and UNGUARDED** inside ``Sparsemax.call()``;
+   see the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
+   ``src/dl_techniques/layers/activations/sparsemax.py``.  They are pinned by
+   :class:`TestSparsemaxOpenDefects` below as ``xfail(strict=True)`` cases —
+   pinned, not fixed.
+"""
 
 import os
 import tempfile
@@ -364,6 +377,174 @@ class TestSparsemax:
                 "MultiHeadCrossAttention(probability_type='sparsemax') produced NaN "
                 f"under mixed_float16 with a partial mask; "
                 f"nan_count={nan_count}/{out.size}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# SCOPE PINS for the four OPEN defects.
+#
+# Each case below asserts the CORRECT behaviour and is expected to FAIL.
+# `strict=True` is the whole point: when the follow-up plan fixes one of these,
+# the case XPASSes, `strict=True` turns that XPASS into a hard FAILURE, and
+# whoever fixed it is FORCED to delete the marker rather than have the
+# improvement absorbed silently. Do not relax these to non-strict xfail, to
+# `skip`, or delete them: an anchor without a test that can fail is a comment,
+# not a guard.
+#
+# An `xpassed` here CONTRADICTS a measured defect. That is a FINDING to
+# investigate, never a win to bank.
+# ---------------------------------------------------------------------
+
+
+class TestSparsemaxOpenDefects:
+    """Executable record of what ``Sparsemax`` still gets WRONG.
+
+    **A green test file does NOT mean sparsemax is numerically correct.** The
+    change that landed alongside these tests closed **Defect A** (the
+    ``0 * -inf = NaN`` gather) and nothing else. Defects **B**, **C**, **D**
+    and **E** below are MEASURED, OPEN, UNGUARDED and deferred to a follow-up
+    plan. They share one root cause: the reduction (ramp, cumsum, support test,
+    ``k_z`` count) runs in the COMPUTE dtype, which under ``float16`` /
+    ``bfloat16`` has neither the range nor the integer precision the algorithm
+    needs — and under ``float32`` fails once magnitudes reach ~1.7e7.
+
+    See the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
+    ``src/dl_techniques/layers/activations/sparsemax.py``.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Defect B (sparsemax.py:~220, OPEN, deferred to the follow-up "
+            "'beta' plan): an overflow-born non-finite z_cumsum is ADMITTED to "
+            "the support because support = 1 + finite - (-inf) = +inf > 0. "
+            "Measured at spread 16.95, mixed_float16, K=4096, with NO -inf in "
+            "the input: k_z = 1863 where the exact answer is 1, sum(out) = "
+            "16.95. Remove this marker when beta fixes it."
+        ),
+    )
+    def test_defect_b_overflow_born_inf_admitted_to_support(self) -> None:
+        """fp16 cumsum overflow must not inflate the support set."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            k = 4096
+            z = np.full((1, k), -16.95, dtype=np.float32)
+            z[:, 0] = 0.0
+
+            out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
+
+            assert np.isfinite(out).all(), (
+                "Defect B: sparsemax output is not finite "
+                f"(nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())})"
+            )
+            total = float(out.sum())
+            assert abs(total - 1.0) <= 1e-2, (
+                f"Defect B: sum(out) = {total}, expected 1.0 "
+                "(the single largest entry should take all the mass)"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Defect C (sparsemax.py:~210, OPEN, deferred to the follow-up "
+            "'beta' plan): ops.arange(1, k+1, dtype=inputs.dtype) cannot "
+            "represent the ramp in a narrow dtype, so the layer RAISES. The "
+            "break is NON-MONOTONE in K: it raises at mixed_bfloat16 K=256/257 "
+            "but is fine at K=512, and raises at mixed_float16 K=2048 but is "
+            "fine at K=4096. Remove this marker when beta fixes it."
+        ),
+    )
+    def test_defect_c_bfloat16_arange_ramp_raises(self) -> None:
+        """``Sparsemax()(z)`` must not raise under ``mixed_bfloat16`` at K=256."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_bfloat16")
+        try:
+            rng = np.random.default_rng(7)
+            z = rng.uniform(-5.0, 5.0, size=(2, 256)).astype(np.float32)
+
+            # The assertion IS that this call completes. Any exception is the
+            # defect; it must not be swallowed into a softer claim.
+            out = ops.convert_to_numpy(Sparsemax()(z))
+            assert out.shape == (2, 256)
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Defect D (sparsemax.py:~220, OPEN, deferred to the follow-up "
+            "'beta' plan): round-off absorbs the literal 1.0 in "
+            "`1.0 + k*z - cumsum`, so support == 0 everywhere, k_z == 0, "
+            "one_hot(-1) is all-zero, tau = -inf and the output is all +inf. "
+            "Measured float32 onset 1.68e7 (K=4) / 7.77e7 (K=512). "
+            "Remove this marker when beta fixes it."
+        ),
+    )
+    def test_defect_d_float32_large_magnitude_swamps_the_literal_one(self) -> None:
+        """float32 magnitudes at the 1.0-swamping onset must still project."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float32")
+        try:
+            z = np.full((1, 4), 1.68e7, dtype=np.float32)
+
+            out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
+
+            assert np.isfinite(out).all(), (
+                "Defect D: sparsemax output is not finite "
+                f"(nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())})"
+            )
+            total = float(out.sum())
+            assert abs(total - 1.0) <= 1e-2, (
+                f"Defect D: sum(out) = {total}, expected 1.0 "
+                "(all entries equal -> uniform 0.25 each)"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Defect E (sparsemax.py:~225, OPEN, deferred to the follow-up "
+            "'beta' plan; the NASTIEST of the four): k_z = ops.sum(support_mask) "
+            "accumulates in the compute dtype and hits float16's integer wall — "
+            "2051 -> 2052, which selects a masked position whose z_cumsum is "
+            "-inf, so tau = -inf and the row dies. The M2 ops.where fix CANNOT "
+            "help here: the -inf sits at the SELECTED index, not at a masked-out "
+            "one. (At 4095 -> 4096 the index is OUT OF RANGE for depth 4096 and "
+            "the layer returns a SILENTLY WRONG FINITE answer instead.) "
+            "Remove this marker when beta fixes it."
+        ),
+    )
+    def test_defect_e_fp16_support_count_overshoots_into_a_masked_index(self) -> None:
+        """An fp16 support of exactly 2051 must not select a masked position."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            k = 4096
+            m = 2051  # support size that fp16 accumulation rounds to 2052
+            z = np.full((1, k), -np.inf, dtype=np.float32)
+            z[:, :m] = -31.921875  # exactly representable in float16
+            masked = ~np.isfinite(z)
+
+            out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
+
+            assert np.isfinite(out).all(), (
+                "Defect E: sparsemax output is not finite "
+                f"(nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())})"
+            )
+            assert np.all(out[masked] == 0.0), (
+                "Defect E: masked positions are not exactly 0.0; "
+                f"{int((out[masked] != 0.0).sum())} of {int(masked.sum())} are non-zero"
+            )
+            total = float(out.sum())
+            assert abs(total - 1.0) <= 1e-2, (
+                f"Defect E: sum(out) = {total}, expected 1.0 "
+                f"(uniform 1/{m} over the finite entries)"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
