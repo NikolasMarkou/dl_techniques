@@ -34,6 +34,7 @@ from dl_techniques.layers.activations.sparsemax import Sparsemax
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
 )
+from dl_techniques.losses.sparsemax_loss import SparsemaxLoss
 
 
 def _x() -> np.ndarray:
@@ -1410,6 +1411,197 @@ class TestSparsemaxXLACapability:
                     f"XLA disagrees with eager at K={width} under {policy} "
                     f"(derived atol={atol})"
                 ),
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# `SparsemaxLoss` x the global dtype policy  (MEASURED 2026-07-29)
+# ---------------------------------------------------------------------
+# WHAT WAS PROBED.  `losses/sparsemax_loss.py:225` builds its inner
+# `Sparsemax()` EAGERLY in `__init__`, so that sub-layer's dtype policy is
+# frozen at LOSS-CONSTRUCTION time. The open question was what happens when the
+# ambient policy differs at CALL time.
+#
+# WHAT WAS MEASURED (both orders, plus same-policy controls, on GPU/TF):
+#
+#   construct   call        loss.dtype  inner compute  result
+#   ---------   ---------   ----------  -------------  --------------------
+#   float32     float32     float32     float32        OK   -> float32
+#   float32     fp16        float32     float32        OK   -> float32
+#   float32     float64     float32     float32        OK   -> float32
+#   fp16        {any}       float32     float16        RAISE InvalidArgument
+#   bf16        {any}       float32     bfloat16       RAISE InvalidArgument
+#   float64     {any}       float32     float64        RAISE InvalidArgument
+#
+# THE RULE, and why the call-time policy turned out to be the wrong axis.
+# `keras.losses.Loss` takes its dtype from `backend.floatx()`, NOT from the
+# global mixed-precision policy — so `loss.dtype` is `float32` under EVERY
+# policy above, and `Loss.__call__` casts both `y_true` and `y_pred` to
+# float32 before `call()` runs. The inner layer, by contrast, honours the
+# policy captured at construction and returns ITS compute dtype. When the two
+# disagree, `y_pred - p` at `sparsemax_loss.py:258` is float32 minus
+# float16/bfloat16/float64 and TensorFlow raises. The ambient policy at call
+# time is therefore IRRELEVANT: the loss is a pure function of the policy in
+# force when it was CONSTRUCTED.
+#
+# RULING: (a) a loud dtype mismatch, not (b) a silently-narrow reduction.
+# `D-007` made the reduction dtype derive from `inputs.dtype` rather than
+# `self.compute_dtype`, which is exactly why route (b) is closed here.
+#
+# THIS IS A PRE-EXISTING GAP IN `losses/sparsemax_loss.py`, NOT A REGRESSION
+# FROM THIS PLAN.  Measured on `ba9efff0` (pre-fix HEAD): `Sparsemax` already
+# returned float16/bfloat16/float64 under the corresponding policies. This
+# plan's `D-003` deliberately PRESERVED that dtype contract (`tau` is cast back
+# so the observable output dtype stays the compute dtype), so the fix neither
+# introduced nor removed the mismatch.
+#
+# THE TESTS BELOW PIN CURRENT BEHAVIOUR, INCLUDING THE DEFECT.  Fixing it
+# means one line in `losses/sparsemax_loss.py` (cast `p` to `y_pred.dtype`
+# before the subtraction), and that file is outside this plan's Files To
+# Modify. `test_loss_constructed_under_a_narrow_policy_raises` therefore
+# asserts the RAISE — it is a guard against silent drift, not an endorsement.
+# When the loss is fixed, that test will fail loudly and must be rewritten to
+# assert the working behaviour; that is the intended handoff.
+# ---------------------------------------------------------------------
+
+#: Policies whose compute dtype differs from `backend.floatx()`, i.e. every
+#: policy under which constructing a `SparsemaxLoss` currently poisons it.
+_LOSS_BROKEN_POLICIES = ("mixed_float16", "mixed_bfloat16", "float64")
+
+
+class TestSparsemaxLossDtypePolicy:
+    """`SparsemaxLoss`'s eager inner `Sparsemax()` vs. the global policy.
+
+    Probe of `losses/sparsemax_loss.py:225` (plan step 6). That file is
+    PROBED, NOT MODIFIED — see the note above for the measured rule and for
+    why the defect these tests pin is escalated rather than fixed here.
+    """
+
+    @pytest.mark.parametrize("construct_policy", ("float32",) + _LOSS_BROKEN_POLICIES)
+    def test_inner_sparsemax_policy_is_frozen_at_construction(
+        self, construct_policy: str
+    ) -> None:
+        """The sub-layer keeps its construction-time policy across a later change.
+
+        This is the MECHANISM the other two tests rest on: changing the global
+        policy after `__init__` does not reach the already-built sub-layer.
+
+        :param construct_policy: Policy in force when the loss is constructed.
+        :type construct_policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy(construct_policy)
+            loss = SparsemaxLoss(from_logits=True)
+            frozen = loss.sparsemax.compute_dtype
+            assert frozen == keras.mixed_precision.global_policy().compute_dtype
+
+            # Flip to the opposite policy AFTER construction.
+            other = "float32" if construct_policy != "float32" else "mixed_float16"
+            keras.mixed_precision.set_global_policy(other)
+
+            assert loss.sparsemax.compute_dtype == frozen, (
+                f"inner Sparsemax followed the ambient policy: expected the "
+                f"construction-time {frozen!r}, got "
+                f"{loss.sparsemax.compute_dtype!r} after switching to {other}"
+            )
+            # `Loss` itself ignores the policy entirely - it tracks
+            # `backend.floatx()`. This is the other half of the mismatch.
+            assert loss.dtype == keras.backend.floatx()
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("call_policy", ("float32", "mixed_float16"))
+    @pytest.mark.parametrize("construct_policy", _LOSS_BROKEN_POLICIES)
+    def test_loss_constructed_under_a_narrow_policy_raises(
+        self, construct_policy: str, call_policy: str
+    ) -> None:
+        """PINS A KNOWN GAP in `losses/sparsemax_loss.py` (do not "fix" this test).
+
+        A `SparsemaxLoss` built under any policy whose compute dtype differs
+        from `backend.floatx()` is unusable: `Loss.__call__` casts `y_pred` to
+        float32 while the frozen sub-layer returns its own dtype, so
+        `y_pred - p` raises. The call-time policy does not change this, which
+        is why it is parametrized here.
+
+        :param construct_policy: Policy in force at construction.
+        :type construct_policy: str
+        :param call_policy: Policy in force at call time (measured irrelevant).
+        :type call_policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy(construct_policy)
+            loss = SparsemaxLoss(from_logits=True)
+
+            keras.mixed_precision.set_global_policy(call_policy)
+            # `masked_fraction=0.0` - the no-`inf` control. `SparsemaxLoss`'s
+            # `0.5*||z - p||^2 - z^T y` is undefined on `-inf` logits, so the
+            # masked corpus belongs to the LAYER's tests, not the loss's.
+            z = _partially_masked_row_batch(16, 0.0, seed=606)
+            z_compute = _to_compute_dtype(z)
+            y = np.zeros_like(z_compute)
+            y[:, 0] = 1.0
+
+            with pytest.raises(tf.errors.InvalidArgumentError, match="Sub"):
+                loss(ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute))
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_loss_built_under_float32_survives_a_later_fp16_policy(self) -> None:
+        """The one order that works: build under float32, then switch to fp16.
+
+        Asserts the observable consequences: the loss still runs, it returns
+        **float32** (not float16 - it is not policy-aware at all), and its
+        value matches the Fenchel-Young formula evaluated on the EXACT-rational
+        sparsemax of the bits the layer actually received.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy("float32")
+            loss = SparsemaxLoss(from_logits=True)
+
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            # No-`inf` control: see the note in the raising test above.
+            z = _partially_masked_row_batch(16, 0.0, seed=607)
+            # The fp16 bits the caller hands in; `Loss.__call__` upcasts these
+            # to float32 losslessly, so these ARE the received bits.
+            z_compute = _to_compute_dtype(z)
+            y = np.zeros_like(z_compute)
+            y[:, 0] = 1.0
+
+            out = loss(
+                ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute)
+            )
+            assert keras.backend.standardize_dtype(out.dtype) == "float32", (
+                f"loss dtype {out.dtype} - expected float32 even under "
+                f"mixed_float16 (keras.losses.Loss tracks backend.floatx())"
+            )
+
+            # Reference: L = 0.5 * ||z - p||^2 - z^T y, reduced by the loss's
+            # default `sum_over_batch_size`.
+            z64 = np.asarray(z_compute, dtype=np.float64)
+            p64 = _exact_rows_as_float64(z_compute)
+            y64 = np.asarray(y, dtype=np.float64)
+            per_sample = 0.5 * np.sum((z64 - p64) ** 2, axis=-1) - np.sum(
+                z64 * y64, axis=-1
+            )
+            expected = float(np.mean(per_sample))
+
+            # First-order propagation of the per-element sparsemax tolerance
+            # through the loss: dL/dp_j = -(z_j - p_j), so an elementwise error
+            # of `eps` costs at most `sum_j |z_j - p_j| * eps`. `_TF32_ATOL_FLOOR`
+            # covers the float32 summation itself.
+            eps = _oracle_atol(z_compute, _output_dtype())
+            atol = _TF32_ATOL_FLOOR + eps * float(
+                np.max(np.sum(np.abs(z64 - p64), axis=-1))
+            )
+            actual = float(ops.convert_to_numpy(out))
+            assert abs(actual - expected) <= atol, (
+                f"loss {actual} != Fenchel-Young reference {expected} "
+                f"(derived atol={atol})"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
