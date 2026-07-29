@@ -718,6 +718,40 @@ def _exact_rows_as_float64(z_compute: np.ndarray) -> np.ndarray:
     )
 
 
+def _exact_rows_along_axis(z_compute: np.ndarray, axis: int) -> np.ndarray:
+    """:func:`_exact_rows_as_float64` for an N-D batch reduced along ``axis``.
+
+    THE WHOLE ADAPTER IS THREE LINES, AND THAT IS THE POINT: no second oracle
+    exists for the moved-axis / rank>2 / dynamic-K surface, and none may be
+    written. ``np.moveaxis`` to last, ``reshape(-1, K)``, run the ONE exact
+    rational oracle, reshape and move back. The layer does structurally the
+    same thing internally (``sparsemax.py:158-194`` transposes the reduction
+    axis to last and reshapes to ``(-1, k)``) — but the two agree only because
+    both are correct, not because they share code: this adapter is pure numpy
+    index bookkeeping and imports nothing from the layer.
+
+    ``np.moveaxis`` accepts negative ``axis`` with the ordinary Python
+    convention, so ``-2`` on a rank-4 batch is ``ndim - 2`` — the same
+    normalisation ``sparsemax.py:150`` performs. It also RAISES ``AxisError``
+    on an out-of-range value, which is exactly what the layer does not do
+    (F-06); out-of-range axes are out of scope here and are step 9's subject.
+
+    :param z_compute: Batch of any rank >= 1, ALREADY cast to the active
+        policy's compute dtype — use :func:`_to_compute_dtype`. The dtype
+        assertion lives in :func:`_exact_sparsemax` and fires through here.
+    :type z_compute: np.ndarray
+    :param axis: The reduction axis, either sign, IN RANGE.
+    :type axis: int
+
+    :return: float64 array of the SAME shape as ``z_compute``, holding the
+        exact rational projection taken along ``axis``.
+    :rtype: np.ndarray
+    """
+    moved = np.moveaxis(np.asarray(z_compute), axis, -1)
+    exact = _exact_rows_as_float64(moved.reshape(-1, moved.shape[-1]))
+    return np.moveaxis(exact.reshape(moved.shape), -1, axis)
+
+
 # ---------------------------------------------------------------------
 # THE ATTACK CORPUS.
 #
@@ -2459,6 +2493,49 @@ class TestSparsemaxBackwardPass:
 # record has carried it as both 19 and 21 (`plans/LESSONS.md:20`).
 # ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
+# THE `axis != -1` / rank>2 GRID  (G8).
+#
+# WHY THESE NINE CASES AND NOT A CROSS-PRODUCT.  The exploration ran 302
+# oracle comparisons over ranks 1-4 x axes {0, 1, -2, -1} x the six `_XLA_WIDTHS`
+# x 4 policies, masked and unmasked, and every one passed. A committed replay of
+# that cross-product would be ~1500 cases of exact RATIONAL arithmetic at K up to
+# 4096 — minutes of gate time to re-derive a grid whose result is already known.
+# What a committed guard has to preserve is COVERAGE OF THE DEGREES OF FREEDOM,
+# not the cardinality: each rank, each axis and each width appears at least once,
+# and the widths stay exactly `_XLA_WIDTHS` because the historical defect onsets
+# were NON-MONOTONE in K (I-7 — 256 and 257 are load-bearing, do not thin them).
+# `test_the_axis_grid_covers_every_declared_rank_axis_and_width` asserts that
+# coverage property directly, so thinning this tuple goes RED rather than
+# quietly shrinking the guard.
+#
+# THE NON-REDUCED DIMENSIONS ARE DELIBERATELY TINY (1..3). They cost oracle time
+# linearly and buy nothing: the layer flattens every one of them into the batch
+# dimension of a `(-1, k)` reshape (`sparsemax.py:194`), so a size-8 leading dim
+# exercises the identical code path as a size-2 one.
+#
+# `rank4_K4096_axism2` IS THE LIVE PRODUCTION SHAPE, not a synthetic corner.
+# `capsule_routing_attention.py:331` builds `Sparsemax(axis=-2)` whenever
+# `probability_type='sparsemax'`, and a `call()` spy measured it receiving rank-4
+# tensors of shape `(2, 4, K, 1)` from the routing loop (`:797-803`). It is the
+# repo's ONLY live non-default-axis sparsemax site and it is reachable from 18 of
+# the 31 attention registry keys (I-8).
+# ---------------------------------------------------------------------
+
+#: `(case_id, input shape, axis)`. ``K = shape[axis]``.
+_AXIS_SHAPE_CASES: Tuple[Tuple[str, Tuple[int, ...], int], ...] = (
+    ("rank1_K8_axis0", (8,), 0),
+    ("rank1_K257_axism1", (257,), -1),
+    ("rank2_K256_axis0", (256, 3), 0),
+    ("rank2_K512_axism1", (2, 512), -1),
+    ("rank3_K8_axis0", (8, 2, 3), 0),
+    ("rank3_K257_axis1", (2, 257, 3), 1),
+    ("rank3_K2048_axism2", (2, 2048, 2), -2),
+    # F-07's LIVE shape: capsule routing, `axis=-2` on rank-4, trailing 1.
+    ("rank4_K4096_axism2", (2, 1, 4096, 1), -2),
+    ("rank4_K256_axis1", (2, 256, 2, 2), 1),
+)
+
 
 class TestSparsemaxAgainstExactOracle:
     """`Sparsemax`'s FORWARD output vs `fractions.Fraction` arithmetic.
@@ -2631,6 +2708,405 @@ class TestSparsemaxAgainstExactOracle:
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
+
+    # -----------------------------------------------------------------
+    # G8 — `axis != -1`, rank > 2, dynamic `K`.
+    #
+    # The two staticmethods below are NOT a fifth module-level abstraction;
+    # they follow `TestSparsemaxBackwardPass._layer_gradient`'s precedent
+    # (a helper scoped to the class that needs it). `_exact_rows_along_axis`
+    # IS the step's one budgeted module-level abstraction, and with it the
+    # plan's 4/4 abstraction budget is spent.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _moved_flat(z: np.ndarray, axis: int) -> np.ndarray:
+        """The ``(rows, K)`` view of ``z`` with ``axis`` moved to last.
+
+        `_oracle_atol` derives its scale from each row's spread along the LAST
+        numpy axis, so it must be fed this view and never the raw N-D batch:
+        on `(2, 257, 3)` with `axis=1` the raw batch's last-axis spread is
+        taken over 3 unrelated entries and the resulting tolerance is a
+        different number derived from a different row.
+
+        :param z: Batch of any rank >= 1.
+        :type z: np.ndarray
+        :param axis: The reduction axis, either sign, in range.
+        :type axis: int
+        :return: 2-D view/copy of shape ``(z.size // K, K)``.
+        :rtype: np.ndarray
+        """
+        moved = np.moveaxis(np.asarray(z), axis, -1)
+        return moved.reshape(-1, moved.shape[-1])
+
+    @staticmethod
+    def _axis_batch(
+        shape: Tuple[int, ...], axis: int, masked: bool, seed: int
+    ) -> np.ndarray:
+        """Seeded float32 logits of ``shape``, optionally ``-inf``-masked.
+
+        Built in the MOVED layout and moved back, so the mask is written
+        through a contiguous ``(rows, K)`` view — writing through
+        ``moveaxis(...).reshape(...)`` of an already-built array can silently
+        hit a copy and drop every mask, which would leave the "masked" half of
+        this grid a duplicate of the unmasked half.
+
+        Each row carries a deliberate exact tie (entry ``K//2`` copied from
+        entry ``0``); ties are the pattern this family's defects live on.
+        A quarter of each row is masked, so no row is ever fully masked
+        (``K >= 8`` throughout) — fully-masked rows are out of the oracle's
+        scope by the same ``any(isfinite)`` predicate used above.
+
+        :param shape: The layer's input shape.
+        :type shape: tuple[int, ...]
+        :param axis: The reduction axis, either sign, in range.
+        :type axis: int
+        :param masked: Whether to write ``-inf`` into a quarter of each row.
+        :type masked: bool
+        :param seed: RNG seed.
+        :type seed: int
+        :return: float32 array of shape ``shape``.
+        :rtype: np.ndarray
+        """
+        ndim = len(shape)
+        ax = axis % ndim
+        k = shape[ax]
+        moved_shape = shape[:ax] + shape[ax + 1:] + (k,)
+
+        rng = np.random.default_rng(seed)
+        moved = rng.uniform(-5.0, 5.0, size=moved_shape).astype(np.float32)
+        flat = moved.reshape(-1, k)
+        flat[:, k // 2] = flat[:, 0]
+
+        if masked:
+            n_masked = max(1, k // 4)
+            assert n_masked < k, f"would mask an entire row (K={k})"
+            for r in range(flat.shape[0]):
+                pos = rng.choice(k, size=n_masked, replace=False)
+                flat[r, pos] = -np.inf
+            assert np.isfinite(flat).any(axis=-1).all(), "a row is fully masked"
+
+        return np.ascontiguousarray(np.moveaxis(moved, -1, ax))
+
+    # -----------------------------------------------------------------
+    # PROVEN RED (GPU, `CUDA_VISIBLE_DEVICES=1`), each injection reverted in
+    # place. The assertion that fired is the final `assert_allclose` below in
+    # every case:
+    #
+    #   (A) the oracle applied along the WRONG axis (`_exact_rows_along_axis(
+    #       z_compute, -1)` while the layer reduces `axis=1`), rank-3 K=257:
+    #       err = 1.000000e+00 at all 4 policies, vs atol 1.000e-03 (float32,
+    #       1000x) / 1.465e-03 (fp16, 683x) / 1.172e-02 (bf16, 85x) / 1.000e-03
+    #       (float64, 1000x). This reproduces the exploration's own harness
+    #       control to the digit.
+    #   (B) a broken projection (`out * 0.5`): RED at 17/17 of the dynamic-K,
+    #       jit, save/load and rank-4-K4096 cases, worst 3.9x (bf16) — i.e.
+    #       none of those four is a shape-only test.
+    #   (C) a CALIBRATED additive `+1.2e-3` is RED on float32 and float64 only
+    #       (1.20x over the `_TF32_ATOL_FLOOR`) and GREEN on fp16 and bf16,
+    #       whose derived tolerances are 1.465e-03 and 1.172e-02. That is not a
+    #       weakness of this grid: it is D-012's measured fact that the narrow
+    #       policies' real sensitivity is ~1 output ulp, and 1.2e-3 is BELOW one
+    #       bfloat16 ulp at 1.0 (7.8e-3), so no representable output can move.
+    #       Do NOT quote (C) as a uniform proof; (B) is the uniform one.
+    # -----------------------------------------------------------------
+
+    def _assert_matches_exact_oracle_along_axis(
+        self, z_compute: np.ndarray, out: Any, axis: int, what: str
+    ) -> int:
+        """Shared body of the four G8 comparisons; returns rows compared.
+
+        :param z_compute: The POST-CAST bits handed to the layer.
+        :type z_compute: np.ndarray
+        :param out: The layer's raw output tensor (not yet numpy).
+        :type out: Any
+        :param axis: The reduction axis.
+        :type axis: int
+        :param what: Identifier for the failure messages.
+        :type what: str
+        :return: Number of ``(row along axis)`` projections compared.
+        :rtype: int
+        """
+        policy = keras.mixed_precision.global_policy().name
+
+        # I-1, on the TENSOR, before `convert_to_numpy` can launder a narrow
+        # answer into float64.
+        assert keras.backend.standardize_dtype(out.dtype) == _output_dtype(), (
+            f"{what}: layer returned {out.dtype} under {policy}, but the "
+            f"compute dtype is {_output_dtype()} (I-1)"
+        )
+
+        out64 = ops.convert_to_numpy(out).astype(np.float64)
+        assert out64.shape == z_compute.shape, (
+            f"{what}: output shape {out64.shape} != input shape "
+            f"{z_compute.shape} — the axis permutation did not round-trip"
+        )
+
+        exact64 = _exact_rows_along_axis(z_compute, axis)
+        flat = self._moved_flat(z_compute, axis)
+
+        masked = ~np.isfinite(np.asarray(z_compute, dtype=np.float64))
+        assert np.all(out64[masked] == 0.0), (
+            f"{what} under {policy}: "
+            f"{int((out64[masked] != 0.0).sum())} of {int(masked.sum())} "
+            "masked positions are not EXACTLY 0.0"
+        )
+
+        atol = _oracle_atol(flat, _output_dtype())
+        err = float(np.max(np.abs(out64 - exact64)))
+        np.testing.assert_allclose(
+            out64,
+            exact64,
+            atol=atol,
+            rtol=0.0,
+            err_msg=(
+                f"layer != EXACT rational oracle at {what} under {policy} "
+                f"(axis={axis}, K={z_compute.shape[axis]}): max abs error "
+                f"{err:.6e} vs derived atol {atol:.6e} ({err / atol:.3f}x)"
+            ),
+        )
+        return int(flat.shape[0])
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    @pytest.mark.parametrize("masked", (False, True), ids=("unmasked", "masked"))
+    @pytest.mark.parametrize(
+        "case_index",
+        range(len(_AXIS_SHAPE_CASES)),
+        ids=[case_id for case_id, _, _ in _AXIS_SHAPE_CASES],
+    )
+    def test_moved_axis_and_rank_match_the_exact_oracle(
+        self, case_index: int, masked: bool, policy: str
+    ) -> None:
+        """One ``(rank, axis, K)`` point vs exact rational arithmetic.
+
+        Covers ranks 1-4 and axes ``{0, 1, -2, -1}`` at every width in
+        ``_XLA_WIDTHS``. ``rank4_K4096_axism2`` is F-07's LIVE shape:
+        `capsule_routing_attention.py:331` builds ``Sparsemax(axis=-2)`` on
+        rank-4 routing logits whenever ``probability_type='sparsemax'``, which
+        18 of the 31 attention registry keys can reach — so this is the one
+        parametrization in the file that guards a shipped configuration rather
+        than a synthetic one.
+
+        Only IN-RANGE axes appear here. Out-of-range ``axis`` is an OPEN defect
+        (F-06: a silently transposed non-distribution at ``axis == -(ndim+1)``,
+        and an uncatchable TF C++ SIGABRT for ``ndim + axis in [-ndim, -2]``
+        that no ``except`` can contain) and is guarded separately; do NOT add
+        an out-of-range value to `_AXIS_SHAPE_CASES` to "round out the grid".
+
+        :param case_index: Index into `_AXIS_SHAPE_CASES`.
+        :type case_index: int
+        :param masked: Whether a quarter of each row is ``-inf``.
+        :type masked: bool
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            case_id, shape, axis = _AXIS_SHAPE_CASES[case_index]
+            z = self._axis_batch(shape, axis, masked, seed=1000 + case_index)
+            z_compute = _to_compute_dtype(z)
+
+            layer = Sparsemax(axis=axis)
+            out = layer(z_compute)
+
+            rows = self._assert_matches_exact_oracle_along_axis(
+                z_compute, out, axis, case_id
+            )
+
+            # ANTI-VACUITY, per case: the number of projections compared is
+            # known exactly here (no row is ever filtered), so it is asserted
+            # as an equality rather than a floor.
+            expected = int(np.prod(shape)) // shape[axis]
+            assert rows == expected >= 1, (
+                f"{case_id}: compared {rows} rows, expected {expected}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_dynamic_k_matches_the_exact_oracle(self, policy: str) -> None:
+        """``input_shape[axis] is None`` — the reduction dim itself unknown.
+
+        `sparsemax.py:187-190` is the layer's ONLY static-shape read: it takes
+        ``k`` from ``input_shape[axis]`` when that is known and from the
+        backend shape tensor otherwise, and four downstream consumers
+        (``reshape``, ``arange``, ``reshape``, ``one_hot``) then have to accept
+        a TENSOR ``k``. This exercises that branch on the harder spelling —
+        the UNKNOWN dimension is the reduction axis itself, not a free batch
+        dim — and retraces the same model at two widths, so a ``k`` frozen at
+        first trace produces a wrong projection at the second.
+
+        A shape-only version of this test would pass on a completely broken
+        projection; every width here is compared against the exact rational
+        oracle.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            axis = 1
+            inp = keras.Input(shape=(None, 6))
+            model = keras.Model(inp, Sparsemax(axis=axis)(inp))
+
+            # PRECONDITION (anti-vacuity): the branch under test is selected by
+            # `input_shape[axis] is None`. If this ever becomes a static width
+            # the test silently degrades into a duplicate of the static grid.
+            assert inp.shape[axis] is None, (
+                f"the reduction axis is static ({inp.shape[axis]}); this test "
+                "would then not exercise the dynamic-k branch at all"
+            )
+
+            rows_compared = 0
+            for k in (8, 257):
+                z = self._axis_batch((2, k, 6), axis, masked=True, seed=k)
+                z_compute = _to_compute_dtype(z)
+                rows_compared += self._assert_matches_exact_oracle_along_axis(
+                    z_compute, model(z_compute), axis, f"dynamic_k={k}"
+                )
+
+            # 2 widths x (2 * 6) rows each.
+            assert rows_compared == 24, (
+                f"dynamic-K guard compared {rows_compared} rows, expected 24"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_jit_compiled_moved_axis_matches_the_exact_oracle(
+        self, policy: str
+    ) -> None:
+        """The single ``jit_compile=True`` point of the moved-axis grid.
+
+        One ``(rank, axis, K)`` point — rank-3, ``axis=1``, K=257 — at all four
+        policies. The width grid under XLA is already swept at ``axis=-1`` by
+        `TestSparsemaxXLACapability`; what is unique here is that XLA lowers the
+        TRANSPOSE/reshape shim (`sparsemax.py:158-194`) as well as the
+        projection, and that the comparison is against the EXACT oracle rather
+        than against the layer's own eager answer.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            axis = 1
+            z = self._axis_batch((2, 257, 3), axis, masked=True, seed=257)
+            z_compute = _to_compute_dtype(z)
+
+            layer = Sparsemax(axis=axis)
+
+            @tf.function(jit_compile=True)
+            def _compiled(t):
+                return layer(t)
+
+            # `jit_compile=True` raises if XLA cannot lower the graph, so the
+            # call itself is the compilation assertion. Do not wrap it.
+            out = _compiled(tf.convert_to_tensor(z_compute))
+
+            rows = self._assert_matches_exact_oracle_along_axis(
+                z_compute, out, axis, "jit_axis1_K257"
+            )
+            assert rows == 6, f"compared {rows} rows, expected 6"
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_save_load_round_trip_preserves_axis_1(self) -> None:
+        """`axis` survives `.keras` serialization, and the answer is unchanged.
+
+        `get_config` carrying `axis` is necessary but not sufficient: this
+        asserts the RELOADED model's output is BIT-IDENTICAL to the original's
+        (`assert_array_equal`, zero tolerance) and that both match the exact
+        rational oracle along ``axis=1``. A round-trip that silently reverted
+        to the default ``axis=-1`` would produce a well-formed, normalised,
+        completely wrong distribution — which a shape or a sum-to-one check
+        cannot see, since both hold along either axis.
+        """
+        axis = 1
+        z = self._axis_batch((2, 257, 3), axis, masked=True, seed=11)
+        z_compute = _to_compute_dtype(z)
+
+        inp = keras.Input(shape=(257, 3))
+        model = keras.Model(inp, Sparsemax(axis=axis)(inp))
+        y0 = ops.convert_to_numpy(model(z_compute))
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sparsemax_axis1.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        reloaded_axes = [
+            layer.axis for layer in loaded.layers if isinstance(layer, Sparsemax)
+        ]
+        assert reloaded_axes == [axis], (
+            f"reloaded model's Sparsemax axes are {reloaded_axes}, expected "
+            f"[{axis}] — `axis` did not survive the round trip"
+        )
+
+        reloaded_out = loaded(z_compute)
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(reloaded_out),
+            y0,
+            err_msg="reloaded model is not bit-identical to the original",
+        )
+        rows = self._assert_matches_exact_oracle_along_axis(
+            z_compute, reloaded_out, axis, "save_load_axis1"
+        )
+        assert rows == 6, f"compared {rows} rows, expected 6"
+
+    def test_the_axis_grid_covers_every_declared_rank_axis_and_width(
+        self,
+    ) -> None:
+        """Grid-level anti-vacuity for G8: the coverage property, asserted.
+
+        `_AXIS_SHAPE_CASES` is condensed from the exploration's 302-point
+        cross-product, so the thing that must not silently erode is COVERAGE.
+        This pins the exact degrees of freedom the condensation preserves —
+        ranks 1-4, both signs of axis including ``0``, ``1``, ``-2`` and
+        ``-1``, every width in ``_XLA_WIDTHS`` (I-7: 256 and 257 are
+        load-bearing, the historical onsets were non-monotone in K), and the
+        presence of F-07's live rank-4 ``axis=-2`` shape.
+
+        THE FLOOR. Measured: 33 rows per (mask variant, policy) x 2 variants x
+        4 policies = **264** projections. The floor is **200**, chosen so that
+        losing an entire policy (-66) or the masked half (-132) goes red while
+        ordinary shrinkage of a leading dimension does not. Same construction
+        as `test_the_corpus_grid_is_not_silently_skipped`'s ``>= 100``.
+        """
+        ranks = {len(shape) for _, shape, _ in _AXIS_SHAPE_CASES}
+        assert ranks == {1, 2, 3, 4}, f"ranks covered: {sorted(ranks)}"
+
+        axes = {axis for _, _, axis in _AXIS_SHAPE_CASES}
+        assert axes == {0, 1, -2, -1}, f"axes covered: {sorted(axes)}"
+
+        widths = {shape[axis] for _, shape, axis in _AXIS_SHAPE_CASES}
+        assert widths == set(_XLA_WIDTHS), (
+            f"widths covered: {sorted(widths)}, expected exactly "
+            f"{sorted(_XLA_WIDTHS)} — the non-monotone points 256 and 257 are "
+            "load-bearing (I-7) and must not be thinned"
+        )
+
+        assert any(
+            len(shape) == 4 and axis == -2
+            for _, shape, axis in _AXIS_SHAPE_CASES
+        ), (
+            "F-07's live shape (rank-4, axis=-2, "
+            "`capsule_routing_attention.py:331`) is no longer in the grid"
+        )
+
+        rows = sum(
+            int(np.prod(shape)) // shape[axis]
+            for _, shape, axis in _AXIS_SHAPE_CASES
+        )
+        total = rows * 2 * len(_XLA_POLICIES)
+        assert total >= 200, (
+            f"the moved-axis grid would compare only {total} projections "
+            "across (cases x masked/unmasked x 4 policies); expected >= 200, "
+            "measured 264 — this guard has gone vacuous"
+        )
 
 
 # ---------------------------------------------------------------------
