@@ -17,7 +17,10 @@
 
 import os
 import tempfile
+from fractions import Fraction
+from typing import Any, Dict, List, Tuple
 
+import ml_dtypes
 import numpy as np
 import keras
 from keras import ops
@@ -144,9 +147,13 @@ _TF32_ATOL_FLOOR = 1e-3
 #: Ulp of ``max|z_finite|`` allowed between layer and oracle. Derived above.
 _ULP_BUDGET = 4.0
 
+#: Compute-dtype name -> numpy dtype. `bfloat16` comes from `ml_dtypes` (a
+#: hard TensorFlow dependency, already in the environment); `np.spacing` is
+#: defined on it, so `_oracle_atol` works for bfloat16 too. The `None` guard
+#: below is retained for any future name that has no numpy counterpart.
 _NUMPY_DTYPE = {
     "float16": np.float16,
-    "bfloat16": None,  # np has no bfloat16; not used by this file's grid.
+    "bfloat16": ml_dtypes.bfloat16,
     "float32": np.float32,
     "float64": np.float64,
 }
@@ -264,6 +271,262 @@ def _large_value_row(width: int) -> np.ndarray:
     z = np.full((1, width), 300.0, dtype=np.float32)
     z[0, 0] = 400.0
     return z
+
+
+# ---------------------------------------------------------------------
+# EXACT-RATIONAL ORACLE (`fractions.Fraction`) — the instrument of record for
+# the LARGE-MAGNITUDE / OVERFLOW attack corpus below.
+#
+# WHY A SECOND ORACLE.  `_sparsemax_reference` above is float64 and uses the
+# same `vals - tau` formulation as the layer, so it shares the layer's
+# cancellation structure.  That is fine at the magnitudes of the property grid
+# (measured: it agrees with the exact oracle to <= 8.9e-16 there, and EXACTLY
+# at every Defect-D onset), but "the oracle is the same species as the code"
+# is precisely how a wrong fix gets validated.  Fractions have no rounding at
+# all, so agreement with them is evidence rather than coincidence.
+#
+# THE ONE RULE THAT MATTERS: FEED IT THE BITS THE LAYER RECEIVED.
+# ---------------------------------------------------------------------
+# Under `mixed_float16` the layer never sees the float32 array the test built;
+# it sees that array rounded to float16 AT THE LAYER BOUNDARY.  An oracle fed
+# the *intended* Python literals is answering a different question, and its
+# disagreement with the layer is an artifact of the test, not a defect in the
+# code.  This has already happened TWICE in this file's history: a predecessor
+# plan produced 319 false violations that way, and this plan's own exploration
+# produced a phantom `err = 0.5` "knife-edge residual" (a 1-unit gap at
+# float32 1.68e7 is below that scale's ulp, so the two entries arrive
+# BIT-IDENTICAL and the exact answer really is the tie).  Measured cost of
+# getting this wrong on the ordinary property grid under fp16: up to
+# 5.4e-3 of pure oracle-input error, i.e. larger than the entire `1e-3`
+# tolerance floor the tests assert with.
+#
+# The rule is therefore CODIFIED, not documented: `_exact_sparsemax` takes an
+# array that is ALREADY in the policy's compute dtype and ASSERTS it, and
+# `_to_compute_dtype` is the only sanctioned way to produce one.  Never call
+# the oracle on a raw float32 test fixture while a narrow policy is active.
+# ---------------------------------------------------------------------
+
+
+def _to_compute_dtype(z: np.ndarray) -> np.ndarray:
+    """Round ``z`` to the ACTIVE policy's compute dtype — the layer boundary.
+
+    :param z: Logit batch as the test constructed it (typically float32).
+    :type z: np.ndarray
+
+    :return: The same batch in the compute dtype, i.e. the bits the layer
+        will actually receive.
+    :rtype: np.ndarray
+    """
+    np_dtype = _NUMPY_DTYPE[_output_dtype()]
+    assert np_dtype is not None, f"no numpy dtype for {_output_dtype()!r}"
+    return np.asarray(z).astype(np_dtype)
+
+
+def _exact_sparsemax(z_compute: np.ndarray) -> List[Dict[str, Any]]:
+    """Sparsemax over each row's FINITE entries in EXACT rational arithmetic.
+
+    Every float is a dyadic rational, so ``Fraction(*x.as_integer_ratio())`` is
+    a lossless transcription of the received bits and the whole projection
+    (sort, cumsum, support test, ``k_z``, ``tau``, ``max(z - tau, 0)``) is then
+    computed without a single rounding.
+
+    :param z_compute: 2-D batch ALREADY cast to the active policy's compute
+        dtype — use :func:`_to_compute_dtype`. Passing a wider array is the
+        oracle-input bug this assertion exists to stop.
+    :type z_compute: np.ndarray
+
+    :return: One dict per row with keys ``k_z`` (int), ``tau`` (Fraction),
+        ``out`` (list of Fraction, full row width, exactly ``0`` at masked
+        positions) and ``total`` (Fraction, the exact row sum).
+    :rtype: list[dict]
+
+    :raises AssertionError: if ``z_compute`` is not in the compute dtype, is
+        not 2-D, or contains a fully-masked row.
+    """
+    expected = np.dtype(_NUMPY_DTYPE[_output_dtype()])
+    assert z_compute.dtype == expected, (
+        f"exact oracle fed dtype {z_compute.dtype} while the policy's compute "
+        f"dtype is {expected} — the oracle MUST consume the bits the layer "
+        "receives, not the test's intended literals. Use _to_compute_dtype()."
+    )
+    assert z_compute.ndim == 2, f"expected a 2-D batch, got {z_compute.shape}"
+
+    rows: List[Dict[str, Any]] = []
+    for i, row in enumerate(z_compute):
+        finite_idx = [j for j, v in enumerate(row) if np.isfinite(float(v))]
+        assert finite_idx, f"row {i} is fully masked; that case is out of scope"
+
+        vals = [Fraction(*float(row[j]).as_integer_ratio()) for j in finite_idx]
+        sorted_vals = sorted(vals, reverse=True)
+
+        cumsum, acc = [], Fraction(0)
+        for v in sorted_vals:
+            acc += v
+            cumsum.append(acc)
+
+        one = Fraction(1)
+        k_z = sum(
+            1
+            for kk in range(1, len(sorted_vals) + 1)
+            if one + kk * sorted_vals[kk - 1] > cumsum[kk - 1]
+        )
+        assert k_z >= 1, f"row {i}: exact support is empty, which is impossible"
+
+        tau = (cumsum[k_z - 1] - one) / k_z
+        out = [Fraction(0)] * row.size
+        for j, v in zip(finite_idx, vals):
+            out[j] = max(v - tau, Fraction(0))
+
+        rows.append(
+            {"k_z": k_z, "tau": tau, "out": out, "total": sum(out)}
+        )
+    return rows
+
+
+def _exact_rows_as_float64(z_compute: np.ndarray) -> np.ndarray:
+    """:func:`_exact_sparsemax`'s answer as a float64 array, for `allclose`.
+
+    :param z_compute: 2-D batch already in the compute dtype.
+    :type z_compute: np.ndarray
+    :return: float64 array of the same shape.
+    :rtype: np.ndarray
+    """
+    rows = _exact_sparsemax(z_compute)
+    return np.array(
+        [[float(v) for v in r["out"]] for r in rows], dtype=np.float64
+    )
+
+
+# ---------------------------------------------------------------------
+# THE ATTACK CORPUS.
+#
+# Shape convention is `_partially_masked_row_batch`'s, deliberately: seeded,
+# 2-D `(rows, width)` float32, deliberate exact ties, and NEVER a fully-masked
+# row (that case is rescued upstream by `apply_attention_mask(rescue_axis=...)`
+# and is out of scope). This is an EXTENSION of that generator's corpus, not a
+# second convention: the random property rows come from the generator itself,
+# and the adversarial rows below are hand-built because a random draw does not
+# reach them.
+#
+# Each entry carries the policy under which its defect was MEASURED. That is a
+# hint about provenance, not a restriction: the corpus rows are ordinary
+# `float32` arrays and are meant to be replayed under every policy.
+# ---------------------------------------------------------------------
+
+#: `(label, z_float32, measured_under_policy)`.
+_AttackCase = Tuple[str, np.ndarray, str]
+
+
+def _plateau_row(width: int, n_finite: int, level: float = 20.0) -> np.ndarray:
+    """``n_finite`` entries at ``level``, the rest ``-inf`` (D-017 clause (d)).
+
+    The exact answer is uniform ``1 / n_finite`` over the finite entries. Under
+    fp16 that mass is not representable at scale ``level``, which is the
+    documented cancellation route to a silently un-normalised row.
+
+    :param width: Row width ``K``.
+    :type width: int
+    :param n_finite: Number of unmasked entries (``< width``).
+    :type n_finite: int
+    :param level: The plateau value.
+    :type level: float
+    :return: float32 array of shape ``(1, width)``.
+    :rtype: np.ndarray
+    """
+    assert 0 < n_finite < width, "a plateau row must be partially masked"
+    z = np.full((1, width), -np.inf, dtype=np.float32)
+    z[:, :n_finite] = level
+    return z
+
+
+def _attack_corpus() -> List[_AttackCase]:
+    """The measured adversarial rows, plus the seeded property-grid controls.
+
+    Contents, all reproduced verbatim from where they were measured:
+
+    * the four ``TestSparsemaxOpenDefects`` pin inputs (Defects B/C/D/E — the
+      5th pin shares Defect B's input);
+    * the ``D-017`` clause (d) plateau rows (fp16, K=512 and K=1024);
+    * the three Defect-D onsets (float32 ``|z| >= 1.68e7``, fp16 ``>= 2048``,
+      bf16 ``>= 300``), each in its all-finite and its 2-of-4-masked form;
+    * the two all-finite cumsum-overflow families that a "loudness guard"
+      destroyed (they are the CONTROL that must stay correct);
+    * a seeded sample of `_partially_masked_row_batch` rows — the ordinary,
+      small-magnitude control.
+
+    :return: List of ``(label, float32 batch, policy it was measured under)``.
+    :rtype: list[tuple[str, np.ndarray, str]]
+    """
+    cases: List[_AttackCase] = []
+
+    # --- the four pin inputs, verbatim (test_sparsemax.py:507-724) ---
+    z = np.full((1, 4096), -16.95, dtype=np.float32)
+    z[:, 0] = 0.0
+    cases.append(("pin_defect_b_spread16.95_K4096", z, "mixed_float16"))
+
+    rng = np.random.default_rng(7)
+    cases.append(
+        (
+            "pin_defect_c_bf16_K256",
+            rng.uniform(-5.0, 5.0, size=(2, 256)).astype(np.float32),
+            "mixed_bfloat16",
+        )
+    )
+
+    cases.append(
+        (
+            "pin_defect_d_f32_1.68e7_K4",
+            np.full((1, 4), 1.68e7, dtype=np.float32),
+            "float32",
+        )
+    )
+
+    z = np.full((1, 4096), -np.inf, dtype=np.float32)
+    z[:, :2051] = -31.921875  # exactly representable in float16
+    cases.append(("pin_defect_e_fp16_m2051_K4096", z, "mixed_float16"))
+
+    # --- D-017 clause (d): the fp16 plateau rows ---
+    for width, n_finite in ((512, 256), (512, 257), (1024, 1023), (1024, 259)):
+        cases.append(
+            (
+                f"plateau_K{width}_m{n_finite}",
+                _plateau_row(width, n_finite),
+                "mixed_float16",
+            )
+        )
+
+    # --- the three Defect-D onsets, all-finite and partially masked ---
+    for policy, magnitude in (
+        ("float32", 1.68e7),
+        ("mixed_float16", 2048.0),
+        ("mixed_bfloat16", 300.0),
+    ):
+        cases.append(
+            (
+                f"onset_d_{policy}_all_finite",
+                np.full((1, 4), magnitude, dtype=np.float32),
+                policy,
+            )
+        )
+        z = np.full((1, 4), magnitude, dtype=np.float32)
+        z[:, 2:] = -np.inf  # the 2-of-4-masked NaN route
+        cases.append((f"onset_d_{policy}_masked_2_of_4", z, policy))
+
+    # --- controls that must NOT break (the loudness guard destroyed these) ---
+    cases.append(("control_finite_mask_row_K256", _finite_mask_row(256), "mixed_float16"))
+    cases.append(("control_large_value_row_K256", _large_value_row(256), "mixed_float16"))
+
+    # --- ordinary, small-magnitude control rows from the shipped generator ---
+    for width, frac, seed in ((17, 0.0, 1), (128, 0.5, 3), (512, 0.9, 5)):
+        cases.append(
+            (
+                f"property_w{width}_f{frac}_s{seed}",
+                _partially_masked_row_batch(width, frac, seed),
+                "float32",
+            )
+        )
+
+    return cases
 
 
 class TestSparsemax:
@@ -482,6 +745,156 @@ class TestSparsemax:
                 out,
                 expected,
                 err_msg=f"{label}: sparsemax != float64 oracle (expected err 0.0)",
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+class TestExactRationalOracle:
+    """Validate the INSTRUMENT, before it is used to judge the layer.
+
+    None of these tests touch ``Sparsemax``. They exist because an oracle that
+    is never itself checked is an assertion generator, not evidence — and the
+    two oracle failures already in this problem's history (319 false
+    violations, then a phantom ``err = 0.5``) were both oracle-INPUT bugs that
+    a layer-vs-oracle test cannot distinguish from a code defect.
+    """
+
+    def test_oracle_refuses_input_that_was_not_cast_to_the_compute_dtype(
+        self,
+    ) -> None:
+        """The F-15 discipline is enforced by code, not by comment.
+
+        Under ``mixed_float16`` the layer receives float16 bits. Handing the
+        oracle the test's float32 fixture asks it a different question, and
+        that must fail loudly rather than produce a plausible wrong number.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            # fp16's own Defect-D onset. NOT float32's 1.68e7: that OVERFLOWS
+            # to `+inf` under fp16, so the oracle would refuse it as a
+            # (differently) out-of-scope row and this test would pass for the
+            # wrong reason. A corpus row is only meaningful under a policy
+            # that can represent it.
+            z32 = np.full((1, 4), 2048.0, dtype=np.float32)
+
+            with pytest.raises(AssertionError, match="_to_compute_dtype"):
+                _exact_sparsemax(z32)
+
+            # ...and the sanctioned route is accepted.
+            rows = _exact_sparsemax(_to_compute_dtype(z32))
+            assert rows[0]["total"] == Fraction(1)
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_exact_oracle_is_exactly_normalised_on_the_whole_attack_corpus(
+        self,
+    ) -> None:
+        """Every corpus row has an exact answer that sums to exactly 1.
+
+        This pins the CORPUS as much as the oracle: a row whose exact sum is
+        not ``1`` would mean the fixture is degenerate (e.g. accidentally
+        fully masked), and every later layer-vs-oracle comparison built on it
+        would be meaningless.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            for label, z, policy in _attack_corpus():
+                keras.mixed_precision.set_global_policy(policy)
+
+                assert z.dtype == np.float32, f"{label}: corpus rows are float32"
+                assert z.ndim == 2, f"{label}: corpus rows are 2-D batches"
+                assert np.isfinite(z).any(axis=-1).all(), (
+                    f"{label}: a corpus row is fully masked, which is out of scope"
+                )
+
+                z_compute = _to_compute_dtype(z)
+                for i, row in enumerate(_exact_sparsemax(z_compute)):
+                    assert row["total"] == Fraction(1), (
+                        f"{label} row {i} (policy={policy}): exact sum is "
+                        f"{row['total']}, not 1 — the fixture is degenerate"
+                    )
+                    assert 1 <= row["k_z"] <= z.shape[-1], (
+                        f"{label} row {i}: exact k_z = {row['k_z']} is out of range"
+                    )
+                    masked = ~np.isfinite(z_compute[i].astype(np.float64))
+                    for j in np.flatnonzero(masked):
+                        assert row["out"][int(j)] == Fraction(0), (
+                            f"{label} row {i}: masked position {j} is not exactly 0"
+                        )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_float64_reference_agrees_with_the_exact_oracle(
+        self, dtype_policy: str
+    ) -> None:
+        """Cross-check the two oracles against each other on the property grid.
+
+        The retained float64 ``_sparsemax_reference`` shares the layer's
+        ``vals - tau`` formulation, so it could in principle inherit the
+        layer's cancellation. On this grid it does not: measured worst-case
+        disagreement is ``7.9e-16`` (float32 policy), i.e. float64 round-off.
+
+        Both oracles are fed the SAME post-cast bits — the comparison is
+        oracle-vs-oracle, so any policy-dependent input rounding must be
+        applied once and shared, not applied to one side only.
+        """
+        widths = (3, 17, 128, 512)
+        fractions_masked = (0.0, 0.25, 0.5, 0.9)
+
+        worst = 0.0
+        worst_label = ""
+        for width in widths:
+            for frac in fractions_masked:
+                for seed in range(8):
+                    z = _partially_masked_row_batch(width, frac, seed)
+                    z_compute = _to_compute_dtype(z)
+                    ref = _sparsemax_reference(z_compute.astype(np.float64))
+                    exact = _exact_rows_as_float64(z_compute)
+                    delta = float(np.max(np.abs(ref - exact)))
+                    if delta > worst:
+                        worst = delta
+                        worst_label = (
+                            f"policy={dtype_policy} width={width} "
+                            f"masked_fraction={frac} seed={seed}"
+                        )
+
+        assert worst <= 1e-12, (
+            "the float64 reference oracle disagrees with EXACT rational "
+            f"arithmetic by {worst:.3e} on the property grid ({worst_label}); "
+            "it can no longer be trusted as the instrument for that grid"
+        )
+
+    def test_float64_reference_is_still_exact_at_the_defect_d_magnitudes(
+        self,
+    ) -> None:
+        """The float64 reference must survive the LARGE-magnitude corpus too.
+
+        This is the specific cross-check step 4 depends on before it keeps
+        using ``_sparsemax_reference`` anywhere near these inputs. Measured:
+        the two oracles agree EXACTLY (delta ``0.0``) at every Defect-D onset
+        and to ``<= 8.9e-16`` on the plateau rows.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            worst = 0.0
+            worst_label = ""
+            for label, z, policy in _attack_corpus():
+                if not (label.startswith("onset_d_") or label.startswith("plateau_")):
+                    continue
+                keras.mixed_precision.set_global_policy(policy)
+                z_compute = _to_compute_dtype(z)
+                ref = _sparsemax_reference(z_compute.astype(np.float64))
+                exact = _exact_rows_as_float64(z_compute)
+                delta = float(np.max(np.abs(ref - exact)))
+                if delta > worst:
+                    worst, worst_label = delta, f"{label} (policy={policy})"
+
+            assert worst <= 1e-12, (
+                "the float64 reference oracle disagrees with EXACT rational "
+                f"arithmetic by {worst:.3e} at {worst_label}; it must not be "
+                "used as the instrument at these magnitudes"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
