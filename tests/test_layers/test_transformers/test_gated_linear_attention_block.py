@@ -264,6 +264,136 @@ class TestGatedLinearAttentionBlock:
         prediction = model(tf.random.normal(shape=(1, 4, 16)), training=False)
         assert prediction.shape == (1, 4, 16)
 
+    # --- Per-head Q/K normalization (plan step 4, decision D-003) ---
+
+    @staticmethod
+    def _spy_on(norm_layer, sink) -> None:
+        """Record every ``(input, output)`` pair a built norm sublayer sees.
+
+        The sublayer is observed through its OWN call, so the test consumes the
+        bits the shipped ``call()`` actually feeds it and never re-derives what
+        the shape "should" be. That distinction matters here: the rank of that
+        tensor is precisely what is being measured, so a test that constructed
+        the norm's input itself would only be verifying its own assumption.
+
+        :param norm_layer: A built normalization sublayer to instrument.
+        :param sink: List that receives ``(input_np, output_np)`` per call.
+        """
+        original = norm_layer.call
+
+        def spy(inputs, *args, **kwargs):
+            outputs = original(inputs, *args, **kwargs)
+            sink.append(
+                (ops.convert_to_numpy(inputs), ops.convert_to_numpy(outputs))
+            )
+            return outputs
+
+        norm_layer.call = spy
+
+    @pytest.mark.parametrize("which", ["q", "k"])
+    def test_qk_norm_statistic_is_per_head(self, which):
+        """Scaling head 0's projected Q/K must not move any other head's norm output.
+
+        This is the discriminating test for D-003. Before the fix, ``q_norm`` /
+        ``k_norm`` saw ``(batch, seq, num_heads * head_dim)`` and their RMS
+        denominator mixed every head, so scaling one head's slice moved all of
+        them (measured on the pre-fix code: max|diff| ~ 1e0 on the other heads).
+
+        Non-vacuity guards, so this cannot pass for the wrong reason:
+          (a) the perturbation is asserted to have REACHED the norm's input, on
+              head 0 and on no other head;
+          (b) head 0's normalized output is asserted to have CHANGED -- a layer
+              emitting a constant would otherwise pass the main assertion.
+
+        The tolerance is exactly ``0.0``: the heads are independent slices of the
+        same elementwise op, so a correct per-head statistic leaves the other
+        heads' bits untouched, not merely close.
+        """
+        num_heads, head_dim = 4, 8
+        layer = GatedLinearAttentionBlock(
+            dim=32,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            max_seq_len=16,
+            dropout_rate=0.0,
+        )
+        x = tf.random.stateless_normal((2, 6, 32), seed=(7, 11))
+        layer(x, training=False)  # build
+
+        captured: list = []
+        self._spy_on(getattr(layer, f"{which}_norm"), captured)
+
+        layer(x, training=False)
+
+        # Scale ONLY head 0's output columns of the projection. Head h owns
+        # kernel columns [h*head_dim, (h+1)*head_dim) because `call()` reshapes
+        # qk_dim -> (num_heads, head_dim) in that (heads-major) order.
+        projection = getattr(layer, f"{which}_proj")
+        kernel = ops.convert_to_numpy(projection.kernel)
+        perturbed_kernel = kernel.copy()
+        perturbed_kernel[:, 0:head_dim] *= 5.0
+        projection.kernel.assign(perturbed_kernel)
+
+        layer(x, training=False)
+
+        assert len(captured) == 2, f"expected 2 recorded norm calls, got {len(captured)}"
+        (in_base, out_base), (in_pert, out_pert) = captured
+
+        def as_heads(arr: np.ndarray) -> np.ndarray:
+            return arr.reshape(arr.shape[0], arr.shape[1], num_heads, head_dim)
+
+        in_base, out_base = as_heads(in_base), as_heads(out_base)
+        in_pert, out_pert = as_heads(in_pert), as_heads(out_pert)
+
+        # (a) the perturbation reached the norm's input, on head 0 only
+        assert not np.array_equal(in_base[:, :, 0, :], in_pert[:, :, 0, :]), (
+            f"setup failed: scaling {which}_proj's head-0 columns did not change "
+            f"{which}_norm's input"
+        )
+        assert np.array_equal(in_base[:, :, 1:, :], in_pert[:, :, 1:, :]), (
+            f"setup failed: the perturbation leaked into other heads' "
+            f"{which}_norm INPUT"
+        )
+        # (b) head 0's normalized output moved -- rules out a constant output
+        assert not np.array_equal(out_base[:, :, 0, :], out_pert[:, :, 0, :]), (
+            f"vacuous: head 0's normalized {which.upper()} did not change at all"
+        )
+        # THE ASSERTION UNDER TEST
+        other_delta = float(
+            np.abs(out_base[:, :, 1:, :] - out_pert[:, :, 1:, :]).max()
+        )
+        assert other_delta == 0.0, (
+            f"{which}_norm's statistic is NOT per-head: scaling head 0 moved "
+            f"heads 1..{num_heads - 1} by max|diff|={other_delta:.6e} "
+            f"(expected exactly 0.0)"
+        )
+
+    def test_qk_norm_scale_weight_is_head_dim_and_v_norm_is_whole_tensor(self):
+        """Pin the intentional Q/K-vs-V asymmetry as a shape fact, not a comment.
+
+        Q/K normalize per head, so their scale weight is ``(head_dim,)`` shared
+        across heads (the standard QK-Norm convention). V is deliberately left
+        whole-tensor over ``v_dim = 2 * num_heads * head_dim``. If someone later
+        "unifies" the three, this test fails and points at D-003.
+        """
+        num_heads, head_dim = 4, 8
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=num_heads, head_dim=head_dim, max_seq_len=16
+        )
+        layer(tf.random.stateless_normal((2, 6, 32), seed=(3, 5)), training=False)
+
+        for norm in (layer.q_norm, layer.k_norm):
+            shapes = [tuple(w.shape) for w in norm.weights]
+            assert shapes == [(head_dim,)], (
+                f"{norm.name} scale weight should be (head_dim,)={(head_dim,)}, "
+                f"got {shapes}"
+            )
+        v_shapes = [tuple(w.shape) for w in layer.v_norm.weights]
+        assert v_shapes == [(2 * num_heads * head_dim,)], (
+            f"v_norm is deliberately whole-tensor; expected "
+            f"[{(2 * num_heads * head_dim,)}], got {v_shapes}"
+        )
+
     def test_build_validation_input_shape(self, default_config):
         """Tests build validation for input shape."""
         layer = GatedLinearAttentionBlock(**default_config)

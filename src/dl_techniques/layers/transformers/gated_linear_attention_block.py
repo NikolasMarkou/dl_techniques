@@ -95,6 +95,22 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :type activation: Union[str, Callable]
     :param normalization_type: Type of normalization for Q, K, V. Defaults to
         'zero_centered_rms_norm'.
+
+        **Q and K are normalized per head**: the tensor is reshaped to
+        ``(batch, seq, num_heads, head_dim)``, normalized over ``head_dim``, and
+        reshaped back before the causal convolution. The scale weight is therefore
+        ``(head_dim,)`` and is shared across heads -- the standard QK-Norm
+        convention. **V is deliberately normalized whole-tensor** over the full
+        ``v_dim`` axis; that is an intentional asymmetry, not an oversight.
+
+        This assumes the chosen normalization reduces over the last axis only.
+        Measured for the 18 factory types on a rank-4 input: 14 reduce over the
+        last axis only (including every RMS/layer/band family member and the
+        default ``'zero_centered_rms_norm'``); ``'global_response_norm'`` also
+        reduces over the head axis by design; and ``'decoupled_max_logit'``,
+        ``'dml_plus_focal'``, ``'dml_plus_center'`` are unusable here at any rank
+        (they change or drop the feature axis, which already breaks the
+        convolution that follows).
     :type normalization_type: NormalizationType
     :param q_norm_args: Optional arguments for Q normalization layer.
     :type q_norm_args: Optional[Dict[str, Any]]
@@ -509,8 +525,18 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         q_shape = (batch_size, seq_len, self.qk_dim)
         k_shape = (batch_size, seq_len, self.qk_dim)
         v_shape = (batch_size, seq_len, self.v_dim)
-        self.q_norm.build(q_shape)
-        self.k_norm.build(k_shape)
+        # DECISION plan-2026-07-29-adbe605f/D-003
+        # q_norm/k_norm are built on the PER-HEAD shape (batch, seq, heads, head_dim),
+        # not on the flat (batch, seq, qk_dim). Their scale weight is therefore
+        # (head_dim,), shared across heads -- the standard QK-Norm convention.
+        # Do NOT "simplify" this back to `q_shape`: a last-axis RMS statistic taken
+        # over the concatenated qk_dim mixes every head into one denominator, which
+        # is the defect this step exists to close (measured: perturbing head 0's
+        # input moved head 1's output by 1.03 at rank 3, by exactly 0.0 at rank 4).
+        # v_norm stays WHOLE-TENSOR on purpose -- see the class docstring.
+        qk_head_shape = (batch_size, seq_len, self.num_heads, self.head_dim)
+        self.q_norm.build(qk_head_shape)
+        self.k_norm.build(qk_head_shape)
         self.v_norm.build(v_shape)
         self.q_conv.build(q_shape)
         self.k_conv.build(k_shape)
@@ -627,8 +653,24 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         k = self.k_proj(inputs, training=training)
         v = self.v_proj(inputs, training=training)
 
-        q_norm = self.q_norm(q, training=training)
-        k_norm = self.k_norm(k, training=training)
+        # DECISION plan-2026-07-29-adbe605f/D-003
+        # Per-head Q/K normalization. Only the SCOPE of the statistic changes; the
+        # pipeline order `proj -> norm -> conv -> activation` is deliberately kept.
+        # Moving the norm after the head reshape in the pipeline would also move it
+        # after the causal conv and the SiLU -- a second, unrequested change to what
+        # the norm sees. So we reshape to per-head, normalize, and reshape straight
+        # back so the conv's input layout is unchanged.
+        # v_norm is deliberately NOT per-head (whole-tensor, over v_dim).
+        q_heads_pre = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k_heads_pre = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
+        q_norm = ops.reshape(
+            self.q_norm(q_heads_pre, training=training),
+            (batch_size, seq_len, self.qk_dim),
+        )
+        k_norm = ops.reshape(
+            self.k_norm(k_heads_pre, training=training),
+            (batch_size, seq_len, self.qk_dim),
+        )
         v_norm = self.v_norm(v, training=training)
 
         q_conv = self.activation_layer(self.q_conv(q_norm, training=training))
