@@ -1,5 +1,6 @@
 # tests/test_layers/test_transformers/test_gated_linear_attention_block.py
 
+import contextlib
 import os
 import tempfile
 from typing import Any, Dict
@@ -565,6 +566,709 @@ class TestGatedLinearAttentionBlock:
             assert "loss" in history.history
         except Exception as e:
             pytest.fail(f"Training failed with dynamic sequence length. Error: {e}")
+
+
+# =========================================================================
+# 8. Shared helpers for the coverage-gap groups below
+# =========================================================================
+
+
+@contextlib.contextmanager
+def global_dtype_policy(name: str):
+    """Set the PROCESS-GLOBAL Keras dtype policy, then always restore it.
+
+    The ``dtype_policy`` fixture in ``tests/test_layers/conftest.py`` is the
+    house instrument for *parametrized* policy sweeps and is used as such
+    below. This context manager exists for the tests that need ONE specific
+    policy (the float64 oracle) rather than a sweep, and it keeps the same
+    invariant that fixture documents: a leaked global policy poisons every
+    later test in the session, so the restore lives in a ``finally``.
+
+    :param name: Policy name, e.g. ``'float64'``.
+    :type name: str
+    :yield: The policy name now in force.
+    """
+    previous = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy(name)
+    try:
+        yield name
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
+def capture_scan_io(layer: GatedLinearAttentionBlock, x, training: bool = False):
+    """Capture the tensors the scan ACTUALLY receives, plus what it returns.
+
+    This wraps ``gated_linear_scan`` itself, so the recorded ``q, k, v,
+    alpha, beta`` are the layer's own post-projection / post-norm /
+    post-conv / post-activation / post-reshape bits at the exact call
+    boundary -- not values re-derived by the test from what it *thinks*
+    the pipeline should produce. Re-deriving them would verify the test's
+    assumptions instead of the layer (a failure mode this repo has already
+    paid for once).
+
+    :param layer: A ``GatedLinearAttentionBlock`` (built or unbuilt).
+    :type layer: GatedLinearAttentionBlock
+    :param x: Input tensor of shape ``(batch, seq, dim)``.
+    :param training: Training flag forwarded to ``call``.
+    :type training: bool
+    :return: Dict with numpy ``q``, ``k``, ``v``, ``alpha``, ``beta``,
+        ``scan_out`` (the scan's return value) and ``block_out``.
+    :rtype: Dict[str, np.ndarray]
+    """
+    captured: Dict[str, Any] = {}
+    original = layer.gated_linear_scan
+
+    def spy(q, k, v, alpha, beta, training=None):
+        out = original(q, k, v, alpha, beta, training=training)
+        captured.update(
+            q=ops.convert_to_numpy(q),
+            k=ops.convert_to_numpy(k),
+            v=ops.convert_to_numpy(v),
+            alpha=ops.convert_to_numpy(alpha),
+            beta=ops.convert_to_numpy(beta),
+            scan_out=ops.convert_to_numpy(out),
+        )
+        return out
+
+    layer.gated_linear_scan = spy
+    try:
+        captured["block_out"] = ops.convert_to_numpy(layer(x, training=training))
+    finally:
+        del layer.gated_linear_scan
+    assert "scan_out" in captured, "gated_linear_scan was never called"
+    return captured
+
+
+def numpy_gated_linear_recurrence(
+    q: np.ndarray,
+    k: np.ndarray,
+    v: np.ndarray,
+    alpha: np.ndarray,
+    beta: np.ndarray,
+) -> np.ndarray:
+    """Independent float64 NumPy reference, written FROM THE DEFINITION.
+
+    Transcribed from the two recurrence lines in the module docstring, not
+    from ``gated_linear_scan``'s body -- an oracle copied from the code
+    under test shares that code's bugs and proves nothing::
+
+        S_t   = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)
+        out_t = q_t^T S_t + v_t^(2)
+
+    ``S`` starts at zero; the read-out uses ``S_t``, i.e. the state AFTER
+    step ``t``'s write (inclusive in ``j = t``, verified independently by an
+    ``alpha=0, beta=1`` probe during plan step 5). ``v`` is split in half
+    along its LAST axis, i.e. within each head -- head ``h``'s write half is
+    that head's own first ``head_dim`` channels, NOT the leading
+    ``num_heads * head_dim`` block of the flat ``v_dim`` axis.
+
+    :param q: Queries, shape ``(batch, seq, heads, head_dim)``.
+    :param k: Keys, same shape as ``q``.
+    :param v: Values, shape ``(batch, seq, heads, 2 * head_dim)``.
+    :param alpha: Persistence gate, shape ``(batch, seq, heads)``.
+    :param beta: Write gate, shape ``(batch, seq, heads)``.
+    :return: Read-out of shape ``(batch, seq, heads, head_dim)``, float64.
+    :rtype: np.ndarray
+    """
+    q = np.asarray(q, dtype=np.float64)
+    k = np.asarray(k, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    alpha = np.asarray(alpha, dtype=np.float64)
+    beta = np.asarray(beta, dtype=np.float64)
+
+    batch, seq, heads, head_dim = q.shape
+    assert v.shape == (batch, seq, heads, 2 * head_dim), f"bad v shape {v.shape}"
+
+    state = np.zeros((batch, heads, head_dim, head_dim), dtype=np.float64)
+    out = np.zeros((batch, seq, heads, head_dim), dtype=np.float64)
+    for t in range(seq):
+        v_write = v[:, t, :, :head_dim]
+        v_skip = v[:, t, :, head_dim:]
+        outer = k[:, t][:, :, :, None] * v_write[:, :, None, :]
+        a_t = alpha[:, t][:, :, None, None]
+        b_t = beta[:, t][:, :, None, None]
+        state = a_t * state + b_t * outer
+        out[:, t] = np.einsum("bhi,bhij->bhj", q[:, t], state) + v_skip
+    return out
+
+
+def oracle_tolerance(seq_len: int, head_dim: int, expected: np.ndarray) -> float:
+    """Roundoff bound for the float64 oracle-vs-layer comparison.
+
+    Derivation (so this is a bound, not a pasted magic number). Per timestep
+    and head the recurrence performs, per state entry, one multiply by
+    ``alpha``, one multiply by ``beta`` and one add -- ~3 rounded float64
+    operations. A state entry surviving ``T`` timesteps therefore carries a
+    relative error of order ``3 * T * u`` with ``u = eps / 2`` the unit
+    roundoff. The read-out adds a length-``head_dim`` dot product, worth a
+    further ``head_dim * u``. The layer and the oracle also associate their
+    sums differently (``ops.matmul`` on GPU vs ``np.einsum``), so charge that
+    bound twice::
+
+        rel_err <= 2 * (3 * T + head_dim) * u  =  (3 * T + head_dim) * eps
+
+    The error is relative, so scale by the output magnitude, and take a 16x
+    safety factor for reduction reassociation inside the backend's matmul::
+
+        tol = 16 * (3 * T + head_dim) * eps * max(1, max|expected|)
+
+    Calibration at ``T=12, head_dim=8``: this yields ~1.6e-13 while the
+    MEASURED error is 2.8e-17 (0.31 eps-units of output scale) -- roughly
+    four orders of magnitude inside the bound. It is not slack that hides a
+    bug: perturbing ONE ``beta`` entry by 1% moves the comparison to 4.6e-05,
+    eight orders of magnitude OUTSIDE it (pinned by
+    ``test_oracle_rejects_a_one_percent_beta_perturbation``).
+
+    :param seq_len: Number of timesteps the state accumulated over.
+    :type seq_len: int
+    :param head_dim: Per-head dimension (the dot-product length).
+    :type head_dim: int
+    :param expected: The oracle's output, used for its magnitude.
+    :type expected: np.ndarray
+    :return: Absolute tolerance.
+    :rtype: float
+    """
+    eps = float(np.finfo(np.float64).eps)
+    scale = max(1.0, float(np.abs(expected).max()))
+    return 16.0 * (3 * seq_len + head_dim) * eps * scale
+
+
+# Deliberately includes shapes where num_heads != head_dim in BOTH directions,
+# so an axis/transpose confusion cannot hide behind a symmetric shape.
+ORACLE_SHAPES = [
+    # (dim, num_heads, head_dim, seq_len)
+    (8, 1, 8, 7),      # single head, prime-length sequence
+    (16, 3, 8, 12),    # multi-head, num_heads < head_dim
+    (24, 4, 6, 17),    # multi-head, num_heads < head_dim, non-round dims
+    (12, 8, 3, 11),    # multi-head, num_heads > head_dim
+]
+
+
+# =========================================================================
+# 9. Numerical-correctness oracle (plan success criterion 6)
+# =========================================================================
+class TestRecurrenceOracle:
+    """The scan must reproduce the recurrence it documents, not merely run."""
+
+    @pytest.mark.parametrize("dim, num_heads, head_dim, seq_len", ORACLE_SHAPES)
+    def test_scan_matches_numpy_oracle_float64(self, dim, num_heads, head_dim, seq_len):
+        """``gated_linear_scan`` == an independent NumPy recurrence, at float64.
+
+        The oracle is fed the layer's OWN pre-scan tensors (see
+        ``capture_scan_io``), so this compares the executed scan against the
+        documented math on identical bits. The whole layer runs under a
+        float64 global policy, so the captured tensors and the scan output are
+        genuinely float64 -- comparing an fp32 scan against a float64 oracle
+        would measure the policy, not the algorithm.
+        """
+        with global_dtype_policy("float64"):
+            keras.utils.set_random_seed(1234)
+            layer = GatedLinearAttentionBlock(
+                dim=dim,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                max_seq_len=64,
+                dropout_rate=0.0,
+            )
+            x = np.asarray(
+                np.random.default_rng(0).normal(size=(2, seq_len, dim)),
+                dtype="float64",
+            )
+            cap = capture_scan_io(layer, x, training=False)
+
+        assert cap["scan_out"].dtype == np.float64, (
+            f"the scan did not run at float64 (got {cap['scan_out'].dtype}); "
+            "the comparison below would be measuring the dtype policy"
+        )
+        assert cap["q"].shape == (2, seq_len, num_heads, head_dim)
+        assert cap["v"].shape == (2, seq_len, num_heads, 2 * head_dim)
+
+        expected = numpy_gated_linear_recurrence(
+            cap["q"], cap["k"], cap["v"], cap["alpha"], cap["beta"]
+        )
+        # Non-vacuity: a scan returning zeros (or an oracle that never ran)
+        # must not be able to pass.
+        assert float(np.abs(expected).max()) > 1e-6, "oracle output is ~zero"
+        assert np.isfinite(expected).all()
+
+        tol = oracle_tolerance(seq_len, head_dim, expected)
+        err = float(np.abs(expected - cap["scan_out"]).max())
+        assert err <= tol, (
+            f"scan disagrees with the NumPy recurrence: max|diff|={err:.3e} "
+            f"> tol={tol:.3e} (seq_len={seq_len}, head_dim={head_dim}, "
+            f"output scale={np.abs(expected).max():.3e})"
+        )
+
+    def test_oracle_rejects_a_one_percent_beta_perturbation(self):
+        """The oracle comparison must be ABLE to fail -- pinned, not asserted once.
+
+        Same setup as the test above, but ONE element of the captured ``beta``
+        is scaled by 1.01 before the oracle runs. If the comparison stayed
+        within tolerance here, the tolerance (or the oracle) would be
+        insensitive to the recurrence's gating and the green result above
+        would mean nothing.
+        """
+        dim, num_heads, head_dim, seq_len = 16, 3, 8, 12
+        with global_dtype_policy("float64"):
+            keras.utils.set_random_seed(1234)
+            layer = GatedLinearAttentionBlock(
+                dim=dim,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                max_seq_len=64,
+                dropout_rate=0.0,
+            )
+            x = np.asarray(
+                np.random.default_rng(0).normal(size=(2, seq_len, dim)),
+                dtype="float64",
+            )
+            cap = capture_scan_io(layer, x, training=False)
+
+        clean = numpy_gated_linear_recurrence(
+            cap["q"], cap["k"], cap["v"], cap["alpha"], cap["beta"]
+        )
+        tol = oracle_tolerance(seq_len, head_dim, clean)
+        assert float(np.abs(clean - cap["scan_out"]).max()) <= tol  # control
+
+        perturbed_beta = cap["beta"].copy()
+        perturbed_beta[0, seq_len // 2, 1] *= 1.01
+        wrong = numpy_gated_linear_recurrence(
+            cap["q"], cap["k"], cap["v"], cap["alpha"], perturbed_beta
+        )
+        err = float(np.abs(wrong - cap["scan_out"]).max())
+        assert err > tol, (
+            f"a 1% perturbation of one beta entry stayed WITHIN tolerance "
+            f"(max|diff|={err:.3e} <= tol={tol:.3e}): the oracle comparison "
+            f"cannot detect a wrong gate and proves nothing"
+        )
+
+    def test_oracle_rejects_an_exclusive_readout(self):
+        """A read-out using ``S_{t-1}`` instead of ``S_t`` must be caught.
+
+        Inclusivity in ``j = t`` is the single easiest thing to get wrong when
+        the recurrence is re-derived (and plan step 7's chunked scan depends on
+        it). This pins that the oracle comparison discriminates the two
+        conventions rather than being blind to a one-step shift.
+        """
+        dim, num_heads, head_dim, seq_len = 16, 3, 8, 12
+        with global_dtype_policy("float64"):
+            keras.utils.set_random_seed(1234)
+            layer = GatedLinearAttentionBlock(
+                dim=dim,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                max_seq_len=64,
+                dropout_rate=0.0,
+            )
+            x = np.asarray(
+                np.random.default_rng(0).normal(size=(2, seq_len, dim)),
+                dtype="float64",
+            )
+            cap = capture_scan_io(layer, x, training=False)
+
+        q, k, v = cap["q"], cap["k"], cap["v"]
+        alpha, beta = cap["alpha"], cap["beta"]
+        batch, seq, heads, hd = q.shape
+        state = np.zeros((batch, heads, hd, hd))
+        exclusive = np.zeros((batch, seq, heads, hd))
+        for t in range(seq):
+            # READ FIRST (state before this step's write) -- the wrong convention.
+            exclusive[:, t] = (
+                np.einsum("bhi,bhij->bhj", q[:, t], state) + v[:, t, :, hd:]
+            )
+            outer = k[:, t][:, :, :, None] * v[:, t, :, :hd][:, :, None, :]
+            state = (
+                alpha[:, t][:, :, None, None] * state
+                + beta[:, t][:, :, None, None] * outer
+            )
+
+        tol = oracle_tolerance(seq_len, head_dim, exclusive)
+        err = float(np.abs(exclusive - cap["scan_out"]).max())
+        assert err > tol, (
+            f"an EXCLUSIVE read-out matched the shipped scan within tolerance "
+            f"(max|diff|={err:.3e} <= tol={tol:.3e}); the comparison cannot "
+            f"tell S_t from S_{{t-1}}"
+        )
+
+
+# =========================================================================
+# 10. Non-default normalization arguments
+# =========================================================================
+class TestNormalizationArgs:
+    """Both branches of the ``q/k/v_norm_args`` default and the explicit path."""
+
+    def test_empty_default_branch_for_non_zero_centered_norm(self):
+        """A non-``zero_centered_rms_norm`` type takes the ``{}`` else-branch.
+
+        The constructor's default is ``{'epsilon': 1e-5, 'use_scale': True}``
+        ONLY for ``zero_centered_rms_norm``; every other type gets ``{}``. The
+        observable consequence is that ``create_normalization_layer``'s own
+        default ``epsilon=1e-6`` reaches the sublayer -- which is also a
+        discriminator against Keras's ``LayerNormalization`` default of 1e-3,
+        so this cannot pass by accident if the args were dropped entirely.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, max_seq_len=16, normalization_type="layer_norm"
+        )
+        assert layer.q_norm_args == {}
+        assert layer.k_norm_args == {}
+        assert layer.v_norm_args == {}
+        for norm in (layer.q_norm, layer.k_norm, layer.v_norm):
+            assert norm.get_config()["epsilon"] == pytest.approx(1e-6), (
+                f"{norm.name} did not receive the factory default epsilon; "
+                f"got {norm.get_config()['epsilon']}"
+            )
+
+    def test_explicit_norm_args_reach_the_built_sublayers(self):
+        """Explicit per-tensor args must arrive at the constructed norm layers.
+
+        Three DIFFERENT epsilons are used on purpose: identical values could
+        not distinguish "each dict reached its own norm" from "one dict was
+        broadcast to all three". The extra ``center=False`` on Q proves a
+        non-shared, type-specific kwarg also survives the factory.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32,
+            num_heads=4,
+            max_seq_len=16,
+            normalization_type="layer_norm",
+            q_norm_args={"epsilon": 0.25, "center": False},
+            k_norm_args={"epsilon": 0.125},
+            v_norm_args={"epsilon": 0.0625},
+        )
+        layer(tf.random.stateless_normal((2, 8, 32), seed=(1, 2)), training=False)
+
+        assert layer.q_norm.get_config()["epsilon"] == pytest.approx(0.25)
+        assert layer.q_norm.get_config()["center"] is False
+        assert layer.k_norm.get_config()["epsilon"] == pytest.approx(0.125)
+        assert layer.k_norm.get_config()["center"] is True, (
+            "q_norm_args leaked into k_norm"
+        )
+        assert layer.v_norm.get_config()["epsilon"] == pytest.approx(0.0625)
+
+    def test_explicit_norm_args_survive_a_config_round_trip(self):
+        """``get_config``/``from_config`` must preserve the explicit dicts."""
+        original = GatedLinearAttentionBlock(
+            dim=32,
+            num_heads=4,
+            max_seq_len=16,
+            normalization_type="layer_norm",
+            q_norm_args={"epsilon": 0.25},
+            k_norm_args={"epsilon": 0.125},
+            v_norm_args={"epsilon": 0.0625},
+        )
+        restored = GatedLinearAttentionBlock.from_config(original.get_config())
+        assert restored.q_norm_args == {"epsilon": 0.25}
+        assert restored.k_norm_args == {"epsilon": 0.125}
+        assert restored.v_norm_args == {"epsilon": 0.0625}
+        assert restored.q_norm.get_config()["epsilon"] == pytest.approx(0.25)
+
+    def test_invalid_norm_args_fail_loudly(self):
+        """An unknown norm kwarg must raise the layer's wrapping ValueError."""
+        with pytest.raises(ValueError, match="Failed to create .* norm layer"):
+            GatedLinearAttentionBlock(
+                dim=32,
+                num_heads=4,
+                max_seq_len=16,
+                normalization_type="layer_norm",
+                q_norm_args={"definitely_not_a_layer_norm_argument": 1},
+            )
+
+
+# =========================================================================
+# 11. ffn_args override
+# =========================================================================
+class TestFFNArgs:
+    """``ffn_args`` is applied last and must reach the constructed FFN."""
+
+    def test_ffn_args_override_reaches_the_built_ffn(self):
+        """``ffn_args`` wins over this layer's own derived defaults.
+
+        ``intermediate_size=320`` becomes the ``hidden_dim`` this layer
+        derives; ``ffn_args={'hidden_dim': 192}`` must override it. 192 is
+        neither 320 nor SwiGLU's own 2/3-rule default of 256 for
+        ``output_dim=64``, so all three cases are distinguishable -- the
+        precise trap that once let a SILENTLY DROPPED ``hidden_dim`` ship
+        green (see ``_create_ffn_layer``'s comment trail).
+
+        ``use_bias`` is overridden in the opposite direction from the block's
+        own value, so this also proves the override is not merely echoing the
+        layer's defaults.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=64,
+            num_heads=4,
+            max_seq_len=32,
+            ffn_type="swiglu",
+            intermediate_size=320,
+            use_bias=False,
+            ffn_args={"hidden_dim": 192, "use_bias": True},
+        )
+        ffn_config = layer.output_ffn.get_config()
+        assert ffn_config["hidden_dim"] == 192, (
+            f"ffn_args['hidden_dim'] did not reach the FFN "
+            f"(got {ffn_config['hidden_dim']}; 320 = intermediate_size wins, "
+            f"256 = SwiGLU's own default)"
+        )
+        assert ffn_config["use_bias"] is True, (
+            "ffn_args['use_bias'] did not override the block's use_bias=False"
+        )
+        assert layer.use_bias is False, "ffn_args must not mutate the block itself"
+
+    def test_ffn_args_survive_a_config_round_trip_and_rebuild_the_same_ffn(self):
+        """The override must be serialized, not just applied at construction."""
+        original = GatedLinearAttentionBlock(
+            dim=64,
+            num_heads=4,
+            max_seq_len=32,
+            ffn_type="swiglu",
+            intermediate_size=320,
+            ffn_args={"hidden_dim": 192},
+        )
+        restored = GatedLinearAttentionBlock.from_config(original.get_config())
+        assert restored.ffn_args == {"hidden_dim": 192}
+        assert restored.output_ffn.get_config()["hidden_dim"] == 192
+
+    def test_unknown_ffn_args_key_is_SILENTLY_DROPPED_not_rejected(self):
+        """MEASURED: an unrecognized ``ffn_args`` key is discarded without error.
+
+        **This pins behaviour that contradicts the shipped documentation.** The
+        class docstring's ``:param ffn_args:`` says the dict is "passed through
+        unfiltered -- the factory rejects an unknown key loudly", and
+        ``_create_ffn_layer``'s comment repeats it ("unlike ``ffn_args``, which
+        the factory now rejects loudly if unknown"). Neither is true:
+        ``ffn/factory.py``'s ``create_ffn_layer`` ends with
+
+            final_params = {k: v for k, v in params.items()
+                            if k in valid_param_names}
+
+        which filters the CALLER's keys exactly as it filters this block's own
+        generic defaults. A typo in ``ffn_args`` is therefore silent.
+
+        This test records the fact rather than asserting the claim, so the suite
+        stays honest; the docstring/comment repair is reported to the plan, not
+        made here (plan step 6 is test-only). If someone later makes the factory
+        strict, THIS test goes red and points at the two prose sites to update.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=64,
+            num_heads=4,
+            max_seq_len=32,
+            ffn_type="swiglu",
+            intermediate_size=320,
+            ffn_args={"definitely_not_a_swiglu_argument": 1},
+        )
+        assert "definitely_not_a_swiglu_argument" not in layer.output_ffn.get_config()
+        # the surrounding, valid configuration still arrived
+        assert layer.output_ffn.get_config()["hidden_dim"] == 320
+
+
+# =========================================================================
+# 12. use_bias
+# =========================================================================
+# The seven Dense sublayers this layer owns under the DEFAULT (built-in gated)
+# output stage. The three Conv1D layers are deliberately NOT listed: they are
+# constructed without a `use_bias` argument, so they always carry a bias
+# regardless of this flag -- counting "every bias in the layer" would blur that.
+_DENSE_SUBLAYER_NAMES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "alpha_proj",
+    "beta_proj",
+    "output_proj",
+    "output_gate_linear",
+)
+
+
+class TestUseBias:
+    """``use_bias`` is asserted by naming variables, not by "it constructed"."""
+
+    @staticmethod
+    def _build(use_bias: bool) -> GatedLinearAttentionBlock:
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, max_seq_len=16, use_bias=use_bias
+        )
+        layer(tf.random.stateless_normal((2, 8, 32), seed=(4, 9)), training=False)
+        return layer
+
+    def test_default_is_biasless_on_every_dense_sublayer(self):
+        layer = self._build(use_bias=False)
+        assert layer.use_bias is False
+        for name in _DENSE_SUBLAYER_NAMES:
+            sub = getattr(layer, name)
+            assert sub.bias is None, f"{name} has a bias under use_bias=False"
+
+    def test_use_bias_true_adds_exactly_one_bias_per_dense_sublayer(self):
+        layer = self._build(use_bias=True)
+        assert layer.use_bias is True
+        for name in _DENSE_SUBLAYER_NAMES:
+            sub = getattr(layer, name)
+            assert sub.bias is not None, f"{name} has no bias under use_bias=True"
+            assert tuple(sub.bias.shape) == (sub.units,), (
+                f"{name} bias shape {tuple(sub.bias.shape)} != ({sub.units},)"
+            )
+
+    def test_bias_variable_count_delta_is_exactly_the_dense_sublayer_count(self):
+        """A count, not a spot check: nothing else may gain or lose a bias."""
+        biasless = self._build(use_bias=False)
+        biased = self._build(use_bias=True)
+
+        def bias_paths(layer):
+            # Drop the auto-numbered top-level layer name ('..._block_1/') so
+            # two instances built in the same session are comparable; everything
+            # that identifies the OWNING sublayer is kept.
+            return sorted(
+                w.path.split("/", 1)[1]
+                for w in layer.weights
+                if w.path.endswith("bias")
+            )
+
+        without, with_ = bias_paths(biasless), bias_paths(biased)
+        assert len(with_) - len(without) == len(_DENSE_SUBLAYER_NAMES), (
+            f"expected exactly {len(_DENSE_SUBLAYER_NAMES)} new bias variables, "
+            f"got {len(with_) - len(without)}\nwithout={without}\nwith={with_}"
+        )
+        # The biasless set must be a strict subset (the convs' biases), so the
+        # flag only ADDS variables and never renames or removes one.
+        assert set(without) < set(with_)
+
+
+# =========================================================================
+# 13. Mixed precision (uses the house dtype_policy fixture)
+# =========================================================================
+_POLICY_TO_OUTPUT_DTYPE = {
+    "float32": "float32",
+    "mixed_float16": "float16",
+    "float64": "float64",
+}
+
+
+class TestMixedPrecision:
+    """float32 / mixed_float16 / float64, short AND long sequences."""
+
+    def test_forward_pass_under_each_policy(self, dtype_policy):
+        """Shape, dtype and finiteness under each global policy.
+
+        The sublayers are constructed inside ``__init__``, so the layer MUST
+        be created while the fixture's policy is in force -- constructing it
+        earlier would silently pin every sublayer to the previous policy and
+        make this test a float32 test wearing three names.
+        """
+        keras.utils.set_random_seed(11)
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, max_seq_len=64, dropout_rate=0.0
+        )
+        x = np.asarray(
+            np.random.default_rng(3).normal(size=(2, 16, 32)), dtype="float32"
+        )
+        y = ops.convert_to_numpy(layer(x, training=False))
+        assert y.shape == (2, 16, 32)
+        assert y.dtype.name == _POLICY_TO_OUTPUT_DTYPE[dtype_policy], (
+            f"policy {dtype_policy} produced {y.dtype}"
+        )
+        assert np.isfinite(y.astype("float64")).all(), (
+            f"non-finite output under {dtype_policy}"
+        )
+
+    def test_long_sequence_accumulator_stays_finite(self, dtype_policy):
+        """512 timesteps with the state gate driven to alpha = 1 (no decay).
+
+        Why not just a short sequence: this repo has already been bitten by a
+        toy ``N=7`` reduction that hid an fp16 failure appearing only at
+        ``N >= 512``. And why the gate surgery: at random init ``alpha`` is
+        ~sigmoid(small) ~ 0.5, so the state's memory horizon is ~1 step and a
+        512-step run would exercise no more accumulation than a 2-step one.
+        Setting ``alpha_proj``/``beta_proj`` to a large constant bias drives
+        ``alpha, beta -> 1`` (MEASURED: alpha_min = 0.999994 at float32 and
+        exactly 1.0 at fp16), so the state genuinely accumulates 512
+        unrenormalized rank-1 writes -- the case the scan is unguarded for.
+
+        MEASURED RESULT (2026-07-29, plan step 6): finite at all three
+        policies; scan output max|.| = 3.363 (float32) / 3.367 (fp16). No fp16
+        overflow was found, so nothing is xfail-pinned here. This test is the
+        instrument that would catch it if the accumulator ever grows.
+        """
+        seq_len = 512
+        keras.utils.set_random_seed(7)
+        layer = GatedLinearAttentionBlock(
+            dim=32,
+            num_heads=4,
+            max_seq_len=seq_len,
+            dropout_rate=0.0,
+            use_bias=True,  # alpha_proj/beta_proj need a bias to be driven
+        )
+        x = np.asarray(
+            np.random.default_rng(1).normal(size=(2, seq_len, 32)), dtype="float32"
+        )
+        layer(x[:, :4], training=False)  # build
+
+        for proj in (layer.alpha_proj, layer.beta_proj):
+            proj.kernel.assign(np.zeros(proj.kernel.shape, dtype="float32"))
+            proj.bias.assign(np.full(proj.bias.shape, 12.0, dtype="float32"))
+
+        cap = capture_scan_io(layer, x, training=False)
+        alpha = cap["alpha"].astype("float64")
+        assert alpha.min() > 0.999, (
+            f"setup failed: alpha was not driven to ~1 (min={alpha.min()}), so "
+            f"the state still decays and this is not a long-accumulation test"
+        )
+        scan_out = cap["scan_out"].astype("float64")
+        assert np.isfinite(scan_out).all(), (
+            f"the {seq_len}-step state accumulator produced "
+            f"{int((~np.isfinite(scan_out)).sum())} non-finite scan outputs "
+            f"under {dtype_policy}"
+        )
+        assert np.isfinite(cap["block_out"].astype("float64")).all(), (
+            f"non-finite block output at seq_len={seq_len} under {dtype_policy}"
+        )
+
+
+# =========================================================================
+# 14. XLA
+# =========================================================================
+class TestXLACompilation:
+    """``ops.while_loop`` + ``ops.scatter_update`` under ``jit_compile=True``.
+
+    MEASURED (2026-07-29, plan step 6): both compile and run on this backend,
+    so no xfail is needed. Recorded as decision D-010.
+    """
+
+    def test_jit_compiled_forward_matches_eager(self):
+        keras.utils.set_random_seed(5)
+        inputs = keras.Input(shape=(16, 32))
+        block = GatedLinearAttentionBlock(dim=32, num_heads=4, max_seq_len=32)
+        model = keras.models.Model(inputs, block(inputs))
+        x = np.asarray(
+            np.random.default_rng(2).normal(size=(4, 16, 32)), dtype="float32"
+        )
+        eager = ops.convert_to_numpy(model(x, training=False)).astype("float64")
+
+        model.compile(loss="mse", optimizer="adam", jit_compile=True)
+        jitted = model.predict(x, verbose=0).astype("float64")
+
+        assert jitted.shape == eager.shape
+        assert np.isfinite(jitted).all()
+
+        # Tolerance, derived rather than guessed. Same weights, same input, so
+        # only the arithmetic differs -- and on this GPU the difference is TF32,
+        # not XLA: measured max|diff| = 6.6e-05 with TF32 enabled (the default)
+        # and 2.2e-08 with `enable_tensor_float_32_execution(False)`, on an
+        # output whose scale is 0.179. TF32 keeps 10 explicit mantissa bits, so
+        # one TF32 ulp is 2**-11 relative; the measured gap is 0.76 ulp. Allow 4
+        # ulps of output scale -- ~5x above the measured value, still ~4 orders
+        # of magnitude below anything a miscompiled scan would produce.
+        # (This matters because TF32 can be disabled process-globally by an
+        # unrelated test module, which swings this number by ~3000x; the bound
+        # must hold in BOTH regimes, and it does.)
+        err = float(np.abs(jitted - eager).max())
+        scale = float(np.abs(eager).max())
+        tol = 4.0 * (2.0 ** -11) * scale
+        assert err <= tol, (
+            f"jit_compile=True changed the result beyond TF32 roundoff: "
+            f"max|diff|={err:.3e} > tol={tol:.3e} (output scale {scale:.3e})"
+        )
 
 
 if __name__ == "__main__":
