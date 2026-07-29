@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import sys
 import tempfile
 from typing import Any, Dict
 
@@ -1269,6 +1270,338 @@ class TestXLACompilation:
             f"jit_compile=True changed the result beyond TF32 roundoff: "
             f"max|diff|={err:.3e} > tol={tol:.3e} (output scale {scale:.3e})"
         )
+
+# ---------------------------------------------------------------------------
+# Step 7: the chunked (blockwise) scan.
+#
+# `_chunked_scan` and `_sequential_scan` must compute the same function. They
+# cannot agree bitwise -- they associate the same sums in a different order --
+# so every comparison below is a tolerance, and each tolerance is derived or
+# measured, never guessed.
+#
+# One TF32 ulp is 2**-11 = 4.88e-04 relative. That is a hard floor on how
+# closely two differently-associated float32 matmul chains can agree on this
+# GPU, and it sits ABOVE the 1e-4 float32 bound the plan pre-committed before
+# TF32 was known to be in play. So the float32 assertions below are expressed
+# in TF32 ulps, exactly as the step-6 XLA test does, and the bound holds in
+# both TF32 regimes (an unrelated test module can disable TF32 process-wide).
+# Evidence that the implementation itself is well inside the plan's original
+# bound: with `enable_tensor_float_32_execution(False)` this same grid measures
+# a worst-case relative error of 4.70e-06, i.e. 21x tighter than 1e-4.
+# ---------------------------------------------------------------------------
+
+_TF32_ULP = 2.0 ** -11
+
+# (seq_len, num_heads, head_dim) -- the plan's pre-committed grid. The lengths
+# deliberately include non-multiples of chunk_size (7, 63, 65, 257) and the
+# non-round neighbours of the 64 boundary, because a powers-of-two-only grid
+# can be fully green on a chunked scan that mishandles its own edges.
+_EQUIV_GRID = [
+    (seq_len, num_heads, head_dim)
+    for seq_len in (1, 7, 63, 64, 65, 128, 257)
+    for num_heads in (1, 4)
+    for head_dim in (8, 32)
+]
+
+
+def _scan_inputs(seq_len, num_heads, head_dim, dtype, alpha_value=None, seed=0):
+    """Random scan inputs. ``alpha_value`` pins the gate for adversarial runs."""
+    rng = np.random.default_rng(seed)
+    batch = 2
+    q = rng.standard_normal((batch, seq_len, num_heads, head_dim)).astype(dtype)
+    k = rng.standard_normal((batch, seq_len, num_heads, head_dim)).astype(dtype)
+    v = rng.standard_normal((batch, seq_len, num_heads, 2 * head_dim)).astype(dtype)
+    if alpha_value is None:
+        alpha = rng.uniform(0.05, 0.95, (batch, seq_len, num_heads)).astype(dtype)
+    else:
+        alpha = np.full((batch, seq_len, num_heads), alpha_value, dtype=dtype)
+    beta = rng.uniform(0.1, 1.0, (batch, seq_len, num_heads)).astype(dtype)
+    return [keras.ops.convert_to_tensor(x) for x in (q, k, v, alpha, beta)]
+
+
+class TestChunkedScanEquivalence:
+    """The chunked scan must agree with the sequential reference."""
+
+    @pytest.mark.parametrize("seq_len,num_heads,head_dim", _EQUIV_GRID)
+    def test_chunked_matches_sequential_float64(self, seq_len, num_heads, head_dim):
+        """float64: absolute agreement within the plan's pre-committed 1e-10."""
+        with global_dtype_policy("float64"):
+            layer = GatedLinearAttentionBlock(
+                dim=num_heads * head_dim, num_heads=num_heads,
+                head_dim=head_dim, max_seq_len=512, chunk_size=64,
+            )
+            args = _scan_inputs(seq_len, num_heads, head_dim, "float64")
+            reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+            chunked = keras.ops.convert_to_numpy(
+                layer._chunked_scan(*args, seq_len)
+            )
+
+        assert np.isfinite(reference).all(), "sequential path produced non-finite values"
+        assert np.isfinite(chunked).all(), "chunked path produced non-finite values"
+        err = float(np.abs(reference - chunked).max())
+        assert err <= 1e-10, (
+            f"chunked scan disagrees with the sequential reference at "
+            f"seq_len={seq_len}, heads={num_heads}, head_dim={head_dim}: "
+            f"max|diff|={err:.3e} > 1e-10"
+        )
+
+    @pytest.mark.parametrize("seq_len,num_heads,head_dim", _EQUIV_GRID)
+    def test_chunked_matches_sequential_float32(self, seq_len, num_heads, head_dim):
+        """float32: agreement within 4 TF32 ulps of output scale (see header)."""
+        layer = GatedLinearAttentionBlock(
+            dim=num_heads * head_dim, num_heads=num_heads,
+            head_dim=head_dim, max_seq_len=512, chunk_size=64,
+        )
+        args = _scan_inputs(seq_len, num_heads, head_dim, "float32")
+        reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+        chunked = keras.ops.convert_to_numpy(layer._chunked_scan(*args, seq_len))
+
+        assert np.isfinite(reference).all(), "sequential path produced non-finite values"
+        assert np.isfinite(chunked).all(), "chunked path produced non-finite values"
+        err = float(np.abs(reference - chunked).max())
+        scale = float(np.abs(reference).max()) or 1.0
+        tol = 4.0 * _TF32_ULP * scale
+        assert err <= tol, (
+            f"chunked scan disagrees with the sequential reference at "
+            f"seq_len={seq_len}, heads={num_heads}, head_dim={head_dim}: "
+            f"max|diff|={err:.3e} > tol={tol:.3e} "
+            f"({err / scale / _TF32_ULP:.2f} TF32 ulps of output scale)"
+        )
+
+    def test_equivalence_gate_rejects_an_exclusive_intra_chunk_mask(self):
+        """The gate must be ABLE to fail: feed it a deliberately wrong variant.
+
+        The intra-chunk causal mask is ``tril`` INCLUSIVE -- the ``j = t`` term
+        carries ``exp(0) = 1`` and is exactly the current step's own write,
+        which the read-out sees because it reads the state AFTER the write.
+        Dropping that diagonal is the single most plausible off-by-one in a
+        chunked rewrite, so this pins that the gate catches it rather than
+        waving it through as roundoff.
+        """
+        module = sys.modules[GatedLinearAttentionBlock.__module__]
+        real_mask = module._inclusive_causal_mask
+
+        def exclusive_mask(size, dtype):
+            """Same mask with the diagonal dropped -- the off-by-one to catch."""
+            idx = keras.ops.arange(size)
+            return keras.ops.cast(
+                keras.ops.greater(
+                    keras.ops.expand_dims(idx, -1), keras.ops.expand_dims(idx, 0)
+                ),
+                dtype,
+            )
+
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
+        )
+        args = _scan_inputs(128, 4, 8, "float32", seed=5)
+        reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+
+        module._inclusive_causal_mask = exclusive_mask
+        try:
+            wrong = keras.ops.convert_to_numpy(layer._chunked_scan(*args, 128))
+        finally:
+            module._inclusive_causal_mask = real_mask
+
+        assert module._inclusive_causal_mask is real_mask, "failed to restore the mask"
+
+        err = float(np.abs(reference - wrong).max())
+        scale = float(np.abs(reference).max()) or 1.0
+        tol = 4.0 * _TF32_ULP * scale
+        assert err > tol, (
+            "the equivalence gate did NOT reject an exclusive intra-chunk mask "
+            f"(max|diff|={err:.3e} <= tol={tol:.3e}); the gate is vacuous"
+        )
+
+    def test_chunked_matches_the_independent_numpy_oracle(self):
+        """Agreement with the sequential path is not sufficient on its own.
+
+        If both scans shared a bug they would agree with each other and the
+        equivalence test would pass. So compare the chunked path against the
+        step-6 oracle -- written from the recurrence definition, not from
+        either implementation -- fed the layer's own captured pre-scan bits.
+        """
+        with global_dtype_policy("float64"):
+            layer = GatedLinearAttentionBlock(
+                dim=32, num_heads=4, head_dim=8, max_seq_len=128, chunk_size=64
+            )
+            x = keras.ops.convert_to_tensor(
+                np.random.default_rng(11).standard_normal((2, 70, 32)).astype("float64")
+            )
+            captured = capture_scan_io(layer, x)
+            expected = numpy_gated_linear_recurrence(
+                captured["q"], captured["k"], captured["v"],
+                captured["alpha"], captured["beta"],
+            )
+            chunked = keras.ops.convert_to_numpy(
+                layer._chunked_scan(
+                    keras.ops.convert_to_tensor(captured["q"]),
+                    keras.ops.convert_to_tensor(captured["k"]),
+                    keras.ops.convert_to_tensor(captured["v"]),
+                    keras.ops.convert_to_tensor(captured["alpha"]),
+                    keras.ops.convert_to_tensor(captured["beta"]),
+                    70,
+                )
+            )
+
+        assert chunked.shape == expected.shape
+        tol = oracle_tolerance(70, 8, expected)
+        err = float(np.abs(chunked - expected).max())
+        assert err <= tol, (
+            f"the CHUNKED scan disagrees with the independent NumPy "
+            f"recurrence: max|diff|={err:.3e} > tol={tol:.3e}"
+        )
+
+    @pytest.mark.parametrize("alpha_value", [0.5, 0.1, 0.01, 1e-4, 1e-7])
+    def test_small_alpha_stays_finite_and_equivalent(self, alpha_value):
+        """Guard the numerical reason this factorization was chosen.
+
+        The textbook two-vector form (``k * exp(-D)``) is algebraically the
+        same but materializes an unbounded reciprocal: measured, it overflows
+        float32 at chunk_size=64 once alpha reaches 0.1, and random-init
+        sigmoid alpha already reaches 0.0111 -- so it fails at initialization,
+        not in a contrived corner. Without this test the stability argument
+        would be unguarded and a future "simplification" back to the
+        reciprocal form would ship green.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
+        )
+        args = _scan_inputs(257, 4, 8, "float32", alpha_value=alpha_value)
+        reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+        chunked = keras.ops.convert_to_numpy(layer._chunked_scan(*args, 257))
+
+        assert np.isfinite(chunked).all(), (
+            f"chunked scan produced non-finite values at alpha={alpha_value}"
+        )
+        err = float(np.abs(reference - chunked).max())
+        scale = float(np.abs(reference).max()) or 1.0
+        assert err <= 4.0 * _TF32_ULP * scale, (
+            f"chunked scan diverged from the reference at alpha={alpha_value}: "
+            f"max|diff|={err:.3e}"
+        )
+
+    def test_padding_contributes_exactly_nothing(self):
+        """A padded step must not perturb any real step.
+
+        Chunk padding uses gate-neutral values (alpha=1 so the cumulative gate
+        stays flat, beta=0 and q=k=v=0 so nothing is written or read). The scan
+        is causal, so truncating the input to a length that needs padding must
+        reproduce the prefix of the unpadded run BIT-EXACTLY -- not merely
+        within a tolerance. 65 needs 63 padded steps; 128 needs none.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
+        )
+        full = _scan_inputs(128, 4, 8, "float32", seed=3)
+        out_full = keras.ops.convert_to_numpy(layer._chunked_scan(*full, 128))
+        prefix = [x[:, :65] for x in full]
+        out_prefix = keras.ops.convert_to_numpy(layer._chunked_scan(*prefix, 65))
+
+        assert np.array_equal(out_full[:, :65], out_prefix), (
+            "a padded chunk perturbed the real timesteps: "
+            f"max|diff|={float(np.abs(out_full[:, :65] - out_prefix).max()):.3e} "
+            "(expected exactly 0)"
+        )
+
+
+class TestChunkSizeParameter:
+    """``chunk_size`` must be validated, serialized, and behaviour-neutral."""
+
+    @pytest.mark.parametrize("bad", [0, -1, -64])
+    def test_non_positive_chunk_size_raises(self, bad):
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            GatedLinearAttentionBlock(
+                dim=32, num_heads=4, max_seq_len=64, chunk_size=bad
+            )
+
+    def test_chunk_size_round_trips_through_get_config(self):
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, max_seq_len=64, chunk_size=16
+        )
+        config = layer.get_config()
+        assert config["chunk_size"] == 16
+        assert GatedLinearAttentionBlock.from_config(config).chunk_size == 16
+
+    def test_chunk_size_survives_a_full_keras_round_trip(self):
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, max_seq_len=64, chunk_size=16
+        )
+        inputs = keras.Input(shape=(20, 32))
+        model = keras.Model(inputs, layer(inputs))
+        x = np.random.default_rng(0).normal(size=(2, 20, 32)).astype("float32")
+        before = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "chunked.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        assert restored.layers[-1].chunk_size == 16
+        np.testing.assert_allclose(
+            before, restored.predict(x, verbose=0), rtol=1e-6, atol=1e-6
+        )
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 16, 64, 256])
+    def test_result_is_independent_of_chunk_size(self, chunk_size):
+        """chunk_size is a performance knob, not a semantic one.
+
+        Includes chunk_size=1 (degenerate: every chunk is one timestep) and 256
+        (larger than the sequence, so one heavily padded chunk).
+        """
+        with global_dtype_policy("float64"):
+            layer = GatedLinearAttentionBlock(
+                dim=32, num_heads=4, head_dim=8,
+                max_seq_len=256, chunk_size=chunk_size,
+            )
+            args = _scan_inputs(100, 4, 8, "float64", seed=7)
+            reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+            chunked = keras.ops.convert_to_numpy(layer._chunked_scan(*args, 100))
+
+        err = float(np.abs(reference - chunked).max())
+        assert err <= 1e-10, (
+            f"chunk_size={chunk_size} changed the result: max|diff|={err:.3e}"
+        )
+
+
+class TestScanDispatch:
+    """``gated_linear_scan`` must route to the right implementation."""
+
+    def test_static_length_takes_the_chunked_path(self):
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=128, chunk_size=64
+        )
+        args = _scan_inputs(70, 4, 8, "float32", seed=2)
+        calls = []
+        real_chunked = layer._chunked_scan
+
+        def spy(*a, **kw):
+            calls.append(1)
+            return real_chunked(*a, **kw)
+
+        layer._chunked_scan = spy
+        try:
+            layer.gated_linear_scan(*args)
+        finally:
+            del layer._chunked_scan
+        assert calls, "a static sequence length did not dispatch to _chunked_scan"
+
+    def test_symbolic_length_falls_back_to_the_sequential_path(self):
+        """A symbolic sequence axis has no concrete chunk grid, so it must fall
+        back -- and the fallback must still build a working model."""
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=128, chunk_size=64
+        )
+        inputs = keras.Input(shape=(None, 32))
+        model = keras.Model(inputs, layer(inputs))
+        for seq_len in (30, 70):
+            x = np.random.default_rng(seq_len).normal(
+                size=(2, seq_len, 32)
+            ).astype("float32")
+            out = model.predict(x, verbose=0)
+            assert out.shape == (2, seq_len, 32)
+            assert np.isfinite(out).all()
+
 
 
 if __name__ == "__main__":

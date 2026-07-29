@@ -27,10 +27,27 @@ claims nothing beyond them.
 
 Arithmetic cost is one ``head_dim x head_dim`` outer product plus one
 vector-matrix product per timestep per head, i.e. it grows linearly with
-sequence length rather than quadratically. Note that the scan is currently
-executed by ``ops.while_loop`` with one *sequential* iteration per timestep, so
-the sequential depth is linear in the sequence length as well; no wall-clock
-speed claim is made here, because none has been measured.
+sequence length rather than quadratically.
+
+Two implementations compute this same function, and ``gated_linear_scan``
+dispatches between them on whether the sequence length is statically known:
+
+* **Chunked** (``_chunked_scan``, used whenever the length is a static
+  ``int`` -- the ordinary case). Splits the sequence into ``chunk_size``-wide
+  blocks. Only the block-to-block state hand-off stays sequential, so the
+  sequential depth drops to ``ceil(seq_len / chunk_size)``; everything within a
+  block is one batched matmul. Measured on an RTX 4070, float32,
+  ``num_heads=4, head_dim=8, chunk_size=64``: **15.2 ms vs 746 ms at
+  ``seq_len=128`` (49x), and 33.3 ms vs 2972 ms at ``seq_len=512`` (89x)**.
+* **Sequential** (``_sequential_scan``, used when the length is symbolic).
+  One ``ops.while_loop`` iteration per timestep. It is also the reference the
+  chunked path is tested against.
+
+The two agree to floating-point reassociation, never bitwise. Measured across
+``seq_len in {1, 7, 63, 64, 65, 128, 257} x num_heads in {1, 4} x head_dim in
+{8, 32}``: worst-case absolute difference ``4.4e-13`` at float64, and
+``1.6`` TF32 ulps of output scale at float32 (``4.7e-06`` relative with TF32
+disabled).
 """
 
 import keras
@@ -42,10 +59,44 @@ from keras import initializers, layers, ops, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.masking import MaskFactory
 from ..ffn.factory import create_ffn_from_config, FFNType, FFN_REGISTRY
 from ..norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
+
+
+def _inclusive_causal_mask(size: int, dtype: str) -> keras.KerasTensor:
+    """Return the causal **keep** mask as a float multiplier, diagonal INCLUDED.
+
+    ``mask[i, j] = 1`` iff ``j <= i``, else ``0``. The diagonal must be
+    included: the ``j = t`` term of the closed-form sum is the current step's
+    own write, and the read-out sees it because it reads the state *after* that
+    write. Dropping it would make the read-out exclusive and wrong.
+
+    This is a **polarity + dtype adapter** over the canonical
+    :meth:`~dl_techniques.utils.masking.MaskFactory.create_causal_mask`, not a
+    reimplementation -- the triangle logic lives there and only there. The
+    canonical helper returns a *boolean block* mask (``True`` where a position
+    must be suppressed, i.e. ``j > i``); the scan needs the complementary
+    *keep* mask as a float it can multiply by. Inverting at the call site is the
+    house convention for this family: the caller supplies the keep predicate
+    because polarity is per-site.
+
+    Do NOT swap this for ``keras.ops.tril``: ``ops.tril`` raises
+    ``TypeError: pred must not be a Python bool`` when traced into a graph on
+    this Keras/TF version, which broke every ``Model``-level path (``fit``,
+    ``predict``, ``jit_compile``, save/load) while eager tests stayed green.
+
+    :param size: Side length of the square mask.
+    :type size: int
+    :param dtype: Floating dtype of the returned mask.
+    :type dtype: str
+    :return: Mask of shape ``(size, size)``.
+    :rtype: keras.KerasTensor
+    """
+    blocked = MaskFactory.create_causal_mask(size, dtype="bool")
+    return ops.cast(ops.logical_not(blocked), dtype)
 
 
 @keras.saving.register_keras_serializable()
@@ -93,7 +144,9 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         │    │               │                v1_t [.,d]          v2_t [.,d]        │
         │    └───────┬───────┘                   │                   │              │
         │            ▼                           ▼                   │              │
-        │    gated_linear_scan -- ops.while_loop, one step per t:     │             │
+        │    gated_linear_scan -- dispatches on shape staticness:      │             │
+        │      static seq_len -> _chunked_scan  (chunk_size-wide blocks)│            │
+        │      symbolic       -> _sequential_scan (one step per t)     │             │
         │      S_t   = a_t * S_{t-1} + b_t * (k_t ⊗ v1_t)             │             │
         │      out_t = q_t · S_t  +  v2_t  ◄──────────────────────────┘             │
         │      out_t reads S_t, i.e. AFTER this step's write.                       │
@@ -184,6 +237,16 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :param intermediate_size: Intermediate size for standard FFNs. Defaults to
         dim * 4 if not provided.
     :type intermediate_size: Optional[int]
+    :param chunk_size: Block width for the chunked scan, in timesteps. Defaults
+        to 64. A pure performance knob: the result is the same (to floating-point
+        reassociation) for every value, which
+        ``test_result_is_independent_of_chunk_size`` pins at float64 for
+        ``chunk_size in {1, 7, 16, 64, 256}``. Larger blocks mean fewer
+        sequential steps but a wider ``(chunk_size, chunk_size)`` intra-block
+        matmul, so the cost is quadratic in this value and linear in the step
+        count. Only used when the sequence length is statically known; the
+        symbolic-length fallback is timestep-sequential and ignores it.
+    :type chunk_size: int
     :param use_bias: Whether to use bias in linear layers. Defaults to False.
     :type use_bias: bool
     :param kernel_initializer: Initializer for weights. Defaults to
@@ -238,6 +301,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         ffn_type: Optional[FFNType] = None,
         ffn_args: Optional[Dict[str, Any]] = None,
         intermediate_size: Optional[int] = None,
+        chunk_size: int = 64,
         use_bias: bool = False,
         kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, initializers.Initializer] = "zeros",
@@ -256,6 +320,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             dropout_rate,
             max_seq_len,
             intermediate_size,
+            chunk_size,
         )
 
         # Store ALL configuration parameters
@@ -285,6 +350,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.ffn_args = ffn_args or {}
         self.intermediate_size = intermediate_size
+        self.chunk_size = chunk_size
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -354,6 +420,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         dropout_rate: float,
         max_seq_len: int,
         intermediate_size: Optional[int] = None,
+        chunk_size: int = 64,
     ) -> None:
         """Validate layer initialization parameters.
 
@@ -372,6 +439,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :param intermediate_size: Intermediate size for the optional FFN stage.
             ``None`` means "derive from ``dim``" and is always valid.
         :type intermediate_size: Optional[int]
+        :param chunk_size: Chunk width for the blockwise scan.
+        :type chunk_size: int
         :raises ValueError: If any parameter is outside its admissible range.
         """
         if dim <= 0:
@@ -398,6 +467,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
                 f"intermediate_size must be positive when given, "
                 f"got {intermediate_size}"
             )
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
 
     def _validate_seq_len(self, seq_len: int) -> None:
         """Reject a statically known sequence length larger than ``max_seq_len``.
@@ -626,7 +697,58 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         beta: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Run the gated outer-product recurrence with ``keras.ops.while_loop``.
+        """Run the gated outer-product recurrence, dispatching on shape staticness.
+
+        Two implementations compute the same function:
+
+        * :meth:`_chunked_scan` -- blockwise, ``ceil(seq_len / chunk_size)``
+          sequential steps. Chosen whenever the sequence length is a static
+          Python ``int``, which is the ordinary eager/compiled case.
+        * :meth:`_sequential_scan` -- one step per timestep. Chosen when the
+          sequence length is symbolic, because the chunked form needs a concrete
+          length to lay out its chunk grid. Also the reference implementation the
+          chunked path is tested against.
+
+        The two agree to floating-point reassociation only, never bitwise; see
+        the class docstring's note on the equivalence tolerances.
+
+        :param q: Query tensor of shape (batch, seq, heads, head_dim).
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape (batch, seq, heads, head_dim).
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape (batch, seq, heads, 2*head_dim).
+        :type v: keras.KerasTensor
+        :param alpha: Persistence gate of shape (batch, seq, heads).
+        :type alpha: keras.KerasTensor
+        :param beta: Write-strength gate of shape (batch, seq, heads).
+        :type beta: keras.KerasTensor
+        :param training: Accepted for signature uniformity; the scan has no
+            training-dependent behaviour (dropout is applied by ``call()``).
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch, seq, heads, head_dim).
+        :rtype: keras.KerasTensor
+        """
+        static_seq_len = None
+        shape = getattr(q, "shape", None)
+        if shape is not None and len(shape) == 4 and shape[1] is not None:
+            try:
+                static_seq_len = int(shape[1])
+            except (TypeError, ValueError):
+                static_seq_len = None
+
+        if static_seq_len is None:
+            return self._sequential_scan(q, k, v, alpha, beta)
+        return self._chunked_scan(q, k, v, alpha, beta, static_seq_len)
+
+    def _sequential_scan(
+        self,
+        q: keras.KerasTensor,
+        k: keras.KerasTensor,
+        v: keras.KerasTensor,
+        alpha: keras.KerasTensor,
+        beta: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Run the recurrence one timestep at a time with ``ops.while_loop``.
 
         One loop iteration per timestep ``t``::
 
@@ -656,10 +778,6 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :param beta: Write-strength gate of shape (batch, seq, heads), one
             scalar per head per timestep.
         :type beta: keras.KerasTensor
-        :param training: Training mode flag. Accepted for signature uniformity;
-            this method has no training-dependent behaviour (dropout is applied
-            by ``call()`` before the scan).
-        :type training: Optional[bool]
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
         """
@@ -683,11 +801,11 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
             k_exp = ops.expand_dims(k_t, -1)
             v_exp = ops.expand_dims(v_t_1, -2)
-            delta = ops.matmul(k_exp, v_exp)
+            write = ops.matmul(k_exp, v_exp)
 
             beta_exp = ops.expand_dims(ops.expand_dims(beta_t, -1), -1)
             alpha_exp = ops.expand_dims(ops.expand_dims(alpha_t, -1), -1)
-            next_state = alpha_exp * state + beta_exp * delta
+            next_state = alpha_exp * state + beta_exp * write
 
             q_exp = ops.expand_dims(q_t, -2)
             output_t = ops.squeeze(ops.matmul(q_exp, next_state), axis=-2) + v_t_2
@@ -704,6 +822,185 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             maximum_iterations=self.max_seq_len,
         )
         return ops.transpose(final_outputs, [1, 0, 2, 3])
+
+    def _chunked_scan(
+        self,
+        q: keras.KerasTensor,
+        k: keras.KerasTensor,
+        v: keras.KerasTensor,
+        alpha: keras.KerasTensor,
+        beta: keras.KerasTensor,
+        seq_len: int,
+    ) -> keras.KerasTensor:
+        """Compute the same recurrence blockwise, in ``ceil(seq/chunk)`` steps.
+
+        Unrolling the recurrence gives a closed form. With the inclusive
+        cumulative log-gate ``d_t = sum_{l<=t} log alpha_l``::
+
+            out_t = sum_{j<=t} exp(d_t - d_j) * beta_j * (q_t . k_j) * v_j^(1)
+                    + v_t^(2)
+
+        The ``j = t`` term carries ``exp(0) = 1``, which is what makes the
+        read-out inclusive -- the same convention ``_sequential_scan`` gets from
+        reading the state *after* the write.
+
+        Splitting the sum at chunk boundaries, with ``D_i`` the cumulative
+        log-gate *within* a chunk and ``S_start`` the state entering it::
+
+            intra_i = sum_{i'<=i} exp(D_i - D_i') * beta_i' * (q_i . k_i') * v_i'
+            inter_i = exp(D_i) * (q_i . S_start)
+            S_end   = exp(D_last) * S_start
+                      + sum_i' exp(D_last - D_i') * beta_i' * k_i' v_i'^T
+
+        Only the ``S_start`` chain is sequential, and it advances one chunk at a
+        time; both the intra-chunk triangle and the per-chunk state
+        contributions are computed for every chunk at once.
+
+        Sequences shorter than a whole number of chunks are padded with
+        gate-neutral values (``alpha = 1`` so the cumulative gate stays flat,
+        ``beta = 0`` and ``q = k = v = 0`` so nothing is written or read) and the
+        output is sliced back.
+
+        :param q: Query tensor of shape (batch, seq, heads, head_dim).
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape (batch, seq, heads, head_dim).
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape (batch, seq, heads, 2*head_dim).
+        :type v: keras.KerasTensor
+        :param alpha: Persistence gate of shape (batch, seq, heads).
+        :type alpha: keras.KerasTensor
+        :param beta: Write-strength gate of shape (batch, seq, heads).
+        :type beta: keras.KerasTensor
+        :param seq_len: Statically known sequence length.
+        :type seq_len: int
+        :return: Output tensor of shape (batch, seq, heads, head_dim).
+        :rtype: keras.KerasTensor
+        """
+        compute_dtype = keras.backend.standardize_dtype(q.dtype)
+        # DECISION plan-2026-07-29-adbe605f/D-012
+        # Every gate factor below is exp() of a DIFFERENCE of cumulative
+        # log-gates whose argument is <= 0, so all of them lie in (0, 1].
+        # Do NOT "simplify" this into the textbook two-vector form
+        #     q~ = q * exp(D),   k~ = k * exp(-D) * beta
+        # which is algebraically identical but materializes the unbounded
+        # reciprocal exp(-D_j). Measured: that form OVERFLOWS float32 at
+        # chunk_size=64 for alpha=0.1, and random-init sigmoid alpha already
+        # reaches 0.0111, so it breaks at initialization -- not just in a
+        # contrived corner. The pairwise-difference form below never forms a
+        # reciprocal; underflow to 0 is the numerically correct answer there
+        # (a gate that has decayed by 1e-60 contributes nothing).
+        #
+        # float32 is a FLOOR for the gate arithmetic, not a target: fp16/bf16
+        # are promoted (a float16 log/exp cannot carry a cumulative sum
+        # spanning hundreds of nats), but float64 must NOT be demoted.
+        gate_dtype = "float64" if compute_dtype == "float64" else "float32"
+
+        batch_size = ops.shape(q)[0]
+        chunk = self.chunk_size
+        n_chunks = (seq_len + chunk - 1) // chunk
+        pad = n_chunks * chunk - seq_len
+
+        if pad > 0:
+            q = ops.pad(q, [[0, 0], [0, pad], [0, 0], [0, 0]])
+            k = ops.pad(k, [[0, 0], [0, pad], [0, 0], [0, 0]])
+            v = ops.pad(v, [[0, 0], [0, pad], [0, 0], [0, 0]])
+            beta = ops.pad(beta, [[0, 0], [0, pad], [0, 0]])
+            alpha = ops.pad(
+                alpha, [[0, 0], [0, pad], [0, 0]], constant_values=1.0
+            )
+
+        v_write = v[..., : self.head_dim]
+        v_residual = v[..., self.head_dim :]
+
+        def to_chunks(x, last_dim):
+            x = ops.reshape(
+                x, (batch_size, n_chunks, chunk, self.num_heads, last_dim)
+            )
+            return ops.transpose(x, [0, 3, 1, 2, 4])
+
+        q_c = to_chunks(q, self.head_dim)
+        k_c = to_chunks(k, self.head_dim)
+        v_c = to_chunks(v_write, self.head_dim)
+
+        # alpha = sigmoid(.) is strictly positive mathematically but can
+        # underflow to exactly 0 in fp16, and log(0) = -inf would poison every
+        # difference into NaN. Floor it before the log.
+        alpha_g = ops.maximum(ops.cast(alpha, gate_dtype), 1e-30)
+        log_alpha = ops.reshape(
+            ops.log(alpha_g), (batch_size, n_chunks, chunk, self.num_heads)
+        )
+        log_alpha = ops.transpose(log_alpha, [0, 3, 1, 2])
+        cum = ops.cumsum(log_alpha, axis=-1)
+        cum_last = cum[..., -1:]
+
+        beta_g = ops.reshape(
+            ops.cast(beta, gate_dtype),
+            (batch_size, n_chunks, chunk, self.num_heads),
+        )
+        beta_g = ops.transpose(beta_g, [0, 3, 1, 2])
+
+        causal = _inclusive_causal_mask(chunk, gate_dtype)
+        decay = ops.exp(
+            ops.minimum(ops.expand_dims(cum, -1) - ops.expand_dims(cum, -2), 0.0)
+        )
+        decay = decay * causal
+
+        scores = ops.matmul(q_c, ops.swapaxes(k_c, -1, -2))
+        weighted = (
+            ops.cast(scores, gate_dtype) * decay * ops.expand_dims(beta_g, -2)
+        )
+        intra = ops.matmul(ops.cast(weighted, compute_dtype), v_c)
+
+        write_weight = ops.exp(ops.minimum(cum_last - cum, 0.0)) * beta_g
+        k_weighted = k_c * ops.expand_dims(
+            ops.cast(write_weight, compute_dtype), -1
+        )
+        chunk_state = ops.matmul(ops.swapaxes(k_weighted, -1, -2), v_c)
+        chunk_decay = ops.reshape(
+            ops.cast(ops.exp(cum_last), compute_dtype),
+            (batch_size, self.num_heads, n_chunks, 1, 1),
+        )
+
+        state = ops.zeros(
+            (batch_size, self.num_heads, self.head_dim, self.head_dim),
+            dtype=compute_dtype,
+        )
+        entry_states = ops.zeros(
+            (n_chunks, batch_size, self.num_heads, self.head_dim, self.head_dim),
+            dtype=compute_dtype,
+        )
+        c = ops.convert_to_tensor(0, dtype="int32")
+
+        def condition(c, state, entries):
+            return ops.less(c, n_chunks)
+
+        def body(c, state, entries):
+            entries = ops.scatter_update(
+                entries, ops.expand_dims([c], -1), ops.expand_dims(state, 0)
+            )
+            state = chunk_decay[:, :, c] * state + chunk_state[:, :, c]
+            return c + 1, state, entries
+
+        _, _, entry_states = ops.while_loop(
+            cond=condition,
+            body=body,
+            loop_vars=(c, state, entry_states),
+            maximum_iterations=n_chunks,
+        )
+        entry_states = ops.transpose(entry_states, [1, 2, 0, 3, 4])
+
+        inter = ops.matmul(q_c, entry_states) * ops.cast(
+            ops.expand_dims(ops.exp(cum), -1), compute_dtype
+        )
+
+        out = ops.transpose(intra + inter, [0, 2, 3, 1, 4])
+        out = ops.reshape(
+            out, (batch_size, n_chunks * chunk, self.num_heads, self.head_dim)
+        )
+        if pad > 0:
+            out = out[:, :seq_len]
+            v_residual = v_residual[:, :seq_len]
+        return out + v_residual
 
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None
@@ -771,15 +1068,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             k_heads = self.dropout(k_heads, training=training)
             v_heads = self.dropout(v_heads, training=training)
 
-        delta_output = self.gated_linear_scan(q_heads, k_heads, v_heads, alpha, beta)
-        delta_output = ops.reshape(delta_output, (batch_size, seq_len, self.qk_dim))
+        scan_output = self.gated_linear_scan(q_heads, k_heads, v_heads, alpha, beta)
+        scan_output = ops.reshape(scan_output, (batch_size, seq_len, self.qk_dim))
 
         if self.use_default_ffn:
-            projected_output = self.output_proj(delta_output, training=training)
+            projected_output = self.output_proj(scan_output, training=training)
             gate = ops.sigmoid(self.output_gate_linear(projected_output, training=training))
             gated_output = gate * projected_output
         else:
-            gated_output = self.output_ffn(delta_output, training=training)
+            gated_output = self.output_ffn(scan_output, training=training)
 
         return gated_output
 
@@ -817,6 +1114,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
                 "v_norm_args": self.v_norm_args,
                 "ffn_type": self.ffn_type,
                 "ffn_args": self.ffn_args,
+                "chunk_size": self.chunk_size,
                 "intermediate_size": self.intermediate_size,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
