@@ -1357,6 +1357,126 @@ class TestSparsemaxClosedDefects:
             "see D-008 of plan-2026-07-29T110112-09832856."
         )
 
+    # DECISION plan-2026-07-29T110112-09832856/D-003
+    # THE TOLERANCE BELOW IS A HARD-CODED LITERAL, AND THAT IS THE POINT.
+    # Do NOT "make it consistent with the rest of the file" by routing it
+    # through `_oracle_atol`. That was measured: `_oracle_atol` returns
+    # `max(_TF32_ATOL_FLOOR = 1e-3, derived)`, and float64's derived term is
+    # ~7.8e-16, so EVERY float64 assertion in this module runs at `atol = 1e-3`.
+    # The regression this guard exists to catch moves the error only to
+    # 1.99e-08 — five orders UNDER that floor — so a `_oracle_atol`-toleranced
+    # version of this test is green on the broken layer and measures nothing.
+    # That is not hypothetical: it is exactly why 63 committed parametrizations
+    # stayed green while D-007 was reverted (`plans/LESSONS.md:11`).
+    # Do not widen `1e-12` either; it is the only value in the record sitting
+    # strictly between the two MEASURED errors and above float64 accumulation
+    # noise. If a future device moves either number, RE-DERIVE the literal from
+    # a fresh A/B on that device — never fall back to a derived helper.
+    def test_float64_reduction_is_never_narrowed_to_float32(self) -> None:
+        """float64 must keep float64 through the sort/cumsum reduction (D-007).
+
+        The layer's reduction dtype WIDENS the two narrow dtypes and leaves
+        everything else alone; the one spelling that must never return is an
+        unconditional ``"float32"``, which silently degrades the most precise
+        policy. See the ``D-007`` anchor in
+        ``src/dl_techniques/layers/activations/sparsemax.py``.
+
+        MEASURED SEPARATION (GPU, `CUDA_VISIBLE_DEVICES=1`, RTX 4070; the CPU
+        figures are identical to four digits) on exactly this input, which is
+        the whole attack corpus's worst row for this defect::
+
+            shipped (never-narrow)        max abs err = 3.469447e-17
+            reverted (unconditional f32)  max abs err = 1.986821e-08
+            degradation factor                          5.727e+08
+
+        ``3.469447e-17 < 1e-12 < 1.986821e-08``, with margins of 2.882e+04x
+        below and 1.987e+04x above — roughly symmetric in log space, which is
+        what makes ``1e-12`` the right literal rather than a lucky one.
+
+        THIS TEST WAS PROVEN RED BY EXECUTION, not by derivation: the source's
+        reduction rule was reverted in place to unconditional ``"float32"``,
+        this assertion fired at ``1.986821e-08 > 1e-12`` (1.99e+04x over), and
+        the whole ``test_activations`` directory was then run in that broken
+        state (``3 failed, 591 passed, 4 skipped, 4 xfailed``). EXACTLY THREE
+        tests went red, and all three were added by
+        ``plan-2026-07-29T110112-09832856`` — every case that predates this
+        plan, including the four-policy property grid and the ``-inf`` mask
+        coverage, stayed GREEN. That is the blind spot this guard closes, now
+        executed rather than derived::
+
+            test_float64_reduction_is_never_narrowed_to_float32  (this test)
+            test_reduction_dtype_mirror_agrees_with_the_source_rule
+            test_gradient_matches_analytic_vjp[float64]
+
+        The second is EXPECTED and correct: it compares the mirror to the
+        source rule as FUNCTIONS, so re-narrowing the source necessarily breaks
+        the lockstep. The third was NOT predicted by the plan — the backward
+        pass inherits the narrowed reduction too, and G1's float64
+        parametrization catches it at ``6.386212e-09`` against a
+        ``2.664535e-15`` budget (2.40e+06x) on ``pin_defect_c_bf16_K256``.
+
+        None of the three subsumes the others. The mirror test catches a
+        re-narrowing even if nobody re-runs any arithmetic, but is blind to a
+        source break that someone "helpfully" mirrors in lockstep. G1 catches
+        the backward-side consequence, but only via a gradient and only on the
+        corpus rows it keeps. This test is the direct FORWARD numeric claim on
+        the corpus's worst row for this defect.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float64")
+        try:
+            # Premises. The fixture is the no-`inf` control row set (masked
+            # fraction 0.0): 4 x 17 = 68 finite entries, deterministic seed.
+            z = _partially_masked_row_batch(17, 0.0, 1)
+            assert z.shape == (4, 17), f"fixture shape moved: {z.shape}"
+            assert np.isfinite(z).all(), (
+                "premise: this fixture carries no masked entry at all — the "
+                "defect is in the reduction's PRECISION, not in its masking"
+            )
+            assert _output_dtype() == "float64", (
+                f"premise: the policy must be float64, got {_output_dtype()!r}"
+            )
+
+            z_compute = _to_compute_dtype(z)
+            layer = Sparsemax()
+            raw = layer(z_compute)
+
+            # I-1, on the tensor: a float64 policy must not observably emit
+            # float32. Checked before `convert_to_numpy` widens anything back.
+            assert keras.backend.standardize_dtype(raw.dtype) == "float64", (
+                f"layer returned {raw.dtype} under a float64 policy (I-1)"
+            )
+
+            out64 = ops.convert_to_numpy(raw).astype(np.float64)
+            exact64 = _exact_rows_as_float64(z_compute)
+            err = float(np.max(np.abs(out64 - exact64)))
+
+            # HARD-CODED, DELIBERATELY. See the block comment above this method
+            # for why no derived tolerance may be substituted here.
+            atol = 1e-12
+            assert err <= atol, (
+                "D-007 RE-NARROWED: the float64 reduction is no longer running "
+                f"in float64. max abs error vs the exact rational oracle is "
+                f"{err:.6e} against a hard-coded atol of {atol:.1e} "
+                f"({err / atol:.3e}x over). The shipped layer measures "
+                "3.469447e-17 here; an unconditional `\"float32\"` reduction "
+                "dtype measures 1.986821e-08. Check the `reduction_dtype` "
+                "expression in `sparsemax.py` before looking anywhere else."
+            )
+
+            # ANTI-VACUITY: the comparison must actually have compared
+            # something. A zero-size or all-zero pair would satisfy the bound
+            # above for free.
+            assert out64.shape == (4, 17) and exact64.shape == (4, 17), (
+                f"compared shapes {out64.shape} vs {exact64.shape}"
+            )
+            assert int((out64 > 0.0).sum()) >= 4, (
+                "every row must have at least one entry in the support; got "
+                f"{int((out64 > 0.0).sum())} positive entries in total"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
     def test_defect_b_closed_overflow_born_inf_excluded_from_support(self) -> None:
         """fp16 cumsum overflow must not inflate the support set.
 
