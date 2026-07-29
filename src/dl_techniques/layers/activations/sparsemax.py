@@ -106,7 +106,9 @@ class Sparsemax(keras.layers.Layer):
         Output: (batch, ..., K) sparse probabilities
 
     :param axis: Axis along which to compute sparsemax normalization.
-        Typically -1. Defaults to -1.
+        Typically -1. Defaults to -1. Must be in ``[-ndim, ndim - 1]`` for the
+        rank of the tensor the layer is called on; that range can only be
+        checked at call time, so an out-of-range value is rejected there.
     :type axis: int
     :param kwargs: Additional keyword arguments passed to the Layer base class.
     """
@@ -121,10 +123,15 @@ class Sparsemax(keras.layers.Layer):
         :param axis: Axis along which to compute sparsemax normalization.
         :type axis: int
         :param kwargs: Additional keyword arguments for the Layer base class.
-        :raises ValueError: If axis is not an integer.
+        :raises ValueError: If axis is not an integer, or is a bool. The RANGE
+            of ``axis`` depends on the input rank and is therefore validated in
+            :meth:`call`, not here.
         """
         super().__init__(**kwargs)
-        if not isinstance(axis, int):
+        # `bool` is a subclass of `int`, so `isinstance(True, int)` is True and
+        # `Sparsemax(axis=True)` used to be accepted and silently behave as
+        # `axis=1`. Reject it: a bool is never a meaningful axis.
+        if isinstance(axis, bool) or not isinstance(axis, int):
             raise ValueError(f"axis must be an integer, got {type(axis).__name__}")
         self.axis = axis
 
@@ -141,10 +148,51 @@ class Sparsemax(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Sparse probability distribution with same shape as inputs.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``axis`` is out of range for the rank of
+            ``inputs``, i.e. outside ``[-ndim, ndim - 1]``.
         """
         # Store original shape for restoration
         input_shape = inputs.shape
         ndim = len(input_shape)
+
+        # DECISION plan-2026-07-29T110112-09832856/D-014
+        # ---------------------------------------------------------------
+        # RANGE-CHECK `axis` HERE, BEFORE ANY `list.pop` / `ops.transpose`.
+        # DO NOT move this to `__init__` (the rank is not known there) and DO
+        # NOT delete it as "defensive programming" — it is the only thing
+        # standing between a public constructor argument and an UNCATCHABLE
+        # PROCESS ABORT. Measured on the pre-fix bytes, one case per process
+        # (a shared process cannot survive the second band), with
+        # `norm = ndim + axis`:
+        #   * `norm == -1` (i.e. `axis == -(ndim + 1)`): SILENT WRONG ANSWER.
+        #     `perm_order.pop(-1)` + `append(-1)` makes the forward transpose a
+        #     no-op, so the projection itself is numerically correct, but
+        #     `inv_perm_order.insert(-1, ndim - 1)` builds a NON-INVERSE
+        #     permutation and the right answer is returned in the wrong layout.
+        #     Input `(2, 4, 5)` -> output `(2, 5, 4)`, last-axis sums
+        #     `[0.1687, 1.3085, 1.0049, 0.7024]` — not a distribution — while
+        #     `compute_output_shape` still declares `(2, 4, 5)`, so the
+        #     functional shape contract is violated too.
+        #   * `norm in [-ndim, -2]`: TF C++ `LOG(FATAL)` in
+        #     `tensor_shape.cc:356 Check failed: d >= 0`, SIGABRT, exit 134.
+        #     NO PYTHON `except` CAN CATCH IT. It kills the interpreter.
+        #   * `norm < -ndim` or `axis >= ndim`: `IndexError` from `list.pop`,
+        #     loud but naming neither the axis nor the rank.
+        # Python's `list.pop` / `list.insert` accept negative indices silently,
+        # which is precisely what converts a user error into a wrong answer
+        # instead of a raise. `keras.layers.Softmax` is rejected at the op
+        # level; this layer's transpose shim intercepts before the op is ever
+        # reached, so the shim has to do the rejecting itself.
+        # Guarded by `TestSparsemax::test_out_of_range_axis_raises_value_error`
+        # (both bands) and `::test_every_in_range_axis_is_accepted_at_ranks_1_to_4`
+        # (the over-rejection control). See decisions.md D-014 / D-004.
+        # ---------------------------------------------------------------
+        if not -ndim <= self.axis < ndim:
+            raise ValueError(
+                f"axis={self.axis} is out of range for an input of rank "
+                f"{ndim} (shape {tuple(input_shape)}); axis must be in "
+                f"[{-ndim}, {ndim - 1}]"
+            )
 
         # Normalize axis to positive index (e.g., -1 -> 2 for rank 3)
         axis = self.axis if self.axis >= 0 else ndim + self.axis

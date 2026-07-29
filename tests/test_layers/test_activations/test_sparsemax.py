@@ -37,6 +37,9 @@ from dl_techniques.layers.activations.sparsemax import Sparsemax
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
 )
+from dl_techniques.layers.attention.capsule_routing_attention import (
+    CapsuleRoutingSelfAttention,
+)
 from dl_techniques.losses.sparsemax_loss import SparsemaxLoss
 
 
@@ -884,6 +887,15 @@ def _attack_corpus() -> List[_AttackCase]:
     return cases
 
 
+#: The four policies the layer must compile and project under. Wider than
+#: `tests/test_layers/conftest.py`'s `dtype_policy` fixture, which omits
+#: `mixed_bfloat16` — the policy Defect C actually raised under at K=256.
+#: Defined here rather than beside `_XLA_WIDTHS` because `TestSparsemax`'s G9
+#: capsule-integration case parametrizes over it and decorators run at
+#: class-definition time.
+_XLA_POLICIES = ("float32", "mixed_float16", "mixed_bfloat16", "float64")
+
+
 class TestSparsemax:
 
     def test_construction(self) -> None:
@@ -1110,6 +1122,253 @@ class TestSparsemax:
                 out,
                 expected,
                 err_msg=f"{label}: sparsemax != float64 oracle (expected err 0.0)",
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    # -----------------------------------------------------------------
+    # G9 — `axis` RANGE validation (F-06). See the
+    # `# DECISION plan-2026-07-29T110112-09832856/D-014` anchor in
+    # `src/dl_techniques/layers/activations/sparsemax.py`'s `call()`.
+    #
+    # WHY THESE CASES ARE SAFE TO RUN IN-PROCESS NOW, AND WERE NOT BEFORE.
+    # Pre-fix, `ndim + axis in [-ndim, -2]` reached a TF C++ `LOG(FATAL)`
+    # (`tensor_shape.cc:356 Check failed: d >= 0`) and ABORTED THE
+    # INTERPRETER (SIGABRT, exit 134). No `pytest.raises`, no `except`, no
+    # `pytest.warns` can contain that — the exploration had to run one case
+    # per process to measure the band at all. The range check rejects in
+    # PYTHON, strictly before `list.pop` and `ops.transpose`, so TF never
+    # sees the bad permutation and the whole band is ordinary
+    # `pytest.raises(ValueError)` territory. Re-verified by running this
+    # class in-process (no abort) AND, with the check commented out, by
+    # `subprocess.run` returning `-6` / 134 — that subprocess exit code IS
+    # this band's RED proof, because an aborted process cannot report a
+    # failed assertion.
+    #
+    # PROVEN RED (GPU, `CUDA_VISIBLE_DEVICES=1`), validation commented out
+    # IN PLACE in `call()` and restored:
+    #   * `test_out_of_range_axis_raises_value_error`, silent-wrong-shape
+    #     band: `DID NOT RAISE <class 'ValueError'>` — the `pytest.raises`
+    #     context is the assertion that fires, at every rank-2/3/4 case.
+    #   * same test, former-SIGABRT band: cannot be proven RED in-pytest at
+    #     all, because the process dies. Proven instead by exit code in an
+    #     isolated subprocess (returncode 134 / -6 vs 0 with the check in
+    #     place), which is a STRICTLY stronger statement than a failed
+    #     assertion.
+    #   * `test_bool_axis_is_rejected`: `DID NOT RAISE` with the
+    #     `isinstance(axis, bool)` clause removed — `Sparsemax(axis=True)`
+    #     constructs and behaves as `axis=1`.
+    #   * `test_every_in_range_axis_is_accepted_at_ranks_1_to_4` is the
+    #     OVER-REJECTION control and goes red the other way: narrowing the
+    #     predicate to `0 <= self.axis < ndim` fires its `ValueError` at
+    #     every negative axis (10 of the 20 (rank, axis) points).
+    # -----------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "shape,axis,band",
+        [
+            # BAND 1 — `ndim + axis == -1`: pre-fix this returned a SILENTLY
+            # TRANSPOSED, non-normalised answer (`(2,4,5)` -> `(2,5,4)`,
+            # last-axis sums `[0.1687, 1.3085, 1.0049, 0.7024]`) while
+            # `compute_output_shape` kept declaring the INPUT shape.
+            ((4, 5), -3, "silent_wrong_shape"),
+            ((2, 4, 5), -4, "silent_wrong_shape"),
+            ((2, 3, 4, 5), -5, "silent_wrong_shape"),
+            # BAND 2 — `ndim + axis in [-ndim, -2]`: pre-fix an UNCATCHABLE
+            # process abort (SIGABRT, exit 134).
+            ((4, 5), -4, "former_sigabrt"),
+            ((2, 4, 5), -5, "former_sigabrt"),
+            ((2, 4, 5), -6, "former_sigabrt"),
+            ((2, 3, 4, 5), -6, "former_sigabrt"),
+            ((2, 3, 4, 5), -8, "former_sigabrt"),
+            # BAND 3 — `ndim + axis < -ndim` or `axis >= ndim`: pre-fix an
+            # `IndexError` from `list.pop`, loud but naming neither the
+            # offending axis nor the rank.
+            ((2, 4, 5), 3, "former_index_error"),
+            ((2, 4, 5), -7, "former_index_error"),
+            ((4, 5), 9, "former_index_error"),
+            # Rank-1 boundaries. Not part of the exploration's measured band
+            # table (which swept ranks 1-4 only for the two defect bands);
+            # included because rank-1 is a real call shape for this layer.
+            ((5,), 1, "rank1_out_of_range"),
+            ((5,), -2, "rank1_out_of_range"),
+        ],
+    )
+    def test_out_of_range_axis_raises_value_error(
+        self, shape: Tuple[int, ...], axis: int, band: str
+    ) -> None:
+        """An out-of-range ``axis`` must raise ``ValueError`` at call time.
+
+        The message must name the offending axis, the input rank and the legal
+        range — the pre-fix `IndexError` ("pop index out of range") named none
+        of the three, and the other two bands said nothing at all because one
+        returned a wrong answer and the other killed the process.
+
+        :param shape: Input shape handed to the layer.
+        :type shape: tuple[int, ...]
+        :param axis: The out-of-range axis under test.
+        :type axis: int
+        :param band: Which pre-fix failure mode this case used to hit.
+        :type band: str
+        """
+        ndim = len(shape)
+        assert not -ndim <= axis < ndim, (
+            f"premise: axis={axis} must be OUT of range for rank {ndim}"
+        )
+
+        z = np.random.default_rng(0).standard_normal(shape).astype("float32")
+        layer = Sparsemax(axis=axis)
+
+        with pytest.raises(ValueError) as excinfo:
+            layer(z)
+
+        message = str(excinfo.value)
+        assert f"axis={axis}" in message, (
+            f"[{band}] the message does not name the offending axis: {message}"
+        )
+        assert f"rank {ndim}" in message, (
+            f"[{band}] the message does not name the input rank: {message}"
+        )
+        assert f"[{-ndim}, {ndim - 1}]" in message, (
+            f"[{band}] the message does not name the legal range "
+            f"[{-ndim}, {ndim - 1}]: {message}"
+        )
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_bool_axis_is_rejected(self, value: bool) -> None:
+        """`bool` is a subclass of `int`, so it slipped through `isinstance`.
+
+        `Sparsemax(axis=True)` used to construct happily and behave as
+        ``axis=1``; `Sparsemax(axis=False)` as ``axis=0``. Neither is anything
+        a caller could have meant, and both are reachable through
+        `ProbabilityOutput(**type_config)` from a config dict — where `True`
+        and `1` are the same JSON-ish value away from each other.
+
+        :param value: The bool under test.
+        :type value: bool
+        """
+        with pytest.raises(ValueError, match="axis must be an integer"):
+            Sparsemax(axis=value)
+
+    def test_every_in_range_axis_is_accepted_at_ranks_1_to_4(self) -> None:
+        """OVER-REJECTION control for the range check: nothing in range raises.
+
+        The whole risk of F-06's fix is that it rejects too much — the check
+        sits on the forward path of 18 of the 31 attention registry keys via
+        `layers/activations/probability_output.py:184`. This walks every axis
+        of both signs at ranks 1-4 (20 ``(rank, axis)`` points) and asserts the
+        layer still runs, keeps its shape, and returns a distribution along the
+        requested axis.
+
+        The ORACLE comparison for these axes lives in
+        `TestSparsemaxAgainstExactOracle`; this method is deliberately a
+        cheap, exhaustive no-raise + shape + normalisation sweep, so a check
+        that over-rejects at one odd rank cannot hide behind that class's
+        condensed 9-case grid.
+        """
+        shapes = {1: (7,), 2: (3, 7), 3: (2, 3, 7), 4: (2, 3, 4, 7)}
+        rng = np.random.default_rng(9)
+
+        points = 0
+        for ndim, shape in shapes.items():
+            z = rng.standard_normal(shape).astype("float32")
+            for axis in range(-ndim, ndim):
+                out = ops.convert_to_numpy(Sparsemax(axis=axis)(z))
+                points += 1
+
+                assert out.shape == shape, (
+                    f"rank {ndim}, axis {axis}: output shape {out.shape} != "
+                    f"input shape {shape} — the permutation did not "
+                    "round-trip (this is exactly the `norm == -1` signature)"
+                )
+                assert np.isfinite(out).all(), (
+                    f"rank {ndim}, axis {axis}: non-finite output"
+                )
+                sums = out.sum(axis=axis)
+                np.testing.assert_allclose(
+                    sums,
+                    np.ones_like(sums),
+                    atol=1e-5,
+                    err_msg=(
+                        f"rank {ndim}, axis {axis}: rows do not sum to 1 "
+                        f"along the requested axis (worst deviation "
+                        f"{float(np.max(np.abs(sums - 1.0))):.3e})"
+                    ),
+                )
+
+        # ANTI-VACUITY: 2 + 4 + 6 + 8 axes over ranks 1..4.
+        assert points == 20, f"swept {points} (rank, axis) points, expected 20"
+
+    @pytest.mark.parametrize("axis", [-1, 0, 1, -2, 3])
+    def test_config_round_trip_preserves_axis(self, axis: int) -> None:
+        """`get_config`/`from_config` still carry `axis` verbatim.
+
+        The `__init__` validation must not normalise, clamp or otherwise
+        rewrite `axis` — a layer that silently turned an out-of-range value
+        into an in-range one would defeat the call-time check, and one that
+        rewrote ``-1`` into ``ndim - 1`` would not survive a round trip at a
+        different rank. ``axis=3`` here is deliberately out of range for most
+        ranks: construction and serialization must still accept it, because
+        the RANGE is a property of the call, not of the config.
+
+        :param axis: The axis to round-trip.
+        :type axis: int
+        """
+        config = Sparsemax(axis=axis).get_config()
+        assert config["axis"] == axis and type(config["axis"]) is int
+        assert Sparsemax.from_config(config).axis == axis
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_capsule_routing_axis_minus_2_site_still_forwards(
+        self, policy: str
+    ) -> None:
+        """I-8: the repo's ONLY live non-default-axis sparsemax site.
+
+        `capsule_routing_attention.py:311-319`'s ``_site_config(-2)``
+        OVERRIDES any caller-supplied axis and builds ``Sparsemax(axis=-2)``
+        on RANK-4 routing logits (measured shapes ``(2, 4, n, m)`` inside the
+        routing loop). ``-2`` is in range there, so the F-06 check must be
+        invisible to it — this is A-3 asserted by EXECUTION rather than by
+        reading the code, and it is the assumption the plan declares falsified
+        the moment this raises.
+
+        Nothing here is sparsemax-specific beyond the `probability_type`: the
+        point is the end-to-end path, config -> `ProbabilityOutput` ->
+        `Sparsemax(axis=-2)` -> `call()`'s validation branch.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            layer = CapsuleRoutingSelfAttention(
+                num_heads=4, key_dim=8, probability_type="sparsemax"
+            )
+            x = np.random.default_rng(4).standard_normal((2, 5, 32)).astype(
+                "float32"
+            )
+            out = ops.convert_to_numpy(layer(x))
+
+            # PREMISE (anti-vacuity): a site really is configured at axis=-2.
+            # Without this the test would still pass on a build that had
+            # quietly dropped the override, i.e. it would guard nothing.
+            axes = sorted(
+                sub.axis
+                for sub in layer._flatten_layers(include_self=False)
+                if isinstance(sub, Sparsemax)
+            )
+            assert -2 in axes, (
+                f"no Sparsemax(axis=-2) sub-layer was built (axes={axes}); "
+                "the capsule routing axis override is gone and this guard is "
+                "no longer watching the site it claims to"
+            )
+
+            assert out.shape == (2, 5, 32), f"unexpected output shape {out.shape}"
+            assert np.isfinite(out).all(), (
+                f"CapsuleRoutingSelfAttention(probability_type='sparsemax') "
+                f"returned non-finite output under {policy}: "
+                f"nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())}"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -1745,10 +2004,10 @@ class TestSparsemaxClosedDefects:
 # at the top of this file, worth up to 5.4e-3 under fp16).
 # ---------------------------------------------------------------------
 
-#: The four policies the layer must compile under. Wider than
-#: `tests/test_layers/conftest.py`'s `dtype_policy` fixture, which omits
-#: `mixed_bfloat16` — the policy Defect C actually raised under at K=256.
-_XLA_POLICIES = ("float32", "mixed_float16", "mixed_bfloat16", "float64")
+#: `_XLA_POLICIES` (the four-policy tuple) is defined ABOVE `TestSparsemax`,
+#: not here: `TestSparsemax`'s G9 capsule-integration case parametrizes over it
+#: too, and a decorator is evaluated at class-definition time. One home for the
+#: tuple, defined before its first use.
 
 #: `K` values. 257 and 2048 are load-bearing (see the note above); 8 is the
 #: small control and 4096 the largest measured width.
