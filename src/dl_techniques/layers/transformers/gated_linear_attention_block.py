@@ -231,8 +231,22 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         otherwise the FFN is built by ``create_ffn_from_config``.
     :type ffn_type: Optional[FFNType]
     :param ffn_args: Optional arguments for the custom FFN layer. Applied last,
-        after this layer's own generic defaults, and passed through unfiltered
-        -- the factory rejects an unknown key loudly.
+        after this layer's own generic defaults, so it wins on any key they
+        share.
+
+        .. warning::
+            **An unrecognized key here is silently discarded, not reported.**
+            ``create_ffn_layer`` ends by intersecting the whole parameter dict
+            with the target FFN's accepted signature, and that filter does not
+            distinguish the caller's explicit keys from this layer's generic
+            defaults. So ``ffn_args={'hiden_dim': 512}`` is dropped without a
+            warning and the FFN is built with its default width. Measured, and
+            pinned by
+            ``test_unknown_ffn_args_key_is_SILENTLY_DROPPED_not_rejected``.
+            Note the asymmetry with the sibling factory: ``q_norm_args`` and
+            friends DO raise on an unknown key, because
+            ``create_normalization_layer`` validates instead of filtering.
+            Check your spelling here; the suite cannot check it for you.
     :type ffn_args: Optional[Dict[str, Any]]
     :param intermediate_size: Intermediate size for standard FFNs. Defaults to
         dim * 4 if not provided.
@@ -584,7 +598,11 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         # Drop OUR OWN generic defaults that this ffn_type does not accept. These are this
         # layer's conveniences, not the caller's explicit intent, so filtering them is
-        # correct -- unlike `ffn_args`, which the factory now rejects loudly if unknown.
+        # correct. NOTE: this pre-filter does NOT protect the caller's own `ffn_args` --
+        # `create_ffn_layer` applies the same signature intersection again at the end and
+        # cannot tell an explicit caller key from one of our defaults, so a misspelled
+        # `ffn_args` key is silently discarded rather than reported. Measured; see the
+        # `:param ffn_args:` warning and the test that pins it.
         config = {
             k: v for k, v in config.items()
             if k in valid_ffn_params or k in ("type", "name")
