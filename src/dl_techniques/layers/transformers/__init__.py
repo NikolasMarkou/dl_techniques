@@ -33,9 +33,12 @@ Specialized and Hybrid Blocks:
 - AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
   conditional transformer block; norms/attention/FFN/AdaLN activation are
   factory-configurable.
-- GatedLinearAttentionBlock: a linear-time recurrent sequence-mixing block whose
-  state is updated by a gated outer-product rule, with configurable Q/K/V
-  normalization, causal short convolutions and a configurable output FFN.
+- GatedLinearAttentionBlock: a recurrent sequence-mixing block carrying one
+  `(head_dim, head_dim)` state per head, rewritten each timestep by a gated
+  outer product and read out after that write (`out_t = q_t^T S_t + v_t^(2)`);
+  arithmetic grows linearly, not quadratically, with sequence length, though the
+  scan is currently a sequential `while_loop`. Configurable Q/K/V normalization,
+  causal short convolutions and a configurable output FFN.
 - EnergyTransformer: the Energy Transformer block (arXiv:2302.07253) — replaces
   the `attn -> FFN` residual stream with T steps of gradient descent on a single
   scalar energy `E_ATT + E_HN`; paired with HopfieldNetwork, its associative-memory

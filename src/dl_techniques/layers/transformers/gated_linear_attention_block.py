@@ -1,18 +1,36 @@
 """
-A Gated Delta Network, a linear-time transformer variant.
+A gated linear-attention block: a recurrent, linear-complexity sequence mixer.
 
-This layer provides a recurrent mechanism for sequence modeling that combines
-associative memory via the delta rule with adaptive gating for linear O(N)
-complexity. The gated delta rule update is:
-S_t = alpha_t * S_{t-1} + beta_t * (K_t outer V_t), where alpha controls
-memory persistence and beta controls update strength. This enables precise
-key-value association retrieval while allowing flexible memory management.
+The block keeps one matrix-valued state ``S`` per head and rewrites it once per
+timestep with a gated outer product::
 
-References:
-    - Schlag, I., et al. (2021). Linear Transformers Are Secretly Fast Weight
-      Programmers (DeltaNet).
-    - Yang, S., et al. (2024). Gated Delta Networks: Improving Mamba2 with
-      Delta Rule.
+    S_t   = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)
+    out_t = q_t^T S_t + v_t^(2)
+
+``alpha_t`` (how much of the previous state survives) and ``beta_t`` (how
+strongly the current key/value pair is written) are *per-head scalars*, obtained
+by applying a ``Dense(num_heads)`` projection and a sigmoid to the raw block
+input -- they bypass the normalization, convolution and activation that ``q``,
+``k`` and ``v`` go through.
+
+The read-out multiplies ``S_t``, the state *after* the current step's write, so
+the equivalent closed form is inclusive in ``j = t``::
+
+    out_t = sum_{j<=t} (prod_{l=j+1..t} alpha_l) * beta_j * (q_t . k_j) * v_j^(1)
+            + v_t^(2)
+
+The state transition is a plain per-head scalar rescaling. There is no
+error-correction term -- the state is never asked to subtract what it already
+predicts for ``k_t``, and the transition is not a projection built from
+``k_t``. This module implements exactly the two recurrence lines above and
+claims nothing beyond them.
+
+Arithmetic cost is one ``head_dim x head_dim`` outer product plus one
+vector-matrix product per timestep per head, i.e. it grows linearly with
+sequence length rather than quadratically. Note that the scan is currently
+executed by ``ops.while_loop`` with one *sequential* iteration per timestep, so
+the sequential depth is linear in the sequence length as well; no wall-clock
+speed claim is made here, because none has been measured.
 """
 
 import keras
@@ -33,56 +51,92 @@ from ..norms import create_normalization_layer, NormalizationType
 @keras.saving.register_keras_serializable()
 class GatedLinearAttentionBlock(keras.layers.Layer):
     """
-    Gated DeltaNet layer combining delta rule updates with adaptive gating.
+    Recurrent sequence-mixing block with a gated outer-product state.
 
-    Implements a linear transformer variant that combines delta rule mechanism
-    for targeted memory updates (S_t = alpha_t * S_{t-1} + beta_t * K_t outer V_t)
-    with adaptive gating (alpha for persistence, beta for update strength).
-    Features configurable normalization for Q/K/V, short convolution for
-    position-based addressing, and a configurable output FFN. Due to TensorFlow
-    framework limitations, requires a hard maximum sequence length parameter.
+    Each head carries a ``(head_dim, head_dim)`` state that is rewritten once per
+    timestep as ``S_t = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)`` and read out
+    *after* that write as ``out_t = q_t^T S_t + v_t^(2)``. See the module
+    docstring for the closed form and for what this recurrence is *not*. Q, K and
+    V each pass through a configurable normalization, a causal depthwise
+    convolution and an activation before the scan; the block output goes through
+    either a built-in gated projection or a factory-built FFN. Because
+    ``ops.while_loop`` needs a compile-time iteration bound, a hard
+    ``max_seq_len`` is required.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────┐
-        │  Input [batch, seq_len, dim]                  │
-        └──────────────────┬────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────┐
-        │  Q/K/V Linear Projections                     │
-        └──────┬───────────┬───────────┬────────────────┘
-               ▼           ▼           ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Q Norm   │ │ K Norm   │ │ V Norm   │
-        │ Q Conv1D │ │ K Conv1D │ │ V Conv1D │
-        │ Activate │ │ Activate │ │ Activate │
-        └────┬─────┘ └────┬─────┘ └────┬─────┘
-             ▼            ▼            ▼
-        ┌───────────────────────────────────────────────┐
-        │  Alpha/Beta Gating (sigmoid projections)      │
-        └──────────────────┬────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────┐
-        │  Delta Rule Update (recurrent, per timestep)  │
-        │  S_t = alpha_t * S_{t-1} + beta_t * K_t⊗V_t   │
-        │  out_t = Q_t @ S_t + V_t_residual             │
-        └──────────────────┬────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────┐
-        │  Reshape & Output FFN (default: GLU gate)     │
-        └──────────────────┬────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────┐
-        │  Output [batch, seq_len, dim]                 │
-        └───────────────────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────────────────┐
+        │          GatedLinearAttentionBlock -- gated outer-product state           │
+        │                                                                           │
+        │  Input [B, S, dim]                                                        │
+        │    │                                                                      │
+        │    ├───────────────┬───────────────┬───────────────┐                      │
+        │    ▼               ▼               ▼               ▼                      │
+        │  q_proj          k_proj          v_proj          alpha_proj / beta_proj   │
+        │  [B,S,qk_dim]    [B,S,qk_dim]    [B,S,2*qk_dim]  Dense(num_heads) on the  │
+        │    ▼               ▼               ▼             RAW block input, then    │
+        │  q_norm          k_norm          v_norm          sigmoid. No norm, no     │
+        │  PER-HEAD,       PER-HEAD,       WHOLE-TENSOR,   conv, no activation on   │
+        │  over head_dim   over head_dim   over 2*qk_dim   this path.               │
+        │    ▼               ▼               ▼               ▼                      │
+        │  q_conv          k_conv          v_conv          a_t, b_t  [B,S,H]        │
+        │  causal depthwise Conv1D (groups = channels),    one scalar per head      │
+        │  then `activation` (default 'silu')                                       │
+        │    ▼               ▼               ▼                                      │
+        │  [B,S,H,d]       [B,S,H,d]       [B,S,H,2d]                               │
+        │    │               │               │  ops.split(2, axis=-1),              │
+        │    │               │               │  WITHIN each head                    │
+        │    │               │               └───┬───────────────────┐              │
+        │    │               │                   ▼                   ▼              │
+        │    │               │                v1_t [.,d]          v2_t [.,d]        │
+        │    └───────┬───────┘                   │                   │              │
+        │            ▼                           ▼                   │              │
+        │    gated_linear_scan -- ops.while_loop, one step per t:     │             │
+        │      S_t   = a_t * S_{t-1} + b_t * (k_t ⊗ v1_t)             │             │
+        │      out_t = q_t · S_t  +  v2_t  ◄──────────────────────────┘             │
+        │      out_t reads S_t, i.e. AFTER this step's write.                       │
+        │                            ▼                                              │
+        │                  reshape [B, S, qk_dim]                                   │
+        │                            ▼                                              │
+        │    ffn_type is None (default): p = output_proj(x)                         │
+        │                                y = sigmoid(output_gate_linear(p)) * p     │
+        │    ffn_type set:               y = output_ffn(x)                          │
+        │                            ▼                                              │
+        │                     Output [B, S, dim]                                    │
+        └───────────────────────────────────────────────────────────────────────────┘
+
+    .. note::
+        **The value projection is split in two, and the second half is not an
+        identity residual.** ``v_proj`` emits ``v_dim = 2 * num_heads * head_dim``
+        channels, twice as many as ``q_proj``/``k_proj``. After the reshape to
+        ``(batch, seq, num_heads, 2 * head_dim)``, ``ops.split(v_t, 2, axis=-1)``
+        divides each head's channels in half: the first ``head_dim`` of that
+        head's channels (``v_t^(1)``) is what the outer-product write puts into
+        the state, and the second ``head_dim`` (``v_t^(2)``) is added straight
+        onto the read-out. The split is therefore *interleaved per head* in the
+        flat ``v_dim`` axis -- head ``h``'s write half is flat channel range
+        ``[2*h*head_dim, 2*h*head_dim + head_dim)``, not the leading
+        ``num_heads * head_dim`` block (verified by construction and by an
+        executed probe).
+
+        The caveat that matters: ``v_t^(2)`` is **not** a plain identity or
+        skip connection over the block input. It is a slice of the *same*
+        processed tensor as ``v_t^(1)`` -- it has already been through
+        ``v_proj``, ``v_norm``, the causal ``v_conv`` and the activation (SiLU by
+        default). It carries no un-transformed copy of the input, and it is
+        outside the recurrence: it depends only on timestep ``t``, never on the
+        state. Read it as "half of V bypasses the state" rather than "the block
+        has a residual connection".
 
     :param dim: Model dimension size. Must be positive.
     :type dim: int
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int
-    :param max_seq_len: Maximum sequence length for the while_loop.
+    :param max_seq_len: Hard upper bound on the sequence length, used as the
+        scan's ``maximum_iterations``. Must be positive. See the overflow note
+        below for what is and is not guaranteed when it is exceeded.
     :type max_seq_len: int
     :param head_dim: Dimension per head. If None, defaults to dim // num_heads.
     :type head_dim: Optional[int]
@@ -118,10 +172,14 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :type k_norm_args: Optional[Dict[str, Any]]
     :param v_norm_args: Optional arguments for V normalization layer.
     :type v_norm_args: Optional[Dict[str, Any]]
-    :param ffn_type: Type of FFN for output stage. If None, uses original gated
-        linear unit output.
+    :param ffn_type: Type of FFN for the output stage. If ``None`` (default),
+        the block uses its built-in gated projection
+        ``y = sigmoid(output_gate_linear(p)) * p`` with ``p = output_proj(x)``;
+        otherwise the FFN is built by ``create_ffn_from_config``.
     :type ffn_type: Optional[FFNType]
-    :param ffn_args: Optional arguments for the custom FFN layer.
+    :param ffn_args: Optional arguments for the custom FFN layer. Applied last,
+        after this layer's own generic defaults, and passed through unfiltered
+        -- the factory rejects an unknown key loudly.
     :type ffn_args: Optional[Dict[str, Any]]
     :param intermediate_size: Intermediate size for standard FFNs. Defaults to
         dim * 4 if not provided.
@@ -568,7 +626,23 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         beta: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Apply gated delta rule update using ``keras.ops.while_loop``.
+        """Run the gated outer-product recurrence with ``keras.ops.while_loop``.
+
+        One loop iteration per timestep ``t``::
+
+            S_t   = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)
+            out_t = q_t^T S_t + v_t^(2)
+
+        ``S`` starts at zeros with shape ``(batch, heads, head_dim, head_dim)``.
+        ``v`` is split in half along its last axis *inside* the loop:
+        ``v_t^(1)`` is written into the state, ``v_t^(2)`` is added to the
+        read-out. The read-out uses ``S_t``, i.e. the state after this step's
+        write, so it is inclusive in ``j = t``.
+
+        The loop carries ``maximum_iterations=self.max_seq_len``; a sequence
+        longer than that is rejected up front by ``_validate_seq_len`` whenever
+        its length is statically known (see the class docstring for the
+        symbolic-shape gap).
 
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
         :type q: keras.KerasTensor
@@ -576,11 +650,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type k: keras.KerasTensor
         :param v: Value tensor of shape (batch, seq, heads, 2*head_dim).
         :type v: keras.KerasTensor
-        :param alpha: Persistence gate of shape (batch, seq, heads).
+        :param alpha: Persistence gate of shape (batch, seq, heads), one scalar
+            per head per timestep.
         :type alpha: keras.KerasTensor
-        :param beta: Update gate of shape (batch, seq, heads).
+        :param beta: Write-strength gate of shape (batch, seq, heads), one
+            scalar per head per timestep.
         :type beta: keras.KerasTensor
-        :param training: Training mode flag.
+        :param training: Training mode flag. Accepted for signature uniformity;
+            this method has no training-dependent behaviour (dropout is applied
+            by ``call()`` before the scan).
         :type training: Optional[bool]
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
@@ -630,7 +708,11 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the Gated DeltaNet layer.
+        """Forward pass: project, normalize, convolve, scan, then project out.
+
+        ``alpha``/``beta`` are read off the *raw* ``inputs``, not off the
+        normalized/convolved Q/K/V stream. Dropout, when enabled, is applied to
+        ``q_heads``/``k_heads``/``v_heads`` immediately before the scan.
 
         :param inputs: Input tensor of shape (batch, seq_len, dim).
         :type inputs: keras.KerasTensor

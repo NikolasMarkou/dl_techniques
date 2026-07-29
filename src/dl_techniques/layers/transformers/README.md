@@ -640,6 +640,73 @@ block = PFTBlock(dim=180, num_heads=6, window_size=16, mlp_ratio=2.0)
 
 > **Note**: `pft_sr` imports `PFTBlock` from `progressive_focused_transformer` (the module name, not `progressive_focused_transformer_block`).
 
+## GatedLinearAttentionBlock
+
+### Overview
+
+The `dl_techniques.layers.transformers.gated_linear_attention_block.GatedLinearAttentionBlock` is a recurrent sequence-mixing block. Instead of an `(S, S)` attention matrix it carries one `(head_dim, head_dim)` state per head, rewritten once per timestep by a **gated outer product**, and read out *after* that write:
+
+```
+S_t   = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)     # state, per head
+out_t = q_t^T S_t + v_t^(2)                             # read-out uses S_t
+```
+
+Equivalently, in closed form — note it is **inclusive in `j = t`**, because the read-out multiplies the post-write state:
+
+```
+out_t = sum_{j<=t} (prod_{l=j+1..t} alpha_l) * beta_j * (q_t . k_j) * v_j^(1) + v_t^(2)
+```
+
+`alpha_t` (how much of the previous state survives) and `beta_t` (how strongly the current key/value pair is written) are per-head scalars, produced by `Dense(num_heads)` + `sigmoid` on the **raw block input** — they bypass the normalization, convolution and activation that Q/K/V go through.
+
+The transition is a plain per-head scalar rescaling. There is **no error-correction term** — the state is never asked to subtract what it already predicts for `k_t` — and no key-dependent projection in the transition. The block implements exactly the two lines above.
+
+### Architectural Highlights
+
+-   **Value-residual split (`v_dim = 2 * num_heads * head_dim`)**: `v_proj` emits twice as many channels as `q_proj`/`k_proj`. After the reshape to `(B, S, num_heads, 2*head_dim)`, `ops.split(v, 2, axis=-1)` gives each head a *write* half `v^(1)` (goes into the state) and a *read-out* half `v^(2)` (added to `out_t`). The split is interleaved **per head** in the flat `v_dim` axis: head `h`'s write half is flat channel range `[2*h*head_dim, 2*h*head_dim + head_dim)`, not the leading `num_heads * head_dim` block.
+
+    > **Caveat**: `v^(2)` is *not* an identity/skip connection over the block input. It is a slice of the same processed tensor as `v^(1)` — already through `v_proj`, `v_norm`, the causal `v_conv` and the activation. It is outside the recurrence (depends only on timestep `t`, never on the state). Read it as "half of V bypasses the state", not "the block has a residual connection".
+
+-   **Per-head Q/K norm, whole-tensor V norm (deliberate asymmetry)**: `q_norm`/`k_norm` are built on `(B, S, num_heads, head_dim)` and reduce over `head_dim`, so one head's statistic cannot be moved by another head — the standard QK-Norm convention, with a shared `(head_dim,)` scale weight. `v_norm` is deliberately left whole-tensor over the full `v_dim` axis. This assumes the chosen `normalization_type` reduces over the last axis only; that holds for 14 of the 18 factory types (including the default `zero_centered_rms_norm`) — see the class docstring's `normalization_type` entry for the four that do not, which are already unusable in this layer at any rank.
+-   **Causal short convolutions**: each of Q/K/V passes a depthwise `Conv1D` (`padding='causal'`, `groups = channels`) followed by `activation` (default `'silu'`) before the scan.
+-   **Configurable output stage**: with `ffn_type=None` (default) the block ends in a built-in gated projection, `y = sigmoid(output_gate_linear(p)) * p` with `p = output_proj(x)`; otherwise `create_ffn_from_config` builds the output FFN.
+-   **`max_seq_len` is load-bearing, and its guard is static-only**: the scan is an `ops.while_loop` with `maximum_iterations=max_seq_len`, so any timestep past the cap is never written and reads back as zero. When the sequence length is **statically known**, `build()` and `call()` both raise `ValueError` naming the offending length and `max_seq_len`. When the sequence axis is `None`/symbolic (e.g. `keras.Input(shape=(None, dim))`) the guard **cannot** fire — `keras.ops` has no portable way to raise inside a traced graph — so `build()` emits one `logger.warning` and the silent truncation remains possible. Size `max_seq_len` for the longest sequence you intend to feed.
+
+> **Cost**: one `head_dim x head_dim` outer product plus one vector-matrix product per timestep per head, i.e. arithmetic that grows linearly rather than quadratically with sequence length. The scan is presently executed as one **sequential** `while_loop` iteration per timestep, so sequential depth is linear too; no wall-clock speed claim is made here, because none has been measured.
+
+### Usage
+
+```python
+from dl_techniques.layers.transformers import GatedLinearAttentionBlock
+
+block = GatedLinearAttentionBlock(
+    dim=512,
+    num_heads=8,
+    max_seq_len=2048,     # hard cap: the while_loop's maximum_iterations
+)
+y = block(tokens)         # (batch, seq_len, 512) -> same shape
+
+# With a factory-built output FFN instead of the built-in gated projection.
+block = GatedLinearAttentionBlock(
+    dim=512, num_heads=8, max_seq_len=2048,
+    ffn_type='swiglu', intermediate_size=2048,
+)
+```
+
+Consumed 3x per block by Qwen3-Next (`models/qwen/components.py`).
+
+### Arguments
+
+-   **`dim`**, **`num_heads`**, **`max_seq_len`**: required. All must be positive; `max_seq_len` bounds the scan (see the guard note above).
+-   **`head_dim`** (default `None` -> `dim // num_heads`): per-head width. With `None`, `dim` must be divisible by `num_heads`. Derived: `qk_dim = num_heads * head_dim`, `v_dim = 2 * qk_dim`.
+-   **`conv_kernel_size`** (default `4`): kernel of the causal depthwise convolutions.
+-   **`dropout_rate`** (default `0.0`): applied to `q_heads`/`k_heads`/`v_heads` immediately before the scan, training only.
+-   **`activation`** (default `'silu'`): applied after each convolution.
+-   **`normalization_type`** (default `'zero_centered_rms_norm'`) plus **`q_norm_args`** / **`k_norm_args`** / **`v_norm_args`**: built via `create_normalization_layer`. When the args dict is omitted, the default type gets `{'epsilon': 1e-5, 'use_scale': True}` and any other type gets `{}`.
+-   **`ffn_type`** (default `None`) and **`ffn_args`**: `None` selects the built-in gated projection; anything else is built by `create_ffn_from_config`. `ffn_args` is applied last and is *not* filtered — the factory rejects unknown keys loudly.
+-   **`intermediate_size`** (default `None` -> `dim * 4`): hidden width of the FFN stage; read only when `ffn_type` is set. Raises at construction if given and `<= 0`.
+-   **`use_bias`** (default `False`), **`kernel_initializer`** (default `'glorot_uniform'`), **`bias_initializer`** (default `'zeros'`), **`kernel_regularizer`**, **`bias_regularizer`**.
+
 ## EnergyTransformer / HopfieldNetwork
 
 The `dl_techniques.layers.transformers.energy_transformer` module implements the Energy Transformer (ET) block of Hoover et al., NeurIPS 2023 ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)).
