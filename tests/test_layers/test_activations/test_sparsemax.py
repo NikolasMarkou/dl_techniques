@@ -18,7 +18,10 @@
    anchor in ``src/dl_techniques/layers/activations/sparsemax.py``.
 """
 
+import ast
+import inspect
 import os
+import re
 import tempfile
 from fractions import Fraction
 from typing import Any, Dict, List, Tuple
@@ -258,6 +261,62 @@ _NUMPY_DTYPE = {
 }
 
 
+# DECISION plan-2026-07-29T110112-09832856/D-008
+# DO NOT re-inline this rule at a call site, and do NOT "just restate it, it is
+# three lines". That was tried: `_grad_atol` shipped a third hand-written copy
+# of it, and this helper is the reversal of that. A rule restated in N places is
+# a hand-maintained lockstep invariant, i.e. a latent defect — this exact
+# problem family already drifted one restated value to three different wrong
+# values in a single plan (`plans/LESSONS.md:20`). ONE home, the derivation
+# command printed beside it, every other statement DELETED. Importing the rule
+# from `sparsemax.py` is also wrong (an instrument must not share code with the
+# thing it measures) — see the docstring.
+def _reduction_dtype(input_dtype: str) -> str:
+    """The dtype the layer runs its sort/cumsum reduction in — the D-007 rule.
+
+    THE SINGLE SOURCE OF TRUTH IS
+    ``src/dl_techniques/layers/activations/sparsemax.py:225-227``.
+    This function is its ONE mirror on the test side. There are exactly two
+    statements of this rule in the repository: the source and this helper.
+
+    LOCKSTEP OBLIGATION. If the source rule moves, THIS MOVES. Every tolerance
+    in this module charges a ``u_r`` (reduction-dtype ulp) term through this
+    function; if the two ever disagree, every such term is charged against the
+    wrong dtype and every tolerance here silently mis-measures — the guards go
+    quietly vacuous rather than red. Find both sites with::
+
+        grep -nE '^ *"float32" if' \\
+            src/dl_techniques/layers/activations/sparsemax.py \\
+            tests/test_layers/test_activations/test_sparsemax.py
+
+    That command must return exactly TWO lines — one per site, and it does not
+    match itself. A third means the rule has been re-duplicated and the
+    duplicate must be routed through this helper instead
+    (`plans/LESSONS.md:20` — one home for the rule, every other statement
+    DELETED, not corrected). ``test_reduction_dtype_mirror_agrees_with_the_
+    source_rule`` executes both that count and a functional comparison against
+    the source's own expression.
+
+    It is a mirror rather than an import because an instrument must not share
+    code with the thing it measures — the same reason the exact-rational
+    oracles in this module are test-local. Importing ``sparsemax``'s own rule
+    would make a re-narrowing of the source invisible to these tolerances by
+    construction.
+
+    :param input_dtype: Name of the dtype the layer receives / emits, e.g.
+        ``'float16'``. For a tolerance this is the OUTPUT dtype, which under
+        every policy in use here equals the layer's compute dtype.
+    :type input_dtype: str
+
+    :return: ``'float32'`` for the two narrow dtypes, ``input_dtype`` itself
+        otherwise (float64 is NEVER narrowed — that is the whole of D-007).
+    :rtype: str
+    """
+    return (
+        "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
+    )
+
+
 def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     """Absolute tolerance for the layer-vs-oracle comparison on inputs ``z``.
 
@@ -281,16 +340,10 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     np_dtype = _NUMPY_DTYPE[output_dtype]
     assert np_dtype is not None, f"no numpy dtype for {output_dtype!r}"
 
-    # The reduction dtype the layer will use, re-derived here rather than
-    # imported: `D-007` in `sparsemax.py` (`float32` for the two narrow dtypes,
-    # the compute dtype itself otherwise). Deliberately duplicated for the same
-    # reason the oracles are test-local — an instrument must not share code
-    # with the thing it measures. If this ever disagrees with the layer, the
-    # `u_r` terms below are being charged against the wrong dtype.
-    reduction_dtype = (
-        "float32" if output_dtype in ("float16", "bfloat16") else output_dtype
-    )
-    np_reduction = _NUMPY_DTYPE[reduction_dtype]
+    # The reduction dtype the layer will use — the D-007 rule, stated once in
+    # `_reduction_dtype` and nowhere else on this side. See that helper's
+    # docstring for the lockstep obligation against `sparsemax.py:225-227`.
+    np_reduction = _NUMPY_DTYPE[_reduction_dtype(output_dtype)]
 
     finite = np.asarray(z)[np.isfinite(z)]
     assert finite.size > 0, "batch is fully masked; that case is out of scope"
@@ -324,19 +377,17 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
 # function.  The two take genuinely different scale arguments — `_oracle_atol`
 # is keyed to `min(row spread, 1.0)`, the FORWARD output's scale, while a
 # gradient's scale is `max(|v|, 1)`, the UPSTREAM's — so a merged version would
-# be a parameterized union, not a shared abstraction.  Generalizing would also
-# drag `_oracle_atol`'s deliberate D-007 reduction-dtype duplicate (`:290-292`,
-# which moves in lockstep with `sparsemax.py:225-227`) onto the gradient path,
-# where one edit could then mis-tolerance the forward and backward directions at
-# once.  See `D-002` of `plan-2026-07-29T110112-09832856`.
+# be a parameterized union, not a shared abstraction.  See `D-002` of
+# `plan-2026-07-29T110112-09832856`.
 #
-# THE REDUCTION-DTYPE RULE IS RESTATED BELOW FOR THE THIRD TIME IN THE REPO.
-# The three sites are `sparsemax.py:225-227` (the source of truth),
-# `_oracle_atol` (`:290-292`) and this function.  They are a hand-maintained
-# lockstep invariant: if one moves, ALL THREE move, or the `u_r` term is charged
-# against the wrong dtype and every tolerance here silently mis-measures.  It is
-# restated rather than extracted because an instrument must not share code with
-# the thing it measures (the same reason the oracles are test-local).
+# THE REDUCTION-DTYPE RULE IS NOT RESTATED HERE.  There are exactly TWO
+# statements of it in the repository: `sparsemax.py:225-227` (the SOURCE OF
+# TRUTH) and `_reduction_dtype` above (its one test-side mirror).  Both this
+# function and `_oracle_atol` call that helper; neither carries a copy.  A third
+# copy is a defect, not a style choice — see `_reduction_dtype`'s docstring for
+# the lockstep obligation and the grep that finds both sites, and `D-008` of
+# `plan-2026-07-29T110112-09832856` for why the duplicate was extracted rather
+# than restated a third time.
 # ---------------------------------------------------------------------
 # THE TERMS.  ``u_c(x) = ulp(x)`` in the compute (= output) dtype, ``u_r(x) =
 # ulp(x)`` in the reduction dtype, both evaluated at ``S = max(|v|, 1.0)`` —
@@ -414,8 +465,9 @@ def _grad_atol(v: np.ndarray, output_dtype: str) -> float:
     generalization of it: that function is keyed to the forward output's scale
     (``min(row spread, 1.0)``) while a gradient is keyed to the upstream's
     (``max(|v|, 1)``), so a merged function would be a parameterized union
-    rather than a shared abstraction, and it would drag `_oracle_atol`'s D-007
-    reduction-dtype lockstep duplicate onto the gradient path. There is no
+    rather than a shared abstraction. Both functions take their reduction dtype
+    from :func:`_reduction_dtype`, the D-007 rule's single test-side home;
+    neither carries a copy of it. There is no
     ``_TF32_ATOL_FLOOR`` here: the layer contains no matmul or convolution for
     TF32 to bind to, and the gradient path was MEASURED regime-insensitive.
 
@@ -434,12 +486,8 @@ def _grad_atol(v: np.ndarray, output_dtype: str) -> float:
     np_dtype = _NUMPY_DTYPE[output_dtype]
     assert np_dtype is not None, f"no numpy dtype for {output_dtype!r}"
 
-    # The D-007 reduction-dtype rule, third statement — see the block above for
-    # the lockstep obligation this creates.
-    reduction_dtype = (
-        "float32" if output_dtype in ("float16", "bfloat16") else output_dtype
-    )
-    np_reduction = _NUMPY_DTYPE[reduction_dtype]
+    # The D-007 reduction-dtype rule, via its single test-side home.
+    np_reduction = _NUMPY_DTYPE[_reduction_dtype(output_dtype)]
 
     v64 = np.asarray(v, dtype=np.float64)
     assert np.isfinite(v64).all(), "the upstream cotangent must be finite"
@@ -1225,6 +1273,89 @@ class TestSparsemaxClosedDefects:
     See the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
     ``src/dl_techniques/layers/activations/sparsemax.py``.
     """
+
+    def test_reduction_dtype_mirror_agrees_with_the_source_rule(self) -> None:
+        """The test-side D-007 mirror must be the SAME FUNCTION as the source.
+
+        ``_reduction_dtype`` (this module) mirrors the reduction-dtype rule at
+        ``sparsemax.py:225-227``. Every ``u_r`` term in ``_oracle_atol`` and
+        ``_grad_atol`` is charged through that mirror, so if the two ever
+        disagree the tolerances are computed against the wrong dtype and the
+        forward/backward guards go quietly VACUOUS rather than red. A comment
+        naming the obligation is not a guard (`plans/LESSONS.md:11`); this is
+        the guard.
+
+        It compares the two as FUNCTIONS, not as text: the source's own
+        ``reduction_dtype = ...`` expression is extracted with :mod:`ast` and
+        EVALUATED over the four dtype names, then compared to the mirror's
+        output. Reformatting, renaming the local, or moving the lines leaves
+        this green; changing what the rule COMPUTES (e.g. re-narrowing float64
+        to ``"float32"``) turns it red. ``G7`` covers the complementary
+        direction — a source re-narrowing that a lockstep-updated mirror would
+        hide from the tolerances is still caught there, numerically.
+
+        The trailing check forbids RESTATEMENT (`plans/LESSONS.md:20`): the
+        rule may be spelled in exactly two places, the source and the mirror.
+        A third copy is what `D-008` of ``plan-2026-07-29T110112-09832856``
+        was raised and ruled on.
+        """
+        source_path = inspect.getsourcefile(Sparsemax)
+        assert source_path is not None, "cannot locate sparsemax.py"
+        source_text = open(source_path, "r", encoding="utf-8").read()
+
+        # Extract every `reduction_dtype = <expr>` assignment in `Sparsemax`.
+        tree = ast.parse(source_text)
+        exprs = [
+            node.value
+            for cls in ast.walk(tree)
+            if isinstance(cls, ast.ClassDef) and cls.name == "Sparsemax"
+            for node in ast.walk(cls)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "reduction_dtype"
+                for t in node.targets
+            )
+        ]
+        assert len(exprs) == 1, (
+            "expected exactly one `reduction_dtype = ...` assignment in "
+            f"`Sparsemax`, found {len(exprs)} in {source_path}. The D-007 rule "
+            "has moved; `_reduction_dtype` must move with it."
+        )
+        expr = exprs[0]
+
+        # The expression's single free variable is the dtype it switches on.
+        free = sorted({n.id for n in ast.walk(expr) if isinstance(n, ast.Name)})
+        assert len(free) == 1, (
+            f"the source rule reads {free!r}; this guard can only evaluate a "
+            "rule that is a pure function of the input dtype name"
+        )
+        code = compile(ast.Expression(expr), "<sparsemax reduction rule>", "eval")
+
+        for dtype in ("float16", "bfloat16", "float32", "float64"):
+            source_answer = eval(code, {"__builtins__": {}}, {free[0]: dtype})
+            assert source_answer == _reduction_dtype(dtype), (
+                f"D-007 LOCKSTEP BROKEN for {dtype!r}: "
+                f"{source_path}:{expr.lineno} computes {source_answer!r} but "
+                f"`_reduction_dtype` mirrors {_reduction_dtype(dtype)!r}. "
+                "Move the mirror, or revert the source."
+            )
+
+        # No third statement of the rule: this is the grep printed in
+        # `_reduction_dtype`'s docstring, executed. The pattern is anchored so
+        # that it matches neither the docstring line that prints it nor this
+        # line — the two hits are the two real homes and nothing else.
+        pattern = re.compile(r'^ *"float32" if', re.MULTILINE)
+        test_path = os.path.abspath(__file__)
+        counts = {
+            path: len(pattern.findall(open(path, "r", encoding="utf-8").read()))
+            for path in (source_path, test_path)
+        }
+        assert counts == {source_path: 1, test_path: 1}, (
+            f"the D-007 rule is stated {counts} times (expected exactly one "
+            "home per file: `sparsemax.py`'s rule and `_reduction_dtype`). A "
+            "further copy must be routed through `_reduction_dtype` instead; "
+            "see D-008 of plan-2026-07-29T110112-09832856."
+        )
 
     def test_defect_b_closed_overflow_born_inf_excluded_from_support(self) -> None:
         """fp16 cumsum overflow must not inflate the support set.
