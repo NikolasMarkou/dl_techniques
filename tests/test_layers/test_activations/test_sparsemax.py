@@ -90,56 +90,140 @@ def _sparsemax_reference(z: np.ndarray) -> np.ndarray:
 # (It shipped unvalidated because the property test aborts at its first grid
 # point, so assertion (b) never executed in the intended-RED run.)
 #
-# ERROR PROPAGATION.  The layer computes ``out_i = max(z_i - tau, 0)`` with
-# ``tau = (S - 1) / k_z`` and ``S = cumsum(sort(z))[k_z - 1]``, all in the
-# compute dtype.  ``out_i`` is a difference of two quantities of magnitude up to
-# ``M = max|z_finite|`` (``|z_i| <= M`` and ``tau <= max(z) <= M``), so AS THE
-# LAYER IS CURRENTLY WRITTEN its absolute resolution is ``ulp(M)``.
+# ERROR PROPAGATION — RE-DERIVED FOR THE SHIFTED, WIDENED LAYER.
+# ---------------------------------------------------------------------
+# The previous derivation (kept in git history) charged five roundings, each at
+# ``ulp(M)`` with ``M = max|z_finite|``, and summed to ``_ULP_BUDGET = 4``.  It
+# described a layer that never shifted its input and ran the whole reduction in
+# the compute dtype.  Both premises are gone: the layer now subtracts the row
+# max and runs the ramp / cumsum / support test / ``k_z`` count in a
+# NEVER-NARROWED reduction dtype (float32 for float16 / bfloat16, the compute
+# dtype itself for float32 / float64 — see the ``D-007`` anchor in
+# ``sparsemax.py``).  Every term below is the SAME term, re-charged; no term was
+# replaced by a fitted constant.
 #
-# THAT IS A PROPERTY OF THIS FORMULATION, NOT A LAW.  ``M`` here is the
-# magnitude of the raw logits only because the layer never shifts them.
-# Sparsemax is shift-invariant, so subtracting the row max before the cumsum is
-# EXACT, and it replaces ``M`` with the row SPREAD ``max(z) - min(z)`` (0 for a
-# plateau row), collapsing the floor by orders of magnitude.  Measured: that one
-# change takes this file's own grid from 86/128 to 0/128 violations, with
-# ``max_err`` 0.013165 -> 0.000628 — i.e. 12x BELOW ``ulp(M = 10)``.  **beta
-# MUST re-tighten ``_ULP_BUDGET`` (and re-derive the ``ulp`` argument against
-# the row spread rather than ``max|z|``) once row-max subtraction lands.**  Do
-# not read the budget below as a permanent ceiling.
+# THE LEMMA THAT SETS THE SCALE (new, and it is what makes this bound tight).
+# Write ``m = max(z_finite)`` and ``s_i = z_i - m``, so ``max(s) = 0``.  The
+# maximum entry is always in the support, hence ``tau <= 0``.  The outputs are
+# non-negative and sum to 1, and the largest of them is ``0 - tau``, hence
+# ``tau >= -1``.  Therefore:
 #
-# Counting the roundings that survive to the output of the CURRENT
-# formulation, each bounded by half the local spacing:
+#     tau in [-1, 0]   and   every SUPPORTED s_i lies in [tau, tau + 1] c [-1, 0]
 #
-#   0.5 ulp(M)  rounding ``z_i`` into the compute dtype (the input is float32);
-#   1.0 ulp(M)  one rounding of a cumsum partial sum.  A partial sum has
-#               magnitude up to ``k_z * M``, so its own spacing is up to
-#               ``2 * k_z * ulp(M)`` (the factor 2 is binade misalignment
-#               between ``k_z * M`` and ``M``); ``tau`` then DIVIDES by
-#               ``k_z``, restoring the scale, so the contribution is
-#               ``0.5 * 2 * ulp(M) = 1.0 ulp(M)``;
-#   1.0 ulp(M)  rounding of ``S - 1.0``, by the same magnitude-and-divide
-#               argument;
-#   0.5 ulp(M)  rounding of the division ``/ k_z`` (result ``|tau| <= M``);
-#   0.5 ulp(M)  rounding of the subtraction ``z_i - tau`` (result ``<= M``).
+# so **every quantity that reaches a non-zero output is at scale <= 1**, and it
+# is also at scale <= the row spread ``d = max(z_finite) - min(z_finite)``
+# (trivially, since ``|s_i| <= d``).  The ulp argument is therefore
 #
-# Sum = 3.5 ulp(M); rounded up to the next integer, ``_ULP_BUDGET = 4``.
-# ``sort``, ``flip`` and the one-hot selection are exact and contribute nothing.
+#     D = min(d, 1.0)
 #
-# THIS BOUND IS DELIBERATELY STRICTER THAN WORST-CASE THEORY.  A rigorous
-# forward bound on a ``k_z``-term cumsum is ``O(k_z)`` ulp, which at K = 512
-# would permit a completely wrong answer and would be a vacuous assertion.  We
-# charge ONE representative accumulation rounding instead, on the basis that the
-# per-step errors partially cancel rather than add coherently.  The consequence
-# is that this test FAILS if the layer's accumulation error ever starts growing
-# with ``k`` — which is the point.  The constant is derived from the arithmetic
-# above; it is NOT fitted to observed error (measured worst case over this
-# file's grid is 1.685 ulp under ``mixed_float16``, i.e. the bound carries a
-# 2.4x margin).
+# — the spread, as this step set out to use, CAPPED by the lemma.  Entries
+# outside the support are clamped to exactly ``0.0``; a perturbation can only
+# lift one across ``tau`` by an amount of the same size as the perturbation, so
+# they need no separate term.
 #
-# float32 and float64 are NOT loosened: ``_TF32_ATOL_FLOOR`` is a FLOOR, and at
-# these grids ``4 * ulp(M)`` is ~4e-6 (float32) / ~7e-15 (float64), far below
-# it, so both keep exactly today's 1e-3 bar.  Only float16, whose ``4 * ulp(M)``
-# exceeds 1e-3 for every ``M >= 0.5``, is governed by the derived term.
+# THE TERMS.  ``u_c(x) = ulp(x)`` in the compute (= output) dtype;
+# ``u_r(x) = ulp(x)`` in the reduction dtype.
+#
+#   0.0 u_c(D)   INPUT CAST.  The float32 fixture is rounded to the compute
+#                dtype at the layer boundary — but the oracle is now fed those
+#                SAME post-cast bits (`_to_compute_dtype`), so this rounding is
+#                shared by both sides and cancels identically.  It was charged
+#                at 0.5 ulp before because the call sites fed the oracle
+#                PRE-cast values; measured cost of that bug on this file's own
+#                grid under fp16 was 5.4e-3, i.e. larger than the whole
+#                ``_TF32_ATOL_FLOOR``.  This term returns the moment any call
+#                site regresses to passing a raw float32 fixture.
+#   0.5 u_c(D)   THE SHIFT, on ``z_i``.  ``row_max`` is a selection and is
+#                exact; ``fl(z_i - row_max)`` rounds relative to its own result,
+#                which for a supported ``i`` is ``s_i`` with ``|s_i| <= D``.
+#                (NEW TERM — there was no shift to charge before.)
+#   0.5 u_c(D)   THE SHIFT, inherited by ``tau``.  ``tau`` is
+#                ``(sum_{j<=k_z} s_j - 1) / k_z``, i.e. it carries the MEAN of
+#                ``k_z`` shift roundings, each ``<= 0.5 u_c(D)``; the mean of
+#                bounded terms obeys the same bound.  (NEW TERM.)
+#   0.0          CAST INTO THE REDUCTION DTYPE.  Exact, by construction:
+#                ``D-007`` makes the reduction dtype never narrow.  If that
+#                decision is ever reverted, this term stops being zero.
+#   1.0 u_r(1)   ONE CUMSUM PARTIAL.  Partial sums up to index ``k_z`` are sums
+#                of values in ``[-1, 0]``, so ``|partial| <= k_z`` and its
+#                spacing is ``<= 2 * k_z * u_r(1)`` (the 2 is binade
+#                misalignment); ``tau`` then DIVIDES by ``k_z``, restoring the
+#                scale: ``0.5 * 2 * u_r(1) = 1.0 u_r(1)``.  Note the change of
+#                dtype AND of scale: this used to be ``1.0 ulp_compute(M)``.
+#   1.0 u_r(1)   ``S - 1.0``, by the same magnitude-and-divide argument
+#                (``|S - 1| <= k_z + 1``).  Same dtype/scale change.
+#   0.5 u_c(1)   THE FINAL ``shifted - tau``.  IEEE rounds relative to the
+#                RESULT, and the result is an output value in ``[0, 1]`` — so
+#                this term is charged at ``u_c(1)``, NOT at ``u_c(D)``.  When
+#                the spread is small (``D << 1``) the output can still be ~1
+#                (e.g. two near-equal logits give ``[0.5, 0.5]``), which is
+#                exactly why it cannot be folded into the ``D`` terms.
+#   (the ``/ k_z`` division's own rounding is subsumed: it is charged inside the
+#    two ``u_r(1)`` terms, whose "divide by k_z" step is what sets their scale.)
+#
+# Sum:
+#
+#     atol_derived = 1.0 * u_c(D) + 0.5 * u_c(1) + 2.0 * u_r(1)
+#
+# spelled below as ``_ULP_BUDGET_SHIFT`` / ``_ULP_BUDGET_OUTPUT`` /
+# ``_ULP_BUDGET_REDUCE``.  ``sort``, ``flip``, ``ops.max`` and the one-hot
+# selection are exact and contribute nothing.
+#
+# WHAT IS DELIBERATELY NOT CHARGED (unchanged in spirit from the old block).
+# (i) A rigorous forward bound on a ``k_z``-term cumsum is ``O(k_z)`` ulp, which
+# at K = 512 would permit a completely wrong answer and would be a vacuous
+# assertion.  We charge ONE representative accumulation rounding instead, on the
+# basis that the per-step errors partially cancel rather than add coherently.
+# The consequence is that this test FAILS if the layer's accumulation error ever
+# starts growing with ``k`` — which is the point.  (ii) A DISCRETE
+# mis-selection of ``k_z`` at an exact tie is not an ulp-sized event and is not
+# charged here; it is pinned separately by the exact-rational oracle tests,
+# which compare ``k_z`` itself.
+#
+# DERIVED vs MEASURED (checked, NOT fitted).  The constants above were fixed by
+# the accounting FIRST; the numbers below are what the fixed layer then measured
+# over the whole committed property grid (4 widths x 4 mask fractions x 8 seeds)
+# PLUS every `_attack_corpus()` row, replayed under each policy, against the
+# EXACT-RATIONAL oracle.  "derived" excludes `_TF32_ATOL_FLOOR` so the derivation
+# is checked on its own terms; "worst ratio" is `max(err / returned atol)`, so
+# anything < 1.0 is a pass.
+#
+#   policy           derived range          measured worst   worst ratio  viol.
+#   float32          2.98e-07 .. 4.17e-07   1.987e-08        0.056  (18x)  0/134
+#   mixed_float16    4.89e-04 .. 1.465e-03  1.628e-04        0.167  ( 6x)  0/138
+#   mixed_bfloat16   3.91e-03 .. 1.172e-02  1.302e-03        0.167  ( 6x)  0/131
+#   float64          5.55e-16 .. 7.77e-16   5.551e-17        0.071  (14x)  0/128
+#
+# PROOF THAT THE TIGHTENED BOUND STILL BITES (executed, not argued).  Three
+# injections, none committed:
+#   * disabling the row-max shift in `sparsemax.py` (the mechanism this budget
+#     was re-derived for) turns `test_sparsemax_property_random_masks` RED at
+#     `mixed_float16` immediately (max abs difference 2.60e-03 vs atol 1.00e-03);
+#   * a uniform +1.2e-03 added to every positive output is caught at float32
+#     (134/134), float64 (128/128) and `mixed_float16` (26/138) — bfloat16
+#     correctly needs ~5e-03, which is its own representable resolution;
+#   * re-introducing the (A) oracle-input bug is caught at 69/138 (fp16) and
+#     72/131 (bf16) points.  The OLD `4 * ulp(max|z|)` budget ABSORBED that same
+#     bug silently (3.13e-02 fp16 / 2.50e-01 bf16 at `max|z| = 10`, versus a
+#     5.45e-03 / 3.92e-02 measured error) — which is why (A) had to be fixed at
+#     the call sites rather than paid for out of the budget.
+#
+# WHICH TERM GOVERNS.  ``_TF32_ATOL_FLOOR`` still dominates for float32 and
+# float64 (4.2e-7 and 7.8e-16 are both far under 1e-3), exactly as before; the
+# derived term governs float16 and bfloat16, whose ``u_c(1)`` alone exceeds the
+# floor.  The floor is RETAINED and must not be deleted: it is not slack for
+# this layer, it absorbs the ~1000x float32 measurement swing caused by
+# `test_linear_attention.py:37` disabling TF32 process-globally at import, so
+# the same assertion runs in two different regimes depending on what pytest
+# co-collected.
+#
+# NET EFFECT vs THE OLD BUDGET.  On the Defect-B spread row (``d = 16.95``,
+# fp16) the old ``4 * ulp(max|z|)`` returned ``0.0625`` for an assertion about
+# an output value in ``[0, 1]`` — 64x looser than fp16's own resolution at 1.0.
+# The lemma's ``min(d, 1.0)`` cap makes that row return ``1.465e-3`` instead, a
+# 43x tightening, WITHOUT introducing a second output-scale tolerance function:
+# the cap is derived, so it applies everywhere rather than at hand-picked call
+# sites.
 # ---------------------------------------------------------------------
 
 #: Flat absolute floor, retained for float32/float64: the documented TF32
@@ -147,8 +231,18 @@ def _sparsemax_reference(z: np.ndarray) -> np.ndarray:
 #: process-globally at import, so the same assertion runs in two regimes).
 _TF32_ATOL_FLOOR = 1e-3
 
-#: Ulp of ``max|z_finite|`` allowed between layer and oracle. Derived above.
-_ULP_BUDGET = 4.0
+#: Ulp of ``D = min(row spread, 1.0)`` in the OUTPUT dtype: the two row-max
+#: shift roundings (on ``z_i``, and inherited by ``tau``). Derived above.
+_ULP_BUDGET_SHIFT = 1.0
+
+#: Ulp of ``1.0`` in the OUTPUT dtype: the final ``shifted - tau``, whose
+#: result is an output value in ``[0, 1]``. Derived above.
+_ULP_BUDGET_OUTPUT = 0.5
+
+#: Ulp of ``1.0`` in the REDUCTION dtype: one cumsum partial plus ``S - 1.0``.
+#: Negligible for float16/bfloat16 (the reduction runs in float32), leading for
+#: float32/float64. Derived above.
+_ULP_BUDGET_REDUCE = 2.0
 
 #: Compute-dtype name -> numpy dtype. `bfloat16` comes from `ml_dtypes` (a
 #: hard TensorFlow dependency, already in the environment); `np.spacing` is
@@ -165,8 +259,14 @@ _NUMPY_DTYPE = {
 def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     """Absolute tolerance for the layer-vs-oracle comparison on inputs ``z``.
 
-    Returns ``max(_TF32_ATOL_FLOOR, _ULP_BUDGET * ulp(max|z_finite|))``
-    evaluated in the layer's OUTPUT dtype. See the derivation above.
+    Returns ``max(_TF32_ATOL_FLOOR, 1.0 * u_c(D) + 0.5 * u_c(1) + 2.0 * u_r(1))``
+    where ``D = min(row spread, 1.0)``, ``u_c`` is the ulp of the layer's
+    OUTPUT dtype and ``u_r`` the ulp of its reduction dtype. See the
+    term-by-term derivation above.
+
+    ``z`` should be the bits the LAYER RECEIVES, i.e. already cast through
+    :func:`_to_compute_dtype` under a narrow policy — the spread is a property
+    of the received row, not of the test's float32 fixture.
 
     :param z: The logit batch handed to the layer (may contain ``-inf``).
     :type z: np.ndarray
@@ -178,11 +278,40 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     """
     np_dtype = _NUMPY_DTYPE[output_dtype]
     assert np_dtype is not None, f"no numpy dtype for {output_dtype!r}"
+
+    # The reduction dtype the layer will use, re-derived here rather than
+    # imported: `D-007` in `sparsemax.py` (`float32` for the two narrow dtypes,
+    # the compute dtype itself otherwise). Deliberately duplicated for the same
+    # reason the oracles are test-local — an instrument must not share code
+    # with the thing it measures. If this ever disagrees with the layer, the
+    # `u_r` terms below are being charged against the wrong dtype.
+    reduction_dtype = (
+        "float32" if output_dtype in ("float16", "bfloat16") else output_dtype
+    )
+    np_reduction = _NUMPY_DTYPE[reduction_dtype]
+
     finite = np.asarray(z)[np.isfinite(z)]
     assert finite.size > 0, "batch is fully masked; that case is out of scope"
-    max_abs = float(np.max(np.abs(finite)))
-    ulp = float(np.spacing(np.asarray(max_abs, dtype=np_dtype)))
-    return max(_TF32_ATOL_FLOOR, _ULP_BUDGET * ulp)
+
+    # Widest per-row spread in the batch (the tolerance is applied batch-wide).
+    zf = np.asarray(z, dtype=np.float64)
+    masked = np.where(np.isfinite(zf), zf, np.nan)
+    spread = float(np.nanmax(np.nanmax(masked, axis=-1) - np.nanmin(masked, axis=-1)))
+
+    # The lemma: tau in [-1, 0] and every supported entry lies in [-1, 0], so
+    # the spread never has to be charged above 1.0.
+    scale = min(spread, 1.0)
+
+    u_c_scale = float(np.spacing(np.asarray(scale, dtype=np_dtype)))
+    u_c_one = float(np.spacing(np.asarray(1.0, dtype=np_dtype)))
+    u_r_one = float(np.spacing(np.asarray(1.0, dtype=np_reduction)))
+
+    derived = (
+        _ULP_BUDGET_SHIFT * u_c_scale
+        + _ULP_BUDGET_OUTPUT * u_c_one
+        + _ULP_BUDGET_REDUCE * u_r_one
+    )
+    return max(_TF32_ATOL_FLOOR, derived)
 
 
 def _output_dtype() -> str:
@@ -572,10 +701,11 @@ class TestSparsemax:
     #
     # Assertion (b)'s absolute tolerance comes from `_oracle_atol` — a DERIVED,
     # dtype-aware bound (see the error-propagation derivation at module scope).
-    # It is `max(1e-3, 4 * ulp(max|z_finite|))` in the OUTPUT dtype: float32
-    # and float64 keep exactly the historical 1e-3 TF32 floor; float16 gets the
-    # ulp-scaled term, because a flat 1e-3 demands precision below float16's
-    # representable resolution and can therefore never pass.
+    # It is `max(1e-3, u_c(min(spread, 1)) + 0.5 u_c(1) + 2 u_r(1))`: float32
+    # and float64 keep exactly the historical 1e-3 TF32 floor; float16 and
+    # bfloat16 get the ulp-scaled term, because a flat 1e-3 demands precision
+    # below their representable resolution and can therefore never pass.
+    # Both the oracle and the tolerance are fed `_to_compute_dtype(z)`.
     # -----------------------------------------------------------------
 
     @pytest.mark.parametrize("compute_dtype", ["float32", "mixed_float16"])
@@ -602,8 +732,14 @@ class TestSparsemax:
 
             # (b) Secondary correctness check against the float64 oracle, at a
             #     tolerance DERIVED from the output dtype's resolution.
-            ref = _sparsemax_reference(z)
-            atol = _oracle_atol(z, _output_dtype())
+            #     BOTH the oracle and the tolerance consume the POST-CAST bits:
+            #     under `mixed_float16` the layer never sees the float32 array
+            #     built above, and feeding the oracle the pre-cast fixture
+            #     charges the comparison an input-rounding term worth up to
+            #     5.4e-3 that the derived budget does not (and must not) carry.
+            z_compute = _to_compute_dtype(z)
+            ref = _sparsemax_reference(z_compute)
+            atol = _oracle_atol(z_compute, _output_dtype())
             np.testing.assert_allclose(
                 out.astype(np.float64),
                 ref,
@@ -651,17 +787,20 @@ class TestSparsemax:
                         f"Sparsemax produced NaN ({label}); "
                         f"nan_count={nan_count}/{out.size}"
                     )
-                    collected.append((label, out.astype(np.float64), z))
+                    # Post-cast bits, captured while the policy is still
+                    # active: both the oracle and the tolerance must see the
+                    # row the LAYER received, not the float32 fixture.
+                    collected.append((label, out.astype(np.float64), _to_compute_dtype(z)))
 
         # (b) secondary correctness check, only reachable once (a) held everywhere.
         #     Tolerance is DERIVED per grid point from the output dtype's
         #     resolution — see `_oracle_atol` and its derivation.
         out_dtype = _output_dtype()
-        for label, out, z in collected:
-            atol = _oracle_atol(z, out_dtype)
+        for label, out, z_compute in collected:
+            atol = _oracle_atol(z_compute, out_dtype)
             np.testing.assert_allclose(
                 out,
-                _sparsemax_reference(z),
+                _sparsemax_reference(z_compute),
                 atol=atol,
                 rtol=1e-3,
                 err_msg=(
@@ -1024,7 +1163,11 @@ class TestSparsemaxClosedDefects:
                 f"(nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())})"
             )
 
-            atol = _oracle_atol(z, _output_dtype())
+            # `_oracle_atol` is keyed to `min(row spread, 1.0)`, so on this row
+            # (spread 16.95) it returns fp16's OUTPUT-scale budget, ~1.5e-3 —
+            # not the 0.0625 that `4 * ulp(max|z|)` used to return for a claim
+            # about a value in [0, 1]. See the derivation's closing paragraph.
+            atol = _oracle_atol(_to_compute_dtype(z), _output_dtype())
             assert abs(float(out[0, 0]) - 1.0) <= atol, (
                 f"the strict maximum must take ALL the mass: out[0, 0] = "
                 f"{float(out[0, 0])}, expected 1.0 (derived atol={atol:.3e})"
