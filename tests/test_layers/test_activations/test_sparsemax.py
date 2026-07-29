@@ -316,6 +316,145 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     return max(_TF32_ATOL_FLOOR, derived)
 
 
+# ---------------------------------------------------------------------
+# GRADIENT tolerance — the SIBLING of `_oracle_atol`, not a generalization.
+#
+# DECISION plan-2026-07-29T110112-09832856/D-002
+# Do NOT merge this with `_oracle_atol`, and do NOT add a third tolerance
+# function.  The two take genuinely different scale arguments — `_oracle_atol`
+# is keyed to `min(row spread, 1.0)`, the FORWARD output's scale, while a
+# gradient's scale is `max(|v|, 1)`, the UPSTREAM's — so a merged version would
+# be a parameterized union, not a shared abstraction.  Generalizing would also
+# drag `_oracle_atol`'s deliberate D-007 reduction-dtype duplicate (`:290-292`,
+# which moves in lockstep with `sparsemax.py:225-227`) onto the gradient path,
+# where one edit could then mis-tolerance the forward and backward directions at
+# once.  See `D-002` of `plan-2026-07-29T110112-09832856`.
+#
+# THE REDUCTION-DTYPE RULE IS RESTATED BELOW FOR THE THIRD TIME IN THE REPO.
+# The three sites are `sparsemax.py:225-227` (the source of truth),
+# `_oracle_atol` (`:290-292`) and this function.  They are a hand-maintained
+# lockstep invariant: if one moves, ALL THREE move, or the `u_r` term is charged
+# against the wrong dtype and every tolerance here silently mis-measures.  It is
+# restated rather than extracted because an instrument must not share code with
+# the thing it measures (the same reason the oracles are test-local).
+# ---------------------------------------------------------------------
+# THE TERMS.  ``u_c(x) = ulp(x)`` in the compute (= output) dtype, ``u_r(x) =
+# ulp(x)`` in the reduction dtype, both evaluated at ``S = max(|v|, 1.0)`` —
+# the upstream's magnitude, floored at 1 because the analytic VJP
+# ``grad_i = v_i - mean_S(v)`` is a difference of quantities at scale ``|v|``
+# and the layer's own internal quantities are at scale <= 1 (the `tau in [-1,0]`
+# lemma above).  Charged in the same style as the forward derivation:
+#
+#   1.0 u_c(S)   THE MEAN ``mean_S(v)``.  A ``k``-term sum then divided by
+#                ``k``: ``|partial| <= k*S`` so its spacing is ``<= 2*k*u_c(S)``
+#                (the 2 is binade misalignment), and the ``/ k`` restores the
+#                scale.  Same magnitude-and-divide argument as `_oracle_atol`'s
+#                cumsum term.
+#   1.0 u_c(S)   THE SUBTRACTION ``v_i - mean``, rounded relative to its own
+#                result, which lies at scale ``<= 2S``.
+#   1.0 u_c(S)   ONE REPRESENTATIVE ACCUMULATION ROUNDING in the backward's
+#                reversed cumsum (the adjoint of `ops.cumsum`).  As forward,
+#                ONE is charged, not ``O(k)``: an ``O(k)`` bound would permit a
+#                completely wrong answer at K=4096 and measure nothing.  The
+#                consequence is that this bound FAILS if the backward error ever
+#                starts growing with ``k`` — which is the point.
+#   1.0 u_c(S)   THE CAST BACK.  ``ops.cast(shifted, reduction_dtype)`` at
+#                `sparsemax.py:228` is differentiable, so the gradient crosses
+#                back from the reduction dtype into the compute dtype and is
+#                rounded once on the way.
+#   2.0 u_r(S)   THE TWO ROUNDINGS THAT HAPPEN INSIDE the never-narrowed
+#                reduction dtype (the cumsum partial and the ``/ k_z`` of the
+#                ``tau`` route).  Negligible for float16/bfloat16 (the reduction
+#                runs in float32) and leading for float32/float64, exactly as
+#                `_ULP_BUDGET_REDUCE` is forward.
+#
+# Sum: ``atol = 4 * u_c(S) + 2 * u_r(S)``.  The permutation scatter (`ops.sort`
+# / `ops.flip`), the `ops.where` selection and the integer `one_hot` path are
+# exact and contribute nothing; `k_z` is piecewise-constant and has NO gradient.
+#
+# DERIVED vs MEASURED (checked, NOT fitted; GPU, `CUDA_VISIBLE_DEVICES=1`).
+# The constants were fixed by the accounting first; the numbers below are what
+# the layer then measured over the whole committed `_attack_corpus()` — the
+# corpus `test_gradient_matches_analytic_vjp` actually runs on — at 4 policies:
+#
+#   policy           atol at S=1.0   worst measured   in ulp_out   slack
+#   float32          7.152557e-07    2.012e-07        1.69         3.55x
+#   mixed_float16    3.906488e-03    1.726e-03        0.88         4.55x
+#   mixed_bfloat16   3.125024e-02    2.365e-02        1.51         2.65x
+#   float64          1.332268e-15    2.776e-16        0.62         9.68x
+#
+# DECISION plan-2026-07-29T110112-09832856/D-007
+# DO NOT TIGHTEN THIS BUDGET.  The real headroom is **2.65x at its tightest**
+# (bfloat16), NOT the ~5x an earlier record claimed: that 5x came from quoting
+# the RANDOM-K-GRID worst (0.73 ulp) as if it were the corpus worst (1.69 ulp).
+# Name the grid when quoting either.  A 2-ulp floor would leave bfloat16 at
+# 1.32x and float32 at 1.18x — thin enough that ordinary reduction-order drift
+# turns this guard permanently red for no signal, which is a guard that measures
+# nothing (`plans/LESSONS.md:47`).  See `D-007` of
+# `plan-2026-07-29T110112-09832856`.
+# ---------------------------------------------------------------------
+
+#: Ulp of ``S = max(|v|, 1)`` in the OUTPUT dtype, for the gradient budget:
+#: the mean, the subtraction, one accumulation and the cast back. Derived above.
+_GRAD_ULP_BUDGET_COMPUTE = 4.0
+
+#: Ulp of ``S`` in the REDUCTION dtype: the two roundings taken inside the
+#: never-narrowed reduction. Derived above.
+_GRAD_ULP_BUDGET_REDUCE = 2.0
+
+
+def _grad_atol(v: np.ndarray, output_dtype: str) -> float:
+    """Absolute tolerance for a layer-gradient vs analytic-VJP comparison.
+
+    Returns ``4 * u_c(S) + 2 * u_r(S)`` where ``S = max(|v|, 1.0)``, ``u_c`` is
+    the ulp of the layer's OUTPUT dtype and ``u_r`` the ulp of its reduction
+    dtype. See the term-by-term derivation above.
+
+    This is the SIBLING of :func:`_oracle_atol`, deliberately not a
+    generalization of it: that function is keyed to the forward output's scale
+    (``min(row spread, 1.0)``) while a gradient is keyed to the upstream's
+    (``max(|v|, 1)``), so a merged function would be a parameterized union
+    rather than a shared abstraction, and it would drag `_oracle_atol`'s D-007
+    reduction-dtype lockstep duplicate onto the gradient path. There is no
+    ``_TF32_ATOL_FLOOR`` here: the layer contains no matmul or convolution for
+    TF32 to bind to, and the gradient path was MEASURED regime-insensitive.
+
+    ``v`` should be the UPSTREAM the tape actually received, i.e. already cast
+    through :func:`_to_compute_dtype` under a narrow policy — the same
+    post-cast-bits rule the oracles enforce.
+
+    :param v: The upstream cotangent ``dL/dp`` handed to the tape.
+    :type v: np.ndarray
+    :param output_dtype: Name of the layer's output dtype, e.g. ``'float16'``.
+    :type output_dtype: str
+
+    :return: Absolute tolerance for the gradient comparison.
+    :rtype: float
+    """
+    np_dtype = _NUMPY_DTYPE[output_dtype]
+    assert np_dtype is not None, f"no numpy dtype for {output_dtype!r}"
+
+    # The D-007 reduction-dtype rule, third statement — see the block above for
+    # the lockstep obligation this creates.
+    reduction_dtype = (
+        "float32" if output_dtype in ("float16", "bfloat16") else output_dtype
+    )
+    np_reduction = _NUMPY_DTYPE[reduction_dtype]
+
+    v64 = np.asarray(v, dtype=np.float64)
+    assert np.isfinite(v64).all(), "the upstream cotangent must be finite"
+
+    # The gradient's scale is the UPSTREAM's magnitude, floored at 1.0: the
+    # layer's own internal quantities never exceed scale 1 (the `tau in [-1, 0]`
+    # lemma), so below |v| = 1 the budget must not shrink with the upstream.
+    scale = max(float(np.max(np.abs(v64))), 1.0)
+
+    u_c = float(np.spacing(np.asarray(scale, dtype=np_dtype)))
+    u_r = float(np.spacing(np.asarray(scale, dtype=np_reduction)))
+
+    return _GRAD_ULP_BUDGET_COMPUTE * u_c + _GRAD_ULP_BUDGET_REDUCE * u_r
+
+
 def _output_dtype() -> str:
     """The dtype a default-constructed layer emits under the global policy."""
     return keras.mixed_precision.global_policy().compute_dtype
@@ -1412,6 +1551,362 @@ class TestSparsemaxXLACapability:
                     f"(derived atol={atol})"
                 ),
             )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# THE BACKWARD PASS.
+#
+# Before this class the file had ZERO gradient coverage of any kind (one grep
+# hit, the word "degrades" inside a comment), while nine sibling files in this
+# directory do have `GradientTape` tests. Their house shape is
+# `assert gradients is not None` + `is_finite`, which would NOT catch the one
+# real defect measured here, so these guards compare against the ANALYTIC VJP
+# instead.
+#
+# `Sparsemax` has no `custom_gradient` and no `stop_gradient`: the backward pass
+# is pure autodiff through `max` / `sort` / `cumsum` / `where` / `maximum`. From
+# Martins & Astudillo 2016 Prop. 1, with support `S = {i : p_i > 0}`, `k = |S|`:
+#
+#     J_ij = [i in S][j in S] * (delta_ij - 1/k)        (0 elsewhere)
+#     grad_z_i = [i in S] * ( v_i - (1/k) * sum_{j in S} v_j )
+#
+# `S` and `k` come from the EXACT-RATIONAL oracle fed POST-CAST bits, never from
+# the layer's own output and never from an intended Python literal — the same
+# rule the forward oracles enforce, for the same reason.
+#
+# WHY BOUNDARY-FREE ROWS ONLY.  On a support-BOUNDARY row (some `z_i == tau`
+# exactly, so `p_i == 0` yet `shifted - tau == 0`), `ops.maximum` at
+# `sparsemax.py:556` routes a full gradient to an entry that `k_z` excludes.
+# The result is not even a Clarke subgradient (228/300 random directions give a
+# mixing coefficient outside [0, 1]), with errors up to 3.24. That is an OPEN
+# defect, deliberately not fixed here, and it is pinned separately rather than
+# absorbed into a widened tolerance. Excluding those rows is what keeps this
+# guard a measurement of the other 46; it is NOT a claim that they are correct.
+# ---------------------------------------------------------------------
+
+
+class TestSparsemaxBackwardPass:
+    """`Sparsemax`'s gradient vs the analytic VJP, on boundary-free rows.
+
+    Measured on GPU at every point below (`CUDA_VISIBLE_DEVICES=1`): 46 / 43 /
+    45 / 46 boundary-free rows checked under float32 / mixed_float16 /
+    mixed_bfloat16 / float64, zero failures, worst error 1.69 ulp of the output
+    dtype against a 4-ulp budget.
+    """
+
+    @staticmethod
+    def _layer_gradient(
+        z_compute: np.ndarray, v_compute: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Backprop ``sum(sparsemax(z) * v)`` through a default `Sparsemax`.
+
+        Internal to this class. Both arguments must ALREADY be in the active
+        policy's compute dtype (:func:`_to_compute_dtype`), so that the tape
+        sees the bits the layer receives and no cast happens inside the taped
+        region — a cast there would add a rounding the derived budget does not
+        carry.
+
+        :param z_compute: 2-D logit batch in the compute dtype.
+        :type z_compute: np.ndarray
+        :param v_compute: Upstream ``dL/dp``, same shape and dtype as ``z``.
+        :type v_compute: np.ndarray
+
+        :return: ``(grad_z, forward_output)``, both as float64 arrays.
+        :rtype: tuple[np.ndarray, np.ndarray]
+
+        :raises AssertionError: if the tape returns no gradient at all, which
+            would make every downstream comparison vacuous.
+        """
+        assert z_compute.dtype == v_compute.dtype, (
+            f"z is {z_compute.dtype} but v is {v_compute.dtype}; both must be "
+            "post-cast so no rounding happens inside the taped region"
+        )
+        layer = Sparsemax()
+        x = tf.convert_to_tensor(z_compute)
+        v = tf.convert_to_tensor(v_compute)
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            p = layer(x)
+            loss = tf.reduce_sum(p * tf.cast(v, p.dtype))
+        grad = tape.gradient(loss, x)
+        assert grad is not None, (
+            "the tape returned no gradient for the input — Sparsemax has "
+            "become non-differentiable and every assertion here is vacuous"
+        )
+        return (
+            np.asarray(grad, dtype=np.float64),
+            np.asarray(p, dtype=np.float64),
+        )
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_gradient_matches_analytic_vjp(self, policy: str) -> None:
+        """``grad_z == s * (v - mean_S(v))`` on every boundary-free row.
+
+        Runs the whole committed `_attack_corpus()` PLUS one random batch per
+        `_XLA_WIDTHS` (which is what keeps the non-monotone K points 256/257 in
+        the gradient grid too), under each of the four policies.
+
+        The tolerance is `_grad_atol`, i.e. ``4 * u_c(S) + 2 * u_r(S)`` at
+        ``S = max(|v|, 1)`` — see its derivation block. It must NOT be
+        tightened: measured slack over this corpus is 2.65x at its tightest
+        (bfloat16, 1.51 of 4.00 ulp), and a 2-ulp floor would leave float32 at
+        1.18x, i.e. red on ordinary reduction-order drift.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            out_dtype = _output_dtype()
+            rng = np.random.default_rng(9091)
+
+            batches: List[Tuple[str, np.ndarray]] = [
+                (label, z) for label, z, _ in _attack_corpus()
+            ]
+            batches += [
+                (
+                    f"random_K{width}",
+                    (rng.standard_normal((3, width)) * 3.0).astype(np.float32),
+                )
+                for width in _XLA_WIDTHS
+            ]
+
+            checked = 0
+            boundary_rows = 0
+            skipped: List[str] = []
+
+            for label, z in batches:
+                z_compute = _to_compute_dtype(z)
+
+                # The `any(isfinite)` predicate the exact oracle already uses:
+                # under `mixed_float16` the literal 1.68e7 casts to `inf`, so
+                # three corpus batches have no finite entry left and are out of
+                # the oracle's scope. They are SKIPPED here, never deleted from
+                # the corpus — they remain in scope for their own policies.
+                if not np.isfinite(
+                    np.asarray(z_compute, dtype=np.float64)
+                ).any(axis=-1).all():
+                    skipped.append(label)
+                    continue
+
+                v = rng.standard_normal(z.shape).astype(np.float32)
+                v_compute = _to_compute_dtype(v)
+                grad, _ = self._layer_gradient(z_compute, v_compute)
+
+                v64 = np.asarray(v_compute, dtype=np.float64)
+                atol = _grad_atol(v_compute, out_dtype)
+
+                for i, row in enumerate(_exact_sparsemax(z_compute)):
+                    tau = row["tau"]
+                    # A row is a BOUNDARY row iff some finite entry equals
+                    # `tau` EXACTLY, in exact rational arithmetic — that is the
+                    # `ops.maximum` tie that F-02 mis-differentiates. Excluded
+                    # here, pinned separately.
+                    if any(
+                        np.isfinite(float(val))
+                        and Fraction(*float(val).as_integer_ratio()) == tau
+                        for val in z_compute[i]
+                    ):
+                        boundary_rows += 1
+                        continue
+
+                    support = np.array(
+                        [float(o) > 0.0 for o in row["out"]], dtype=bool
+                    )
+                    k = int(support.sum())
+                    assert k >= 1, f"{label} row {i}: empty support is impossible"
+
+                    reference = np.zeros(v64.shape[-1], dtype=np.float64)
+                    reference[support] = (
+                        v64[i][support] - v64[i][support].sum() / k
+                    )
+
+                    err = float(np.max(np.abs(grad[i] - reference)))
+                    checked += 1
+                    assert err <= atol, (
+                        f"gradient != analytic VJP at {label} row {i} "
+                        f"(policy={policy}, K={z.shape[-1]}, k_z={k}): "
+                        f"max abs error {err:.6e} > derived atol {atol:.6e} "
+                        f"({err / atol:.2f}x the 4-ulp budget)"
+                    )
+
+            # Anti-vacuity: measured 46 / 43 / 45 / 46 boundary-free rows per
+            # policy (the fp16 figure is lower because of the three skips).
+            # A collapse below this floor means the corpus, the skip predicate
+            # or the boundary filter silently ate the grid.
+            assert checked >= 40, (
+                f"only {checked} boundary-free rows were checked under "
+                f"{policy} (expected >= 40; boundary rows excluded="
+                f"{boundary_rows}, batches skipped={skipped}) — this guard has "
+                "gone vacuous"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_rowmax_shift_is_gradient_neutral(self, policy: str) -> None:
+        """``grad(z)`` is BIT-IDENTICAL to ``grad(z - rowmax(z))``.
+
+        The committed guard for the ``ops.max`` route at `sparsemax.py:205-206`
+        — a gradient path the layer did not have before the row-max shift was
+        added to close Defects B/D. Because every row of the sparsemax Jacobian
+        sums to exactly 0, the upstream reaching `ops.max` sums to 0 too, so
+        the route contributes EXACTLY nothing.
+
+        Asserted at ZERO tolerance (`assert_array_equal`, not `assert_allclose`)
+        because the claim is exact and was measured exact — 0.000e+00 at every
+        point, all four policies. Do not weaken this to `allclose`: an
+        approximate version would pass even if the route started contributing.
+
+        The pre-shift is done in NUMPY at the layer boundary, in the compute
+        dtype, so no source edit is needed and both calls receive representable
+        bits.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            rng = np.random.default_rng(2026)
+            for width in _XLA_WIDTHS:
+                for frac in (0.0, 0.25):
+                    z = _partially_masked_row_batch(
+                        width, frac, seed=width + int(frac * 100)
+                    )
+                    z_compute = _to_compute_dtype(z)
+                    v_compute = _to_compute_dtype(
+                        rng.standard_normal(z.shape).astype(np.float32)
+                    )
+
+                    # Row max over the FINITE entries only; `-inf` positions
+                    # stay `-inf` under the shift, so the mask survives it.
+                    z64 = np.asarray(z_compute, dtype=np.float64)
+                    row_max = np.max(
+                        np.where(np.isfinite(z64), z64, -np.inf),
+                        axis=-1,
+                        keepdims=True,
+                    )
+                    shifted = (
+                        z_compute - row_max.astype(z_compute.dtype)
+                    ).astype(z_compute.dtype)
+
+                    grad_raw, _ = self._layer_gradient(z_compute, v_compute)
+                    grad_shifted, _ = self._layer_gradient(shifted, v_compute)
+
+                    np.testing.assert_array_equal(
+                        grad_raw,
+                        grad_shifted,
+                        err_msg=(
+                            f"the row-max shift is NOT gradient-neutral at "
+                            f"K={width} masked_fraction={frac} under {policy}: "
+                            f"worst |delta| = "
+                            f"{float(np.max(np.abs(grad_raw - grad_shifted)))}"
+                        ),
+                    )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_masked_gradients_are_exactly_zero_and_never_nan(
+        self, policy: str
+    ) -> None:
+        """`-inf` positions get gradient exactly ``0.0``; nothing is NaN or inf.
+
+        Three claims, at all four policies (the last two were measured at only
+        two policies before this plan's GPU round extended them):
+
+        1. **Non-vacuity control first.** A HALF-masked row must produce
+           NON-ZERO gradient at its support, otherwise "the masked slots are
+           zero" would be true of every input and would measure nothing. The
+           row and upstream are chosen so the answer is exactly representable
+           in every dtype: support ``{0, 1}``, ``k = 2``, upstream
+           ``[1, -1, 0, ...]``, so ``grad == [1, -1, 0, 0, 0, 0, 0, 0]``
+           EXACTLY — measured identical under all four policies.
+        2. A FULLY `-inf`-masked row makes the forward all-NaN (the known,
+           documented behaviour: such rows are rescued upstream by
+           `apply_attention_mask(rescue_axis=...)` and are out of the forward
+           oracle's scope) — but the GRADIENT is exactly ``0.0``, not NaN. That
+           asymmetry is the whole point of the case.
+        3. Over the WHOLE `_attack_corpus()`, including the three rows that
+           cast to non-finite under `mixed_float16`, the gradient is finite and
+           is exactly ``0.0`` at every non-finite input position. Nothing is
+           skipped here: unlike the exact oracle, this claim is well-defined on
+           an out-of-scope row, and it was measured to hold on all of them.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            # --- (1) the non-vacuity control ---------------------------------
+            z = np.full((1, 8), -np.inf, dtype=np.float32)
+            z[0, :4] = np.array([2.0, 1.5, 0.5, -1.0], dtype=np.float32)
+            v = np.zeros((1, 8), dtype=np.float32)
+            v[0, 0], v[0, 1] = 1.0, -1.0
+
+            grad, _ = self._layer_gradient(
+                _to_compute_dtype(z), _to_compute_dtype(v)
+            )
+            expected = np.zeros((1, 8), dtype=np.float64)
+            expected[0, 0], expected[0, 1] = 1.0, -1.0
+            np.testing.assert_array_equal(
+                grad,
+                expected,
+                err_msg=(
+                    f"CONTROL ({policy}): a half-masked row's gradient is "
+                    f"{grad.tolist()}, expected {expected.tolist()} — if it is "
+                    "all zeros, the assertions below measure nothing"
+                ),
+            )
+
+            # --- (2) the fully-masked row: NaN forward, ZERO gradient ---------
+            z_all_masked = _to_compute_dtype(
+                np.full((1, 8), -np.inf, dtype=np.float32)
+            )
+            grad, forward = self._layer_gradient(
+                z_all_masked, _to_compute_dtype(np.ones((1, 8), dtype=np.float32))
+            )
+            assert int(np.isnan(forward).sum()) == forward.size, (
+                f"premise ({policy}): a fully -inf-masked row's FORWARD is "
+                f"documented as all-NaN, but {int(np.isnan(forward).sum())} of "
+                f"{forward.size} entries are NaN — the case has changed shape "
+                "and claim (2) below is no longer the asymmetry it pins"
+            )
+            assert np.all(grad == 0.0), (
+                f"a fully -inf-masked row's gradient is not exactly 0.0 under "
+                f"{policy}: nan={int(np.isnan(grad).sum())}, "
+                f"inf={int(np.isinf(grad).sum())}, grad={grad.tolist()}"
+            )
+
+            # --- (3) the whole corpus: finite, and exactly 0 where masked -----
+            rng = np.random.default_rng(4242)
+            for label, z, _measured_under in _attack_corpus():
+                z_compute = _to_compute_dtype(z)
+                v_compute = _to_compute_dtype(
+                    rng.standard_normal(z.shape).astype(np.float32)
+                )
+                grad, _ = self._layer_gradient(z_compute, v_compute)
+
+                assert np.isfinite(grad).all(), (
+                    f"gradient is not finite on corpus row {label} under "
+                    f"{policy}: nan={int(np.isnan(grad).sum())}, "
+                    f"inf={int(np.isinf(grad).sum())} of {grad.size}"
+                )
+
+                masked = ~np.isfinite(np.asarray(z_compute, dtype=np.float64))
+                if masked.any():
+                    nonzero = int((grad[masked] != 0.0).sum())
+                    assert nonzero == 0, (
+                        f"{nonzero} of {int(masked.sum())} masked positions "
+                        f"have a non-zero gradient on corpus row {label} under "
+                        f"{policy}; largest is "
+                        f"{float(np.max(np.abs(grad[masked])))}"
+                    )
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
