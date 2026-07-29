@@ -355,6 +355,33 @@ def _reduction_dtype(input_dtype: str) -> str:
 # value, and lowering it for them is a separate, unmeasured change.
 # The default is `True`, so every pre-existing caller is BIT-IDENTICAL: the
 # `True` branch is the same `max(...)` expression, unmoved.
+#
+# WHAT THIS DID *NOT* FIX, AND THE FIXTURE COUPLING IT LEAVES BEHIND.
+# The two loss guards spell their tolerance `_TF32_ATOL_FLOOR + eps * max_j
+# sum|z - p|`. Unfloring `eps` did nothing to the LEADING ADDITIVE
+# `_TF32_ATOL_FLOOR`, which is a FLAT CONSTANT: it does not scale with `K`,
+# with `|L|`, or with anything else. On the float64 arms the derived term is
+# ~1e-13, so their atol is EXACTLY `1.000e-03` at every width — 100% constant,
+# 0% derived — while the error tracks the loss magnitude. Measured
+# (`iter-1/step-14`, GPU 1, `_partially_masked_row_batch(W, 0.0, seed)`, worst
+# over seeds 606/607/11/42/999/2024), worst `err/atol`:
+#   W:                        16       64      256     1024   floor share @1024
+#   float64 x float32     0.0151   0.1062   0.2716   0.5495   100%
+#   float64 x mixed_fp16  0.0109   0.0222   0.1401   1.6572   100%   <-- RED
+#   float32 anchor        0.0146   0.0926   0.1727   0.1707    31%
+#   fp16/bf16 arms (x4)   <=0.014  <=0.008  <=0.002  <=0.001  <=0.05%
+# So: DO NOT WIDEN THESE FIXTURES PAST `width=16` AS A "STRONGER TEST" WITHOUT
+# RE-DERIVING THE ADDITIVE TERM ON THE LOSS'S OWN ACCUMULATION SCALE. The
+# obvious move turns `float64 x mixed_float16` RED at 1024 (1.66x over) for no
+# defect at all — the guard is measuring float32 loss accumulation growing with
+# `K`, not the projection. Note the float32 anchor is NOT flat (its derived
+# `eps = 4.1723e-07` overtakes the floor by W=1024, share 96% -> 31%) and its
+# ratio saturates near 0.17; only the two float64 arms are truly width-blind.
+# The fp16/bf16 arms are governed by their derived `eps` (floor share 0.4-3%)
+# and are insensitive to width. Recorded, deliberately NOT fixed here: a
+# magnitude-aware additive term is a THIRD tolerance rule, i.e. a
+# Complexity-Budget tripwire, and changing a tolerance at this point needs its
+# own review round (`plans/LESSONS.md:47`).
 def _oracle_atol(
     z: np.ndarray, output_dtype: str, *, apply_tf32_floor: bool = True
 ) -> float:
@@ -2374,14 +2401,28 @@ class TestSparsemaxBackwardPass:
         the taped region is a NO-OP — a cast that actually converted there
         would add a rounding the derived budget does not carry.
 
-        That no-op is guaranteed by the ``z.dtype == v.dtype`` assert below
-        plus the fact that a default `Sparsemax` emits its input's dtype, and
-        it is EXECUTED, not assumed: measured at all four `_XLA_POLICIES`,
-        ``p.dtype == v.dtype`` and the cast is bit-identity
-        (`iter-1/step-13`). This docstring used to claim outright that "no cast
-        happens inside the taped region", which the line below contradicts —
-        the load-bearing statement is that the cast is a no-op BECAUSE of the
-        assert, not that it is absent.
+        A default `Sparsemax` does NOT emit its input's dtype — it emits the
+        ACTIVE POLICY's compute dtype, because a Keras layer autocasts its
+        input. Measured (`iter-1/step-14`, GPU 1): under `mixed_float16` a
+        float32 ``z`` gives ``p.dtype == float16``, and under `mixed_bfloat16`
+        ``bfloat16``. So ``p.dtype`` is pinned by the POLICY, and the cast is a
+        no-op exactly when ``v`` is in that same compute dtype. That is what
+        the two asserts below enforce JOINTLY: the first ties ``z`` to the
+        policy's compute dtype, the second ties ``v`` to ``z``.
+
+        This paragraph has now been wrong twice. It first claimed outright
+        that "no cast happens inside the taped region", which the line below
+        contradicts. Step 13 replaced that with "the no-op is guaranteed by
+        the ``z.dtype == v.dtype`` assert plus the fact that a default
+        `Sparsemax` emits its input's dtype" — ALSO false, and falsifiable in
+        one run: under `mixed_float16` with float32 ``z`` and float32 ``v``
+        that assert PASSES while ``p.dtype`` is float16, so
+        ``tf.cast(v, p.dtype)`` is a real DOWNCAST and this method accepted
+        the pair silently. Step 13 had measured ``p.dtype == v.dtype`` only on
+        POST-CAST inputs, i.e. it verified its conclusion under its own
+        assumption. The compute-dtype assert below is the repair; do not
+        delete it and do not weaken it back to a ``z``-vs-``v`` comparison,
+        which cannot see this at all.
 
         :param z_compute: 2-D logit batch in the compute dtype.
         :type z_compute: np.ndarray
@@ -2394,6 +2435,24 @@ class TestSparsemaxBackwardPass:
         :raises AssertionError: if the tape returns no gradient at all, which
             would make every downstream comparison vacuous.
         """
+        # DECISION plan-2026-07-29T110112-09832856/D-019
+        # BOTH asserts are load-bearing; DO NOT drop the compute-dtype one as
+        # "redundant with the z-vs-v one". `z.dtype == v.dtype` alone is blind
+        # to the actual hazard: under `mixed_float16`, float32 `z` and float32
+        # `v` PASS it, yet the layer autocasts and `p.dtype` is float16, so
+        # `tf.cast(v, p.dtype)` below is a real DOWNCAST that adds a rounding
+        # the derived budget does not carry (measured `iter-1/step-14`: the
+        # cast is non-bit-identical at `mixed_float16` and `mixed_bfloat16`,
+        # and at `float64` it is an upcast of the WRONG bits). `p.dtype`
+        # follows the POLICY, never the input, so the precondition can only be
+        # checked against `_output_dtype()`.
+        _policy_dtype = np.dtype(_NUMPY_DTYPE[_output_dtype()])
+        assert z_compute.dtype == _policy_dtype, (
+            f"z is {z_compute.dtype} but the active policy's compute dtype is "
+            f"{_policy_dtype}; the layer will autocast and emit "
+            f"{_policy_dtype}, making the tf.cast(v, p.dtype) below a real "
+            "conversion. Pass _to_compute_dtype() output."
+        )
         assert z_compute.dtype == v_compute.dtype, (
             f"z is {z_compute.dtype} but v is {v_compute.dtype}; both must be "
             "post-cast so no rounding happens inside the taped region"
