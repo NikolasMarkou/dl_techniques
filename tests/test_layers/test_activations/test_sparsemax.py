@@ -28,6 +28,7 @@ import numpy as np
 import keras
 from keras import ops
 import pytest
+import tensorflow as tf
 
 from dl_techniques.layers.activations.sparsemax import Sparsemax
 from dl_techniques.layers.attention.multi_head_cross_attention import (
@@ -1288,6 +1289,127 @@ class TestSparsemaxClosedDefects:
             assert abs(total - 1.0) <= 1e-2, (
                 f"Defect E: sum(out) = {total}, expected 1.0 "
                 f"(uniform 1/{m} over the finite entries)"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# XLA CAPABILITY GATE.
+#
+# This is a NEW capability, not a regression check: before the reduction was
+# widened, `Sparsemax` could not even TRACE under `tf.function` at
+# `mixed_float16` K=512, because `ops.arange(1, k + 1, dtype=inputs.dtype)`
+# lowers to `Range[Tidx=DT_HALF]`, for which no XLA kernel exists. There is
+# therefore no baseline to preserve here — every point below is newly bought
+# by the float32 ramp.
+#
+# WHY THE FULL K GRID, INCLUDING 257 AND 2048.  The eager break was
+# NON-MONOTONE in K: `mixed_bfloat16` raised at K=256 and K=257 but not at
+# K=512, and `mixed_float16` raised at K=2048 but not at K=4096. There is no
+# threshold to sample around, so a "representative" grid is exactly the grid
+# that misses the defect. Do not thin this parametrization on the assumption
+# that a monotone onset exists.
+#
+# WHAT IS ASSERTED.  "It compiles" alone is a test that passes the moment it
+# stops raising, which is far weaker than the property that matters. Each
+# point also asserts finiteness, exact `0.0` at every masked position, a
+# normalised row sum, and agreement with the EAGER answer within
+# `_oracle_atol` computed on the POST-CAST bits (never a raw float32 fixture:
+# feeding the tolerance pre-cast bits is the same oracle-input bug documented
+# at the top of this file, worth up to 5.4e-3 under fp16).
+# ---------------------------------------------------------------------
+
+#: The four policies the layer must compile under. Wider than
+#: `tests/test_layers/conftest.py`'s `dtype_policy` fixture, which omits
+#: `mixed_bfloat16` — the policy Defect C actually raised under at K=256.
+_XLA_POLICIES = ("float32", "mixed_float16", "mixed_bfloat16", "float64")
+
+#: `K` values. 257 and 2048 are load-bearing (see the note above); 8 is the
+#: small control and 4096 the largest measured width.
+_XLA_WIDTHS = (8, 256, 257, 512, 2048, 4096)
+
+
+class TestSparsemaxXLACapability:
+    """`Sparsemax` compiles and runs under `tf.function(jit_compile=True)`.
+
+    24 grid points: ``K`` in ``{8, 256, 257, 512, 2048, 4096}`` times
+    ``{float32, mixed_float16, mixed_bfloat16, float64}``.
+    """
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    @pytest.mark.parametrize("width", _XLA_WIDTHS)
+    def test_jit_compiled_sparsemax_matches_eager(
+        self, width: int, policy: str
+    ) -> None:
+        """Compile at ``(width, policy)``, run, and compare against eager.
+
+        :param width: Row width ``K``.
+        :type width: int
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            # Seeded, partially masked, never fully masked (the generator
+            # asserts that); the mask is what makes `-inf` reach the reduction.
+            z = _partially_masked_row_batch(width, 0.25, seed=width)
+            # Both paths are fed the bits the layer would receive anyway, so
+            # eager-vs-XLA is a comparison of ARITHMETIC, not of rounding at
+            # the layer boundary.
+            z_compute = _to_compute_dtype(z)
+            masked = ~np.isfinite(z_compute)
+
+            layer = Sparsemax()
+            eager = ops.convert_to_numpy(layer(z_compute))
+
+            @tf.function(jit_compile=True)
+            def _compiled(t):
+                return layer(t)
+
+            # `jit_compile=True` RAISES if XLA cannot lower the graph, so the
+            # call itself is the compilation assertion. Do not wrap it.
+            compiled_out = _compiled(tf.convert_to_tensor(z_compute))
+            xla = ops.convert_to_numpy(compiled_out)
+
+            assert keras.backend.standardize_dtype(compiled_out.dtype) == (
+                _output_dtype()
+            ), (
+                f"XLA output dtype {compiled_out.dtype} != compute dtype "
+                f"{_output_dtype()} under {policy}"
+            )
+
+            eager64 = eager.astype(np.float64)
+            xla64 = xla.astype(np.float64)
+
+            assert np.isfinite(xla64).all(), (
+                f"XLA output not finite at K={width} under {policy} "
+                f"(nan={int(np.isnan(xla64).sum())}, "
+                f"inf={int(np.isinf(xla64).sum())})"
+            )
+            assert np.all(xla64[masked] == 0.0), (
+                f"XLA output is non-zero at {int((xla64[masked] != 0.0).sum())} "
+                f"masked positions at K={width} under {policy}"
+            )
+
+            sums = xla64.sum(axis=-1)
+            worst = float(np.max(np.abs(sums - 1.0)))
+            assert worst <= 1e-2, (
+                f"XLA row sums are not normalised at K={width} under "
+                f"{policy}: worst |sum - 1| = {worst}"
+            )
+
+            atol = _oracle_atol(z_compute, _output_dtype())
+            np.testing.assert_allclose(
+                xla64,
+                eager64,
+                atol=atol,
+                rtol=0.0,
+                err_msg=(
+                    f"XLA disagrees with eager at K={width} under {policy} "
+                    f"(derived atol={atol})"
+                ),
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
