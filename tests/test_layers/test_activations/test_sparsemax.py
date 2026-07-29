@@ -277,13 +277,34 @@ _NUMPY_DTYPE = {
 # command printed beside it, every other statement DELETED. Importing the rule
 # from `sparsemax.py` is also wrong (an instrument must not share code with the
 # thing it measures) — see the docstring.
+#
+# DECISION plan-2026-07-29T110112-09832856/D-018
+# DO NOT CITE `sparsemax.py` BY LINE NUMBER FROM THIS MODULE. Not here, not in
+# a docstring, not inside an `xfail` reason string. Cite the SYMBOL (the
+# function plus the expression) and, where one exists, the anchored grep that
+# finds it. This is not style: step 9 of this plan inserted 47 lines into
+# `sparsemax.py` and every one of the 13 `sparsemax.py:NNN` citations in this
+# file silently came to name a different line — including all four copies of
+# the lockstep pointer just above, which came to name unrelated prose about
+# 5-D video transformers. A file:line citation is a hand-maintained lockstep
+# invariant with no guard, i.e. a latent defect (`plans/LESSONS.md:20`), and
+# renumbering them would only reset the clock.
 def _reduction_dtype(input_dtype: str) -> str:
     """The dtype the layer runs its sort/cumsum reduction in — the D-007 rule.
 
-    THE SINGLE SOURCE OF TRUTH IS
-    ``src/dl_techniques/layers/activations/sparsemax.py:225-227``.
+    THE SINGLE SOURCE OF TRUTH IS the ``reduction_dtype = ...`` assignment
+    inside ``Sparsemax.call``
+    (``src/dl_techniques/layers/activations/sparsemax.py``).
     This function is its ONE mirror on the test side. There are exactly two
     statements of this rule in the repository: the source and this helper.
+
+    CITED BY SYMBOL, NEVER BY LINE NUMBER. This pointer used to read
+    ``sparsemax.py:225-227``; step 9 of
+    ``plan-2026-07-29T110112-09832856`` inserted 47 lines above it and every
+    copy of that pointer silently came to name unrelated prose about 5-D video
+    transformers. A file:line citation is a hand-maintained lockstep
+    invariant, i.e. a latent defect (`plans/LESSONS.md:20`). Use the grep
+    below, which survives insertion.
 
     LOCKSTEP OBLIGATION. If the source rule moves, THIS MOVES. Every tolerance
     in this module charges a ``u_r`` (reduction-dtype ulp) term through this
@@ -323,7 +344,20 @@ def _reduction_dtype(input_dtype: str) -> str:
     )
 
 
-def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
+# DECISION plan-2026-07-29T110112-09832856/D-016
+# `apply_tf32_floor=False` EXISTS SO THE DERIVATION BELOW HAS EXACTLY ONE HOME.
+# Do NOT "just write the three terms out" at a caller that wants the unfloored
+# value — that was the suggested remedy for the loss guard's floored `eps`, and
+# taking it would have created a SECOND hand-maintained copy of this derivation
+# in a module whose whole D-008 history is the deletion of exactly that pattern
+# (`plans/LESSONS.md:20`). Do NOT delete or gate `_TF32_ATOL_FLOOR` itself
+# either: several forward guards (G6, the whole G8 grid) depend on the floored
+# value, and lowering it for them is a separate, unmeasured change.
+# The default is `True`, so every pre-existing caller is BIT-IDENTICAL: the
+# `True` branch is the same `max(...)` expression, unmoved.
+def _oracle_atol(
+    z: np.ndarray, output_dtype: str, *, apply_tf32_floor: bool = True
+) -> float:
     """Absolute tolerance for the layer-vs-oracle comparison on inputs ``z``.
 
     Returns ``max(_TF32_ATOL_FLOOR, 1.0 * u_c(D) + 0.5 * u_c(1) + 2.0 * u_r(1))``
@@ -339,6 +373,16 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
     :type z: np.ndarray
     :param output_dtype: Name of the layer's output dtype, e.g. ``'float16'``.
     :type output_dtype: str
+    :param apply_tf32_floor: Keyword-only, default ``True`` (the historical
+        behaviour, bit-identical). Pass ``False`` to get the DERIVED term
+        alone, without the ``_TF32_ATOL_FLOOR`` clamp. Only a caller that can
+        argue TF32 cannot reach its measurement may do so — the floor is a
+        float32 matmul/convolution belt and this layer has neither (the same
+        argument :func:`_grad_atol` makes for carrying no floor at all). At
+        float64 and float32 the derived term is ~7.8e-16 and ~4.2e-07, so the
+        clamp is 12 and 3 orders of magnitude wide there and silently dominates
+        anything built on top of it.
+    :type apply_tf32_floor: bool
 
     :return: Absolute tolerance for ``np.testing.assert_allclose``.
     :rtype: float
@@ -348,7 +392,8 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
 
     # The reduction dtype the layer will use — the D-007 rule, stated once in
     # `_reduction_dtype` and nowhere else on this side. See that helper's
-    # docstring for the lockstep obligation against `sparsemax.py:225-227`.
+    # docstring for the lockstep obligation against the `reduction_dtype = ...`
+    # assignment in `Sparsemax.call` (cited by symbol, not by line: see D-018).
     np_reduction = _NUMPY_DTYPE[_reduction_dtype(output_dtype)]
 
     finite = np.asarray(z)[np.isfinite(z)]
@@ -372,7 +417,7 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
         + _ULP_BUDGET_OUTPUT * u_c_one
         + _ULP_BUDGET_REDUCE * u_r_one
     )
-    return max(_TF32_ATOL_FLOOR, derived)
+    return max(_TF32_ATOL_FLOOR, derived) if apply_tf32_floor else derived
 
 
 # ---------------------------------------------------------------------
@@ -387,8 +432,9 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
 # `plan-2026-07-29T110112-09832856`.
 #
 # THE REDUCTION-DTYPE RULE IS NOT RESTATED HERE.  There are exactly TWO
-# statements of it in the repository: `sparsemax.py:225-227` (the SOURCE OF
-# TRUTH) and `_reduction_dtype` above (its one test-side mirror).  Both this
+# statements of it in the repository: the `reduction_dtype = ...` assignment in
+# `Sparsemax.call` (the SOURCE OF TRUTH, cited by symbol — see D-018 for why not
+# by line) and `_reduction_dtype` above (its one test-side mirror).  Both this
 # function and `_oracle_atol` call that helper; neither carries a copy.  A third
 # copy is a defect, not a style choice — see `_reduction_dtype`'s docstring for
 # the lockstep obligation and the grep that finds both sites, and `D-008` of
@@ -415,10 +461,10 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
 #                completely wrong answer at K=4096 and measure nothing.  The
 #                consequence is that this bound FAILS if the backward error ever
 #                starts growing with ``k`` — which is the point.
-#   1.0 u_c(S)   THE CAST BACK.  ``ops.cast(shifted, reduction_dtype)`` at
-#                `sparsemax.py:228` is differentiable, so the gradient crosses
-#                back from the reduction dtype into the compute dtype and is
-#                rounded once on the way.
+#   1.0 u_c(S)   THE CAST BACK.  `Sparsemax.call`'s
+#                ``ops.cast(shifted, reduction_dtype)`` is differentiable, so
+#                the gradient crosses back from the reduction dtype into the
+#                compute dtype and is rounded once on the way.
 #   2.0 u_r(S)   THE TWO ROUNDINGS THAT HAPPEN INSIDE the never-narrowed
 #                reduction dtype (the cumsum partial and the ``/ k_z`` of the
 #                ``tau`` route).  Negligible for float16/bfloat16 (the reduction
@@ -429,26 +475,53 @@ def _oracle_atol(z: np.ndarray, output_dtype: str) -> float:
 # / `ops.flip`), the `ops.where` selection and the integer `one_hot` path are
 # exact and contribute nothing; `k_z` is piecewise-constant and has NO gradient.
 #
-# DERIVED vs MEASURED (checked, NOT fitted; GPU, `CUDA_VISIBLE_DEVICES=1`).
-# The constants were fixed by the accounting first; the numbers below are what
-# the layer then measured over the whole committed `_attack_corpus()` — the
-# corpus `test_gradient_matches_analytic_vjp` actually runs on — at 4 policies:
+# DECISION plan-2026-07-29T110112-09832856/D-017
+# DERIVED vs MEASURED — THE ONE HOME FOR THESE NUMBERS.
 #
-#   policy           atol at S=1.0   worst measured   in ulp_out   slack
-#   float32          7.152557e-07    2.012e-07        1.69         3.55x
-#   mixed_float16    3.906488e-03    1.726e-03        0.88         4.55x
-#   mixed_bfloat16   3.125024e-02    2.365e-02        1.51         2.65x
-#   float64          1.332268e-15    2.776e-16        0.62         9.68x
+# Do NOT restate the slack figure anywhere else (not in `_grad_atol`'s
+# docstring, not in `TestSparsemaxBackwardPass`'s, not in a plan file). Two
+# earlier restatements of it drifted to two different wrong values and a third
+# value fell out of dividing the two columns of the table that stated them,
+# because the atol column was quoted at `S = 1.0` while the error column was
+# measured at the corpus's real `S ~ 2.5-3.4` (`plans/LESSONS.md:20`). Every
+# figure below is quoted AT ITS OWN WORST POINT'S `S`, so `err / atol` is an
+# arithmetic identity a reader can check on the line.
+#
+# GRID (name it, per the rule two paragraphs down): the loop of
+# `test_gradient_matches_analytic_vjp` exactly as shipped — the whole committed
+# `_attack_corpus()` PLUS one `rng(9091)` batch per `_XLA_WIDTHS`, with the
+# `any(isfinite)` skip and the exact-rational boundary-row filter applied.
+# The per-policy boundary-free ROW COUNTS this reproduced (which is how the
+# grid was confirmed to be the shipped one) are stated once, beside the
+# anti-vacuity floor they justify inside that test — not restated here.
+# Measured on GPU (`CUDA_VISIBLE_DEVICES=1`, RTX 4070), serial, two independent
+# runs at `iter-1/step-13`, agreeing to every digit.  The constants were fixed
+# by the accounting FIRST; these are what the layer then measured.
+#
+#   policy          worst point               S       atol=4u_c+2u_r  worst err     err/atol  slack   err in u_c(S)
+#   float32         random_K256 row 0         2.863578  1.430511e-06  1.577040e-07  0.1102    9.07x   0.66
+#   mixed_float16   property_w512_f0.9_s5 r1  3.380859  7.812977e-03  3.515625e-03  0.4500    2.22x   1.80
+#   mixed_bfloat16  random_K256 row 0         2.859375  6.250048e-02  9.602865e-03  0.1536    6.51x   0.62
+#   float64         property_w17_f0.0_s1 r2   2.577674  2.664535e-15  2.220446e-16  0.0833    12.00x  0.50
 #
 # DECISION plan-2026-07-29T110112-09832856/D-007
-# DO NOT TIGHTEN THIS BUDGET.  The real headroom is **2.65x at its tightest**
-# (bfloat16), NOT the ~5x an earlier record claimed: that 5x came from quoting
-# the RANDOM-K-GRID worst (0.73 ulp) as if it were the corpus worst (1.69 ulp).
-# Name the grid when quoting either.  A 2-ulp floor would leave bfloat16 at
-# 1.32x and float32 at 1.18x — thin enough that ordinary reduction-order drift
-# turns this guard permanently red for no signal, which is a guard that measures
-# nothing (`plans/LESSONS.md:47`).  See `D-007` of
-# `plan-2026-07-29T110112-09832856`.
+# DO NOT TIGHTEN THIS BUDGET.  The real headroom is **2.22x at its tightest, and
+# the tightest policy is `mixed_float16`** — not bfloat16, and not the ~5x an
+# earlier record claimed.  Two corrections are folded in here and both were
+# quoting-errors of the same species, so read the rule before the numbers:
+#   (i)  the ~5x came from quoting the RANDOM-K-GRID worst (0.73 ulp) as if it
+#        were the corpus worst.  NAME THE GRID WHEN QUOTING EITHER.
+#   (ii) the 2.65x-at-bfloat16 that replaced it came from dividing an atol
+#        quoted at `S = 1.0` by an error measured at the corpus's real `S`.
+#        NAME THE SCALE `S` WHEN QUOTING EITHER.  At a common `S` bfloat16 has
+#        6.51x, i.e. 2.9x MORE headroom than that figure claimed, while
+#        `mixed_float16` has 2.22x, i.e. 2.0x LESS.
+# Halving the budget to `2 * u_c(S)` would leave `mixed_float16` at **1.11x**
+# (3.906250e-03 against a measured 3.515625e-03) — thin enough that ordinary
+# reduction-order drift turns this guard permanently red for no signal, which is
+# a guard that measures nothing (`plans/LESSONS.md:47`).  Re-measure on the
+# target device before touching any constant here.  See `D-007` (superseded
+# figures) and `D-017` of `plan-2026-07-29T110112-09832856`.
 # ---------------------------------------------------------------------
 
 #: Ulp of ``S = max(|v|, 1)`` in the OUTPUT dtype, for the gradient budget:
@@ -731,14 +804,16 @@ def _exact_rows_along_axis(z_compute: np.ndarray, axis: int) -> np.ndarray:
     exists for the moved-axis / rank>2 / dynamic-K surface, and none may be
     written. ``np.moveaxis`` to last, ``reshape(-1, K)``, run the ONE exact
     rational oracle, reshape and move back. The layer does structurally the
-    same thing internally (``sparsemax.py:158-194`` transposes the reduction
-    axis to last and reshapes to ``(-1, k)``) — but the two agree only because
+    same thing internally (``Sparsemax.call``'s transpose/reshape shim moves
+    the reduction axis to last and reshapes to ``(-1, k)``) — but the two
+    agree only because
     both are correct, not because they share code: this adapter is pure numpy
     index bookkeeping and imports nothing from the layer.
 
     ``np.moveaxis`` accepts negative ``axis`` with the ordinary Python
     convention, so ``-2`` on a rank-4 batch is ``ndim - 2`` — the same
-    normalisation ``sparsemax.py:150`` performs. It also RAISES ``AxisError``
+    normalisation ``axis = self.axis if self.axis >= 0 else ndim + self.axis``
+    in ``Sparsemax.call`` performs. It also RAISES ``AxisError``
     on an out-of-range value, which is exactly what the layer does not do
     (F-06); out-of-range axes are out of scope here and are step 9's subject.
 
@@ -820,7 +895,9 @@ def _attack_corpus() -> List[_AttackCase]:
     """
     cases: List[_AttackCase] = []
 
-    # --- the four pin inputs, verbatim (test_sparsemax.py:507-724) ---
+    # --- the four pin inputs, verbatim from the `test_defect_{b,c,d,e}_closed_*`
+    # methods of `TestSparsemaxClosedDefects` (cited by symbol, not by line —
+    # see D-018) ---
     z = np.full((1, 4096), -16.95, dtype=np.float32)
     z[:, 0] = 0.0
     cases.append(("pin_defect_b_spread16.95_K4096", z, "mixed_float16"))
@@ -1573,8 +1650,9 @@ class TestSparsemaxClosedDefects:
     def test_reduction_dtype_mirror_agrees_with_the_source_rule(self) -> None:
         """The test-side D-007 mirror must be the SAME FUNCTION as the source.
 
-        ``_reduction_dtype`` (this module) mirrors the reduction-dtype rule at
-        ``sparsemax.py:225-227``. Every ``u_r`` term in ``_oracle_atol`` and
+        ``_reduction_dtype`` (this module) mirrors the ``reduction_dtype =
+        ...`` assignment in ``Sparsemax.call``. Every ``u_r`` term in
+        ``_oracle_atol`` and
         ``_grad_atol`` is charged through that mirror, so if the two ever
         disagree the tolerances are computed against the wrong dtype and the
         forward/backward guards go quietly VACUOUS rather than red. A comment
@@ -2257,8 +2335,9 @@ class TestSparsemaxXLACapability:
 # rule the forward oracles enforce, for the same reason.
 #
 # WHY BOUNDARY-FREE ROWS ONLY.  On a support-BOUNDARY row (some `z_i == tau`
-# exactly, so `p_i == 0` yet `shifted - tau == 0`), `ops.maximum` at
-# `sparsemax.py:556` routes a full gradient to an entry that `k_z` excludes.
+# exactly, so `p_i == 0` yet `shifted - tau == 0`), the
+# `ops.maximum(shifted - tau, 0.0)` in `Sparsemax.call` routes a full gradient
+# to an entry that `k_z` excludes.
 # The result is not even a Clarke subgradient (228/300 random directions give a
 # mixing coefficient outside [0, 1]), with errors up to 3.24. That is an OPEN
 # defect, deliberately not fixed here, and it is pinned separately rather than
@@ -2270,10 +2349,17 @@ class TestSparsemaxXLACapability:
 class TestSparsemaxBackwardPass:
     """`Sparsemax`'s gradient vs the analytic VJP, on boundary-free rows.
 
-    Measured on GPU at every point below (`CUDA_VISIBLE_DEVICES=1`): 46 / 43 /
-    45 / 46 boundary-free rows checked under float32 / mixed_float16 /
-    mixed_bfloat16 / float64, zero failures, worst error 1.69 ulp of the output
-    dtype against a 4-ulp budget.
+    Measured on GPU at every point below (`CUDA_VISIBLE_DEVICES=1`), zero
+    failures. The boundary-free row COUNTS are stated where they are
+    load-bearing — beside the anti-vacuity floor they justify, inside
+    `test_gradient_matches_analytic_vjp`.
+
+    THE WORST-ERROR AND SLACK FIGURES ARE DELIBERATELY NOT RESTATED HERE.
+    Their one home is the `DERIVED vs MEASURED` table above `_grad_atol`,
+    which quotes each policy at its own worst point's `S`. This docstring used
+    to carry its own copy ("worst error 1.69 ulp ... against a 4-ulp budget"),
+    which was the float32 number presented as the global one and was wrong
+    twice over — see `D-017` of `plan-2026-07-29T110112-09832856`.
     """
 
     @staticmethod
@@ -2284,9 +2370,18 @@ class TestSparsemaxBackwardPass:
 
         Internal to this class. Both arguments must ALREADY be in the active
         policy's compute dtype (:func:`_to_compute_dtype`), so that the tape
-        sees the bits the layer receives and no cast happens inside the taped
-        region — a cast there would add a rounding the derived budget does not
-        carry.
+        sees the bits the layer receives and the ``tf.cast(v, p.dtype)`` inside
+        the taped region is a NO-OP — a cast that actually converted there
+        would add a rounding the derived budget does not carry.
+
+        That no-op is guaranteed by the ``z.dtype == v.dtype`` assert below
+        plus the fact that a default `Sparsemax` emits its input's dtype, and
+        it is EXECUTED, not assumed: measured at all four `_XLA_POLICIES`,
+        ``p.dtype == v.dtype`` and the cast is bit-identity
+        (`iter-1/step-13`). This docstring used to claim outright that "no cast
+        happens inside the taped region", which the line below contradicts —
+        the load-bearing statement is that the cast is a no-op BECAUSE of the
+        assert, not that it is absent.
 
         :param z_compute: 2-D logit batch in the compute dtype.
         :type z_compute: np.ndarray
@@ -2329,10 +2424,11 @@ class TestSparsemaxBackwardPass:
         the gradient grid too), under each of the four policies.
 
         The tolerance is `_grad_atol`, i.e. ``4 * u_c(S) + 2 * u_r(S)`` at
-        ``S = max(|v|, 1)`` — see its derivation block. It must NOT be
-        tightened: measured slack over this corpus is 2.65x at its tightest
-        (bfloat16, 1.51 of 4.00 ulp), and a 2-ulp floor would leave float32 at
-        1.18x, i.e. red on ordinary reduction-order drift.
+        ``S = max(|v|, 1)``. It must NOT be tightened; the measured per-policy
+        slack, each figure quoted at its own worst point's ``S``, lives in the
+        ``DERIVED vs MEASURED`` table above `_grad_atol` and NOWHERE ELSE. Go
+        read it there rather than trusting a number restated here — a copy in
+        this docstring is exactly what drifted (`D-017`).
 
         :param policy: Global Keras dtype policy name.
         :type policy: str
@@ -2430,7 +2526,8 @@ class TestSparsemaxBackwardPass:
     def test_rowmax_shift_is_gradient_neutral(self, policy: str) -> None:
         """``grad(z)`` is BIT-IDENTICAL to ``grad(z - rowmax(z))``.
 
-        The committed guard for the ``ops.max`` route at `sparsemax.py:205-206`
+        The committed guard for the ``row_max = ops.max(inputs_2d, ...)`` /
+        ``shifted = inputs_2d - row_max`` route in ``Sparsemax.call``
         — a gradient path the layer did not have before the row-max shift was
         added to close Defects B/D. Because every row of the sparsemax Jacobian
         sums to exactly 0, the upstream reaching `ops.max` sums to 0 too, so
@@ -2608,8 +2705,8 @@ class TestSparsemaxBackwardPass:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "OPEN DEFECT F-02: ops.maximum(shifted - tau, 0.0) at "
-            "sparsemax.py:556 hands a full gradient to a support-BOUNDARY "
+            "OPEN DEFECT F-02: ops.maximum(shifted - tau, 0.0) in "
+            "Sparsemax.call hands a full gradient to a support-BOUNDARY "
             "entry (z_i == tau exactly, so p_i == 0 but shifted - tau == 0), "
             "while k_z correctly excludes it. User ruling for this plan: "
             "GUARD, do not fix."
@@ -2773,7 +2870,8 @@ class TestSparsemaxBackwardPass:
 #
 # THE NON-REDUCED DIMENSIONS ARE DELIBERATELY TINY (1..3). They cost oracle time
 # linearly and buy nothing: the layer flattens every one of them into the batch
-# dimension of a `(-1, k)` reshape (`sparsemax.py:194`), so a size-8 leading dim
+# dimension of `Sparsemax.call`'s `ops.reshape(inputs_permuted, (-1, k))`, so a
+# size-8 leading dim
 # exercises the identical code path as a size-2 one.
 #
 # `rank4_K4096_axism2` IS THE LIVE PRODUCTION SHAPE, not a synthetic corner.
@@ -3190,7 +3288,8 @@ class TestSparsemaxAgainstExactOracle:
     def test_dynamic_k_matches_the_exact_oracle(self, policy: str) -> None:
         """``input_shape[axis] is None`` — the reduction dim itself unknown.
 
-        `sparsemax.py:187-190` is the layer's ONLY static-shape read: it takes
+        ``Sparsemax.call``'s ``if input_shape[axis] is not None`` branch is the
+        layer's ONLY static-shape read: it takes
         ``k`` from ``input_shape[axis]`` when that is known and from the
         backend shape tensor otherwise, and four downstream consumers
         (``reshape``, ``arange``, ``reshape``, ``one_hot``) then have to accept
@@ -3245,7 +3344,7 @@ class TestSparsemaxAgainstExactOracle:
         One ``(rank, axis, K)`` point — rank-3, ``axis=1``, K=257 — at all four
         policies. The width grid under XLA is already swept at ``axis=-1`` by
         `TestSparsemaxXLACapability`; what is unique here is that XLA lowers the
-        TRANSPOSE/reshape shim (`sparsemax.py:158-194`) as well as the
+        TRANSPOSE/reshape shim of `Sparsemax.call` as well as the
         projection, and that the comparison is against the EXACT oracle rather
         than against the layer's own eager answer.
 
@@ -3582,7 +3681,25 @@ class TestSparsemaxLossDtypePolicy:
             # float32 summation the loss itself performs. Charging `eps` at
             # float32 instead would under-budget bf16 by ~1e4x and this guard
             # would be permanently red.
-            eps = _oracle_atol(z_inner, inner_dtype)
+            #
+            # `apply_tf32_floor=False` IS LOAD-BEARING; DO NOT DROP IT.
+            # `_oracle_atol`'s clamp is a TF32 belt, and TF32 is a float32
+            # matmul/convolution feature: neither `Sparsemax` nor
+            # `SparsemaxLoss` contains a matmul or a convolution, so nothing on
+            # this path can bind it (the identical argument `_grad_atol`'s
+            # docstring makes for carrying no floor at all). Charging the
+            # CLAMPED value here multiplied 1e-3 by `max_j sum|z - p| = 93.27`
+            # and made the float64 arm 94x looser than derivable: MEASURED at
+            # `iter-1/step-13` on GPU, a systematic 1% shrink of the projection
+            # (`p -> 0.99p`, moving the loss by 7.42e-02) PASSED it, and 0.1%
+            # passed all six arms. Unfloored, the float64 arms run at atol
+            # 1.000e-03 against measured errors 1.006e-05 / 3.897e-06 — still
+            # 99x / 257x margin — and both go red on 1% AND on 0.1%. The fp16
+            # and bf16 arms are BYTE-UNCHANGED (their derived `eps`, 1.4651e-03
+            # and 1.1719e-02, already exceeds the floor), so this tightening
+            # buys the float64 third of the grid and costs the other two
+            # nothing.
+            eps = _oracle_atol(z_inner, inner_dtype, apply_tf32_floor=False)
             atol = _TF32_ATOL_FLOOR + eps * float(
                 np.max(np.sum(np.abs(z_outer - p64), axis=-1))
             )
@@ -3660,7 +3777,17 @@ class TestSparsemaxLossDtypePolicy:
             # is what the frozen sub-layer runs in - charging it at the ambient
             # fp16 would make this float32 anchor 1.47x looser than the arm it
             # claims to pin.
-            eps = _oracle_atol(z_inner, inner_dtype)
+            #
+            # `apply_tf32_floor=False` for the same reason as in the
+            # narrow-policy test above (no matmul, no convolution, nothing for
+            # TF32 to bind to) - see the long note there. The reviewer that
+            # raised this only measured the float64 arms; this float32 anchor
+            # was floored too, and gains just as much. MEASURED at
+            # `iter-1/step-13` on GPU: atol 1.005e-01 -> 1.042e-03, a 96.5x
+            # tightening, against a measured error of 1.091e-05 (95x margin
+            # retained), and it now goes RED on both a 1% and a 0.1% systematic
+            # shrink of the projection, which it did not before.
+            eps = _oracle_atol(z_inner, inner_dtype, apply_tf32_floor=False)
             atol = _TF32_ATOL_FLOOR + eps * float(
                 np.max(np.sum(np.abs(z64 - p64), axis=-1))
             )
