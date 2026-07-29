@@ -253,7 +253,7 @@ class Sparsemax(keras.layers.Layer):
         row_max = ops.max(inputs_2d, axis=-1, keepdims=True)
         shifted = inputs_2d - row_max
 
-        # DECISION plan-2026-07-29-9bfc04c5/D-007
+        # DECISION plan-2026-07-29T070705-9bfc04c5/D-007
         # ---------------------------------------------------------------
         # The reduction dtype WIDENS; it must never NARROW. Only float16 and
         # bfloat16 lack the range and integer precision the reduction needs,
@@ -373,7 +373,7 @@ class Sparsemax(keras.layers.Layer):
         #     `::test_finite_cumsum_overflow_rows_are_correct_not_nan`.
         #
         # (b) FOUR FURTHER DEFECTS — B, C, D and E — ALL **CLOSED** by
-        #     plan-2026-07-29-9bfc04c5. They stay on the record with the
+        #     plan-2026-07-29T070705-9bfc04c5. They stay on the record with the
         #     magnitudes at which they were first measured, because those
         #     magnitudes are what made them findable and are what any
         #     regression would have to reproduce. Do NOT read them as open.
@@ -390,7 +390,7 @@ class Sparsemax(keras.layers.Layer):
         #       M3 — run sort / cumsum / support / `k_z` / one-hot in a
         #            reduction dtype that WIDENS but never NARROWS. That rule,
         #            and the measured cost of getting it wrong, live in the
-        #            `plan-2026-07-29-9bfc04c5/D-007` anchor above; they are
+        #            `plan-2026-07-29T070705-9bfc04c5/D-007` anchor above; they are
         #            deliberately not restated here, and nothing in this clause
         #            overrides them.
         #       - Defect B (line ~220 pre-fix): an overflow-born non-finite
@@ -523,8 +523,9 @@ class Sparsemax(keras.layers.Layer):
         #     predicate on `z_cumsum` therefore trades a wrong-but-loud row for
         #     a correct-but-destroyed one, on commoner shapes.
         #
-        # (f) DELIBERATE SCOPE-OUTS AND MEASURED LIMITS (plan-2026-07-29-9bfc04c5).
-        #     Recorded so a future reader sees choices, not omissions.
+        # (f) DELIBERATE SCOPE-OUTS AND MEASURED LIMITS
+        #     (plan-2026-07-29T070705-9bfc04c5). Recorded so a future reader
+        #     sees choices, not omissions.
         #
         #     THE OUTPUT-SIDE VALIDITY PREDICATE (`|sum(out) - 1| > tol`) WAS
         #     DROPPED FROM SCOPE, not forgotten. An earlier revision of clause
@@ -547,11 +548,14 @@ class Sparsemax(keras.layers.Layer):
         #     returning float32 under an fp16 policy: that changes the dtype
         #     contract for every consumer, and M1 already removed the precision
         #     argument for doing so (clause (d)).
-        #     CONSUMER CONSTRAINT: `losses/sparsemax_loss.py` does not currently
-        #     accommodate that compute-dtype output contract under a non-default
-        #     policy. That is a defect in the LOSS and its fix belongs in the
-        #     loss's own file — it is NOT a reason to make this layer return
-        #     float32.
+        #     CONSUMER CONSTRAINT (RESOLVED in the loss, not here):
+        #     `losses/sparsemax_loss.py` used to break under a non-default
+        #     policy because it consumed this compute-dtype output directly.
+        #     It now CASTS at its own boundary — `keras.ops.cast(..., self.dtype)`
+        #     — so the defect was fixed in the loss's own file, which is where
+        #     it belonged. That is still NOT a reason to make this layer return
+        #     float32: the cast-back contract above is unchanged, and any future
+        #     consumer with the same complaint gets the same answer.
         #
         #     FULLY-MASKED ROWS (`all(z[i]) == -inf`) RETURN ALL-NaN, under all
         #     four dtype policies, IDENTICALLY before and after this plan:
@@ -563,18 +567,41 @@ class Sparsemax(keras.layers.Layer):
         #     (`out` is that one-hot, `sum = 1.0`), so the degeneracy is
         #     strictly the all-masked case.
         #
-        #     COST. The widened reduction costs ~12% eager wall-clock and 2x
-        #     memory in the reduction intermediates; the XLA capability grid
-        #     adds ~5-11s to the activations test gate.
+        #     COST. Measured eager wall-clock (min-of-80, 64 rows, K in
+        #     {8,256,4096} x 4 policies, two runs), dominated by the ROW-MAX
+        #     shift (M1), NOT by the widening (M3, which measures inside
+        #     noise): M1 is +6%..+22% CPU and +10%..+24% GPU, positive at
+        #     24/24 points on both; M3 is -31%..+10% CPU and -4%..+16% GPU,
+        #     sign-unstable. Total vs the pre-plan bytes is -6%..+22% CPU and
+        #     +16%..+41% GPU — strongly shape- and policy-dependent, so do not
+        #     quote a point estimate. These are per-call eager latencies
+        #     dominated by op dispatch, not kernel time. The widened reduction
+        #     costs 2x memory in its intermediates for float16 / bfloat16
+        #     ONLY; float32 and float64 are unwidened (D-007). The XLA
+        #     capability grid adds ~5-11s to the activations test gate.
         #
-        #     TOLERANCE / DUPLICATION. The test file's `_oracle_atol` derivation
-        #     re-states D-007's reduction-dtype rule on purpose (an oracle must
-        #     not share code with the thing it checks). A future change to
-        #     `reduction_dtype` must move that copy in LOCKSTEP. Note also that
-        #     the guard against re-narrowing float64 is THIS ANCHOR plus D-007's
-        #     recorded measurement — NOT the tolerance test: the narrowed
-        #     float64 error (1.99e-08) sits far under the 1e-3 TF32 floor those
-        #     assertions carry, so they would stay green through the regression.
+        #     TOLERANCE / DUPLICATION. The test file re-states D-007's
+        #     reduction-dtype rule on purpose (an oracle must not share code
+        #     with the thing it checks). That restatement lives in ONE place:
+        #     the private `_reduction_dtype()` helper in `test_sparsemax.py`
+        #     (it used to be inlined in `_oracle_atol`; both inline copies were
+        #     deleted). A future change to `reduction_dtype` must move that
+        #     copy in LOCKSTEP — and that obligation is now EXECUTABLE, not
+        #     just prose: `TestSparsemaxClosedDefects::
+        #     test_reduction_dtype_mirror_agrees_with_the_source_rule` parses
+        #     the `reduction_dtype` expression ABOVE with `ast`, evaluates it
+        #     over the four dtype names against the mirror, and goes red if
+        #     either side drifts.
+        #     Note also that the ORDINARY tolerance assertions still cannot see
+        #     a re-narrowing of float64: the narrowed error (1.99e-08) sits far
+        #     under the 1e-3 TF32 floor they carry, so they stay green through
+        #     the regression. That blind spot is no longer guarded by this
+        #     anchor alone — `TestSparsemaxClosedDefects::
+        #     test_float64_reduction_is_never_narrowed_to_float32` covers it
+        #     with a hard-coded 1e-12 tolerance that deliberately does NOT come
+        #     from `_oracle_atol`. Executed, not derived: re-narrowing the rule
+        #     turns exactly that guard, the mirror guard above and one
+        #     float64 gradient case red, and nothing else.
         # ---------------------------------------------------------------
         # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
         # where the one-hot is set, substitute an exact zero everywhere else,

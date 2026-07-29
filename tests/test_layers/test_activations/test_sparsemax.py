@@ -185,8 +185,11 @@ def _sparsemax_reference(z: np.ndarray) -> np.ndarray:
 # The consequence is that this test FAILS if the layer's accumulation error ever
 # starts growing with ``k`` — which is the point.  (ii) A DISCRETE
 # mis-selection of ``k_z`` at an exact tie is not an ulp-sized event and is not
-# charged here; it is pinned separately by the exact-rational oracle tests,
-# which compare ``k_z`` itself.
+# charged here.  NO committed test compares the LAYER's ``k_z`` to the oracle's:
+# ``k_z`` is internal to ``call()`` and is not observable from the output.  The
+# risk was measured benign — ``tau`` is invariant across an exact tie, so a
+# mis-selection at a tie cannot change the answer — but that is a MEASUREMENT,
+# not a guard.
 #
 # DERIVED vs MEASURED (checked, NOT fitted).  The constants above were fixed by
 # the accounting FIRST; the numbers below are what the fixed layer then measured
