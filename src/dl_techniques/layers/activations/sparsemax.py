@@ -197,9 +197,18 @@ class Sparsemax(keras.layers.Layer):
         # CORE ALGORITHM: Sparsemax Logic
         # =====================================================================
 
+        # 0. Shift by the row max, then widen the reduction to float32.
+        # Sparsemax is shift-invariant, so subtracting the row max is EXACT and
+        # moves the final cancellation from scale |z| down to the row spread.
+        # The reduction below then runs in float32 under every policy, which is
+        # what the ramp / cumsum / support test / k_z count actually need.
+        row_max = ops.max(inputs_2d, axis=-1, keepdims=True)
+        shifted = inputs_2d - row_max
+        shifted_f32 = ops.cast(shifted, "float32")
+
         # 1. Sort logits (descending)
         # Necessary to find the "elbow" where probabilities drop to zero.
-        sorted_logits = ops.sort(inputs_2d, axis=-1)
+        sorted_logits = ops.sort(shifted_f32, axis=-1)
         sorted_logits = ops.flip(sorted_logits, axis=-1)
 
         # 2. Cumulative Sum
@@ -207,7 +216,7 @@ class Sparsemax(keras.layers.Layer):
         z_cumsum = ops.cumsum(sorted_logits, axis=-1)
 
         # 3. Create range vector [1, 2, ..., K]
-        k_values = ops.arange(1, k + 1, dtype=inputs.dtype)
+        k_values = ops.arange(1, k + 1, dtype="float32")
 
         # Explicit Reshape: (K,) -> (1, K)
         # "Attempt": Just use k_values.
@@ -218,7 +227,7 @@ class Sparsemax(keras.layers.Layer):
         # Calculate the condition for every element.
         # support > 0 means that element is part of the active set.
         support = 1.0 + k_values * sorted_logits - z_cumsum
-        support_mask = ops.cast(support > 0, inputs.dtype)
+        support_mask = ops.cast(support > 0, "float32")
 
         # k_z is the count of active elements (the "support size")
         # Shape: (N, 1) - One value per sample in the flattened batch
@@ -256,7 +265,7 @@ class Sparsemax(keras.layers.Layer):
 
         # Create One-Hot Mask: (N, K)
         # Only the position corresponding to k(z) will be 1.0, others 0.0
-        gather_mask = ops.one_hot(support_indices, k, dtype=inputs.dtype)
+        gather_mask = ops.one_hot(support_indices, k, dtype="float32")
 
         # DECISION plan-2026-07-28T134123-420f6ccb/D-017
         # ---------------------------------------------------------------
@@ -423,11 +432,18 @@ class Sparsemax(keras.layers.Layer):
 
         # Calculate Tau (Threshold)
         # tau = (sum(z_support) - 1) / |support|
-        tau = (z_cumsum_at_k - 1.0) / k_z
+        # `tau` is the ONLY value cast back: it is (N, 1), and casting it here
+        # keeps the observable output dtype equal to the compute dtype, so
+        # `compute_output_shape` stays truthful and no `compute_output_spec`
+        # override is needed.
+        tau = ops.cast((z_cumsum_at_k - 1.0) / k_z, inputs.dtype)
 
         # Projection: P = max(0, z - tau)
         # This naturally sets elements outside the support to exactly zero.
-        output_2d = ops.maximum(inputs_2d - tau, 0.0)
+        # MUST read `shifted`, NOT `inputs_2d`: `tau` was derived from the
+        # SHIFTED row, and it is this line's cancellation being at scale
+        # `spread` rather than `max|z|` that closes the D-017(d) plateau route.
+        output_2d = ops.maximum(shifted - tau, 0.0)
 
         # =====================================================================
         # DECISION 4: Restore Structure
