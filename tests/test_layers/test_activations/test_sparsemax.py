@@ -1,18 +1,21 @@
 """Tests for the Sparsemax activation layer.
 
-.. warning::
+.. note::
 
-   **THIS FILE BEING GREEN DOES NOT MEAN SPARSEMAX IS NUMERICALLY CORRECT.**
-   The work that produced these tests closed **Defect A only** — the
-   ``0 * -inf = NaN`` arithmetic gather that made a partially ``-inf``-masked
-   row return all-``NaN``.  Four further defects (**B**, **C**, **D**, **E**)
-   were MEASURED and remain **OPEN and UNGUARDED** inside ``Sparsemax.call()``;
-   see the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
-   ``src/dl_techniques/layers/activations/sparsemax.py``.  They are pinned by
-   :class:`TestSparsemaxOpenDefects` below as ``xfail(strict=True)`` cases —
-   pinned, not fixed.  A fifth pin there records a REGRESSION the same work
-   knowingly shipped: on Defect-B inputs the failure moved from loud (``NaN``)
-   to silent (a finite, un-normalised row).
+   **Defects A, B, C, D and E are all CLOSED and this file now asserts it
+   directly.**  Defect A (the ``0 * -inf = NaN`` arithmetic gather) was closed
+   first; B, C, D and E — which shared one root cause, a reduction (ramp,
+   cumsum, support test, ``k_z`` count) running in a compute dtype with
+   neither the range nor the integer precision the algorithm needs — were
+   closed by subtracting the row max, building the ``arange`` ramp in
+   ``float32``, and running the reduction in a NEVER-NARROWED dtype.
+
+   :class:`TestSparsemaxClosedDefects` below is the executable record.  Those
+   cases were previously ``xfail(strict=True)`` pins on OPEN defects; the
+   markers are gone and every one of them is now a **live** assertion of the
+   correct behaviour, so a regression on any of the four families fails this
+   file loudly.  See the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017``
+   anchor in ``src/dl_techniques/layers/activations/sparsemax.py``.
 """
 
 import os
@@ -444,7 +447,7 @@ def _attack_corpus() -> List[_AttackCase]:
 
     Contents, all reproduced verbatim from where they were measured:
 
-    * the four ``TestSparsemaxOpenDefects`` pin inputs (Defects B/C/D/E — the
+    * the four ``TestSparsemaxClosedDefects`` pin inputs (Defects B/C/D/E — the
       5th pin shares Defect B's input);
     * the ``D-017`` clause (d) plateau rows (fp16, K=512 and K=1024);
     * the three Defect-D onsets (float32 ``|z| >= 1.68e7``, fp16 ``>= 2048``,
@@ -901,66 +904,68 @@ class TestExactRationalOracle:
 
 
 # ---------------------------------------------------------------------
-# SCOPE PINS: FIVE cases — the four OPEN defects B/C/D/E, plus the accepted
-# loud -> silent conversion this plan knowingly ships on Defect-B inputs.
+# REGRESSION GUARDS for the four CLOSED defects B/C/D/E.
 #
-# Each case below asserts the CORRECT behaviour and is expected to FAIL.
-# `strict=True` is the whole point: when the follow-up plan fixes one of these,
-# the case XPASSes, `strict=True` turns that XPASS into a hard FAILURE, and
-# whoever fixed it is FORCED to delete the marker rather than have the
-# improvement absorbed silently. Do not relax these to non-strict xfail, to
-# `skip`, or delete them: an anchor without a test that can fail is a comment,
-# not a guard.
+# These five cases were `xfail(strict=True)` pins while B/C/D/E were open.
+# Each already asserted the CORRECT behaviour, so closing the defects turned
+# every one of them into an XPASS — and `strict=True` converted that XPASS
+# into a hard FAILURE, which is exactly what forced the markers to be deleted
+# rather than letting the improvement be absorbed silently. The markers are
+# now gone and the bodies are LIVE assertions.
 #
-# An `xpassed` here CONTRADICTS a measured defect. That is a FINDING to
-# investigate, never a win to bank.
+# Do not weaken these back into `xfail`/`skip`, and do not delete them: an
+# anchor without a test that can fail is a comment, not a guard. Each case
+# is the only committed repro of its input family, at the magnitude where
+# the defect was originally measured.
 # ---------------------------------------------------------------------
 
 
-class TestSparsemaxOpenDefects:
-    """Executable record of what ``Sparsemax`` still gets WRONG.
+class TestSparsemaxClosedDefects:
+    """Executable record of the four defects ``Sparsemax`` no longer has.
 
-    **A green test file does NOT mean sparsemax is numerically correct.** The
-    change that landed alongside these tests closed **Defect A** (the
-    ``0 * -inf = NaN`` gather) and, as a bonus, the all-finite cumsum-overflow
-    family — and nothing else. Defects **B**, **C**, **D** and **E** below are
-    MEASURED, OPEN, UNGUARDED and deferred to a follow-up plan. They share one
-    root cause: the reduction (ramp, cumsum, support test, ``k_z`` count) runs
-    in the COMPUTE dtype, which under ``float16`` / ``bfloat16`` has neither
-    the range nor the integer precision the algorithm needs — and under
-    ``float32`` fails once magnitudes reach ~1.7e7.
+    Defect **A** (the ``0 * -inf = NaN`` gather) and the all-finite
+    cumsum-overflow family were closed first. Defects **B**, **C**, **D** and
+    **E** below shared one root cause — the reduction (ramp, cumsum, support
+    test, ``k_z`` count) ran in the COMPUTE dtype, which under ``float16`` /
+    ``bfloat16`` has neither the range nor the integer precision the algorithm
+    needs, and which under ``float32`` fails once magnitudes reach ~1.7e7.
+    They are closed by three mechanisms: subtracting the row max before the
+    projection, building the ``arange`` ramp in ``float32``, and running the
+    reduction in a never-narrowed dtype (``float32`` for ``float16`` /
+    ``bfloat16``, the compute dtype itself for ``float32`` / ``float64``).
 
-    A **fifth** pin records something different in kind: not a defect this
-    change failed to fix, but a REGRESSION it knowingly introduced — on
-    Defect-B inputs the failure moved from loud (NaN) to silent (a finite,
-    un-normalised row). It is accepted deliberately; see clause (e) of the
-    anchor.
+    The fifth case used to record something different in kind: an accepted
+    REGRESSION where, on Defect-B inputs, the failure had moved from loud
+    (``NaN``) to silent (a finite, un-normalised row). That premise is
+    **eliminated**, not merely fixed — the row is now simply correct — so the
+    case was retargeted onto the strictly stronger exact-answer claim on the
+    same input rather than deleted (which would have left the family with only
+    the weaker ``sum(out)`` check).
 
     See the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
     ``src/dl_techniques/layers/activations/sparsemax.py``.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Defect B (sparsemax.py:~220, OPEN, deferred to the follow-up "
-            "'beta' plan): an overflow-born non-finite z_cumsum is ADMITTED to "
-            "the support because support = 1 + finite - (-inf) = +inf > 0. "
-            "Measured at spread 16.95, mixed_float16, K=4096, with NO -inf in "
-            "the input: k_z = 1863 where the exact answer is 1. This case "
-            "fails on the NORMALISATION assertion: the output is entirely "
-            "FINITE (nan=0, inf=0) and sum(out) = 16.9375 where 1.0 is "
-            "correct. (An interim revision of this plan added a 'loudness "
-            "guard' that made it fail on the FINITENESS assertion with "
-            "nan=4096 instead; the guard was measured to destroy correct "
-            "answers on ordinary rows and was REVERTED — see clause (e) of the "
-            "D-017 anchor. Do not re-derive it.) The silence itself is pinned "
-            "separately by test_defect_b_loud_to_silent_conversion_is_"
-            "accepted. Remove this marker when beta fixes it."
-        ),
-    )
-    def test_defect_b_overflow_born_inf_admitted_to_support(self) -> None:
-        """fp16 cumsum overflow must not inflate the support set."""
+    def test_defect_b_closed_overflow_born_inf_excluded_from_support(self) -> None:
+        """fp16 cumsum overflow must not inflate the support set.
+
+        Defect B (``sparsemax.py:~220``, CLOSED): an overflow-born non-finite
+        ``z_cumsum`` used to be ADMITTED to the support, because
+        ``support = 1 + finite - (-inf) = +inf > 0``. Measured at spread 16.95,
+        ``mixed_float16``, K=4096, with NO ``-inf`` anywhere in the input:
+        ``k_z = 1863`` where the exact answer is ``1``, giving an entirely
+        FINITE output (nan=0, inf=0) with ``sum(out) = 16.9375``. The cumsum no
+        longer overflows because the row max is subtracted first and the
+        reduction runs in float32.
+
+        An interim attempt at a "loudness guard" made this row fail on the
+        FINITENESS assertion (nan=4096) instead; it was measured to destroy
+        correct answers on ordinary rows and was REVERTED — see clause (e) of
+        the D-017 anchor. Do not re-derive it.
+
+        The exact answer on this row is pinned, more strongly, by
+        ``test_defect_b_closed_max_entry_takes_all_mass_on_the_spread_row``.
+        """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("mixed_float16")
         try:
@@ -982,32 +987,28 @@ class TestSparsemaxOpenDefects:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "ACCEPTED LOUD -> SILENT CONVERSION on Defect-B inputs (OPEN, "
-            "deferred to the follow-up 'beta' plan). This pin is about the "
-            "ALARM, not the answer: on this all-finite fp16 row the layer "
-            "SHOULD either be normalised or fail visibly, and it does NEITHER "
-            "— it returns a finite, plausible-looking sum(out) = 16.9375 where "
-            "1.0 is correct. Before this plan the same input returned "
-            "nan=4096, because the `-inf * 0.0` product at the NON-SELECTED "
-            "overflowed positions manufactured a NaN that INCIDENTALLY masked "
-            "Defect B's wrong k_z. The ops.where selection removes that "
-            "product, so the pre-existing wrong answer is now quiet. This is "
-            "DELIBERATE: the alternative — a guard keyed on cumsum finiteness "
-            "— was implemented, measured and REVERTED because it destroyed "
-            "exactly-correct answers on two ordinary input families (see "
-            "test_finite_cumsum_overflow_rows_are_correct_not_nan). Full "
-            "reasoning: clause (e) of the "
-            "`# DECISION plan-2026-07-28T134123-420f6ccb/D-017` anchor in "
-            "sparsemax.py. Beta closes this with a widened reduction plus an "
-            "OUTPUT-side predicate (|sum(out) - 1| > tol); remove this marker "
-            "then."
-        ),
-    )
-    def test_defect_b_loud_to_silent_conversion_is_accepted(self) -> None:
-        """A Defect-B row must be either normalised OR loud. It is neither."""
+    def test_defect_b_closed_max_entry_takes_all_mass_on_the_spread_row(self) -> None:
+        """The Defect-B spread row must be EXACTLY one-hot on its maximum.
+
+        Same input as
+        ``test_defect_b_closed_overflow_born_inf_excluded_from_support``, but a
+        strictly stronger claim: not merely finite-and-normalised, but the
+        exact answer. With a spread of 16.95 over K=4096 the projection puts
+        all the mass on the single largest entry, so ``out[0, 0] == 1.0`` and
+        every other entry is EXACTLY ``0.0``.
+
+        This case used to be ``test_defect_b_loud_to_silent_conversion_is_
+        accepted``, an ``xfail(strict=True)`` pin asserting only ``normalised
+        or loud`` — a deliberately accepted regression where the row was
+        neither correct (``sum(out) = 16.9375``) nor alarming (nan=0, inf=0).
+        That premise is ELIMINATED, not merely fixed, so the case was
+        retargeted rather than deleted; deleting it would have left this input
+        family with only the weaker ``sum(out)`` check above. See D-004 of
+        ``plan-2026-07-29T070705-9bfc04c5``.
+
+        The ``0.0`` assertion is exact on purpose: it is what distinguishes
+        "the right answer" from "an answer that happens to sum to 1".
+        """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("mixed_float16")
         try:
@@ -1018,30 +1019,41 @@ class TestSparsemaxOpenDefects:
 
             out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
 
-            total = float(np.sum(out[np.isfinite(out)]))
-            normalised = abs(total - 1.0) <= 1e-2
-            loud = not np.isfinite(out).all()
-            assert normalised or loud, (
-                "accepted loud->silent conversion: the row is neither correct "
-                f"nor alarming — finite everywhere, sum(out) = {total}, "
-                "expected 1.0"
+            assert np.isfinite(out).all(), (
+                "the row is not finite "
+                f"(nan={int(np.isnan(out).sum())}, inf={int(np.isinf(out).sum())})"
+            )
+
+            atol = _oracle_atol(z, _output_dtype())
+            assert abs(float(out[0, 0]) - 1.0) <= atol, (
+                f"the strict maximum must take ALL the mass: out[0, 0] = "
+                f"{float(out[0, 0])}, expected 1.0 (derived atol={atol:.3e})"
+            )
+
+            rest = out[0, 1:]
+            nonzero = int((rest != 0.0).sum())
+            assert nonzero == 0, (
+                f"{nonzero} of {rest.size} non-maximal entries are not exactly "
+                f"0.0; largest is {float(np.max(np.abs(rest)))}"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Defect C (sparsemax.py:~210, OPEN, deferred to the follow-up "
-            "'beta' plan): ops.arange(1, k+1, dtype=inputs.dtype) cannot "
-            "represent the ramp in a narrow dtype, so the layer RAISES. The "
-            "break is NON-MONOTONE in K: it raises at mixed_bfloat16 K=256/257 "
-            "but is fine at K=512, and raises at mixed_float16 K=2048 but is "
-            "fine at K=4096. Remove this marker when beta fixes it."
-        ),
-    )
-    def test_defect_c_bfloat16_arange_ramp_raises(self) -> None:
-        """``Sparsemax()(z)`` must not raise under ``mixed_bfloat16`` at K=256."""
+    def test_defect_c_closed_bfloat16_ramp_builds_and_runs_at_k256(self) -> None:
+        """``Sparsemax()(z)`` must not raise under ``mixed_bfloat16`` at K=256.
+
+        Defect C (``sparsemax.py:~210``, CLOSED): the ramp was built as
+        ``ops.arange(1, k + 1, dtype=inputs.dtype)``, which cannot represent
+        the integers ``1..K`` in a narrow dtype, so the layer RAISED. The break
+        was NON-MONOTONE in K — it raised at ``mixed_bfloat16`` K=256/257 but
+        was fine at K=512, and raised at ``mixed_float16`` K=2048 but was fine
+        at K=4096 — which is why this case pins the exact K where it broke.
+        Closed by building the ramp in ``float32`` unconditionally.
+
+        This test was named ``test_defect_c_bfloat16_arange_ramp_raises``
+        while it asserted, under ``xfail``, that the raise happened. It no
+        longer does, so the name no longer says it does.
+        """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("mixed_bfloat16")
         try:
@@ -1055,19 +1067,20 @@ class TestSparsemaxOpenDefects:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Defect D (sparsemax.py:~220, OPEN, deferred to the follow-up "
-            "'beta' plan): round-off absorbs the literal 1.0 in "
-            "`1.0 + k*z - cumsum`, so support == 0 everywhere, k_z == 0, "
-            "one_hot(-1) is all-zero, tau = -inf and the output is all +inf. "
-            "Measured float32 onset 1.68e7 (K=4) / 7.77e7 (K=512). "
-            "Remove this marker when beta fixes it."
-        ),
-    )
-    def test_defect_d_float32_large_magnitude_swamps_the_literal_one(self) -> None:
-        """float32 magnitudes at the 1.0-swamping onset must still project."""
+    def test_defect_d_closed_float32_large_magnitude_still_projects(self) -> None:
+        """float32 magnitudes at the 1.0-swamping onset must still project.
+
+        Defect D (``sparsemax.py:~220``, CLOSED): round-off used to absorb the
+        literal ``1.0`` in ``1.0 + k*z - cumsum``, so ``support == 0``
+        everywhere, ``k_z == 0``, ``one_hot(-1)`` was all-zero, ``tau = -inf``
+        and the output was all ``+inf``. Measured float32 onsets: 1.68e7 (K=4)
+        and 7.77e7 (K=512). Closed by subtracting the row max, which moves the
+        arithmetic from scale ``max|z|`` down to the row SPREAD (here exactly
+        ``0.0``), so the literal ``1.0`` is never swamped.
+
+        The name previously read ``..._swamps_the_literal_one``, which asserted
+        the defect; it no longer happens.
+        """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("float32")
         try:
@@ -1087,28 +1100,28 @@ class TestSparsemaxOpenDefects:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Defect E (sparsemax.py:~225, OPEN, deferred to the follow-up "
-            "'beta' plan): k_z = ops.sum(support_mask) accumulates in the "
-            "compute dtype and hits float16's integer wall — measured on the "
-            "TF/GPU tree reduction: 2049 -> 2048, 2051 -> 2052, 4095 -> 4096 "
-            "(2050 / 3000 / 4094 are exact). The 2051 -> 2052 overshoot selects "
-            "a MASKED position whose z_cumsum is -inf, so tau = -inf and the row "
-            "dies (nan=2045, inf=2051 at K=4096). The M2 ops.where fix CANNOT "
-            "help here: the -inf sits at the SELECTED index, not at a masked-out "
-            "one, so no spelling of that selection recovers tau. An earlier "
-            "version of this string "
-            "claimed 4095 -> 4096 indexes OUT OF RANGE for depth 4096; that claim "
-            "is FALSE (4095 is a valid index) and was deleted — no end-to-end "
-            "input reaching an out-of-range one-hot was constructible, since "
-            "every such K raises Defect C first. Remove this marker when beta "
-            "fixes it."
-        ),
-    )
-    def test_defect_e_fp16_support_count_overshoots_into_a_masked_index(self) -> None:
-        """An fp16 support of exactly 2051 must not select a masked position."""
+    def test_defect_e_closed_fp16_support_count_2051_is_counted_exactly(self) -> None:
+        """An fp16 support of exactly 2051 must not select a masked position.
+
+        Defect E (``sparsemax.py:~225``, CLOSED): ``k_z = ops.sum(support_mask)``
+        accumulated in the compute dtype and hit float16's integer wall —
+        measured on the TF/GPU tree reduction: 2049 -> 2048, 2051 -> 2052,
+        4095 -> 4096 (2050 / 3000 / 4094 are exact). The 2051 -> 2052 overshoot
+        selected a MASKED position whose ``z_cumsum`` is ``-inf``, so
+        ``tau = -inf`` and the row died (nan=2045, inf=2051 at K=4096). The
+        ``ops.where`` selection that closed Defect A could NOT help here: the
+        ``-inf`` sat at the SELECTED index, not at a masked-out one. Closed by
+        running the count in a never-narrowed reduction dtype, where 2051 is
+        exact.
+
+        (An earlier revision of this text claimed 4095 -> 4096 indexes OUT OF
+        RANGE for depth 4096. That claim is FALSE — 4095 is a valid index —
+        and was deleted; no end-to-end input reaching an out-of-range one-hot
+        was constructible, since every such K raised Defect C first.)
+
+        The name previously read ``..._overshoots_into_a_masked_index``, which
+        asserted the defect; the count is now exact.
+        """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("mixed_float16")
         try:
