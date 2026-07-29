@@ -122,6 +122,30 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for biases.
     :type bias_regularizer: Optional[regularizers.Regularizer]
     :param kwargs: Additional arguments for Layer base class.
+
+    :raises ValueError: At construction, if any parameter is outside its
+        admissible range (including ``intermediate_size <= 0`` when given).
+    :raises ValueError: At ``build()`` / ``call()`` time, if the input's
+        sequence axis is a *statically known* integer greater than
+        ``max_seq_len``.
+
+    .. note::
+        **What the overflow guard does and does not cover.** The recurrent scan
+        runs under ``ops.while_loop`` with ``maximum_iterations=max_seq_len``,
+        so a sequence longer than ``max_seq_len`` cannot be computed: every
+        timestep past the cap stays at the zero-initialized buffer value.
+
+        *Guaranteed*: when the sequence length is statically known -- the
+        ordinary case of calling the layer on a concrete tensor, or building it
+        on a shape with a concrete sequence axis -- an over-long input raises
+        ``ValueError`` naming both the offending length and ``max_seq_len``.
+
+        *Not guaranteed*: when the sequence axis is ``None``/symbolic (for
+        example ``keras.Input(shape=(None, dim))``), the guard cannot fire --
+        ``keras.ops`` offers no portable way to raise from inside a traced
+        graph. In that case ``build()`` emits a one-time ``logger.warning`` and
+        the silent truncation described above remains possible at runtime. Size
+        ``max_seq_len`` for the longest sequence you intend to feed.
     """
 
     def __init__(
@@ -151,7 +175,13 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         # Validate parameters
         self._validate_inputs(
-            dim, num_heads, head_dim, conv_kernel_size, dropout_rate, max_seq_len
+            dim,
+            num_heads,
+            head_dim,
+            conv_kernel_size,
+            dropout_rate,
+            max_seq_len,
+            intermediate_size,
         )
 
         # Store ALL configuration parameters
@@ -249,6 +279,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         conv_kernel_size: int,
         dropout_rate: float,
         max_seq_len: int,
+        intermediate_size: Optional[int] = None,
     ) -> None:
         """Validate layer initialization parameters.
 
@@ -264,6 +295,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type dropout_rate: float
         :param max_seq_len: Maximum sequence length.
         :type max_seq_len: int
+        :param intermediate_size: Intermediate size for the optional FFN stage.
+            ``None`` means "derive from ``dim``" and is always valid.
+        :type intermediate_size: Optional[int]
+        :raises ValueError: If any parameter is outside its admissible range.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -284,6 +319,60 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             )
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
+        if intermediate_size is not None and intermediate_size <= 0:
+            raise ValueError(
+                f"intermediate_size must be positive when given, "
+                f"got {intermediate_size}"
+            )
+
+    def _validate_seq_len(self, seq_len: int) -> None:
+        """Reject a statically known sequence length larger than ``max_seq_len``.
+
+        The recurrent scan runs under ``ops.while_loop`` with
+        ``maximum_iterations=max_seq_len``, so any timestep past that cap is
+        never written and silently reads back as zero. This turns that silent
+        corruption into a loud failure.
+
+        :param seq_len: Statically known sequence length.
+        :type seq_len: int
+        :raises ValueError: If ``seq_len`` exceeds ``self.max_seq_len``.
+        """
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"Sequence length ({seq_len}) exceeds max_seq_len "
+                f"({self.max_seq_len}). The recurrent scan is capped at "
+                f"max_seq_len steps, so every timestep from index "
+                f"{self.max_seq_len} onwards would be silently zero. "
+                f"Increase max_seq_len to at least {seq_len}."
+            )
+
+    @staticmethod
+    def _static_seq_len(inputs: Any) -> Optional[int]:
+        """Return the sequence length as a Python ``int``, or ``None``.
+
+        Only a statically known dimension is returned. Symbolic or unknown
+        sequence axes yield ``None`` -- a traced tensor's shape entry must never
+        reach a Python ``if``, which is exactly why the guard cannot fire under
+        a dynamic shape.
+
+        :param inputs: Input tensor (eager, symbolic or Keras) of rank 3.
+        :type inputs: Any
+        :return: The static sequence length, or ``None`` if it is not static.
+        :rtype: Optional[int]
+        """
+        shape = getattr(inputs, "shape", None)
+        if shape is None or len(shape) != 3:
+            return None
+        try:
+            dim = shape[1]
+        except (TypeError, IndexError, ValueError):
+            return None
+        if dim is None:
+            return None
+        try:
+            return int(dim)
+        except (TypeError, ValueError):
+            return None
 
     def _create_normalization_layer(
         self, name: str, custom_args: Dict[str, Any]
@@ -369,12 +458,40 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         :param input_shape: Shape tuple (batch_size, sequence_length, dim).
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the rank is not 3, if the feature axis does not
+            match ``dim``, or if a *statically known* sequence axis exceeds
+            ``max_seq_len``.
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {input_shape}")
         batch_size, seq_len, features = input_shape
         if features != self.dim:
             raise ValueError(f"Input feature dim ({features}) must match layer dim ({self.dim})")
+
+        if seq_len is not None:
+            self._validate_seq_len(int(seq_len))
+        else:
+            # DECISION plan-2026-07-29-adbe605f/D-002
+            # The overflow guard is STATIC-ONLY, deliberately. Do NOT "fix" this
+            # branch by raising here (it would break every legitimate
+            # `keras.Input(shape=(None, dim))` model) and do NOT replace it with
+            # a graph-time assert: `keras.ops` has no portable way to raise from
+            # inside a traced graph, and a backend-specific `tf.debugging.assert`
+            # would make this layer non-portable for a guarantee we then could
+            # not state uniformly. Under a symbolic sequence axis the
+            # `maximum_iterations=max_seq_len` cap still silently truncates, and
+            # the docstring says so rather than claiming dynamic coverage.
+            logger.warning(
+                "GatedLinearAttentionBlock '%s' built with an unknown "
+                "(symbolic/dynamic) sequence axis: the max_seq_len=%d overflow "
+                "guard CANNOT fire for this layer. If a batch longer than %d is "
+                "fed at runtime, the recurrent scan silently returns zeros for "
+                "every timestep past index %d.",
+                self.name,
+                self.max_seq_len,
+                self.max_seq_len,
+                self.max_seq_len - 1,
+            )
 
         # Set common initializers/regularizers for dense layers
         for layer in [self.q_proj, self.k_proj, self.v_proj, self.alpha_proj, self.beta_proj]:
@@ -495,7 +612,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor of shape (batch, seq_len, dim).
         :rtype: keras.KerasTensor
+        :raises ValueError: If the input's sequence length is statically known
+            and exceeds ``max_seq_len``. A built layer can be re-called at a
+            different length than it was built at, so this re-checks rather than
+            trusting ``build()``.
         """
+        static_seq_len = self._static_seq_len(inputs)
+        if static_seq_len is not None:
+            self._validate_seq_len(static_seq_len)
+
         batch_size, seq_len, _ = ops.shape(inputs)
 
         q = self.q_proj(inputs, training=training)

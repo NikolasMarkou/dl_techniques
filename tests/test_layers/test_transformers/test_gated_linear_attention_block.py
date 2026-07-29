@@ -170,6 +170,8 @@ class TestGatedLinearAttentionBlock:
             ({"dim": 65, "num_heads": 4}, "dim .* must be divisible by num_heads"),
             ({"conv_kernel_size": 0}, "conv_kernel_size must be positive"),
             ({"dropout_rate": -0.1}, "dropout_rate must be in"),
+            ({"intermediate_size": 0}, "intermediate_size must be positive"),
+            ({"intermediate_size": -128}, "intermediate_size must be positive"),
         ],
     )
     def test_parameter_validation(self, invalid_params, match_str):
@@ -178,6 +180,89 @@ class TestGatedLinearAttentionBlock:
         config.update(invalid_params)
         with pytest.raises(ValueError, match=match_str):
             GatedLinearAttentionBlock(**config)
+
+    def test_intermediate_size_none_is_valid(self):
+        """`intermediate_size=None` means "derive from dim" and must NOT raise.
+
+        Control for `test_parameter_validation`: without it, a validator that
+        rejected *every* `intermediate_size` (including the default `None`)
+        would still look green.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=64, num_heads=4, max_seq_len=256, intermediate_size=None
+        )
+        assert layer.intermediate_size is None
+
+    # ===============================================
+    # 2b. max_seq_len Overflow Guard
+    # ===============================================
+    def test_overflow_raises_on_static_seq_len(self):
+        """A statically known seq_len > max_seq_len must raise, not zero-fill.
+
+        Regression for the probed defect: `max_seq_len=4` on a `(1, 10, 16)`
+        input returned the CORRECT shape with timesteps 4-9 silently all-zero,
+        because `ops.while_loop(..., maximum_iterations=max_seq_len)` capped the
+        loop while the output buffer stayed zero-initialized. No exception, no
+        warning.
+
+        The match pattern names both concrete numbers, so an unrelated
+        `ValueError` (e.g. a shape or dtype complaint) cannot satisfy it.
+        """
+        layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
+        over_long = tf.random.normal(shape=(1, 10, 16))
+        with pytest.raises(
+            ValueError, match=r"Sequence length \(10\) exceeds max_seq_len \(4\)"
+        ):
+            layer(over_long)
+
+    def test_overflow_raises_from_build(self):
+        """The same guard fires from `build()` on a static shape tuple.
+
+        `build()` and `call()` are guarded independently: a layer built at one
+        length can be re-called at another, so neither site alone is sufficient.
+        """
+        layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
+        with pytest.raises(
+            ValueError, match=r"Sequence length \(10\) exceeds max_seq_len \(4\)"
+        ):
+            layer.build((1, 10, 16))
+
+    def test_overflow_control_at_exactly_max_seq_len(self):
+        """CONTROL: seq_len == max_seq_len must NOT raise and must do real work.
+
+        Without this control, a layer that raised unconditionally -- or that
+        raised at the wrong comparison (`>=` instead of `>`) -- would pass the
+        two tests above. The output must additionally be finite and not
+        all-zero, so a "guard passes but the scan is dead" state also fails.
+        """
+        layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
+        exact = tf.random.normal(shape=(1, 4, 16))
+        output = layer(exact, training=False)
+
+        assert output.shape == exact.shape
+        out_np = ops.convert_to_numpy(output)
+        assert np.all(np.isfinite(out_np)), "output must be finite"
+        assert np.any(out_np != 0.0), "output must not be all-zero"
+        # Every timestep must carry signal -- the defect zeroed a *suffix*.
+        per_step_absmax = np.max(np.abs(out_np), axis=(0, 2))
+        assert np.all(per_step_absmax > 0.0), (
+            f"some timestep is entirely zero: {per_step_absmax}"
+        )
+
+    def test_overflow_guard_does_not_fire_on_symbolic_seq_len(self):
+        """A `None` sequence axis must build (with a warning), never raise.
+
+        This is D-002's documented gap: the guard is static-only. A functional
+        model with `keras.Input(shape=(None, dim))` is legitimate and must keep
+        working, so `build()` warns rather than raising.
+        """
+        inputs = keras.Input(shape=(None, 16))
+        outputs = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)(inputs)
+        model = keras.models.Model(inputs, outputs)
+
+        # Within the cap, the dynamic path still computes normally.
+        prediction = model(tf.random.normal(shape=(1, 4, 16)), training=False)
+        assert prediction.shape == (1, 4, 16)
 
     def test_build_validation_input_shape(self, default_config):
         """Tests build validation for input shape."""
