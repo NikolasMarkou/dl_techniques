@@ -249,9 +249,44 @@ class SparsemaxLoss(keras.losses.Loss):
         Returns:
             Loss value per sample, shape (batch_size,) before reduction.
             Scalar after reduction (except if reduction='none').
+
+        Note:
+            The sparsemax probabilities are cast to ``self.dtype`` before they
+            meet ``y_pred``. ``keras.losses.Loss`` computes in ``self.dtype``
+            (derived from ``keras.backend.floatx()``), while the inner
+            ``Sparsemax`` sub-layer returns the compute dtype of whatever
+            mixed-precision policy was in force when this loss was
+            CONSTRUCTED. See the decision anchor at the cast site.
         """
-        # Compute sparsemax probabilities from logits
-        p = self.sparsemax(y_pred)
+        # DECISION plan-2026-07-29T110112-09832856/D-015
+        # THE CAST IS LOAD-BEARING; DO NOT SIMPLIFY IT AWAY.
+        # `keras.losses.Loss` fixes its dtype from `keras.backend.floatx()` and
+        # casts `y_true`/`y_pred` to it before `call()` runs — it is NOT
+        # mixed-precision-policy aware. The `Sparsemax()` sub-layer is built
+        # EAGERLY in `__init__` (a `Loss` has no `build()`), so it freezes the
+        # compute dtype of the policy in force at CONSTRUCTION time and returns
+        # that dtype forever after. Without this cast, `y_pred - p` below is
+        # float32 minus float16/bfloat16/float64 and TensorFlow raises
+        # (`InvalidArgumentError` eagerly, `TypeError` inside `model.fit`).
+        # Measured on the full 4x4 construct-x-call policy grid: 12/12
+        # non-float32-CONSTRUCTION points raised and 4/4 float32-construction
+        # points worked, with the CALL-time policy irrelevant at every point.
+        # The cast is bit-identical under float32 construction (all three
+        # reductions, `np.array_equal`), so deleting it looks free and silently
+        # re-breaks all three narrow policies.
+        # DO NOT instead make `Sparsemax` return float32 — prohibited in that
+        # layer's own cast-back anchor ("That is a defect in the LOSS and its
+        # fix belongs in the loss's own file") and by user ruling.
+        # DO NOT instead pin the sub-layer with `Sparsemax(dtype=self.dtype)`
+        # in `__init__`: it keeps more precision but changes the sub-layer's
+        # advertised policy contract. Ruled out by the user in favour of this
+        # boundary cast (`D-005`).
+        # ACCEPTED COST: under fp16/bf16 construction the projection is still
+        # computed narrow (loss error 1.56e-05 / 7.89e-05 against an
+        # exact-rational Fenchel-Young reference).
+        # RED-able: `TestSparsemaxLossDtypePolicy::
+        # test_loss_constructed_under_a_narrow_policy_matches_the_reference`.
+        p = keras.ops.cast(self.sparsemax(y_pred), self.dtype)
 
         # Compute loss components
         # 1. Squared Euclidean distance: 0.5 * ||z - p||²

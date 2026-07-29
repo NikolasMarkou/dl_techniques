@@ -3369,69 +3369,86 @@ class TestSparsemaxAgainstExactOracle:
 
 
 # ---------------------------------------------------------------------
-# `SparsemaxLoss` x the global dtype policy  (MEASURED 2026-07-29)
+# `SparsemaxLoss` x the global dtype policy  (MEASURED 2026-07-29; FIXED here)
 # ---------------------------------------------------------------------
-# WHAT WAS PROBED.  `losses/sparsemax_loss.py:225` builds its inner
-# `Sparsemax()` EAGERLY in `__init__`, so that sub-layer's dtype policy is
-# frozen at LOSS-CONSTRUCTION time. The open question was what happens when the
-# ambient policy differs at CALL time.
+# WHAT WAS PROBED.  `losses/sparsemax_loss.py` builds its inner `Sparsemax()`
+# EAGERLY in `__init__`, so that sub-layer's dtype policy is frozen at
+# LOSS-CONSTRUCTION time. The open question was what happens when the ambient
+# policy differs at CALL time.
 #
-# WHAT WAS MEASURED (both orders, plus same-policy controls, on GPU/TF):
+# WHAT WAS MEASURED — the full 4x4 CONSTRUCT x CALL policy grid, GPU/TF:
+# 4/4 float32-CONSTRUCTION points worked and 12/12 non-float32-construction
+# points raised, REGARDLESS of the call policy. The call-time policy is not
+# the axis; the construction-time policy is.
 #
-#   construct   call        loss.dtype  inner compute  result
-#   ---------   ---------   ----------  -------------  --------------------
-#   float32     float32     float32     float32        OK   -> float32
-#   float32     fp16        float32     float32        OK   -> float32
-#   float32     float64     float32     float32        OK   -> float32
-#   fp16        {any}       float32     float16        RAISE InvalidArgument
-#   bf16        {any}       float32     bfloat16       RAISE InvalidArgument
-#   float64     {any}       float32     float64        RAISE InvalidArgument
+# THE MECHANISM.  `keras.losses.Loss` takes its dtype from `backend.floatx()`,
+# NOT from the global mixed-precision policy — so `loss.dtype` is float32
+# under EVERY policy, and `Loss.__call__` casts both `y_true` and `y_pred` to
+# it before `call()` runs. The inner layer, by contrast, honours the policy
+# captured at construction and returns ITS compute dtype. When the two
+# disagreed, `y_pred - p` was float32 minus float16/bfloat16/float64 and
+# TensorFlow raised.
 #
-# THE RULE, and why the call-time policy turned out to be the wrong axis.
-# `keras.losses.Loss` takes its dtype from `backend.floatx()`, NOT from the
-# global mixed-precision policy — so `loss.dtype` is `float32` under EVERY
-# policy above, and `Loss.__call__` casts both `y_true` and `y_pred` to
-# float32 before `call()` runs. The inner layer, by contrast, honours the
-# policy captured at construction and returns ITS compute dtype. When the two
-# disagree, `y_pred - p` at `sparsemax_loss.py:258` is float32 minus
-# float16/bfloat16/float64 and TensorFlow raises. The ambient policy at call
-# time is therefore IRRELEVANT: the loss is a pure function of the policy in
-# force when it was CONSTRUCTED.
+# THE FIX THAT SHIPPED (`plan-2026-07-29T110112-09832856` step 10, `D-015`):
+# ONE line in `losses/sparsemax_loss.py` — `p = keras.ops.cast(
+# self.sparsemax(y_pred), self.dtype)`. THE FIX IS IN THE LOSS, NOT IN THE
+# LAYER. Making `Sparsemax` return float32 under a narrow policy is prohibited
+# by that layer's own cast-back anchor and by user ruling; it would change the
+# dtype contract for every other consumer. `D-007`'s never-narrow reduction
+# rule is a separate, already-closed matter and is not what fixed this.
 #
-# RULING: (a) a loud dtype mismatch, not (b) a silently-narrow reduction.
-# `D-007` made the reduction dtype derive from `inputs.dtype` rather than
-# `self.compute_dtype`, which is exactly why route (b) is closed here.
+# WHY THE PROJECTION IS STILL COMPUTED NARROW.  The cast reconciles dtypes at
+# the boundary; it does not widen the projection. Under fp16/bf16 construction
+# the sparsemax runs in fp16/bf16 (measured loss error 1.56e-05 / 7.89e-05
+# against the exact-rational Fenchel-Young reference), which is why the
+# tolerance below is derived on the CONSTRUCTION policy's compute dtype and
+# NOT on float32 — a float32-derived atol would be ~1e2..1e4x too tight at
+# bf16 and the guard would be permanently red, or (if floored) vacuous.
+# The rejected alternative, `Sparsemax(dtype=self.dtype)` in `__init__`
+# (spelling D), would have kept float32 accuracy at every policy but changed
+# the sub-layer's advertised policy contract and broken
+# `test_inner_sparsemax_policy_is_frozen_at_construction`, which under the
+# shipped spelling stays valid UNCHANGED.
 #
-# THIS IS A PRE-EXISTING GAP IN `losses/sparsemax_loss.py`, NOT A REGRESSION
-# FROM THIS PLAN.  Measured on `ba9efff0` (pre-fix HEAD): `Sparsemax` already
-# returned float16/bfloat16/float64 under the corresponding policies. This
-# plan's `D-003` deliberately PRESERVED that dtype contract (`tau` is cast back
-# so the observable output dtype stays the compute dtype), so the fix neither
-# introduced nor removed the mismatch.
-#
-# THE TESTS BELOW PIN CURRENT BEHAVIOUR, INCLUDING THE DEFECT.  Fixing it
-# means one line in `losses/sparsemax_loss.py` (cast `p` to `y_pred.dtype`
-# before the subtraction), and that file is outside this plan's Files To
-# Modify. `test_loss_constructed_under_a_narrow_policy_raises` therefore
-# asserts the RAISE — it is a guard against silent drift, not an endorsement.
-# When the loss is fixed, that test will fail loudly and must be rewritten to
-# assert the working behaviour; that is the intended handoff.
+# THE TESTS BELOW ASSERT THE WORKING BEHAVIOUR, and they were proven RED with
+# the `sparsemax_loss.py` cast reverted IN PLACE (never `git stash`): all 6
+# parametrizations of
+# `test_loss_constructed_under_a_narrow_policy_matches_the_reference` fail.
+# NO NEGATIVE CONTROL ASSERTING A RAISE SURVIVES HERE, deliberately: the old
+# one used `pytest.raises(tf.errors.InvalidArgumentError, match="Sub")`, which
+# only ever covered the EAGER path — the graph / `model.fit` path raised
+# `TypeError`. If a raise-asserting control is ever re-added for some other
+# reason, it must accept BOTH exception types.
 # ---------------------------------------------------------------------
 
 #: Policies whose compute dtype differs from `backend.floatx()`, i.e. every
-#: policy under which constructing a `SparsemaxLoss` currently poisons it.
-_LOSS_BROKEN_POLICIES = ("mixed_float16", "mixed_bfloat16", "float64")
+#: policy under which the inner `Sparsemax` is frozen at a dtype the `Loss`
+#: itself does not use. Constructing under these USED to poison the loss;
+#: since `D-015` the boundary cast reconciles them, so these are the NARROW
+#: construction policies, not broken ones.
+_LOSS_NARROW_CONSTRUCT_POLICIES = ("mixed_float16", "mixed_bfloat16", "float64")
 
 
 class TestSparsemaxLossDtypePolicy:
     """`SparsemaxLoss`'s eager inner `Sparsemax()` vs. the global policy.
 
-    Probe of `losses/sparsemax_loss.py:225` (plan step 6). That file is
-    PROBED, NOT MODIFIED — see the note above for the measured rule and for
-    why the defect these tests pin is escalated rather than fixed here.
+    Guards `losses/sparsemax_loss.py`'s construction-time dtype freeze and the
+    `D-015` boundary cast that reconciles it with `keras.losses.Loss`'s own
+    `backend.floatx()` dtype — see the note above for the measured 4x4 grid,
+    the mechanism, and why the fix lives in the loss rather than in the layer.
     """
 
-    @pytest.mark.parametrize("construct_policy", ("float32",) + _LOSS_BROKEN_POLICIES)
+    # STILL VALID UNCHANGED UNDER `D-015`, and that is a deliberate property of
+    # the spelling that shipped: the boundary cast leaves the sub-layer's
+    # construction-time policy alone. Spelling D (`Sparsemax(dtype=self.dtype)`
+    # in `__init__`) would have made this test RED at its 3 narrow
+    # parametrizations — the inner layer would report float32 instead of the
+    # construction policy's compute dtype. Do not "modernize" this test to
+    # accommodate a float32 inner layer; that would silently endorse the
+    # rejected fix.
+    @pytest.mark.parametrize(
+        "construct_policy", ("float32",) + _LOSS_NARROW_CONSTRUCT_POLICIES
+    )
     def test_inner_sparsemax_policy_is_frozen_at_construction(
         self, construct_policy: str
     ) -> None:
@@ -3466,19 +3483,37 @@ class TestSparsemaxLossDtypePolicy:
             keras.mixed_precision.set_global_policy(previous)
 
     @pytest.mark.parametrize("call_policy", ("float32", "mixed_float16"))
-    @pytest.mark.parametrize("construct_policy", _LOSS_BROKEN_POLICIES)
-    def test_loss_constructed_under_a_narrow_policy_raises(
+    @pytest.mark.parametrize("construct_policy", _LOSS_NARROW_CONSTRUCT_POLICIES)
+    def test_loss_constructed_under_a_narrow_policy_matches_the_reference(
         self, construct_policy: str, call_policy: str
     ) -> None:
-        """PINS A KNOWN GAP in `losses/sparsemax_loss.py` (do not "fix" this test).
+        """`D-015`: a loss built under ANY policy runs and is numerically right.
 
-        A `SparsemaxLoss` built under any policy whose compute dtype differs
-        from `backend.floatx()` is unusable: `Loss.__call__` casts `y_pred` to
-        float32 while the frozen sub-layer returns its own dtype, so
-        `y_pred - p` raises. The call-time policy does not change this, which
-        is why it is parametrized here.
+        This is the guard for the `losses/sparsemax_loss.py` boundary cast. It
+        replaced a test that asserted the RAISE these 6 grid points used to
+        produce; that name and that assertion became false claims the moment
+        the cast landed (`plans/LESSONS.md:44`).
 
-        :param construct_policy: Policy in force at construction.
+        Asserts three things per grid point: the loss RUNS, it returns
+        `backend.floatx()` (asserted as `floatx()`, never as the literal
+        `"float32"` — `Loss` tracks the backend default, and a hard-coded
+        literal would make this an environment pin), and its value matches the
+        Fenchel-Young formula `0.5*||z - p||^2 - z^T y` evaluated on the
+        EXACT-rational sparsemax of the bits the frozen sub-layer really
+        received.
+
+        The call-time policy stays parametrized because "the call policy is
+        irrelevant" is the measured 4x4 finding this class exists to keep true
+        — it is now asserted in the working direction instead of the raising
+        one.
+
+        RED PROOF (`plan-2026-07-29T110112-09832856` step 10): with the cast at
+        the `p = self.sparsemax(y_pred)` site reverted IN PLACE (never
+        `git stash`), all 6 parametrizations fail on the `loss(...)` call
+        itself, before any assertion runs.
+
+        :param construct_policy: Policy in force at construction — the axis
+            that actually matters.
         :type construct_policy: str
         :param call_policy: Policy in force at call time (measured irrelevant).
         :type call_policy: str
@@ -3487,6 +3522,15 @@ class TestSparsemaxLossDtypePolicy:
         try:
             keras.mixed_precision.set_global_policy(construct_policy)
             loss = SparsemaxLoss(from_logits=True)
+            inner_dtype = loss.sparsemax.compute_dtype
+            # Premise: the sub-layer really is frozen at the NARROW dtype, so
+            # this grid point exercises the reconciliation rather than a
+            # degenerate all-float32 path.
+            assert inner_dtype != keras.backend.floatx(), (
+                f"inner Sparsemax reports {inner_dtype!r} under "
+                f"{construct_policy!r}; this case can no longer see the "
+                "construct-time dtype freeze it exists to guard"
+            )
 
             keras.mixed_precision.set_global_policy(call_policy)
             # `masked_fraction=0.0` - the no-`inf` control. `SparsemaxLoss`'s
@@ -3497,26 +3541,81 @@ class TestSparsemaxLossDtypePolicy:
             y = np.zeros_like(z_compute)
             y[:, 0] = 1.0
 
-            with pytest.raises(tf.errors.InvalidArgumentError, match="Sub"):
-                loss(ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute))
+            out = loss(
+                ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute)
+            )
+            assert keras.backend.standardize_dtype(out.dtype) == (
+                keras.backend.floatx()
+            ), (
+                f"loss dtype {out.dtype} - expected backend.floatx()="
+                f"{keras.backend.floatx()} under construct={construct_policy}, "
+                f"call={call_policy} (keras.losses.Loss is not policy-aware)"
+            )
+
+            # THE BITS THAT REACH THE PROJECTION. `Loss.__call__` upcasts the
+            # caller's bits to `floatx()` losslessly, then the frozen sub-layer
+            # casts THAT down to its own compute dtype. Restoring the
+            # construction policy here is not cosmetic: `_exact_sparsemax`
+            # asserts it is fed the ACTIVE policy's compute dtype, which is
+            # precisely the "feed the oracle the layer's real bits" guard
+            # (`plans/LESSONS.md:42`), and here the layer in question is the
+            # frozen sub-layer, not the ambient one.
+            keras.mixed_precision.set_global_policy(construct_policy)
+            assert _output_dtype() == inner_dtype
+            z_outer = np.asarray(z_compute, dtype=np.float64)
+            z_inner = _to_compute_dtype(z_compute)
+            p64 = _exact_rows_as_float64(z_inner)
+            y64 = np.asarray(y, dtype=np.float64)
+            per_sample = 0.5 * np.sum((z_outer - p64) ** 2, axis=-1) - np.sum(
+                z_outer * y64, axis=-1
+            )
+            expected = float(np.mean(per_sample))
+
+            # DERIVED ON THE CONSTRUCTION POLICY'S COMPUTE DTYPE, not float32.
+            # `eps` is the per-element projection tolerance for a layer running
+            # in `inner_dtype`; first-order propagation through the loss gives
+            # `dL/dp_j = -(z_j - p_j)`, so an elementwise error of `eps` costs
+            # at most `sum_j |z_j - p_j| * eps`. `_TF32_ATOL_FLOOR` covers the
+            # float32 summation the loss itself performs. Charging `eps` at
+            # float32 instead would under-budget bf16 by ~1e4x and this guard
+            # would be permanently red.
+            eps = _oracle_atol(z_inner, inner_dtype)
+            atol = _TF32_ATOL_FLOOR + eps * float(
+                np.max(np.sum(np.abs(z_outer - p64), axis=-1))
+            )
+            actual = float(ops.convert_to_numpy(out))
+            assert abs(actual - expected) <= atol, (
+                f"loss {actual} != Fenchel-Young reference {expected} "
+                f"(construct={construct_policy}, call={call_policy}, "
+                f"inner={inner_dtype}, derived atol={atol})"
+            )
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    def test_loss_built_under_float32_survives_a_later_fp16_policy(self) -> None:
-        """The one order that works: build under float32, then switch to fp16.
+    def test_loss_built_under_float32_matches_the_reference(self) -> None:
+        """The float32 NUMERIC ANCHOR: build under float32, then switch to fp16.
+
+        Near-vacuous as a *policy* test since `D-015` — every construction
+        policy now works, so "the one order that works" is no longer
+        distinguishing and the name that said so was retired. It is kept, and
+        renamed, for what it still uniquely pins: the float32 arm of the
+        Fenchel-Young numerics, which is the arm the `D-015` cast is
+        BIT-IDENTICAL on (measured, all three reductions, `np.array_equal`) and
+        therefore the arm that must never move.
 
         Asserts the observable consequences: the loss still runs, it returns
-        **float32** (not float16 - it is not policy-aware at all), and its
-        value matches the Fenchel-Young formula evaluated on the EXACT-rational
-        sparsemax of the bits the layer actually received.
+        `backend.floatx()` (not float16 - it is not policy-aware at all), and
+        its value matches the Fenchel-Young formula evaluated on the
+        EXACT-rational sparsemax of the bits the layer actually received.
         """
         previous = keras.mixed_precision.global_policy().name
         try:
             keras.mixed_precision.set_global_policy("float32")
             loss = SparsemaxLoss(from_logits=True)
+            inner_dtype = loss.sparsemax.compute_dtype
 
             keras.mixed_precision.set_global_policy("mixed_float16")
-            # No-`inf` control: see the note in the raising test above.
+            # No-`inf` control: see the note in the narrow-policy test above.
             z = _partially_masked_row_batch(16, 0.0, seed=607)
             # The fp16 bits the caller hands in; `Loss.__call__` upcasts these
             # to float32 losslessly, so these ARE the received bits.
@@ -3527,15 +3626,23 @@ class TestSparsemaxLossDtypePolicy:
             out = loss(
                 ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute)
             )
-            assert keras.backend.standardize_dtype(out.dtype) == "float32", (
-                f"loss dtype {out.dtype} - expected float32 even under "
-                f"mixed_float16 (keras.losses.Loss tracks backend.floatx())"
+            assert keras.backend.standardize_dtype(out.dtype) == (
+                keras.backend.floatx()
+            ), (
+                f"loss dtype {out.dtype} - expected backend.floatx()="
+                f"{keras.backend.floatx()} even under mixed_float16 "
+                f"(keras.losses.Loss is not policy-aware)"
             )
 
             # Reference: L = 0.5 * ||z - p||^2 - z^T y, reduced by the loss's
-            # default `sum_over_batch_size`.
+            # default `sum_over_batch_size`. Restoring the CONSTRUCTION policy
+            # is load-bearing for the same reason as in the narrow-policy test:
+            # `_exact_sparsemax` asserts it is fed the active policy's compute
+            # dtype, and the layer whose bits matter is the FROZEN sub-layer.
+            keras.mixed_precision.set_global_policy("float32")
+            z_inner = _to_compute_dtype(z_compute)
             z64 = np.asarray(z_compute, dtype=np.float64)
-            p64 = _exact_rows_as_float64(z_compute)
+            p64 = _exact_rows_as_float64(z_inner)
             y64 = np.asarray(y, dtype=np.float64)
             per_sample = 0.5 * np.sum((z64 - p64) ** 2, axis=-1) - np.sum(
                 z64 * y64, axis=-1
@@ -3545,8 +3652,12 @@ class TestSparsemaxLossDtypePolicy:
             # First-order propagation of the per-element sparsemax tolerance
             # through the loss: dL/dp_j = -(z_j - p_j), so an elementwise error
             # of `eps` costs at most `sum_j |z_j - p_j| * eps`. `_TF32_ATOL_FLOOR`
-            # covers the float32 summation itself.
-            eps = _oracle_atol(z_compute, _output_dtype())
+            # covers the float32 summation itself. `eps` is charged at the
+            # CONSTRUCTION policy's compute dtype (`float32` here) because that
+            # is what the frozen sub-layer runs in - charging it at the ambient
+            # fp16 would make this float32 anchor 1.47x looser than the arm it
+            # claims to pin.
+            eps = _oracle_atol(z_inner, inner_dtype)
             atol = _TF32_ATOL_FLOOR + eps * float(
                 np.max(np.sum(np.abs(z64 - p64), axis=-1))
             )
