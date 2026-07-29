@@ -2174,6 +2174,140 @@ class TestSparsemaxBackwardPass:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
+    # DECISION plan-2026-07-29T110112-09832856/D-010
+    # POLARITY.  This pin asserts the CORRECT (k-branch) gradient and marks it
+    # `xfail(strict=True)`, so it reports `xfailed` while F-02 is open and
+    # `xpassed` -> FAILED the moment F-02 is fixed. Do NOT "simplify" it into
+    # the obvious-looking alternative — asserting the MEASURED values
+    # `[-1, 1]` / `[-5, 5]` and marking THAT `xfail` — which is the same
+    # mechanism run backwards: it would go red on the FIX and stay green
+    # forever while the defect is open, i.e. it would guard nothing.
+    # PORTABILITY.  Do not reintroduce the TF literals in any form.
+    # `ops.maximum`'s tie routing (`x >= y` routes to `x`) is a TF
+    # gradient-registration detail; JAX's `jnp.maximum` splits 50/50 at exact
+    # equality and would give a DIFFERENT (still non-Clarke) boundary
+    # gradient. An exact-value assertion is a backend pin wearing a
+    # correctness pin's name. See `D-001`/`D-010` of
+    # `plan-2026-07-29T110112-09832856`.
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "OPEN DEFECT F-02: ops.maximum(shifted - tau, 0.0) at "
+            "sparsemax.py:556 hands a full gradient to a support-BOUNDARY "
+            "entry (z_i == tau exactly, so p_i == 0 but shifted - tau == 0), "
+            "while k_z correctly excludes it. User ruling for this plan: "
+            "GUARD, do not fix."
+        ),
+    )
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    def test_open_defect_f02_boundary_gradient_should_equal_the_k_branch(
+        self, policy: str
+    ) -> None:
+        """OPEN DEFECT F-02 — the support-boundary gradient is wrong.
+
+        `z = [[1.0, 0.0]]` is the minimal reproducer: the top-2 gap is exactly
+        1.0, the knife edge of sparsemax, so `k_z == 1`, `p == [1, 0]` and the
+        second entry sits EXACTLY on `tau`. The analytic VJP over the support
+        `S = {0}` is therefore ``v_0 - v_0/1 == 0`` — the true gradient is the
+        zero vector for EVERY upstream `v`. The layer instead routes a full
+        gradient through `ops.maximum`'s tie, and the result is not even a
+        Clarke subgradient: solving ``layer = l*J(k=2) + (1-l)*J(k=1)`` over
+        300 random directions put `l` outside `[0, 1]` in 228 of them.
+
+        Measured identically under all four policies, so this is an
+        op-semantics defect, not a precision one. Incidence on ORDINARY
+        `N(0, 2)` K=64 logits is 0/1000 (float32, float64) but **6/1000**
+        (mixed_float16) and **26/1000** (mixed_bfloat16) — narrow dtypes
+        manufacture the tie by quantization, so this is not measure-zero.
+
+        WHAT IS ASSERTED, AND WHY IT LOOKS INVERTED. This test asserts the
+        CORRECT behaviour (gradient == the k-branch, within `_grad_atol`) and
+        is marked `xfail(strict=True)`. It therefore reports `xfailed` today.
+        It deliberately does NOT assert the measured wrong values: see the
+        POLARITY and PORTABILITY notes above the marker.
+
+        WHAT AN XPASS OBLIGES. If this test XPASSes, `strict=True` turns that
+        into a hard FAILURE, and that failure is the intended signal: someone
+        has added a `custom_gradient` or a `stop_gradient`ed support mask to
+        `sparsemax.py` (both are STOP tripwires of the plan that wrote this
+        pin, so it should have been a deliberate act). The obligation is then,
+        in the same commit:
+
+        1. remove the `xfail` marker — a marker over a closed defect is a
+           false claim;
+        2. RENAME this test, dropping `open_defect_f02` — a name asserting a
+           closed defect is itself a false claim
+           (`plans/LESSONS.md:44`); grep the whole file for the old name;
+        3. update the sparsemax entry in `plans/SYSTEM.md` (currently
+           `:101-107`), which records F-02 as open;
+        4. re-enable the boundary rows that
+           `test_gradient_matches_analytic_vjp` currently EXCLUDES — that
+           guard's boundary filter exists only because of this defect.
+
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            out_dtype = _output_dtype()
+            z = np.array([[1.0, 0.0]], dtype=np.float32)
+            z_compute = _to_compute_dtype(z)
+
+            # --- premise: this row really is a support-boundary row ----------
+            # If any of these fire, the reproducer has stopped reproducing and
+            # the assertion below would be xfailing for the WRONG reason. They
+            # are stated separately so `-rx` names which one it was.
+            row = _exact_sparsemax(z_compute)[0]
+            support = np.array([float(o) > 0.0 for o in row["out"]], dtype=bool)
+            k = int(support.sum())
+            assert k == 1, (
+                f"premise ({policy}): expected k_z == 1 on z=[[1.0, 0.0]], got "
+                f"{k} — the reproducer is no longer the knife-edge row"
+            )
+            assert any(
+                np.isfinite(float(val))
+                and Fraction(*float(val).as_integer_ratio()) == row["tau"]
+                for val in z_compute[0]
+            ), (
+                f"premise ({policy}): no entry of z=[[1.0, 0.0]] equals tau "
+                f"exactly in rational arithmetic — this is not a boundary row "
+                "and F-02's mechanism is not being exercised"
+            )
+
+            # --- the pin -----------------------------------------------------
+            # Several upstreams, because the defect is DIRECTION-dependent:
+            # under TF, `v = [1, 0]` happens to give the right answer while
+            # `[0, 1]` and `[3, 5]` do not. A single-direction pin could go
+            # green on a backend whose tie routing differs without the defect
+            # being fixed at all. The strongest direction is checked first so
+            # the reported xfail reason is the substantive one.
+            for v in ([0.0, 1.0], [3.0, 5.0], [1.0, -1.0], [1.0, 0.0]):
+                v_compute = _to_compute_dtype(
+                    np.array([v], dtype=np.float32)
+                )
+                grad, _ = self._layer_gradient(z_compute, v_compute)
+
+                v64 = np.asarray(v_compute, dtype=np.float64)
+                reference = np.zeros_like(v64)
+                reference[0][support] = (
+                    v64[0][support] - v64[0][support].sum() / k
+                )
+
+                atol = _grad_atol(v_compute, out_dtype)
+                err = float(np.max(np.abs(grad[0] - reference[0])))
+                assert err <= atol, (
+                    f"OPEN DEFECT F-02 ({policy}): the boundary row's gradient "
+                    f"disagrees with the k={k} branch for upstream v={v}: max "
+                    f"abs error {err:.6e} > derived atol {atol:.6e} "
+                    f"({err / atol:.2f}x). This assertion failing is the "
+                    "EXPECTED state while F-02 is open; it passing everywhere "
+                    "means the defect is fixed and this test's xfail marker "
+                    "and name must both go — see the docstring."
+                )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
 
 # ---------------------------------------------------------------------
 # `SparsemaxLoss` x the global dtype policy  (MEASURED 2026-07-29)
