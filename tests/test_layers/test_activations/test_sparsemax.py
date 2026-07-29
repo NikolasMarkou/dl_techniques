@@ -10,7 +10,9 @@
    see the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
    ``src/dl_techniques/layers/activations/sparsemax.py``.  They are pinned by
    :class:`TestSparsemaxOpenDefects` below as ``xfail(strict=True)`` cases —
-   pinned, not fixed.
+   pinned, not fixed.  A fifth pin there records a REGRESSION the same work
+   knowingly shipped: on Defect-B inputs the failure moved from loud (``NaN``)
+   to silent (a finite, un-normalised row).
 """
 
 import os
@@ -85,11 +87,22 @@ def _sparsemax_reference(z: np.ndarray) -> np.ndarray:
 # ERROR PROPAGATION.  The layer computes ``out_i = max(z_i - tau, 0)`` with
 # ``tau = (S - 1) / k_z`` and ``S = cumsum(sort(z))[k_z - 1]``, all in the
 # compute dtype.  ``out_i`` is a difference of two quantities of magnitude up to
-# ``M = max|z_finite|`` (``|z_i| <= M`` and ``tau <= max(z) <= M``), so its
-# absolute resolution is ``ulp(M)`` — it is a CANCELLATION, and no amount of
-# correctness in the layer buys precision finer than one representable step at
-# scale ``M``.  Counting the roundings that survive to the output, each bounded
-# by half the local spacing:
+# ``M = max|z_finite|`` (``|z_i| <= M`` and ``tau <= max(z) <= M``), so AS THE
+# LAYER IS CURRENTLY WRITTEN its absolute resolution is ``ulp(M)``.
+#
+# THAT IS A PROPERTY OF THIS FORMULATION, NOT A LAW.  ``M`` here is the
+# magnitude of the raw logits only because the layer never shifts them.
+# Sparsemax is shift-invariant, so subtracting the row max before the cumsum is
+# EXACT, and it replaces ``M`` with the row SPREAD ``max(z) - min(z)`` (0 for a
+# plateau row), collapsing the floor by orders of magnitude.  Measured: that one
+# change takes this file's own grid from 86/128 to 0/128 violations, with
+# ``max_err`` 0.013165 -> 0.000628 — i.e. 12x BELOW ``ulp(M = 10)``.  **beta
+# MUST re-tighten ``_ULP_BUDGET`` (and re-derive the ``ulp`` argument against
+# the row spread rather than ``max|z|``) once row-max subtraction lands.**  Do
+# not read the budget below as a permanent ceiling.
+#
+# Counting the roundings that survive to the output of the CURRENT
+# formulation, each bounded by half the local spacing:
 #
 #   0.5 ulp(M)  rounding ``z_i`` into the compute dtype (the input is float32);
 #   1.0 ulp(M)  one rounding of a cumsum partial sum.  A partial sum has
@@ -216,6 +229,40 @@ def _partially_masked_row_batch(
             z[r, pos] = -np.inf
 
     assert np.isfinite(z).any(axis=-1).all(), "a generated row is fully masked"
+    return z
+
+
+def _finite_mask_row(width: int) -> np.ndarray:
+    """``[2.0, 1.0, -1e4, -1e4, ...]`` — the large-finite-negative mask idiom.
+
+    All entries are finite, so this row is NOT a ``-inf`` mask; but at
+    ``width >= ~7`` its float16 cumsum overflows. The correct answer is
+    ``[1, 0, 0, ...]``: the strict argmax takes the whole mass.
+
+    :param width: Row width.
+    :type width: int
+    :return: float32 array of shape ``(1, width)``.
+    :rtype: np.ndarray
+    """
+    z = np.full((1, width), -1e4, dtype=np.float32)
+    z[0, 0] = 2.0
+    z[0, 1] = 1.0
+    return z
+
+
+def _large_value_row(width: int) -> np.ndarray:
+    """``[400.0, 300.0, 300.0, ...]`` — no mask of any kind, just large values.
+
+    ``300 * 256 = 76800`` exceeds float16's ``65504``, so the cumsum overflows
+    while the answer (``[1, 0, 0, ...]``) is completely unaffected.
+
+    :param width: Row width.
+    :type width: int
+    :return: float32 array of shape ``(1, width)``.
+    :rtype: np.ndarray
+    """
+    z = np.full((1, width), 300.0, dtype=np.float32)
+    z[0, 0] = 400.0
     return z
 
 
@@ -381,58 +428,68 @@ class TestSparsemax:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    def test_overflowed_all_finite_row_fails_loudly_not_silently(self) -> None:
-        """An all-finite row whose cumsum overflows must return NaN, never a
-        plausible finite number.
+    @pytest.mark.parametrize(
+        "label,builder",
+        [
+            # The LARGE-FINITE-NEGATIVE mask convention: `-1e4` in place of
+            # `-inf`. This is what an attention mask bias degrades to once it
+            # is cast to float16, so it is an ordinary production shape.
+            ("large_finite_negative_mask", lambda k: _finite_mask_row(k)),
+            # No mask anywhere: 256 entries near 300 overflow the fp16 cumsum
+            # (`300 * 256 = 76800 > 65504`) purely by being large.
+            ("no_mask_large_values", lambda k: _large_value_row(k)),
+        ],
+    )
+    def test_finite_cumsum_overflow_rows_are_correct_not_nan(
+        self, label: str, builder
+    ) -> None:
+        """An ALL-FINITE fp16 row whose cumsum overflows must still be correct.
 
-        This asserts SHIPPED behaviour (the loudness guard), not an aspiration.
+        This is the SECOND defect family closed by the ``ops.where`` selection,
+        found only by adversarial review. The ``-inf`` these rows put into
+        ``z_cumsum`` is born from OVERFLOW, not from the input, but it reached
+        the same ``-inf * 0.0`` product and poisoned the whole row. Measured on
+        the pre-fix bytes (``87aa809c^``): ``nan=256/256, sum=0``. Here the
+        answer is exact.
 
-        Rationale: replacing the arithmetic gather with ``ops.where`` removed a
-        ``-inf * 0.0`` product that had been manufacturing a NaN which
-        INCIDENTALLY MASKED Defect B. Without the guard this exact input
-        returns ``nan=0, sum=16.94`` where the correct sum is ``1.0`` — a wrong
-        answer with no alarm attached. The layer does NOT compute Defect B
-        correctly (see ``test_defect_b_overflow_born_inf_admitted_to_support``);
-        it is merely required to be LOUD about getting it wrong.
-
-        The predicate is the load-bearing part, so the legitimate masked case is
-        asserted here too: a masked row HAS ``-inf`` in its input and must never
-        be poisoned.
+        Crucially, ``k_z`` is selected LONG BEFORE the overflow position, so the
+        overflow never touches the result — which is why a guard keyed on
+        ``isfinite(z_cumsum)`` (written, measured and reverted; see clause (e)
+        of the ``D-017`` anchor) destroys these rows for nothing.
         """
         previous = keras.mixed_precision.global_policy().name
         keras.mixed_precision.set_global_policy("mixed_float16")
         try:
-            k = 4096
-            z = np.full((1, k), -16.95, dtype=np.float32)
-            z[:, 0] = 0.0
+            k = 256
+            z = builder(k)
             assert np.isfinite(z).all(), "premise: the INPUT is entirely finite"
 
             out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
 
-            assert np.isnan(out).all(), (
-                "loudness guard did not fire: an all-finite row whose z_cumsum "
-                "overflowed float16 returned a finite (and WRONG) answer instead "
-                f"of NaN; nan={int(np.isnan(out).sum())}/{out.size}, "
-                f"sum={float(np.nan_to_num(out).sum())} (correct sum is 1.0)"
-            )
+            expected = np.zeros((1, k), dtype=np.float64)
+            expected[0, 0] = 1.0  # float64 oracle: the strict argmax takes all
 
-            # The guard must NOT poison a legitimately masked row.
-            masked = np.array([[2.0, 1.0, -np.inf, -np.inf]], dtype=np.float32)
-            m_out = ops.convert_to_numpy(Sparsemax()(masked)).astype(np.float64)
+            assert np.isfinite(out).all(), (
+                f"{label}: an all-finite row whose fp16 cumsum overflows returned "
+                f"a non-finite answer (nan={int(np.isnan(out).sum())}, "
+                f"inf={int(np.isinf(out).sum())}) — the pre-fix behaviour"
+            )
+            total = float(out.sum())
+            assert abs(total - 1.0) <= 1e-3, (
+                f"{label}: sum(out) = {total}, expected 1.0"
+            )
             np.testing.assert_array_equal(
-                m_out,
-                np.array([[1.0, 0.0, 0.0, 0.0]]),
-                err_msg=(
-                    "loudness guard poisoned a LEGITIMATE masked row; its input "
-                    "carries -inf, so the all-finite predicate must exclude it"
-                ),
+                out,
+                expected,
+                err_msg=f"{label}: sparsemax != float64 oracle (expected err 0.0)",
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
 
 # ---------------------------------------------------------------------
-# SCOPE PINS for the four OPEN defects.
+# SCOPE PINS: FIVE cases — the four OPEN defects B/C/D/E, plus the accepted
+# loud -> silent conversion this plan knowingly ships on Defect-B inputs.
 #
 # Each case below asserts the CORRECT behaviour and is expected to FAIL.
 # `strict=True` is the whole point: when the follow-up plan fixes one of these,
@@ -452,12 +509,19 @@ class TestSparsemaxOpenDefects:
 
     **A green test file does NOT mean sparsemax is numerically correct.** The
     change that landed alongside these tests closed **Defect A** (the
-    ``0 * -inf = NaN`` gather) and nothing else. Defects **B**, **C**, **D**
-    and **E** below are MEASURED, OPEN, UNGUARDED and deferred to a follow-up
-    plan. They share one root cause: the reduction (ramp, cumsum, support test,
-    ``k_z`` count) runs in the COMPUTE dtype, which under ``float16`` /
-    ``bfloat16`` has neither the range nor the integer precision the algorithm
-    needs — and under ``float32`` fails once magnitudes reach ~1.7e7.
+    ``0 * -inf = NaN`` gather) and, as a bonus, the all-finite cumsum-overflow
+    family — and nothing else. Defects **B**, **C**, **D** and **E** below are
+    MEASURED, OPEN, UNGUARDED and deferred to a follow-up plan. They share one
+    root cause: the reduction (ramp, cumsum, support test, ``k_z`` count) runs
+    in the COMPUTE dtype, which under ``float16`` / ``bfloat16`` has neither
+    the range nor the integer precision the algorithm needs — and under
+    ``float32`` fails once magnitudes reach ~1.7e7.
+
+    A **fifth** pin records something different in kind: not a defect this
+    change failed to fix, but a REGRESSION it knowingly introduced — on
+    Defect-B inputs the failure moved from loud (NaN) to silent (a finite,
+    un-normalised row). It is accepted deliberately; see clause (e) of the
+    anchor.
 
     See the ``# DECISION plan-2026-07-28T134123-420f6ccb/D-017`` anchor in
     ``src/dl_techniques/layers/activations/sparsemax.py``.
@@ -470,13 +534,16 @@ class TestSparsemaxOpenDefects:
             "'beta' plan): an overflow-born non-finite z_cumsum is ADMITTED to "
             "the support because support = 1 + finite - (-inf) = +inf > 0. "
             "Measured at spread 16.95, mixed_float16, K=4096, with NO -inf in "
-            "the input: k_z = 1863 where the exact answer is 1, sum(out) = "
-            "16.95. NOTE the failure MODE moved: this case now fails on the "
-            "FINITENESS assertion (nan=4096), not on sum(out)=16.9375, because "
-            "the loudness guard forces tau to NaN for an all-finite row whose "
-            "z_cumsum overflowed. The answer is still wrong; it is now loud "
-            "again (see test_overflowed_all_finite_row_fails_loudly_not_"
-            "silently). Remove this marker when beta fixes it."
+            "the input: k_z = 1863 where the exact answer is 1. This case "
+            "fails on the NORMALISATION assertion: the output is entirely "
+            "FINITE (nan=0, inf=0) and sum(out) = 16.9375 where 1.0 is "
+            "correct. (An interim revision of this plan added a 'loudness "
+            "guard' that made it fail on the FINITENESS assertion with "
+            "nan=4096 instead; the guard was measured to destroy correct "
+            "answers on ordinary rows and was REVERTED — see clause (e) of the "
+            "D-017 anchor. Do not re-derive it.) The silence itself is pinned "
+            "separately by test_defect_b_loud_to_silent_conversion_is_"
+            "accepted. Remove this marker when beta fixes it."
         ),
     )
     def test_defect_b_overflow_born_inf_admitted_to_support(self) -> None:
@@ -498,6 +565,53 @@ class TestSparsemaxOpenDefects:
             assert abs(total - 1.0) <= 1e-2, (
                 f"Defect B: sum(out) = {total}, expected 1.0 "
                 "(the single largest entry should take all the mass)"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "ACCEPTED LOUD -> SILENT CONVERSION on Defect-B inputs (OPEN, "
+            "deferred to the follow-up 'beta' plan). This pin is about the "
+            "ALARM, not the answer: on this all-finite fp16 row the layer "
+            "SHOULD either be normalised or fail visibly, and it does NEITHER "
+            "— it returns a finite, plausible-looking sum(out) = 16.9375 where "
+            "1.0 is correct. Before this plan the same input returned "
+            "nan=4096, because the `-inf * 0.0` product at the NON-SELECTED "
+            "overflowed positions manufactured a NaN that INCIDENTALLY masked "
+            "Defect B's wrong k_z. The ops.where selection removes that "
+            "product, so the pre-existing wrong answer is now quiet. This is "
+            "DELIBERATE: the alternative — a guard keyed on cumsum finiteness "
+            "— was implemented, measured and REVERTED because it destroyed "
+            "exactly-correct answers on two ordinary input families (see "
+            "test_finite_cumsum_overflow_rows_are_correct_not_nan). Full "
+            "reasoning: clause (e) of the "
+            "`# DECISION plan-2026-07-28T134123-420f6ccb/D-017` anchor in "
+            "sparsemax.py. Beta closes this with a widened reduction plus an "
+            "OUTPUT-side predicate (|sum(out) - 1| > tol); remove this marker "
+            "then."
+        ),
+    )
+    def test_defect_b_loud_to_silent_conversion_is_accepted(self) -> None:
+        """A Defect-B row must be either normalised OR loud. It is neither."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            k = 4096
+            z = np.full((1, k), -16.95, dtype=np.float32)
+            z[:, 0] = 0.0
+            assert np.isfinite(z).all(), "premise: the INPUT is entirely finite"
+
+            out = ops.convert_to_numpy(Sparsemax()(z)).astype(np.float64)
+
+            total = float(np.sum(out[np.isfinite(out)]))
+            normalised = abs(total - 1.0) <= 1e-2
+            loud = not np.isfinite(out).all()
+            assert normalised or loud, (
+                "accepted loud->silent conversion: the row is neither correct "
+                f"nor alarming — finite everywhere, sum(out) = {total}, "
+                "expected 1.0"
             )
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -571,8 +685,8 @@ class TestSparsemaxOpenDefects:
             "a MASKED position whose z_cumsum is -inf, so tau = -inf and the row "
             "dies (nan=2045, inf=2051 at K=4096). The M2 ops.where fix CANNOT "
             "help here: the -inf sits at the SELECTED index, not at a masked-out "
-            "one, and the loudness guard cannot either (this input CARRIES -inf, "
-            "so it is correctly not poisoned). An earlier version of this string "
+            "one, so no spelling of that selection recovers tau. An earlier "
+            "version of this string "
             "claimed 4095 -> 4096 indexes OUT OF RANGE for depth 4096; that claim "
             "is FALSE (4095 is a valid index) and was deleted — no end-to-end "
             "input reaching an out-of-range one-hot was constructible, since "
