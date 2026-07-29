@@ -1604,8 +1604,9 @@ _XLA_WIDTHS = (8, 256, 257, 512, 2048, 4096)
 class TestSparsemaxXLACapability:
     """`Sparsemax` compiles and runs under `tf.function(jit_compile=True)`.
 
-    24 grid points: ``K`` in ``{8, 256, 257, 512, 2048, 4096}`` times
-    ``{float32, mixed_float16, mixed_bfloat16, float64}``.
+    24 grid points per method: ``K`` in ``{8, 256, 257, 512, 2048, 4096}`` times
+    ``{float32, mixed_float16, mixed_bfloat16, float64}`` — once for the
+    forward output and once for the backward pass, which XLA lowers separately.
     """
 
     @pytest.mark.parametrize("policy", _XLA_POLICIES)
@@ -1680,6 +1681,138 @@ class TestSparsemaxXLACapability:
                 err_msg=(
                     f"XLA disagrees with eager at K={width} under {policy} "
                     f"(derived atol={atol})"
+                ),
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    @pytest.mark.parametrize("width", _XLA_WIDTHS)
+    def test_jit_compiled_backward_matches_eager(
+        self, width: int, policy: str
+    ) -> None:
+        """The XLA-compiled BACKWARD pass is bit-identical to the eager one.
+
+        The forward sibling above only proves the compiled FORWARD agrees.
+        `Sparsemax` has no `custom_gradient`, so its backward pass is whatever
+        XLA lowers `max` / `sort` / `cumsum` / `where` / `maximum` to — a
+        different set of kernels from the eager ones, with a different reduction
+        order available to it. That is exactly the thing measured to move fp16
+        and bf16 magnitudes elsewhere in this file, so it is asserted rather
+        than assumed.
+
+        NOT BIT-IDENTICAL — and this is the measurement, not a concession.
+        The plan for this guard specified `assert_array_equal` at zero
+        tolerance, on the strength of a `max|xla - eager| = 0.000e+00` reading.
+        **That reading does not reproduce on GPU** (RTX 4070, TF 2.18): the
+        delta is non-zero at 22 of these 24 points, worst 9.537e-07 (float32,
+        K=4096) / 2.441e-03 (fp16, K=256) / 1.563e-02 (bf16, K=2048) /
+        5.551e-16 (float64, K=2048). The forward sibling above is unaffected,
+        so it is the BACKWARD lowering that differs.
+
+        It is not an artefact of this harness. Moving the tape OUTSIDE the
+        compiled function (compiled forward, eager backward) reproduces the
+        same delta to the digit at 21 of 24 points, so the difference is XLA's
+        gradient kernels, not where the tape is written.
+
+        The tolerance is therefore `_grad_atol(v_compute, _output_dtype())` —
+        the gradient-scale budget `4*u_c(S) + 2*u_r(S)` at ``S = max(|v|, 1)``,
+        NOT `_oracle_atol`, whose scale argument is the forward row spread and
+        which would be charging the wrong magnitude here. Worst measured ratio
+        over the whole grid is **0.333** of that budget (float32, K=4096), so
+        the guard keeps ~3x headroom and still bites: an injection scaling the
+        compiled path's upstream by 1.5 fails it by 5-6 orders of magnitude.
+        Do NOT widen it further, and do not re-tighten to `assert_array_equal`
+        without re-measuring on the target device.
+
+        The eager side reuses
+        `TestSparsemaxBackwardPass._layer_gradient`, the file's single eager
+        backward harness (its 4th call site). The compiled side cannot call it:
+        the tape must be TRACED INSIDE the `jit_compile=True` function for the
+        backward to be compiled at all, and `_layer_gradient` crosses the numpy
+        boundary. The compiled body below is therefore a deliberate mirror of
+        it — if one changes, both change.
+
+        :param width: Row width ``K``.
+        :type width: int
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            z = _partially_masked_row_batch(width, 0.25, seed=width)
+            # Post-cast bits on BOTH sides, so this compares ARITHMETIC and not
+            # a rounding at the layer boundary (same rule as the forward
+            # sibling and as `_layer_gradient`'s own precondition).
+            z_compute = _to_compute_dtype(z)
+            rng = np.random.default_rng(4041 + width)
+            v_compute = _to_compute_dtype(
+                rng.standard_normal(z.shape).astype(np.float32)
+            )
+            masked = ~np.isfinite(np.asarray(z_compute, dtype=np.float64))
+
+            eager_grad, _ = TestSparsemaxBackwardPass._layer_gradient(
+                z_compute, v_compute
+            )
+
+            layer = Sparsemax()
+            v_tensor = tf.convert_to_tensor(v_compute)
+
+            @tf.function(jit_compile=True)
+            def _compiled_grad(t):
+                # Mirror of `_layer_gradient`'s taped region. The tape lives
+                # INSIDE the compiled function on purpose: that is what makes
+                # XLA lower the backward too, which is the property under test.
+                with tf.GradientTape() as tape:
+                    tape.watch(t)
+                    p = layer(t)
+                    loss = tf.reduce_sum(p * tf.cast(v_tensor, p.dtype))
+                return tape.gradient(loss, t)
+
+            # `jit_compile=True` RAISES if XLA cannot lower forward OR backward,
+            # so this call is itself the compilation assertion. Do not wrap it.
+            xla_raw = _compiled_grad(tf.convert_to_tensor(z_compute))
+            assert xla_raw is not None, (
+                "the compiled tape returned no gradient — every assertion "
+                "below would be vacuous"
+            )
+            xla_grad = np.asarray(xla_raw, dtype=np.float64)
+
+            # ANTI-VACUITY. An all-zero gradient would satisfy bit-identity
+            # trivially, and a NaN-vs-NaN pair compares EQUAL under
+            # `assert_array_equal` — so both are excluded before the comparison
+            # is trusted.
+            assert np.isfinite(xla_grad).all(), (
+                f"XLA gradient is not finite at K={width} under {policy} "
+                f"(nan={int(np.isnan(xla_grad).sum())}, "
+                f"inf={int(np.isinf(xla_grad).sum())})"
+            )
+            nonzero = int(np.count_nonzero(xla_grad))
+            assert nonzero > 0, (
+                f"XLA gradient is identically zero at K={width} under "
+                f"{policy} — bit-identity would be vacuous"
+            )
+            assert np.all(xla_grad[masked] == 0.0), (
+                f"XLA gradient is non-zero at "
+                f"{int((xla_grad[masked] != 0.0).sum())} masked positions at "
+                f"K={width} under {policy}"
+            )
+
+            atol = _grad_atol(v_compute, _output_dtype())
+            np.testing.assert_allclose(
+                xla_grad,
+                eager_grad,
+                atol=atol,
+                rtol=0.0,
+                err_msg=(
+                    f"XLA backward disagrees with eager backward at K={width} "
+                    f"under {policy}: worst |delta| = "
+                    f"{float(np.max(np.abs(xla_grad - eager_grad))):.6e} > "
+                    f"derived atol {atol:.6e} "
+                    f"({float(np.max(np.abs(xla_grad - eager_grad))) / atol:.3f}"
+                    f"x the budget; worst measured on this grid is 0.333x; "
+                    f"{nonzero} non-zero gradient entries)"
                 ),
             )
         finally:
