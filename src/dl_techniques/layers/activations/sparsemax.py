@@ -324,38 +324,63 @@ class Sparsemax(keras.layers.Layer):
         #     `[1, 0, ...], sum = 1.0` after. Guarded by
         #     `::test_finite_cumsum_overflow_rows_are_correct_not_nan`.
         #
-        # (b) WHAT IS STILL BROKEN — OPEN, UNGUARDED, DEFERRED to a follow-up
-        #     plan. This layer is NOT numerically safe. Four further defects
-        #     were MEASURED and are NOT fixed here; a green test file does not
-        #     mean otherwise. All four share one root cause: the reduction
-        #     (ramp, cumsum, support test, `k_z` count) runs in the COMPUTE
-        #     dtype, which under fp16/bf16 has neither the range nor the
-        #     integer precision the algorithm needs.
-        #       - Defect B (line ~220): an overflow-born non-finite `z_cumsum`
-        #         is ADMITTED to the support, because
+        # (b) FOUR FURTHER DEFECTS — B, C, D and E — ALL **CLOSED** by
+        #     plan-2026-07-29-9bfc04c5. They stay on the record with the
+        #     magnitudes at which they were first measured, because those
+        #     magnitudes are what made them findable and are what any
+        #     regression would have to reproduce. Do NOT read them as open.
+        #     All four shared ONE root cause: the reduction (ramp, cumsum,
+        #     support test, `k_z` count) ran in the COMPUTE dtype, which under
+        #     fp16/bf16 has neither the range nor the integer precision the
+        #     algorithm needs, and which under float32 gives out near 1.7e7.
+        #     Three mechanisms, all visible above in `call()`, closed them:
+        #       M1 — subtract the ROW MAX first (`shifted`). Exact: sparsemax
+        #            is shift-invariant. It moves every later cancellation from
+        #            scale `max|z|` down to the row SPREAD.
+        #       M2 — build the `arange` ramp in the reduction dtype rather than
+        #            in the compute dtype.
+        #       M3 — run sort / cumsum / support / `k_z` / one-hot in a
+        #            reduction dtype that WIDENS but never NARROWS. That rule,
+        #            and the measured cost of getting it wrong, live in the
+        #            `plan-2026-07-29-9bfc04c5/D-007` anchor above; they are
+        #            deliberately not restated here, and nothing in this clause
+        #            overrides them.
+        #       - Defect B (line ~220 pre-fix): an overflow-born non-finite
+        #         `z_cumsum` was ADMITTED to the support, because
         #         `support = 1 + finite - (-inf) = +inf > 0`. Measured at
         #         spread 16.95, fp16, K=4096, with NO `-inf` in the input:
         #         `k_z = 1863` where the exact answer is 1; `sum(out) = 16.95`.
-        #       - Defect C (line ~210): `ops.arange(1, k+1, dtype=inputs.dtype)`
-        #         cannot represent `k+1`, so the reshape raises. The break is
-        #         NON-MONOTONE: it raises at fp16 K=2048 and bf16 K=256/257,
-        #         but is fine at fp16 K=4096 and bf16 K=512. Do not assume a
-        #         threshold.
-        #       - Defect D (line ~220): round-off absorbs the literal `1.0`, so
-        #         `support == 0` everywhere, `k_z == 0`, `one_hot(-1)` is
-        #         all-zero and `tau = -inf`. On an ALL-FINITE row the output is
-        #         then all `+inf`; on a row that ALSO carries an `-inf` mask the
-        #         masked slots compute `-inf - (-inf)` and the row returns NaN.
-        #         Measured onsets (K=4, 2 of 4 masked for the NaN route):
-        #         float32 |z| >= 1.68e7 (7.77e7 at K=512), fp16 |z| >= 2048,
-        #         bf16 |z| >= 300.
-        #       - Defect E (line ~225): `k_z = ops.sum(support_mask)` accumulates
-        #         in the compute dtype and hits the same integer wall. Measured
-        #         under fp16 on the TF/GPU tree reduction: 2049 -> 2048,
-        #         2051 -> 2052, 4095 -> 4096 (2050 / 3000 / 4094 are exact).
-        #         The 2051 -> 2052 overshoot selects a MASKED position whose
-        #         `z_cumsum` is `-inf`, so `tau = -inf` and the row dies
-        #         (measured: nan=2045, inf=2051 at K=4096).
+        #         CLOSED by M1 + M3: after the shift the cumsum is bounded by
+        #         `K * spread` and is accumulated in float32, so it no longer
+        #         overflows on this row. Post-fix on that exact input:
+        #         `maxerr = 0` against the exact-rational oracle.
+        #       - Defect C (line ~210 pre-fix):
+        #         `ops.arange(1, k+1, dtype=inputs.dtype)` could not represent
+        #         `k+1`, so the reshape RAISED. The break was NON-MONOTONE in
+        #         K: it raised at fp16 K=2048 and bf16 K=256/257, but not at
+        #         fp16 K=4096 or bf16 K=512. Do not assume a threshold.
+        #         CLOSED by M2: the bf16 K=256 row now builds and runs.
+        #       - Defect D (line ~220 pre-fix): round-off absorbed the literal
+        #         `1.0`, so `support == 0` everywhere, `k_z == 0`,
+        #         `one_hot(-1)` was all-zero and `tau = -inf`. On an ALL-FINITE
+        #         row the output was then all `+inf`; on a row that ALSO
+        #         carried an `-inf` mask the masked slots computed
+        #         `-inf - (-inf)` and the row returned NaN. Measured onsets
+        #         (K=4, 2 of 4 masked for the NaN route): float32 |z| >= 1.68e7
+        #         (7.77e7 at K=512), fp16 |z| >= 2048, bf16 |z| >= 300.
+        #         CLOSED by M1 (with M3): once the row sits at scale `spread`
+        #         the literal `1.0` is no longer absorbed. Post-fix at all
+        #         three onsets, in both the all-finite and the masked form:
+        #         `maxerr = 0`.
+        #       - Defect E (line ~225 pre-fix): `k_z = ops.sum(support_mask)`
+        #         accumulated in the compute dtype and hit the same integer
+        #         wall. Measured under fp16 on the TF/GPU tree reduction:
+        #         2049 -> 2048, 2051 -> 2052, 4095 -> 4096 (2050 / 3000 / 4094
+        #         were exact). The 2051 -> 2052 overshoot selected a MASKED
+        #         position whose `z_cumsum` was `-inf`, so `tau = -inf` and the
+        #         row died (measured: nan=2045, inf=2051 at K=4096).
+        #         CLOSED by M3: the count is exact in float32 far beyond
+        #         K=4096. Post-fix on that row: `maxerr = 1.05e-09`.
         #         An earlier revision of this anchor also claimed that the
         #         4095 -> 4096 overshoot indexes OUT OF RANGE for depth 4096 and
         #         yields a silently wrong finite answer. That claim was FALSE and
@@ -368,22 +393,35 @@ class Sparsemax(keras.layers.Layer):
         #     accumulation moves them. Treat a non-reproduction on another
         #     backend as a different measurement, not as absence of the defect.
         #
-        # (c) THIS LINE CANNOT HELP DEFECT E OR DEFECT D. In both, the `-inf`
-        #     reaches `tau` ITSELF — for E it sits at the SELECTED index, for D
-        #     it is manufactured by `k_z == 0` — rather than at a masked-out
-        #     operand of this selection, so `ops.where` cannot exclude it and
-        #     `tau` is `-inf` regardless of how the selection is spelled. Fixing
-        #     E and D requires widening the reduction dtype (and, for D,
-        #     subtracting the row max), not re-spelling this expression.
+        #     XLA, STATED PRECISELY — an earlier blanket claim that fp16 and
+        #     bf16 "do not compile at all" was too strong in exactly this
+        #     direction. Re-measured on scratch-reverted bytes over
+        #     K in {8, 256, 257, 512, 2048, 4096}: **fp16 failed at EVERY K**,
+        #     and failed at XLA LOWERING (`ValueError: Unsupported dtype19 ...
+        #     Range[Tidx=DT_HALF]`); **bf16 failed only at K=256/257**, and
+        #     failed EAGERLY on `ops.reshape` ("Input to reshape is a tensor
+        #     with 255 values, but the requested shape has 256") — i.e. bf16's
+        #     compile failure merely TRACKED its eager Defect-C raise rather
+        #     than being an independent XLA limitation. All 24 (K x dtype) grid
+        #     points now compile under `tf.function(jit_compile=True)` and
+        #     match eager, guarded by `::TestSparsemaxXLACapability`.
         #
-        # (d) OUTPUT PRECISION under fp16 is ~1 ulp of `max|z|` (measured worst
-        #     case 1.685 ulp over the committed property grid), because
-        #     `out = max(z - tau, 0)` is a cancellation at scale `|z|`. The
-        #     tests' oracle tolerance is derived from that resolution rather
-        #     than fixed. Subtracting the row max before the cumsum (exact:
-        #     sparsemax is shift-invariant) takes the same grid from 86/128 to
-        #     0/128 violations — deferred to the follow-up plan, not done here.
-        #     AT LARGE K THIS PER-ELEMENT LIMIT BECOMES A ROW-SUM DEFECT.
+        # (c) WHY THE `ops.where` SPELLING ALONE COULD NOT CLOSE D OR E
+        #     (historical, and still true — do not expect this line to carry
+        #     that load). In both, the `-inf` reached `tau` ITSELF — for E it
+        #     sat at the SELECTED index, for D it was manufactured by
+        #     `k_z == 0` — rather than at a masked-out operand of this
+        #     selection, so `ops.where` could not exclude it and `tau` was
+        #     `-inf` regardless of how the selection was spelled. What closed
+        #     them was M1 and M3 above, not a re-spelling of this expression.
+        #     This line remains load-bearing for Defect A; see (a).
+        #
+        # (d) OUTPUT PRECISION under fp16 WAS ~1 ulp of `max|z|` (measured
+        #     worst case 1.685 ulp over the committed property grid), because
+        #     `out = max(z - tau, 0)` is a cancellation — at scale `max|z|`
+        #     before M1, at scale `spread` after it. The tests' oracle
+        #     tolerance is derived from that resolution rather than fixed.
+        #     AT LARGE K THAT PER-ELEMENT LIMIT BECAME A ROW-SUM DEFECT.
         #     Measured under `mixed_float16` on plateau rows, with NO overflow,
         #     NO non-finite value and no alarm of any kind:
         #       K=512,  256 entries at |z| = 20 -> `sum(out) = 4.000`;
@@ -392,52 +430,103 @@ class Sparsemax(keras.layers.Layer):
         #       K=1024, 259 entries            -> 4.047   (correct sum: 1.0).
         #     Mechanism: the correct per-entry mass `1/256 = 0.0039` is NOT
         #     REPRESENTABLE at scale 20 (`ulp_fp16(20) = 0.0156`), so the
-        #     nearest non-zero result is one whole ulp; the per-element error
-        #     is 0.0117 = 0.75 ulp, i.e. SUB-ULP and as good as fp16 can do,
-        #     but K of them add up. This is a THIRD route by which the layer
-        #     returns a silently un-normalised row (the others are Defect B and
-        #     Defect D) — but it is NOT a new defect and gets no letter: it is
-        #     this clause's cancellation limit, and it measures IDENTICAL in
-        #     the pre-plan bytes, in the M2-only bytes and here, so no spelling
-        #     of the selection above affects it. **An fp16 sparsemax output
-        #     must not be assumed normalised.** Row-max subtraction removes it
-        #     too (the shifted row's ulp is ~2e-6, not 0.0156).
+        #     nearest non-zero result was one whole ulp; the per-element error
+        #     was 0.0117 = 0.75 ulp, i.e. SUB-ULP and as good as fp16 can do,
+        #     but K of them added up. It never got a letter — it was this
+        #     clause's cancellation limit, not a separate defect, and it
+        #     measured IDENTICAL in the pre-plan bytes and in the M2-only
+        #     bytes, so no spelling of the selection above affected it.
+        #     **CLOSED by M1**, which is the only thing that could close it:
+        #     the shifted row's ulp is ~2e-6, not 0.0156. This is why the
+        #     projection below MUST read `shifted` and not `inputs_2d` —
+        #     reading `inputs_2d` there silently reopens this clause, with no
+        #     non-finite value and no raise to warn you.
         #
-        # (e) WHAT THIS CHANGE DOES **NOT** FIX — an accepted LOUD -> SILENT
-        #     CONVERSION on Defect-B inputs. On an all-finite row whose cumsum
-        #     OVERFLOWS, the pre-plan code returned NaN — but only by accident:
-        #     the `-inf * 0.0` product at the NON-SELECTED positions
-        #     manufactured one. The selection below removes that product, so
-        #     such a row now returns a FINITE, UNNORMALISED answer. Measured
-        #     (`mixed_float16`, K=4096, `full(-16.95)` with `z[0] = 0.0`, all
-        #     finite): before `nan=4096`; after `nan=0, sum(out) = 16.938`
-        #     where the correct sum is 1.0. The answer was ALREADY WRONG both
-        #     times — Defect B gives `k_z = 1863` where the exact answer is 1 —
-        #     but the FAILURE MODE moved from loud to silent, and that is a
-        #     real regression for that family. It is DELIBERATE, and it is
-        #     pinned: `::test_defect_b_loud_to_silent_conversion_is_accepted`.
+        # (e) THE ACCEPTED LOUD -> SILENT CONVERSION NO LONGER EXISTS, BUT ITS
+        #     PROHIBITION IS STILL IN FORCE — it is the most important thing in
+        #     this anchor. Historically, on an all-finite Defect-B row whose
+        #     cumsum OVERFLOWED, the pre-Defect-A code returned NaN by accident
+        #     (the `-inf * 0.0` product at the NON-SELECTED positions
+        #     manufactured one); removing that product left the row FINITE and
+        #     UNNORMALISED (`mixed_float16`, K=4096, `full(-16.95)` with
+        #     `z[0] = 0.0`: `nan=4096` before, `nan=0, sum(out) = 16.938`
+        #     after, correct sum 1.0), i.e. wrong both times but silently so.
+        #     M1 + M3 removed the premise entirely: that row is now simply
+        #     CORRECT. It is pinned by `TestSparsemaxClosedDefects`
+        #     `::test_defect_b_closed_max_entry_takes_all_mass_on_the_spread_row`.
         #
-        #     WHY IT IS ACCEPTED, AND WHY YOU MUST NOT RE-INVENT THE FIX. A
-        #     "loudness guard" — force `tau` to NaN when the INPUT is all
-        #     finite yet `z_cumsum` is not — was written, shipped, measured and
-        #     then REVERTED, because it DESTROYED exactly-correct answers on
-        #     two ORDINARY input families: the very ones clause (a) records as
-        #     this change's second win (`z = [400, 300 x255]` and
-        #     `z = [2, 1, -1e4 x254]`, fp16 K=256, `err = 0.0` here, ALL-NaN
-        #     under the guard). Its premise — "a legitimately masked row HAS
-        #     `-inf` in its input, so it is never poisoned" — is simply false;
-        #     legitimacy does not require `-inf`.
+        #     YOU MUST STILL NOT RE-INVENT THE "LOUDNESS GUARD". A guard that
+        #     forces `tau` to NaN when the INPUT is all finite yet `z_cumsum` is
+        #     not was written, shipped, measured and then REVERTED, because it
+        #     DESTROYED exactly-correct answers on two ORDINARY input families —
+        #     the very ones clause (a) records as its second win:
+        #       - `z = [400, 300 x255]`   — no mask anywhere in the input;
+        #       - `z = [2, 1, -1e4 x254]` — the large-finite-negative mask
+        #                                   convention.
+        #     Both were ALL-NaN under the guard; both re-measure at `maxerr = 0`
+        #     against the exact oracle with the current code. The guard's
+        #     premise — "a legitimately masked row HAS `-inf` in its input, so
+        #     it is never poisoned" — is simply false; legitimacy does not
+        #     require `-inf`.
         #     A CUMSUM-FINITENESS PREDICATE CANNOT DISTINGUISH THESE CASES.
         #     Overflowing the cumsum is neither necessary nor sufficient for a
-        #     wrong answer: in both families above `k_z` is selected long
-        #     before the overflow happens, so the overflow is irrelevant to the
-        #     result. Any predicate on `z_cumsum` therefore trades a wrong-but-
-        #     loud row for a correct-but-destroyed one, on commoner shapes.
-        #     The ACCURATE predicate is on the OUTPUT (`|sum(out) - 1| > tol`),
-        #     which catches Defect B, Defect D and clause (d)'s plateau route
-        #     alike while leaving correct rows untouched — and it belongs with
-        #     the widened reduction in the follow-up plan, where it makes the
-        #     question moot rather than traded. Not here.
+        #     wrong answer: in both families `k_z` is selected long before the
+        #     overflow happens, so the overflow is irrelevant to the result. Any
+        #     predicate on `z_cumsum` therefore trades a wrong-but-loud row for
+        #     a correct-but-destroyed one, on commoner shapes.
+        #
+        # (f) DELIBERATE SCOPE-OUTS AND MEASURED LIMITS (plan-2026-07-29-9bfc04c5).
+        #     Recorded so a future reader sees choices, not omissions.
+        #
+        #     THE OUTPUT-SIDE VALIDITY PREDICATE (`|sum(out) - 1| > tol`) WAS
+        #     DROPPED FROM SCOPE, not forgotten. An earlier revision of clause
+        #     (e) promised it to this follow-up as "the ACCURATE predicate".
+        #     The evidence for calling it necessary is gone: every family that
+        #     appeared to require it — Defect B, both Defect-D forms, Defect E,
+        #     and clause (d)'s plateau rows, under all four dtype policies — is
+        #     correct without it, and the one apparent survivor turned out to be
+        #     an oracle-input artifact (the oracle had been fed the intended
+        #     Python literals instead of the bits the layer actually received).
+        #     Do not add it speculatively; if you ever construct a row that is
+        #     finite, plausible and un-normalised, that is new evidence and the
+        #     decision can be revisited on it.
+        #
+        #     THE CAST-BACK POINT. `tau` — an `(N, 1)` tensor — is the ONLY
+        #     value cast back to the compute dtype, at the `ops.cast` below.
+        #     The layer's observable output dtype therefore still equals its
+        #     compute dtype, `compute_output_shape` stays truthful, and no
+        #     `compute_output_spec` override is needed. Do NOT "improve" this by
+        #     returning float32 under an fp16 policy: that changes the dtype
+        #     contract for every consumer, and M1 already removed the precision
+        #     argument for doing so (clause (d)).
+        #     CONSUMER CONSTRAINT: `losses/sparsemax_loss.py` does not currently
+        #     accommodate that compute-dtype output contract under a non-default
+        #     policy. That is a defect in the LOSS and its fix belongs in the
+        #     loss's own file — it is NOT a reason to make this layer return
+        #     float32.
+        #
+        #     FULLY-MASKED ROWS (`all(z[i]) == -inf`) RETURN ALL-NaN, under all
+        #     four dtype policies, IDENTICALLY before and after this plan:
+        #     `row_max = -inf`, `shifted = -inf - (-inf) = NaN`, and that NaN
+        #     reaches `tau` and hence every element. Measured, not assumed —
+        #     neither fixed nor worsened here, and out of scope: upstream
+        #     `apply_attention_mask(rescue_axis=...)` rescues such rows before
+        #     they reach this layer. A row with a SINGLE finite entry is exact
+        #     (`out` is that one-hot, `sum = 1.0`), so the degeneracy is
+        #     strictly the all-masked case.
+        #
+        #     COST. The widened reduction costs ~12% eager wall-clock and 2x
+        #     memory in the reduction intermediates; the XLA capability grid
+        #     adds ~5-11s to the activations test gate.
+        #
+        #     TOLERANCE / DUPLICATION. The test file's `_oracle_atol` derivation
+        #     re-states D-007's reduction-dtype rule on purpose (an oracle must
+        #     not share code with the thing it checks). A future change to
+        #     `reduction_dtype` must move that copy in LOCKSTEP. Note also that
+        #     the guard against re-narrowing float64 is THIS ANCHOR plus D-007's
+        #     recorded measurement — NOT the tolerance test: the narrowed
+        #     float64 error (1.99e-08) sits far under the 1e-3 TF32 floor those
+        #     assertions carry, so they would stay green through the regression.
         # ---------------------------------------------------------------
         # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
         # where the one-hot is set, substitute an exact zero everywhere else,
