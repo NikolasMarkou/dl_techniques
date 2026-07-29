@@ -356,6 +356,15 @@ def _reduction_dtype(input_dtype: str) -> str:
 # The default is `True`, so every pre-existing caller is BIT-IDENTICAL: the
 # `True` branch is the same `max(...)` expression, unmoved.
 #
+# [SUPERSEDED AT iter-1/step-15 — the coupling below is FIXED. The two loss
+# guards no longer spell their additive term `_TF32_ATOL_FLOOR`; they call
+# `_loss_accum_atol`, which derives it from the loss's own float32 tree
+# summation and therefore DOES scale with K. The measured table below is kept
+# as the record of WHY the flat constant was wrong, and the prohibition on
+# widening the fixtures is LIFTED — `test_loss_reference_atol_is_width_correct`
+# now sweeps W in {16,64,256,1024} precisely to keep it lifted. Worst `err/atol`
+# over that sweep is now 0.083, against the 1.6572 recorded below.]
+#
 # WHAT THIS DID *NOT* FIX, AND THE FIXTURE COUPLING IT LEAVES BEHIND.
 # The two loss guards spell their tolerance `_TF32_ATOL_FLOOR + eps * max_j
 # sum|z - p|`. Unfloring `eps` did nothing to the LEADING ADDITIVE
@@ -558,6 +567,69 @@ _GRAD_ULP_BUDGET_COMPUTE = 4.0
 #: Ulp of ``S`` in the REDUCTION dtype: the two roundings taken inside the
 #: never-narrowed reduction. Derived above.
 _GRAD_ULP_BUDGET_REDUCE = 2.0
+
+
+#: Slack on the loss's own float32 accumulation bound, in units of the derived
+#: term. 4 matches `_GRAD_ULP_BUDGET_COMPUTE`'s convention in this module.
+#: Measured headroom at this value: worst `err/atol` = 0.083 over
+#: (6 arms x W in {16,64,256,1024} x 6 seeds). See `_loss_accum_atol`.
+_LOSS_ACCUM_SLACK = 4.0
+
+
+def _loss_accum_atol(
+        z64: np.ndarray, p64: np.ndarray, y64: np.ndarray
+) -> float:
+    """The loss's OWN float32 summation error — the additive term of a
+    `SparsemaxLoss`-vs-Fenchel-Young comparison.
+
+    ``SparsemaxLoss`` computes ``0.5 * sum_j (z_j - p_j)^2 - sum_j z_j y_j`` in
+    ``backend.floatx()`` (float32) and then averages over rows. That summation
+    has a roundoff floor of its own, entirely independent of how accurate the
+    projection ``p`` is, and it GROWS WITH THE ROW WIDTH. This function is that
+    floor; the caller adds the projection-propagation term separately.
+
+    Bound: ``slack * depth * u_f32 * T``, where ``T`` is the largest per-row
+    total of the summed magnitudes (``0.5 * max_j sum (z-p)^2`` plus
+    ``max_j sum |z y|`` — the two accumulations, charged at their own scales so
+    a cancelling difference cannot hide either), ``u_f32`` is the float32 unit
+    roundoff, and ``depth = ceil(log2(K))``.
+
+    **Why `log2(K)` and not `K`.** The textbook sequential-summation bound is
+    ``K * u * T``. TF reduces in a TREE, not a loop — the same fact the layer's
+    own D-007/D-017 work rests on — so the depth is logarithmic. Using the
+    sequential bound was MEASURED (`iter-1/step-15`, GPU 1) to be 100x too
+    generous at ``K=1024`` and to COST BITE: a systematic 1% shrink of the
+    projection stopped being detected on 2 of 6 arms. The tree bound keeps the
+    grid green (worst ratio 0.083) while detecting everything the flat
+    constant it replaces detected, and more.
+
+    **What this replaced, and why that was wrong.** The two loss guards used to
+    spell this term as the flat constant ``_TF32_ATOL_FLOOR`` (1e-3). That is a
+    float32 matmul/convolution belt: it does not scale with ``K``, with ``|L|``,
+    or with anything else, while the error it is supposed to cover tracks the
+    loss magnitude. At ``K=16`` it was ~63x too LOOSE (1.0e-03 against a
+    derived 1.6e-05); at ``K=1024`` it was too TIGHT and the
+    ``float64 x mixed_float16`` arm was already RED at 1.66x over, on
+    correct code. Both directions are now gone: the term is derived, so
+    widening these fixtures is safe.
+
+    :param z64: The logits the LOSS received, float64, shape ``(rows, K)``.
+    :type z64: np.ndarray
+    :param p64: The exact-rational projection of the bits the SUB-LAYER
+        received, float64, same shape.
+    :type p64: np.ndarray
+    :param y64: The one-hot targets, float64, same shape.
+    :type y64: np.ndarray
+
+    :return: The additive accumulation term.
+    :rtype: float
+    """
+    u_f32 = float(np.spacing(np.float32(1.0))) / 2.0
+    k = int(z64.shape[-1])
+    depth = max(1, int(np.ceil(np.log2(k)))) if k > 1 else 1
+    quadratic = 0.5 * float(np.max(np.sum((z64 - p64) ** 2, axis=-1)))
+    linear = float(np.max(np.sum(np.abs(z64 * y64), axis=-1)))
+    return _LOSS_ACCUM_SLACK * depth * u_f32 * (quadratic + linear)
 
 
 def _grad_atol(v: np.ndarray, output_dtype: str) -> float:
@@ -1339,6 +1411,71 @@ class TestSparsemax:
         assert f"[{-ndim}, {ndim - 1}]" in message, (
             f"[{band}] the message does not name the legal range "
             f"[{-ndim}, {ndim - 1}]: {message}"
+        )
+
+    def test_compute_output_shape_rejects_the_same_axes_as_call(self) -> None:
+        """`compute_output_shape` and `call` must AGREE on which axes are legal.
+
+        This asserts AGREEMENT over a swept band, not merely that each raises
+        somewhere — two predicates that each reject *something* can still
+        disagree, and the disagreement is the defect. `compute_output_shape`
+        used to accept every axis unconditionally, so a functional/symbolic
+        build was told the output shape was the input shape and wired a graph
+        that could only fail later, at call time. For `axis == -(ndim+1)` the
+        declared shape was additionally a LIE about what the pre-D-014 layer
+        emitted (`(2,4,5)` declared, `(2,5,4)` produced).
+
+        Sweeps every rank 1-4 against every axis in `[-(ndim+3), ndim+2]`, i.e.
+        well past both ends of the legal range in both directions, and requires
+        the two to raise on exactly the same set.
+        """
+        rng = np.random.default_rng(0)
+        shapes = [(5,), (4, 5), (2, 4, 5), (2, 3, 4, 5)]
+        disagreements = []
+        checked = 0
+
+        for shape in shapes:
+            ndim = len(shape)
+            z = rng.standard_normal(shape).astype("float32")
+            for axis in range(-(ndim + 3), ndim + 3):
+                layer = Sparsemax(axis=axis)
+
+                try:
+                    layer.compute_output_shape(shape)
+                    shape_raised = False
+                except ValueError:
+                    shape_raised = True
+
+                try:
+                    layer(z)
+                    call_raised = False
+                except ValueError:
+                    call_raised = True
+
+                checked += 1
+                if shape_raised != call_raised:
+                    disagreements.append(
+                        f"shape={shape} axis={axis}: "
+                        f"compute_output_shape raised={shape_raised} but "
+                        f"call raised={call_raised}"
+                    )
+                # And when both accept, the declared shape must be the truth.
+                if not call_raised:
+                    declared = tuple(layer.compute_output_shape(shape))
+                    produced = tuple(ops.convert_to_numpy(layer(z)).shape)
+                    if declared != produced:
+                        disagreements.append(
+                            f"shape={shape} axis={axis}: declared {declared} "
+                            f"but produced {produced}"
+                        )
+
+        # Anti-vacuity: the sweep must actually have covered both outcomes,
+        # or a predicate that rejects everything (or nothing) passes silently.
+        assert checked >= 24, f"only {checked} (shape, axis) points swept"
+        assert not disagreements, (
+            "compute_output_shape and call disagree at "
+            f"{len(disagreements)} of {checked} points:\n  "
+            + "\n  ".join(disagreements)
         )
 
     @pytest.mark.parametrize("value", [True, False])
@@ -3759,7 +3896,7 @@ class TestSparsemaxLossDtypePolicy:
             # buys the float64 third of the grid and costs the other two
             # nothing.
             eps = _oracle_atol(z_inner, inner_dtype, apply_tf32_floor=False)
-            atol = _TF32_ATOL_FLOOR + eps * float(
+            atol = _loss_accum_atol(z_outer, p64, y64) + eps * float(
                 np.max(np.sum(np.abs(z_outer - p64), axis=-1))
             )
             actual = float(ops.convert_to_numpy(out))
@@ -3847,7 +3984,7 @@ class TestSparsemaxLossDtypePolicy:
             # retained), and it now goes RED on both a 1% and a 0.1% systematic
             # shrink of the projection, which it did not before.
             eps = _oracle_atol(z_inner, inner_dtype, apply_tf32_floor=False)
-            atol = _TF32_ATOL_FLOOR + eps * float(
+            atol = _loss_accum_atol(z64, p64, y64) + eps * float(
                 np.max(np.sum(np.abs(z64 - p64), axis=-1))
             )
             actual = float(ops.convert_to_numpy(out))
@@ -3855,5 +3992,129 @@ class TestSparsemaxLossDtypePolicy:
                 f"loss {actual} != Fenchel-Young reference {expected} "
                 f"(derived atol={atol})"
             )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("width", [16, 64, 256, 1024])
+    @pytest.mark.parametrize("call_policy", ["float32", "mixed_float16"])
+    @pytest.mark.parametrize(
+        "construct_policy", _LOSS_NARROW_CONSTRUCT_POLICIES + ("float32",)
+    )
+    def test_loss_reference_atol_is_width_correct(
+        self, construct_policy: str, call_policy: str, width: int
+    ) -> None:
+        """The loss guards' tolerance must track the row width, not a constant.
+
+        This test exists to keep a prohibition LIFTED. The two guards above ran
+        at `width=16` behind a comment forbidding anyone from widening them,
+        because their additive term was the flat `_TF32_ATOL_FLOOR` and
+        widening turned `float64 x mixed_float16` RED at 1024 (1.66x over) with
+        no defect present — the guard was measuring the loss's own float32
+        accumulation growing with `K`, not the projection. `_loss_accum_atol`
+        derives that term instead, so the coupling is gone; this sweep is what
+        stops it coming back. A regression to any flat constant fails here at
+        `width=1024` long before anyone notices at 16.
+
+        It deliberately does NOT re-assert the dtype contract (the guards above
+        own that) — only that `|actual - expected| <= atol` holds as the
+        fixture grows, and that the tolerance has not been made vacuous in the
+        process (the anti-vacuity bound below).
+
+        :param construct_policy: Policy in force when the loss is CONSTRUCTED.
+        :type construct_policy: str
+        :param width: Row width of the fixture.
+        :type width: int
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy(construct_policy)
+            loss = SparsemaxLoss()
+            inner_dtype = _output_dtype()
+
+            # The CALL policy is varied independently: the arm this sweep was
+            # written for (`construct=float64 x call=mixed_float16` at K=1024)
+            # was RED at 1.66x under the flat constant, and a
+            # construction-only parametrization never reaches it.
+            keras.mixed_precision.set_global_policy(call_policy)
+            # SEED 999, NOT 606, AND THE CHOICE IS LOAD-BEARING. Over the six
+            # seeds swept at `iter-1/step-15`, only 999 drives the arm this
+            # test exists for into the red under the OLD flat constant:
+            # `err/atol` at K=1024, construct=float64 x call=mixed_float16 is
+            # 0.75 / 0.58 / 0.04 / 0.10 / **1.66** / 0.06 for
+            # 606 / 607 / 11 / 42 / 999 / 2024. A sweep on 606 would go green
+            # against a reintroduced flat constant on THIS assertion and catch
+            # the regression only via the growth check below — i.e. it would be
+            # a weaker test that looked identical. Judge the fixture by how it
+            # was chosen, not by its size (`plans/LESSONS.md`).
+            z = _partially_masked_row_batch(width, 0.0, seed=999)
+            z_compute = _to_compute_dtype(z)
+            y = np.zeros_like(z_compute)
+            y[:, 0] = 1.0
+            out = loss(
+                ops.convert_to_tensor(y), ops.convert_to_tensor(z_compute)
+            )
+
+            # Restore the CONSTRUCTION policy before touching the oracle:
+            # `_exact_sparsemax` asserts it is fed the ACTIVE policy's compute
+            # dtype, and the layer in question is the FROZEN sub-layer.
+            keras.mixed_precision.set_global_policy(construct_policy)
+            assert _output_dtype() == inner_dtype
+            z64 = np.asarray(z_compute, dtype=np.float64)
+            z_inner = _to_compute_dtype(z_compute)
+            p64 = _exact_rows_as_float64(z_inner)
+            y64 = np.asarray(y, dtype=np.float64)
+            expected = float(
+                np.mean(
+                    0.5 * np.sum((z64 - p64) ** 2, axis=-1)
+                    - np.sum(z64 * y64, axis=-1)
+                )
+            )
+
+            eps = _oracle_atol(z_inner, inner_dtype, apply_tf32_floor=False)
+            accum = _loss_accum_atol(z64, p64, y64)
+            atol = accum + eps * float(
+                np.max(np.sum(np.abs(z64 - p64), axis=-1))
+            )
+            actual = float(ops.convert_to_numpy(out))
+            err = abs(actual - expected)
+
+            assert err <= atol, (
+                f"loss {actual} != Fenchel-Young reference {expected} at "
+                f"width={width} under construct={construct_policy}, "
+                f"call={call_policy} (inner={inner_dtype}): "
+                f"err {err:.6e} > atol {atol:.6e} "
+                f"({err / atol:.4f}x). If this fired after someone replaced "
+                f"`_loss_accum_atol` with a constant, that is the defect: the "
+                f"additive term must scale with the row width."
+            )
+
+            # ANTI-VACUITY — on the PROPERTY THIS TEST EXISTS TO PROTECT, not
+            # on the margin.
+            #
+            # A first attempt asserted `err >= atol / 200`, i.e. "the tolerance
+            # must not greatly exceed the observed error". That was a CATEGORY
+            # ERROR and it fired on 10 of 20 correct cases: `atol` here is a
+            # WORST-CASE bound, and a worst-case bound is legitimately orders
+            # above a typical realisation. On the bf16 arms the projection term
+            # alone is `eps * sum|z - p| ~ 1.2e-2 * 93 ~ 1.1`, which is the
+            # honest per-element budget for a bfloat16 projection, not slack.
+            # Penalising a conservative derivation for being conservative would
+            # have pushed the next author to shrink a correct bound.
+            #
+            # What IS checkable, and is the actual regression risk: the additive
+            # term must TRACK THE WIDTH. Recompute it on a 16-wide slice of the
+            # same batch and require strict growth. A regression to any flat
+            # constant (`_TF32_ATOL_FLOOR` being the one this replaced) makes
+            # these two equal and fails here.
+            if width > 16:
+                narrow = _loss_accum_atol(
+                    z64[:, :16], p64[:, :16], y64[:, :16]
+                )
+                assert accum > narrow, (
+                    f"the additive term does not grow with width: "
+                    f"{narrow:.6e} at K=16 vs {accum:.6e} at K={width}. A flat "
+                    f"constant would give exactly this — that is the defect "
+                    f"`_loss_accum_atol` was written to remove."
+                )
         finally:
             keras.mixed_precision.set_global_policy(previous)

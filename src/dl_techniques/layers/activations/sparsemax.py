@@ -657,7 +657,35 @@ class Sparsemax(keras.layers.Layer):
         :type input_shape: tuple
         :return: Output shape tuple, identical to input.
         :rtype: tuple
+        :raises ValueError: If ``axis`` is out of range for ``input_shape``'s
+            rank. The range is the same one :meth:`call` enforces, and the two
+            MUST agree — see the DECISION anchor below.
         """
+        # ---------------------------------------------------------------
+        # DECISION plan-2026-07-29T110112-09832856/D-022
+        # THIS CHECK IS NOT DEFENSIVE PROGRAMMING; DO NOT DELETE IT AS SUCH.
+        # `call()` rejects an out-of-range `axis` (D-014). Before this check
+        # existed, `compute_output_shape` did NOT, so the two disagreed: a
+        # functional/symbolic build reached `compute_output_shape`, was told
+        # the output shape was the input shape, and wired a graph that could
+        # only fail later at call time. Worse, for `axis == -(ndim+1)` the
+        # declared shape was a LIE about what the pre-D-014 layer actually
+        # emitted (measured: `(2,4,5)` declared, `(2,5,4)` produced).
+        # A shape function that accepts a configuration `call()` rejects
+        # moves the error from build time to run time, which is the wrong
+        # direction. The two predicates must stay identical; if the one in
+        # `call()` changes, change this one in the same edit.
+        # Guarded by `TestSparsemax::test_compute_output_shape_rejects_the_
+        # same_axes_as_call` (it asserts the two predicates AGREE on a swept
+        # band, not merely that each raises somewhere).
+        # ---------------------------------------------------------------
+        ndim = len(input_shape)
+        if not -ndim <= self.axis < ndim:
+            raise ValueError(
+                f"axis={self.axis} is out of range for an input of rank "
+                f"{ndim} (shape {tuple(input_shape)}); axis must be in "
+                f"[{-ndim}, {ndim - 1}]"
+            )
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
