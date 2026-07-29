@@ -211,7 +211,7 @@ class SwiGLUFFN(keras.layers.Layer):
         # An EXPLICIT hidden_dim wins; otherwise size via the 2/3 rule from PaLM.
         # SwiGLU historically had no `hidden_dim` at all, which made it the odd one out:
         # every other FFN type in the factory is sized by `hidden_dim`, so a caller
-        # (e.g. GatedDeltaNet's `intermediate_size`) passing one had it SILENTLY DROPPED by
+        # (e.g. GatedLinearAttentionBlock's `intermediate_size`) passing one had it SILENTLY DROPPED by
         # the factory's kwarg filter and got the 2/3-rule default instead. It now accepts
         # the same knob as the rest.
         self.hidden_dim = (

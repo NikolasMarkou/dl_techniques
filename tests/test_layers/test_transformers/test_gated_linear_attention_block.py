@@ -1,4 +1,4 @@
-# tests/test_gated_deltanet.py
+# tests/test_layers/test_transformers/test_gated_linear_attention_block.py
 
 import os
 import tempfile
@@ -10,14 +10,14 @@ import pytest
 import tensorflow as tf
 from keras import layers, models, ops
 
-# Make sure to import the NEW, refactored GatedDeltaNet
-from dl_techniques.layers.gated_delta_net import GatedDeltaNet
+# Make sure to import the NEW, refactored GatedLinearAttentionBlock
+from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
 
 # --- Test Class ---
-class TestGatedDeltaNet:
+class TestGatedLinearAttentionBlock:
     """
-    Comprehensive test suite for the refactored and configurable GatedDeltaNet layer.
+    Comprehensive test suite for the refactored and configurable GatedLinearAttentionBlock layer.
     """
 
     # --- Fixtures for Reusability ---
@@ -62,14 +62,14 @@ class TestGatedDeltaNet:
         """`intermediate_size` must reach the FFN -- it used to be silently discarded.
 
         SwiGLUFFN had no `hidden_dim` (it sized itself via `ffn_expansion_factor`), so the
-        factory's kwarg filter DROPPED the `hidden_dim` GatedDeltaNet passed, so the FFN was
+        factory's kwarg filter DROPPED the `hidden_dim` GatedLinearAttentionBlock passed, so the FFN was
         built at SwiGLU's 2/3-rule default and nothing failed. The old test only asserted
         `hasattr(layer, "output_ffn")`, which was true either way.
 
         The fixture deliberately asks for 320, NOT 256: SwiGLU's own default for
         output_dim=64 IS 256, so a 256 fixture passes whether or not the value is honored.
         """
-        layer = GatedDeltaNet(**ffn_config)
+        layer = GatedLinearAttentionBlock(**ffn_config)
         assert layer.output_ffn.hidden_dim == 320, (
             f"intermediate_size=320 did not reach the SwiGLU FFN "
             f"(hidden_dim={layer.output_ffn.hidden_dim})"
@@ -109,7 +109,7 @@ class TestGatedDeltaNet:
     # ===============================================
     def test_initialization_defaults(self, default_config):
         """Tests layer initialization with default parameters."""
-        layer = GatedDeltaNet(**default_config)
+        layer = GatedLinearAttentionBlock(**default_config)
         assert not layer.built
         assert layer.dim == 64
         assert layer.num_heads == 4
@@ -121,7 +121,7 @@ class TestGatedDeltaNet:
 
     def test_initialization_custom_config(self, custom_config):
         """Tests initialization with custom norm, activation, and head dim."""
-        layer = GatedDeltaNet(**custom_config)
+        layer = GatedLinearAttentionBlock(**custom_config)
         assert layer.dim == 72
         assert layer.num_heads == 6
         assert layer.head_dim == 16
@@ -130,7 +130,7 @@ class TestGatedDeltaNet:
 
     def test_initialization_with_custom_ffn(self, ffn_config):
         """Tests initialization with a custom FFN output."""
-        layer = GatedDeltaNet(**ffn_config)
+        layer = GatedLinearAttentionBlock(**ffn_config)
         assert layer.ffn_type == "swiglu"
         assert not layer.use_default_ffn
         assert hasattr(layer, "output_ffn")
@@ -138,7 +138,7 @@ class TestGatedDeltaNet:
 
     def test_build_process_default(self, default_config, sample_input_64):
         """Tests that the layer builds correctly with default FFN."""
-        layer = GatedDeltaNet(**default_config)
+        layer = GatedLinearAttentionBlock(**default_config)
         output = layer(sample_input_64)
         assert layer.built
         assert output.shape == sample_input_64.shape
@@ -149,7 +149,7 @@ class TestGatedDeltaNet:
 
     def test_build_process_custom_ffn(self, ffn_config, sample_input_64):
         """Tests that the layer builds correctly with a custom FFN."""
-        layer = GatedDeltaNet(**ffn_config)
+        layer = GatedLinearAttentionBlock(**ffn_config)
         output = layer(sample_input_64)
         assert layer.built
         assert output.shape == sample_input_64.shape
@@ -177,11 +177,11 @@ class TestGatedDeltaNet:
         config = {"dim": 64, "num_heads": 4, "max_seq_len": 256}
         config.update(invalid_params)
         with pytest.raises(ValueError, match=match_str):
-            GatedDeltaNet(**config)
+            GatedLinearAttentionBlock(**config)
 
     def test_build_validation_input_shape(self, default_config):
         """Tests build validation for input shape."""
-        layer = GatedDeltaNet(**default_config)
+        layer = GatedLinearAttentionBlock(**default_config)
         with pytest.raises(ValueError, match="Expected 3D input shape"):
             layer.build((32, 64))
         with pytest.raises(ValueError, match="Input feature dim .* must match layer dim"):
@@ -203,7 +203,7 @@ class TestGatedDeltaNet:
         """Tests forward pass with various configurations."""
         config = request.getfixturevalue(config_fixture)
         sample_input = request.getfixturevalue(input_fixture)
-        layer = GatedDeltaNet(**config)
+        layer = GatedLinearAttentionBlock(**config)
         output = layer(sample_input, training=False)
 
         assert output.shape == sample_input.shape
@@ -211,7 +211,7 @@ class TestGatedDeltaNet:
 
     def test_training_vs_inference_mode(self, regularized_config, sample_input_32):
         """Tests that layer behaves differently in training vs inference due to dropout."""
-        layer = GatedDeltaNet(**regularized_config)
+        layer = GatedLinearAttentionBlock(**regularized_config)
         output_train = layer(sample_input_32, training=True)
         output_infer = layer(sample_input_32, training=False)
         assert not np.allclose(
@@ -220,7 +220,7 @@ class TestGatedDeltaNet:
 
     def test_deterministic_inference(self, default_config, sample_input_64):
         """Tests that inference is deterministic."""
-        layer = GatedDeltaNet(**default_config)
+        layer = GatedLinearAttentionBlock(**default_config)
         output1 = layer(sample_input_64, training=False)
         output2 = layer(sample_input_64, training=False)
         np.testing.assert_allclose(
@@ -232,7 +232,7 @@ class TestGatedDeltaNet:
     # ===============================================
     def test_get_config_completeness(self, custom_config):
         """Tests that get_config contains all new and old __init__ parameters."""
-        layer = GatedDeltaNet(**custom_config)
+        layer = GatedLinearAttentionBlock(**custom_config)
         config = layer.get_config()
         for param in custom_config.keys():
             assert param in config
@@ -242,9 +242,9 @@ class TestGatedDeltaNet:
 
     def test_from_config_reconstruction(self, regularized_config):
         """Tests that a layer can be fully reconstructed from its config."""
-        original_layer = GatedDeltaNet(**regularized_config)
+        original_layer = GatedLinearAttentionBlock(**regularized_config)
         config = original_layer.get_config()
-        reconstructed_layer = GatedDeltaNet.from_config(config)
+        reconstructed_layer = GatedLinearAttentionBlock.from_config(config)
         new_config = reconstructed_layer.get_config()
         assert config == new_config
 
@@ -263,7 +263,7 @@ class TestGatedDeltaNet:
         sample_input = request.getfixturevalue(input_fixture)
 
         inputs = layers.Input(shape=sample_input.shape[1:])
-        outputs = GatedDeltaNet(**config)(inputs)
+        outputs = GatedLinearAttentionBlock(**config)(inputs)
         model = models.Model(inputs, outputs)
 
         original_prediction = model(sample_input, training=False)
@@ -285,7 +285,7 @@ class TestGatedDeltaNet:
     # ===============================================
     def test_gradient_flow(self, default_config, sample_input_64):
         """Tests that gradients can be computed through the layer."""
-        layer = GatedDeltaNet(**default_config)
+        layer = GatedLinearAttentionBlock(**default_config)
         x_var = tf.Variable(sample_input_64)
         with tf.GradientTape() as tape:
             output = layer(x_var, training=True)
@@ -298,7 +298,7 @@ class TestGatedDeltaNet:
         """Tests integration into a standard training loop."""
         model = models.Sequential([
             layers.InputLayer(shape=(16, 64)),
-            GatedDeltaNet(**default_config),
+            GatedLinearAttentionBlock(**default_config),
             layers.GlobalAveragePooling1D(),
             layers.Dense(10),
         ])
@@ -323,7 +323,7 @@ class TestGatedDeltaNet:
         """Tests that the layer works in a functional model with dynamic shapes."""
         try:
             inputs = keras.Input(shape=input_shape[1:])
-            outputs = GatedDeltaNet(**default_config)(inputs)
+            outputs = GatedLinearAttentionBlock(**default_config)(inputs)
             model = keras.models.Model(inputs, outputs)
         except Exception as e:
             pytest.fail(f"Failed to build model with dynamic shape {input_shape}. Error: {e}")
@@ -336,7 +336,7 @@ class TestGatedDeltaNet:
     def test_dynamic_sequence_length_in_training_loop(self, default_config):
         """Tests a model with dynamic sequence length can be compiled and trained."""
         inputs = keras.Input(shape=(None, 64))
-        outputs = GatedDeltaNet(**default_config)(inputs)
+        outputs = GatedLinearAttentionBlock(**default_config)(inputs)
         pooled = keras.layers.GlobalAveragePooling1D()(outputs)
         logits = keras.layers.Dense(10)(pooled)
         model = keras.models.Model(inputs, logits)

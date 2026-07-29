@@ -2,7 +2,7 @@
 Comprehensive Tests for Qwen3 Next Model Implementation
 
 This module provides comprehensive tests for the Qwen3 Next model, including:
-- Basic functionality tests with hybrid block structure (3x GatedDeltaNet + 1x GatedAttention)
+- Basic functionality tests with hybrid block structure (3x GatedLinearAttentionBlock + 1x GatedAttention)
 - Configuration variants optimized for single GPU testing
 - Block-level MoE configuration and testing
 - Serialization/deserialization with full architecture support
@@ -26,7 +26,7 @@ from dl_techniques.models.qwen.qwen3_next import (
     Qwen3NextBlock,
     create_qwen3_next,
 )
-from dl_techniques.layers.gated_delta_net import GatedDeltaNet
+from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
 class TestQwen3NextModelBasic:
     """Test basic Qwen3 Next model functionality with hybrid block structure."""
@@ -114,9 +114,9 @@ class TestQwen3NextModelBasic:
             assert len(block.delta_layers) == 3, f"Block {i} should have 3 delta layers"
             assert len(block.delta_moe_layers) == 3, f"Block {i} should have 3 delta MoE layers"
 
-            # Check delta layers are GatedDeltaNet
+            # Check delta layers are GatedLinearAttentionBlock
             for j, delta_layer in enumerate(block.delta_layers):
-                assert isinstance(delta_layer, GatedDeltaNet), f"Block {i} delta layer {j} is not GatedDeltaNet"
+                assert isinstance(delta_layer, GatedLinearAttentionBlock), f"Block {i} delta layer {j} is not GatedLinearAttentionBlock"
 
             # Check attention layer is GatedAttention
             from dl_techniques.layers.attention.gated_attention import GatedAttention

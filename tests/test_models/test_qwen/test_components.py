@@ -616,7 +616,7 @@ class TestQwen3NextBlock:
         block(sample_input)  # Build the block
 
         # Expected variables:
-        # 3x Delta layers: each has ~13 variables (from GatedDeltaNet tests)
+        # 3x Delta layers: each has ~13 variables (from GatedLinearAttentionBlock tests)
         # 1x Attention layer: similar structure, ~13 variables
         # 4x Normalization layers: each has 1 scale parameter (zero-centered RMS)
         # Total: roughly 3*13 + 13 + 4*1 = 56 variables
@@ -684,7 +684,7 @@ class TestQwen3NextBlock:
         # Each component should be built
         for i in range(3):
             assert hasattr(block.delta_layers[i], '__class__')
-            # Verify it's a GatedDeltaNet (would need to import to check directly)
+            # Verify it's a GatedLinearAttentionBlock (would need to import to check directly)
 
         # Verify attention layer exists
         assert hasattr(block.attention_layer, '__class__')

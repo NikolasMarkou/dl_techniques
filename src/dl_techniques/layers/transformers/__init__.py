@@ -33,6 +33,9 @@ Specialized and Hybrid Blocks:
 - AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
   conditional transformer block; norms/attention/FFN/AdaLN activation are
   factory-configurable.
+- GatedLinearAttentionBlock: a linear-time recurrent sequence-mixing block whose
+  state is updated by a gated outer-product rule, with configurable Q/K/V
+  normalization, causal short convolutions and a configurable output FFN.
 - EnergyTransformer: the Energy Transformer block (arXiv:2302.07253) — replaces
   the `attn -> FFN` residual stream with T steps of gradient descent on a single
   scalar energy `E_ATT + E_HN`; paired with HopfieldNetwork, its associative-memory
@@ -97,6 +100,7 @@ from .eomt_transformer import EomtTransformer
 from .adaln_zero import AdaLNZeroConditionalBlock
 from .free_transformer import BinaryMapper, FreeTransformerLayer
 from .progressive_focused_transformer import PFTBlock
+from .gated_linear_attention_block import GatedLinearAttentionBlock
 
 # ---------------------------------------------------------------------
 # Energy Transformer (arXiv:2302.07253)
@@ -137,6 +141,7 @@ __all__ = [
     "BinaryMapper",
     "FreeTransformerLayer",
     "PFTBlock",
+    "GatedLinearAttentionBlock",
 
     # Energy Transformer
     "EnergyTransformer",

@@ -23,15 +23,15 @@ from keras import initializers, layers, ops, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .ffn.factory import create_ffn_from_config, FFNType, FFN_REGISTRY
-from .norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.logger import logger
+from ..ffn.factory import create_ffn_from_config, FFNType, FFN_REGISTRY
+from ..norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
-class GatedDeltaNet(keras.layers.Layer):
+class GatedLinearAttentionBlock(keras.layers.Layer):
     """
     Gated DeltaNet layer combining delta rule updates with adaptive gating.
 
@@ -235,7 +235,7 @@ class GatedDeltaNet(keras.layers.Layer):
         )
 
         logger.info(
-            f"GatedDeltaNet initialized: dim={dim}, "
+            f"GatedLinearAttentionBlock initialized: dim={dim}, "
             f"num_heads={num_heads}, head_dim={self.head_dim}, "
             f"max_seq_len={self.max_seq_len}, activation='{self.activation}', "
             f"norm='{self.normalization_type}', ffn='{self.ffn_type or 'default_gated'}'"
@@ -416,7 +416,7 @@ class GatedDeltaNet(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def delta_rule_update(
+    def gated_linear_scan(
         self,
         q: keras.KerasTensor,
         k: keras.KerasTensor,
@@ -522,7 +522,7 @@ class GatedDeltaNet(keras.layers.Layer):
             k_heads = self.dropout(k_heads, training=training)
             v_heads = self.dropout(v_heads, training=training)
 
-        delta_output = self.delta_rule_update(q_heads, k_heads, v_heads, alpha, beta)
+        delta_output = self.gated_linear_scan(q_heads, k_heads, v_heads, alpha, beta)
         delta_output = ops.reshape(delta_output, (batch_size, seq_len, self.qk_dim))
 
         if self.use_default_ffn:

@@ -32,7 +32,7 @@ class Qwen3Next(keras.Model):
 
     This implementation follows the exact pattern shown in the architecture diagram:
     - Token embeddings + RoPE position embeddings
-    - N blocks, each containing 3x GatedDeltaNet + 1x GatedAttention
+    - N blocks, each containing 3x GatedLinearAttentionBlock + 1x GatedAttention
     - Each layer has its own Zero-Centered RMSNorm and MoE
     - Final normalization and language modeling head
 
@@ -48,7 +48,7 @@ class Qwen3Next(keras.Model):
            │
            ▼
     Qwen3NextBlock₁:
-        3x [Zero-Centered RMSNorm → GatedDeltaNet → MoE → Residual]
+        3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
         1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
            │
            ▼
@@ -56,7 +56,7 @@ class Qwen3Next(keras.Model):
            │
            ▼
     Qwen3NextBlockₙ:
-        3x [Zero-Centered RMSNorm → GatedDeltaNet → MoE → Residual]
+        3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
         1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
            │
            ▼

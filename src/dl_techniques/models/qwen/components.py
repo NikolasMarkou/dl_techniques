@@ -19,7 +19,7 @@ from typing import Optional, List, Any, Dict, Tuple
 
 from dl_techniques.layers.moe import MoEConfig
 from dl_techniques.layers.moe import MixtureOfExperts
-from dl_techniques.layers.gated_delta_net import GatedDeltaNet
+from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention.gated_attention import GatedAttention
@@ -103,7 +103,7 @@ class Qwen3NextBlock(keras.layers.Layer):
 
     Attributes:
         delta_norms: List of normalization layers for DeltaNet blocks.
-        delta_layers: List of GatedDeltaNet layers.
+        delta_layers: List of GatedLinearAttentionBlock layers.
         delta_moe_layers: List of optional MoE layers for DeltaNet blocks.
         attention_norm: Normalization layer for attention block.
         attention_layer: GatedAttention layer.
@@ -221,13 +221,13 @@ class Qwen3NextBlock(keras.layers.Layer):
             )
             self.delta_norms.append(delta_norm)
 
-            delta_layer = GatedDeltaNet(
+            delta_layer = GatedLinearAttentionBlock(
                 dim=self.dim,
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
                 dropout_rate=self.dropout_rate,
                 max_seq_len=max_seq_len,
-                name=f"gated_delta_net_{i}"
+                name=f"gated_linear_attention_{i}"
             )
             self.delta_layers.append(delta_layer)
 
