@@ -2310,6 +2310,210 @@ class TestSparsemaxBackwardPass:
 
 
 # ---------------------------------------------------------------------
+# THE LAYER vs THE EXACT-RATIONAL ORACLE.
+#
+# WHY THIS CLASS EXISTS.  Until it was added, `_attack_corpus()` had exactly
+# two consumers, both inside `TestExactRationalOracle`, whose own docstring
+# says "None of these tests touch ``Sparsemax``". So the corpus and the oracle
+# only ever checked EACH OTHER: no committed test compared the LAYER to the
+# exact-rational oracle at all. Everything layer-side compared against the
+# float64 `_sparsemax_reference` (which shares the layer's `vals - tau`
+# cancellation structure), or against the layer's own eager answer (the XLA
+# class), or against the analytic VJP (the backward class). An instrument that
+# is validated but never used is not evidence.
+#
+# WHAT IS ASSERTED, per `(corpus row, policy)` pair:
+#   * the output dtype IS the compute dtype (I-1: `Sparsemax` never returns
+#     float32 under a narrow policy — asserted on the TENSOR, before any
+#     numpy conversion can launder it);
+#   * exact `0.0` at every masked position, with `== 0.0`, not `allclose`;
+#   * agreement with `_exact_rows_as_float64` at `_oracle_atol(z_compute,
+#     _output_dtype())`, `rtol=0.0`, fed the POST-CAST bits on BOTH sides.
+#
+# WHY ONE TEST CASE PER `(row, policy)` PAIR rather than a loop inside four
+# policy cases: the three oracle-out-of-scope pairs must be REPORTED as pytest
+# skips (`-rs` names which and why), not silently `continue`d past. A `continue`
+# inside a loop is invisible to the runner, and "which rows did this guard
+# actually look at" is precisely the question a vacuous guard answers wrongly.
+# The corpus length is READ (`len(_attack_corpus())`), never hard-coded — the
+# record has carried it as both 19 and 21 (`plans/LESSONS.md:20`).
+# ---------------------------------------------------------------------
+
+
+class TestSparsemaxAgainstExactOracle:
+    """`Sparsemax`'s FORWARD output vs `fractions.Fraction` arithmetic.
+
+    Measured on GPU (`CUDA_VISIBLE_DEVICES=1`, RTX 4070) before being
+    committed: 0 violations at 147 points per policy, worst ratio
+    ``err / derived`` = 0.0556 / 0.1666 / 0.1667 / 0.0714 for float32 /
+    mixed_float16 / mixed_bfloat16 / float64 — identical in BOTH TF32 regimes
+    (standalone and co-collected with `test_linear_attention.py`, which
+    disables TF32 process-globally at import). A green result here is
+    therefore expected; the value of this class is that the comparison is
+    COMMITTED, not that it is surprising.
+
+    This class is the home for every layer-vs-exact-oracle comparison. Add to
+    it rather than starting a sibling class.
+    """
+
+    @pytest.mark.parametrize("policy", _XLA_POLICIES)
+    @pytest.mark.parametrize(
+        "case_index",
+        # READ the corpus length; do not assume it. Ids are the corpus labels
+        # so a skip or a failure names the row it happened on.
+        range(len(_attack_corpus())),
+        ids=[label for label, _, _ in _attack_corpus()],
+    )
+    def test_layer_matches_the_exact_oracle_on_the_attack_corpus(
+        self, case_index: int, policy: str
+    ) -> None:
+        """One corpus row under one policy, layer vs exact rational arithmetic.
+
+        :param case_index: Index into `_attack_corpus()`.
+        :type case_index: int
+        :param policy: Global Keras dtype policy name.
+        :type policy: str
+        """
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            label, z, _measured_under = _attack_corpus()[case_index]
+            z_compute = _to_compute_dtype(z)
+            z64 = np.asarray(z_compute, dtype=np.float64)
+
+            # The `any(isfinite)` predicate the exact oracle already applies.
+            # Under `mixed_float16` the float32 literal 1.68e7 casts to `inf`,
+            # leaving three corpus batches with no finite entry at all — the
+            # projection is undefined there, for the layer and the oracle
+            # alike. Those pairs are SKIPPED, never deleted from the corpus:
+            # they remain in scope under the policies that can represent them.
+            if not np.isfinite(z64).any(axis=-1).all():
+                # ANTI-VACUITY: a skip is only ever legitimate for these three
+                # pairs. If the predicate starts firing anywhere else it is a
+                # bug in the predicate (or a corpus change), and this guard
+                # must go RED rather than quietly shrink its own grid.
+                assert policy == "mixed_float16" and label in (
+                    "pin_defect_d_f32_1.68e7_K4",
+                    "onset_d_float32_all_finite",
+                    "onset_d_float32_masked_2_of_4",
+                ), (
+                    f"{label} has no finite entry under {policy}, which is not "
+                    "one of the three known oracle-out-of-scope (row, policy) "
+                    "pairs — the skip predicate has started eating rows it "
+                    "should be checking"
+                )
+                pytest.skip(
+                    f"{label} under {policy}: every entry casts to a "
+                    "non-finite value (float32 1.68e7 -> fp16 inf), so the "
+                    "projection is undefined and the exact-rational oracle "
+                    "refuses the row by the same predicate. Out of scope for "
+                    "THIS policy only."
+                )
+
+            layer = Sparsemax()
+            raw = layer(z_compute)
+
+            # I-1, on the tensor: the observable output dtype is the compute
+            # dtype. Checked before `convert_to_numpy`, which would happily
+            # widen a narrow answer and hide a regression.
+            assert keras.backend.standardize_dtype(raw.dtype) == (
+                _output_dtype()
+            ), (
+                f"{label}: layer returned {raw.dtype} under {policy}, but the "
+                f"compute dtype is {_output_dtype()} (I-1)"
+            )
+
+            out64 = ops.convert_to_numpy(raw).astype(np.float64)
+            exact64 = _exact_rows_as_float64(z_compute)
+
+            masked = ~np.isfinite(z64)
+            assert np.all(out64[masked] == 0.0), (
+                f"{label} under {policy}: "
+                f"{int((out64[masked] != 0.0).sum())} of "
+                f"{int(masked.sum())} masked positions are not EXACTLY 0.0 "
+                f"(worst {float(np.max(np.abs(out64[masked]))) if masked.any() else 0.0:.3e})"
+            )
+
+            atol = _oracle_atol(z_compute, _output_dtype())
+            err = float(np.max(np.abs(out64 - exact64)))
+            np.testing.assert_allclose(
+                out64,
+                exact64,
+                atol=atol,
+                rtol=0.0,
+                err_msg=(
+                    f"layer != EXACT rational oracle at {label} under "
+                    f"{policy} (K={z.shape[-1]}): max abs error {err:.6e} vs "
+                    f"derived atol {atol:.6e} ({err / atol:.3f}x)"
+                ),
+            )
+
+            # Per-case floor: EVERY row of this batch was compared. Stated as
+            # an equality rather than a `>= n` floor because the count is known
+            # exactly here — one comparison per row, no filtering of any kind
+            # (unlike the backward guard, which legitimately drops boundary
+            # rows and therefore can only assert a floor).
+            assert out64.shape[0] == z_compute.shape[0] >= 1, (
+                f"{label}: compared {out64.shape[0]} rows of "
+                f"{z_compute.shape[0]}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_the_corpus_grid_is_not_silently_skipped(self) -> None:
+        """Grid-level anti-vacuity: the skip predicate eats 3 rows, not more.
+
+        The per-case guard above cannot see a predicate bug that skips
+        EVERYTHING — pytest would report 76 skips and 0 failures, which is a
+        green run. This method counts, over the whole
+        ``_attack_corpus() x _XLA_POLICIES`` grid, how many ROWS the predicate
+        would let through, and pins the exact set it turns away.
+
+        THE FLOOR. Measured: 29 rows per policy x 4 policies = 116, minus the
+        3 single-row batches the fp16 predicate refuses = **113**. The floor is
+        **100**, chosen so that losing any ENTIRE policy (-29 or -27 -> 84..87)
+        or the whole seeded property subset (-48 -> 65) goes red, while
+        ordinary corpus growth does not. It is the analogue of the backward
+        guard's ``checked >= 40`` against a measured 43..46.
+        """
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            rows_compared = 0
+            skipped: List[Tuple[str, str]] = []
+            for policy in _XLA_POLICIES:
+                keras.mixed_precision.set_global_policy(policy)
+                for label, z, _measured_under in _attack_corpus():
+                    z64 = np.asarray(_to_compute_dtype(z), dtype=np.float64)
+                    if not np.isfinite(z64).any(axis=-1).all():
+                        skipped.append((label, policy))
+                    else:
+                        rows_compared += int(z64.shape[0])
+
+            assert rows_compared >= 100, (
+                f"only {rows_compared} corpus rows would be compared across "
+                f"the whole 4-policy grid (expected >= 100, measured 113); "
+                f"{len(skipped)} (row, policy) pairs were turned away by the "
+                f"predicate, e.g. {sorted(skipped)[:5]} — this guard has gone "
+                "vacuous"
+            )
+            assert sorted(skipped) == sorted(
+                [
+                    ("pin_defect_d_f32_1.68e7_K4", "mixed_float16"),
+                    ("onset_d_float32_all_finite", "mixed_float16"),
+                    ("onset_d_float32_masked_2_of_4", "mixed_float16"),
+                ]
+            ), (
+                "the set of oracle-out-of-scope (row, policy) pairs has "
+                f"changed: {sorted(skipped)}. Exactly three pairs are known "
+                "out of scope (float32 1.68e7 -> fp16 inf); any other pair "
+                "being skipped means rows are being silently dropped, and any "
+                "of these three no longer skipping means the corpus changed."
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
 # `SparsemaxLoss` x the global dtype policy  (MEASURED 2026-07-29)
 # ---------------------------------------------------------------------
 # WHAT WAS PROBED.  `losses/sparsemax_loss.py:225` builds its inner
