@@ -450,8 +450,16 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'pooling_factor': 4,
             'top_k': 1536,
             'scorer': 'norm',
+            'score_head_reduction': 'mean',
             'full_attention': False,
-            'qk_norm_type': 'rms_norm',
+            # WAS 'rms_norm', which disagreed with the constructor's None and
+            # was therefore SILENTLY APPLIED to every factory-built lighthouse
+            # layer. Per the class's own D-004(a) that is actively harmful: the
+            # scorer ranks ||Q|| and ||K||, and RMSNorm makes both near-constant
+            # across positions, erasing the very signal the selection reads.
+            # Factory-built layers were getting a degraded scorer that
+            # direct-constructed ones were not.
+            'qk_norm_type': None,
             'qk_norm_kwargs': None,
             'probability_type': 'softmax',
             'probability_config': None,

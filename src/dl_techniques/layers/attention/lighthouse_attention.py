@@ -30,13 +30,31 @@ Architecture:
         build time, holds every coarsest-level entry plus the leading level-0
         entries, and together these guarantee at least one contributor at every
         base position. A *discretionary* set of ``top_k`` entries is then chosen
-        by score from the remaining candidates. The union is sorted by causal
-        position, restoring temporal order.
+        by score from the remaining candidates, with the budget PARTITIONED BY
+        CAUSAL BLOCK so that entries never compete across time (D-023). The union
+        is sorted by causal position, restoring temporal order.
     -   **Sub-attention.** Q, K and V are gathered at the selected indices and a
         single causal scaled dot-product attention runs over the resulting
-        sub-sequence. Because the indices are sorted by causal position, an
-        ordinary lower-triangular mask over the gathered scores reproduces
-        causality with respect to the original sequence.
+        sub-sequence. The indices are sorted by causal position, so an ordinary
+        lower-triangular mask over the gathered scores prevents any query from
+        READING an entry that summarises its future.
+
+        **The exact causality guarantee, which is not the whole of causality.**
+        The mask above governs reading; it says nothing about *which entries are
+        in the gathered sequence at all*. Selection is content-dependent, so a
+        token that changes its own score can change the set — and before D-023
+        a single global ``top_k`` let a token evict an entry belonging to an
+        arbitrarily earlier position (measured: perturbing token 31 evicted the
+        entry base position 15 reads as itself, moving output 15 by 2.585).
+        The per-block budget bounds that to a block: **a perturbation at token
+        ``T`` can move outputs at positions in ``T``'s own causal block of span
+        ``p^(L-1)``, and never in any earlier block** (measured over all 28
+        perturbation positions of the guard config, 0 cross-block leaks).
+        Positions *earlier in ``T``'s own block* can still move — that residual
+        is real, reproduced, and pinned by
+        ``test_causality_is_per_position`` as a strict xfail. Closing it needs
+        per-query selection and a block-wise SDPA, i.e. a different layer shape.
+        Do not describe this layer as per-position causal.
     -   **Scatter-back.** Each entry's output is written to the base positions its
         window covers, offset by a causal shift of ``p^l - 1``. That shift is what
         makes coarse entries safe: a level-``l`` summary contributes only at or
@@ -778,6 +796,87 @@ class LighthouseAttention(keras.layers.Layer):
 
         n_cand = int(self._candidate_indices.size)
         self._effective_k = int(min(self.top_k, n_cand))
+
+        # DECISION plan-2026-07-29T110112-09832856/D-023
+        # ---------------------------------------------------------------
+        # PARTITION THE DISCRETIONARY BUDGET BY CAUSAL TIME. DO NOT REPLACE
+        # THIS WITH A SINGLE GLOBAL `ops.top_k` OVER ALL CANDIDATES — that is
+        # the causality defect this layer shipped with, and it is structural,
+        # not a masking slip.
+        #
+        # MEASURED on the pre-fix bytes (N=32, L=2, p=2, top_k=16, seed 7/99):
+        # perturbing ONLY token 31 raised its score into the shared top_k,
+        # which EVICTED pyramid entry 15 (causal_pos 15) from the budget.
+        # Entry 15 is the level-0 entry that base position 15 reads as itself,
+        # so output position 15 moved by 2.585 — a future token silently
+        # rewrote a past token's output. |A\B| = |B\A| = 1, and position 15 was
+        # the ONLY position < N/2 that moved, exactly as this mechanism
+        # predicts. The lower-triangular mask over the gathered sub-sequence
+        # cannot help: it stops an early query from READING a late entry, but
+        # nothing stops the late entry from taking the early entry's BUDGET.
+        #
+        # The fix is a per-block budget. An entry's score depends only on the
+        # base tokens it pools, all of which are at or before its own
+        # `causal_pos`, so a competition confined to one causal block can only
+        # be disturbed by tokens inside that block.
+        #
+        # HONEST STATEMENT OF THE GUARANTEE THIS BUYS (do not overclaim it):
+        # causality now holds at BLOCK granularity. A perturbation at token T
+        # can still change the selection among entries whose `causal_pos` lies
+        # in T's own block, hence outputs at positions in that block at or
+        # before T. It cannot reach any earlier block. Per-POSITION causality
+        # would require a per-query selection and a block-wise SDPA — a
+        # different layer shape, deliberately not built here.
+        # Guarded by `test_causality` (cross-block) and
+        # `test_causality_is_block_granular` (which pins the residual so it
+        # cannot be quietly forgotten or quietly fixed).
+        # ---------------------------------------------------------------
+        cand_causal = self._causal_pos[self._candidate_indices]
+        block_span = int(self._max_fanout)
+        self._sel_block_span = block_span
+        nb = max(1, int(np.ceil(n / float(block_span))))
+        block_of_cand = np.minimum(cand_causal // block_span, nb - 1)
+
+        # Every block must be able to fund its share, so the per-block budget
+        # is capped by the thinnest block. Blocks with no candidates at all are
+        # dropped from the partition rather than funded with padding.
+        occupied = [
+            np.nonzero(block_of_cand == b)[0] for b in range(nb)
+        ]
+        occupied = [idx for idx in occupied if idx.size > 0]
+        nb_eff = len(occupied)
+        thinnest = min(int(idx.size) for idx in occupied) if nb_eff else 0
+
+        per_block = self._effective_k // nb_eff if nb_eff else 0
+        per_block = int(min(per_block, thinnest))
+        if per_block < 1 and nb_eff:
+            # Budget smaller than the block count: fund the earliest blocks
+            # one entry each. Earliest, not highest-scoring, because "which
+            # blocks get funded" must not itself depend on future content.
+            per_block = 1
+            occupied = occupied[: self._effective_k]
+            nb_eff = len(occupied)
+
+        self._sel_num_blocks = nb_eff
+        self._sel_per_block = per_block
+        width = max((int(idx.size) for idx in occupied), default=0)
+        block_cand = np.full((nb_eff, width), -1, dtype=np.int64)
+        for b, idx in enumerate(occupied):
+            block_cand[b, : idx.size] = self._candidate_indices[idx]
+        self._sel_block_cand = block_cand
+        self._sel_block_valid = block_cand >= 0
+
+        budget = per_block * nb_eff
+        if budget != self._effective_k:
+            logger.info(
+                "LighthouseAttention: causal-block partition trimmed the "
+                "discretionary budget %d -> %d (%d blocks x %d, span %d). The "
+                "budget must divide evenly across causal blocks and cannot "
+                "exceed the thinnest block's %d candidates; see D-023.",
+                self._effective_k, budget, nb_eff, per_block, block_span,
+                thinnest,
+            )
+        self._effective_k = int(budget)
         self._S_sel = int(mandatory.size) + self._effective_k
 
         if self._effective_k < self.top_k:
@@ -916,11 +1015,43 @@ class LighthouseAttention(keras.layers.Layer):
         )
 
         if self._effective_k > 0:
-            cand_1d = self._const("candidates", self._candidate_indices, "int32")
-            # Score only the non-mandatory pool, then map local -> pyramid index.
-            s_cand = ops.take(s_shared, cand_1d, axis=1)  # (B, S_cand)
-            _, local_idx = ops.top_k(s_cand, k=self._effective_k)
-            fine = ops.take(cand_1d, local_idx, axis=0)  # (B, k)
+            # PER-CAUSAL-BLOCK top_k, NOT a global one. See D-023 in
+            # `_analyze_shape`: a single global budget lets a future token
+            # evict a past token's entry, which is the causality defect this
+            # layer shipped with. Confining each competition to one causal
+            # block bounds the blast radius of a perturbation to that block.
+            nb, per_b = self._sel_num_blocks, self._sel_per_block
+            block_cand = self._const(
+                "block_cand", self._sel_block_cand, "int32"
+            )  # (nb, W), -1 padded
+            valid = self._const(
+                "block_valid", self._sel_block_valid.astype(np.int64), "bool"
+            )  # (nb, W)
+
+            # (B, nb, W) scores. Padded slots must never win, so they are
+            # pushed below any real score with the dtype-safe sentinel rather
+            # than -inf (which NaNs a fully padded row under fp16).
+            flat = ops.reshape(block_cand, (-1,))
+            s_blocks = ops.take(s_shared, flat, axis=1)
+            s_blocks = ops.reshape(
+                s_blocks, (-1, nb, int(self._sel_block_cand.shape[1]))
+            )
+            s_blocks = ops.where(
+                valid[None, :, :],
+                s_blocks,
+                ops.cast(_mask_value(s_blocks.dtype), s_blocks.dtype),
+            )
+
+            _, local_idx = ops.top_k(s_blocks, k=per_b)  # (B, nb, per_b)
+            picked = ops.take_along_axis(
+                ops.broadcast_to(
+                    block_cand[None, :, :],
+                    ops.shape(s_blocks),
+                ),
+                local_idx,
+                axis=-1,
+            )  # (B, nb, per_b) pyramid indices
+            fine = ops.reshape(picked, (-1, nb * per_b))
             selected = ops.concatenate([selected, fine], axis=1)
 
         # Sort by causal timestamp (last summarised base position). Ordering by

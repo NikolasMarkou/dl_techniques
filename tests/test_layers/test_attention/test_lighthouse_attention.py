@@ -49,7 +49,13 @@ class TestLighthouseAttention:
         assert layer.top_k == 1536
         assert layer.scorer == "norm"
         assert layer.full_attention is False
-        assert layer.qk_norm_type == "rms_norm"
+        # None, not "rms_norm". The class documents this as deliberate
+        # (D-004(a)): the scorer ranks ||Q|| and ||K||, and RMSNorm makes both
+        # near-constant across positions, erasing the selection signal. The
+        # factory registry used to declare "rms_norm" here and silently applied
+        # it to every factory-built layer; that disagreement is now fixed in
+        # `attention/factory.py`, in the constructor's favour.
+        assert layer.qk_norm_type is None
         assert layer.probability_type == "softmax"
 
     def test_invalid_args(self):
@@ -244,3 +250,86 @@ class TestLighthouseAttention:
             loaded = keras.models.load_model(path)
         y_post = loaded(x).numpy()
         np.testing.assert_allclose(y_pre, y_post, atol=1e-5)
+
+    # ==================== Causality: the exact guarantee ====================
+
+    @staticmethod
+    def _perturb(perturb_at, N=32, dim=64, H=4, L=2, p=2, k=16):
+        """Return (block_span, positions whose output moved) for a one-token hit."""
+        keras.utils.set_random_seed(7)
+        layer = LighthouseAttention(
+            dim=dim, num_heads=H, num_levels=L, pooling_factor=p, top_k=k
+        )
+        inp = keras.Input(shape=(N, dim))
+        m = keras.Model(inp, layer(inp))
+        x = tf.random.normal([1, N, dim], seed=99)
+        y0 = m(x).numpy()
+        xp = x.numpy().copy()
+        xp[:, perturb_at, :] += 100.0
+        y1 = m(tf.constant(xp)).numpy()
+        d = np.abs(y0 - y1).max(axis=-1)[0]
+        return layer._sel_block_span, np.nonzero(d > 1e-5)[0], d
+
+    def test_causality_no_cross_block_leakage(self):
+        """The guarantee D-023 actually buys: no leak into an EARLIER block.
+
+        `test_causality` checks one perturbation (the last token) against one
+        prefix (`i < N/2`). That single point passed even on some broken
+        variants during development, so this sweeps EVERY perturbation position
+        and asserts the general property: a perturbation at token T may move
+        outputs in T's own causal block or later, never in a block before it.
+
+        This is the assertion that goes red if anyone reinstates a global
+        `ops.top_k` over all candidates — measured on the pre-fix bytes,
+        perturbing token 31 evicted pyramid entry 15 and moved output 15 by
+        2.585, eight blocks earlier.
+        """
+        leaks = []
+        for t in range(4, 32):
+            span, changed, d = self._perturb(t)
+            cross = [int(i) for i in changed if i // span < t // span]
+            if cross:
+                leaks.append((t, cross, float(d[cross].max())))
+        assert not leaks, (
+            "a perturbation leaked into an earlier causal block: "
+            + "; ".join(
+                f"token {t} (block {t // span}) moved positions {c} by up to "
+                f"{m:.4f}"
+                for t, c, m in leaks
+            )
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "OPEN: causality is BLOCK-granular, not per-position. A "
+            "perturbation at token T can still change the selection among "
+            "entries whose causal_pos lies in T's own block (span p^(L-1)), so "
+            "positions earlier in that same block can move — measured: perturb "
+            "token 5 (block 2, span 2) moves position 4 by 2.5558. Per-position "
+            "causality needs per-query selection + block-wise SDPA, a different "
+            "layer shape (D-023). AN XPASS MEANS SOMEONE BUILT IT: remove this "
+            "marker, rename the test, and update D-023 and the class docstring, "
+            "which currently promise only the block-granular guarantee."
+        ),
+    )
+    def test_causality_is_per_position(self):
+        """Full per-position causality — the property this layer does NOT have.
+
+        Asserts the CORRECT behaviour (nothing before T may move), so it xfails
+        today and XPASS-fails the moment the residual is closed. Pinning the
+        residual as an assertion instead would go red on the fix, which is
+        backwards.
+        """
+        offenders = []
+        for t in range(4, 32):
+            _, changed, d = self._perturb(t)
+            before = [int(i) for i in changed if i < t]
+            if before:
+                offenders.append((t, before, float(d[before].max())))
+        assert not offenders, (
+            "positions before the perturbed token moved: "
+            + "; ".join(
+                f"token {t} -> {b} by up to {m:.4f}" for t, b, m in offenders
+            )
+        )
