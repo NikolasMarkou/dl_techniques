@@ -277,6 +277,23 @@ class Sparsemax(keras.layers.Layer):
         #     This is the same `ops.where`-over-arithmetic-masking rule that
         #     `layers/attention/common.py:159-163` (D-002) already prescribes.
         #
+        #     A SECOND FAMILY, found only by adversarial review, is fixed by
+        #     the same line: rows whose fp16 CUMSUM overflows while their
+        #     answer is unaffected, because `k_z` is selected long before the
+        #     overflow. Pre-plan these were ALL-NaN (the same `-inf * 0.0`
+        #     product, with the `-inf` born from overflow rather than from the
+        #     input); they are now exactly correct. Measured under
+        #     `mixed_float16`, K=256, `err = 0.0` vs a float64 oracle:
+        #       - `z = [400, 300 x255]`   — no mask anywhere in the input
+        #                                   (`300 * 256 = 76800 > 65504`);
+        #       - `z = [2, 1, -1e4 x254]` — the LARGE-FINITE-NEGATIVE mask
+        #                                   convention, which is what an
+        #                                   attention mask bias degrades to
+        #                                   once it is cast to fp16.
+        #     Both were `nan=256/256, sum=0` before this line and are
+        #     `[1, 0, ...], sum = 1.0` after. Guarded by
+        #     `::test_finite_cumsum_overflow_rows_are_correct_not_nan`.
+        #
         # (b) WHAT IS STILL BROKEN — OPEN, UNGUARDED, DEFERRED to a follow-up
         #     plan. This layer is NOT numerically safe. Four further defects
         #     were MEASURED and are NOT fixed here; a green test file does not
@@ -336,32 +353,61 @@ class Sparsemax(keras.layers.Layer):
         #     than fixed. Subtracting the row max before the cumsum (exact:
         #     sparsemax is shift-invariant) takes the same grid from 86/128 to
         #     0/128 violations — deferred to the follow-up plan, not done here.
+        #     AT LARGE K THIS PER-ELEMENT LIMIT BECOMES A ROW-SUM DEFECT.
+        #     Measured under `mixed_float16` on plateau rows, with NO overflow,
+        #     NO non-finite value and no alarm of any kind:
+        #       K=512,  256 entries at |z| = 20 -> `sum(out) = 4.000`;
+        #       K=512,  257 entries            -> 4.016;
+        #       K=1024, 1023 entries           -> 15.984;
+        #       K=1024, 259 entries            -> 4.047   (correct sum: 1.0).
+        #     Mechanism: the correct per-entry mass `1/256 = 0.0039` is NOT
+        #     REPRESENTABLE at scale 20 (`ulp_fp16(20) = 0.0156`), so the
+        #     nearest non-zero result is one whole ulp; the per-element error
+        #     is 0.0117 = 0.75 ulp, i.e. SUB-ULP and as good as fp16 can do,
+        #     but K of them add up. This is a THIRD route by which the layer
+        #     returns a silently un-normalised row (the others are Defect B and
+        #     Defect D) — but it is NOT a new defect and gets no letter: it is
+        #     this clause's cancellation limit, and it measures IDENTICAL in
+        #     the pre-plan bytes, in the M2-only bytes and here, so no spelling
+        #     of the selection above affects it. **An fp16 sparsemax output
+        #     must not be assumed normalised.** Row-max subtraction removes it
+        #     too (the shifted row's ulp is ~2e-6, not 0.0156).
         #
-        # (e) THE LOUDNESS GUARD (the three lines just before the projection,
-        #     below). Replacing the arithmetic gather with `ops.where` above
-        #     removed a `-inf * 0.0` product that, on Defect-B inputs, had been
-        #     manufacturing a NaN which INCIDENTALLY MASKED B's wrong answer.
-        #     Measured on `full((1, 4096), -16.95)` with `z[0, 0] = 0.0` (all
-        #     finite, `mixed_float16`): before, `nan=4096`; after, `nan=0,
-        #     sum=16.94` where the correct sum is 1.0 — a loud failure turned
-        #     silent. The guard restores loudness:
-        #       WHAT IT DOES: if a row's INPUT is entirely finite yet its
-        #       `z_cumsum` contains a non-finite value, that row has OVERFLOWED
-        #       the compute dtype, its `k_z` is meaningless, and its `tau` is
-        #       forced to NaN so the whole row fails visibly. The predicate is
-        #       the load-bearing part: a LEGITIMATELY masked row HAS `-inf` in
-        #       its input, so it is never poisoned (measured: `[2, 1, -inf,
-        #       -inf]` still gives `[1, 0, 0, 0]`, err 0.0, float32 and fp16).
-        #       WHAT IT DOES NOT DO: it does not FIX any of B/C/D/E — the answer
-        #       is still wrong, it is merely no longer quiet. It does not fire
-        #       for Defect D (measured float32 K=4 at 1.68e7: the cumsum stays
-        #       finite, so the output is `+inf` exactly as before the guard),
-        #       nor for Defect C (which raises), nor for Defect E (whose input
-        #       carries `-inf`). It is bit-identical on every well-behaved row
-        #       (measured `max|diff| == 0.0` over 41 cases / 34,513 values in
-        #       float32 and float64). Rows it DOES restore to loud: all-finite
-        #       float32 `1e37` (K=512) and `3e38` (K=4), and float64 `1e307`
-        #       (K=512) — all NaN again, matching pre-`ops.where` behaviour.
+        # (e) WHAT THIS CHANGE DOES **NOT** FIX — an accepted LOUD -> SILENT
+        #     CONVERSION on Defect-B inputs. On an all-finite row whose cumsum
+        #     OVERFLOWS, the pre-plan code returned NaN — but only by accident:
+        #     the `-inf * 0.0` product at the NON-SELECTED positions
+        #     manufactured one. The selection below removes that product, so
+        #     such a row now returns a FINITE, UNNORMALISED answer. Measured
+        #     (`mixed_float16`, K=4096, `full(-16.95)` with `z[0] = 0.0`, all
+        #     finite): before `nan=4096`; after `nan=0, sum(out) = 16.938`
+        #     where the correct sum is 1.0. The answer was ALREADY WRONG both
+        #     times — Defect B gives `k_z = 1863` where the exact answer is 1 —
+        #     but the FAILURE MODE moved from loud to silent, and that is a
+        #     real regression for that family. It is DELIBERATE, and it is
+        #     pinned: `::test_defect_b_loud_to_silent_conversion_is_accepted`.
+        #
+        #     WHY IT IS ACCEPTED, AND WHY YOU MUST NOT RE-INVENT THE FIX. A
+        #     "loudness guard" — force `tau` to NaN when the INPUT is all
+        #     finite yet `z_cumsum` is not — was written, shipped, measured and
+        #     then REVERTED, because it DESTROYED exactly-correct answers on
+        #     two ORDINARY input families: the very ones clause (a) records as
+        #     this change's second win (`z = [400, 300 x255]` and
+        #     `z = [2, 1, -1e4 x254]`, fp16 K=256, `err = 0.0` here, ALL-NaN
+        #     under the guard). Its premise — "a legitimately masked row HAS
+        #     `-inf` in its input, so it is never poisoned" — is simply false;
+        #     legitimacy does not require `-inf`.
+        #     A CUMSUM-FINITENESS PREDICATE CANNOT DISTINGUISH THESE CASES.
+        #     Overflowing the cumsum is neither necessary nor sufficient for a
+        #     wrong answer: in both families above `k_z` is selected long
+        #     before the overflow happens, so the overflow is irrelevant to the
+        #     result. Any predicate on `z_cumsum` therefore trades a wrong-but-
+        #     loud row for a correct-but-destroyed one, on commoner shapes.
+        #     The ACCURATE predicate is on the OUTPUT (`|sum(out) - 1| > tol`),
+        #     which catches Defect B, Defect D and clause (d)'s plateau route
+        #     alike while leaving correct rows untouched — and it belongs with
+        #     the widened reduction in the follow-up plan, where it makes the
+        #     question moot rather than traded. Not here.
         # ---------------------------------------------------------------
         # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
         # where the one-hot is set, substitute an exact zero everywhere else,
@@ -378,16 +424,6 @@ class Sparsemax(keras.layers.Layer):
         # Calculate Tau (Threshold)
         # tau = (sum(z_support) - 1) / |support|
         tau = (z_cumsum_at_k - 1.0) / k_z
-
-        # LOUDNESS GUARD — see clause (e) of the D-017 anchor above.
-        # A row whose INPUT is entirely finite but whose `z_cumsum` went
-        # non-finite has OVERFLOWED the compute dtype: its `k_z` is wrong and
-        # its answer is garbage, so it must fail LOUDLY (NaN) rather than
-        # return a plausible finite number. A legitimately masked row HAS
-        # `-inf` in its input, so it is never poisoned by this predicate.
-        finite_in = ops.all(ops.isfinite(inputs_2d), axis=-1, keepdims=True)
-        ovf = ops.any(ops.logical_not(ops.isfinite(z_cumsum)), axis=-1, keepdims=True)
-        tau = ops.where(ops.logical_and(finite_in, ovf), ops.full_like(tau, float("nan")), tau)
 
         # Projection: P = max(0, z - tau)
         # This naturally sets elements outside the support to exactly zero.
