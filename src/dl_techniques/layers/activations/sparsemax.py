@@ -197,14 +197,35 @@ class Sparsemax(keras.layers.Layer):
         # CORE ALGORITHM: Sparsemax Logic
         # =====================================================================
 
-        # 0. Shift by the row max, then widen the reduction to float32.
+        # 0. Shift by the row max, then WIDEN the reduction.
         # Sparsemax is shift-invariant, so subtracting the row max is EXACT and
         # moves the final cancellation from scale |z| down to the row spread.
-        # The reduction below then runs in float32 under every policy, which is
-        # what the ramp / cumsum / support test / k_z count actually need.
+        # The reduction below then runs in `reduction_dtype`, which is what the
+        # ramp / cumsum / support test / k_z count actually need.
         row_max = ops.max(inputs_2d, axis=-1, keepdims=True)
         shifted = inputs_2d - row_max
-        shifted_f32 = ops.cast(shifted, "float32")
+
+        # DECISION plan-2026-07-29-9bfc04c5/D-007
+        # ---------------------------------------------------------------
+        # The reduction dtype WIDENS; it must never NARROW. Only float16 and
+        # bfloat16 lack the range and integer precision the reduction needs,
+        # so only they are promoted to float32. float32 is unchanged (the
+        # expression is a no-op there) and float64 KEEPS float64.
+        # DO NOT hard-code "float32" here. That was tried: it silently
+        # narrowed the float64 policy, moving corpus worst-case error from
+        # 1.31e-15 to 1.99e-08, with every test still green. Degrading the
+        # most precise policy without an alarm is the same species of defect
+        # this reduction was widened to remove.
+        # Spelled off `inputs.dtype` (the bits actually received), NOT
+        # `self.compute_dtype`, and normalised through
+        # `standardize_dtype` so the membership test cannot silently miss a
+        # backend dtype object and re-narrow float64.
+        # ---------------------------------------------------------------
+        input_dtype = keras.backend.standardize_dtype(inputs.dtype)
+        reduction_dtype = (
+            "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
+        )
+        shifted_f32 = ops.cast(shifted, reduction_dtype)
 
         # 1. Sort logits (descending)
         # Necessary to find the "elbow" where probabilities drop to zero.
@@ -216,7 +237,7 @@ class Sparsemax(keras.layers.Layer):
         z_cumsum = ops.cumsum(sorted_logits, axis=-1)
 
         # 3. Create range vector [1, 2, ..., K]
-        k_values = ops.arange(1, k + 1, dtype="float32")
+        k_values = ops.arange(1, k + 1, dtype=reduction_dtype)
 
         # Explicit Reshape: (K,) -> (1, K)
         # "Attempt": Just use k_values.
@@ -227,7 +248,7 @@ class Sparsemax(keras.layers.Layer):
         # Calculate the condition for every element.
         # support > 0 means that element is part of the active set.
         support = 1.0 + k_values * sorted_logits - z_cumsum
-        support_mask = ops.cast(support > 0, "float32")
+        support_mask = ops.cast(support > 0, reduction_dtype)
 
         # k_z is the count of active elements (the "support size")
         # Shape: (N, 1) - One value per sample in the flattened batch
@@ -265,7 +286,7 @@ class Sparsemax(keras.layers.Layer):
 
         # Create One-Hot Mask: (N, K)
         # Only the position corresponding to k(z) will be 1.0, others 0.0
-        gather_mask = ops.one_hot(support_indices, k, dtype="float32")
+        gather_mask = ops.one_hot(support_indices, k, dtype=reduction_dtype)
 
         # DECISION plan-2026-07-28T134123-420f6ccb/D-017
         # ---------------------------------------------------------------
