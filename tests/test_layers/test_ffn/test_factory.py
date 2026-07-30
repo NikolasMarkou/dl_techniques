@@ -30,6 +30,7 @@ from dl_techniques.layers.ffn import (
     LogicFFN,
     CountingFFN
 )
+from dl_techniques.layers.ffn.factory import FFN_REGISTRY
 
 
 class TestFFNFactory:
@@ -1059,3 +1060,127 @@ class TestKanAndTverskyFactory:
         assert 'features' in info['kan']['required_params']
         assert 'units' in info['tversky']['required_params']
         assert 'num_features' in info['tversky']['required_params']
+
+
+# ---------------------------------------------------------------------
+# FFN_REGISTRY['output_dim_param'] contract guards
+# ---------------------------------------------------------------------
+
+# Written INDEPENDENTLY of len(FFN_REGISTRY) (counted from the FFNType Literal
+# in ffn/factory.py). Its only job is anti-vacuity: it makes the parametrized
+# guards below fail loudly if the registry is ever gutted, rather than passing
+# over an empty or truncated derived list. Bump it deliberately when a genuinely
+# new FFN type is registered.
+_EXPECTED_FFN_TYPE_COUNT = 21
+
+# Derived from the registry itself -- never hand-listed, so a newly-added type
+# is covered by these guards on the day it lands.
+_ALL_REGISTRY_FFN_TYPES = sorted(FFN_REGISTRY.keys())
+
+
+class TestOutputDimParamRegistryField:
+    """
+    Contract guards for ``FFN_REGISTRY[t]['output_dim_param']``.
+
+    The field names the constructor parameter that sets each FFN's OUTPUT WIDTH.
+    It exists because those names are NOT uniform across types: 'output_dim' for
+    most, but 'filters' (gated_mlp), 'features' (kan), 'units' (power_mlp,
+    tversky), and ``None`` (mixer, which has no output-width concept). See
+    ``src/dl_techniques/layers/ffn/factory.py``'s registry schema comment.
+    """
+
+    def test_registry_type_list_is_not_vacuous_for_width_param_guards(self):
+        """Anti-vacuity: the derived type list must be non-empty AND the
+        expected size. A ``len(x) > 0`` assertion alone would be satisfied by a
+        one-entry registry, which would make every parametrized guard below
+        near-meaningless."""
+        assert len(_ALL_REGISTRY_FFN_TYPES) > 0, "FFN_REGISTRY is empty"
+        assert len(FFN_REGISTRY) == _EXPECTED_FFN_TYPE_COUNT, (
+            f"FFN_REGISTRY has {len(FFN_REGISTRY)} entries but the independently "
+            f"written expected count is {_EXPECTED_FFN_TYPE_COUNT}. If a type was "
+            f"deliberately added or removed, update _EXPECTED_FFN_TYPE_COUNT; do "
+            f"not delete this assertion. Registry types: {_ALL_REGISTRY_FFN_TYPES}"
+        )
+        assert len(_ALL_REGISTRY_FFN_TYPES) == _EXPECTED_FFN_TYPE_COUNT
+
+    @pytest.mark.parametrize('ffn_type', _ALL_REGISTRY_FFN_TYPES)
+    def test_every_registry_entry_declares_its_output_width_param(self, ffn_type):
+        """ASSERTION 1 (presence). A MISSING key must FAIL here -- it must never
+        be allowed to fall back to a default of 'output_dim', because that
+        default is exactly wrong for gated_mlp/kan/power_mlp/tversky/mixer and
+        would silently reintroduce the no-op this field exists to prevent."""
+        entry = FFN_REGISTRY[ffn_type]
+        assert 'output_dim_param' in entry, (
+            f"FFN_REGISTRY['{ffn_type}'] is missing the mandatory "
+            f"'output_dim_param' key. This key is NOT optional and has NO "
+            f"default: consumers must be able to distinguish 'this type's width "
+            f"param is named X' from 'nobody said'. Add it, using None only for "
+            f"a type whose output width equals its input width by construction."
+        )
+
+    @pytest.mark.parametrize('ffn_type', _ALL_REGISTRY_FFN_TYPES)
+    def test_output_width_param_names_a_real_parameter(self, ffn_type):
+        """ASSERTION 2 (validity). The value must be ``None`` or an actual
+        parameter name of that same entry -- a typo would otherwise sit in the
+        registry until a consumer silently dropped the width key."""
+        entry = FFN_REGISTRY[ffn_type]
+        if 'output_dim_param' not in entry:
+            # PRESENCE is owned exclusively by
+            # test_every_registry_entry_declares_its_output_width_param, which is
+            # parametrized over the SAME derived type list and therefore cannot be
+            # silently disabled for one type. Skipping here keeps a missing key
+            # from cascading into a bare KeyError that obscures which assertion
+            # actually diagnosed the defect.
+            pytest.skip(
+                f"'{ffn_type}' has no 'output_dim_param' -- diagnosed by "
+                f"test_every_registry_entry_declares_its_output_width_param"
+            )
+        width_param = entry['output_dim_param']
+        if width_param is None:
+            return
+        accepted = set(entry['required_params']) | set(entry['optional_params'])
+        assert width_param in accepted, (
+            f"FFN_REGISTRY['{ffn_type}']['output_dim_param'] == {width_param!r}, "
+            f"which is neither in required_params {sorted(entry['required_params'])} "
+            f"nor in optional_params {sorted(entry['optional_params'])}. A width "
+            f"param name that does not exist on the entry cannot ever be passed "
+            f"to the layer -- it is a typo, not a policy."
+        )
+
+    def test_output_width_param_names_are_heterogeneous(self):
+        """
+        ASSERTION 3 (anti-simplification) -- the load-bearing one.
+
+        # DECISION plan-2026-07-30T140922-8af1028f/D-005
+        This guard exists to go RED against the specific way this work could
+        ship as a silent no-op: a future reader concluding the field is
+        redundant with the literal string "output_dim" and "simplifying" it
+        away. It is NOT redundant -- gated_mlp/kan/power_mlp/tversky name their
+        output width 'filters'/'features'/'units'/'units', and mixer has no
+        width param at all. See decisions.md D-005.
+        """
+        declared = {t: FFN_REGISTRY[t] for t in _ALL_REGISTRY_FFN_TYPES}
+        undeclared = sorted(t for t, e in declared.items()
+                            if 'output_dim_param' not in e)
+        if undeclared:
+            # PRESENCE is owned exclusively by
+            # test_every_registry_entry_declares_its_output_width_param -- see the
+            # note there. Do not let a missing key masquerade as a heterogeneity
+            # failure; they have different remedies.
+            pytest.skip(
+                f"{undeclared} have no 'output_dim_param' -- diagnosed by "
+                f"test_every_registry_entry_declares_its_output_width_param"
+            )
+        values = {t: e['output_dim_param'] for t, e in declared.items()}
+        divergent = {t: v for t, v in values.items() if v != 'output_dim'}
+        assert divergent, (
+            "Every FFN_REGISTRY entry now declares output_dim_param == "
+            "'output_dim'. That makes the field look redundant -- and it is NOT. "
+            "This assertion fires because someone either normalized the values "
+            "away or removed the types that diverge. The real mapping includes "
+            "gated_mlp->'filters', kan->'features', power_mlp->'units', "
+            "tversky->'units', mixer->None (no output-width concept). A consumer "
+            "that assumes the literal string \"output_dim\" silently builds those "
+            "types at the WRONG width, or drops the key entirely. Restore the "
+            "per-type values; do not delete this test."
+        )

@@ -116,12 +116,38 @@ FFNType = Literal[
 # ---------------------------------------------------------------------
 # FFN layer registry mapping types to classes and parameter info
 # ---------------------------------------------------------------------
+#
+# Entry schema (every key is MANDATORY for every entry):
+#   'class'            -- the Keras Layer class to instantiate.
+#   'description'      -- human-readable one-liner.
+#   'required_params'  -- names a caller MUST supply; enforced by
+#                         ``validate_ffn_config``.
+#   'output_dim_param' -- CONTRACT: the name of the constructor parameter that
+#                         sets this FFN's OUTPUT WIDTH (i.e. the value that
+#                         becomes ``compute_output_shape(...)[-1]``), or ``None``
+#                         for a type whose output width is structurally equal to
+#                         its input width and therefore not settable.
+#                         The value, when not ``None``, is always a member of
+#                         ``required_params`` U ``optional_params`` for the same
+#                         entry. The names are NOT uniform across types
+#                         ('output_dim' | 'filters' | 'features' | 'units'), which
+#                         is precisely why this field exists: a caller that
+#                         pattern-matches the literal string "output_dim" silently
+#                         no-ops for 'gated_mlp'/'kan'/'power_mlp'/'tversky'.
+#                         Consumers: the two VLM head FFN construction sites in
+#                         ``layers/heads/vlm/factory.py``.
+#                         Invariants pinned by
+#                         ``tests/test_layers/test_ffn/test_factory.py``
+#                         (``TestOutputDimParamRegistryField``).
+#   'optional_params'  -- name -> default, merged under caller kwargs.
+#   'use_case'         -- human-readable guidance.
 
 FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
     'counting': {
         'class': CountingFFN,
         'description': 'Feed-Forward Network that learns to count features in a sequence',
         'required_params': ['output_dim', 'count_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'counting_scope': 'local',
             'activation': 'gelu',
@@ -137,6 +163,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': DifferentialFFN,
         'description': 'Differential Feed-Forward Network with dual-pathway processing',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'branch_activation': 'gelu',
             'gate_activation': 'sigmoid',
@@ -153,6 +180,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GatedMLP,
         'description': 'Spatially-gated MLP using 1x1 convolutions, an alternative to self-attention',
         'required_params': ['filters'],
+        'output_dim_param': 'filters',
         'optional_params': {
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
@@ -169,6 +197,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GeGLUFFN,
         'description': 'GELU Gated Linear Unit Feed-Forward Network',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'gelu',
             'dropout_rate': 0.0,
@@ -184,6 +213,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GELUMLPFFN,
         'description': 'SD3-style GELU (tanh-approximation) MLP FeedForward (Dense -> gelu(approximate=True) -> Dense)',
         'required_params': ['hidden_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'output_dim': None,
             'dropout_rate': 0.0,
@@ -195,6 +225,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GLUFFN,
         'description': 'Gated Linear Unit Feed Forward Network',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'swish',
             'dropout_rate': 0.0,
@@ -210,6 +241,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GLUFFN,
         'description': "ReGLU: ReLU-gated GLU FFN (Shazeer 2020) — alias of GLUFFN with activation='relu'",
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'relu',
             'dropout_rate': 0.0,
@@ -225,6 +257,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': GLUFFN,
         'description': "Bilinear GLU FFN (Shazeer 2020) — alias of GLUFFN with activation='linear' (no gate nonlinearity)",
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'linear',
             'dropout_rate': 0.0,
@@ -243,6 +276,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'univariate activations parameterized by B-splines. Supports N-D inputs via einsum.'
         ),
         'required_params': ['features'],
+        'output_dim_param': 'features',
         'optional_params': {
             'grid_size': 5,
             'spline_order': 3,
@@ -260,6 +294,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': LogicFFN,
         'description': 'Feed-Forward Network that performs soft logical reasoning',
         'required_params': ['output_dim', 'logic_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
@@ -274,6 +309,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': MLPBlock,
         'description': 'Standard MLP with intermediate expansion',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'gelu',
             'dropout_rate': 0.0,
@@ -293,6 +329,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'parameter count when rank << dims. Same shape contract as MLPBlock.'
         ),
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'rank': None,
             'activation': 'gelu',
@@ -314,6 +351,13 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             '(Tolstikhin et al. 2021). Output shape == input shape.'
         ),
         'required_params': ['tokens_mlp_dim', 'channels_mlp_dim'],
+        # DECISION plan-2026-07-30T140922-8af1028f/D-004: `None` here is a
+        # MEANINGFUL value, not a missing entry. MixerBlock.compute_output_shape
+        # returns the input shape unchanged (mlp_mixer_block.py:334-343) -- it has
+        # no output-width concept at all. Do NOT 'fix' this to 'output_dim' (the key
+        # does not exist) nor to 'channels_mlp_dim' (that is the INNER width of the
+        # channel-mixing MLP, not the block's output width). See decisions.md D-004.
+        'output_dim_param': None,
         'optional_params': {
             'activation': 'gelu',
             'dropout_rate': 0.0,
@@ -333,6 +377,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'Sub-quadratic parameter count; nblocks must divide input_dim, hidden_dim and output_dim.'
         ),
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'nblocks': 4,
             'activation': 'gelu',
@@ -349,6 +394,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': OrthoGLUFFN,
         'description': 'Orthogonally-regularized Gated Linear Unit for disciplined routing',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'activation': 'gelu',
             'dropout_rate': 0.0,
@@ -361,6 +407,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': PowerMLPLayer,
         'description': 'Dual-branch MLP with ReLUK and basis functions for enhanced expressiveness',
         'required_params': ['units'],
+        'output_dim_param': 'units',
         'optional_params': {
             'k': 3,
             'kernel_initializer': 'he_normal',
@@ -375,6 +422,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': ResidualBlock,
         'description': 'Residual block with skip connections',
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'dropout_rate': 0.0,
             'activation': 'relu',
@@ -394,6 +442,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'but with a fixed (non-configurable) squared-ReLU non-linearity.'
         ),
         'required_params': ['hidden_dim', 'output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'dropout_rate': 0.0,
             'use_bias': True,
@@ -408,6 +457,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': SwiGLUFFN,
         'description': 'SwiGLU Feed-Forward Network with gating mechanism',
         'required_params': ['output_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'hidden_dim': None,  # explicit size; None => 2/3-rule from ffn_expansion_factor
             'ffn_expansion_factor': 4,
@@ -429,6 +479,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             '(batch, time, dim) consumers.'
         ),
         'required_params': ['units', 'num_features'],
+        'output_dim_param': 'units',
         'optional_params': {
             'intersection_reduction': 'product',
             'difference_reduction': 'subtractmatch',
@@ -442,6 +493,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': SwinMLP,
         'description': 'Swin Transformer MLP with configurable activation and regularization',
         'required_params': ['hidden_dim'],
+        'output_dim_param': 'output_dim',
         'optional_params': {
             'use_bias': True,
             'output_dim': None,
