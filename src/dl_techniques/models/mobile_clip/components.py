@@ -505,7 +505,8 @@ class MobileClipTextEncoder(keras.layers.Layer):
             # 3D so it broadcasts across the batch and head dimensions.
             #
             # Built from `MaskFactory.create_causal_mask` (which is an arange index
-            # comparison) rather than `ops.tril`. `ops.tril` routes through a
+            # comparison) rather than `ops.tril`. `ops.tril` -- and `ops.triu`,
+            # same implementation, same trap -- routes through a
             # `tf.cond` that rejects a Python-bool predicate the moment it is
             # traced, raising `TypeError: pred must not be a Python bool` -- it
             # works EAGERLY and fails on every graph path (`tf.function`,

@@ -137,7 +137,7 @@ Check in this precedence order; only proceed to the next step when nothing fits:
    |--------|---------------------|------------------|
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
    | Attention | `create_attention_layer()` in `attention/factory.py` | 31 |
-   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | ~15 |
+   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | ~13 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | ~22 |
    | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | RBF / KMeans / GMM |

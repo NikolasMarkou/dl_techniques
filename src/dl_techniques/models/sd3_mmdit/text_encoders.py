@@ -266,7 +266,8 @@ class CLIPTextEncoder(keras.Model):
         """
         L = ops.shape(token_ids)[1]
         # Lower-triangular causal mask (L, L): query i may attend to key j <= i.
-        # Built from an arange index comparison rather than ops.tril: tril routes
+        # Built from an arange index comparison rather than ops.tril (or ops.triu,
+        # which shares its implementation and its trap): tril routes
         # through a tf cond that rejects the Python-bool dtype on a dynamic-L
         # symbolic tensor during the .keras save/load trace. The index form is
         # fully graph-safe (no cond, no Python bool).

@@ -260,7 +260,8 @@ class TransformerDecoderLayer(keras.layers.Layer):
         """Lower-triangular keep-mask ``(1, T, T)``; ``mask[i, j] = 1 iff j <= i``.
 
         Built via an arange index comparison (``row >= col``) rather than
-        ``ops.tril`` for backend portability and to match the repo's causal-mask
+        ``ops.tril``/``ops.triu`` (both carry the same graph-mode trap) for
+        backend portability and to match the repo's causal-mask
         idiom. The downstream attention applies ``scores + (1 - mask) * -1e9``.
         """
         row = ops.arange(seq_len)[:, None]

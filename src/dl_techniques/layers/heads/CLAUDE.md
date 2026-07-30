@@ -4,11 +4,24 @@ Task-head layers for `dl_techniques`, organized by domain. Single merged
 package consolidating the formerly-separate `nlp_heads/`, `vision_heads/`, and
 `vlm_heads/` packages into `nlp/`, `vision/`, `vlm/` sub-packages, each keeping
 its own `factory.py` + `task_types.py` + `README.md`. Relocated via `git mv`;
-all 21 layer-class names are preserved verbatim, so existing `.keras`
-checkpoints stay loadable (bare `@register_keras_serializable()` registers as
+every layer-class name is preserved verbatim, so existing `.keras` checkpoints
+stay loadable (bare `@register_keras_serializable()` registers as
 `Custom>ClassName`, independent of `__module__`).
 
-## Layers (21 classes, grouped by domain)
+## Layers (22 classes, grouped by domain)
+
+> The count lives HERE and nowhere else in this file -- it was previously
+> restated in two places and both said 21 while the list below already had 22.
+> Re-derive rather than trust it:
+>
+> ```bash
+> grep -hoP '^class \K\w+Head\b' \
+>   src/dl_techniques/layers/heads/{nlp,vision,vlm}/factory.py | sort -u | wc -l
+> ```
+>
+> The `\b` matters: without it the pattern also matches `NLPHead` inside
+> `NLPHeadConfiguration`, which is a config dataclass, not a layer, and yields 23.
+> Breakdown: 8 NLP + 8 vision + 6 VLM.
 
 **NLP** (`nlp/factory.py`) — `BaseNLPHead`, `TextClassificationHead`,
 `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`,

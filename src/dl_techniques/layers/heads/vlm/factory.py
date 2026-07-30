@@ -527,6 +527,25 @@ class ImageCaptioningHead(keras.layers.Layer):
     :param num_heads: Number of attention heads.
     :type num_heads: int
     :param ffn_type: Type of feed-forward network in decoder blocks.
+
+        **This is a 14-of-21 surface, not all 21.** `hidden_dim` is supplied
+        conditionally from ``FFN_REGISTRY`` (see the note at the construction
+        site), but ``output_dim`` is still passed unconditionally and hardcoded,
+        so the 7 registry types that do not accept it fail on BOTH this head and
+        ``BaseVLMHead``'s post-fusion FFN. Measured by sweeping all 21 types
+        against both heads: 14 construct, the same 7 fail on each. Making the
+        remaining 7 work means giving ``output_dim`` the same registry-driven
+        treatment; it was deliberately not done here.
+
+        Related, and also measured rather than assumed: four
+        ``fusion_strategy``/pooling combinations build successfully and then fail
+        inside ``call()`` (``VisualGroundingHead`` with
+        ``fusion_strategy="attention_pooling"``, ``VQAHead`` with
+        ``pooling_strategy`` ``"mean"``/``"max"`` on 2-D inputs, and
+        ``ImageCaptioningHead`` with a text width other than ``hidden_dim`` or
+        with 2-D vision features). None of them breaks a configuration that ever
+        worked -- ``build()`` is merely more permissive than ``call()`` there, so
+        a guard would only relocate the error message.
     :type ffn_type: FFNType
     :param ffn_expansion_factor: Width multiplier for the decoder FFN's hidden
         layer, i.e. ``hidden_dim * ffn_expansion_factor``. Defaults to 4.
@@ -684,7 +703,9 @@ class ImageCaptioningHead(keras.layers.Layer):
         # Lower-triangular KEEP mask: 1 = attend (current+past), 0 = future.
         #
         # Built from `MaskFactory.create_causal_mask` (an arange index comparison)
-        # rather than `ops.tril`. `ops.tril` routes through a `tf.cond` that
+        # rather than `ops.tril`. `ops.tril` -- and `ops.triu`, which shares the
+        # same implementation and therefore the same trap -- routes through a
+        # `tf.cond` that
         # rejects a Python-bool predicate once traced, raising
         # `TypeError: pred must not be a Python bool` -- it works EAGERLY and
         # fails on every graph path (`tf.function`, `Model.predict`, `.keras`
@@ -1713,9 +1734,30 @@ def create_multi_task_vlm_head(
 
     :param task_configs: List or dict of VLMTaskConfig objects.
     :type task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]]
-    :param kwargs: Shared configuration for all heads, such as ``vision_dim``,
-        ``text_dim``, ``fusion_strategy``. Can also include
-        ``task_specific_kwargs`` to override settings for specific tasks.
+    :param kwargs: Shared per-head configuration, plus this wrapper's own Keras
+        base kwargs. **Do NOT pass ``vision_dim`` / ``text_dim`` here** -- the
+        wrapper owns those and RAISES on them; use ``shared_vision_dim`` /
+        ``shared_text_dim``. (This paragraph used to instruct the opposite; the
+        reserved-kwarg guard added afterwards made the documented call raise.)
+
+        Kwarg routing is three-tiered:
+
+        1. **Wrapper-owned** (``shared_vision_dim``, ``shared_text_dim``, ...) --
+           consumed here; passing the per-head spelling instead raises.
+        2. **``task_specific_kwargs``** -- a dict keyed by task name, applied to
+           that head only. STRICT: an unknown task name raises.
+        3. **Everything else** -- shared, and routed BEST-EFFORT to each head
+           whose constructor accepts it. A key no head accepts raises, and a
+           misspelling therefore raises too; but a key that is real for SOME head
+           and merely meant for a DIFFERENT one is applied wherever it fits, with
+           only a ``logger.info`` recording where it landed. Use
+           ``task_specific_kwargs`` when you mean exactly one head.
+
+        Note also that the heads disagree on their input key: ``VQAHead`` reads
+        ``question_features`` while the other four read ``text_features``, and
+        this wrapper fans ONE input dict to all of them. A wrapper mixing VQA with
+        any other task therefore raises ``KeyError`` unless the caller supplies
+        both keys (duplicating the same tensor is fine).
     :return: Configured multi-task VLM head instance.
     :rtype: MultiTaskVLMHead
     """

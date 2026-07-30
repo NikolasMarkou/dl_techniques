@@ -83,7 +83,8 @@ def _inclusive_causal_mask(size: int, dtype: str) -> keras.KerasTensor:
     house convention for this family: the caller supplies the keep predicate
     because polarity is per-site.
 
-    Do NOT swap this for ``keras.ops.tril``: ``ops.tril`` raises
+    Do NOT swap this for ``keras.ops.tril`` (nor ``ops.triu``, which shares the
+    same implementation and the same trap): ``ops.tril`` raises
     ``TypeError: pred must not be a Python bool`` when traced into a graph on
     this Keras/TF version, which broke every ``Model``-level path (``fit``,
     ``predict``, ``jit_compile``, save/load) while eager tests stayed green.
