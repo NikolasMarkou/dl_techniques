@@ -120,6 +120,54 @@ def _is_single_shape(shape: Any) -> bool:
     )
 
 
+def _ffn_width_kwargs(ffn_type: str, width: int) -> Dict[str, int]:
+    """The kwargs that set ``ffn_type``'s OUTPUT width to ``width``.
+
+    Interface contract (2 call sites: :meth:`BaseVLMHead._build_common_layers`
+    and :meth:`ImageCaptioningHead.__init__`'s per-layer FFN loop; keeping those
+    two identical is the point of the helper existing at all):
+
+    * Returns ``{<the type's own width-parameter name>: width}``, read from
+      ``FFN_REGISTRY[ffn_type]['output_dim_param']``.
+    * Returns ``{}`` when that field is ``None`` -- the type has no output-width
+      concept and must be passed NO width key (``mixer``: its output shape is
+      structurally its input shape).
+    * Returns ``{}`` for a type absent from ``FFN_REGISTRY``, leaving
+      ``create_ffn_layer`` to raise its own unknown-type error rather than
+      inventing a second one here.
+    * Raises ``KeyError`` if a registry entry is missing the field entirely. That
+      is deliberate: a silent default would reintroduce the exact defect below.
+
+    # DECISION plan-2026-07-30T140922-8af1028f/D-014
+    Do NOT "simplify" this to ``if "output_dim" in required_params: pass it``.
+    That variant looks identical and is a NO-OP for exactly the 4 types whose
+    width parameter is named something else -- ``gated_mlp`` (``filters``),
+    ``kan`` (``features``), ``power_mlp`` and ``tversky`` (``units``) -- which
+    are precisely the types this routing exists to reach. Both sites previously
+    hardcoded ``"output_dim": self.hidden_dim``; for those 4 the key was silently
+    dropped by ``create_ffn_layer``'s parameter filter and the type then died in
+    ``validate_ffn_config`` on its own width parameter, which nobody had
+    supplied. Pinned by
+    ``tests/test_layers/test_heads/test_vlm.py::TestFFNOutputWidthParamRouting``,
+    whose ``kan``/``power_mlp`` parametrizations go RED against the literal-string
+    variant with "Required parameters missing for kan: ['features']".
+
+    :param ffn_type: An ``FFN_REGISTRY`` key.
+    :type ffn_type: str
+    :param width: The output width the FFN must produce.
+    :type width: int
+    :return: Zero or one kwarg for ``create_ffn_layer``.
+    :rtype: Dict[str, int]
+    """
+    entry = FFN_REGISTRY.get(ffn_type)
+    if entry is None:
+        return {}
+    width_param = entry["output_dim_param"]
+    if width_param is None:
+        return {}
+    return {width_param: width}
+
+
 # ---------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------
@@ -316,10 +364,26 @@ class BaseVLMHead(keras.layers.Layer):
             # the identical call. Do NOT "simplify" this back to an
             # unconditional kwarg -- the swiglu parameter-count invariance test
             # is what fails when you do.
+            #
+            # The OUTPUT width is routed by name, not hardcoded -- see
+            # `_ffn_width_kwargs` (D-014) for why `"output_dim"` cannot be
+            # spelled literally here. `ImageCaptioningHead.__init__` calls the
+            # same helper with the same arguments; the two sites must stay
+            # identical (I-4).
+            #
+            # `counting`, `logic` and `mixer` remain UNUSABLE on this head, and
+            # deliberately so: each needs a hyperparameter `VLMTaskConfig` does
+            # not carry and cannot derive -- `count_dim` (counting), `logic_dim`
+            # (logic), `tokens_mlp_dim` + `channels_mlp_dim` (mixer). `tversky`
+            # is in the same position via `num_features` (a feature-bank size,
+            # unrelated to any width). Inventing defaults for those would be new
+            # modelling surface, not a lookup, so they stay closed. See the
+            # `ffn_type` docstring of `ImageCaptioningHead` for the one home of
+            # the full reachability outcome.
             ffn_kwargs = {
-                "output_dim": self.hidden_dim,
                 "dropout_rate": self.task_config.dropout_rate,
                 "name": f"{self.name}_post_fusion_ffn",
+                **_ffn_width_kwargs(self.ffn_type, self.hidden_dim),
             }
             _entry = FFN_REGISTRY.get(self.ffn_type, {})
             if "hidden_dim" in _entry.get("required_params", ()):
@@ -459,6 +523,35 @@ class BaseVLMHead(keras.layers.Layer):
                 self.post_fusion_ffn.build(fused_shape)
                 fused_shape = self.post_fusion_ffn.compute_output_shape(fused_shape)
 
+                # DECISION plan-2026-07-30T140922-8af1028f/D-015
+                # Keras will NOT catch a wrong post-fusion width here, so assert
+                # it. Everything downstream is derived from the line above rather
+                # than from `hidden_dim`, and `ImageTextMatchingHead.
+                # similarity_head` is a plain `Dense` that accepts ANY input
+                # width -- so an FFN emitting the wrong width silently REWIRES
+                # the head and still trains, instead of raising. (Contrast
+                # `ImageCaptioningHead`, whose unprojected `x + ffn_output`
+                # residual add raises loudly on the same mistake; that is why
+                # only this site carries an explicit check.)
+                #
+                # The oracle is deliberately `compute_output_shape` -- the very
+                # method the wiring above consumes -- so the assertion cannot
+                # pass while the wiring is wrong. That required fixing
+                # `SwiGLUFFN.compute_output_shape`, which reported its INPUT
+                # width (D-013); `swiglu` is the default FFN of the sibling head
+                # and asserting against a lying oracle would have been theatre.
+                if fused_shape[-1] != self.hidden_dim:
+                    raise ValueError(
+                        f"post-fusion FFN ffn_type={self.ffn_type!r} produces "
+                        f"output width {fused_shape[-1]}, but "
+                        f"{type(self).__name__} requires exactly "
+                        f"hidden_dim={self.hidden_dim}. Nothing downstream would "
+                        f"raise on this -- the task head is built from the FFN's "
+                        f"derived shape and would silently accept the wrong "
+                        f"width. Check FFN_REGISTRY[{self.ffn_type!r}]"
+                        f"['output_dim_param'] and the type's own width rule."
+                    )
+
         return tuple(fused_shape)
 
     def compute_output_shape(
@@ -577,14 +670,46 @@ class ImageCaptioningHead(keras.layers.Layer):
     :type num_heads: int
     :param ffn_type: Type of feed-forward network in decoder blocks.
 
-        **This is a 14-of-21 surface, not all 21.** `hidden_dim` is supplied
-        conditionally from ``FFN_REGISTRY`` (see the note at the construction
-        site), but ``output_dim`` is still passed unconditionally and hardcoded,
-        so the 7 registry types that do not accept it fail on BOTH this head and
-        ``BaseVLMHead``'s post-fusion FFN. Measured by sweeping all 21 types
-        against both heads: 14 construct, the same 7 fail on each. Making the
-        remaining 7 work means giving ``output_dim`` the same registry-driven
-        treatment; it was deliberately not done here.
+        **Not every registry type is usable, and this is the ONE place that says
+        which.** Re-derive rather than trust the list::
+
+            CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest \
+              tests/test_layers/test_heads/test_vlm.py \
+              -k "OutputWidthParamRouting" -v
+
+        Both FFN construction sites (this head's per-layer loop and
+        ``BaseVLMHead._build_common_layers``) supply ``hidden_dim`` conditionally
+        from ``FFN_REGISTRY`` (D-008/D-020) and the OUTPUT width by the type's
+        own parameter name via ``_ffn_width_kwargs`` (D-014). What that closed,
+        and what remains closed and why:
+
+        * ``kan`` and ``power_mlp`` -- newly usable on BOTH sites. Their width
+          parameter was simply named something else (``features`` / ``units``)
+          and was the only thing they were missing.
+        * ``tversky`` -- still closed on BOTH sites, for two independent reasons:
+          it also requires ``num_features`` (a feature-bank size with no source
+          in ``VLMTaskConfig``), and ``TverskyProjectionLayer.build()``
+          hard-raises on anything but rank-2, which this head's rank-3 decoder
+          stream can never satisfy.
+        * ``gated_mlp`` -- a permanent capability gap. ``GatedMLP`` is 1x1-conv
+          based and needs a rank-4 ``(B, H, W, C)`` input; this head passes
+          rank-3 and ``BaseVLMHead`` rank-2. Its ``filters`` width parameter now
+          reaches it, which is exactly why the failure moved from a missing
+          parameter to a kernel-rank error.
+        * ``counting``, ``logic``, ``mixer`` -- closed by a hyperparameter
+          ``VLMTaskConfig`` does not carry and cannot derive: ``count_dim``,
+          ``logic_dim``, and ``tokens_mlp_dim`` + ``channels_mlp_dim``
+          respectively. Inventing defaults for those is a modelling decision, not
+          a lookup, so it was deliberately not done. (``mixer`` additionally has
+          no output-width concept at all -- its output shape IS its input shape,
+          which is why its ``output_dim_param`` is ``None``.)
+
+        The superseded claim, recorded so it is not re-derived: this docstring
+        used to say the failures were caused by ``output_dim`` being hardcoded.
+        That was FALSE and was disproved by execution -- ``output_dim`` was
+        either accepted and present, or silently dropped by
+        ``create_ffn_layer``'s parameter filter, and every failing type died
+        earlier inside ``validate_ffn_config`` on a DIFFERENT required key.
 
         Related, and also measured rather than assumed: four
         ``fusion_strategy``/pooling combinations build successfully and then fail
@@ -677,10 +802,16 @@ class ImageCaptioningHead(keras.layers.Layer):
             # (2/3 rule from `ffn_expansion_factor`, rounded to
             # `ffn_multiple_of`). Passing it explicitly would override that
             # derivation and silently change the default path's widths.
+            #
+            # The OUTPUT width is routed by name, not hardcoded -- same helper,
+            # same arguments as `BaseVLMHead._build_common_layers` (I-4). See
+            # `_ffn_width_kwargs` (D-014) for why the literal string
+            # `"output_dim"` must not reappear here, and the `ffn_type` docstring
+            # above for which types this does and does not make reachable.
             ffn_config = {
                 "type": self.ffn_type,
-                "output_dim": self.hidden_dim,
                 "name": f"ffn_{i}",
+                **_ffn_width_kwargs(self.ffn_type, self.hidden_dim),
             }
             _entry = FFN_REGISTRY.get(self.ffn_type, {})
             if "hidden_dim" in _entry.get("required_params", ()):

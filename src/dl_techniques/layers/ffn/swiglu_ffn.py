@@ -392,14 +392,31 @@ class SwiGLUFFN(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape (same as input shape for FFN).
+        Compute output shape: the input shape with its last axis set to ``output_dim``.
+
+        # DECISION plan-2026-07-30T140922-8af1028f/D-013
+        This used to ``return input_shape`` verbatim, documented as "same as
+        input shape for FFN". That was FALSE: ``build()`` creates
+        ``self.down_proj`` as ``Dense(self.output_dim)``, so the forward path
+        genuinely projects to ``output_dim``. Measured: input width 32 with
+        ``output_dim=24`` gave ``compute_output_shape(...)[-1] == 32`` and
+        ``layer(x).shape[-1] == 24``. The lie was invisible only because every
+        shipped caller happens to pass ``output_dim == input width``.
+
+        Do NOT "restore" the passthrough. It is load-bearing for
+        ``BaseVLMHead._build_fusion_stack``, which derives every downstream shape
+        (and the post-fusion width assertion) from this method while ``swiglu``
+        is the default FFN of ``ImageCaptioningHead`` -- a passthrough there
+        makes the width assertion check its own input instead of the layer.
+        Swept across all 21 ``FFN_REGISTRY`` types at an output width different
+        from the input width: ``swiglu`` was the only one that disagreed.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, same as input shape.
+        :return: Input shape with the last axis replaced by ``output_dim``.
         :rtype: Tuple[Optional[int], ...]
         """
-        return input_shape
+        return tuple(input_shape)[:-1] + (self.output_dim,)
 
     def get_config(self) -> Dict[str, Any]:
         """

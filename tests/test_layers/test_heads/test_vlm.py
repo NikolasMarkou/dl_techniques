@@ -30,6 +30,7 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+from dl_techniques.layers.heads.vlm import factory as vlm_factory
 from dl_techniques.layers.heads.vlm.factory import (
     _accepted_constructor_kwargs,
     _is_single_shape,
@@ -1036,11 +1037,6 @@ class TestMultiTaskTaskSpecificKwargs:
         # `MultiTaskVLMHead.__init__`: a shared kwarg must be accepted by every
         # head class, and `fusion_strategy` for instance would raise on
         # ImageCaptioningHead, which is not a BaseVLMHead subclass.
-        #
-        # "swiglu" not "mlp": ImageCaptioningHead builds its FFN via
-        # `create_ffn_from_config({"type": ..., "output_dim": ...})` without a
-        # `hidden_dim`, which the `mlp` type requires -- so `ffn_type="mlp"`
-        # raises there. A separate pre-existing defect, reported not fixed.
         assert head.shared_head_kwargs == {"ffn_type": "swiglu"}
         for task_head in head.task_heads.values():
             assert task_head.ffn_type == "swiglu"
@@ -1168,6 +1164,349 @@ class TestCaptioningFFNTypes:
         del config["ffn_expansion_factor"]
         rebuilt = ImageCaptioningHead.from_config(config)
         assert rebuilt.ffn_expansion_factor == 4
+
+
+# ---------------------------------------------------------------------
+# Output-WIDTH routing via FFN_REGISTRY['output_dim_param']
+#
+# Both VLM FFN sites used to hardcode `"output_dim": self.hidden_dim`. That key
+# does not EXIST for 4 of the 21 registry types, which name their output width
+# `filters` (gated_mlp), `features` (kan) or `units` (power_mlp, tversky). For
+# them the hardcoded key was silently dropped by `create_ffn_layer`'s parameter
+# filter and the type then died in `validate_ffn_config` on its own width
+# parameter, which the head never supplied.
+#
+# The sites now look the width parameter's NAME up in the registry. The failure
+# this section exists to catch is a "fix" that pattern-matches the literal string
+# "output_dim" instead: it is a no-op for exactly those 4 types while looking
+# identical to the correct routing, so every test would stay green and nothing
+# would have been closed. `test_the_width_parameter_names_are_still_renamed` is
+# the anti-vacuity guard on the derived list, and the `kan`/`power_mlp`
+# forward+round-trip parametrizations are what go RED against that variant.
+#
+# The honest reachable outcome and the reasons the rest stay closed live in ONE
+# home: the `ffn_type` docstring of `ImageCaptioningHead` in
+# `src/dl_techniques/layers/heads/vlm/factory.py`. It is not restated here.
+# ---------------------------------------------------------------------
+
+_WIDTH_PARAM_BY_FFN_TYPE = {
+    t: meta["output_dim_param"] for t, meta in FFN_REGISTRY.items()
+}
+
+# The types whose width parameter is NOT called "output_dim". This list is what
+# separates the correct registry lookup from the literal-string variant.
+_RENAMED_WIDTH_FFN_TYPES = sorted(
+    t for t, p in _WIDTH_PARAM_BY_FFN_TYPE.items()
+    if p is not None and p != "output_dim"
+)
+
+# Newly reachable on BOTH sites: the width parameter was their ONLY missing
+# required parameter.
+_NEWLY_REACHABLE_FFN_TYPES = ["kan", "power_mlp"]
+
+# Still closed, and WHY -- each value is a substring of the error that keeps it
+# closed. Asserting the specific message (not merely "it raises") is what proves
+# the width routing landed: `units`/`filters` no longer appear as missing.
+_CLOSED_BY_MISSING_HYPERPARAM = {
+    "counting": "count_dim",
+    "logic": "logic_dim",
+    "mixer": "tokens_mlp_dim",
+    "tversky": "num_features",
+}
+
+
+def _itm_width_head(ffn_type: str) -> ImageTextMatchingHead:
+    """Site 1: `BaseVLMHead._build_common_layers` -> post-fusion FFN (rank-2)."""
+    return ImageTextMatchingHead(
+        task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+        vision_dim=_FAMILY_DIM,
+        text_dim=_FAMILY_DIM,
+        use_post_fusion_ffn=True,
+        ffn_type=ffn_type,
+    )
+
+
+def _cap_width_head(ffn_type: str) -> ImageCaptioningHead:
+    """Site 2: `ImageCaptioningHead.__init__`'s per-layer FFN loop (rank-3)."""
+    return ImageCaptioningHead(
+        task_config=_family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
+        vision_dim=_FAMILY_DIM,
+        text_dim=_FAMILY_DIM,
+        num_layers=1,
+        num_heads=NUM_HEADS,
+        ffn_type=ffn_type,
+    )
+
+
+def _forward_and_round_trip(head) -> None:
+    """Forward pass + `.keras` round-trip asserting VALUES and weight counts.
+
+    Shape-only round-trip assertions are worthless here: this file's own history
+    records a model that restored ZERO weights and still emitted
+    correctly-shaped output. Compare the actual tensors, and compare the pre/post
+    weight COUNT so a partially-restored model cannot pass either.
+    """
+    payload = _family_payload()
+    vi = keras.Input(shape=(_FAMILY_SEQ, _FAMILY_DIM))
+    ti = keras.Input(shape=(_FAMILY_SEQ, _FAMILY_DIM))
+    out = head({"vision_features": vi, "text_features": ti})
+    model = keras.Model([vi, ti], out)
+    args = [payload["vision_features"], payload["text_features"]]
+    before = model.predict(args, verbose=0)
+    n_before = len(model.get_weights())
+    assert n_before > 0, "the head created no weights — nothing to round-trip"
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "width.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+    after = restored.predict(args, verbose=0)
+    n_after = len(restored.get_weights())
+
+    assert n_after == n_before, (
+        f"weight count changed across the .keras round-trip: "
+        f"{n_before} -> {n_after}"
+    )
+    keys = before.keys() if isinstance(before, dict) else range(len(before))
+    for k in keys:
+        b = before[k] if isinstance(before, dict) else before[k]
+        a = after[k] if isinstance(after, dict) else after[k]
+        assert np.isfinite(np.asarray(b)).all(), f"output {k!r} is not finite"
+        np.testing.assert_allclose(
+            b, a, rtol=1e-5, atol=1e-5,
+            err_msg=f"output {k!r} changed across the .keras round-trip",
+        )
+
+
+class TestFFNOutputWidthParamRouting:
+    """Both VLM sites must route the output width by the type's OWN param name."""
+
+    def test_the_width_parameter_names_are_still_renamed(self) -> None:
+        """Anti-vacuity: if every type called it `output_dim`, this whole
+        section would pass against the literal-string no-op variant."""
+        assert _RENAMED_WIDTH_FFN_TYPES, (
+            "no FFN type names its output width anything other than "
+            "'output_dim' any more — the parametrizations below can no longer "
+            "distinguish a registry lookup from a literal string match"
+        )
+        assert _RENAMED_WIDTH_FFN_TYPES == [
+            "gated_mlp", "kan", "power_mlp", "tversky"
+        ], (
+            f"the renamed-width type set moved to {_RENAMED_WIDTH_FFN_TYPES}; "
+            f"re-derive the reachability groups below before editing this"
+        )
+
+    @pytest.mark.parametrize("ffn_type", _NEWLY_REACHABLE_FFN_TYPES)
+    def test_site1_matching_head_forward_and_round_trip(self, ffn_type) -> None:
+        """Site 1 (`BaseVLMHead._build_common_layers`), rank-2 post-fusion."""
+        _forward_and_round_trip(_itm_width_head(ffn_type))
+
+    @pytest.mark.parametrize("ffn_type", _NEWLY_REACHABLE_FFN_TYPES)
+    def test_site2_captioning_head_forward_and_round_trip(self, ffn_type) -> None:
+        """Site 2 (`ImageCaptioningHead.__init__`), rank-3 decoder stream."""
+        _forward_and_round_trip(_cap_width_head(ffn_type))
+
+    @pytest.mark.parametrize("ffn_type", sorted(_CLOSED_BY_MISSING_HYPERPARAM))
+    def test_types_needing_an_unrelated_hyperparameter_stay_closed(
+        self, ffn_type
+    ) -> None:
+        """Closed by a hyperparameter `VLMTaskConfig` does not carry.
+
+        Deliberately NOT closed by inventing a derivation (user ruling): a
+        `count_dim`/`logic_dim`/`tokens_mlp_dim`/`channels_mlp_dim`/`num_features`
+        default would be new design surface, not a lookup.
+
+        The assertion names the SPECIFIC missing key, which is also what proves
+        the width routing landed for `tversky`: its width parameter `units` is no
+        longer among the missing ones.
+        """
+        needle = _CLOSED_BY_MISSING_HYPERPARAM[ffn_type]
+        for factory in (_itm_width_head, _cap_width_head):
+            with pytest.raises(ValueError, match=needle):
+                factory(ffn_type)
+
+    def test_tversky_width_param_reaches_the_factory_even_though_it_stays_closed(
+        self,
+    ) -> None:
+        """`units` must have been supplied; only `num_features` may be missing.
+
+        Without the registry lookup the error names BOTH keys. This is the
+        assertion that separates "the routing works but the type needs more" from
+        "the routing silently did nothing".
+        """
+        with pytest.raises(ValueError) as excinfo:
+            _itm_width_head("tversky")
+        message = str(excinfo.value)
+        # Match the MISSING list specifically -- the factory's wrapper message
+        # also echoes the full `required`/`provided` lists, in which 'units'
+        # legitimately appears either way.
+        assert "missing for tversky: ['num_features']" in message, (
+            f"'units' is still reported missing for tversky, so the width "
+            f"parameter never reached the factory: {message}"
+        )
+
+    def test_gated_mlp_stays_closed_on_its_RANK_not_on_its_width_param(self) -> None:
+        """A permanent capability gap, not a registry gap.
+
+        `GatedMLP` is 1x1-conv based and needs a rank-4 `(B, H, W, C)` input.
+        Site 1 hands it rank-2 and site 2 rank-3, so `filters` now reaching it
+        moves the failure from "required parameter missing" to a kernel-rank
+        error — and that MOVE is the observable proof the routing works.
+        """
+        for factory in (_itm_width_head, _cap_width_head):
+            with pytest.raises(ValueError) as excinfo:
+                head = factory("gated_mlp")
+                head({k: ops.convert_to_tensor(v)
+                      for k, v in _family_payload().items()})
+            message = str(excinfo.value)
+            assert "filters" not in message, (
+                f"'filters' is still reported missing, so gated_mlp's width "
+                f"parameter never reached the factory: {message}"
+            )
+            assert "Kernel shape" in message or "rank" in message.lower(), message
+
+    def test_both_sites_ask_the_registry_the_same_question(self) -> None:
+        """I-4 for the WIDTH rule, mirroring the `hidden_dim` rule's own guard.
+
+        Spies on the single shared helper and asserts both construction sites
+        call it with the same arguments and consume the same answer. If one site
+        is ever re-hardcoded, the spy records one call instead of two.
+        """
+        calls = []
+        original = vlm_factory._ffn_width_kwargs
+
+        def spy(ffn_type, width):
+            result = original(ffn_type, width)
+            calls.append((ffn_type, width, tuple(sorted(result.items()))))
+            return result
+
+        vlm_factory._ffn_width_kwargs = spy
+        try:
+            _cap_width_head("kan")
+            cap_calls = list(calls)
+            calls.clear()
+            _itm_width_head("kan")
+            itm_calls = list(calls)
+        finally:
+            vlm_factory._ffn_width_kwargs = original
+
+        assert cap_calls and itm_calls, (
+            f"a site did not consult the shared width helper at all: "
+            f"captioning={cap_calls}, matching={itm_calls}"
+        )
+        assert set(cap_calls) == set(itm_calls) == {
+            ("kan", _FAMILY_DIM, (("features", _FAMILY_DIM),))
+        }, f"the two sites disagree: captioning={cap_calls}, matching={itm_calls}"
+
+    def test_mixer_receives_no_width_key_at_all(self) -> None:
+        """`output_dim_param is None` means "pass nothing", not "pass output_dim".
+
+        `mixer`'s output shape is structurally its input shape; there is no width
+        to set. It stays closed on its own two hyperparameters (asserted above),
+        so this checks the helper directly.
+        """
+        assert vlm_factory._ffn_width_kwargs("mixer", _FAMILY_DIM) == {}
+        assert vlm_factory._ffn_width_kwargs("mlp", _FAMILY_DIM) == {
+            "output_dim": _FAMILY_DIM
+        }
+
+
+class TestSite1PostFusionWidthAssertion:
+    """I-2: a wrong post-fusion width on site 1 silently REWIRES, so assert it.
+
+    `ImageTextMatchingHead.similarity_head` is a plain `Dense` built from the
+    shape `post_fusion_ffn.compute_output_shape(...)` returns, so it accepts any
+    width and no Keras error is ever raised. Site 2 needs no such assertion — its
+    unprojected residual add raises loudly (pinned by
+    `test_site2_residual_add_raises_loudly_on_a_wrong_width`).
+    """
+
+    def test_the_assertion_is_green_as_shipped(self) -> None:
+        head = _itm_width_head("swiglu")
+        head({k: ops.convert_to_tensor(v) for k, v in _family_payload().items()})
+        assert head.post_fusion_ffn.compute_output_shape(
+            (None, _FAMILY_DIM)
+        )[-1] == _FAMILY_DIM
+
+    def test_a_wrong_post_fusion_width_raises_naming_the_ffn_type(self) -> None:
+        """RED proof: force a half-width FFN and require OUR error, not a
+        downstream shape complaint (there is none — that is the whole point)."""
+        original = vlm_factory._ffn_width_kwargs
+
+        def half_width(ffn_type, width):
+            return {k: width // 2 for k in original(ffn_type, width)}
+
+        vlm_factory._ffn_width_kwargs = half_width
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                head = _itm_width_head("mlp")
+                head({k: ops.convert_to_tensor(v)
+                      for k, v in _family_payload().items()})
+        finally:
+            vlm_factory._ffn_width_kwargs = original
+        message = str(excinfo.value)
+        assert "post-fusion FFN" in message, message
+        assert "ffn_type='mlp'" in message, message
+        assert str(_FAMILY_DIM // 2) in message and str(_FAMILY_DIM) in message, (
+            f"the error must report both the actual and the expected width: "
+            f"{message}"
+        )
+
+    def test_site2_residual_add_raises_loudly_on_a_wrong_width(self) -> None:
+        """I-1, executed rather than assumed.
+
+        `ImageCaptioningHead.call()` does `x + ffn_output` with no projection, so
+        a wrong FFN width must raise. This is why site 2 gets no explicit
+        assertion of its own.
+        """
+        original = vlm_factory._ffn_width_kwargs
+
+        def half_width(ffn_type, width):
+            return {k: width // 2 for k in original(ffn_type, width)}
+
+        vlm_factory._ffn_width_kwargs = half_width
+        try:
+            with pytest.raises(Exception) as excinfo:
+                head = _cap_width_head("mlp")
+                head({k: ops.convert_to_tensor(v)
+                      for k, v in _family_payload().items()})
+        finally:
+            vlm_factory._ffn_width_kwargs = original
+        message = str(excinfo.value)
+        assert str(_FAMILY_DIM // 2) in message and str(_FAMILY_DIM) in message, (
+            f"expected a shape-mismatch naming both widths, got: {message}"
+        )
+
+
+class TestSwiGLUComputeOutputShapeHonesty:
+    """`SwiGLUFFN.compute_output_shape` must not lie about its output width.
+
+    It returned `input_shape` verbatim while the forward path really projects to
+    `output_dim`. Harmless only because every shipped caller happened to pass
+    `output_dim == input width`. It is load-bearing HERE:
+    `BaseVLMHead._build_fusion_stack` derives every downstream shape from that
+    method, `swiglu` is `ImageCaptioningHead`'s default, and the site-1 width
+    assertion above would otherwise be checking a lying oracle.
+
+    Swept across all 21 registry types at an output width different from the
+    input width; `swiglu` was the ONLY type whose declared width disagreed with
+    its forward width.
+    """
+
+    def test_declared_width_matches_forward_width(self) -> None:
+        from dl_techniques.layers.ffn.factory import create_ffn_layer
+
+        layer = create_ffn_layer("swiglu", output_dim=24)
+        x = ops.convert_to_tensor(
+            np.zeros((2, 5, 32), dtype="float32")
+        )
+        declared = tuple(layer.compute_output_shape((2, 5, 32)))
+        actual = tuple(layer(x).shape)
+        assert declared[-1] == actual[-1] == 24, (
+            f"compute_output_shape declares width {declared[-1]} but the "
+            f"forward pass produces {actual[-1]}"
+        )
+        assert declared[:-1] == actual[:-1] == (2, 5)
 
 
 # ---------------------------------------------------------------------
