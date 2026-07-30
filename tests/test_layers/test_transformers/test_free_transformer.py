@@ -134,3 +134,96 @@ class TestFreeTransformerLayer:
             loaded = keras.models.load_model(path)
         out2 = loaded(x, training=False)
         np.testing.assert_allclose(np.array(ref), np.array(out2), atol=1e-5)
+
+
+class TestEncoderFFNKwargFiltering:
+    """The encoder FFN bundle must not hand `create_ffn_layer` keys it rejects.
+
+    `encoder_ffn_type` defaults to 'swiglu', which does not accept `activation`,
+    yet the bundle passed `activation=self.activation` unconditionally. The
+    factory filtered it out silently -- no warning at any log level -- so the
+    layer's own default config was quietly discarding a parameter. This was one
+    of only two (call site, ffn_type) pairs in the repo that armed that drop,
+    measured over an instrumented 1634-test run.
+
+    The layer now pre-filters its OWN generic defaults to what the chosen
+    `encoder_ffn_type` accepts, as `gated_linear_attention_block.py` does.
+    """
+
+    @staticmethod
+    def _build(caplog_level="WARNING", **kw):
+        layer = FreeTransformerLayer(
+            hidden_size=32, num_heads=4, intermediate_size=128,
+            use_free_transformer=True, dropout_rate=0.0,
+            attention_dropout_rate=0.0, **kw
+        )
+        layer(keras.random.normal([2, 8, 32]), training=False)
+        return layer
+
+    def test_default_config_drops_no_key_silently(self, caplog):
+        """swiglu default: zero dropped-key warnings.
+
+        This is the defect. Reverting the pre-filter makes the factory warn about
+        `activation`, and this assertion fails on the captured record.
+        """
+        import logging
+        with caplog.at_level(logging.WARNING):
+            self._build()
+        dropped = [
+            r.getMessage() for r in caplog.records
+            if "unsupported parameter" in r.getMessage()
+        ]
+        assert not dropped, (
+            f"the DEFAULT encoder FFN config still hands swiglu keys it "
+            f"rejects: {dropped}"
+        )
+
+    def test_misspelled_encoder_ffn_args_key_warns_exactly_once(self, caplog):
+        """The caller's own `encoder_ffn_args` is still NOT protected -- but is now loud.
+
+        The pre-filter deliberately covers only this layer's generic defaults;
+        `create_ffn_layer` re-applies the same signature intersection and cannot
+        distinguish an explicit caller key from a convenience default. That
+        residual gap is unchanged by design, so the factory's `logger.warning`
+        is what makes it findable. Removing that warning fails here.
+        """
+        import logging
+        with caplog.at_level(logging.WARNING):
+            self._build(encoder_ffn_args={"activatoin": "gelu"})
+        naming_the_typo = [
+            r.getMessage() for r in caplog.records
+            if "unsupported parameter" in r.getMessage()
+            and "activatoin" in r.getMessage()
+        ]
+        assert len(naming_the_typo) == 1, (
+            f"expected exactly one warning naming the misspelled key, got "
+            f"{len(naming_the_typo)}: {naming_the_typo}"
+        )
+
+    def test_an_ffn_type_that_accepts_activation_still_receives_it(self):
+        """CONTROL: the pre-filter must not strip a key the type DOES accept.
+
+        Without this, a filter that dropped `activation` unconditionally would
+        satisfy both tests above while silently changing every mlp-style encoder
+        FFN. `mlp` lists `activation` as a real parameter, so it must arrive.
+        """
+        layer = self._build(encoder_ffn_type="mlp",
+                            encoder_ffn_args={"activation": "relu"})
+        # MLPBlock stores the raw value as `activation_name` and the resolved
+        # callable as `activation_fn`; assert on the resolved one so a silently
+        # ignored kwarg cannot pass by leaving the name set.
+        resolved = layer.encoder_ffn.activation_fn
+        assert resolved is not None
+        activation_repr = getattr(resolved, "__name__", str(resolved))
+        assert "relu" in activation_repr.lower(), (
+            f"the pre-filter stripped an `activation` that mlp accepts: "
+            f"{activation_repr}"
+        )
+
+    def test_unknown_encoder_ffn_type_raises_naming_alternatives(self):
+        """An unknown type must fail loudly, matching the GLA site's behaviour."""
+        with pytest.raises(ValueError, match="Unknown encoder_ffn_type"):
+            FreeTransformerLayer(
+                hidden_size=32, num_heads=4, intermediate_size=128,
+                use_free_transformer=True, encoder_ffn_type="not_a_real_ffn",
+            )

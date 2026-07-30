@@ -635,6 +635,33 @@ def create_ffn_layer(
         # Filter out any unknown parameters to avoid "Unrecognized keyword arguments" error
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
 
+        # DECISION plan-2026-07-30T081929-1645aa52/D-013
+        # Say so when a key is dropped. The filter above silences a free framework
+        # error -- Keras `Layer.__init__` would itself reject an unknown keyword --
+        # so a misspelled or misdirected key produced no signal at all, at any log
+        # level. Measured over an instrumented 1634-test run, exactly two
+        # (call site, ffn_type) pairs actually hit it, one of them a real defect.
+        #
+        # This WARNS rather than raising, deliberately. Raising is a separate,
+        # larger decision: the strict-factory change breaks 29 (site, type)
+        # combinations across three wrapper sites, and that count is
+        # registry-derived rather than executed. It is recorded as a deferral, and
+        # this warning is what makes the trap greppable in the meantime. Do not
+        # promote it to a raise without the executed 3x21 grid.
+        #
+        # Only caller-supplied keys are reported, never this factory's own
+        # optional-parameter defaults, or every call would warn.
+        dropped = sorted(set(kwargs) - valid_param_names)
+        if dropped:
+            logger.warning(
+                "create_ffn_layer('%s'): dropping %d unsupported parameter(s) "
+                "%s. '%s' accepts %s. These keys are SILENTLY IGNORED, not "
+                "applied -- check for a typo or a parameter meant for a "
+                "different ffn_type.",
+                ffn_type, len(dropped), dropped, ffn_type,
+                sorted(valid_param_names),
+            )
+
         # Add name if provided
         if name is not None:
             final_params['name'] = name

@@ -60,7 +60,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from .transformer import TransformerLayer
-from ..ffn.factory import create_ffn_layer, FFNType
+from ..ffn.factory import create_ffn_layer, FFN_REGISTRY, FFNType
 from ..norms import create_normalization_layer, NormalizationType
 from ..attention.factory import create_attention_layer, AttentionType
 
@@ -375,19 +375,56 @@ class FreeTransformerLayer(TransformerLayer):
             name='encoder_attention_dropout'
         )
 
+        # DECISION plan-2026-07-30T081929-1645aa52/D-013
+        # Pre-filter OUR OWN generic defaults to the ones this `encoder_ffn_type`
+        # accepts, exactly as `gated_linear_attention_block.py` does at its own FFN
+        # site. These are this layer's conveniences, not the caller's explicit
+        # intent, so filtering them is correct -- and without it they reach
+        # `create_ffn_layer`, which drops them silently.
+        #
+        # This was live at the encoder path's own default: `encoder_ffn_type`
+        # defaults to 'swiglu', which does not accept `activation`, so the bundle
+        # below handed swiglu an `activation` that was discarded without a word.
+        # Measured across an instrumented 1634-test run, this was one of only two
+        # (site, ffn_type) pairs in the repo that armed the drop. A strict factory
+        # would break this site at 12 of 21 ffn_types.
+        #
+        # NOTE, as at the GLA site: this pre-filter does NOT protect the caller's
+        # own `encoder_ffn_args`. `create_ffn_layer` applies the same signature
+        # intersection again and cannot tell an explicit caller key from one of our
+        # defaults, so a misspelled `encoder_ffn_args` key is still dropped -- now
+        # with a `logger.warning` naming it, which is what the guard pins.
+        encoder_ffn_config = {
+            'hidden_dim': self.intermediate_size,
+            'output_dim': self.hidden_size,
+            'activation': self.activation,
+            'dropout_rate': self.dropout_rate,
+            'use_bias': self.use_bias,
+            'kernel_initializer': self.kernel_initializer,
+            'bias_initializer': self.bias_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
+            'bias_regularizer': self.bias_regularizer,
+        }
+        encoder_ffn_info = FFN_REGISTRY.get(self.encoder_ffn_type)
+        if encoder_ffn_info is None:
+            raise ValueError(
+                f"Unknown encoder_ffn_type '{self.encoder_ffn_type}'. "
+                f"Available: {sorted(FFN_REGISTRY)}."
+            )
+        valid_encoder_ffn_params = (
+            set(encoder_ffn_info['required_params'])
+            | set(encoder_ffn_info['optional_params'].keys())
+        )
+        encoder_ffn_config = {
+            k: v for k, v in encoder_ffn_config.items()
+            if k in valid_encoder_ffn_params
+        }
+        encoder_ffn_config.update(self.encoder_ffn_args)
+
         self.encoder_ffn = create_ffn_layer(
             ffn_type=self.encoder_ffn_type,
-            hidden_dim=self.intermediate_size,
-            output_dim=self.hidden_size,
-            activation=self.activation,
-            dropout_rate=self.dropout_rate,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
             name='encoder_ffn',
-            **self.encoder_ffn_args
+            **encoder_ffn_config
         )
 
         self.encoder_output_norm = create_normalization_layer(
