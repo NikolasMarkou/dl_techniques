@@ -188,9 +188,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :type dim: int
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int
-    :param max_seq_len: Hard upper bound on the sequence length, used as the
-        scan's ``maximum_iterations``. Must be positive. See the overflow note
-        below for what is and is not guaranteed when it is exceeded.
+    :param max_seq_len: Declared upper bound on the sequence length. Must be
+        positive. **Advisory only** -- see the note below. It shapes no weight and
+        bounds no loop; exceeding it is computed correctly, and logs a warning at
+        build time when the length is statically known.
     :type max_seq_len: int
     :param head_dim: Dimension per head. If None, defaults to dim // num_heads.
     :type head_dim: Optional[int]
@@ -277,27 +278,29 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
     :raises ValueError: At construction, if any parameter is outside its
         admissible range (including ``intermediate_size <= 0`` when given).
-    :raises ValueError: At ``build()`` / ``call()`` time, if the input's
-        sequence axis is a *statically known* integer greater than
-        ``max_seq_len``.
-
     .. note::
-        **What the overflow guard does and does not cover.** The recurrent scan
-        runs under ``ops.while_loop`` with ``maximum_iterations=max_seq_len``,
-        so a sequence longer than ``max_seq_len`` cannot be computed: every
-        timestep past the cap stays at the zero-initialized buffer value.
+        **``max_seq_len`` is advisory. Neither scan branch truncates.**
+        ``_sequential_scan`` runs under
+        ``ops.while_loop(..., maximum_iterations=seq_len)`` and
+        ``_chunked_scan``'s loop is bounded by the chunk count, so a sequence
+        longer than ``max_seq_len`` is computed exactly. Exceeding it costs
+        compute, not correctness; ``build()`` logs a warning when the length is
+        statically known, because the declared value is then probably wrong.
 
-        *Guaranteed*: when the sequence length is statically known -- the
-        ordinary case of calling the layer on a concrete tensor, or building it
-        on a shape with a concrete sequence axis -- an over-long input raises
-        ``ValueError`` naming both the offending length and ``max_seq_len``.
-
-        *Not guaranteed*: when the sequence axis is ``None``/symbolic (for
-        example ``keras.Input(shape=(None, dim))``), the guard cannot fire --
-        ``keras.ops`` offers no portable way to raise from inside a traced
-        graph. In that case ``build()`` emits a one-time ``logger.warning`` and
-        the silent truncation described above remains possible at runtime. Size
-        ``max_seq_len`` for the longest sequence you intend to feed.
+        This is the third revision of this note and the history is worth keeping,
+        because the first two were both wrong in the same direction. Originally
+        the loop carried ``maximum_iterations=self.max_seq_len``, so an over-long
+        sequence really did return zeros past the cap, and ``build()``/``call()``
+        raised on a statically known over-long length. D-010 then observed that
+        the CHUNKED branch has no such cap and moved the raise into
+        ``_sequential_scan`` -- which was still wrong, because with
+        ``keras.Input(shape=(None, dim))`` TF relaxes the trace signature after a
+        second distinct length and dispatches to the sequential branch with a
+        SYMBOLIC length, where no static check can fire. Measured at that
+        revision: ``max_seq_len=8`` returned 52 of 60 timesteps all-zero, with no
+        raise and no warning. D-018 removed the cap itself, which is the only fix
+        that closes the symbolic case -- ``keras.ops`` offers no portable way to
+        raise from inside a traced graph, so no guard-based approach ever could.
     """
 
     def __init__(
@@ -639,8 +642,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :param input_shape: Shape tuple (batch_size, sequence_length, dim).
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the rank is not 3, if the feature axis does not
-            match ``dim``, or if a *statically known* sequence axis exceeds
-            ``max_seq_len``.
+            match ``dim``. A sequence axis exceeding ``max_seq_len`` does NOT
+            raise -- the cap is advisory (see the class note).
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {input_shape}")
@@ -658,28 +661,29 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             # a graph-time assert: `keras.ops` has no portable way to raise from
             # inside a traced graph, and a backend-specific `tf.debugging.assert`
             # would make this layer non-portable for a guarantee we then could
-            # not state uniformly. Under a symbolic sequence axis the
-            # `maximum_iterations=max_seq_len` cap still silently truncates, and
-            # the docstring says so rather than claiming dynamic coverage.
+            # not state uniformly.
             #
-            # DECISION plan-2026-07-30T081929-1645aa52/D-010
-            # Note the asymmetry this leaves, and do not "restore symmetry" by
-            # re-adding a static raise here: a STATIC length is dispatched to
-            # `_chunked_scan`, which has no truncation to guard against, so the
-            # static case needs no check at build time. It is precisely the
-            # symbolic case -- the one that reaches `_sequential_scan` -- that
-            # cannot be guarded. The raise now lives in `_sequential_scan`,
-            # beside the `maximum_iterations` cap that actually truncates.
-            logger.warning(
+            # SUPERSEDED IN PART by D-018 of plan-2026-07-30T081929-1645aa52:
+            # the thing this branch could not guard -- silent truncation under a
+            # symbolic axis -- no longer exists. `maximum_iterations` is now the
+            # actual `seq_len`, so nothing truncates and there is nothing here to
+            # raise about. The reasoning above still stands as the reason a
+            # graph-time raise was never viable.
+            #
+            # DECISION plan-2026-07-30T081929-1645aa52/D-018
+            # There is no raise anywhere any more, on either branch. D-010 moved
+            # it into `_sequential_scan`; D-018 then removed the truncation that
+            # justified it. `max_seq_len` is advisory -- see
+            # `_warn_if_seq_len_exceeds_declared`.
+            logger.debug(
                 "GatedLinearAttentionBlock '%s' built with an unknown "
-                "(symbolic/dynamic) sequence axis: the max_seq_len=%d overflow "
-                "guard CANNOT fire for this layer. If a batch longer than %d is "
-                "fed at runtime, the recurrent scan silently returns zeros for "
-                "every timestep past index %d.",
+                "(symbolic/dynamic) sequence axis, so the declared "
+                "max_seq_len=%d cannot be checked at build time. This is "
+                "harmless since D-018: both scan branches are bounded by the "
+                "ACTUAL sequence length, so a longer input is computed "
+                "correctly rather than truncated.",
                 self.name,
                 self.max_seq_len,
-                self.max_seq_len,
-                self.max_seq_len - 1,
             )
 
         # Set common initializers/regularizers for dense layers
@@ -808,15 +812,16 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         read-out. The read-out uses ``S_t``, i.e. the state after this step's
         write, so it is inclusive in ``j = t``.
 
-        The loop carries ``maximum_iterations=self.max_seq_len``, so **this
-        branch is the one that truncates**: every timestep from index
-        ``max_seq_len`` onwards is never written and reads back as zero. A
-        statically known over-long length is therefore rejected HERE, beside the
-        cap that causes it, rather than in ``build()``/``call()`` -- those see
-        static lengths that get dispatched to :meth:`_chunked_scan`, which has no
-        such cap and is correct past it (D-010). When this method is reached
-        through :meth:`gated_linear_scan` the length is symbolic by construction,
-        so the check cannot fire; see the class docstring for that gap.
+        The loop is bounded by the ACTUAL sequence length
+        (``maximum_iterations=seq_len``), not by ``max_seq_len``. It therefore
+        does NOT truncate, and neither branch does.
+
+        This changed twice. The loop originally carried
+        ``maximum_iterations=self.max_seq_len`` and silently returned zeros past
+        that cap; D-010 relocated the resulting raise here, which was still
+        wrong because a symbolic length reaches this branch and no static check
+        can fire; D-018 removed the cap itself. See the ``maximum_iterations``
+        comment in the body.
 
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
         :type q: keras.KerasTensor
@@ -832,9 +837,6 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type beta: keras.KerasTensor
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
-        :raises ValueError: If ``q``'s sequence axis is statically known and
-            exceeds ``max_seq_len``, which would silently zero every timestep
-            past the cap.
         """
         # DECISION plan-2026-07-30T081929-1645aa52/D-018
         # No `max_seq_len` guard here any more, and none anywhere else either.
@@ -1152,20 +1154,11 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor of shape (batch, seq_len, dim).
         :rtype: keras.KerasTensor
-        :raises ValueError: If the input's sequence length is statically known
-            and exceeds ``max_seq_len``. A built layer can be re-called at a
-            different length than it was built at, so this re-checks rather than
-            trusting ``build()``.
         """
-        # DECISION plan-2026-07-30T081929-1645aa52/D-010
-        # No `_validate_seq_len` call here. A statically known length is
-        # dispatched to `_chunked_scan`, whose loop is bounded by the CHUNK count
-        # (`ceil(seq_len/chunk_size)`), not by `max_seq_len` -- so it is exactly
-        # correct past that cap. Raising here rejected the path that works:
-        # measured at seq_len=32 with max_seq_len=8, the chunked branch matched a
-        # NumPy oracle to 9.3e-07 while `_sequential_scan` returned zeros past
-        # index 8 (error 6.13). The guard now sits in `_sequential_scan`, the
-        # only branch that truncates.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018
+        # No length check here, and none in `_sequential_scan` either: since
+        # D-018 neither branch truncates, so there is nothing to reject.
+        # `max_seq_len` is advisory only.
         batch_size, seq_len, _ = ops.shape(inputs)
 
         q = self.q_proj(inputs, training=training)

@@ -220,6 +220,19 @@ class BaseVLMHead(keras.layers.Layer):
     :param ffn_type: Type of FFN to use in the post-fusion block.
     :type ffn_type: FFNType
     :param ffn_expansion_factor: Expansion factor for the post-fusion FFN.
+
+        Reaches the FFN by one of two channels, depending on the ``ffn_type``
+        (D-008 / D-020): a type that REQUIRES an explicit ``hidden_dim`` receives
+        ``hidden_dim * ffn_expansion_factor``; a type that derives its own width
+        receives this factor itself and applies its own rule. Of the 8 registry
+        types in the second group only ``swiglu`` accepts it -- for the other 7
+        (``kan``, ``mixer``, ``tversky``, ...) the concept does not apply and the
+        value does not reach them. It is never passed BOTH ways.
+
+        Note the default here is ``ffn_type="mlp"``, which takes the first
+        channel, so the default post-fusion width is
+        ``hidden_dim * ffn_expansion_factor``. ``ImageCaptioningHead`` defaults to
+        ``swiglu`` instead and therefore takes the second.
     :type ffn_expansion_factor: int
     :param kwargs: Additional arguments for the base Layer.
     """
@@ -584,12 +597,18 @@ class ImageCaptioningHead(keras.layers.Layer):
         a guard would only relocate the error message.
     :type ffn_type: FFNType
     :param ffn_expansion_factor: Width multiplier for the decoder FFN's hidden
-        layer, i.e. ``hidden_dim * ffn_expansion_factor``. Defaults to 4.
+        layer. Defaults to 4.
 
-        Read ONLY by the 13 registry FFN types that require an explicit
-        ``hidden_dim`` (``mlp``, ``geglu``, ``glu``, ``reglu``, ``lowrank``, ...).
-        The default ``swiglu`` derives its own hidden width and IGNORES this, so
-        changing it does not affect the default configuration.
+        Read by every FFN type that can use it, via one of two channels: types
+        that REQUIRE an explicit ``hidden_dim`` receive
+        ``hidden_dim * ffn_expansion_factor``; types that derive their own width
+        (of the 8 such registry types, only ``swiglu``) receive the factor itself
+        and apply their own rule to it -- for ``swiglu``, 2/3 of
+        ``output_dim * factor`` rounded up to ``ffn_multiple_of`` (D-020). The
+        remaining 7 optional-``hidden_dim`` types (``kan``, ``mixer``,
+        ``tversky``, ...) have no expansion concept and size themselves from
+        unrelated parameters, so this value does not reach them.
+
     :type ffn_expansion_factor: int
     :param kwargs: Additional arguments for the base Layer.
     """

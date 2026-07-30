@@ -259,6 +259,44 @@ class TestGatedLinearAttentionBlock:
                 f"max_seq_len={max_seq_len} — it is still truncating: {per_step}"
             )
 
+    def test_symbolic_input_model_does_not_truncate_past_max_seq_len(self):
+        """The END-TO-END scenario CRITICAL-2 was about, not a private-method proxy.
+
+        `test_neither_branch_truncates_past_max_seq_len` calls the scan methods
+        directly with static shapes. That is a proxy: it never reaches the state
+        that actually broke, which needs (a) a symbolic sequence axis, and (b) a
+        SECOND distinct length, so TF relaxes the trace signature and dispatches
+        to `_sequential_scan` with a symbolic length where no static guard can
+        fire.
+
+        Measured before D-018, at exactly this configuration: L=40 was fine
+        (chunked) and L=60 returned **52 of 60 timesteps all-zero**, silently.
+        Restoring `maximum_iterations=self.max_seq_len` fails HERE, and this is
+        the only test in the file that would catch it end-to-end.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=8, chunk_size=64
+        )
+        inputs = keras.Input(shape=(None, 32))
+        model = keras.Model(inputs, layer(inputs))
+
+        # Order matters: the SECOND, longer length is what triggers relaxation.
+        for seq_len in (40, 60):
+            x = np.random.default_rng(seq_len).normal(
+                size=(2, seq_len, 32)
+            ).astype("float32")
+            out = model.predict(x, verbose=0)
+            assert out.shape == (2, seq_len, 32)
+            assert np.isfinite(out).all()
+            per_step = np.max(np.abs(out), axis=(0, 2))
+            dead = int((per_step == 0.0).sum())
+            assert dead == 0, (
+                f"L={seq_len} with max_seq_len={layer.max_seq_len}: {dead} of "
+                f"{seq_len} timesteps came back ALL-ZERO. The scan is truncating "
+                f"at the declared cap and returning the zero-initialized buffer "
+                f"as if it were output."
+            )
+
     def test_exceeding_declared_max_seq_len_warns_but_does_not_raise(self, caplog):
         """The advisory replaces the raise: a warning, and a correct answer."""
         import logging
