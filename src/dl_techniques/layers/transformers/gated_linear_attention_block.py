@@ -514,13 +514,19 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         reach a Python ``if``, which is exactly why the guard cannot fire under
         a dynamic shape.
 
-        :param inputs: Input tensor (eager, symbolic or Keras) of rank 3.
+        Accepts rank 3 ``(batch, seq, dim)`` -- ``call()``'s input -- and rank 4
+        ``(batch, seq, heads, head_dim)`` -- the per-head stream the scans take.
+        The sequence axis is index 1 in both, so one helper serves both; this
+        replaced a hand-rolled rank-4 copy of this logic inside
+        :meth:`gated_linear_scan` and a rank-3-only check here.
+
+        :param inputs: Input tensor (eager, symbolic or Keras) of rank 3 or 4.
         :type inputs: Any
         :return: The static sequence length, or ``None`` if it is not static.
         :rtype: Optional[int]
         """
         shape = getattr(inputs, "shape", None)
-        if shape is None or len(shape) != 3:
+        if shape is None or len(shape) not in (3, 4):
             return None
         try:
             dim = shape[1]
@@ -631,9 +637,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         if features != self.dim:
             raise ValueError(f"Input feature dim ({features}) must match layer dim ({self.dim})")
 
-        if seq_len is not None:
-            self._validate_seq_len(int(seq_len))
-        else:
+        if seq_len is None:
             # DECISION plan-2026-07-29-adbe605f/D-002
             # The overflow guard is STATIC-ONLY, deliberately. Do NOT "fix" this
             # branch by raising here (it would break every legitimate
@@ -644,6 +648,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             # not state uniformly. Under a symbolic sequence axis the
             # `maximum_iterations=max_seq_len` cap still silently truncates, and
             # the docstring says so rather than claiming dynamic coverage.
+            #
+            # DECISION plan-2026-07-30T081929-1645aa52/D-010
+            # Note the asymmetry this leaves, and do not "restore symmetry" by
+            # re-adding a static raise here: a STATIC length is dispatched to
+            # `_chunked_scan`, which has no truncation to guard against, so the
+            # static case needs no check at build time. It is precisely the
+            # symbolic case -- the one that reaches `_sequential_scan` -- that
+            # cannot be guarded. The raise now lives in `_sequential_scan`,
+            # beside the `maximum_iterations` cap that actually truncates.
             logger.warning(
                 "GatedLinearAttentionBlock '%s' built with an unknown "
                 "(symbolic/dynamic) sequence axis: the max_seq_len=%d overflow "
@@ -730,6 +743,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         The two agree to floating-point reassociation only, never bitwise; see
         the class docstring's note on the equivalence tolerances.
 
+        ``alpha`` is expected in ``(0, 1]`` -- a persistence gate, which is what
+        ``call()`` always supplies (a sigmoid). The two branches agree on that
+        domain and, since D-009, on ``alpha > 1`` as well; but ``alpha > 1`` makes
+        the recurrence a *growing* one, so the state and the output blow up
+        geometrically in the sequence length (measured at ``alpha=2.0``,
+        ``seq_len=128``: output magnitude ~1e+24 at float64, and float32 simply
+        overflows to ``inf``). Values above 1 are numerically usable only for
+        short sequences, and nothing in this layer produces them.
+
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
         :type q: keras.KerasTensor
         :param k: Key tensor of shape (batch, seq, heads, head_dim).
@@ -746,13 +768,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
         """
-        static_seq_len = None
-        shape = getattr(q, "shape", None)
-        if shape is not None and len(shape) == 4 and shape[1] is not None:
-            try:
-                static_seq_len = int(shape[1])
-            except (TypeError, ValueError):
-                static_seq_len = None
+        static_seq_len = self._static_seq_len(q)
 
         if static_seq_len is None:
             return self._sequential_scan(q, k, v, alpha, beta)
@@ -779,10 +795,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         read-out. The read-out uses ``S_t``, i.e. the state after this step's
         write, so it is inclusive in ``j = t``.
 
-        The loop carries ``maximum_iterations=self.max_seq_len``; a sequence
-        longer than that is rejected up front by ``_validate_seq_len`` whenever
-        its length is statically known (see the class docstring for the
-        symbolic-shape gap).
+        The loop carries ``maximum_iterations=self.max_seq_len``, so **this
+        branch is the one that truncates**: every timestep from index
+        ``max_seq_len`` onwards is never written and reads back as zero. A
+        statically known over-long length is therefore rejected HERE, beside the
+        cap that causes it, rather than in ``build()``/``call()`` -- those see
+        static lengths that get dispatched to :meth:`_chunked_scan`, which has no
+        such cap and is correct past it (D-010). When this method is reached
+        through :meth:`gated_linear_scan` the length is symbolic by construction,
+        so the check cannot fire; see the class docstring for that gap.
 
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
         :type q: keras.KerasTensor
@@ -798,7 +819,16 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :type beta: keras.KerasTensor
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``q``'s sequence axis is statically known and
+            exceeds ``max_seq_len``, which would silently zero every timestep
+            past the cap.
         """
+        # DECISION plan-2026-07-30T081929-1645aa52/D-010
+        # The truncation guard belongs to THIS branch, not to build()/call().
+        static_seq_len = self._static_seq_len(q)
+        if static_seq_len is not None:
+            self._validate_seq_len(static_seq_len)
+
         batch_size, seq_len, _, _ = ops.shape(q)
 
         i = ops.convert_to_tensor(0, dtype="int32")
@@ -958,10 +988,32 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         beta_g = ops.transpose(beta_g, [0, 3, 1, 2])
 
         causal = _inclusive_causal_mask(chunk, gate_dtype)
-        decay = ops.exp(
-            ops.minimum(ops.expand_dims(cum, -1) - ops.expand_dims(cum, -2), 0.0)
+        # DECISION plan-2026-07-30T081929-1645aa52/D-009
+        # Select BEFORE the exp, do not clamp after it.
+        #
+        # The exponent is only meaningful where `causal` keeps the entry; above
+        # the diagonal it is a positive number whose exp() would be +inf for a
+        # long chunk, and `inf * 0` is NaN, not 0. The old form suppressed that
+        # by clamping the exponent with `ops.minimum(., 0.0)`. That works only
+        # because `alpha <= 1` makes `cum` non-increasing, so the KEPT entries
+        # are already <= 0 and the clamp is a no-op on them.
+        #
+        # For `alpha > 1` the sign flips: `cum` increases, the kept entries turn
+        # POSITIVE, and the clamp silently saturates them to exp(0)=1 -- inside
+        # the causal region, where the value matters. That made this branch
+        # disagree with `_sequential_scan`, which has no such clamp: measured
+        # 2.59 at alpha=1.05 and 3.59e+04 at alpha=2.0, with the sequential
+        # branch matching a NumPy oracle exactly.
+        #
+        # Masking the exponent instead of the result is exact for alpha <= 1
+        # (bit-identical -- verified against a float64 23-cell reference grid)
+        # and correct for alpha > 1, and it removes the inf*0 NaN path entirely.
+        exponent = ops.where(
+            causal > 0,
+            ops.expand_dims(cum, -1) - ops.expand_dims(cum, -2),
+            ops.zeros_like(causal),
         )
-        decay = decay * causal
+        decay = ops.exp(exponent) * causal
 
         scores = ops.matmul(q_c, ops.swapaxes(k_c, -1, -2))
         weighted = (
@@ -969,7 +1021,12 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         )
         intra = ops.matmul(ops.cast(weighted, compute_dtype), v_c)
 
-        write_weight = ops.exp(ops.minimum(cum_last - cum, 0.0)) * beta_g
+        # No mask multiplies this term, so there is no inf*0 path to suppress
+        # and the clamp had no protective role here -- see D-009 above. For
+        # `alpha <= 1` the argument is already <= 0 (cum is non-increasing, so
+        # cum_last <= cum_t), making removal bit-identical; for `alpha > 1` the
+        # clamp was silently saturating a genuinely growing carry weight.
+        write_weight = ops.exp(cum_last - cum) * beta_g
         k_weighted = k_c * ops.expand_dims(
             ops.cast(write_weight, compute_dtype), -1
         )
@@ -1040,10 +1097,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             different length than it was built at, so this re-checks rather than
             trusting ``build()``.
         """
-        static_seq_len = self._static_seq_len(inputs)
-        if static_seq_len is not None:
-            self._validate_seq_len(static_seq_len)
-
+        # DECISION plan-2026-07-30T081929-1645aa52/D-010
+        # No `_validate_seq_len` call here. A statically known length is
+        # dispatched to `_chunked_scan`, whose loop is bounded by the CHUNK count
+        # (`ceil(seq_len/chunk_size)`), not by `max_seq_len` -- so it is exactly
+        # correct past that cap. Raising here rejected the path that works:
+        # measured at seq_len=32 with max_seq_len=8, the chunked branch matched a
+        # NumPy oracle to 9.3e-07 while `_sequential_scan` returned zeros past
+        # index 8 (error 6.13). The guard now sits in `_sequential_scan`, the
+        # only branch that truncates.
         batch_size, seq_len, _ = ops.shape(inputs)
 
         q = self.q_proj(inputs, training=training)

@@ -198,8 +198,8 @@ class TestGatedLinearAttentionBlock:
     # ===============================================
     # 2b. max_seq_len Overflow Guard
     # ===============================================
-    def test_overflow_raises_on_static_seq_len(self):
-        """A statically known seq_len > max_seq_len must raise, not zero-fill.
+    def test_sequential_scan_raises_on_static_seq_len(self):
+        """The guard belongs to `_sequential_scan`, the branch that truncates.
 
         Regression for the probed defect: `max_seq_len=4` on a `(1, 10, 16)`
         input returned the CORRECT shape with timesteps 4-9 silently all-zero,
@@ -207,27 +207,48 @@ class TestGatedLinearAttentionBlock:
         loop while the output buffer stayed zero-initialized. No exception, no
         warning.
 
+        This test used to drive `layer(...)` and `layer.build(...)`. Those sites
+        no longer raise ON PURPOSE (D-010): a static length is dispatched to
+        `_chunked_scan`, whose loop is bounded by the chunk count and is correct
+        past `max_seq_len` -- so raising there rejected the path that works.
+        The truncation is real only here, so the guard is asserted here.
+
         The match pattern names both concrete numbers, so an unrelated
         `ValueError` (e.g. a shape or dtype complaint) cannot satisfy it.
         """
         layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
-        over_long = tf.random.normal(shape=(1, 10, 16))
+        args = _scan_inputs(10, 2, 8, "float32", seed=7)
         with pytest.raises(
             ValueError, match=r"Sequence length \(10\) exceeds max_seq_len \(4\)"
         ):
-            layer(over_long)
+            layer._sequential_scan(*args)
 
-    def test_overflow_raises_from_build(self):
-        """The same guard fires from `build()` on a static shape tuple.
+    def test_chunked_path_is_correct_past_max_seq_len(self):
+        """`call()` at seq_len > max_seq_len must now WORK, not raise.
 
-        `build()` and `call()` are guarded independently: a layer built at one
-        length can be re-called at another, so neither site alone is sufficient.
+        The complement of the test above, and the actual F-12 fix. `max_seq_len`
+        was a spurious limit on the path that runs: measured at seq_len=32 with
+        max_seq_len=8, `_chunked_scan` matched a NumPy oracle to 2.2e-15 while
+        `_sequential_scan` returned zeros past index 8 (error 6.13). Restoring
+        the `build()`/`call()` raise fails HERE.
+
+        Asserting a live suffix is what makes this more than a smoke test: the
+        original defect produced exactly this shape with a zeroed tail.
         """
         layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
-        with pytest.raises(
-            ValueError, match=r"Sequence length \(10\) exceeds max_seq_len \(4\)"
-        ):
-            layer.build((1, 10, 16))
+        over_long = tf.random.normal(shape=(1, 10, 16))
+
+        layer.build((1, 10, 16))          # must not raise either
+        output = layer(over_long, training=False)
+
+        assert output.shape == over_long.shape
+        out_np = ops.convert_to_numpy(output)
+        assert np.all(np.isfinite(out_np)), "output must be finite"
+        per_step_absmax = np.max(np.abs(out_np), axis=(0, 2))
+        assert np.all(per_step_absmax > 0.0), (
+            f"timesteps past max_seq_len=4 came back dead, i.e. the chunked "
+            f"path is truncating after all: {per_step_absmax}"
+        )
 
     def test_overflow_control_at_exactly_max_seq_len(self):
         """CONTROL: seq_len == max_seq_len must NOT raise and must do real work.
@@ -1662,6 +1683,97 @@ class TestScanDispatch:
             assert out.shape == (2, seq_len, 32)
             assert np.isfinite(out).all()
 
+
+
+class TestScanBranchAgreementAboveUnitGate:
+    """The two branches must compute the same function for `alpha > 1` too.
+
+    `_chunked_scan` clamped its gate exponents with `ops.minimum(., 0.0)`. That
+    is a no-op while `alpha <= 1` keeps the cumulative log-gate non-increasing,
+    but for `alpha > 1` the sign flips and the clamp silently saturated the
+    exponent to `exp(0)=1` INSIDE the causal region, where the value matters.
+    `_sequential_scan` has no such clamp, so the two branches disagreed on a
+    domain the public `gated_linear_scan` never excluded: measured 2.59 at
+    alpha=1.05 and 3.59e+04 at alpha=2.0.
+
+    Compared in RELATIVE terms against the independent NumPy oracle, because
+    `alpha > 1` makes the recurrence genuinely growing -- at alpha=2.0,
+    seq_len=128 the true output magnitude is ~1e+24, so an absolute tolerance
+    would be meaningless here.
+    """
+
+    @pytest.mark.parametrize("alpha_value", [1.05, 1.5, 2.0])
+    @pytest.mark.parametrize("seq_len,chunk_size", [(32, 8), (65, 64), (128, 32)])
+    def test_branches_agree_above_unit_gate(self, alpha_value, seq_len, chunk_size):
+        """Restoring either `ops.minimum(., 0.0)` clamp fails here."""
+        num_heads, head_dim = 2, 8
+        with global_dtype_policy("float64"):
+            layer = GatedLinearAttentionBlock(
+                dim=num_heads * head_dim, num_heads=num_heads,
+                head_dim=head_dim, max_seq_len=2048, chunk_size=chunk_size,
+            )
+            args = _scan_inputs(
+                seq_len, num_heads, head_dim, "float64",
+                alpha_value=alpha_value, seed=101,
+            )
+            reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+            chunked = keras.ops.convert_to_numpy(
+                layer._chunked_scan(*args, seq_len)
+            )
+            oracle = numpy_gated_linear_recurrence(
+                *[keras.ops.convert_to_numpy(a) for a in args]
+            )
+
+        scale = max(float(np.abs(reference).max()), 1e-300)
+        rel_branches = float(np.abs(reference - chunked).max()) / scale
+        rel_oracle = float(np.abs(chunked - oracle).max()) / scale
+
+        assert rel_branches <= 1e-10, (
+            f"chunked and sequential disagree at alpha={alpha_value}, "
+            f"seq_len={seq_len}, chunk_size={chunk_size}: "
+            f"relative max|diff|={rel_branches:.3e} -- the gate exponent is "
+            f"being clamped, saturating a growing gate inside the causal region"
+        )
+        assert rel_oracle <= 1e-10, (
+            f"chunked disagrees with the independent NumPy oracle at "
+            f"alpha={alpha_value}: relative max|diff|={rel_oracle:.3e}"
+        )
+
+    def test_unit_gate_boundary_is_not_a_discontinuity(self):
+        """CONTROL: alpha slightly below/at/above 1 must all track the oracle.
+
+        Without this, a fix that special-cased `alpha > 1` -- or that broke the
+        `alpha <= 1` path while fixing the other side -- would still pass the
+        parametrized test above.
+        """
+        num_heads, head_dim, seq_len = 2, 8, 65
+        results = {}
+        with global_dtype_policy("float64"):
+            for alpha_value in (0.95, 1.0, 1.05):
+                layer = GatedLinearAttentionBlock(
+                    dim=num_heads * head_dim, num_heads=num_heads,
+                    head_dim=head_dim, max_seq_len=2048, chunk_size=64,
+                )
+                args = _scan_inputs(
+                    seq_len, num_heads, head_dim, "float64",
+                    alpha_value=alpha_value, seed=202,
+                )
+                chunked = keras.ops.convert_to_numpy(
+                    layer._chunked_scan(*args, seq_len)
+                )
+                oracle = numpy_gated_linear_recurrence(
+                    *[keras.ops.convert_to_numpy(a) for a in args]
+                )
+                scale = max(float(np.abs(oracle).max()), 1e-300)
+                results[alpha_value] = (
+                    float(np.abs(chunked - oracle).max()) / scale
+                )
+
+        for alpha_value, rel in results.items():
+            assert rel <= 1e-10, (
+                f"alpha={alpha_value} deviates from the oracle by "
+                f"{rel:.3e} (relative); all of {sorted(results)} must hold"
+            )
 
 
 if __name__ == "__main__":
