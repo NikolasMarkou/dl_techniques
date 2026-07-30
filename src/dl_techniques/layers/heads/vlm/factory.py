@@ -24,6 +24,14 @@ from ....utils.masking import MaskFactory
 from .task_types import VLMTaskConfig, VLMTaskType
 
 
+# Keras `Layer.__init__` arguments. These belong to a layer itself and must never
+# be forwarded into a child layer's constructor -- `name` collides with a child's
+# own name, and `trainable`/`dtype` silently reconfigure it.
+_KERAS_BASE_LAYER_KWARGS = frozenset(
+    {"name", "trainable", "dtype", "dynamic", "autocast", "activity_regularizer"}
+)
+
+
 # ---------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------
@@ -1169,26 +1177,78 @@ class MultiTaskVLMHead(keras.layers.Layer):
         task_configs: Dict[str, VLMTaskConfig],
         shared_vision_dim: int = 768,
         shared_text_dim: int = 768,
+        task_specific_kwargs: Optional[Dict[str, Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        """Build one head per task, from shared settings plus per-task overrides.
+
+        :param task_configs: Mapping of task name to its ``VLMTaskConfig``.
+        :type task_configs: Dict[str, VLMTaskConfig]
+        :param shared_vision_dim: Vision feature width handed to every head.
+        :type shared_vision_dim: int
+        :param shared_text_dim: Text feature width handed to every head.
+        :type shared_text_dim: int
+        :param task_specific_kwargs: Per-task constructor overrides, keyed by the
+            same task names as ``task_configs`` -- e.g.
+            ``{"cap": {"num_heads": 4, "num_layers": 1}}``. Merged over the
+            shared kwargs, so a task-specific value wins.
+
+            This is an EXPLICIT parameter rather than something read back out of
+            ``**kwargs``. It used to be the latter, which made it unusable: it
+            stayed in ``kwargs``, was forwarded to ``Layer.__init__``, and was
+            rejected with ``ValueError: Unrecognized keyword arguments``. So the
+            documented feature always raised and every head was forced onto the
+            shared defaults.
+        :type task_specific_kwargs: Optional[Dict[str, Dict[str, Any]]]
+        :param kwargs: Shared per-head constructor settings plus this layer's own
+            Keras base arguments. The two are SEPARATED below: base arguments go
+            only to ``Layer.__init__``, never into a head constructor, where
+            ``name`` would collide with the head's own auto-generated name.
+
+            **A shared kwarg must be accepted by EVERY head class in this
+            wrapper**, because it is forwarded to all of them. The head classes
+            do not share one signature: ``ImageCaptioningHead`` and ``VQAHead``
+            are plain ``Layer`` subclasses, so a ``BaseVLMHead`` argument such as
+            ``fusion_strategy`` raises on them. ``ffn_type`` is one of the few
+            universally accepted names. Use ``task_specific_kwargs`` for anything
+            narrower -- that is precisely what it is for.
+        :raises ValueError: If ``task_specific_kwargs`` names a task absent from
+            ``task_configs``.
+        """
+        # Keras base arguments belong to THIS layer; everything else is intended
+        # for the per-task heads. Forwarding `name` into a head raises (each head
+        # sets its own `name=f"{task_config.name}_head"`), and forwarding
+        # `trainable`/`dtype` silently reconfigures the children.
+        base_kwargs = {
+            k: v for k, v in kwargs.items() if k in _KERAS_BASE_LAYER_KWARGS
+        }
+        shared_head_kwargs = {
+            k: v for k, v in kwargs.items() if k not in _KERAS_BASE_LAYER_KWARGS
+        }
+        super().__init__(**base_kwargs)
+
         self.task_configs = task_configs
         self.shared_vision_dim = shared_vision_dim
         self.shared_text_dim = shared_text_dim
-        self.shared_head_kwargs = kwargs
+        self.shared_head_kwargs = shared_head_kwargs
+        self.task_specific_kwargs = dict(task_specific_kwargs or {})
+
+        # A typo'd task name would otherwise apply to nothing at all, which is
+        # exactly the silent-no-op class this package's conventions forbid.
+        unknown_tasks = set(self.task_specific_kwargs) - set(task_configs)
+        if unknown_tasks:
+            raise ValueError(
+                f"task_specific_kwargs names task(s) absent from task_configs: "
+                f"{sorted(unknown_tasks)}. Known tasks: {sorted(task_configs)}."
+            )
 
         self.task_heads = {}
         for task_name, task_config in task_configs.items():
             head_class = get_head_class(task_config.task_type)
 
-            # Combine shared kwargs with task-specific overrides.
-            head_kwargs = self.shared_head_kwargs.copy()
-            task_specific_kwargs = self.shared_head_kwargs.get(
-                "task_specific_kwargs", {}
-            ).get(task_name, {})
-            head_kwargs.update(task_specific_kwargs)
-            if "task_specific_kwargs" in head_kwargs:
-                del head_kwargs["task_specific_kwargs"]
+            # Shared settings first, then this task's overrides on top.
+            head_kwargs = dict(self.shared_head_kwargs)
+            head_kwargs.update(self.task_specific_kwargs.get(task_name, {}))
 
             head = head_class(
                 task_config=task_config,
@@ -1259,8 +1319,12 @@ class MultiTaskVLMHead(keras.layers.Layer):
                 },
                 "shared_vision_dim": self.shared_vision_dim,
                 "shared_text_dim": self.shared_text_dim,
+                "task_specific_kwargs": self.task_specific_kwargs,
             }
         )
+        # `shared_head_kwargs` no longer contains this layer's Keras base
+        # arguments, so this cannot clobber the `name`/`dtype` that
+        # `super().get_config()` already wrote.
         config.update(self.shared_head_kwargs)
         return config
 

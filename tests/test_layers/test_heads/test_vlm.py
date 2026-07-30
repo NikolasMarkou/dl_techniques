@@ -842,3 +842,160 @@ class TestVisualGroundingForwardPass:
                 got[b], fused_np[b, r],
                 err_msg=f"batch {b}: gathered the wrong region (expected {r})",
             )
+
+
+# ---------------------------------------------------------------------
+# MultiTaskVLMHead.task_specific_kwargs (regression, dead documented feature)
+#
+# The parameter was documented on `create_multi_task_vlm_head` but unusable:
+# `MultiTaskVLMHead.__init__` read it back out of `**kwargs` while also
+# forwarding `kwargs` to `Layer.__init__`, which rejects unknown keys. So every
+# call passing it raised `ValueError: Unrecognized keyword arguments`, and the
+# per-task overrides were unreachable -- forcing every head onto the shared
+# defaults (notably `num_heads=12`, so `hidden_size` had to be divisible by 12).
+#
+# The same `self.shared_head_kwargs = kwargs` line also leaked this layer's own
+# Keras base arguments into every child constructor, where `name` collides with
+# the head's auto-generated `f"{task_config.name}_head"`.
+#
+# The tests use hidden_size=32, which is deliberately NOT divisible by the
+# default num_heads=12: construction can only succeed if the override actually
+# reaches the head, so these tests cannot pass vacuously.
+# ---------------------------------------------------------------------
+
+_TSK_DIM = 32          # not divisible by the default num_heads=12 -- load-bearing
+_TSK_OVERRIDE = {"cap": {"num_heads": 4, "num_layers": 1}}
+
+
+def _tsk_configs(dim: int = _TSK_DIM):
+    return {
+        "cap": VLMTaskConfig(
+            name="cap", task_type=VLMTaskType.IMAGE_CAPTIONING,
+            vocab_size=VOCAB, hidden_size=dim,
+        ),
+        "itm": VLMTaskConfig(
+            name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
+            vocab_size=VOCAB, hidden_size=dim,
+        ),
+    }
+
+
+def _tsk_payload(dim: int = _TSK_DIM):
+    rng = np.random.default_rng(21)
+    return {
+        "vision_features": rng.normal(size=(B, S, dim)).astype("float32"),
+        "text_features": rng.normal(size=(B, S, dim)).astype("float32"),
+    }
+
+
+def _make_multi(dim: int = _TSK_DIM, **extra):
+    return create_multi_task_vlm_head(
+        _tsk_configs(dim), shared_vision_dim=dim, shared_text_dim=dim, **extra
+    )
+
+
+class TestMultiTaskTaskSpecificKwargs:
+    """Per-task constructor overrides must actually reach the per-task heads."""
+
+    def test_override_reaches_the_head(self) -> None:
+        """Constructing at all is the proof.
+
+        `_TSK_DIM` (32) is not divisible by the default `num_heads=12`, so if the
+        override did not land, `ImageCaptioningHead.__init__` would raise
+        "hidden_dim (32) must be divisible by num_heads (12)". The explicit
+        attribute assertions then pin WHICH values arrived.
+        """
+        head = _make_multi(task_specific_kwargs=_TSK_OVERRIDE)
+        assert head.task_heads["cap"].num_heads == 4
+        assert head.task_heads["cap"].num_layers == 1
+
+    def test_override_does_not_leak_to_other_tasks(self) -> None:
+        """A per-task override must apply to THAT task only."""
+        head = _make_multi(task_specific_kwargs=_TSK_OVERRIDE)
+        itm = head.task_heads["itm"]
+        # ImageTextMatchingHead takes no num_heads/num_layers at all; if the
+        # override leaked it would have raised on construction. Assert the head
+        # exists and is the expected class, so this is not a vacuous check.
+        assert isinstance(itm, ImageTextMatchingHead)
+        assert not hasattr(itm, "num_layers")
+
+    def test_unknown_task_name_raises(self) -> None:
+        """A typo'd task name must not silently apply to nothing."""
+        with pytest.raises(ValueError, match="absent from task_configs"):
+            _make_multi(96, task_specific_kwargs={"caption": {"num_heads": 4}})
+
+    def test_override_survives_get_config_round_trip(self) -> None:
+        head = _make_multi(task_specific_kwargs=_TSK_OVERRIDE)
+        config = head.get_config()
+        assert config["task_specific_kwargs"] == _TSK_OVERRIDE
+        assert json.dumps(config["task_specific_kwargs"])  # JSON-serializable
+
+        rebuilt = MultiTaskVLMHead.from_config(config)
+        assert rebuilt.task_heads["cap"].num_heads == 4
+        assert rebuilt.task_heads["cap"].num_layers == 1
+
+    def test_override_survives_a_keras_round_trip(self) -> None:
+        """Values preserved AND the override still present on the loaded layer."""
+        payload = _tsk_payload()
+        inputs = {
+            k: keras.Input(shape=v.shape[1:], name=k) for k, v in payload.items()
+        }
+        model = keras.Model(
+            list(inputs.values()),
+            _make_multi(task_specific_kwargs=_TSK_OVERRIDE)(inputs),
+        )
+        xs = [payload[k] for k in inputs]
+        before = model.predict(xs, verbose=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "multitask_tsk.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        np.testing.assert_allclose(
+            _flatten_outputs(before),
+            _flatten_outputs(restored.predict(xs, verbose=0)),
+            rtol=1e-6, atol=1e-6,
+        )
+        loaded = next(l for l in restored.layers if hasattr(l, "task_heads"))
+        assert loaded.task_heads["cap"].num_heads == 4, (
+            "the override was lost across the round-trip"
+        )
+
+    def test_keras_base_kwargs_do_not_leak_into_the_heads(self) -> None:
+        """`name` belongs to this layer, not to its children.
+
+        `self.shared_head_kwargs = kwargs` used to forward it into every head,
+        where it collides with the head's own `f"{task_config.name}_head"`.
+        """
+        head = _make_multi(96, name="my_multitask_head")
+        assert head.name == "my_multitask_head"
+        # Each head keeps its OWN generated name, not the wrapper's.
+        for task_name, task_head in head.task_heads.items():
+            assert task_head.name != "my_multitask_head"
+            assert task_name in task_head.name
+
+    def test_shared_kwargs_still_reach_every_head(self) -> None:
+        """Control: the shared path must keep working alongside overrides.
+
+        Without this, a fix that dropped shared kwargs entirely would still pass
+        every test above.
+        """
+        head = _make_multi(
+            task_specific_kwargs={"cap": {"num_heads": 4, "num_layers": 1}},
+            ffn_type="swiglu",
+        )
+        # `ffn_type` is one of the few kwargs EVERY head class here accepts
+        # (ImageCaptioningHead declares it directly; ImageTextMatchingHead
+        # inherits it from BaseVLMHead). See the note in
+        # `MultiTaskVLMHead.__init__`: a shared kwarg must be accepted by every
+        # head class, and `fusion_strategy` for instance would raise on
+        # ImageCaptioningHead, which is not a BaseVLMHead subclass.
+        #
+        # "swiglu" not "mlp": ImageCaptioningHead builds its FFN via
+        # `create_ffn_from_config({"type": ..., "output_dim": ...})` without a
+        # `hidden_dim`, which the `mlp` type requires -- so `ffn_type="mlp"`
+        # raises there. A separate pre-existing defect, reported not fixed.
+        assert head.shared_head_kwargs == {"ffn_type": "swiglu"}
+        for task_head in head.task_heads.values():
+            assert task_head.ffn_type == "swiglu"
