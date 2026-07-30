@@ -277,9 +277,21 @@ class TestGatedLinearAttentionBlock:
         layer = GatedLinearAttentionBlock(
             dim=32, num_heads=4, head_dim=8, max_seq_len=8, chunk_size=64
         )
+        seen = {"chunked": 0, "sequential": 0}
+        real_chunked, real_sequential = layer._chunked_scan, layer._sequential_scan
+        layer._chunked_scan = lambda *a, **k: (
+            seen.__setitem__("chunked", seen["chunked"] + 1),
+            real_chunked(*a, **k),
+        )[1]
+        layer._sequential_scan = lambda *a, **k: (
+            seen.__setitem__("sequential", seen["sequential"] + 1),
+            real_sequential(*a, **k),
+        )[1]
+
         inputs = keras.Input(shape=(None, 32))
         model = keras.Model(inputs, layer(inputs))
 
+        reached = []
         # Order matters: the SECOND, longer length is what triggers relaxation.
         for seq_len in (40, 60):
             x = np.random.default_rng(seq_len).normal(
@@ -296,6 +308,19 @@ class TestGatedLinearAttentionBlock:
                 f"at the declared cap and returning the zero-initialized buffer "
                 f"as if it were output."
             )
+            reached.append(seq_len)
+
+        # Pin the PRECONDITION, or this test can decay to vacuous in silence.
+        # It only exercises the bug if TF actually relaxes the trace signature
+        # and dispatches to `_sequential_scan`; if a future TF retracing policy
+        # kept a concrete spec for every length, every call would take the
+        # chunked path and the assertions above would pass without ever touching
+        # the branch that used to truncate.
+        assert seen["sequential"] > 0, (
+            f"the sequential branch was never reached across lengths {reached}, "
+            f"so this test did not exercise the trace-relaxation path it exists "
+            f"for and proves nothing about it: {seen}"
+        )
 
     def test_exceeding_declared_max_seq_len_warns_but_does_not_raise(self, caplog):
         """The advisory replaces the raise: a warning, and a correct answer."""
@@ -362,12 +387,16 @@ class TestGatedLinearAttentionBlock:
             f"some timestep is entirely zero: {per_step_absmax}"
         )
 
-    def test_overflow_guard_does_not_fire_on_symbolic_seq_len(self):
-        """A `None` sequence axis must build (with a warning), never raise.
+    def test_symbolic_seq_len_builds_and_runs(self):
+        """A `None` sequence axis must build and compute, never raise.
 
-        This is D-002's documented gap: the guard is static-only. A functional
-        model with `keras.Input(shape=(None, dim))` is legitimate and must keep
-        working, so `build()` warns rather than raising.
+        Originally this asserted D-002's "documented gap" -- that the overflow
+        guard was static-only, so `build()` warned instead of raising. Both
+        halves are obsolete since D-018: there is no guard and no truncation to
+        guard against, on either branch, and the build-time message is now a
+        `logger.debug`. What remains worth pinning is the plain requirement that
+        a functional model with `keras.Input(shape=(None, dim))` is legitimate
+        and keeps working.
         """
         inputs = keras.Input(shape=(None, 16))
         outputs = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)(inputs)
