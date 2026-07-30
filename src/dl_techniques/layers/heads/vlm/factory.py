@@ -6,6 +6,8 @@ Model tasks. Designed to be model-agnostic and work with any VLM foundation
 model (CLIP, BLIP, Flamingo, etc.).
 """
 
+import inspect
+
 import keras
 from keras import layers, ops
 from typing import Dict, List, Optional, Union, Tuple, Any
@@ -25,6 +27,7 @@ from ...ffn.factory import (
 from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
 from ...norms import NormalizationType
 from ...norms.factory import create_normalization_layer
+from ....utils.logger import logger
 from ....utils.masking import MaskFactory
 from .task_types import VLMTaskConfig, VLMTaskType
 
@@ -35,6 +38,49 @@ from .task_types import VLMTaskConfig, VLMTaskType
 _KERAS_BASE_LAYER_KWARGS = frozenset(
     {"name", "trainable", "dtype", "dynamic", "autocast", "activity_regularizer"}
 )
+
+# Arguments `MultiTaskVLMHead` supplies to every head itself. A caller passing one
+# of these through would collide with the wrapper's own positional forwarding.
+_WRAPPER_OWNED_HEAD_KWARGS = frozenset({"task_config", "vision_dim", "text_dim"})
+
+
+def _accepted_constructor_kwargs(head_class: type) -> frozenset:
+    """Return the constructor argument names ``head_class`` actually accepts.
+
+    The five VLM head classes do NOT share a signature: ``ImageCaptioningHead``
+    and ``VQAHead`` derive straight from ``keras.layers.Layer``, while
+    ``VisualGroundingHead`` and ``ImageTextMatchingHead`` derive from
+    ``BaseVLMHead`` and inherit its fusion arguments. So a kwarg meaningful to
+    one head (``fusion_strategy``) is a hard error on another.
+
+    Walks the MRO and unions each class's OWN explicitly-named parameters,
+    stopping at ``keras.layers.Layer``. ``**kwargs`` is deliberately excluded:
+    every head declares it, but only to forward to ``Layer.__init__``, which
+    rejects unknown keys -- so treating ``**kwargs`` as "accepts anything" would
+    invert the very check this function exists to perform.
+
+    :param head_class: A VLM head class.
+    :type head_class: type
+    :return: Constructor argument names the class accepts, including inherited.
+    :rtype: frozenset
+    """
+    accepted = set()
+    for klass in head_class.__mro__:
+        if klass in (keras.layers.Layer, object):
+            break
+        init = klass.__dict__.get("__init__")
+        if init is None:
+            continue
+        for name, param in inspect.signature(init).parameters.items():
+            if name == "self":
+                continue
+            if param.kind in (
+                inspect.Parameter.VAR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+            ):
+                continue
+            accepted.add(name)
+    return frozenset(accepted)
 
 
 # ---------------------------------------------------------------------
@@ -1239,13 +1285,18 @@ class MultiTaskVLMHead(keras.layers.Layer):
             only to ``Layer.__init__``, never into a head constructor, where
             ``name`` would collide with the head's own auto-generated name.
 
-            **A shared kwarg must be accepted by EVERY head class in this
-            wrapper**, because it is forwarded to all of them. The head classes
-            do not share one signature: ``ImageCaptioningHead`` and ``VQAHead``
-            are plain ``Layer`` subclasses, so a ``BaseVLMHead`` argument such as
-            ``fusion_strategy`` raises on them. ``ffn_type`` is one of the few
-            universally accepted names. Use ``task_specific_kwargs`` for anything
-            narrower -- that is precisely what it is for.
+            A shared kwarg is routed to the heads whose class ACCEPTS it and
+            skipped for the rest, because the five head classes do not share one
+            signature -- ``ImageCaptioningHead`` and ``VQAHead`` are plain
+            ``Layer`` subclasses, so a ``BaseVLMHead`` argument such as
+            ``fusion_strategy`` is a hard error on them, and requiring every head
+            to accept every shared argument would make this wrapper unusable for
+            any mixed set of tasks.
+
+            Two guards keep that from being silent: a shared kwarg accepted by
+            NO head raises, and partial application is reported via
+            ``logger.info``. Use ``task_specific_kwargs`` to target one head
+            exactly -- those ARE validated strictly, since they name a head.
         :raises ValueError: If ``task_specific_kwargs`` names a task absent from
             ``task_configs``.
         """
@@ -1276,12 +1327,84 @@ class MultiTaskVLMHead(keras.layers.Layer):
                 f"{sorted(unknown_tasks)}. Known tasks: {sorted(task_configs)}."
             )
 
+        head_classes = {
+            task_name: get_head_class(task_config.task_type)
+            for task_name, task_config in task_configs.items()
+        }
+        accepted = {
+            task_name: _accepted_constructor_kwargs(head_class)
+            for task_name, head_class in head_classes.items()
+        }
+
+        # The wrapper supplies these itself; a caller passing one through would
+        # collide with that and raise an opaque duplicate-argument TypeError.
+        for source, mapping in (
+            ("shared kwargs", self.shared_head_kwargs),
+            *(
+                (f"task_specific_kwargs[{t!r}]", o)
+                for t, o in self.task_specific_kwargs.items()
+            ),
+        ):
+            reserved = set(mapping) & _WRAPPER_OWNED_HEAD_KWARGS
+            if reserved:
+                raise ValueError(
+                    f"{source} may not set {sorted(reserved)} — "
+                    f"MultiTaskVLMHead supplies these to every head itself. Use "
+                    f"shared_vision_dim / shared_text_dim, and task_configs."
+                )
+
+        # A per-task override names ONE head explicitly, so an argument that head
+        # cannot accept is a caller error and is rejected outright.
+        for task_name, overrides in self.task_specific_kwargs.items():
+            unusable = set(overrides) - accepted[task_name]
+            if unusable:
+                raise ValueError(
+                    f"task_specific_kwargs[{task_name!r}] sets {sorted(unusable)}, "
+                    f"which {head_classes[task_name].__name__} does not accept. "
+                    f"It accepts: {sorted(accepted[task_name] - _WRAPPER_OWNED_HEAD_KWARGS)}."
+                )
+
+        # A SHARED kwarg is best-effort by design: the head classes do not share
+        # a signature, so requiring every head to accept every shared argument
+        # would make this wrapper unusable for any mixed set of tasks (which is
+        # its entire purpose). It is routed to the heads that accept it and
+        # skipped for the rest.
+        #
+        # The guard that keeps that from becoming a silent no-op: a shared kwarg
+        # accepted by NO head is a typo or a mistake, and raises. Partial
+        # application is reported through the logger so it is discoverable.
+        for key in sorted(self.shared_head_kwargs):
+            takers = [t for t, acc in accepted.items() if key in acc]
+            if not takers:
+                every = sorted(
+                    set().union(*accepted.values()) - _WRAPPER_OWNED_HEAD_KWARGS
+                )
+                raise ValueError(
+                    f"shared kwarg {key!r} is not accepted by ANY head in this "
+                    f"multi-task wrapper "
+                    f"({ {t: c.__name__ for t, c in head_classes.items()} }). "
+                    f"Accepted by at least one head: {every}."
+                )
+            skipped = sorted(set(accepted) - set(takers))
+            if skipped:
+                logger.info(
+                    f"MultiTaskVLMHead: shared kwarg '{key}' applied to "
+                    f"{sorted(takers)}; skipped for {skipped} "
+                    f"(their head classes do not accept it). Use "
+                    f"task_specific_kwargs to configure those explicitly."
+                )
+
         self.task_heads = {}
         for task_name, task_config in task_configs.items():
-            head_class = get_head_class(task_config.task_type)
+            head_class = head_classes[task_name]
 
-            # Shared settings first, then this task's overrides on top.
-            head_kwargs = dict(self.shared_head_kwargs)
+            # Shared settings, filtered to what THIS head accepts, then this
+            # task's overrides on top (already validated as acceptable above).
+            head_kwargs = {
+                k: v
+                for k, v in self.shared_head_kwargs.items()
+                if k in accepted[task_name]
+            }
             head_kwargs.update(self.task_specific_kwargs.get(task_name, {}))
 
             head = head_class(

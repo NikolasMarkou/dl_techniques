@@ -20,6 +20,7 @@ The three forward-pass-fixed heads are locked here:
 """
 
 import json
+import logging
 import os
 import tempfile
 
@@ -29,6 +30,7 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+from dl_techniques.layers.heads.vlm.factory import _accepted_constructor_kwargs
 from dl_techniques.layers.heads.vlm import (
     VLMTaskType,
     VLMTaskConfig,
@@ -1124,3 +1126,153 @@ class TestCaptioningFFNTypes:
         del config["ffn_expansion_factor"]
         rebuilt = ImageCaptioningHead.from_config(config)
         assert rebuilt.ffn_expansion_factor == 4
+
+
+# ---------------------------------------------------------------------
+# MultiTaskVLMHead x heterogeneous head signatures
+#
+# The five head classes do NOT share a constructor signature:
+# ImageCaptioningHead and VQAHead derive straight from keras.layers.Layer, while
+# VisualGroundingHead and ImageTextMatchingHead derive from BaseVLMHead and
+# inherit its fusion arguments. Shared kwargs used to be forwarded to ALL heads,
+# so `fusion_strategy` -- perfectly valid for two of them -- raised
+# "Unrecognized keyword arguments" on the other two, making the wrapper unusable
+# for any mixed set of tasks.
+#
+# Shared kwargs are now routed to the heads whose class accepts them. That is
+# deliberately best-effort, so it is fenced by three guards, each pinned below:
+#   - a shared kwarg accepted by NO head raises (typo guard)
+#   - task_specific_kwargs is STRICT, because it names one head explicitly
+#   - wrapper-owned args (task_config/vision_dim/text_dim) raise a clear error
+#     instead of an opaque duplicate-argument TypeError
+# plus a logger.info record of every partial application, so routing is
+# discoverable rather than silent.
+# ---------------------------------------------------------------------
+
+_HETERO_DIM = 96   # divisible by the default num_heads=12
+
+
+def _hetero_configs():
+    return {
+        "cap": VLMTaskConfig(
+            name="cap", task_type=VLMTaskType.IMAGE_CAPTIONING,
+            vocab_size=VOCAB, hidden_size=_HETERO_DIM,
+        ),
+        "itm": VLMTaskConfig(
+            name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
+            vocab_size=VOCAB, hidden_size=_HETERO_DIM,
+        ),
+        "vqa": VLMTaskConfig(
+            name="vqa", task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING,
+            vocab_size=VOCAB, hidden_size=_HETERO_DIM, num_classes=NUM_CLASSES,
+        ),
+    }
+
+
+def _hetero_multi(**kwargs):
+    return create_multi_task_vlm_head(
+        _hetero_configs(),
+        shared_vision_dim=_HETERO_DIM,
+        shared_text_dim=_HETERO_DIM,
+        **kwargs,
+    )
+
+
+class TestMultiTaskHeterogeneousSignatures:
+    """A shared kwarg must reach the heads that accept it, and only those."""
+
+    def test_kwarg_valid_for_only_some_heads_no_longer_raises(self) -> None:
+        """The original bug, in one line.
+
+        `fusion_strategy` is a BaseVLMHead argument. Two of these three heads
+        are not BaseVLMHead subclasses, and forwarding it to them used to raise.
+        """
+        head = _hetero_multi(fusion_strategy="concatenation")
+        assert head.task_heads["itm"].fusion_strategy == "concatenation"
+        # The heads that cannot take it simply do not get it.
+        assert not hasattr(head.task_heads["cap"], "fusion_strategy")
+        assert not hasattr(head.task_heads["vqa"], "fusion_strategy")
+
+    def test_shared_kwarg_accepted_by_no_head_raises(self) -> None:
+        """Routing is best-effort, so a kwarg going NOWHERE must not be silent."""
+        with pytest.raises(ValueError, match="not accepted by ANY head"):
+            _hetero_multi(fusionn_strategy="concatenation")   # typo
+
+    def test_task_specific_kwargs_are_validated_strictly(self) -> None:
+        """A per-task override names ONE head, so it cannot be best-effort.
+
+        This is the deliberate asymmetry with shared kwargs: naming a head and
+        handing it something it cannot accept is unambiguously a caller error.
+        """
+        with pytest.raises(ValueError, match="does not accept"):
+            _hetero_multi(
+                task_specific_kwargs={"cap": {"fusion_strategy": "concatenation"}}
+            )
+
+    @pytest.mark.parametrize("reserved", ["task_config", "vision_dim", "text_dim"])
+    def test_wrapper_owned_arguments_are_rejected(self, reserved) -> None:
+        """These are supplied by the wrapper; passing them collided opaquely."""
+        with pytest.raises(ValueError, match="supplies these to every head"):
+            _hetero_multi(**{reserved: _HETERO_DIM})
+
+    def test_wrapper_owned_arguments_rejected_in_task_specific_kwargs_too(self) -> None:
+        with pytest.raises(ValueError, match="supplies these to every head"):
+            _hetero_multi(task_specific_kwargs={"cap": {"vision_dim": _HETERO_DIM}})
+
+    def test_universally_accepted_kwarg_still_reaches_every_taker(self) -> None:
+        """Control: routing must not become "give it to nobody"."""
+        head = _hetero_multi(ffn_type="swiglu")
+        assert head.task_heads["cap"].ffn_type == "swiglu"
+        assert head.task_heads["itm"].ffn_type == "swiglu"
+        # VQAHead has no ffn_type at all -- it is skipped, not crashed on.
+        assert not hasattr(head.task_heads["vqa"], "ffn_type")
+
+    def test_partial_application_is_logged(self, caplog) -> None:
+        """Skipping must be discoverable, not silent.
+
+        Best-effort routing is only defensible if the caller can find out that a
+        setting did not reach every head.
+        """
+        with caplog.at_level(logging.INFO):
+            _hetero_multi(fusion_strategy="concatenation")
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "fusion_strategy" in messages
+        assert "skipped for" in messages
+        assert "'cap'" in messages or "cap" in messages
+
+    def test_shared_and_task_specific_compose(self) -> None:
+        """Shared routing and per-task overrides must work together."""
+        head = _hetero_multi(
+            ffn_type="swiglu",
+            task_specific_kwargs={
+                "cap": {"num_heads": 4, "num_layers": 1},
+                "vqa": {"pooling_strategy": "mean"},
+            },
+        )
+        assert head.task_heads["cap"].num_heads == 4
+        assert head.task_heads["cap"].num_layers == 1
+        assert head.task_heads["cap"].ffn_type == "swiglu"     # shared still applied
+        assert head.task_heads["vqa"].pooling_strategy == "mean"
+        assert head.task_heads["itm"].ffn_type == "swiglu"
+
+    def test_accepted_kwargs_helper_excludes_var_keyword(self) -> None:
+        """`**kwargs` must NOT count as "accepts anything".
+
+        Every head declares `**kwargs`, but only to forward to Layer.__init__,
+        which rejects unknown keys. If the helper treated `**kwargs` as
+        universal acceptance, every routing decision above would invert and the
+        typo guard would never fire.
+        """
+        accepted = _accepted_constructor_kwargs(ImageCaptioningHead)
+        assert "num_layers" in accepted and "ffn_type" in accepted
+        assert "fusion_strategy" not in accepted, (
+            "ImageCaptioningHead is not a BaseVLMHead subclass; **kwargs was "
+            "wrongly treated as accepting anything"
+        )
+        assert "kwargs" not in accepted and "self" not in accepted
+
+    def test_accepted_kwargs_helper_includes_inherited_parameters(self) -> None:
+        """A BaseVLMHead subclass declaring only `**kwargs` still inherits."""
+        accepted = _accepted_constructor_kwargs(VisualGroundingHead)
+        assert "fusion_strategy" in accepted, "inherited BaseVLMHead args missed"
+        assert "normalization_type" in accepted
