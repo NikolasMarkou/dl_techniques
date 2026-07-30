@@ -221,7 +221,22 @@ class TransformerDecoderLayer(keras.layers.Layer):
         }
         if self.ffn_type == 'swiglu':
             config.update({'output_dim': self.hidden_size, 'ffn_expansion_factor': 4, 'ffn_multiple_of': 256})
-        elif self.ffn_type in ('mlp', 'glu', 'geglu', 'residual', 'swin_mlp', 'differential'):
+        # DECISION plan-2026-07-30T140922-8af1028f/D-016
+        # `differential` needs its OWN branch: DifferentialFFN takes `branch_activation`,
+        # NOT `activation`. Do NOT fold it back into the generic branch below -- doing so
+        # is exactly the bug this branch fixes (`activation` was silently dropped by
+        # create_ffn_layer's parameter filter on EVERY construction, leaving the FFN at
+        # DifferentialFFN's default 'gelu'). Do NOT forward `gate_activation` either:
+        # the sigmoid gate is DifferentialFFN's defining feature, and this mirrors
+        # TransformerLayer._get_ffn_config exactly -- two copies of this table are what
+        # produced the divergence in the first place. See decisions.md D-016.
+        elif self.ffn_type == 'differential':
+            config.update({
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'branch_activation': self.activation,
+            })
+        elif self.ffn_type in ('mlp', 'glu', 'geglu', 'residual', 'swin_mlp'):
             config.update({'hidden_dim': self.intermediate_size, 'output_dim': self.hidden_size, 'activation': self.activation})
         config.update(self.ffn_args)
         return config

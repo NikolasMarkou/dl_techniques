@@ -1,6 +1,7 @@
 """Tests for TransformerDecoderLayer (plan_2026-06-12_0bb1729b, F5)."""
 
 import os
+import logging
 import tempfile
 from typing import Any, Dict
 
@@ -11,6 +12,7 @@ import keras
 from keras import ops, layers, models
 
 from dl_techniques.layers.transformers.transformer_decoder import TransformerDecoderLayer
+from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
 
 
 class TestTransformerDecoderLayer:
@@ -187,3 +189,125 @@ class TestTransformerDecoderLayer:
         x = l2(x, encoder_output, training=False)
         assert x.shape == (self.BATCH, self.DEC_SEQ, self.HIDDEN)
         assert not np.any(np.isnan(ops.convert_to_numpy(x)))
+
+
+class _DroppedKeyRecorder(logging.Handler):
+    """Captures ``create_ffn_layer(...): dropping`` WARNINGs off the ``dl`` logger.
+
+    The repo's centralized logger is named ``"dl"`` (``dl_techniques/utils/logger.py``),
+    NOT ``"dl_techniques"`` -- attaching to the latter records nothing. Reading stderr
+    by eye is not an instrument; this is.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.dropped: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if 'dropping' in msg and 'unsupported parameter' in msg:
+            self.dropped.append(msg)
+
+
+class TestDecoderDifferentialFFNActivation:
+    """`ffn_type='differential'` must forward the site's activation as `branch_activation`.
+
+    Regression guard for a live silent drop: ``_get_ffn_config`` used to place
+    ``'differential'`` in the same generic branch as ``mlp/glu/geglu/residual/swin_mlp``
+    and inject ``'activation'``, which ``DifferentialFFN`` does not accept -- so
+    ``create_ffn_layer``'s parameter filter dropped it on EVERY construction and the FFN
+    was built at DifferentialFFN's own default. ``TransformerLayer._get_ffn_config``
+    already had a dedicated ``differential`` branch; this pins the decoder to it.
+    """
+
+    HIDDEN = 32
+    HEADS = 4
+    INTER = 64
+
+    # DifferentialFFN's own default is 'gelu' (diff_ffn.py __init__), and so is
+    # TransformerDecoderLayer's default `activation`. The probe value must differ from
+    # BOTH, or the assertion would pass against the pre-fix code by coincidence.
+    NON_DEFAULT_ACTIVATION = 'relu'
+
+    def _build(self):
+        return TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS, intermediate_size=self.INTER,
+            ffn_type='differential', activation=self.NON_DEFAULT_ACTIVATION,
+        )
+
+    def test_differential_default_is_not_the_probe_value(self):
+        """Anti-vacuity: the probe activation must not be DifferentialFFN's default."""
+        default_ffn = DifferentialFFN(hidden_dim=self.INTER, output_dim=self.HIDDEN)
+        assert keras.activations.serialize(default_ffn.branch_activation) == 'gelu'
+        assert self.NON_DEFAULT_ACTIVATION != 'gelu'
+
+    def test_site_activation_reaches_branch_activation(self):
+        layer = self._build()
+        ffn = layer.ffn_layer
+        assert isinstance(ffn, DifferentialFFN)
+        got = keras.activations.serialize(ffn.branch_activation)
+        assert got == self.NON_DEFAULT_ACTIVATION, (
+            f"TransformerDecoderLayer(ffn_type='differential', "
+            f"activation='{self.NON_DEFAULT_ACTIVATION}') built a DifferentialFFN whose "
+            f"branch_activation is '{got}'. The site's activation was dropped; "
+            f"DifferentialFFN takes `branch_activation`, not `activation`."
+        )
+
+    def test_gate_activation_is_left_at_its_default(self):
+        """The site's generic `activation` must NOT be forwarded to the gate.
+
+        Mirrors ``TransformerLayer._get_ffn_config``, which forwards only
+        ``branch_activation``: the sigmoid gate is DifferentialFFN's defining feature.
+        """
+        ffn = self._build().ffn_layer
+        assert keras.activations.serialize(ffn.gate_activation) == 'sigmoid'
+
+    def test_no_dropped_key_warnings_for_this_construction(self):
+        """Generalizes past this one parameter name: ZERO keys may be silently dropped."""
+        handler = _DroppedKeyRecorder()
+        dl_logger = logging.getLogger('dl')
+        dl_logger.addHandler(handler)
+        try:
+            self._build()
+        finally:
+            dl_logger.removeHandler(handler)
+        assert handler.dropped == [], (
+            "TransformerDecoderLayer(ffn_type='differential') silently dropped "
+            f"caller/site key(s): {handler.dropped}"
+        )
+
+    def test_dropped_key_harness_bites(self):
+        """The capture harness must be proven to see a real drop, not merely be silent."""
+        handler = _DroppedKeyRecorder()
+        dl_logger = logging.getLogger('dl')
+        dl_logger.addHandler(handler)
+        try:
+            TransformerDecoderLayer(
+                hidden_size=self.HIDDEN, num_heads=self.HEADS, intermediate_size=self.INTER,
+                ffn_type='differential', ffn_args={'nosuchparam': 1},
+            )
+        finally:
+            dl_logger.removeHandler(handler)
+        assert any('nosuchparam' in m for m in handler.dropped), (
+            f"harness saw {handler.dropped}; it cannot detect a dropped key and so its "
+            f"silence in the sibling test proves nothing"
+        )
+
+    def test_differential_forward_and_round_trip(self):
+        layer = self._build()
+        dec = tf.random.normal((2, 6, self.HIDDEN))
+        enc = tf.random.normal((2, 9, self.HIDDEN))
+        out = layer(dec, enc, training=False)
+        assert out.shape == (2, 6, self.HIDDEN)
+        assert not np.any(np.isnan(ops.convert_to_numpy(out)))
+
+        inp_d = layers.Input(shape=(6, self.HIDDEN))
+        inp_e = layers.Input(shape=(9, self.HIDDEN))
+        model = models.Model([inp_d, inp_e], layer(inp_d, inp_e))
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'm.keras')
+            model.save(path)
+            restored = models.load_model(path)
+        rebuilt_ffn = restored.layers[-1].ffn_layer
+        assert keras.activations.serialize(
+            rebuilt_ffn.branch_activation) == self.NON_DEFAULT_ACTIVATION
