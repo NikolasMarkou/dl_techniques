@@ -20,6 +20,7 @@ from ...activations import ActivationType
 from ...attention.factory import create_attention_layer
 from ...ffn.factory import (
     FFN_REGISTRY,
+    assemble_ffn_config,
     create_ffn_from_config,
     create_ffn_layer,
     FFNType,
@@ -412,6 +413,20 @@ class BaseVLMHead(keras.layers.Layer):
                 # themselves from unrelated params), so for them the head's
                 # factor is genuinely inapplicable rather than dropped.
                 ffn_kwargs["ffn_expansion_factor"] = self.ffn_expansion_factor
+
+            # DECISION plan-2026-07-30T140922-8af1028f/D-019
+            # `dropout_rate` above is THIS HEAD's convenience, injected
+            # unconditionally, and 2 of the 21 registry types do not accept it.
+            # Measured at HEAD before this change: constructing this site with
+            # `ffn_type='kan'` or `'power_mlp'` -- both newly reachable as of
+            # D-014 -- logged `create_ffn_layer(...): dropping 1 unsupported
+            # parameter(s) ['dropout_rate']`. Once the factory raises, that
+            # becomes a hard construction failure for two types this plan just
+            # opened. Filtering it HERE is correct: it is our default, not the
+            # caller's intent. This head exposes no `ffn_args` surface, so the
+            # third argument is None; if one is ever added it goes THERE, never
+            # into `ffn_kwargs` -- see `assemble_ffn_config`'s D-017 contract.
+            ffn_kwargs = assemble_ffn_config(self.ffn_type, ffn_kwargs)
             self.post_fusion_ffn = create_ffn_layer(self.ffn_type, **ffn_kwargs)
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
@@ -824,6 +839,17 @@ class ImageCaptioningHead(keras.layers.Layer):
                 # rule as `BaseVLMHead._build_common_layers` -- keeping the two
                 # sites identical is the entire point of D-008.
                 ffn_config["ffn_expansion_factor"] = self.ffn_expansion_factor
+
+            # D-019: same pre-filter as `BaseVLMHead._build_common_layers`, and
+            # for the same reason (keeping the two sites identical is I-4).
+            # MEASURED difference from site 1, recorded so nobody "fixes" a
+            # symmetry that is not there: at HEAD this loop emitted ZERO dropped
+            # keys over all 21 types, because -- unlike site 1 -- it never
+            # injects `dropout_rate`, and every other key it sends is already
+            # gated on the registry. The pre-filter is therefore a no-op here
+            # TODAY; it is present so that adding one unconditional convenience
+            # cannot silently re-arm the hazard.
+            ffn_config = assemble_ffn_config(self.ffn_type, ffn_config)
             ffn = create_ffn_from_config(ffn_config)
             self.ffn_layers.append(ffn)
 

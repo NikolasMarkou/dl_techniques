@@ -76,7 +76,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 from ..moe import MixtureOfExperts, MoEConfig
 from ..stochastic_depth import StochasticDepth
 from ..layer_scale import LearnableMultiplier
-from ..ffn import create_ffn_from_config, FFNType
+from ..ffn import assemble_ffn_config, create_ffn_from_config, FFNType
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 
@@ -85,6 +85,124 @@ from ..norms import create_normalization_layer, NormalizationType
 # ---------------------------------------------------------------------
 
 NormalizationPositionType = Literal['post', 'pre']
+
+
+# ---------------------------------------------------------------------
+# The transformer family's ONE FFN parameter-injection policy
+# ---------------------------------------------------------------------
+
+#: FFN types whose defining feature is a FIXED nonlinearity or gate, so the
+#: wrapper's single generic ``activation`` must NOT be forwarded even though the
+#: registry accepts an ``activation`` key for some of them.
+#:
+#: * ``squared_relu`` -- fixed ``relu(x) ** 2``; the registry has no
+#:   ``activation`` param at all, so this entry is documentation.
+#: * ``reglu`` / ``bilinear`` -- ``GLUFFN`` aliases whose whole identity is the
+#:   fixed relu / linear gate. They DO accept ``activation``, so the pre-filter
+#:   would happily let it through; withholding it must be explicit. (D-005)
+_FFN_TYPES_WITH_FIXED_ACTIVATION: Tuple[str, ...] = (
+    'squared_relu', 'reglu', 'bilinear',
+)
+
+
+def build_transformer_ffn_config(
+        *,
+        ffn_type: str,
+        name: str,
+        hidden_size: int,
+        intermediate_size: int,
+        activation: Union[str, Callable],
+        dropout_rate: float,
+        kernel_initializer: Any,
+        bias_initializer: Any,
+        ffn_args: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the FFN factory config for a transformer encoder/decoder block.
+
+    Interface contract (2 call sites: :meth:`TransformerLayer._get_ffn_config`
+    and :meth:`TransformerDecoderLayer._get_ffn_config`; the two producing the
+    IDENTICAL dict for every registry type is the reason this exists):
+
+    * Emits the block's generic conveniences (dims derived from
+      ``hidden_size``/``intermediate_size``, plus ``activation``,
+      ``dropout_rate`` and the initializers), applies the three per-type POLICY
+      adjustments below, then hands the result to
+      :func:`~dl_techniques.layers.ffn.factory.assemble_ffn_config`, which
+      intersects it with what ``ffn_type`` actually accepts and merges
+      ``ffn_args`` on top UNFILTERED.
+    * Returns a config carrying ``type`` and ``name``, ready for
+      ``create_ffn_from_config``.
+    * Raises ``ValueError`` for an unregistered ``ffn_type``.
+
+    The three policy adjustments -- the only things the registry intersection
+    cannot express, and therefore the only per-type branching left here:
+
+    1. ``swiglu`` sizes ITSELF (2/3 rule from ``ffn_expansion_factor``, rounded
+       to ``ffn_multiple_of``) and lists ``hidden_dim`` as OPTIONAL, so passing
+       the block's ``intermediate_size`` would silently override that
+       derivation. Withheld, and the two expansion knobs are supplied instead.
+    2. ``differential`` RENAMES: ``DifferentialFFN`` takes ``branch_activation``,
+       not ``activation`` (D-016). ``gate_activation`` is deliberately not
+       forwarded -- the sigmoid gate is the layer's defining feature.
+    3. ``_FFN_TYPES_WITH_FIXED_ACTIVATION`` withholds ``activation`` (D-005).
+
+    # DECISION plan-2026-07-30T140922-8af1028f/D-018
+    Do NOT re-inline this table into either caller. Two independently
+    hand-maintained copies of it are exactly what produced the D-016 defect
+    (`differential` silently losing its activation on the decoder for the whole
+    life of that file) and five further decoder-only coverage gaps (`lowrank`,
+    `monarch`, `squared_relu`, `reglu`, `bilinear` raised on the decoder while
+    the encoder handled them). Pinned by
+    ``TestEncoderDecoderFFNConfigParity`` in
+    ``tests/test_layers/test_transformers/test_transformer.py``, which compares
+    both dispatchers over every ``FFN_REGISTRY`` key.
+
+    :param ffn_type: An ``FFN_REGISTRY`` key.
+    :type ffn_type: str
+    :param name: Name for the FFN layer.
+    :type name: str
+    :param hidden_size: The block's model width; the FFN's output width.
+    :type hidden_size: int
+    :param intermediate_size: The FFN's inner width.
+    :type intermediate_size: int
+    :param activation: The block's generic activation.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: The block's dropout rate.
+    :type dropout_rate: float
+    :param kernel_initializer: The block's kernel initializer.
+    :type kernel_initializer: Any
+    :param bias_initializer: The block's bias initializer.
+    :type bias_initializer: Any
+    :param ffn_args: The caller's explicit FFN args; merged LAST and NEVER
+        filtered, so a caller key the type does not accept still reaches
+        ``create_ffn_layer``.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :return: Config dict for ``create_ffn_from_config``.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If ``ffn_type`` is not a registered FFN type.
+    """
+    config: Dict[str, Any] = {
+        'type': ffn_type,
+        'name': name,
+        'dropout_rate': dropout_rate,
+        'kernel_initializer': kernel_initializer,
+        'bias_initializer': bias_initializer,
+        'hidden_dim': intermediate_size,
+        'output_dim': hidden_size,
+        'activation': activation,
+    }
+
+    if ffn_type == 'swiglu':
+        del config['hidden_dim']
+        del config['activation']
+        config['ffn_expansion_factor'] = 4
+        config['ffn_multiple_of'] = 256
+    elif ffn_type == 'differential':
+        config['branch_activation'] = config.pop('activation')
+    elif ffn_type in _FFN_TYPES_WITH_FIXED_ACTIVATION:
+        del config['activation']
+
+    return assemble_ffn_config(ffn_type, config, ffn_args)
 
 
 # ---------------------------------------------------------------------
@@ -147,7 +265,12 @@ class TransformerLayer(keras.layers.Layer):
     :type ffn_norm_args: Optional[Dict[str, Any]]
     :param ffn_type: FFN architecture type. Default: ``'mlp'``.
     :type ffn_type: FFNType
-    :param ffn_args: Custom arguments for the FFN factory.
+    :param ffn_args: Custom arguments for the FFN factory. These are the
+        CALLER's explicit keys and are merged LAST, after this layer's own
+        generic conveniences have been intersected with what ``ffn_type``
+        accepts. They are never pre-filtered, so they always reach
+        ``create_ffn_layer`` -- including a misdirected or misspelled one,
+        which the factory reports rather than this layer swallowing it.
     :type ffn_args: Optional[Dict[str, Any]]
     :param moe_config: Mixture-of-Experts configuration replacing the FFN.
     :type moe_config: Optional[Union[MoEConfig, Dict[str, Any]]]
@@ -494,46 +617,17 @@ class TransformerLayer(keras.layers.Layer):
         :return: Parameter dictionary for the FFN factory.
         :rtype: Dict[str, Any]
         """
-        config = {
-            'type': self.ffn_type,
-            'name': name,
-            'dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer
-        }
-
-        # Map TransformerLayer's generic parameters to FFN-specific ones
-        if self.ffn_type == 'swiglu':
-            config.update({
-                'output_dim': self.hidden_size,
-                'ffn_expansion_factor': 4,
-                'ffn_multiple_of': 256,
-            })
-        elif self.ffn_type == 'differential':
-            config.update({
-                'hidden_dim': self.intermediate_size,
-                'output_dim': self.hidden_size,
-                'branch_activation': self.activation,
-            })
-        elif self.ffn_type in ['mlp', 'glu', 'geglu', 'residual', 'swin_mlp', 'lowrank', 'monarch']:
-            config.update({
-                'hidden_dim': self.intermediate_size,
-                'output_dim': self.hidden_size,
-                'activation': self.activation,
-            })
-        elif self.ffn_type in ['squared_relu', 'reglu', 'bilinear']:
-            # squared_relu has a fixed relu(x)**2 nonlinearity (no activation param);
-            # reglu/bilinear are GLUFFN aliases whose defining feature is their fixed
-            # relu/linear gate -- injecting activation would defeat the alias. So inject
-            # only the dims. (D-005)
-            config.update({
-                'hidden_dim': self.intermediate_size,
-                'output_dim': self.hidden_size,
-            })
-
-        # User-provided args override everything
-        config.update(self.ffn_args)
-        return config
+        return build_transformer_ffn_config(
+            ffn_type=self.ffn_type,
+            name=name,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            activation=self.activation,
+            dropout_rate=self.dropout_rate,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            ffn_args=self.ffn_args,
+        )
 
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
         """Create a feed-forward network or MoE layer.

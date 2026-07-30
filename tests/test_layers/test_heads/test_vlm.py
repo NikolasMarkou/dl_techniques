@@ -29,7 +29,10 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+from dl_techniques.layers.ffn.factory import (
+    FFN_REGISTRY,
+    create_ffn_layer as _factory_create_ffn_layer,
+)
 from dl_techniques.layers.heads.vlm import factory as vlm_factory
 from dl_techniques.layers.heads.vlm.factory import (
     _accepted_constructor_kwargs,
@@ -2105,6 +2108,127 @@ class TestHeadsActuallyConsumeTheirInputs:
             "captioning logits are identical with the text stream zeroed — the "
             "decoder input is not reaching the output"
         )
+
+
+# ---------------------------------------------------------------------
+# Step-4 guards: both VLM FFN construction sites now pre-filter their OWN
+# generic conveniences against FFN_REGISTRY before handing the config to the
+# factory (`assemble_ffn_config`, D-017/D-019).
+#
+# The hazard was created by D-014, not inherited: opening `kan` and `power_mlp`
+# made SITE 1's UNCONDITIONAL `dropout_rate` reachable for two types that do not
+# accept it, so those constructions logged
+# `create_ffn_layer(...): dropping 1 unsupported parameter(s) ['dropout_rate']`.
+# Once the factory raises, that is a hard failure for two types this plan just
+# opened.
+#
+# Instrument note: the repo logger is named 'dl' (`utils/logger.py`:
+# `logging.getLogger("dl")`), NOT 'dl_techniques'. A handler on the wrong name
+# captures ZERO records and every assertion below would pass vacuously -- hence
+# `test_ffn_type_grid_harness_bites`.
+# ---------------------------------------------------------------------
+
+_GRID_ALL_FFN_TYPES = sorted(FFN_REGISTRY)
+
+
+class _VLMDropRecorder(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.dropped: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if "dropping" in msg and "unsupported parameter" in msg:
+            self.dropped.append(msg)
+
+
+def _vlm_capture_drops(fn):
+    handler = _VLMDropRecorder()
+    dl_logger = logging.getLogger("dl")
+    dl_logger.addHandler(handler)
+    try:
+        fn()
+    finally:
+        dl_logger.removeHandler(handler)
+    return handler.dropped
+
+
+def _build_site1(ffn_type: str):
+    """SITE 1: `BaseVLMHead._build_common_layers`'s post-fusion FFN."""
+    head = ImageTextMatchingHead(
+        task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+        vision_dim=_FAMILY_DIM,
+        text_dim=_FAMILY_DIM,
+        use_post_fusion_ffn=True,
+        ffn_type=ffn_type,
+    )
+    payload = _family_payload()
+    head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+    return head
+
+
+def _build_site2(ffn_type: str):
+    """SITE 2: `ImageCaptioningHead.__init__`'s per-layer FFN loop."""
+    head = _ffn_head(ffn_type)
+    head(_ffn_inputs())
+    return head
+
+
+class TestVLMFFNTypeGrid:
+    """Neither VLM site may silently drop a key, for any of the 21 types.
+
+    MEASURED before this change (`grid.py`, 21 types, site defaults):
+    site 1 dropped `dropout_rate` for `kan` and `power_mlp`; site 2 dropped
+    NOTHING, because it never injects `dropout_rate` and gates every other key
+    on the registry. The asymmetry is real and is recorded in source beside both
+    sites -- site 2's pre-filter is a no-op today and is there so that adding one
+    unconditional convenience cannot silently re-arm the hazard.
+    """
+
+    def test_ffn_type_grid_harness_bites(self) -> None:
+        """RED-proof the recorder against a real drop before trusting a zero."""
+        dropped = _vlm_capture_drops(
+            lambda: _factory_create_ffn_layer(
+                "mlp", hidden_dim=8, output_dim=8, nosuchparam=1
+            )
+        )
+        assert any("nosuchparam" in m for m in dropped), (
+            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
+            f"unsupported key; it is blind, so its silence below proves nothing"
+        )
+
+    def test_ffn_type_grid_covers_every_registry_type(self) -> None:
+        assert len(_GRID_ALL_FFN_TYPES) == 21
+
+    @pytest.mark.parametrize("ffn_type", _GRID_ALL_FFN_TYPES)
+    @pytest.mark.parametrize("site", ["site1", "site2"])
+    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, site) -> None:
+        build = _build_site1 if site == "site1" else _build_site2
+
+        def go():
+            try:
+                build(ffn_type)
+            except Exception:
+                # An already-loud RAISE cannot be newly broken by strictness.
+                pass
+
+        dropped = _vlm_capture_drops(go)
+        assert dropped == [], (
+            f"VLM {site} with ffn_type={ffn_type!r} silently dropped {dropped}."
+        )
+
+    @pytest.mark.parametrize("ffn_type", ["kan", "power_mlp"])
+    def test_the_two_newly_reachable_types_still_build_on_both_sites(
+        self, ffn_type
+    ) -> None:
+        """Anti-vacuity for the grid above: silence must not mean "it raised".
+
+        `kan` and `power_mlp` are exactly the two cells the pre-filter fixed, so
+        if the fix had instead broken their construction, the drop-count would
+        also be zero and the grid would look green.
+        """
+        assert _build_site1(ffn_type).post_fusion_ffn is not None
+        assert _build_site2(ffn_type).ffn_layers[0] is not None
 
 
 if __name__ == "__main__":

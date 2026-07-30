@@ -539,3 +539,341 @@ class TestTransformerLayerExtendedAttention:
         """An unsupported factory key still fails fast at construction."""
         with pytest.raises(ValueError, match="Unknown attention type"):
             TransformerLayer(64, 4, 128, attention_type='capsule_routing')
+
+# ---------------------------------------------------------------------
+# Step-4 guards: the shared FFN_REGISTRY pre-filter.
+#
+# `TransformerLayer` used to inject its OWN generic conveniences (`activation`,
+# `dropout_rate`, the initializers, the dims) without checking whether the
+# selected `ffn_type` accepts them. `create_ffn_layer` discarded the surplus and
+# only logged it, so 6 of 21 types were about to become HARD construction
+# failures the moment that warning becomes a raise.
+#
+# The instrument below attaches to the logger named 'dl' -- `utils/logger.py`
+# does `logging.getLogger("dl")`, NOT "dl_techniques". A handler on the wrong
+# name captures ZERO records and every assertion here would pass vacuously,
+# which is why `test_..._harness_bites` exists and must never be deleted.
+# ---------------------------------------------------------------------
+
+import logging as _logging
+
+from dl_techniques.layers.ffn.factory import FFN_REGISTRY, assemble_ffn_config
+from dl_techniques.layers.transformers.transformer import (
+    build_transformer_ffn_config,
+)
+from dl_techniques.layers.transformers.transformer_decoder import (
+    TransformerDecoderLayer,
+)
+
+_GRID_HIDDEN = 32
+_GRID_HEADS = 4
+_GRID_INTER = 64
+_ALL_FFN_TYPES = sorted(FFN_REGISTRY)
+
+
+class _DropRecorder(_logging.Handler):
+    """Captures `create_ffn_layer`'s dropped-key warnings off the 'dl' logger."""
+
+    def __init__(self) -> None:
+        super().__init__(level=_logging.WARNING)
+        self.dropped: list = []
+
+    def emit(self, record: _logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if 'dropping' in msg and 'unsupported parameter' in msg:
+            self.dropped.append(msg)
+
+
+def _capture_drops(fn):
+    """Run `fn` with a recorder attached to 'dl'; return the captured messages."""
+    handler = _DropRecorder()
+    dl_logger = _logging.getLogger('dl')
+    dl_logger.addHandler(handler)
+    try:
+        fn()
+    finally:
+        dl_logger.removeHandler(handler)
+    return handler.dropped
+
+
+def _required_ffn_args(ffn_type: str) -> Dict[str, Any]:
+    """The minimal caller-supplied `ffn_args` covering `ffn_type`'s required params.
+
+    This is the 'caller-supplies-required' grid condition: the realistic shape a
+    caller must use to even reach construction for a type the wrapper does not
+    size itself. It is the condition under which the pre-filter matters -- at
+    pure site defaults most of these types die earlier in `validate_ffn_config`.
+    """
+    sized = {
+        'hidden_dim': _GRID_INTER,
+        'output_dim': _GRID_HIDDEN, 'units': _GRID_HIDDEN,
+        'features': _GRID_HIDDEN, 'filters': _GRID_HIDDEN,
+    }
+    return {
+        p: sized.get(p, 8)
+        for p in FFN_REGISTRY[ffn_type]['required_params']
+    }
+
+
+class TestFFNTypeGridEncoder:
+    """0 of 21 types may lose a key silently, at either grid condition."""
+
+    def _build(self, ffn_type: str, ffn_args: Dict[str, Any]) -> None:
+        layer = TransformerLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type=ffn_type,
+            activation='relu', ffn_args=ffn_args,
+        )
+        layer(np.zeros((2, 5, _GRID_HIDDEN), dtype='float32'))
+
+    def test_ffn_type_grid_harness_bites(self) -> None:
+        """RED-proof the instrument BEFORE trusting any zero it reports."""
+        dropped = _capture_drops(
+            lambda: self._build('mlp', {'hiden_dim_typo': 3})
+        )
+        assert any('hiden_dim_typo' in m for m in dropped), (
+            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
+            f"misspelled ffn_args key. It is blind, so its silence in the "
+            f"parametrized tests below would prove nothing."
+        )
+
+    def test_ffn_type_grid_covers_every_registry_type(self) -> None:
+        """Anti-vacuity: the parametrization must not quietly shrink."""
+        assert len(_ALL_FFN_TYPES) == 21, (
+            f"FFN_REGISTRY now has {len(_ALL_FFN_TYPES)} types, not 21; "
+            f"re-derive the grid numbers in decisions.md D-018 rather than "
+            f"editing this assertion"
+        )
+
+    @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
+    @pytest.mark.parametrize('condition', ['site-default-only', 'caller-supplies-required'])
+    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, condition) -> None:
+        args = (
+            {} if condition == 'site-default-only'
+            else _required_ffn_args(ffn_type)
+        )
+
+        def build():
+            try:
+                self._build(ffn_type, args)
+            except Exception:
+                # A RAISE is already loud, so strictness cannot newly break it.
+                # Only a construction that SUCCEEDS while losing a key counts.
+                pass
+
+        dropped = _capture_drops(build)
+        assert dropped == [], (
+            f"TransformerLayer(ffn_type={ffn_type!r}) [{condition}] silently "
+            f"dropped {dropped}. Once create_ffn_layer raises, this becomes a "
+            f"hard construction failure."
+        )
+
+
+class TestFFNArgsSurviveThePreFilter:
+    """PRE-MORTEM #3: the pre-filter must NEVER touch the caller's `ffn_args`.
+
+    The pre-filter exists to strip the WRAPPER's generic conveniences. If it is
+    ever applied AFTER `ffn_args` is merged in -- the one-line "simplification"
+    a future reader will reach for -- it eats the caller's keys too. A valid one
+    then stops reaching the FFN, and an invalid one becomes invisible to the
+    factory, so the strict raise this plan is building toward can never fire and
+    the caller's typo is silently discarded exactly as before.
+    """
+
+    def test_valid_caller_key_reaches_the_constructed_ffn(self) -> None:
+        """A key the type accepts, that the wrapper never sends, must arrive."""
+        # `mlp` accepts `use_bias`; `TransformerLayer` does not emit it.
+        layer = TransformerLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            ffn_args={'use_bias': False},
+        )
+        assert layer.ffn_layer.use_bias is False, (
+            "ffn_args={'use_bias': False} did not reach MLPBlock. The "
+            "pre-filter ate a CALLER key -- see assemble_ffn_config's D-017 "
+            "contract: it must filter only the wrapper's own dict."
+        )
+
+    def test_caller_key_overrides_the_wrapper_default(self) -> None:
+        """`ffn_args` is merged LAST, so it still wins over our conveniences."""
+        layer = TransformerLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            activation='relu', ffn_args={'activation': 'tanh'},
+        )
+        assert layer.ffn_layer.activation_name == 'tanh'
+
+    def test_invalid_caller_key_stays_visible_to_the_factory(self) -> None:
+        """An unaccepted CALLER key must still reach `create_ffn_layer`.
+
+        Today that surfaces as the dropped-key warning; after the factory is
+        made strict it becomes the ValueError. Either way the key must not be
+        swallowed here -- if the pre-filter removes it, there is nothing left
+        for the factory to complain about.
+        """
+        dropped = _capture_drops(lambda: TransformerLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            ffn_args={'branch_activation': 'relu'},
+        ))
+        assert any('branch_activation' in m for m in dropped), (
+            "a caller's inapplicable ffn_args key produced NO signal. The "
+            "pre-filter removed it before the factory could see it, which "
+            "defeats the strict raise entirely."
+        )
+
+    def test_the_helper_itself_owns_the_merge_order(self) -> None:
+        """Unit-level: `assemble_ffn_config` filters arg 2, never arg 3.
+
+        This is the structural guarantee. Because the merge happens INSIDE the
+        helper, a call site cannot express the wrong order; only editing the
+        helper can.
+        """
+        out = assemble_ffn_config(
+            'mlp',
+            {'hidden_dim': 8, 'output_dim': 4, 'branch_activation': 'relu'},
+            {'branch_activation': 'tanh', 'totally_bogus': 1},
+        )
+        # arg 2's inapplicable key WAS filtered ...
+        assert 'branch_activation' in out and out['branch_activation'] == 'tanh'
+        # ... and arg 3's inapplicable keys were NOT.
+        assert out['totally_bogus'] == 1
+
+
+class TestEncoderDecoderFFNConfigParity:
+    """Guard against a THIRD divergent copy of the per-type injection table.
+
+    `TransformerLayer` and `TransformerDecoderLayer` maintained two independent
+    copies of it. That is what produced the `differential`/`activation` silent
+    drop (D-016) and five decoder-only coverage gaps. Both now call
+    `build_transformer_ffn_config`, so this compares them over EVERY registry
+    key and names its exceptions instead of hiding them.
+    """
+
+    #: Deliberate exceptions, stated rather than silently excluded. There are
+    #: none: the two blocks differ only in their attention wiring, and the FFN
+    #: sub-layer sees the identical model/inner widths. If a real exception ever
+    #: appears, add it HERE with its reason -- do not narrow the parametrization.
+    DELIBERATE_EXCEPTIONS: Dict[str, str] = {}
+
+    @staticmethod
+    def _comparable(cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Serialize values so two equivalent configs compare equal.
+
+        Keras initializer INSTANCES do not define `__eq__`, so two identically
+        configured `GlorotUniform` objects are unequal by identity. Comparing
+        raw dicts would make this guard fail for all 21 types regardless of the
+        thing it exists to detect -- a guard that is always red is as useless as
+        one that is always green.
+        """
+        return {k: keras.saving.serialize_keras_object(v)
+                for k, v in cfg.items()}
+
+    @staticmethod
+    def _spy_config(monkeypatch, module, cls, ffn_type: str) -> Dict[str, Any]:
+        """Capture the dict the dispatcher hands the FFN factory.
+
+        A spy, not a direct `_get_ffn_config` call: both blocks construct their
+        FFN inside `__init__`, and 7 of the 21 types legitimately RAISE there
+        (missing a required param the block cannot supply, e.g. `kan`'s
+        `features`). Observing the config at the factory boundary compares the
+        two dispatchers over ALL 21 types instead of only the ones that build.
+        """
+        seen: Dict[str, Any] = {}
+
+        def _fake(config):
+            seen.update(config)
+            return keras.layers.Identity(name=config.get('name'))
+
+        monkeypatch.setattr(module, 'create_ffn_from_config', _fake)
+        cls(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type=ffn_type,
+            activation='relu',
+        )
+        assert seen, f"the spy captured nothing for {ffn_type!r}"
+        return seen
+
+    @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
+    def test_both_dispatchers_emit_the_identical_config(
+        self, ffn_type, monkeypatch
+    ) -> None:
+        import dl_techniques.layers.transformers.transformer as _enc_mod
+        import dl_techniques.layers.transformers.transformer_decoder as _dec_mod
+
+        enc_cfg = self._comparable(self._spy_config(
+            monkeypatch, _enc_mod, TransformerLayer, ffn_type))
+        dec_cfg = self._comparable(self._spy_config(
+            monkeypatch, _dec_mod, TransformerDecoderLayer, ffn_type))
+
+        if ffn_type in self.DELIBERATE_EXCEPTIONS:
+            pytest.skip(self.DELIBERATE_EXCEPTIONS[ffn_type])
+
+        assert enc_cfg == dec_cfg, (
+            f"the encoder and decoder FFN dispatchers disagree for "
+            f"ffn_type={ffn_type!r}: encoder-only keys "
+            f"{ {k: v for k, v in enc_cfg.items() if dec_cfg.get(k) != v} }, "
+            f"decoder-only keys "
+            f"{ {k: v for k, v in dec_cfg.items() if enc_cfg.get(k) != v} }. "
+            f"Someone re-inlined the table -- see D-018."
+        )
+
+    def test_the_policy_lives_in_exactly_one_function(self) -> None:
+        """Both dispatchers must delegate, not re-implement."""
+        import inspect
+        for cls in (TransformerLayer, TransformerDecoderLayer):
+            src = inspect.getsource(cls._get_ffn_config)
+            assert 'build_transformer_ffn_config' in src, (
+                f"{cls.__name__}._get_ffn_config no longer delegates to the "
+                f"shared policy function. A second hand-maintained copy of the "
+                f"per-type table is exactly what D-016/D-018 removed."
+            )
+
+
+class TestTransformerFFNPolicyPreserved:
+    """The three things a pure registry intersection CANNOT express."""
+
+    def _cfg(self, ffn_type: str) -> Dict[str, Any]:
+        return build_transformer_ffn_config(
+            ffn_type=ffn_type, name='ffn', hidden_size=_GRID_HIDDEN,
+            intermediate_size=_GRID_INTER, activation='relu',
+            dropout_rate=0.1, kernel_initializer='glorot_uniform',
+            bias_initializer='zeros',
+        )
+
+    def test_differential_renames_activation_to_branch_activation(self) -> None:
+        cfg = self._cfg('differential')
+        assert cfg['branch_activation'] == 'relu'
+        assert 'activation' not in cfg
+        assert 'gate_activation' not in cfg, (
+            "the sigmoid gate is DifferentialFFN's defining feature (D-016)"
+        )
+
+    @pytest.mark.parametrize('ffn_type', ['reglu', 'bilinear'])
+    def test_d005_activation_withholding_survives_the_pre_filter(self, ffn_type) -> None:
+        """RED-proof target: these types ACCEPT `activation`, so the filter keeps it.
+
+        `reglu`/`bilinear` list `activation` in `optional_params`, so a pure
+        intersection would let the block's generic activation through and defeat
+        the alias's fixed gate. Only the explicit withholding stops it.
+        """
+        assert 'activation' in FFN_REGISTRY[ffn_type]['optional_params'], (
+            "anti-vacuity: if the registry stops accepting `activation` for "
+            f"{ffn_type}, the pre-filter would drop it anyway and this test "
+            "would no longer be testing the withholding"
+        )
+        assert 'activation' not in self._cfg(ffn_type)
+
+    def test_swiglu_still_sizes_itself(self) -> None:
+        """`hidden_dim` is OPTIONAL for swiglu, so the filter would keep it."""
+        assert 'hidden_dim' in FFN_REGISTRY['swiglu']['optional_params']
+        cfg = self._cfg('swiglu')
+        assert 'hidden_dim' not in cfg, (
+            "passing hidden_dim overrides swiglu's own 2/3 derivation"
+        )
+        assert cfg['ffn_expansion_factor'] == 4
+        assert cfg['ffn_multiple_of'] == 256
+
+    def test_unknown_type_raises_from_the_helper(self) -> None:
+        with pytest.raises(ValueError, match="Unknown ffn_type"):
+            self._cfg('no_such_ffn')

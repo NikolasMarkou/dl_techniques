@@ -57,7 +57,7 @@ References:
 """
 
 import keras
-from typing import Dict, Any, Literal, Optional
+from typing import Dict, Any, Literal, Mapping, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -641,6 +641,85 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
                     keras.initializers.get(initializer)
                 except (ValueError, KeyError):
                     raise ValueError(f"Unknown {param}: '{initializer}'")
+
+
+# Keys every construction path carries that are NOT FFN constructor parameters:
+# `type` is consumed by `create_ffn_from_config` to pick the class, and `name` is
+# accepted by every Keras layer. Neither appears in any registry entry, so both
+# must survive the intersection below.
+_FFN_CONFIG_PASSTHROUGH_KEYS: Tuple[str, ...] = ('type', 'name')
+
+
+def assemble_ffn_config(
+        ffn_type: str,
+        wrapper_config: Mapping[str, Any],
+        caller_args: Optional[Mapping[str, Any]] = None,
+        *,
+        passthrough: Sequence[str] = _FFN_CONFIG_PASSTHROUGH_KEYS,
+) -> Dict[str, Any]:
+    """Pre-filter a WRAPPER's own generic FFN conveniences, then merge the CALLER's.
+
+    Interface contract (4 call sites: ``TransformerLayer._get_ffn_config``,
+    ``TransformerDecoderLayer._get_ffn_config``,
+    ``BaseVLMHead._build_common_layers`` and
+    ``ImageCaptioningHead.__init__``'s per-layer FFN loop):
+
+    * ``wrapper_config`` -- the wrapper layer's OWN generic conveniences
+      (``activation``, ``dropout_rate``, ``kernel_initializer``, the dims it
+      derives from its own hyperparameters, ...). It is INTERSECTED with
+      ``FFN_REGISTRY[ffn_type]``'s ``required_params | optional_params``, plus
+      ``passthrough``. Keys the target type does not accept are dropped HERE,
+      silently and correctly -- they are this wrapper's defaults, not anybody's
+      expressed intent.
+    * ``caller_args`` -- the end user's own ``ffn_args``/``encoder_ffn_args``
+      dict. Merged on top of the filtered result **verbatim, never filtered**,
+      and therefore still reaches ``create_ffn_layer``. A caller key the type
+      does not accept must stay visible to the factory so the factory can
+      complain about it.
+    * Returns a NEW dict; neither input is mutated.
+    * Raises ``ValueError`` naming the available types if ``ffn_type`` is not in
+      ``FFN_REGISTRY`` -- matching what the wrapper sites raised before.
+
+    # DECISION plan-2026-07-30T140922-8af1028f/D-017
+    This function owns the MERGE, not just the filter, and that is the whole
+    reason it takes two dicts instead of one. Do NOT "simplify" it to a
+    single-dict filter that call sites apply after merging their ``ffn_args``
+    in -- that ordering makes the pre-filter EAT the caller's keys, which turns
+    a caller's typo back into the silent drop this whole plan exists to remove
+    (and, once ``create_ffn_layer`` raises, means the raise can never fire).
+    With the merge inside, a call site cannot express the wrong order.
+    Pinned by ``TestFFNArgsSurviveThePreFilter`` in
+    ``tests/test_layers/test_transformers/test_transformer.py`` and its decoder
+    twin.
+
+    :param ffn_type: An ``FFN_REGISTRY`` key.
+    :type ffn_type: str
+    :param wrapper_config: The wrapper's own generic config; filtered.
+    :type wrapper_config: Mapping[str, Any]
+    :param caller_args: The caller's explicit args; NEVER filtered.
+    :type caller_args: Optional[Mapping[str, Any]]
+    :param passthrough: Keys kept regardless of the registry intersection.
+    :type passthrough: Sequence[str]
+    :return: The assembled config dict for ``create_ffn_layer`` /
+        ``create_ffn_from_config``.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If ``ffn_type`` is not a registered FFN type.
+    """
+    ffn_info = FFN_REGISTRY.get(ffn_type)
+    if ffn_info is None:
+        raise ValueError(
+            f"Unknown ffn_type '{ffn_type}'. Available: {sorted(FFN_REGISTRY)}."
+        )
+
+    accepted = (
+        set(ffn_info['required_params'])
+        | set(ffn_info['optional_params'])
+        | set(passthrough)
+    )
+    config = {k: v for k, v in wrapper_config.items() if k in accepted}
+    if caller_args:
+        config.update(caller_args)
+    return config
 
 
 def create_ffn_layer(

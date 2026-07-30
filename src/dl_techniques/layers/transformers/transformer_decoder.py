@@ -35,6 +35,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_from_config, FFNType
+from .transformer import build_transformer_ffn_config
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 
@@ -88,7 +89,11 @@ class TransformerDecoderLayer(keras.layers.Layer):
     :param normalization_type: Normalization type. Default ``'layer_norm'``.
     :param normalization_position: ``'pre'`` or ``'post'``. Default ``'post'``.
     :param ffn_type: FFN architecture type. Default ``'mlp'``.
-    :param ffn_args: Extra args forwarded to the FFN factory.
+    :param ffn_args: Extra args forwarded to the FFN factory. These are the
+        CALLER's explicit keys and are merged LAST, after this layer's own
+        generic conveniences have been intersected with what ``ffn_type``
+        accepts; they are never pre-filtered and always reach
+        ``create_ffn_layer``.
     :param dropout_rate: FFN output dropout rate. Default 0.1.
     :param attention_dropout_rate: Attention dropout rate. Default 0.1.
     :param use_causal_mask: If True and no ``self_attention_mask`` is supplied at
@@ -212,34 +217,29 @@ class TransformerDecoderLayer(keras.layers.Layer):
         return {**params, **self.cross_attention_args}
 
     def _get_ffn_config(self, name: str) -> Dict[str, Any]:
-        config: Dict[str, Any] = {
-            'type': self.ffn_type,
-            'name': name,
-            'dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
-        }
-        if self.ffn_type == 'swiglu':
-            config.update({'output_dim': self.hidden_size, 'ffn_expansion_factor': 4, 'ffn_multiple_of': 256})
-        # DECISION plan-2026-07-30T140922-8af1028f/D-016
-        # `differential` needs its OWN branch: DifferentialFFN takes `branch_activation`,
-        # NOT `activation`. Do NOT fold it back into the generic branch below -- doing so
-        # is exactly the bug this branch fixes (`activation` was silently dropped by
-        # create_ffn_layer's parameter filter on EVERY construction, leaving the FFN at
-        # DifferentialFFN's default 'gelu'). Do NOT forward `gate_activation` either:
-        # the sigmoid gate is DifferentialFFN's defining feature, and this mirrors
-        # TransformerLayer._get_ffn_config exactly -- two copies of this table are what
-        # produced the divergence in the first place. See decisions.md D-016.
-        elif self.ffn_type == 'differential':
-            config.update({
-                'hidden_dim': self.intermediate_size,
-                'output_dim': self.hidden_size,
-                'branch_activation': self.activation,
-            })
-        elif self.ffn_type in ('mlp', 'glu', 'geglu', 'residual', 'swin_mlp'):
-            config.update({'hidden_dim': self.intermediate_size, 'output_dim': self.hidden_size, 'activation': self.activation})
-        config.update(self.ffn_args)
-        return config
+        # DECISION plan-2026-07-30T140922-8af1028f/D-018
+        # This method used to carry its OWN hand-maintained copy of the per-type
+        # parameter-injection table, and that copy is what produced D-016 (the
+        # `differential`/`activation` silent drop, live for the whole life of
+        # this file) plus five decoder-only coverage gaps -- `lowrank`,
+        # `monarch`, `squared_relu`, `reglu` and `bilinear` RAISED here with
+        # "Required parameters missing ... ['hidden_dim', 'output_dim']" while
+        # `TransformerLayer` handled all five. Both dispatchers now call the ONE
+        # policy function, so a divergence has to be introduced deliberately.
+        # Do NOT re-inline the table here. See decisions.md D-018, and
+        # `TestEncoderDecoderFFNConfigParity`, which compares the two over every
+        # `FFN_REGISTRY` key.
+        return build_transformer_ffn_config(
+            ffn_type=self.ffn_type,
+            name=name,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            activation=self.activation,
+            dropout_rate=self.dropout_rate,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            ffn_args=self.ffn_args,
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all sub-layers. ``input_shape`` is the decoder input ``(B, T, H)``.

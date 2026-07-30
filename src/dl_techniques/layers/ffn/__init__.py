@@ -20,6 +20,7 @@ from .lowrank_ffn import LowRankFFN
 
 from .factory import (
     FFNType,
+    assemble_ffn_config,
     create_ffn_layer,
     create_ffn_from_config,
     get_ffn_info,
@@ -53,6 +54,7 @@ __all__ = [
     "LowRankFFN",
     # Factory interface
     "FFNType",
+    "assemble_ffn_config",
     "create_ffn_layer",
     "create_ffn_from_config",
     "get_ffn_info",

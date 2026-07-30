@@ -218,6 +218,15 @@ class TestDecoderDifferentialFFNActivation:
     ``create_ffn_layer``'s parameter filter dropped it on EVERY construction and the FFN
     was built at DifferentialFFN's own default. ``TransformerLayer._get_ffn_config``
     already had a dedicated ``differential`` branch; this pins the decoder to it.
+
+    STILL LOAD-BEARING after step 4 folded both dispatchers into the single
+    ``build_transformer_ffn_config``, and the pre-filter does NOT subsume it:
+    with the ``activation`` -> ``branch_activation`` rename removed, the
+    pre-filter simply DISCARDS ``activation`` (``DifferentialFFN`` does not
+    accept it), so zero dropped-key warnings are emitted, the whole 21-type grid
+    stays green, and the FFN silently reverts to its own 'gelu'. Verified by
+    removing the rename in place: the grid was green and these were the only
+    assertions that fired.
     """
 
     HIDDEN = 32
@@ -311,3 +320,155 @@ class TestDecoderDifferentialFFNActivation:
         rebuilt_ffn = restored.layers[-1].ffn_layer
         assert keras.activations.serialize(
             rebuilt_ffn.branch_activation) == self.NON_DEFAULT_ACTIVATION
+
+
+# ---------------------------------------------------------------------
+# Step-4 guards: the shared FFN_REGISTRY pre-filter, decoder side.
+#
+# The decoder's own hand-maintained copy of the per-type injection table is
+# gone -- `_get_ffn_config` now delegates to `build_transformer_ffn_config`,
+# the same function `TransformerLayer` uses. These are the decoder halves of
+# the encoder guards in `test_transformer.py`; the cross-dispatcher parity test
+# lives THERE (one home) and is not restated here.
+#
+# The recorder attaches to the logger named 'dl' (`utils/logger.py` uses
+# `logging.getLogger("dl")`, NOT "dl_techniques"); `_DroppedKeyRecorder` above
+# is reused rather than redefined.
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+
+_GRID_HIDDEN = 32
+_GRID_HEADS = 4
+_GRID_INTER = 64
+_ALL_FFN_TYPES = sorted(FFN_REGISTRY)
+
+#: Types that RAISED on this dispatcher while `TransformerLayer` handled them,
+#: because the decoder's table simply had no branch for them. Closing these was
+#: the point of deleting that table (state.md step-3 divergence inventory).
+_FORMER_DECODER_COVERAGE_GAPS = (
+    'lowrank', 'monarch', 'squared_relu', 'reglu', 'bilinear',
+)
+
+
+def _capture_drops(fn):
+    handler = _DroppedKeyRecorder()
+    dl_logger = logging.getLogger('dl')
+    dl_logger.addHandler(handler)
+    try:
+        fn()
+    finally:
+        dl_logger.removeHandler(handler)
+    return handler.dropped
+
+
+def _required_ffn_args(ffn_type: str) -> Dict[str, Any]:
+    sized = {
+        'hidden_dim': _GRID_INTER,
+        'output_dim': _GRID_HIDDEN, 'units': _GRID_HIDDEN,
+        'features': _GRID_HIDDEN, 'filters': _GRID_HIDDEN,
+    }
+    return {
+        p: sized.get(p, 8)
+        for p in FFN_REGISTRY[ffn_type]['required_params']
+    }
+
+
+def _build_decoder(ffn_type: str, ffn_args: Dict[str, Any]):
+    layer = TransformerDecoderLayer(
+        hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+        intermediate_size=_GRID_INTER, ffn_type=ffn_type,
+        activation='relu', ffn_args=ffn_args,
+    )
+    layer(
+        np.zeros((2, 5, _GRID_HIDDEN), dtype='float32'),
+        encoder_output=np.zeros((2, 6, _GRID_HIDDEN), dtype='float32'),
+    )
+    return layer
+
+
+class TestFFNTypeGridDecoder:
+    """0 of 21 types may lose a key silently, at either grid condition."""
+
+    def test_ffn_type_grid_harness_bites(self) -> None:
+        """RED-proof the instrument BEFORE trusting any zero it reports."""
+        dropped = _capture_drops(
+            lambda: _build_decoder('mlp', {'hiden_dim_typo': 3})
+        )
+        assert any('hiden_dim_typo' in m for m in dropped), (
+            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
+            f"misspelled ffn_args key; it is blind."
+        )
+
+    def test_ffn_type_grid_covers_every_registry_type(self) -> None:
+        assert len(_ALL_FFN_TYPES) == 21
+
+    @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
+    @pytest.mark.parametrize(
+        'condition', ['site-default-only', 'caller-supplies-required'])
+    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, condition) -> None:
+        args = (
+            {} if condition == 'site-default-only'
+            else _required_ffn_args(ffn_type)
+        )
+
+        def build():
+            try:
+                _build_decoder(ffn_type, args)
+            except Exception:
+                # Already-loud RAISEs cannot be newly broken by strictness.
+                pass
+
+        dropped = _capture_drops(build)
+        assert dropped == [], (
+            f"TransformerDecoderLayer(ffn_type={ffn_type!r}) [{condition}] "
+            f"silently dropped {dropped}."
+        )
+
+    @pytest.mark.parametrize('ffn_type', _FORMER_DECODER_COVERAGE_GAPS)
+    def test_former_decoder_coverage_gap_now_builds_at_site_defaults(
+        self, ffn_type
+    ) -> None:
+        """These five raised "Required parameters missing ['hidden_dim', ...]".
+
+        The decoder's deleted table injected the dims for only 6 types; the
+        encoder's injected them for 11. Sharing one policy function closed the
+        difference by construction rather than by hand-adding five branches.
+        """
+        layer = _build_decoder(ffn_type, {})
+        assert layer.ffn_layer is not None
+
+
+class TestFFNArgsSurviveThePreFilter:
+    """PRE-MORTEM #3, decoder side: `ffn_args` must never be pre-filtered."""
+
+    def test_valid_caller_key_reaches_the_constructed_ffn(self) -> None:
+        layer = TransformerDecoderLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            ffn_args={'use_bias': False},
+        )
+        assert layer.ffn_layer.use_bias is False, (
+            "ffn_args={'use_bias': False} did not reach MLPBlock -- the "
+            "pre-filter ate a CALLER key (assemble_ffn_config, D-017)."
+        )
+
+    def test_caller_key_overrides_the_wrapper_default(self) -> None:
+        layer = TransformerDecoderLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            activation='relu', ffn_args={'activation': 'tanh'},
+        )
+        assert layer.ffn_layer.activation_name == 'tanh'
+
+    def test_invalid_caller_key_stays_visible_to_the_factory(self) -> None:
+        """The strict raise this plan is building toward needs this key intact."""
+        dropped = _capture_drops(lambda: TransformerDecoderLayer(
+            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+            intermediate_size=_GRID_INTER, ffn_type='mlp',
+            ffn_args={'branch_activation': 'relu'},
+        ))
+        assert any('branch_activation' in m for m in dropped), (
+            "a caller's inapplicable ffn_args key produced NO signal; the "
+            "pre-filter removed it before the factory could see it."
+        )
