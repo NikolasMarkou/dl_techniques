@@ -1588,13 +1588,24 @@ class MultiTaskVLMHead(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> "MultiTaskVLMHead":
         """Reconstruct the multi-task head, deserializing each ``task_config``.
 
-        Keras base kwargs (``name``/``trainable``/``dtype``) are dropped so they
-        are not forwarded into per-task head construction (where ``name`` would
-        collide with each head's auto-generated name).
+        # DECISION plan-2026-07-30T081929-1645aa52/D-012
+        Keras base kwargs (``name`` / ``trainable`` / ``dtype``) are deliberately
+        KEPT and forwarded. Do NOT re-add a `config.pop` loop for them.
+
+        This used to pop all three, on the reasoning that they must not leak into
+        per-task head construction. That reasoning is already satisfied one level
+        down: ``__init__`` partitions ``**kwargs`` on
+        ``_KERAS_BASE_LAYER_KWARGS`` and passes the base ones to
+        ``super().__init__`` only, never to a sub-head. Popping them here on top
+        of that did not prevent a leak -- it silently DISCARDED the values.
+
+        Measured on a full ``.keras`` round-trip: a head saved with ``name='mt'``
+        and ``trainable=False`` reloaded as ``name='multi_task_vlm_head'`` and
+        ``trainable=True``, with outputs bit-identical -- so a frozen head came
+        back unfrozen and nothing about the numbers gave it away. Freezing a
+        head is exactly the kind of intent a round-trip must not lose.
         """
         config = dict(config)
-        for base_key in ("name", "trainable", "dtype"):
-            config.pop(base_key, None)
         config["task_configs"] = {
             name: _deserialize_task_config(tc)
             for name, tc in config["task_configs"].items()

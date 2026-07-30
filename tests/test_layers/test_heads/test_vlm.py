@@ -1497,5 +1497,108 @@ class TestFusionStrategyOutputContract:
         assert not _is_single_shape("not a shape")
 
 
+class TestMultiTaskConfigPreservesKerasBaseKwargs:
+    """`from_config` must not silently discard `name` / `trainable`.
+
+    `MultiTaskVLMHead.from_config` popped `name`, `trainable` and `dtype` before
+    `cls(**config)`, to stop them leaking into per-task head construction. But
+    `__init__` already partitions `**kwargs` on `_KERAS_BASE_LAYER_KWARGS` and
+    forwards the base ones to `super().__init__` only -- so the pop prevented no
+    leak and merely threw the values away. A head saved frozen reloaded
+    UNFROZEN, with bit-identical outputs, so nothing about the numbers showed it.
+    """
+
+    @staticmethod
+    def _cfgs():
+        return [
+            VLMTaskConfig(name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
+                          hidden_size=_FAMILY_DIM),
+            VLMTaskConfig(name="grd", task_type=VLMTaskType.VISUAL_GROUNDING,
+                          hidden_size=_FAMILY_DIM),
+        ]
+
+    def _head(self, **kw):
+        return create_multi_task_vlm_head(
+            self._cfgs(), shared_vision_dim=_FAMILY_DIM,
+            shared_text_dim=_FAMILY_DIM, **kw
+        )
+
+    def test_from_config_preserves_name_and_trainable(self) -> None:
+        """Restoring the `config.pop` loop fails here."""
+        head = self._head(name="mt", trainable=False)
+        rebuilt = type(head).from_config(head.get_config())
+        assert rebuilt.name == "mt", (
+            f"name was regenerated instead of restored: {rebuilt.name!r}"
+        )
+        assert rebuilt.trainable is False, (
+            "trainable=False was discarded — a frozen head reloads unfrozen"
+        )
+
+    def test_trainable_false_actually_freezes(self) -> None:
+        """CONTROL: `trainable` must have teeth, or the test above is vacuous.
+
+        If `trainable=False` did not change anything observable, preserving it
+        would be a cosmetic assertion. Asserted standalone (0 vs 29 trainable
+        weights) rather than through a Functional wrapper, where the model-level
+        count read 33 both before and after and is not a reliable discriminator.
+        """
+        payload = _family_payload()
+        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+
+        frozen = self._head(name="mt", trainable=False)
+        frozen(tensors)
+        live = self._head(name="mt2", trainable=True)
+        live(tensors)
+
+        assert len(frozen.trainable_weights) == 0
+        assert len(live.trainable_weights) > 0, "the live head built nothing"
+
+    def test_keras_round_trip_preserves_name_and_trainable(self) -> None:
+        """End-to-end `.keras` save/load, not just `get_config` in memory."""
+        payload = _family_payload()
+        vin = keras.Input(shape=(_FAMILY_SEQ, _FAMILY_DIM), name="vision_features")
+        tin = keras.Input(shape=(_FAMILY_SEQ, _FAMILY_DIM), name="text_features")
+        head = self._head(name="mt", trainable=False)
+        model = keras.Model(
+            {"vision_features": vin, "text_features": tin},
+            head({"vision_features": vin, "text_features": tin}),
+        )
+
+        def _find(m):
+            for layer in m.layers:
+                if isinstance(layer, MultiTaskVLMHead):
+                    return layer
+            raise AssertionError("MultiTaskVLMHead not found in the model")
+
+        assert _find(model).trainable is False
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mt.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+
+        restored = _find(reloaded)
+        assert restored.name == "mt"
+        assert restored.trainable is False, (
+            "a frozen MultiTaskVLMHead came back trainable from .keras"
+        )
+
+    def test_base_kwargs_still_do_not_reach_sub_heads(self) -> None:
+        """The pop's ORIGINAL purpose must still hold after removing it.
+
+        This is the over-fix direction: forwarding base kwargs must not start
+        leaking them into per-task construction, where `name` would collide with
+        each head's auto-generated `f"{task_config.name}_head"`.
+        """
+        head = self._head(name="mt", trainable=False)
+        assert head.name == "mt"
+        for task_name, sub in head.task_heads.items():
+            assert sub.name != "mt", (
+                f"the wrapper's name leaked into sub-head {task_name!r}"
+            )
+            assert sub.name.startswith(task_name), (
+                f"sub-head {task_name!r} lost its generated name: {sub.name!r}"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
