@@ -1346,16 +1346,59 @@ class TestXLACompilation:
 
 _TF32_ULP = 2.0 ** -11
 
-# (seq_len, num_heads, head_dim) -- the plan's pre-committed grid. The lengths
-# deliberately include non-multiples of chunk_size (7, 63, 65, 257) and the
-# non-round neighbours of the 64 boundary, because a powers-of-two-only grid
-# can be fully green on a chunked scan that mishandles its own edges.
+# (seq_len, num_heads, head_dim). Non-multiples of chunk_size (7, 65, 257) and
+# the exact 64 boundary are all deliberate: a powers-of-two-only grid can be
+# fully green on a chunked scan that mishandles its own edges.
+#
+# MEASURED, and the reason 257 is load-bearing: dropping the inter-chunk carry
+# decay (`state = chunk_decay * state + chunk_state` -> `state + chunk_state`)
+# is detected by seq_len=257 ONLY. It is invisible at every shorter length here,
+# and NOT because those cases are weak -- it is arithmetically invisible below
+# THREE chunks. With `n_chunks == 1` there is no carry at all; with
+# `n_chunks == 2` the only entry state that gets consumed is the one after chunk
+# 0, and `chunk_decay * 0 + chunk_state[0]` equals `0 + chunk_state[0]`, so the
+# two forms agree exactly. The paths first diverge at chunk 2, i.e.
+# `seq_len > 2 * chunk_size`.
+#
+# So the grid needs at least one length with `ceil(seq_len/64) >= 3`, and 257
+# (5 chunks) is it. `test_equiv_grid_can_detect_an_inter_chunk_carry_bug` below
+# pins that requirement mechanically, so a future trim cannot silently drop the
+# only cell that can fail.
+#
+# Trimmed from 7 lengths to 5: 63 was redundant with 7 (both single-chunk at
+# chunk_size=64) and 128 was redundant with 65 (both exactly 2 chunks, both
+# provably unable to detect a carry bug). 28 -> 20 combinations per test.
 _EQUIV_GRID = [
     (seq_len, num_heads, head_dim)
-    for seq_len in (1, 7, 63, 64, 65, 128, 257)
+    for seq_len in (1, 7, 64, 65, 257)
     for num_heads in (1, 4)
     for head_dim in (8, 32)
 ]
+
+_EQUIV_CHUNK_SIZE = 64
+
+
+def test_equiv_grid_can_detect_an_inter_chunk_carry_bug():
+    """The equivalence grid must retain a >=3-chunk case, or it proves nothing.
+
+    A "no silent caps" guard on the grid itself. Every cell below 3 chunks is
+    arithmetically incapable of detecting a dropped inter-chunk carry decay (see
+    the note above), so a grid consisting only of short lengths would be fully
+    green against that bug. This fails if a future edit trims 257 away.
+    """
+    chunk_counts = {
+        -(-seq_len // _EQUIV_CHUNK_SIZE) for seq_len, _, _ in _EQUIV_GRID
+    }
+    assert max(chunk_counts) >= 3, (
+        f"_EQUIV_GRID's longest case spans only {max(chunk_counts)} chunk(s) at "
+        f"chunk_size={_EQUIV_CHUNK_SIZE}; an inter-chunk carry bug first shows "
+        f"at 3 chunks, so this grid cannot detect one. Keep a seq_len > "
+        f"{2 * _EQUIV_CHUNK_SIZE}."
+    )
+    assert 1 in chunk_counts, "grid lost its single-chunk degenerate case"
+    assert any(
+        seq_len % _EQUIV_CHUNK_SIZE for seq_len, _, _ in _EQUIV_GRID
+    ), "grid lost every length that is not a multiple of chunk_size"
 
 
 def _scan_inputs(seq_len, num_heads, head_dim, dtype, alpha_value=None, seed=0):
