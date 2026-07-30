@@ -288,9 +288,47 @@ class TestCapsuleRoutingSelfAttention:
         assert not np.any(np.isnan(ops.convert_to_numpy(output_with_mask)))
 
         # Test with 3D mask (causal mask)
-        mask_3d = keras.ops.ones((batch_size, seq_len, seq_len), dtype='bool')
-        # Create causal mask
-        mask_3d = keras.ops.tril(mask_3d)
+        #
+        # DECISION plan-2026-07-30T140922-8af1028f/D-032
+        # This causal mask is built from an `ops.arange` index comparison
+        # (`row >= col`), NOT from `keras.ops.tril`. Do NOT "simplify" it back to
+        # `keras.ops.tril(keras.ops.ones(...))` -- nor to `ops.triu`, which shares
+        # the same implementation and therefore the same trap. `ops.tril` routes
+        # through a `tf.cond` whose predicate rejects a Python bool once traced,
+        # raising `TypeError: pred must not be a Python bool` on every graph path
+        # (`tf.function`, `Model.predict`, `jit_compile=True`, `.keras`
+        # save/load), for BOTH Python-int and symbolic sizes; re-verified by
+        # execution this cycle. `src/` has zero live call sites of either op and
+        # this was the last live call anywhere in the repo.
+        #
+        # The old call here was EAGER and never traced, so it never triggered the
+        # trap: this migration is hygiene, not a bug fix. It is done anyway
+        # because the repo's standing preference is to REMOVE a raw trap rather
+        # than document an accepted exception, and because an eager fixture is
+        # exactly the shape that gets copied into a traced path later.
+        #
+        # The `arange` form is element-wise identical to what `ops.tril` produced
+        # (measured on this shape: 0 mismatches out of batch_size*seq_len**2).
+        # An `arange` comparison is used rather than `MaskFactory.create_causal_mask`
+        # because that helper returns BLOCK polarity (`True` where a position must
+        # be suppressed) and this layer wants a KEEP mask; adapting it would have
+        # added a third copy of the `logical_not(...)` block->keep adapter, and
+        # the repo currently has exactly 2.
+        row = keras.ops.arange(seq_len)[:, None]
+        col = keras.ops.arange(seq_len)[None, :]
+        mask_3d = keras.ops.broadcast_to(
+            (row >= col)[None, :, :], (batch_size, seq_len, seq_len)
+        )
+        # Pin the identity against a NumPy oracle so a future edit cannot drift
+        # the mask's meaning while keeping the NaN/shape assertions green.
+        expected_causal = np.broadcast_to(
+            np.tril(np.ones((seq_len, seq_len), dtype=bool)),
+            (batch_size, seq_len, seq_len),
+        )
+        assert np.array_equal(ops.convert_to_numpy(mask_3d), expected_causal), (
+            "the arange-built causal mask must be element-wise identical to the "
+            "lower-triangular mask ops.tril used to produce"
+        )
 
         output_with_3d_mask = layer_instance(input_tensor, attention_mask=mask_3d)
         assert output_with_3d_mask.shape == input_tensor.shape

@@ -381,6 +381,38 @@ class BaseVLMHead(keras.layers.Layer):
             # modelling surface, not a lookup, so they stay closed. See the
             # `ffn_type` docstring of `ImageCaptioningHead` for the one home of
             # the full reachability outcome.
+            #
+            # DECISION plan-2026-07-30T140922-8af1028f/D-034
+            # STILL OPEN: the training-quality impact of the D-008/D-020 rule
+            # above is UNMEASURED, and stays open pending any future VLM
+            # checkpoint. The rule changes FFN weight counts and widths for
+            # `ffn_type="swiglu"` with `use_post_fusion_ffn=True` (see the
+            # measured 55296/110592/221184 and 73728 figures above), which is
+            # ordinary reachable behaviour on this default-constructed path.
+            # Nothing measures it today only because no checkpoint exists to
+            # measure against: a repo-wide scan this cycle found 41 `.keras`
+            # files and 0 containing any VLM head class or
+            # `GatedLinearAttentionBlock`. This is the ONE home of that count;
+            # re-derive it rather than trusting it (measured 2026-07-30):
+            #
+            #   find . -name '*.keras' -not -path './.git/*' | wc -l
+            #   for f in $(find . -name '*.keras' -not -path './.git/*'); do
+            #     unzip -p "$f" config.json | grep -oE 'VLMHead|VQAHead|Image[A-Za-z]*Head|VisualGroundingHead'
+            #   done | sort -u
+            #
+            # (the second command prints nothing today).
+            #
+            # This is a DIFFERENT case from the closure recorded beside
+            # `alpha = ops.sigmoid(...)` in
+            # `layers/transformers/gated_linear_attention_block.py`, and the
+            # difference is the whole point: that one is closed UNANSWERABLE BY
+            # CONSTRUCTION, because a sigmoid makes the changed arithmetic
+            # unreachable from any model, so no checkpoint could ever exercise
+            # it. Here there is no unreachability argument at all -- this path is
+            # the default. Do NOT transfer that closure to this item. The
+            # 0-checkpoint fact is an absence of evidence with an expiry date:
+            # train or obtain one VLM head checkpoint and the question becomes
+            # answerable exactly as it stands.
             ffn_kwargs = {
                 "dropout_rate": self.task_config.dropout_rate,
                 "name": f"{self.name}_post_fusion_ffn",

@@ -1192,6 +1192,33 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         k_heads = ops.reshape(k_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
         v_heads = ops.reshape(v_conv, (batch_size, seq_len, self.num_heads, 2 * self.head_dim))
 
+        # DECISION plan-2026-07-30T140922-8af1028f/D-033
+        # THIS EXPRESSION CLOSES THE `alpha > 1` TRAINING-QUALITY QUESTION.
+        #
+        # "What is the training-quality impact of the exponent-masking fix that
+        # corrected `alpha > 1` behaviour in `_chunked_scan`?" is not merely
+        # unevidenced -- it is UNANSWERABLE BY CONSTRUCTION, and no amount of
+        # checkpoint scanning or training can change the answer.
+        #
+        # `ops.sigmoid` has range (0, 1), strictly less than 1. This line is the
+        # ONLY place `alpha` is produced on the layer's forward path: `call()`
+        # computes it here and passes it straight to `gated_linear_scan` below;
+        # the only other assignment to the name `alpha` in this module is the
+        # `ops.pad` of that same tensor inside `_chunked_scan`, which cannot make
+        # a value exceed 1. No constructor argument, `get_config` key, or public
+        # attribute of this layer feeds `alpha`. So the `alpha > 1` arithmetic is
+        # UNREACHABLE from any real model, and a training run would exercise
+        # exactly the `alpha <= 1` path the fix did not change.
+        #
+        # The fix was still correct and worth making, for a path that is NOT
+        # closed: `gated_linear_scan` is PUBLIC and takes `alpha` as an argument,
+        # so an external caller can hand it `alpha > 1` (only test code does so
+        # today -- zero `src/` callers besides the line below). The closure above
+        # applies to the LAYER path only. See `gated_linear_scan`'s docstring for
+        # what `alpha > 1` then means numerically (a growing recurrence).
+        #
+        # Do NOT reopen this as "needs a checkpoint scan" or "needs an A/B
+        # training run": neither instrument can observe an unreachable branch.
         alpha = ops.sigmoid(self.alpha_proj(inputs, training=training))
         beta = ops.sigmoid(self.beta_proj(inputs, training=training))
 
