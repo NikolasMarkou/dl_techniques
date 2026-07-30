@@ -26,6 +26,7 @@ from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+from dl_techniques.layers.ffn import assemble_ffn_config
 
 # ---------------------------------------------------------------------
 
@@ -281,11 +282,19 @@ class Qwen3(keras.Model):
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
-                    ffn_config={
+                    # DECISION plan-2026-07-30T140922-8af1028f/D-037
+                    # Same case as the `ffn_args` site below: these two keys are
+                    # THIS MODEL's conveniences, not the user's request, and
+                    # `FFNExpert` hands the dict to `create_ffn_from_config`
+                    # verbatim. Do NOT drop the `assemble_ffn_config` wrapper --
+                    # `ffn_expansion_factor` is accepted by only 6 of the 21
+                    # registry types, so without it every other `ffn_type` dies
+                    # at construction blaming a key the user never wrote.
+                    ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
                         "ffn_expansion_factor": max(1, self.moe_intermediate_size // self.hidden_size)
-                    }
+                    })
                 ),
                 gating_config=GatingConfig(
                     top_k=self.num_experts_per_tok,
@@ -313,12 +322,25 @@ class Qwen3(keras.Model):
                 'rope_theta': self.rope_theta
             }
 
-            ffn_args = {
+            # DECISION plan-2026-07-30T140922-8af1028f/D-037
+            # This dict is THIS MODEL's own generic convenience set, not an end
+            # user's explicit request, so it must be pre-filtered against the
+            # target `ffn_type` before it enters `TransformerLayer.ffn_args`.
+            # Do NOT "simplify" this back to a bare dict literal: `ffn_args` is
+            # the ONE channel `assemble_ffn_config` deliberately forwards
+            # UNFILTERED (D-017), and `create_ffn_layer` now RAISES on a key the
+            # type does not accept (D-023). `ffn_expansion_factor` is accepted by
+            # only 6 of the 21 registry types, so the bare literal made
+            # `Qwen3(ffn_type=...)` fail for 11 of the 12 types that used to
+            # work -- measured, both sides, against pristine `f013c232`.
+            # Pinned by `TestModelBuiltFFNKwargDictSweep` in
+            # `tests/test_layers/test_ffn/test_factory.py`.
+            ffn_args = assemble_ffn_config(self.ffn_type, {
                 'output_dim': self.hidden_size,
                 'ffn_expansion_factor': 4,  # Standard 4x expansion
                 'dropout_rate': self.dropout_rate,
                 'use_bias': False
-            }
+            })
 
             block = TransformerLayer(
                 hidden_size=self.hidden_size,

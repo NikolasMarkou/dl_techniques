@@ -1998,3 +1998,435 @@ class TestFormerlyDroppingConstructionSites:
         """
         ffn = self._sites[site]('differential')
         assert keras.activations.serialize(ffn.branch_activation) == 'gelu'
+
+
+# =========================================================================
+# The `ffn_args` / `ffn_config` population -- the channel the sweep above
+# structurally CANNOT see.
+# =========================================================================
+#
+# `TestFFNConstructionSiteSweep` above derives its site list from `ast.Call`
+# nodes naming `create_ffn_layer` / `create_ffn_from_config`, and builds each
+# site at its OWN default `ffn_type`. Both choices are deliberate and both are
+# blind to the defect class below:
+#
+#   * `models/qwen/qwen3.py` contains NO factory call at all. It reaches the
+#     factory through `TransformerLayer(ffn_args=...)` and through
+#     `MoEConfig(...ExpertConfig(ffn_config=...))`, so it is not in that file
+#     set and never could be.
+#   * `ffn_args` is the ONE channel `assemble_ffn_config` forwards UNFILTERED
+#     (D-017), on purpose -- it is how an end user's typo stays visible to the
+#     strict factory (D-023). A caller that builds that dict ITSELF therefore
+#     hands the factory keys nobody typed, and the raise blames the user for
+#     the model's own convenience defaults.
+#
+# That is precisely what shipped: at `3ada9cdb` `Qwen3(ffn_type='mlp')` raised
+# `create_ffn_layer('mlp'): 1 unsupported parameter(s) ['ffn_expansion_factor']`.
+# MEASURED across the full 21-type registry, HEAD vs a pristine `f013c232`
+# worktree, on `Qwen3` / `Qwen3SOM` / `Qwen3MEGA`:
+#
+#     dense block path  (`ffn_args`)  : 12 of 21 constructed -> 1 of 21
+#     MoE expert path (`ffn_config`)  :  7 of 21 constructed -> 1 of 21
+#
+# i.e. 11 of the 12 working `ffn_type` values died on three shipped model
+# families, plus 6 more on the MoE path, plus `Qwen3Next`'s MoE path.
+#
+# Derivation (re-run to reproduce; nothing here is keyed on a line number):
+#
+#     grep -rn "ffn_args=\|encoder_ffn_args=\|ffn_config=" src/ --include=*.py
+#
+# which over-reports, because most of those hits are a LAYER forwarding its own
+# `self.ffn_args` parameter downstream -- a pass-through, not a self-built dict.
+# `_derive_self_built_ffn_kwarg_sites()` below separates the two structurally.
+
+_SELF_BUILT_KWARG_NAMES = frozenset({"ffn_args", "encoder_ffn_args", "ffn_config"})
+_PREFILTER_NAME = "assemble_ffn_config"
+
+#: The site is a HAZARD when a self-built dict meets a NON-constant `ffn_type`:
+#: the dict's keys are fixed at authoring time while the type is chosen by the
+#: caller, so no set of keys can be right for every type.
+_KIND_FILTERED = "FILTERED"
+_KIND_RAW = "RAW"
+_KIND_PASSTHROUGH = "PASSTHROUGH"
+_DYNAMIC = "<dynamic>"
+
+
+def _call_name(node) -> Optional[str]:
+    """Name of the function a `ast.Call` invokes, attribute or bare."""
+    func = node.func
+    return getattr(func, "id", None) or getattr(func, "attr", None)
+
+
+def _dict_keys(node) -> Optional[List[Any]]:
+    """Constant keys of an `ast.Dict`, or ``None`` for a non-literal."""
+    if not isinstance(node, _sweep_ast.Dict):
+        return None
+    return [k.value if isinstance(k, _sweep_ast.Constant) else None
+            for k in node.keys]
+
+
+def _derive_self_built_ffn_kwarg_sites() -> List[Dict[str, Any]]:
+    """Every ``ffn_args=`` / ``ffn_config=`` argument built IN `src/`.
+
+    Derived by AST, not grep, so a pass-through (``ffn_args=self.ffn_args``)
+    is separated from a self-built dict (``ffn_args={...}``) structurally
+    rather than by pattern-guessing. For each site it records:
+
+    * ``kind`` -- ``FILTERED`` (the value is an ``assemble_ffn_config(...)``
+      call), ``RAW`` (a dict literal, directly or via a local name), or
+      ``PASSTHROUGH`` (anything else -- an attribute, a call, a ``.copy()``).
+    * ``ffn_type`` -- the constant string chosen at that call site, or
+      ``"<dynamic>"`` when it is an expression. Read from the sibling
+      ``ffn_type=`` keyword, or from the dict's own ``"type"`` entry for the
+      ``ffn_config`` form.
+    * ``keys`` -- the dict's constant keys, for ``RAW`` sites.
+
+    Only ``RAW`` sites can carry the defect; ``PASSTHROUGH`` sites hand on
+    whatever their own caller supplied and are that caller's responsibility.
+
+    :return: one record per site, sorted by (file, line).
+    :rtype: List[Dict[str, Any]]
+    """
+    rows: List[Dict[str, Any]] = []
+    for path in _SWEEP_SRC_ROOT.rglob("*.py"):
+        rel = path.relative_to(_SWEEP_SRC_ROOT).as_posix()
+        try:
+            tree = _sweep_ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - defensive
+            continue
+        # module-wide Name -> assigned values. Crude on purpose: a name bound to
+        # a dict literal ANYWHERE in the module is treated as self-built, which
+        # errs toward reporting a hazard rather than hiding one.
+        assigns: Dict[str, List[Any]] = {}
+        for node in _sweep_ast.walk(tree):
+            if (isinstance(node, _sweep_ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], _sweep_ast.Name)):
+                assigns.setdefault(node.targets[0].id, []).append(node.value)
+
+        for node in _sweep_ast.walk(tree):
+            if not isinstance(node, _sweep_ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg not in _SELF_BUILT_KWARG_NAMES:
+                    continue
+                value = kw.value
+                kind, keys, dict_node = _KIND_PASSTHROUGH, None, None
+                prefiltered_type = None
+                if (isinstance(value, _sweep_ast.Call)
+                        and _call_name(value) == _PREFILTER_NAME):
+                    kind = _KIND_FILTERED
+                    # The pre-filter's FIRST positional argument IS the ffn_type
+                    # this site targets. Read it here: a FILTERED site often has
+                    # no sibling `ffn_type=` keyword at all (the MoE
+                    # `ffn_config` form carries the type INSIDE the dict, which
+                    # is now hidden behind the call), and without this the site
+                    # would report `ffn_type=None` and drop out of
+                    # `_derive_dynamic_type_model_classes` -- silently
+                    # un-sweeping the model. MEASURED: that is exactly what
+                    # happened to `models/qwen/qwen3_next.py`.
+                    if value.args:
+                        first = value.args[0]
+                        prefiltered_type = (
+                            first.value
+                            if isinstance(first, _sweep_ast.Constant)
+                            else _DYNAMIC
+                        )
+                elif isinstance(value, _sweep_ast.Dict):
+                    kind, dict_node = _KIND_RAW, value
+                elif isinstance(value, _sweep_ast.Name):
+                    candidates = assigns.get(value.id, [])
+                    if any(isinstance(c, _sweep_ast.Call)
+                           and _call_name(c) == _PREFILTER_NAME
+                           for c in candidates):
+                        kind = _KIND_FILTERED
+                    else:
+                        literals = [c for c in candidates
+                                    if isinstance(c, _sweep_ast.Dict)]
+                        if literals:
+                            kind, dict_node = _KIND_RAW, literals[0]
+                if dict_node is not None:
+                    keys = _dict_keys(dict_node)
+
+                ffn_type = prefiltered_type
+                for sibling in node.keywords:
+                    if sibling.arg == "ffn_type":
+                        ffn_type = (
+                            sibling.value.value
+                            if isinstance(sibling.value, _sweep_ast.Constant)
+                            else _DYNAMIC
+                        )
+                if dict_node is not None and keys and "type" in keys:
+                    for k, v in zip(dict_node.keys, dict_node.values):
+                        if isinstance(k, _sweep_ast.Constant) and k.value == "type":
+                            ffn_type = (v.value
+                                        if isinstance(v, _sweep_ast.Constant)
+                                        else _DYNAMIC)
+
+                rows.append({
+                    "file": rel,
+                    "line": node.lineno,
+                    "kwarg": kw.arg,
+                    "kind": kind,
+                    "ffn_type": ffn_type,
+                    "keys": keys,
+                })
+    return sorted(rows, key=lambda r: (r["file"], r["line"]))
+
+
+#: Minimal construction kwargs for each model class that owns a self-built FFN
+#: kwarg dict AND exposes a caller-settable `ffn_type`. The CLASS SET is derived
+#: (`_derive_dynamic_type_model_classes`); only "how do I instantiate this
+#: cheaply" is hand-written, because that cannot be derived. A new model with
+#: the same shape therefore fails `test_every_dynamic_type_model_has_a_recipe`
+#: loudly instead of shipping the regression again.
+#:
+#: Two variants per class where the two paths differ: the dense block path feeds
+#: `TransformerLayer(ffn_args=...)`, the MoE path feeds
+#: `ExpertConfig(ffn_config=...)`. Only the second was ever exercised by
+#: `Qwen3Next`, and neither was exercised by any test at `3ada9cdb`:
+#: `grep -rn ffn_type tests/test_models/test_qwen/` returns 2 hits, both inside
+#: a `get_config()` key list.
+_MODEL_FFN_RECIPES: Dict[str, List[Dict[str, Any]]] = {
+    "Qwen3": [
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
+         "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
+         "moe_intermediate_size": 64},
+    ],
+    "Qwen3SOM": [
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
+         "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
+         "moe_intermediate_size": 64},
+    ],
+    "Qwen3MEGA": [
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
+         "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
+         "moe_intermediate_size": 64},
+    ],
+    "Qwen3Next": [
+        # `num_experts > 1` is the MoE trigger here and its default is 64, so
+        # this single recipe already exercises the `ffn_config` path.
+        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
+         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
+         "num_experts": 2, "num_experts_per_tok": 1,
+         "moe_intermediate_size": 64},
+    ],
+}
+
+
+def _derive_dynamic_type_model_classes() -> Dict[str, Any]:
+    """Model classes owning a self-built FFN kwarg dict at a dynamic `ffn_type`.
+
+    Derived: take every site whose ``kind`` is ``RAW`` or ``FILTERED`` with
+    ``ffn_type == "<dynamic>"`` in a module under ``models/``, import that
+    module, and collect the ``keras.Model`` subclasses DEFINED there that take
+    an ``ffn_type`` constructor parameter.
+
+    :return: class name -> class object.
+    :rtype: Dict[str, Any]
+    """
+    import importlib
+    import inspect
+
+    modules = {
+        row["file"] for row in _derive_self_built_ffn_kwarg_sites()
+        if row["file"].startswith("models/")
+        and row["kind"] in (_KIND_RAW, _KIND_FILTERED)
+        and row["ffn_type"] == _DYNAMIC
+    }
+    found: Dict[str, Any] = {}
+    for rel in sorted(modules):
+        dotted = "dl_techniques." + rel[:-len(".py")].replace("/", ".")
+        module = importlib.import_module(dotted)
+        for name, obj in vars(module).items():
+            if (inspect.isclass(obj) and issubclass(obj, keras.Model)
+                    and obj.__module__ == dotted
+                    and "ffn_type" in inspect.signature(obj.__init__).parameters):
+                found[name] = obj
+    return found
+
+
+class TestModelBuiltFFNKwargDictSweep:
+    """A MODEL that builds its own FFN kwarg dict must pre-filter it.
+
+    This is the population `TestFFNConstructionSiteSweep` cannot reach, and the
+    one the strictness flip (D-023) actually broke. Two halves, because either
+    alone is defeatable:
+
+    * a STATIC rule over every self-built site in `src/` -- catches a new site
+      the moment it is written, including in a model this file never imports;
+    * an EXECUTED 21-type sweep over the model classes that own one -- catches
+      the case where the static rule is satisfied in form (a pre-filter is
+      called) but the wrong dict is filtered.
+    """
+
+    def test_the_derivation_is_not_blind(self) -> None:
+        """Anti-vacuity floor: the AST walk must actually find sites.
+
+        A silently-empty walk -- a renamed kwarg, a moved `src/` root, a
+        `SyntaxError` swallowed by the `except` -- would make every assertion
+        below pass over an empty set, forever.
+        """
+        rows = _derive_self_built_ffn_kwarg_sites()
+        assert len(rows) >= 15, (
+            f"only {len(rows)} `ffn_args=`/`ffn_config=` sites found under "
+            f"{_SWEEP_SRC_ROOT}; the walk is blind"
+        )
+        kinds = {row["kind"] for row in rows}
+        assert kinds >= {_KIND_RAW, _KIND_FILTERED, _KIND_PASSTHROUGH}, (
+            f"the walk found only {sorted(kinds)}; it is no longer "
+            f"distinguishing self-built dicts from pass-throughs, so the "
+            f"hazard rule below cannot fire"
+        )
+        files = {row["file"] for row in rows}
+        assert "models/qwen/qwen3.py" in files, (
+            "the known-defective site `models/qwen/qwen3.py` is not in the "
+            "derived inventory; the walk no longer covers the regression it "
+            "was written for"
+        )
+
+    def test_no_raw_self_built_dict_meets_a_dynamic_ffn_type(self) -> None:
+        """THE RULE. A fixed key set cannot be right for a caller-chosen type.
+
+        # DECISION plan-2026-07-30T140922-8af1028f/D-037
+        Do NOT relax this to "warn". It is the ONLY instrument in the repo that
+        sees a caller reaching `create_ffn_layer` WITHOUT calling it, and its
+        absence is exactly why `Qwen3(ffn_type='mlp')` shipped broken.
+        """
+        hazards = [
+            row for row in _derive_self_built_ffn_kwarg_sites()
+            if row["kind"] == _KIND_RAW and row["ffn_type"] == _DYNAMIC
+        ]
+        assert not hazards, (
+            "self-built FFN kwarg dict handed to a CALLER-CHOSEN `ffn_type`:\n"
+            + "\n".join(
+                f"  {r['file']}:{r['line']} {r['kwarg']}={{{', '.join(map(str, r['keys'] or []))}}}"
+                for r in hazards
+            )
+            + "\n\nThese keys are the MODEL's own conveniences, not a user's "
+              "request, so wrap the dict in `assemble_ffn_config(<ffn_type>, "
+              "{...})`. Leaving it raw sends them down the deliberately "
+              "UNFILTERED `ffn_args` channel (D-017), where the strict factory "
+              "(D-023) raises and blames the user for a key the model injected."
+        )
+
+    def test_every_constant_type_site_passes_only_keys_that_type_accepts(
+            self) -> None:
+        """A raw dict is fine when the site also pins `ffn_type` to a literal.
+
+        Those sites (`models/clip/model.py` -> `swiglu`,
+        `models/modern_bert/*` -> `geglu`) are checked against that exact
+        type's registry entry instead, which is the strongest statement
+        available without constructing the whole model.
+        """
+        offenders = []
+        for row in _derive_self_built_ffn_kwarg_sites():
+            if row["kind"] != _KIND_RAW or row["ffn_type"] in (None, _DYNAMIC):
+                continue
+            info = FFN_REGISTRY.get(row["ffn_type"])
+            assert info is not None, (
+                f"{row['file']}:{row['line']} names unregistered ffn_type "
+                f"{row['ffn_type']!r}"
+            )
+            accepted = (set(info["required_params"])
+                        | set(info["optional_params"])
+                        | {"type", "name"})
+            unsupported = sorted(set(row["keys"] or []) - accepted)
+            if unsupported:
+                offenders.append((row, unsupported))
+        assert not offenders, "\n".join(
+            f"{r['file']}:{r['line']} passes {bad} which "
+            f"{r['ffn_type']!r} does not accept"
+            for r, bad in offenders
+        )
+
+    def test_every_dynamic_type_model_has_a_recipe(self) -> None:
+        """A NEW model with this shape must fail here, not in production."""
+        derived = set(_derive_dynamic_type_model_classes())
+        assert derived == set(_MODEL_FFN_RECIPES), (
+            f"derived model classes {sorted(derived)} != recipes "
+            f"{sorted(_MODEL_FFN_RECIPES)}. Add a construction recipe to "
+            f"`_MODEL_FFN_RECIPES` (or remove a stale one) so the executed "
+            f"sweep below actually covers it."
+        )
+
+    @pytest.mark.parametrize("class_name", sorted(_MODEL_FFN_RECIPES))
+    def test_model_constructs_across_the_whole_registry(
+            self, class_name) -> None:
+        """EXECUTED: no registry type may fail with the strictness message.
+
+        Types that fail for a DIFFERENT reason (a required parameter the model
+        has no value for, e.g. `kan`'s `features`) were already loud before the
+        flip and are deliberately tolerated -- `_strictness_break` returns
+        `None` for them. The anti-vacuity floor is
+        `test_the_sweep_actually_builds_something`.
+
+        THE FORWARD PASS IS HONESTLY NOT YET LOAD-BEARING, and that is recorded
+        rather than dressed up. It was added on the theory that `MoELayer`
+        builds its `FFNExpert`s lazily and so would need data to flow; MEASURED
+        against an injected raw `ffn_config` in `models/qwen/qwen3.py`, the
+        `Qwen3` MoE path in fact raises at CONSTRUCTION, so a construction-only
+        sweep catches every site that exists today. The `model(x)` call is kept
+        anyway, at ~95s of the ~140s runtime, because "it builds" and "it runs"
+        are different claims and the whole subject of this class is a sweep that
+        was green over the wrong population. If a future site creates its FFN in
+        `build()`, this is what will see it.
+        """
+        cls = _derive_dynamic_type_model_classes()[class_name]
+        tokens = np.ones((1, 4), dtype="int32")
+        broken = []
+        for recipe in _MODEL_FFN_RECIPES[class_name]:
+            for ffn_type in sorted(FFN_REGISTRY):
+                def _build(t=ffn_type, r=recipe):
+                    return cls(ffn_type=t, **r)(tokens)
+
+                message = _strictness_break(_build)
+                if message is not None:
+                    broken.append((ffn_type, sorted(recipe), message))
+        assert not broken, (
+            f"{class_name} newly fails the strict factory for "
+            f"{len(broken)} (ffn_type, recipe) cells:\n"
+            + "\n".join(f"  {t}: {m}" for t, _, m in broken[:5])
+        )
+
+    @pytest.mark.parametrize("class_name", sorted(_MODEL_FFN_RECIPES))
+    def test_the_sweep_actually_builds_something(self, class_name) -> None:
+        """Anti-vacuity: `test_model_constructs_...` passes on a dead model.
+
+        `_strictness_break` returns `None` for ANY non-strictness exception, so
+        a model that raised on every single type -- a broken import, a renamed
+        constructor argument, a forward pass that never reaches an FFN --
+        would report zero breaks and look green. Pin that the default `swiglu`
+        really constructs AND really runs, on every recipe.
+        """
+        cls = _derive_dynamic_type_model_classes()[class_name]
+        tokens = np.ones((1, 4), dtype="int32")
+        for recipe in _MODEL_FFN_RECIPES[class_name]:
+            model = cls(ffn_type="swiglu", **recipe)
+            assert model(tokens) is not None
+
+    def test_a_genuine_end_user_ffn_args_typo_still_raises(self) -> None:
+        """The fix must NOT have re-armed the silent drop it replaced.
+
+        The model now pre-filters its OWN dict, but `TransformerLayer.ffn_args`
+        remains the unfiltered end-user channel (D-017). A user's typo must
+        still reach the factory and raise, naming the key.
+        """
+        from dl_techniques.layers.transformers import TransformerLayer
+
+        with pytest.raises(ValueError) as excinfo:
+            TransformerLayer(
+                hidden_size=32, num_heads=4, intermediate_size=64,
+                ffn_type='mlp', ffn_args={'hiden_dim': 512},
+            )
+        assert 'hiden_dim' in str(excinfo.value)
+        assert STRICT_DROPPED_KEY_MARKER in str(excinfo.value)

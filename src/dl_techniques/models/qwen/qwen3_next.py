@@ -20,6 +20,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+from dl_techniques.layers.ffn import assemble_ffn_config
 
 from .components import Qwen3NextBlock
 
@@ -264,11 +265,17 @@ class Qwen3Next(keras.Model):
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
-                    ffn_config={
+                    # DECISION plan-2026-07-30T140922-8af1028f/D-037
+                    # Model-owned conveniences, pre-filtered against `ffn_type`.
+                    # Do NOT unwrap: `FFNExpert` forwards this dict to
+                    # `create_ffn_from_config` verbatim and the factory RAISES on
+                    # a key the type does not accept. Full reasoning at the twin
+                    # anchor in `models/qwen/qwen3.py`.
+                    ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
                         "ffn_expansion_factor": max(1, self.moe_intermediate_size // self.hidden_size)
-                    }
+                    })
                 ),
                 gating_config=GatingConfig(
                     top_k=self.num_experts_per_tok,

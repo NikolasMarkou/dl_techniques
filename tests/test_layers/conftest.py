@@ -122,16 +122,30 @@ def _tf32_leak_canary():
     restore-safe: `tf32_disabled` above and the self-contained toggle in
     `test_gated_linear_attention_block.py`. A new unrestored mutation anywhere
     under `tests/test_layers/` is exactly what this is meant to turn RED.
+
+    # DECISION plan-2026-07-30T140922-8af1028f/D-038
+    The canary asserts against the EXPECTED value for the current scope; it does
+    NOT skip while a module has TF32 scoped off. Do NOT "simplify" this back to
+    `if not _TF32_SCOPED_OFF: assert ...` -- that shape disabled the canary for
+    the entire duration of every opted-in module, i.e. it was inert in exactly
+    the four files that manipulate TF32, which are the only files where a leak
+    can originate. A test inside `test_energy_transformer.py` that enabled TF32
+    without restoring would then run the remaining ~160 tests of that module in
+    the wrong regime, green, and `tf32_disabled`'s own teardown would repair the
+    damage silently (it writes `previous` back unconditionally, so its
+    `== previous` assertion cannot see it either).
     """
-    if not _TF32_SCOPED_OFF:
-        assert (
-            tf.config.experimental.tensor_float_32_execution_enabled()
-            == _TF32_SESSION_BASELINE
-        ), (
-            "TF32 leaked: the process-global tensor-float-32 setting is "
-            f"{tf.config.experimental.tensor_float_32_execution_enabled()} at the "
-            f"start of this test but was {_TF32_SESSION_BASELINE} at session start. "
-            "Some module mutated it without restoring; every float32 tolerance that "
-            "runs after it now depends on collection order."
-        )
+    expected = False if _TF32_SCOPED_OFF else _TF32_SESSION_BASELINE
+    actual = tf.config.experimental.tensor_float_32_execution_enabled()
+    scope = (
+        "this module has TF32 scoped OFF via the `tf32_disabled` fixture"
+        if _TF32_SCOPED_OFF
+        else f"TF32 was {_TF32_SESSION_BASELINE} at session start"
+    )
+    assert actual == expected, (
+        f"TF32 leaked: the process-global tensor-float-32 setting is {actual} "
+        f"at the start of this test, but {scope}, so it should be {expected}. "
+        "Some test or module mutated it without restoring; every float32 "
+        "tolerance that runs after it now depends on execution order."
+    )
     yield

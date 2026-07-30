@@ -31,6 +31,7 @@ from dl_techniques.layers.memory.mann import MannLayer
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+from dl_techniques.layers.ffn import assemble_ffn_config
 from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetworkLayer
 
 # ---------------------------------------------------------------------
@@ -546,13 +547,19 @@ class Qwen3MEGA(keras.Model):
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
-                    ffn_config={
+                    # DECISION plan-2026-07-30T140922-8af1028f/D-037
+                    # Model-owned conveniences, pre-filtered against `ffn_type`.
+                    # Do NOT unwrap: `FFNExpert` forwards this dict to
+                    # `create_ffn_from_config` verbatim and the factory RAISES on
+                    # a key the type does not accept. Full reasoning at the twin
+                    # anchor in `models/qwen/qwen3.py`.
+                    ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
                         "ffn_expansion_factor": max(
                             1, self.moe_intermediate_size // self.hidden_size
                         )
-                    }
+                    })
                 ),
                 gating_config=GatingConfig(
                     top_k=self.num_experts_per_tok,
@@ -584,12 +591,18 @@ class Qwen3MEGA(keras.Model):
                 'rope_theta': self.rope_theta
             }
 
-            ffn_args = {
+            # DECISION plan-2026-07-30T140922-8af1028f/D-037
+            # Model-owned conveniences, pre-filtered against `ffn_type` before
+            # they enter the deliberately-UNFILTERED `ffn_args` channel. Do NOT
+            # revert this to a bare dict literal -- that made 11 of the 12
+            # previously-working `ffn_type` values raise. Full reasoning at the
+            # twin anchor in `models/qwen/qwen3.py`.
+            ffn_args = assemble_ffn_config(self.ffn_type, {
                 'output_dim': self.hidden_size,
                 'ffn_expansion_factor': 4,
                 'dropout_rate': self.dropout_rate,
                 'use_bias': False
-            }
+            })
 
             block = TransformerLayer(
                 hidden_size=self.hidden_size,

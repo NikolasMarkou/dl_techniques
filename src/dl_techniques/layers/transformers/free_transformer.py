@@ -389,11 +389,20 @@ class FreeTransformerLayer(TransformerLayer):
         # (site, ffn_type) pairs in the repo that armed the drop. A strict factory
         # would break this site at 12 of 21 ffn_types.
         #
-        # NOTE, as at the GLA site: this pre-filter does NOT protect the caller's
-        # own `encoder_ffn_args`. `create_ffn_layer` applies the same signature
-        # intersection again and cannot tell an explicit caller key from one of our
-        # defaults, so a misspelled `encoder_ffn_args` key is still dropped -- now
-        # with a `logger.warning` naming it, which is what the guard pins.
+        # NOTE, as at the GLA site: this pre-filter deliberately does NOT cover the
+        # caller's own `encoder_ffn_args`, which is merged AFTER it and reaches
+        # `create_ffn_layer` verbatim -- that factory RAISES on a key the type does
+        # not accept (D-023), which is exactly how a misspelled `encoder_ffn_args`
+        # key becomes findable. Filtering it here would silently swallow the typo
+        # again. The narrow `set(kwargs) - valid_param_names` predicate in
+        # `layers/ffn/factory.py` is what tells an explicit caller key apart from
+        # one of our defaults; the two are NOT indistinguishable.
+        #
+        # The dict-comprehension pre-filter below is a hand-rolled copy of
+        # `layers/ffn/factory.py::assemble_ffn_config`, kept here (as at the GLA
+        # site) because both already measure 0 dropped keys across all 21 registry
+        # types, so migrating is pure de-duplication with no behaviour to fix.
+        # Named as a follow-up at step 4, not an accepted permanent divergence.
         encoder_ffn_config = {
             'hidden_dim': self.intermediate_size,
             'output_dim': self.hidden_size,

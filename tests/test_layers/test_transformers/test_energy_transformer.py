@@ -180,7 +180,11 @@ def reassociation_atol(reduction_lengths, num_steps: int, scale: float) -> float
            atol = 8 * sqrt(2 * num_steps * sum(L)) * u * max(1, max|output|)
 
     Calibration (measured 2026-07-30, CPU-only, `CUDA_VISIBLE_DEVICES=""`, TF32 disabled by
-    this module's import-time toggle). DERIVED FIRST, then checked — the formula and the
+    this module's `pytestmark = pytest.mark.usefixtures("tf32_disabled")` opt-in near the
+    top of the file — the numbers below were taken at step 7 under the import-time toggle
+    that opt-in REPLACED at step 10; the toggle is gone, the regime it produced is not, and
+    the assertions stayed green across the swap). DERIVED FIRST, then
+    checked — the formula and the
     8-sigma factor were fixed before any of these numbers were read, and none was tuned
     afterwards:
 
@@ -212,8 +216,13 @@ def reassociation_atol(reduction_lengths, num_steps: int, scale: float) -> float
     to 10 bits, i.e. one TF32 ulp is ``2**-11 = 4.88e-04``, ~4100x larger, so under TF32 the
     reassociation noise would exceed this bound and these assertions would need to be
     restated in TF32 ulps (the `_TF32_ULP` pattern at
-    `test_gated_linear_attention_block.py:1298`). That is exactly why this module disables
-    TF32 at import time — do NOT remove that toggle without re-deriving here. Verified
+    `test_gated_linear_attention_block.py:1298`). That is exactly why this module opts into
+    the shared `tf32_disabled` fixture via the module-level `pytestmark` above — do NOT
+    remove that `pytestmark` without re-deriving here. (Until step 10 the mechanism was a
+    bare `enable_tensor_float_32_execution(False)` at import time, which was PROCESS-GLOBAL
+    and never restored: it silently changed the regime of every module collected after this
+    one. The `pytestmark` opt-in is the same regime, scoped and restored, and
+    `test_this_module_really_runs_with_tf32_disabled` is its anti-vacuity guard.) Verified
     2026-07-30 in three regimes, all CPU-only: file alone (168 passed), co-collected behind
     `test_linear_attention.py` (208 passed), and with TF32 force-ENABLED after collection
     (168 passed, all four measured diffs bit-identical). The third is a WEAK check and is

@@ -410,10 +410,18 @@ def test_the_guard_has_subjects():
 
 @pytest.mark.parametrize("factory,type_name,target,info", ENTRIES, ids=IDS)
 def test_registry_declares_every_constructor_param(factory, type_name, target, info):
-    """MISSING drift: a ctor param absent from the registry is SILENTLY DROPPED by create_*.
+    """MISSING drift: a ctor param absent from the registry is DROPPED by create_*.
 
-    This is the bug. Nothing raises -- the caller's value is filtered out and the class
-    default is used instead.
+    This is the bug. The caller's value is filtered out and the class default is used
+    instead.
+
+    The FAILURE MODE is factory-specific, and saying only "silently" is no longer
+    accurate for the whole set this test parametrizes: `create_ffn_layer` RAISES on a
+    caller key it cannot place (`layers/ffn/factory.py`, the `STRICT_DROPPED_KEY_MARKER`
+    predicate), so for the `ffn` family the drift surfaces as a loud construction failure
+    at a parameter the class genuinely accepts. The other families still drop the value
+    without raising, which is where "silently" still applies. Either way the registry is
+    wrong and this test is what says so.
     """
     signature = _signature_params(target)
     declared = set(info.get("required_params", [])) | set(
