@@ -1276,3 +1276,101 @@ class TestMultiTaskHeterogeneousSignatures:
         accepted = _accepted_constructor_kwargs(VisualGroundingHead)
         assert "fusion_strategy" in accepted, "inherited BaseVLMHead args missed"
         assert "normalization_type" in accepted
+
+
+# ---------------------------------------------------------------------
+# The post-fusion `hidden_dim` rule (one rule, both sites).
+#
+# `BaseVLMHead._build_common_layers` used to pass `hidden_dim` to
+# `create_ffn_layer` UNCONDITIONALLY while `ImageCaptioningHead` passed it only
+# to types whose registry entry requires it. Two contradictory rules for the
+# same question in one file, and the unconditional one silently overrode the
+# internal width derivation of every type that treats `hidden_dim` as optional.
+# ---------------------------------------------------------------------
+
+
+class TestPostFusionFFNHiddenDimRule:
+    """`hidden_dim` reaches the FFN factory only when the type requires it."""
+
+    @staticmethod
+    def _itm(ffn_type: str, expansion: int):
+        head = ImageTextMatchingHead(
+            task_config=_family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+            vision_dim=_FAMILY_DIM,
+            text_dim=_FAMILY_DIM,
+            use_post_fusion_ffn=True,
+            ffn_type=ffn_type,
+            ffn_expansion_factor=expansion,
+        )
+        payload = _family_payload()
+        head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        return head
+
+    @staticmethod
+    def _ffn_params(head) -> int:
+        return int(sum(int(np.prod(w.shape)) for w in head.post_fusion_ffn.weights))
+
+    def test_swiglu_width_is_invariant_to_ffn_expansion_factor(self) -> None:
+        """An optional-`hidden_dim` type must keep deriving its own width.
+
+        This is the OVER-FIX guard. `swiglu` lists only `output_dim` as
+        required and derives its hidden width internally (2/3 rule, rounded to
+        `ffn_multiple_of`). Passing `hidden_dim` unconditionally overrides that,
+        which makes the parameter count track `ffn_expansion_factor`. Measured
+        before the fix: 55296 / 110592 / 221184 at factor 2 / 4 / 8. After it,
+        all three must be equal.
+
+        Reverting `_build_common_layers` to an unconditional `hidden_dim=` kwarg
+        fails HERE, on this assertion.
+        """
+        assert "hidden_dim" not in FFN_REGISTRY["swiglu"]["required_params"], (
+            "premise changed: swiglu now REQUIRES hidden_dim, so this guard no "
+            "longer tests what it claims"
+        )
+        counts = {f: self._ffn_params(self._itm("swiglu", f)) for f in (2, 4, 8)}
+        assert len(set(counts.values())) == 1, (
+            f"swiglu's post-fusion width tracks ffn_expansion_factor {counts} — "
+            f"`hidden_dim` is being passed to a type that derives it internally"
+        )
+
+    def test_mlp_width_still_tracks_ffn_expansion_factor(self) -> None:
+        """The conditional must NOT stop feeding types that DO require it.
+
+        Reverting the fix in the other direction -- dropping the kwarg entirely
+        -- either raises "Required parameters missing for mlp: ['hidden_dim']"
+        or silently stops honouring `ffn_expansion_factor`. Either way this
+        fails, so the guard pins both directions together with the one above.
+        """
+        assert "hidden_dim" in FFN_REGISTRY["mlp"]["required_params"]
+        counts = {f: self._ffn_params(self._itm("mlp", f)) for f in (2, 4, 8)}
+        assert len(set(counts.values())) == 3, (
+            f"mlp's post-fusion width no longer responds to "
+            f"ffn_expansion_factor {counts} — the required kwarg stopped flowing"
+        )
+        # 96*factor hidden units, two kernels + two biases.
+        assert counts[4] == 74208, f"expected the measured baseline, got {counts[4]}"
+
+    def test_both_ffn_sites_use_the_same_predicate(self) -> None:
+        """Guards the seam itself, not just one side of it.
+
+        `ImageCaptioningHead` and `BaseVLMHead` must agree. If either site
+        reverts to an unconditional kwarg, the two heads disagree about swiglu's
+        width inside a single wrapper -- the originally measured symptom was
+        captioning FFN hidden_dim=256 vs matching hidden_dim=192.
+        """
+        cap = ImageCaptioningHead(
+            task_config=_family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
+            vision_dim=_FAMILY_DIM, text_dim=_FAMILY_DIM,
+            ffn_type="swiglu", ffn_expansion_factor=4, num_layers=1,
+        )
+        payload = _family_payload()
+        cap({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        cap_hidden = int(cap.ffn_layers[0].hidden_dim)
+
+        itm = self._itm("swiglu", 4)
+        itm_hidden = int(itm.post_fusion_ffn.hidden_dim)
+
+        assert cap_hidden == itm_hidden, (
+            f"the two FFN construction sites disagree on swiglu's derived "
+            f"hidden width: captioning={cap_hidden}, matching={itm_hidden}"
+        )

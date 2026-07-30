@@ -237,13 +237,36 @@ class BaseVLMHead(keras.layers.Layer):
         )
 
         if self.use_post_fusion_ffn:
-            self.post_fusion_ffn = create_ffn_layer(
-                self.ffn_type,
-                hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
-                output_dim=self.hidden_dim,
-                dropout_rate=self.task_config.dropout_rate,
-                name=f"{self.name}_post_fusion_ffn",
-            )
+            # DECISION plan-2026-07-30T081929-1645aa52/D-008
+            # Supply `hidden_dim` only to FFN types that REQUIRE it, matching
+            # `ImageCaptioningHead` (see the longer note at its own FFN site).
+            # This site used to pass it UNCONDITIONALLY while that one passed it
+            # conditionally -- two contradictory rules for the same question in
+            # one file. The unconditional form silently OVERRIDES the internal
+            # width derivation of any type that lists `hidden_dim` as optional:
+            # measured on `ImageTextMatchingHead` with `ffn_type="swiglu"`, the
+            # post-fusion FFN's parameter count tracked `ffn_expansion_factor`
+            # (55296 / 110592 / 221184 at factor 2 / 4 / 8) instead of staying
+            # invariant, because swiglu derives its own hidden width by the 2/3
+            # rule and had that derivation overwritten.
+            #
+            # The DEFAULT path is unaffected: `ffn_type` defaults to "mlp" here,
+            # and `mlp` lists `hidden_dim` as required, so the conditional makes
+            # the identical call. Do NOT "simplify" this back to an
+            # unconditional kwarg -- the swiglu parameter-count invariance test
+            # is what fails when you do.
+            ffn_kwargs = {
+                "output_dim": self.hidden_dim,
+                "dropout_rate": self.task_config.dropout_rate,
+                "name": f"{self.name}_post_fusion_ffn",
+            }
+            if "hidden_dim" in FFN_REGISTRY.get(self.ffn_type, {}).get(
+                "required_params", ()
+            ):
+                ffn_kwargs["hidden_dim"] = (
+                    self.hidden_dim * self.ffn_expansion_factor
+                )
+            self.post_fusion_ffn = create_ffn_layer(self.ffn_type, **ffn_kwargs)
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
         """Builds the layer.
