@@ -198,30 +198,82 @@ class TestGatedLinearAttentionBlock:
     # ===============================================
     # 2b. max_seq_len Overflow Guard
     # ===============================================
-    def test_sequential_scan_raises_on_static_seq_len(self):
-        """The guard belongs to `_sequential_scan`, the branch that truncates.
+    def test_neither_branch_truncates_past_max_seq_len(self):
+        """`max_seq_len` must not truncate EITHER branch. It is advisory only.
 
-        Regression for the probed defect: `max_seq_len=4` on a `(1, 10, 16)`
-        input returned the CORRECT shape with timesteps 4-9 silently all-zero,
-        because `ops.while_loop(..., maximum_iterations=max_seq_len)` capped the
-        loop while the output buffer stayed zero-initialized. No exception, no
-        warning.
+        History, because this test has now been rewritten twice and the reason
+        matters:
 
-        This test used to drive `layer(...)` and `layer.build(...)`. Those sites
-        no longer raise ON PURPOSE (D-010): a static length is dispatched to
-        `_chunked_scan`, whose loop is bounded by the chunk count and is correct
-        past `max_seq_len` -- so raising there rejected the path that works.
-        The truncation is real only here, so the guard is asserted here.
+        1. Originally it asserted that `build()`/`call()` RAISE on a static length
+           over `max_seq_len` -- correct at the time, because `_sequential_scan`
+           ran under `maximum_iterations=max_seq_len` and returned zeros past the
+           cap.
+        2. D-010 moved that raise into `_sequential_scan`, on the grounds that the
+           chunked branch does not truncate. That was true but insufficient: with
+           `keras.Input(shape=(None, dim))` TF eventually relaxes the trace
+           signature and dispatches to the SEQUENTIAL branch with a symbolic
+           length, where a static guard cannot fire. Measured at that revision:
+           `max_seq_len=8` returned **52 of 60 timesteps all-zero**, silently.
+        3. D-018 removed the truncation itself -- `maximum_iterations=seq_len` --
+           so there is nothing to guard on either branch, and the raise was
+           deleted rather than relocated again.
 
-        The match pattern names both concrete numbers, so an unrelated
-        `ValueError` (e.g. a shape or dtype complaint) cannot satisfy it.
+        Restoring `maximum_iterations=self.max_seq_len` fails this test.
         """
-        layer = GatedLinearAttentionBlock(dim=16, num_heads=2, max_seq_len=4)
-        args = _scan_inputs(10, 2, 8, "float32", seed=7)
-        with pytest.raises(
-            ValueError, match=r"Sequence length \(10\) exceeds max_seq_len \(4\)"
-        ):
-            layer._sequential_scan(*args)
+        seq_len, max_seq_len = 40, 8
+        num_heads, head_dim = 2, 4
+        with global_dtype_policy("float64"):
+            args = _scan_inputs(seq_len, num_heads, head_dim, "float64", seed=91)
+            oracle = numpy_gated_linear_recurrence(
+                *[keras.ops.convert_to_numpy(a) for a in args]
+            )
+            tight = GatedLinearAttentionBlock(
+                dim=num_heads * head_dim, num_heads=num_heads, head_dim=head_dim,
+                max_seq_len=max_seq_len, chunk_size=64,
+            )
+            roomy = GatedLinearAttentionBlock(
+                dim=num_heads * head_dim, num_heads=num_heads, head_dim=head_dim,
+                max_seq_len=1024, chunk_size=64,
+            )
+            seq_tight = keras.ops.convert_to_numpy(tight._sequential_scan(*args))
+            seq_roomy = keras.ops.convert_to_numpy(roomy._sequential_scan(*args))
+            chunked = keras.ops.convert_to_numpy(
+                tight._chunked_scan(*args, seq_len)
+            )
+
+        # The declared cap must not change the answer at all.
+        assert np.array_equal(seq_tight, seq_roomy), (
+            f"max_seq_len changed the sequential result: max|diff|="
+            f"{float(np.abs(seq_tight - seq_roomy).max()):.3e}. It is advisory and "
+            f"must not affect the computation."
+        )
+        for label, got in (("sequential", seq_tight), ("chunked", chunked)):
+            err = float(np.abs(got - oracle).max())
+            assert err <= 1e-10, (
+                f"{label} branch disagrees with the NumPy oracle past "
+                f"max_seq_len={max_seq_len}: max|diff|={err:.3e}"
+            )
+            per_step = np.max(np.abs(got), axis=(0, 2, 3))
+            assert np.all(per_step > 0.0), (
+                f"{label} branch returned dead timesteps past "
+                f"max_seq_len={max_seq_len} — it is still truncating: {per_step}"
+            )
+
+    def test_exceeding_declared_max_seq_len_warns_but_does_not_raise(self, caplog):
+        """The advisory replaces the raise: a warning, and a correct answer."""
+        import logging
+        layer = GatedLinearAttentionBlock(
+            dim=16, num_heads=2, max_seq_len=4, chunk_size=64
+        )
+        with caplog.at_level(logging.WARNING):
+            layer.build((1, 10, 16))
+        assert any(
+            "exceeds the declared max_seq_len" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "building at seq_len=10 with max_seq_len=4 produced no advisory "
+            f"warning; got {[r.getMessage()[:60] for r in caplog.records]}"
+        )
 
     def test_chunked_path_is_correct_past_max_seq_len(self):
         """`call()` at seq_len > max_seq_len must now WORK, not raise.
@@ -1377,57 +1429,139 @@ _EQUIV_GRID = [
 
 _EQUIV_CHUNK_SIZE = 64
 
+# (label, alpha_value) -- `None` means `_scan_inputs`' default random draw.
+#
+# The near-1 regime is LOAD-BEARING, not a nicety. At the default
+# `alpha ~ U(0.05, 0.95)` the per-chunk carry factor is ~1.8e-26, so the
+# inter-chunk state contribution is numerically zero and every carry bug is
+# invisible regardless of sequence length. At alpha=0.97 the factor is ~0.14, so
+# the carry actually reaches the next chunk and can be checked.
+# (label, alpha_value, alpha_range)
+_ALPHA_REGIMES = [
+    ("mixed", None, None),
+    # RANDOM near-one, not constant. Two independent reasons this band is needed:
+    #   * carry ALIVE: exp(64*log(~0.95)) is ~1e-1..1e-2, versus ~1.8e-26 at the
+    #     default draw -- so the inter-chunk state actually reaches the next chunk
+    #     and a DROPPED carry is visible;
+    #   * carry VARYING per chunk -- so a MIS-INDEXED carry (`[:, :, 0]` for
+    #     `[:, :, c]`) is visible too. A constant alpha makes those two
+    #     expressions bit-identical and is blind to that bug by construction.
+    ("near_one_random", None, (0.90, 0.99)),
+]
 
-def test_equiv_grid_can_detect_an_inter_chunk_carry_bug():
-    """The equivalence grid must retain a >=3-chunk case, or it proves nothing.
 
-    A "no silent caps" guard on the grid itself. Every cell below 3 chunks is
-    arithmetically incapable of detecting a dropped inter-chunk carry decay (see
-    the note above), so a grid consisting only of short lengths would be fully
-    green against that bug. This fails if a future edit trims 257 away.
+def test_equiv_grid_covers_a_regime_where_the_inter_chunk_carry_MATTERS():
+    """The grid must contain a case whose inter-chunk carry is numerically alive.
+
+    A "no silent caps" guard on the grid itself, and the harder half of it is the
+    GATE VALUE, not the sequence length.
+
+    An earlier version of this test asserted only `max(chunk_counts) >= 3` and was
+    named "...can_detect_an_inter_chunk_carry_bug". That name claimed a capability
+    the grid did not have. `_scan_inputs` draws `alpha ~ U(0.05, 0.95)`, so over a
+    64-wide chunk the carry factor `exp(cum_last) = exp(sum(log alpha))` is about
+    **1.8e-26** -- the state entering chunk c+1 is numerically annihilated, and a
+    carry bug (dropped, mis-indexed, or wrong sign) changes an output term whose
+    true weight is ~1e-26. It is invisible at EVERY sequence length.
+
+    Two requirements, therefore:
+      * a length spanning >= 3 chunks -- below that the paths agree exactly even
+        with the carry deleted, because the only consumed entry state is
+        `chunk_decay * 0 + chunk_state[0]`; and
+      * at least one gate regime whose per-chunk carry factor is materially
+        non-zero, which is what `_ALPHA_REGIMES` provides.
     """
     chunk_counts = {
         -(-seq_len // _EQUIV_CHUNK_SIZE) for seq_len, _, _ in _EQUIV_GRID
     }
     assert max(chunk_counts) >= 3, (
         f"_EQUIV_GRID's longest case spans only {max(chunk_counts)} chunk(s) at "
-        f"chunk_size={_EQUIV_CHUNK_SIZE}; an inter-chunk carry bug first shows "
-        f"at 3 chunks, so this grid cannot detect one. Keep a seq_len > "
-        f"{2 * _EQUIV_CHUNK_SIZE}."
+        f"chunk_size={_EQUIV_CHUNK_SIZE}; the two forms agree exactly below 3 "
+        f"chunks. Keep a seq_len > {2 * _EQUIV_CHUNK_SIZE}."
     )
     assert 1 in chunk_counts, "grid lost its single-chunk degenerate case"
     assert any(
         seq_len % _EQUIV_CHUNK_SIZE for seq_len, _, _ in _EQUIV_GRID
     ), "grid lost every length that is not a multiple of chunk_size"
 
+    # The gate-value half. A regime is useful only if the carry survives a chunk.
+    alive = []
+    varying = []
+    for label, alpha_value, alpha_range in _ALPHA_REGIMES:
+        if alpha_range is not None:
+            # geometric-mean gate over the band, as a representative
+            typical = float(np.sqrt(alpha_range[0] * alpha_range[1]))
+            varying.append(label)
+        elif alpha_value is not None:
+            typical = float(alpha_value)
+        else:
+            continue
+        carry = float(np.exp(_EQUIV_CHUNK_SIZE * np.log(typical)))
+        if carry > 1e-3:
+            alive.append((label, carry))
+    assert varying, (
+        "no _ALPHA_REGIMES entry uses a RANDOM alpha_range, so every regime has a "
+        "constant per-chunk decay. A mis-indexed carry (`chunk_decay[:, :, 0]` for "
+        "`[:, :, c]`) is then bit-identical to the correct code and undetectable "
+        "at any length. Keep a random near-one band."
+    )
+    assert alive, (
+        f"no _ALPHA_REGIMES entry keeps the inter-chunk carry alive over "
+        f"{_EQUIV_CHUNK_SIZE} steps. Without one, every equivalence cell is blind "
+        f"to a carry bug: at the default alpha ~ U(0.05, 0.95) the carry factor is "
+        f"~1.8e-26. Add a near-1 fixed alpha."
+    )
 
-def _scan_inputs(seq_len, num_heads, head_dim, dtype, alpha_value=None, seed=0):
-    """Random scan inputs. ``alpha_value`` pins the gate for adversarial runs."""
+
+def _scan_inputs(seq_len, num_heads, head_dim, dtype, alpha_value=None, seed=0,
+                 alpha_range=None):
+    """Random scan inputs.
+
+    ``alpha_value`` pins the gate to a CONSTANT for adversarial runs.
+    ``alpha_range`` draws it randomly from ``(lo, hi)`` instead.
+
+    The distinction is load-bearing, not cosmetic. A constant alpha gives every
+    chunk the SAME per-chunk decay `exp(cum_last)`, so a mis-INDEXED carry
+    (`chunk_decay[:, :, 0]` in place of `[:, :, c]`) is arithmetically identical
+    to the correct code and cannot be detected at any length or tolerance. Only a
+    per-chunk-VARYING decay separates them -- hence the random near-one band.
+    """
     rng = np.random.default_rng(seed)
     batch = 2
     q = rng.standard_normal((batch, seq_len, num_heads, head_dim)).astype(dtype)
     k = rng.standard_normal((batch, seq_len, num_heads, head_dim)).astype(dtype)
     v = rng.standard_normal((batch, seq_len, num_heads, 2 * head_dim)).astype(dtype)
-    if alpha_value is None:
+    if alpha_range is not None:
+        alpha = rng.uniform(*alpha_range, (batch, seq_len, num_heads)).astype(dtype)
+    elif alpha_value is None:
         alpha = rng.uniform(0.05, 0.95, (batch, seq_len, num_heads)).astype(dtype)
     else:
         alpha = np.full((batch, seq_len, num_heads), alpha_value, dtype=dtype)
     beta = rng.uniform(0.1, 1.0, (batch, seq_len, num_heads)).astype(dtype)
     return [keras.ops.convert_to_tensor(x) for x in (q, k, v, alpha, beta)]
 
-
 class TestChunkedScanEquivalence:
     """The chunked scan must agree with the sequential reference."""
 
+    @pytest.mark.parametrize("alpha_label,alpha_value,alpha_range", _ALPHA_REGIMES)
     @pytest.mark.parametrize("seq_len,num_heads,head_dim", _EQUIV_GRID)
-    def test_chunked_matches_sequential_float64(self, seq_len, num_heads, head_dim):
-        """float64: absolute agreement within the plan's pre-committed 1e-10."""
+    def test_chunked_matches_sequential_float64(
+        self, seq_len, num_heads, head_dim, alpha_label, alpha_value, alpha_range
+    ):
+        """float64: absolute agreement within the plan's pre-committed 1e-10.
+
+        Swept over `_ALPHA_REGIMES` because the default random gate annihilates
+        the inter-chunk carry (~1.8e-26 per chunk); the `near_one` regime is what
+        makes this test able to see a carry bug at all.
+        """
         with global_dtype_policy("float64"):
             layer = GatedLinearAttentionBlock(
                 dim=num_heads * head_dim, num_heads=num_heads,
                 head_dim=head_dim, max_seq_len=512, chunk_size=64,
             )
-            args = _scan_inputs(seq_len, num_heads, head_dim, "float64")
+            args = _scan_inputs(seq_len, num_heads, head_dim, "float64",
+                                alpha_value=alpha_value,
+                                alpha_range=alpha_range)
             reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
             chunked = keras.ops.convert_to_numpy(
                 layer._chunked_scan(*args, seq_len)

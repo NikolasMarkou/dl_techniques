@@ -1352,27 +1352,53 @@ class TestPostFusionFFNHiddenDimRule:
     def _ffn_params(head) -> int:
         return int(sum(int(np.prod(w.shape)) for w in head.post_fusion_ffn.weights))
 
-    def test_swiglu_width_is_invariant_to_ffn_expansion_factor(self) -> None:
-        """An optional-`hidden_dim` type must keep deriving its own width.
+    def test_swiglu_width_follows_its_OWN_derivation_not_an_override(self) -> None:
+        """An optional-`hidden_dim` type must size itself, from the head's factor.
 
-        This is the OVER-FIX guard. `swiglu` lists only `output_dim` as
-        required and derives its hidden width internally (2/3 rule, rounded to
-        `ffn_multiple_of`). Passing `hidden_dim` unconditionally overrides that,
-        which makes the parameter count track `ffn_expansion_factor`. Measured
-        before the fix: 55296 / 110592 / 221184 at factor 2 / 4 / 8. After it,
-        all three must be equal.
+        REWRITTEN after review-iter-1 WARNING-3. The first version asserted the
+        width was INVARIANT to `ffn_expansion_factor`, which fixed the original
+        override bug but replaced it with a quieter one: `hidden_dim` was the only
+        channel carrying the head's factor to the FFN, so not sending it made a
+        documented constructor knob a silent no-op (73728 params at factor 2, 4
+        AND 8). D-020 forwards `ffn_expansion_factor` itself to types that accept
+        it, so the knob works THROUGH swiglu's own derivation.
 
-        Reverting `_build_common_layers` to an unconditional `hidden_dim=` kwarg
-        fails HERE, on this assertion.
+        The invariant now pinned is the one that actually matters: the width is
+        swiglu's own `2/3 * output_dim * factor` rounded UP to `ffn_multiple_of`,
+        and NOT the head's `hidden_dim * factor` override. Reverting to an
+        unconditional `hidden_dim=` fails on the `!=` assertion; dropping the
+        factor forward fails on the responsiveness assertion.
         """
         assert "hidden_dim" not in FFN_REGISTRY["swiglu"]["required_params"], (
             "premise changed: swiglu now REQUIRES hidden_dim, so this guard no "
             "longer tests what it claims"
         )
-        counts = {f: self._ffn_params(self._itm("swiglu", f)) for f in (2, 4, 8)}
-        assert len(set(counts.values())) == 1, (
-            f"swiglu's post-fusion width tracks ffn_expansion_factor {counts} — "
-            f"`hidden_dim` is being passed to a type that derives it internally"
+        widths, params = {}, {}
+        for factor in (2, 4, 8):
+            head = self._itm("swiglu", factor)
+            widths[factor] = int(head.post_fusion_ffn.hidden_dim)
+            params[factor] = self._ffn_params(head)
+
+        multiple_of = 256  # swiglu's default `ffn_multiple_of`
+        for factor, width in widths.items():
+            raw = int(2 * _FAMILY_DIM * factor / 3)
+            expected = ((raw + multiple_of - 1) // multiple_of) * multiple_of
+            assert width == expected, (
+                f"factor {factor}: swiglu width {width} is not its own "
+                f"derivation {expected} (2/3*{_FAMILY_DIM}*{factor} rounded up to "
+                f"{multiple_of})"
+            )
+            assert width != _FAMILY_DIM * factor, (
+                f"factor {factor}: width {width} equals the head's "
+                f"hidden_dim*factor — the override is back"
+            )
+
+        # The knob must be observable at least once across the sweep. Factors 2
+        # and 4 both round to 256 here, which is the multiple_of granularity, not
+        # a dead knob -- so require variation across the whole sweep, not per-step.
+        assert len(set(params.values())) > 1, (
+            f"swiglu's width does not respond to ffn_expansion_factor anywhere "
+            f"in {sorted(widths)}: {params}. The head's factor is not reaching it"
         )
 
     def test_mlp_width_still_tracks_ffn_expansion_factor(self) -> None:
@@ -1535,6 +1561,19 @@ class TestFusionStrategyOutputContract:
         assert not _is_single_shape(((None, 96), (None, 96)))
         assert not _is_single_shape("not a shape")
 
+        # NOTE-5 (review-iter-1): a backend shape object is a sequence of ints
+        # but NOT a list/tuple, so an isinstance-only predicate misclassifies it
+        # in BOTH directions. Latent today (`MultiModalFusion` returns plain
+        # tuples) and pinned so it stays fixed.
+        import tensorflow as _tf
+        assert _is_single_shape(_tf.TensorShape([2, 5, 96])), (
+            "a TensorShape is ONE shape; an isinstance-only check calls it a "
+            "collection and the contract guard then rejects a valid fusion layer"
+        )
+        assert not _is_single_shape(
+            [_tf.TensorShape([2, 5, 96]), _tf.TensorShape([2, 5, 96])]
+        ), "a list OF TensorShapes is a collection, not one shape"
+
 
 class TestMultiTaskConfigPreservesKerasBaseKwargs:
     """`from_config` must not silently discard `name` / `trainable`.
@@ -1679,6 +1718,15 @@ class TestHeadsActuallyConsumeTheirInputs:
         Parametrized over both inputs deliberately: asserting only on
         `text_features` would let a head that ignores the IMAGE pass, which is
         the same defect mirrored.
+
+        SCOPE, stated so this is not mistaken for more than it is: this detects
+        TOTAL deadness only. The threshold is `max|delta| > 1e-6` after a `+7.0`
+        shift -- roughly 1e-7 relative. A head that reads only one position of the
+        text stream, mixes the two streams with the wrong weight, or attenuates
+        one input by 1e5 all PASS. It is exactly the guard for the dead component
+        that was found (a `zeros_like` stream, which moves the output by 0.0); it
+        is not a correctness test, and a numerically-correct-fusion guard would
+        need a reference implementation, not a perturbation.
         """
         payload = _family_payload(text_key)
         key = "vision_features" if which == "vision" else text_key

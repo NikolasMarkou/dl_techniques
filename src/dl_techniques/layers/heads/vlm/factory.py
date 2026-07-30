@@ -100,9 +100,24 @@ def _is_single_shape(shape: Any) -> bool:
     :return: ``True`` for a single shape, ``False`` for a collection of them.
     :rtype: bool
     """
-    if not isinstance(shape, (list, tuple)):
+    # `TensorShape` is a sequence of ints but not a list/tuple, so an
+    # isinstance check against (list, tuple) alone MISCLASSIFIES it as "not a
+    # single shape" -- and a list OF TensorShapes as "single". Not reachable from
+    # today's `MultiModalFusion`, which returns plain tuples, but a latent trap
+    # for any fusion layer that returns backend shape objects.
+    if isinstance(shape, (str, bytes)):
+        return False                   # iterable, but never a shape
+    if isinstance(shape, (list, tuple)):
+        entries = shape
+    elif hasattr(shape, "__iter__") and hasattr(shape, "__len__"):
+        entries = list(shape)          # e.g. tf.TensorShape
+    else:
         return False
-    return not any(isinstance(entry, (list, tuple)) for entry in shape)
+    return not any(
+        isinstance(entry, (list, tuple))
+        or (hasattr(entry, "__len__") and not isinstance(entry, (str, bytes, int)))
+        for entry in entries
+    )
 
 
 # ---------------------------------------------------------------------
@@ -293,12 +308,33 @@ class BaseVLMHead(keras.layers.Layer):
                 "dropout_rate": self.task_config.dropout_rate,
                 "name": f"{self.name}_post_fusion_ffn",
             }
-            if "hidden_dim" in FFN_REGISTRY.get(self.ffn_type, {}).get(
-                "required_params", ()
-            ):
+            _entry = FFN_REGISTRY.get(self.ffn_type, {})
+            if "hidden_dim" in _entry.get("required_params", ()):
                 ffn_kwargs["hidden_dim"] = (
                     self.hidden_dim * self.ffn_expansion_factor
                 )
+            elif "ffn_expansion_factor" in set(
+                _entry.get("required_params", ())
+            ) | set(_entry.get("optional_params", {})):
+                # DECISION plan-2026-07-30T081929-1645aa52/D-020
+                # For a type that DERIVES its own hidden width, forward the
+                # factor itself instead of a precomputed width.
+                #
+                # Otherwise `ffn_expansion_factor` -- a documented constructor
+                # parameter of this head -- becomes a silent no-op for it:
+                # `hidden_dim` was the only channel by which the head's value
+                # reached the FFN, and D-020's predecessor stopped sending it.
+                # Measured on `swiglu`: the post-fusion width sat at 73728 for
+                # factor 2, 4 AND 8. Now it tracks the factor through swiglu's
+                # OWN 2/3 rule (rounded to `ffn_multiple_of`), which is the point
+                # of not overriding `hidden_dim`.
+                #
+                # Of the 8 registry types that treat `hidden_dim` as optional,
+                # only `swiglu` accepts this parameter; the other 7 have no
+                # expansion concept (`kan`, `mixer`, `tversky`, ... size
+                # themselves from unrelated params), so for them the head's
+                # factor is genuinely inapplicable rather than dropped.
+                ffn_kwargs["ffn_expansion_factor"] = self.ffn_expansion_factor
             self.post_fusion_ffn = create_ffn_layer(self.ffn_type, **ffn_kwargs)
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
@@ -627,10 +663,17 @@ class ImageCaptioningHead(keras.layers.Layer):
                 "output_dim": self.hidden_dim,
                 "name": f"ffn_{i}",
             }
-            if "hidden_dim" in FFN_REGISTRY.get(self.ffn_type, {}).get(
-                "required_params", ()
-            ):
+            _entry = FFN_REGISTRY.get(self.ffn_type, {})
+            if "hidden_dim" in _entry.get("required_params", ()):
                 ffn_config["hidden_dim"] = self.hidden_dim * self.ffn_expansion_factor
+            elif "ffn_expansion_factor" in set(
+                _entry.get("required_params", ())
+            ) | set(_entry.get("optional_params", {})):
+                # D-020: forward the factor to types that derive their own width,
+                # or this head's `ffn_expansion_factor` is inert for them. Same
+                # rule as `BaseVLMHead._build_common_layers` -- keeping the two
+                # sites identical is the entire point of D-008.
+                ffn_config["ffn_expansion_factor"] = self.ffn_expansion_factor
             ffn = create_ffn_from_config(ffn_config)
             self.ffn_layers.append(ffn)
 

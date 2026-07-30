@@ -485,25 +485,35 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {chunk_size}")
 
-    def _validate_seq_len(self, seq_len: int) -> None:
-        """Reject a statically known sequence length larger than ``max_seq_len``.
+    def _warn_if_seq_len_exceeds_declared(self, seq_len: int) -> None:
+        """Warn -- never raise -- when a static length exceeds ``max_seq_len``.
 
-        The recurrent scan runs under ``ops.while_loop`` with
-        ``maximum_iterations=max_seq_len``, so any timestep past that cap is
-        never written and silently reads back as zero. This turns that silent
-        corruption into a loud failure.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018
+        ``max_seq_len`` shapes no weight in this layer and, since D-018, bounds
+        no loop: both scan branches are bounded by the ACTUAL sequence length, so
+        a longer input is computed correctly rather than truncated. The value is
+        therefore advisory -- a declaration of intent that is useful for catching
+        a config mistake, and nothing more.
+
+        It used to RAISE, correctly, because the sequential branch really did
+        truncate to `maximum_iterations=max_seq_len` and return zeros past the
+        cap. Do not restore the raise: it would reject inputs this layer now
+        handles exactly (measured against a NumPy oracle), and it never protected
+        the case that actually mattered -- a symbolic sequence axis, where no
+        portable `keras.ops` raise is possible at all (prior plan's D-002).
 
         :param seq_len: Statically known sequence length.
         :type seq_len: int
-        :raises ValueError: If ``seq_len`` exceeds ``self.max_seq_len``.
         """
         if seq_len > self.max_seq_len:
-            raise ValueError(
-                f"Sequence length ({seq_len}) exceeds max_seq_len "
-                f"({self.max_seq_len}). The recurrent scan is capped at "
-                f"max_seq_len steps, so every timestep from index "
-                f"{self.max_seq_len} onwards would be silently zero. "
-                f"Increase max_seq_len to at least {seq_len}."
+            logger.warning(
+                "GatedLinearAttentionBlock '%s' received seq_len=%d, which "
+                "exceeds the declared max_seq_len=%d. This is COMPUTED "
+                "CORRECTLY (both scan branches are bounded by the actual "
+                "length), so it is advisory only -- but the declared value is "
+                "probably wrong, and the sequential branch costs one loop "
+                "iteration per timestep.",
+                self.name, seq_len, self.max_seq_len,
             )
 
     @staticmethod
@@ -638,7 +648,9 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         if features != self.dim:
             raise ValueError(f"Input feature dim ({features}) must match layer dim ({self.dim})")
 
-        if seq_len is None:
+        if seq_len is not None:
+            self._warn_if_seq_len_exceeds_declared(int(seq_len))
+        else:
             # DECISION plan-2026-07-29T173132-adbe605f/D-002
             # The overflow guard is STATIC-ONLY, deliberately. Do NOT "fix" this
             # branch by raising here (it would break every legitimate
@@ -824,12 +836,13 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             exceeds ``max_seq_len``, which would silently zero every timestep
             past the cap.
         """
-        # DECISION plan-2026-07-30T081929-1645aa52/D-010
-        # The truncation guard belongs to THIS branch, not to build()/call().
-        static_seq_len = self._static_seq_len(q)
-        if static_seq_len is not None:
-            self._validate_seq_len(static_seq_len)
-
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018
+        # No `max_seq_len` guard here any more, and none anywhere else either.
+        # D-010 moved the raise into this branch on the grounds that this branch
+        # truncates; D-018 removed the truncation itself, so there is nothing
+        # left to guard and the old message ("every timestep from index N onwards
+        # would be silently zero") became false. See the `maximum_iterations`
+        # note below.
         batch_size, seq_len, _, _ = ops.shape(q)
 
         i = ops.convert_to_tensor(0, dtype="int32")
@@ -868,7 +881,29 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             cond=condition,
             body=body,
             loop_vars=(i, initial_state, outputs_transposed),
-            maximum_iterations=self.max_seq_len,
+            # DECISION plan-2026-07-30T081929-1645aa52/D-018
+            # Bound by the ACTUAL sequence length, not by `max_seq_len`.
+            #
+            # `condition` is already `i < seq_len` and `outputs_transposed` is
+            # already allocated at `seq_len`, so `maximum_iterations` was never
+            # load-bearing for correctness -- it was a self-imposed cap, and
+            # `max_seq_len` shapes no weight anywhere in this layer. When a
+            # sequence exceeded it, the loop simply stopped early and the
+            # remaining rows of the zero-initialized buffer were returned as
+            # real output: a SILENT wrong answer.
+            #
+            # Measured at HEAD before this change: `max_seq_len=8` behind
+            # `keras.Input(shape=(None, 32))` returned 52 of 60 timesteps
+            # all-zero, with no raise and no warning -- and a length that worked
+            # on the first call (L=40, chunked) started truncating once TF relaxed
+            # the trace signature and dispatched to this branch. That is the
+            # variable-length serving path, i.e. exactly the Qwen3-Next scenario.
+            #
+            # With the bound tied to `seq_len` the truncation cannot occur on
+            # either branch, which is strictly better than guarding it: the
+            # symbolic case could never be guarded (no portable way to raise
+            # inside a traced graph -- prior plan's D-002).
+            maximum_iterations=seq_len,
         )
         return ops.transpose(final_outputs, [1, 0, 2, 3])
 
@@ -943,7 +978,16 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         compute_dtype = keras.backend.standardize_dtype(q.dtype)
         # DECISION plan-2026-07-29T173132-adbe605f/D-012
         # Every gate factor below is exp() of a DIFFERENCE of cumulative
-        # log-gates whose argument is <= 0, so all of them lie in (0, 1].
+        # log-gates. FOR alpha <= 1 -- the regime `call()` produces, since the
+        # gate is a sigmoid -- each argument is <= 0 and every factor lies in
+        # (0, 1], which is what makes the reciprocal-free form below safe.
+        #
+        # NOTE (D-009, this plan): the public `gated_linear_scan` also accepts
+        # alpha > 1, where these arguments turn POSITIVE and the factors exceed 1.
+        # That is handled correctly and the two branches agree there, but the
+        # bounded-by-construction guarantee stated in this paragraph does NOT
+        # extend to it: the recurrence is genuinely growing, so float32 overflows
+        # to inf for large alpha*seq_len. See `gated_linear_scan`'s docstring.
         # Do NOT "simplify" this into the textbook two-vector form
         #     q~ = q * exp(D),   k~ = k * exp(-D) * beta
         # which is algebraically identical but materializes the unbounded
