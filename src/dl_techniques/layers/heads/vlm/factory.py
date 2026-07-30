@@ -16,7 +16,12 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 
 from ...activations import ActivationType
 from ...attention.factory import create_attention_layer
-from ...ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
+from ...ffn.factory import (
+    FFN_REGISTRY,
+    create_ffn_from_config,
+    create_ffn_layer,
+    FFNType,
+)
 from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
 from ...norms import NormalizationType
 from ...norms.factory import create_normalization_layer
@@ -367,6 +372,14 @@ class ImageCaptioningHead(keras.layers.Layer):
     :type num_heads: int
     :param ffn_type: Type of feed-forward network in decoder blocks.
     :type ffn_type: FFNType
+    :param ffn_expansion_factor: Width multiplier for the decoder FFN's hidden
+        layer, i.e. ``hidden_dim * ffn_expansion_factor``. Defaults to 4.
+
+        Read ONLY by the 13 registry FFN types that require an explicit
+        ``hidden_dim`` (``mlp``, ``geglu``, ``glu``, ``reglu``, ``lowrank``, ...).
+        The default ``swiglu`` derives its own hidden width and IGNORES this, so
+        changing it does not affect the default configuration.
+    :type ffn_expansion_factor: int
     :param kwargs: Additional arguments for the base Layer.
     """
 
@@ -378,6 +391,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         num_layers: int = 6,
         num_heads: int = 12,
         ffn_type: FFNType = "swiglu",
+        ffn_expansion_factor: int = 4,
         **kwargs: Any,
     ) -> None:
         super().__init__(name=f"{task_config.name}_head", **kwargs)
@@ -388,6 +402,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.ffn_type = ffn_type
+        self.ffn_expansion_factor = ffn_expansion_factor
 
         if self.hidden_dim % self.num_heads != 0:
             raise ValueError(
@@ -420,9 +435,27 @@ class ImageCaptioningHead(keras.layers.Layer):
             )
             self.self_attention_layers.append(self_attn)
 
-            ffn = create_ffn_from_config(
-                {"type": self.ffn_type, "output_dim": self.hidden_dim, "name": f"ffn_{i}"}
-            )
+            # Supply `hidden_dim` only to FFN types that REQUIRE it. 13 of the
+            # registry's 21 types do (`mlp`, `geglu`, `glu`, `reglu`, `lowrank`,
+            # ...), and omitting it raised
+            # "Required parameters missing for mlp: ['hidden_dim']" -- so every
+            # one of those `ffn_type` values was unusable on this head.
+            #
+            # It is passed CONDITIONALLY rather than always, because the default
+            # `swiglu` lists `hidden_dim` as OPTIONAL and derives it internally
+            # (2/3 rule from `ffn_expansion_factor`, rounded to
+            # `ffn_multiple_of`). Passing it explicitly would override that
+            # derivation and silently change the default path's widths.
+            ffn_config = {
+                "type": self.ffn_type,
+                "output_dim": self.hidden_dim,
+                "name": f"ffn_{i}",
+            }
+            if "hidden_dim" in FFN_REGISTRY.get(self.ffn_type, {}).get(
+                "required_params", ()
+            ):
+                ffn_config["hidden_dim"] = self.hidden_dim * self.ffn_expansion_factor
+            ffn = create_ffn_from_config(ffn_config)
             self.ffn_layers.append(ffn)
 
             norm1 = create_normalization_layer("rms_norm", name=f"norm1_{i}")
@@ -554,6 +587,7 @@ class ImageCaptioningHead(keras.layers.Layer):
                 "num_layers": self.num_layers,
                 "num_heads": self.num_heads,
                 "ffn_type": self.ffn_type,
+                "ffn_expansion_factor": self.ffn_expansion_factor,
             }
         )
         return config

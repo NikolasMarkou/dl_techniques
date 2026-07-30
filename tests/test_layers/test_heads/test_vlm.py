@@ -28,6 +28,7 @@ import pytest
 import keras
 from keras import ops
 
+from dl_techniques.layers.ffn.factory import FFN_REGISTRY
 from dl_techniques.layers.heads.vlm import (
     VLMTaskType,
     VLMTaskConfig,
@@ -999,3 +1000,127 @@ class TestMultiTaskTaskSpecificKwargs:
         assert head.shared_head_kwargs == {"ffn_type": "swiglu"}
         for task_head in head.task_heads.values():
             assert task_head.ffn_type == "swiglu"
+
+
+# ---------------------------------------------------------------------
+# ImageCaptioningHead x ffn_type (regression, missing hidden_dim)
+#
+# The head built its decoder FFN with
+# `create_ffn_from_config({"type": ..., "output_dim": ..., "name": ...})` and no
+# `hidden_dim`. 13 of the FFN registry's 21 types REQUIRE `hidden_dim`, so every
+# one of those `ffn_type` values raised
+# "Required parameters missing for mlp: ['hidden_dim']" and was unusable. Only
+# the default `swiglu` (which lists it as optional and derives it) and the 7
+# types that take no `hidden_dim` at all ever worked.
+#
+# `hidden_dim` is now passed CONDITIONALLY, driven by the registry. That
+# conditionality is the load-bearing part and has its own control below:
+# `swiglu` derives its hidden width internally (2/3 rule from
+# `ffn_expansion_factor`, rounded to `ffn_multiple_of`), so passing `hidden_dim`
+# unconditionally would override that derivation and silently change the DEFAULT
+# configuration's widths.
+# ---------------------------------------------------------------------
+
+_HIDDEN_DIM_REQUIRING_FFN_TYPES = sorted(
+    t for t, meta in FFN_REGISTRY.items()
+    if "hidden_dim" in meta.get("required_params", ())
+)
+
+
+def _ffn_head(ffn_type: str, **extra) -> ImageCaptioningHead:
+    cfg = VLMTaskConfig(
+        name="cap", task_type=VLMTaskType.IMAGE_CAPTIONING,
+        vocab_size=VOCAB, hidden_size=DIM,
+    )
+    return ImageCaptioningHead(
+        task_config=cfg, vision_dim=DIM, text_dim=DIM,
+        num_layers=1, num_heads=NUM_HEADS, ffn_type=ffn_type, **extra
+    )
+
+
+def _ffn_inputs():
+    rng = np.random.default_rng(1)
+    return {
+        "vision_features": ops.convert_to_tensor(
+            rng.normal(size=(B, S, DIM)).astype("float32")
+        ),
+        "text_features": ops.convert_to_tensor(
+            rng.normal(size=(B, S, DIM)).astype("float32")
+        ),
+    }
+
+
+def _param_count(head) -> int:
+    return int(sum(np.prod(w.shape) for w in head.weights))
+
+
+class TestCaptioningFFNTypes:
+    """Every FFN type requiring an explicit `hidden_dim` must be usable."""
+
+    def test_the_registry_still_has_types_that_require_hidden_dim(self) -> None:
+        """Guard the guard: if this list empties, the tests below go vacuous."""
+        assert len(_HIDDEN_DIM_REQUIRING_FFN_TYPES) > 5, (
+            "no FFN types require hidden_dim any more — the parametrized tests "
+            "below would silently test nothing"
+        )
+        assert "mlp" in _HIDDEN_DIM_REQUIRING_FFN_TYPES
+
+    @pytest.mark.parametrize("ffn_type", _HIDDEN_DIM_REQUIRING_FFN_TYPES)
+    def test_forward_pass_works(self, ffn_type) -> None:
+        head = _ffn_head(ffn_type)
+        out = head(_ffn_inputs())
+        assert tuple(out["logits"].shape) == (B, S, VOCAB)
+        assert np.isfinite(ops.convert_to_numpy(out["logits"])).all()
+
+    @pytest.mark.parametrize("ffn_type", _HIDDEN_DIM_REQUIRING_FFN_TYPES)
+    def test_config_round_trip(self, ffn_type) -> None:
+        head = _ffn_head(ffn_type)
+        rebuilt = ImageCaptioningHead.from_config(head.get_config())
+        assert rebuilt.ffn_type == ffn_type
+        assert rebuilt.ffn_expansion_factor == head.ffn_expansion_factor
+
+    def test_ffn_expansion_factor_widens_a_hidden_dim_requiring_ffn(self) -> None:
+        """The factor must actually reach the FFN, not just be stored."""
+        counts = []
+        for factor in (2, 4, 8):
+            head = _ffn_head("mlp", ffn_expansion_factor=factor)
+            head(_ffn_inputs())
+            counts.append(_param_count(head))
+        assert counts[0] < counts[1] < counts[2], (
+            f"ffn_expansion_factor did not widen the mlp FFN: {counts}"
+        )
+
+    def test_default_swiglu_ignores_ffn_expansion_factor(self) -> None:
+        """The control that forbids passing `hidden_dim` unconditionally.
+
+        `swiglu` derives its own hidden width, so its parameter count must be
+        INVARIANT to this head's `ffn_expansion_factor`. If a future change
+        passed `hidden_dim` to every FFN type, swiglu would start honouring the
+        factor and this test would fail — which is exactly the silent change to
+        the default configuration it exists to prevent.
+        """
+        counts = set()
+        for factor in (2, 4, 8):
+            head = _ffn_head("swiglu", ffn_expansion_factor=factor)
+            head(_ffn_inputs())
+            counts.add(_param_count(head))
+        assert len(counts) == 1, (
+            f"the default swiglu path responded to ffn_expansion_factor "
+            f"({sorted(counts)}) — hidden_dim is being passed to an FFN type "
+            f"that should derive it, changing the default configuration"
+        )
+
+    def test_ffn_expansion_factor_defaults_to_four(self) -> None:
+        assert _ffn_head("swiglu").ffn_expansion_factor == 4
+
+    def test_old_configs_without_the_new_key_still_load(self) -> None:
+        """Backward compatibility: the parameter has a default.
+
+        A config serialized before `ffn_expansion_factor` existed lacks the key;
+        `from_config` must still work rather than raising a missing-argument
+        error.
+        """
+        config = _ffn_head("swiglu").get_config()
+        del config["ffn_expansion_factor"]
+        rebuilt = ImageCaptioningHead.from_config(config)
+        assert rebuilt.ffn_expansion_factor == 4
