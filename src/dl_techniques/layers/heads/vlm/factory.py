@@ -374,6 +374,52 @@ class ImageCaptioningHead(keras.layers.Layer):
             self.task_config.vocab_size, name=f"{self.name}_output_proj"
         )
 
+    def build(self, input_shape: Union[Dict, Tuple, List]) -> None:
+        """Explicitly build every sub-layer, in computational order.
+
+        Without this, the sub-layers created in ``__init__`` stay unbuilt until
+        Keras traces ``call()``, and a ``.keras`` round-trip through a Functional
+        model then fails to restore them -- measured as
+        ``ValueError: A total of 12 objects could not be loaded`` with
+        ``<Dense name=kv, built=False>`` as the example. This is the repo's
+        documented lazy-sublayer serialization trap.
+
+        Note the shape contract this head already relies on: ``call()`` adds each
+        sub-block's output straight onto its input (``x + attn_output``) with no
+        projection anywhere, so the text feature width must equal
+        ``hidden_dim``. The builds below therefore use ``hidden_dim`` for the
+        whole decoder stack. ``vision_dim`` is independent -- it only enters as
+        the cross-attention's key/value width.
+
+        :param input_shape: Shape dict with ``vision_features`` and
+            ``text_features`` entries, as passed to ``call()``.
+        :type input_shape: Union[Dict, Tuple, List]
+        """
+        if self.built:
+            return
+
+        text_shape = input_shape["text_features"]
+        vision_shape = input_shape["vision_features"]
+        batch = text_shape[0]
+        seq_len = text_shape[1]
+
+        # The decoder stream carries `hidden_dim` throughout (see the residual
+        # note above), regardless of the declared `text_dim`.
+        stream_shape = (batch, seq_len, self.hidden_dim)
+
+        for i in range(self.num_layers):
+            # Self-attention takes one shape; cross-attention takes [query, kv].
+            self.self_attention_layers[i].build(stream_shape)
+            self.norm_layers[i * 3].build(stream_shape)
+            self.cross_attention_layers[i].build([stream_shape, tuple(vision_shape)])
+            self.norm_layers[i * 3 + 1].build(stream_shape)
+            self.ffn_layers[i].build(stream_shape)
+            self.norm_layers[i * 3 + 2].build(stream_shape)
+
+        self.output_proj.build(stream_shape)
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],

@@ -449,3 +449,134 @@ class TestCaptioningCausalMaskGraphSafety:
         assert got[0, 0] == 1.0, "diagonal dropped: a token cannot attend to itself"
         assert got[0, 1] == 0.0, "future not masked"
         assert got[-1].sum() == seq_len, "last query must attend to the whole prefix"
+
+
+# ---------------------------------------------------------------------
+# Explicit sub-layer build (regression, lazy-sublayer serialization trap)
+#
+# `ImageCaptioningHead` declared no `build()`, so the sub-layers created in
+# `__init__` stayed unbuilt until Keras traced `call()`. A `.keras` round-trip
+# through a Functional model then could not restore them:
+#
+#     ValueError: A total of 12 objects could not be loaded.
+#     Example error message for object <Dense name=kv, built=False>
+#
+# This was masked twice over. First by the `ops.tril` graph-mode trap, which
+# crashed `call()` before the loader got this far. Then by the head's own
+# round-trip test, which compares only output SHAPES after reload — and a model
+# that restored NO weights still emits correctly-shaped output. The tests below
+# assert VALUES across the save/load boundary, which is the only assertion that
+# can tell a restored model from an empty one.
+# ---------------------------------------------------------------------
+
+
+class TestCaptioningExplicitBuild:
+    """Sub-layers must be built by `build()`, not lazily by tracing `call()`."""
+
+    @staticmethod
+    def _shapes():
+        return {"vision_features": (None, S, DIM), "text_features": (None, S, DIM)}
+
+    @staticmethod
+    def _inputs():
+        rng = np.random.default_rng(17)
+        return (rng.normal(size=(B, S, DIM)).astype("float32"),
+                rng.normal(size=(B, S, DIM)).astype("float32"))
+
+    def test_build_creates_weights_without_a_forward_pass(self) -> None:
+        """`build()` alone must materialize the weights.
+
+        This is the assertion that fails outright when `build()` is absent:
+        with no explicit build, `head.weights` is empty until something traces
+        `call()`.
+        """
+        head = _captioning_head()
+        assert not head.built
+        head.build(self._shapes())
+        assert head.built
+        assert len(head.weights) > 0, (
+            "build() produced no weights — sub-layers are still unbuilt and a "
+            ".keras round-trip cannot restore them"
+        )
+
+    def test_explicit_build_is_numerically_inert(self) -> None:
+        """Building explicitly must not change any number.
+
+        Same seed, same inputs: a head built via `build()` and one built lazily
+        by its first call must agree bit-exactly, and hold the same number of
+        weights. A `build()` that created the wrong shapes, or extra/fewer
+        sub-layers, would show up here rather than as a silent divergence.
+        """
+        vf, tf_ = self._inputs()
+        payload = {"vision_features": ops.convert_to_tensor(vf),
+                   "text_features": ops.convert_to_tensor(tf_)}
+
+        keras.utils.set_random_seed(31)
+        eager_built = _captioning_head()
+        eager_built.build(self._shapes())
+        explicit = ops.convert_to_numpy(eager_built(payload)["logits"])
+
+        keras.utils.set_random_seed(31)
+        lazy = _captioning_head()
+        lazily = ops.convert_to_numpy(lazy(payload)["logits"])
+
+        assert len(eager_built.weights) == len(lazy.weights)
+        assert np.array_equal(explicit, lazily), (
+            "explicit build() changed the forward result; it must be inert"
+        )
+
+    def test_functional_round_trip_preserves_VALUES(self) -> None:
+        """The assertion the pre-existing round-trip test was missing.
+
+        `test_image_captioning_roundtrip` compares only shapes, so it passed
+        even while 12 sub-layer objects failed to load. Comparing values is what
+        makes this a real round-trip test.
+        """
+        vf, tf_ = self._inputs()
+        vi = keras.Input(shape=(S, DIM))
+        ti = keras.Input(shape=(S, DIM))
+        out = _captioning_head()({"vision_features": vi, "text_features": ti})
+        model = keras.Model([vi, ti], out)
+        before = model.predict([vf, tf_], verbose=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cap_functional.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = restored.predict([vf, tf_], verbose=0)
+
+        assert set(before) == set(after)
+        for key in before:
+            np.testing.assert_allclose(
+                before[key], after[key], rtol=1e-6, atol=1e-6,
+                err_msg=f"'{key}' changed across a .keras round-trip — weights "
+                        f"were not restored",
+            )
+
+    def test_round_trip_restores_every_weight(self) -> None:
+        """Weight-level check, independent of the forward pass.
+
+        Value equality could in principle be reached with a subset of weights
+        restored if the rest happened not to matter for this input. Compare the
+        weight tensors themselves.
+        """
+        vf, tf_ = self._inputs()
+        vi = keras.Input(shape=(S, DIM))
+        ti = keras.Input(shape=(S, DIM))
+        out = _captioning_head()({"vision_features": vi, "text_features": ti})
+        model = keras.Model([vi, ti], out)
+        model.predict([vf, tf_], verbose=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cap_weights.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        before = model.get_weights()
+        after = restored.get_weights()
+        assert len(before) == len(after) and len(before) > 0
+        for i, (w0, w1) in enumerate(zip(before, after)):
+            np.testing.assert_allclose(
+                w0, w1, rtol=1e-6, atol=1e-6,
+                err_msg=f"weight {i} (shape {w0.shape}) not restored",
+            )
