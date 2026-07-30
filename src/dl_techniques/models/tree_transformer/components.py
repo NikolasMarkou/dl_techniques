@@ -23,6 +23,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger  # noqa: F401  (kept for parity with model.py imports)
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
+from dl_techniques.layers.ffn.factory import assemble_ffn_config
 from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
@@ -613,13 +614,26 @@ class TreeTransformerBlock(keras.layers.Layer):
             hidden_size=hidden_size,
             attention_dropout_rate=attention_dropout_rate,
         )
+        # DECISION plan-2026-07-30T140922-8af1028f/D-022
+        # See `models/nam/cell.py` for the full reasoning. In short: this
+        # block's own generic `activation`/`dropout_rate` are pre-filtered
+        # against what `ffn_type` accepts, because `create_ffn_layer` now
+        # RAISES on a key it would have to drop; and `hidden_act` is DISCARDED
+        # rather than renamed to `branch_activation` for `differential`,
+        # because this site never enumerated FFN types. Route through
+        # `build_transformer_ffn_config` if that rename is ever wanted here.
         self.ffn = create_ffn_layer(
             ffn_type=ffn_type,
-            hidden_dim=intermediate_size,
-            output_dim=hidden_size,
-            activation=hidden_act,
-            dropout_rate=hidden_dropout_rate,
             name="ffn",
+            **assemble_ffn_config(
+                ffn_type,
+                {
+                    "hidden_dim": intermediate_size,
+                    "output_dim": hidden_size,
+                    "activation": hidden_act,
+                    "dropout_rate": hidden_dropout_rate,
+                },
+            ),
         )
         self.norm1 = create_normalization_layer(
             normalization_type=normalization_type,

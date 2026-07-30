@@ -33,6 +33,7 @@ from dl_techniques.models.tree_transformer.model import (
 )
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.ffn.factory import assemble_ffn_config
 
 from .config import NAMConfig
 
@@ -187,13 +188,35 @@ class NAMCell(keras.layers.Layer):
             name="attn_norm",
         )
         self.attn_dropout = keras.layers.Dropout(config.hidden_dropout_rate)
+        # DECISION plan-2026-07-30T140922-8af1028f/D-022
+        # `activation`/`dropout_rate` are this cell's OWN generic defaults, so
+        # they go through `assemble_ffn_config`, which intersects them with
+        # what `config.ffn_type` actually accepts. Without it, `differential`,
+        # `gelu_tanh`, `squared_relu` and `swiglu` each had `activation`
+        # silently discarded by `create_ffn_layer` -- and that factory now
+        # RAISES on a dropped key, so this filter is what keeps those four
+        # types constructible here.
+        # DISCARD, not rename: this site never enumerated FFN types, so
+        # `hidden_act` is an unconditional default and not an expressed
+        # per-type intent (contrast D-021, where `differential` was listed by
+        # name in the injecting branch). A future consumer that genuinely
+        # wants `hidden_act` on `DifferentialFFN.branch_activation` should
+        # route this site through
+        # `layers.transformers.transformer.build_transformer_ffn_config`,
+        # which already owns that rename -- do NOT hand-add a fourth copy of
+        # the per-type policy table here (D-018).
         self.ffn = create_ffn_layer(
             ffn_type=config.ffn_type,
-            hidden_dim=config.intermediate_size,
-            output_dim=h,
-            activation=config.hidden_act,
-            dropout_rate=config.hidden_dropout_rate,
             name="ffn",
+            **assemble_ffn_config(
+                config.ffn_type,
+                {
+                    "hidden_dim": config.intermediate_size,
+                    "output_dim": h,
+                    "activation": config.hidden_act,
+                    "dropout_rate": config.hidden_dropout_rate,
+                },
+            ),
         )
         self.ffn_norm = create_normalization_layer(
             normalization_type=config.normalization_type,

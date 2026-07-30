@@ -643,6 +643,13 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
                     raise ValueError(f"Unknown {param}: '{initializer}'")
 
 
+#: The stable substring every strict dropped-key ``ValueError`` from
+#: :func:`create_ffn_layer` carries. Guards match on THIS constant rather than
+#: re-typing the phrase, so rewording the message cannot silently blind them
+#: (and so the phrase has exactly one home).
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
+
+
 # Keys every construction path carries that are NOT FFN constructor parameters:
 # `type` is consumed by `create_ffn_from_config` to pick the class, and `name` is
 # accepted by every Keras layer. Neither appears in any registry entry, so both
@@ -738,10 +745,14 @@ def create_ffn_layer(
     :param name: Optional name for the layer.
     :type name: Optional[str]
     :param kwargs: Parameters specific to the FFN type. See individual layer
-        documentation for parameter details.
+        documentation for parameter details. This is STRICT: any key ``ffn_type``
+        does not accept raises rather than being silently dropped. A wrapper that
+        wants to offer generic conveniences should pre-filter them through
+        :func:`assemble_ffn_config` before calling here.
     :return: Configured FFN layer instance.
     :rtype: keras.layers.Layer
-    :raises ValueError: If ffn_type is invalid or required parameters are missing.
+    :raises ValueError: If ffn_type is invalid, a required parameter is missing,
+        or a supplied parameter is not accepted by ``ffn_type``.
     :raises TypeError: If parameter types are incorrect.
     """
     try:
@@ -766,31 +777,46 @@ def create_ffn_layer(
         # Filter out any unknown parameters to avoid "Unrecognized keyword arguments" error
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
 
-        # DECISION plan-2026-07-30T081929-1645aa52/D-013
-        # Say so when a key is dropped. The filter above silences a free framework
-        # error -- Keras `Layer.__init__` would itself reject an unknown keyword --
-        # so a misspelled or misdirected key produced no signal at all, at any log
-        # level. Measured over an instrumented 1634-test run, exactly two
-        # (call site, ffn_type) pairs actually hit it, one of them a real defect.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-023
+        # RAISE, do not warn. This used to be a `logger.warning` guarded by a
+        # deferral comment citing a never-executed "29 (site, type) breakage"
+        # figure. That grid has since been executed (the real number is 13,
+        # none reachable by any production caller) and all 27 FFN construction
+        # sites in `src/` were swept and fixed BEFORE this flip. Reverting to a
+        # warning re-opens the silent-typo trap the sweep exists to keep shut.
         #
-        # This WARNS rather than raising, deliberately. Raising is a separate,
-        # larger decision: the strict-factory change breaks 29 (site, type)
-        # combinations across three wrapper sites, and that count is
-        # registry-derived rather than executed. It is recorded as a deferral, and
-        # this warning is what makes the trap greppable in the meantime. Do not
-        # promote it to a raise without the executed 3x21 grid.
+        # The predicate subtracts from the raw `kwargs` -- ONLY keys the caller
+        # actually supplied -- and both halves of it are load-bearing:
         #
-        # Only caller-supplied keys are reported, never this factory's own
-        # optional-parameter defaults, or every call would warn.
+        # * subtracting `valid_param_names` (required | optional), NOT just
+        #   `required_params`. The narrower right-hand side is the tempting
+        #   "simplification" and it is CATASTROPHIC: every optional parameter
+        #   anyone passes becomes an error. MEASURED -- with
+        #   `set(kwargs) - set(required_params)` the registry-defaults guard
+        #   fires for 21/21 types.
+        # * reading `kwargs` rather than the merged `params` dict. Note
+        #   HONESTLY that these two are EXTENSIONALLY EQUAL today, because
+        #   `params` is `optional_params` updated with `kwargs` and
+        #   `optional_params`'s keys are a subset of `valid_param_names` by
+        #   construction -- measured: swapping in `set(params) - ...` changes
+        #   nothing, 205/205 green. (The plan predicted mass failures here;
+        #   that prediction was wrong and is recorded as such in D-023.) The
+        #   `kwargs` form is kept because it stays correct if that subset
+        #   relation ever breaks -- i.e. if a registry entry gains an
+        #   `optional_params` key its class does not accept -- where the
+        #   `params` form would then blame the caller for the registry's bug.
         dropped = sorted(set(kwargs) - valid_param_names)
         if dropped:
-            logger.warning(
-                "create_ffn_layer('%s'): dropping %d unsupported parameter(s) "
-                "%s. '%s' accepts %s. These keys are SILENTLY IGNORED, not "
-                "applied -- check for a typo or a parameter meant for a "
-                "different ffn_type.",
-                ffn_type, len(dropped), dropped, ffn_type,
-                sorted(valid_param_names),
+            raise ValueError(
+                f"create_ffn_layer('{ffn_type}'): "
+                f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
+                f"'{ffn_type}' ({ffn_class.__name__}) accepts only "
+                f"{sorted(valid_param_names)}. "
+                f"Either you mistyped one of those names, or you chose the "
+                f"wrong ffn_type for the parameters you are passing. If these "
+                f"keys are a WRAPPER's own generic defaults rather than an "
+                f"explicit request, pre-filter them with assemble_ffn_config() "
+                f"instead of passing them here."
             )
 
         # Add name if provided

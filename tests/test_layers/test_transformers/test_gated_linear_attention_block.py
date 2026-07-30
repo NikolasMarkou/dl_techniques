@@ -1190,26 +1190,35 @@ class TestFFNArgs:
         assert restored.ffn_args == {"hidden_dim": 192}
         assert restored.output_ffn.get_config()["hidden_dim"] == 192
 
-    def test_unknown_ffn_args_key_is_SILENTLY_DROPPED_not_rejected(self):
-        """MEASURED: an unrecognized ``ffn_args`` key is discarded without error.
+    def test_unknown_ffn_args_key_RAISES_naming_the_key(self):
+        """MEASURED: an unrecognized ``ffn_args`` key now fails loudly.
 
-        **This pins behaviour that contradicts the shipped documentation.** The
-        class docstring's ``:param ffn_args:`` says the dict is "passed through
-        unfiltered -- the factory rejects an unknown key loudly", and
-        ``_create_ffn_layer``'s comment repeats it ("unlike ``ffn_args``, which
-        the factory now rejects loudly if unknown"). Neither is true:
-        ``ffn/factory.py``'s ``create_ffn_layer`` ends with
+        This test previously pinned the OPPOSITE fact -- that the key was
+        silently discarded -- and said in its own docstring: "If someone later
+        makes the factory strict, THIS test goes red and points at the two
+        prose sites to update." That happened
+        (``plan-2026-07-30T140922-8af1028f``/D-023); both prose sites in
+        ``gated_linear_attention_block.py`` were corrected in the same commit,
+        and the assertion is inverted here rather than deleted, so it keeps its
+        full discriminating power: the key must be NAMED in the message, which
+        is what tells a caller which of their ``ffn_args`` was wrong.
+        """
+        with pytest.raises(ValueError, match="definitely_not_a_swiglu_argument"):
+            GatedLinearAttentionBlock(
+                dim=64,
+                num_heads=4,
+                max_seq_len=32,
+                ffn_type="swiglu",
+                intermediate_size=320,
+                ffn_args={"definitely_not_a_swiglu_argument": 1},
+            )
 
-            final_params = {k: v for k, v in params.items()
-                            if k in valid_param_names}
+    def test_a_valid_ffn_args_key_still_arrives(self):
+        """CONTROL for the test above: strictness must not eat a GOOD key.
 
-        which filters the CALLER's keys exactly as it filters this block's own
-        generic defaults. A typo in ``ffn_args`` is therefore silent.
-
-        This test records the fact rather than asserting the claim, so the suite
-        stays honest; the docstring/comment repair is reported to the plan, not
-        made here (plan step 6 is test-only). If someone later makes the factory
-        strict, THIS test goes red and points at the two prose sites to update.
+        Without this, a block that rejected every ``ffn_args`` key outright --
+        or one whose pre-filter ate the caller's dict before the factory ever
+        saw it -- would satisfy the raise assertion while breaking the feature.
         """
         layer = GatedLinearAttentionBlock(
             dim=64,
@@ -1217,11 +1226,9 @@ class TestFFNArgs:
             max_seq_len=32,
             ffn_type="swiglu",
             intermediate_size=320,
-            ffn_args={"definitely_not_a_swiglu_argument": 1},
+            ffn_args={"hidden_dim": 192},
         )
-        assert "definitely_not_a_swiglu_argument" not in layer.output_ffn.get_config()
-        # the surrounding, valid configuration still arrived
-        assert layer.output_ffn.get_config()["hidden_dim"] == 320
+        assert layer.output_ffn.get_config()["hidden_dim"] == 192
 
 
 # =========================================================================

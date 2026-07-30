@@ -148,6 +148,11 @@ class TestEncoderFFNKwargFiltering:
 
     The layer now pre-filters its OWN generic defaults to what the chosen
     `encoder_ffn_type` accepts, as `gated_linear_attention_block.py` does.
+
+    As of `plan-2026-07-30T140922-8af1028f`/D-023 the factory RAISES on a key
+    it would have had to drop, so the pre-filter is no longer merely tidy: it
+    is what keeps the default config CONSTRUCTIBLE. These tests assert the
+    raise, not a log record -- there is no dropped-key warning left to capture.
     """
 
     @staticmethod
@@ -160,45 +165,30 @@ class TestEncoderFFNKwargFiltering:
         layer(keras.random.normal([2, 8, 32]), training=False)
         return layer
 
-    def test_default_config_drops_no_key_silently(self, caplog):
-        """swiglu default: zero dropped-key warnings.
+    def test_default_config_drops_no_key(self):
+        """swiglu default: the layer CONSTRUCTS, i.e. no key needed dropping.
 
-        This is the defect. Reverting the pre-filter makes the factory warn about
-        `activation`, and this assertion fails on the captured record.
+        This is the defect, restated against the strict factory. Reverting the
+        pre-filter makes `create_ffn_layer` raise on `activation`, so this
+        assertion fails with that exact message rather than on a log record.
+        The `_build` call is the assertion -- a strictness raise propagates.
         """
-        import logging
-        with caplog.at_level(logging.WARNING):
-            self._build()
-        dropped = [
-            r.getMessage() for r in caplog.records
-            if "unsupported parameter" in r.getMessage()
-        ]
-        assert not dropped, (
-            f"the DEFAULT encoder FFN config still hands swiglu keys it "
-            f"rejects: {dropped}"
+        layer = self._build()
+        assert layer.encoder_ffn is not None, (
+            "the default encoder FFN was never constructed, so this test "
+            "measured nothing"
         )
 
-    def test_misspelled_encoder_ffn_args_key_warns_exactly_once(self, caplog):
-        """The caller's own `encoder_ffn_args` is still NOT protected -- but is now loud.
+    def test_misspelled_encoder_ffn_args_key_raises_naming_the_typo(self):
+        """The caller's own `encoder_ffn_args` is deliberately NOT pre-filtered.
 
-        The pre-filter deliberately covers only this layer's generic defaults;
-        `create_ffn_layer` re-applies the same signature intersection and cannot
-        distinguish an explicit caller key from a convenience default. That
-        residual gap is unchanged by design, so the factory's `logger.warning`
-        is what makes it findable. Removing that warning fails here.
+        The pre-filter covers only this layer's generic defaults; a caller key
+        reaches `create_ffn_layer` verbatim so the factory can complain about
+        it. As of D-023 that complaint is a `ValueError` naming the key, not a
+        `logger.warning`. Softening the factory back to a warning fails here.
         """
-        import logging
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match="activatoin"):
             self._build(encoder_ffn_args={"activatoin": "gelu"})
-        naming_the_typo = [
-            r.getMessage() for r in caplog.records
-            if "unsupported parameter" in r.getMessage()
-            and "activatoin" in r.getMessage()
-        ]
-        assert len(naming_the_typo) == 1, (
-            f"expected exactly one warning naming the misspelled key, got "
-            f"{len(naming_the_typo)}: {naming_the_typo}"
-        )
 
     def test_an_ffn_type_that_accepts_activation_still_receives_it(self):
         """CONTROL: the pre-filter must not strip a key the type DOES accept.

@@ -420,10 +420,10 @@ class BaseVLMHead(keras.layers.Layer):
             # Measured at HEAD before this change: constructing this site with
             # `ffn_type='kan'` or `'power_mlp'` -- both newly reachable as of
             # D-014 -- logged `create_ffn_layer(...): dropping 1 unsupported
-            # parameter(s) ['dropout_rate']`. Once the factory raises, that
-            # becomes a hard construction failure for two types this plan just
-            # opened. Filtering it HERE is correct: it is our default, not the
-            # caller's intent. This head exposes no `ffn_args` surface, so the
+            # parameter(s) ['dropout_rate']`. The factory RAISES on a dropped
+            # key now (D-023), so this filter is what keeps those two types
+            # constructible here at all. Filtering HERE is correct: it is our
+            # default, not the caller's intent. This head exposes no `ffn_args` surface, so the
             # third argument is None; if one is ever added it goes THERE, never
             # into `ffn_kwargs` -- see `assemble_ffn_config`'s D-017 contract.
             ffn_kwargs = assemble_ffn_config(self.ffn_type, ffn_kwargs)
@@ -722,9 +722,10 @@ class ImageCaptioningHead(keras.layers.Layer):
         The superseded claim, recorded so it is not re-derived: this docstring
         used to say the failures were caused by ``output_dim`` being hardcoded.
         That was FALSE and was disproved by execution -- ``output_dim`` was
-        either accepted and present, or silently dropped by
-        ``create_ffn_layer``'s parameter filter, and every failing type died
-        earlier inside ``validate_ffn_config`` on a DIFFERENT required key.
+        either accepted and present, or (under the factory's then-permissive
+        parameter filter, which RAISES as of D-023) dropped, and every failing
+        type died earlier inside ``validate_ffn_config`` on a DIFFERENT
+        required key.
 
         Related, and also measured rather than assumed: four
         ``fusion_strategy``/pooling combinations build successfully and then fail

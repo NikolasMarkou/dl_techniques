@@ -31,6 +31,7 @@ from keras import ops
 
 from dl_techniques.layers.ffn.factory import (
     FFN_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
     create_ffn_layer as _factory_create_ffn_layer,
 )
 from dl_techniques.layers.heads.vlm import factory as vlm_factory
@@ -2122,35 +2123,32 @@ class TestHeadsActuallyConsumeTheirInputs:
 # Once the factory raises, that is a hard failure for two types this plan just
 # opened.
 #
-# Instrument note: the repo logger is named 'dl' (`utils/logger.py`:
-# `logging.getLogger("dl")`), NOT 'dl_techniques'. A handler on the wrong name
-# captures ZERO records and every assertion below would pass vacuously -- hence
-# `test_ffn_type_grid_harness_bites`.
+# Instrument note: this used to be a handler on the logger named 'dl'
+# (`utils/logger.py`: `logging.getLogger("dl")`, NOT 'dl_techniques'), because
+# the factory WARNED about a dropped key. It RAISES now (D-023), so the
+# instrument is a raise classifier -- but the vacuity hazard is identical, and
+# `test_ffn_type_grid_harness_bites` is what proves it is not blind.
 # ---------------------------------------------------------------------
 
 _GRID_ALL_FFN_TYPES = sorted(FFN_REGISTRY)
 
 
-class _VLMDropRecorder(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.dropped: list = []
+def _vlm_strictness_break(fn):
+    """Run ``fn``; return the strict-factory dropped-key message, or ``None``.
 
-    def emit(self, record: logging.LogRecord) -> None:
-        msg = record.getMessage()
-        if "dropping" in msg and "unsupported parameter" in msg:
-            self.dropped.append(msg)
-
-
-def _vlm_capture_drops(fn):
-    handler = _VLMDropRecorder()
-    dl_logger = logging.getLogger("dl")
-    dl_logger.addHandler(handler)
+    Replaces a ``logging.Handler`` on the ``dl`` logger: ``create_ffn_layer``
+    used to WARN about a key it had to drop and now RAISES (D-023), so a
+    warning recorder would capture nothing forever and every zero the grid
+    reported would be vacuous while still looking green. Any raise that is NOT
+    a dropped key (missing required param, rank mismatch) was already loud
+    before the flip and is therefore not a strictness break.
+    """
     try:
         fn()
-    finally:
-        dl_logger.removeHandler(handler)
-    return handler.dropped
+    except Exception as exc:  # noqa: BLE001 - classification is the point
+        msg = str(exc)
+        return msg if STRICT_DROPPED_KEY_MARKER in msg else None
+    return None
 
 
 def _build_site1(ffn_type: str):
@@ -2175,7 +2173,7 @@ def _build_site2(ffn_type: str):
 
 
 class TestVLMFFNTypeGrid:
-    """Neither VLM site may silently drop a key, for any of the 21 types.
+    """Neither VLM site may hand the factory a key it must drop, for any type.
 
     MEASURED before this change (`grid.py`, 21 types, site defaults):
     site 1 dropped `dropout_rate` for `kan` and `power_mlp`; site 2 dropped
@@ -2186,35 +2184,39 @@ class TestVLMFFNTypeGrid:
     """
 
     def test_ffn_type_grid_harness_bites(self) -> None:
-        """RED-proof the recorder against a real drop before trusting a zero."""
-        dropped = _vlm_capture_drops(
+        """RED-proof the classifier against a real drop before trusting a None."""
+        broke = _vlm_strictness_break(
             lambda: _factory_create_ffn_layer(
                 "mlp", hidden_dim=8, output_dim=8, nosuchparam=1
             )
         )
-        assert any("nosuchparam" in m for m in dropped), (
-            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
-            f"unsupported key; it is blind, so its silence below proves nothing"
+        assert broke is not None and "nosuchparam" in broke, (
+            f"the classifier returned {broke!r} for a deliberately unsupported "
+            f"key; it is blind, so its None below proves nothing"
         )
+
+    def test_ffn_type_grid_harness_does_not_always_fire(self) -> None:
+        """CONTROL: a clean build, and a raise of a DIFFERENT kind, are not breaks."""
+        assert _vlm_strictness_break(
+            lambda: _factory_create_ffn_layer("mlp", hidden_dim=8, output_dim=8)
+        ) is None
+        assert _vlm_strictness_break(
+            lambda: _factory_create_ffn_layer("mlp")  # missing required params
+        ) is None
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
         assert len(_GRID_ALL_FFN_TYPES) == 21
 
     @pytest.mark.parametrize("ffn_type", _GRID_ALL_FFN_TYPES)
     @pytest.mark.parametrize("site", ["site1", "site2"])
-    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, site) -> None:
+    def test_ffn_type_grid_is_not_broken_by_strictness(
+        self, ffn_type, site
+    ) -> None:
         build = _build_site1 if site == "site1" else _build_site2
-
-        def go():
-            try:
-                build(ffn_type)
-            except Exception:
-                # An already-loud RAISE cannot be newly broken by strictness.
-                pass
-
-        dropped = _vlm_capture_drops(go)
-        assert dropped == [], (
-            f"VLM {site} with ffn_type={ffn_type!r} silently dropped {dropped}."
+        broke = _vlm_strictness_break(lambda: build(ffn_type))
+        assert broke is None, (
+            f"VLM {site} with ffn_type={ffn_type!r} fails construction on a "
+            f"key that type does not accept: {broke}"
         )
 
     @pytest.mark.parametrize("ffn_type", ["kan", "power_mlp"])

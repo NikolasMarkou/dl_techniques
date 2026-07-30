@@ -52,6 +52,7 @@ from typing import Optional, Union, Tuple, Callable, Any, Literal, Dict
 # ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_layer, FFNType
+from ..ffn.factory import assemble_ffn_config
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.logger import logger
@@ -317,41 +318,48 @@ class MixedSequentialBlock(keras.layers.Layer):
             self.norm2 = None
             self.norm3 = None
 
-        # Feed-forward network using factory
-        ffn_kwargs = self.ffn_args.copy()
-
-        # Map FFN type to required parameters
-        if self.ffn_type in ['mlp', 'differential', 'glu', 'geglu', 'residual']:
-            ffn_kwargs.update({
-                'hidden_dim': self.ff_dim,
-                'output_dim': self.embed_dim,
-                'activation': self.activation,
-                'dropout_rate': self.dropout_rate
-            })
+        # Feed-forward network using factory.
+        #
+        # This block's OWN generic conveniences go into `ffn_config`; the
+        # caller's `self.ffn_args` is handed to `assemble_ffn_config` as the
+        # third argument so it is merged LAST and NEVER filtered (D-017). Do
+        # not fold `ffn_args` into `ffn_config` -- that ordering lets this
+        # block's defaults override what the caller explicitly asked for, and
+        # it hides a caller's typo from `create_ffn_layer`, which now RAISES
+        # on one.
+        ffn_config: Dict[str, Any] = {
+            'hidden_dim': self.ff_dim,
+            'output_dim': self.embed_dim,
+        }
+        if self.ffn_type in ['mlp', 'glu', 'geglu', 'residual', 'swin_mlp']:
+            ffn_config['activation'] = self.activation
+            ffn_config['dropout_rate'] = self.dropout_rate
+        elif self.ffn_type == 'differential':
+            # DECISION plan-2026-07-30T140922-8af1028f/D-021
+            # RENAME, do not drop. `differential` was listed in the generic
+            # `activation`-injecting branch above, so this site's expressed
+            # intent has always been "the block's activation is the FFN's
+            # activation" -- but `DifferentialFFN` takes `branch_activation`,
+            # so the value was SILENTLY DISCARDED on every construction.
+            # `gate_activation` is deliberately NOT forwarded (the sigmoid
+            # gate is that layer's defining feature). Same shape as D-016 on
+            # `TransformerDecoderLayer`. A dropped-key grid CANNOT see a
+            # missing rename -- the pre-filter would simply discard
+            # `activation` and report a clean zero -- so this line is pinned
+            # by an explicit `branch_activation` assertion, never by the grid.
+            ffn_config['branch_activation'] = self.activation
+            ffn_config['dropout_rate'] = self.dropout_rate
         elif self.ffn_type == 'swiglu':
-            ffn_kwargs.update({
-                'output_dim': self.embed_dim,
-                'ffn_expansion_factor': self.ff_dim // self.embed_dim,
-                'dropout_rate': self.dropout_rate
-            })
-        elif self.ffn_type == 'swin_mlp':
-            ffn_kwargs.update({
-                'hidden_dim': self.ff_dim,
-                'output_dim': self.embed_dim,
-                'activation': self.activation,
-                'dropout_rate': self.dropout_rate
-            })
-        else:
-            # Default parameters
-            ffn_kwargs.update({
-                'hidden_dim': self.ff_dim,
-                'output_dim': self.embed_dim
-            })
+            # SwiGLU sizes itself from `ffn_expansion_factor`; passing
+            # `hidden_dim` (which it accepts as OPTIONAL) would override that.
+            del ffn_config['hidden_dim']
+            ffn_config['ffn_expansion_factor'] = self.ff_dim // self.embed_dim
+            ffn_config['dropout_rate'] = self.dropout_rate
 
         self.ffn_layer = create_ffn_layer(
             ffn_type=self.ffn_type,
             name="ffn",
-            **ffn_kwargs
+            **assemble_ffn_config(self.ffn_type, ffn_config, self.ffn_args)
         )
 
         # Dropout layers

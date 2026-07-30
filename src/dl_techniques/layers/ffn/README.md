@@ -515,6 +515,20 @@ create_ffn_layer('swiglu', output_dim=768, dropout_rate=1.5)  # Invalid dropout 
 create_ffn_layer('mlp', hidden_dim=512, output_dim=256, activation='unknown_activation')
 ```
 
+### Unsupported Parameter Checking (strict)
+```python
+# Will raise ValueError naming the key, the ffn_type and the accepted set.
+# It is NOT silently dropped -- this used to be a logger.warning.
+create_ffn_layer('mlp', hidden_dim=512, output_dim=256, hiden_dim=1024)
+```
+
+If you are writing a *wrapper* layer that offers generic conveniences
+(`activation`, `dropout_rate`, initializers) across several `ffn_type`s, do not
+hand them to `create_ffn_layer` directly. Pre-filter them with
+`assemble_ffn_config(ffn_type, wrapper_config, caller_args)`, which intersects
+your own dict with what the type accepts while passing the caller's dict
+through untouched -- so a caller's typo still reaches the raise above.
+
 ## Logging and Debugging
 
 The factory provides detailed logging for debugging:

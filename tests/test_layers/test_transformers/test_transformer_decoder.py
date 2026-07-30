@@ -3,7 +3,7 @@
 import os
 import logging
 import tempfile
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pytest
 import numpy as np
@@ -13,6 +13,7 @@ from keras import ops, layers, models
 
 from dl_techniques.layers.transformers.transformer_decoder import TransformerDecoderLayer
 from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
+from dl_techniques.layers.ffn.factory import STRICT_DROPPED_KEY_MARKER
 
 
 class TestTransformerDecoderLayer:
@@ -191,22 +192,28 @@ class TestTransformerDecoderLayer:
         assert not np.any(np.isnan(ops.convert_to_numpy(x)))
 
 
-class _DroppedKeyRecorder(logging.Handler):
-    """Captures ``create_ffn_layer(...): dropping`` WARNINGs off the ``dl`` logger.
+def _strictness_break(fn) -> Optional[str]:
+    """Run ``fn``; return the strict-factory dropped-key message, or ``None``.
 
-    The repo's centralized logger is named ``"dl"`` (``dl_techniques/utils/logger.py``),
-    NOT ``"dl_techniques"`` -- attaching to the latter records nothing. Reading stderr
-    by eye is not an instrument; this is.
+    This replaced a ``logging.Handler`` on the ``dl`` logger. ``create_ffn_layer``
+    used to WARN about a key it had to drop and now RAISES (D-023), so a warning
+    recorder would capture nothing forever and every zero it reported would be
+    vacuous -- the guard would still be green while measuring nothing at all.
+    This classifier isolates the ONE failure mode strictness introduces from
+    every other raise (missing required param, rank mismatch), which were
+    already loud before the flip.
+
+    :param fn: A zero-argument callable that constructs an FFN-owning layer.
+    :return: The ``ValueError`` message if ``fn`` failed on a dropped key, else
+        ``None`` -- both for success and for any other exception.
+    :rtype: Optional[str]
     """
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.dropped: list = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        msg = record.getMessage()
-        if 'dropping' in msg and 'unsupported parameter' in msg:
-            self.dropped.append(msg)
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 - classification is the point
+        msg = str(exc)
+        return msg if STRICT_DROPPED_KEY_MARKER in msg else None
+    return None
 
 
 class TestDecoderDifferentialFFNActivation:
@@ -271,35 +278,29 @@ class TestDecoderDifferentialFFNActivation:
         ffn = self._build().ffn_layer
         assert keras.activations.serialize(ffn.gate_activation) == 'sigmoid'
 
-    def test_no_dropped_key_warnings_for_this_construction(self):
-        """Generalizes past this one parameter name: ZERO keys may be silently dropped."""
-        handler = _DroppedKeyRecorder()
-        dl_logger = logging.getLogger('dl')
-        dl_logger.addHandler(handler)
-        try:
-            self._build()
-        finally:
-            dl_logger.removeHandler(handler)
-        assert handler.dropped == [], (
-            "TransformerDecoderLayer(ffn_type='differential') silently dropped "
-            f"caller/site key(s): {handler.dropped}"
+    def test_no_dropped_key_for_this_construction(self):
+        """Generalizes past this one parameter name: ZERO keys may be dropped.
+
+        Was an assertion on the factory's dropped-key WARNING; the factory
+        raises now (D-023), so the assertion is that construction SUCCEEDS --
+        a dropped key can no longer be silent, it is a hard failure.
+        """
+        broke = _strictness_break(self._build)
+        assert broke is None, (
+            "TransformerDecoderLayer(ffn_type='differential') hands "
+            f"create_ffn_layer a key DifferentialFFN does not accept: {broke}"
         )
 
     def test_dropped_key_harness_bites(self):
-        """The capture harness must be proven to see a real drop, not merely be silent."""
-        handler = _DroppedKeyRecorder()
-        dl_logger = logging.getLogger('dl')
-        dl_logger.addHandler(handler)
-        try:
-            TransformerDecoderLayer(
-                hidden_size=self.HIDDEN, num_heads=self.HEADS, intermediate_size=self.INTER,
-                ffn_type='differential', ffn_args={'nosuchparam': 1},
-            )
-        finally:
-            dl_logger.removeHandler(handler)
-        assert any('nosuchparam' in m for m in handler.dropped), (
-            f"harness saw {handler.dropped}; it cannot detect a dropped key and so its "
-            f"silence in the sibling test proves nothing"
+        """The classifier must be proven to SEE a real drop, not merely be quiet."""
+        broke = _strictness_break(lambda: TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER,
+            ffn_type='differential', ffn_args={'nosuchparam': 1},
+        ))
+        assert broke is not None and 'nosuchparam' in broke, (
+            f"the classifier returned {broke!r}; it cannot detect a dropped key "
+            f"and so its None in the sibling test proves nothing"
         )
 
     def test_differential_forward_and_round_trip(self):
@@ -351,17 +352,6 @@ _FORMER_DECODER_COVERAGE_GAPS = (
 )
 
 
-def _capture_drops(fn):
-    handler = _DroppedKeyRecorder()
-    dl_logger = logging.getLogger('dl')
-    dl_logger.addHandler(handler)
-    try:
-        fn()
-    finally:
-        dl_logger.removeHandler(handler)
-    return handler.dropped
-
-
 def _required_ffn_args(ffn_type: str) -> Dict[str, Any]:
     sized = {
         'hidden_dim': _GRID_INTER,
@@ -388,17 +378,24 @@ def _build_decoder(ffn_type: str, ffn_args: Dict[str, Any]):
 
 
 class TestFFNTypeGridDecoder:
-    """0 of 21 types may lose a key silently, at either grid condition."""
+    """0 of 21 types may lose a caller key, at either grid condition."""
 
     def test_ffn_type_grid_harness_bites(self) -> None:
         """RED-proof the instrument BEFORE trusting any zero it reports."""
-        dropped = _capture_drops(
+        broke = _strictness_break(
             lambda: _build_decoder('mlp', {'hiden_dim_typo': 3})
         )
-        assert any('hiden_dim_typo' in m for m in dropped), (
-            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
+        assert broke is not None and 'hiden_dim_typo' in broke, (
+            f"_strictness_break returned {broke!r} for a deliberately "
             f"misspelled ffn_args key; it is blind."
         )
+
+    def test_ffn_type_grid_harness_does_not_always_fire(self) -> None:
+        """CONTROL: it must report None for a clean build AND for a raise of a
+        different kind, or the grid below is 42 guaranteed failures / 42
+        meaningless passes."""
+        assert _strictness_break(lambda: _build_decoder('mlp', {})) is None
+        assert _strictness_break(lambda: _build_decoder('counting', {})) is None
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
         assert len(_ALL_FFN_TYPES) == 21
@@ -406,23 +403,16 @@ class TestFFNTypeGridDecoder:
     @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
     @pytest.mark.parametrize(
         'condition', ['site-default-only', 'caller-supplies-required'])
-    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, condition) -> None:
+    def test_ffn_type_grid_is_not_broken_by_strictness(
+            self, ffn_type, condition) -> None:
         args = (
             {} if condition == 'site-default-only'
             else _required_ffn_args(ffn_type)
         )
-
-        def build():
-            try:
-                _build_decoder(ffn_type, args)
-            except Exception:
-                # Already-loud RAISEs cannot be newly broken by strictness.
-                pass
-
-        dropped = _capture_drops(build)
-        assert dropped == [], (
+        broke = _strictness_break(lambda: _build_decoder(ffn_type, args))
+        assert broke is None, (
             f"TransformerDecoderLayer(ffn_type={ffn_type!r}) [{condition}] "
-            f"silently dropped {dropped}."
+            f"fails construction on a key that type does not accept: {broke}"
         )
 
     @pytest.mark.parametrize('ffn_type', _FORMER_DECODER_COVERAGE_GAPS)
@@ -462,13 +452,15 @@ class TestFFNArgsSurviveThePreFilter:
         assert layer.ffn_layer.activation_name == 'tanh'
 
     def test_invalid_caller_key_stays_visible_to_the_factory(self) -> None:
-        """The strict raise this plan is building toward needs this key intact."""
-        dropped = _capture_drops(lambda: TransformerDecoderLayer(
-            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
-            intermediate_size=_GRID_INTER, ffn_type='mlp',
-            ffn_args={'branch_activation': 'relu'},
-        ))
-        assert any('branch_activation' in m for m in dropped), (
-            "a caller's inapplicable ffn_args key produced NO signal; the "
-            "pre-filter removed it before the factory could see it."
-        )
+        """The strict raise (D-023) needs this key intact to fire at all.
+
+        Was an assertion on the dropped-key warning; now asserts the raise, and
+        that the raise NAMES the key. If the pre-filter ever eats `ffn_args`,
+        construction succeeds silently and this goes red.
+        """
+        with pytest.raises(ValueError, match='branch_activation'):
+            TransformerDecoderLayer(
+                hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+                intermediate_size=_GRID_INTER, ffn_type='mlp',
+                ffn_args={'branch_activation': 'relu'},
+            )

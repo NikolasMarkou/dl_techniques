@@ -469,3 +469,109 @@ class TestMixedSequentialBlock:
         # Verify the layer was created successfully with custom args
         assert layer.attention_layer is not None
         assert layer.built
+
+# =====================================================================
+# Step 6 guards (plan-2026-07-30T140922-8af1028f, D-021)
+# =====================================================================
+
+from dl_techniques.layers.ffn.factory import (
+    FFN_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
+)
+
+
+def _strictness_break(fn):
+    """Return the strict-factory dropped-key message `fn` triggered, or None.
+
+    Any other raise (missing required param, rank mismatch) was already loud
+    before `create_ffn_layer` became strict, so it is not a strictness break.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 - classification is the point
+        message = str(exc)
+        return message if STRICT_DROPPED_KEY_MARKER in message else None
+    return None
+
+
+def _build_block(ffn_type: str, activation: str = 'relu'):
+    block = MixedSequentialBlock(
+        embed_dim=16, num_heads=2, ff_dim=32,
+        ffn_type=ffn_type, activation=activation,
+    )
+    block.build((None, 8, 16))
+    return block
+
+
+class TestMixedSequentialBlockFFNStrictness:
+    """This block must never hand `create_ffn_layer` a key its type rejects.
+
+    MEASURED at HEAD before step 6 (21-type grid, `activation='relu'`): this
+    site dropped `activation` for `differential` -- 1 of 21. It now routes its
+    own generic conveniences through `assemble_ffn_config`, which is what keeps
+    all 21 constructible once the factory raises.
+    """
+
+    def test_the_classifier_bites(self) -> None:
+        """RED-proof: a None from a blind classifier proves nothing."""
+        broke = _strictness_break(lambda: MixedSequentialBlock(
+            embed_dim=16, num_heads=2, ff_dim=32,
+            ffn_type='mlp', ffn_args={'hiden_dim_typo': 3},
+        ).build((None, 8, 16)))
+        assert broke is not None and 'hiden_dim_typo' in broke
+
+    def test_the_classifier_does_not_always_fire(self) -> None:
+        assert _strictness_break(lambda: _build_block('mlp')) is None
+
+    @pytest.mark.parametrize('ffn_type', sorted(FFN_REGISTRY))
+    def test_no_ffn_type_is_broken_by_strictness(self, ffn_type) -> None:
+        broke = _strictness_break(lambda: _build_block(ffn_type))
+        assert broke is None, (
+            f"MixedSequentialBlock(ffn_type={ffn_type!r}) hands the factory a "
+            f"key that type does not accept: {broke}"
+        )
+
+    def test_differential_receives_the_sites_activation_as_branch_activation(
+            self) -> None:
+        """D-021: the site RENAMES `activation`, it does not discard it.
+
+        THIS ASSERTION CANNOT BE REPLACED BY THE GRID ABOVE. Deleting the
+        rename leaves the grid fully green -- `assemble_ffn_config` simply
+        filters `activation` out, because `DifferentialFFN` does not accept it
+        -- while the FFN silently reverts to its own 'gelu'. A dropped-key grid
+        is structurally blind to a missing rename (same finding as D-018 on
+        `TransformerLayer`). Never retire this as redundant.
+        """
+        ffn = _build_block('differential', activation='relu').ffn_layer
+        got = keras.activations.serialize(ffn.branch_activation)
+        assert got == 'relu', (
+            f"MixedSequentialBlock(ffn_type='differential', activation='relu') "
+            f"built a DifferentialFFN with branch_activation='{got}'. The "
+            f"site's activation was discarded instead of renamed."
+        )
+
+    def test_differential_probe_value_is_not_the_default(self) -> None:
+        """Anti-vacuity for the test above: 'relu' must differ from the default."""
+        from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
+        default = DifferentialFFN(hidden_dim=32, output_dim=16)
+        assert keras.activations.serialize(default.branch_activation) == 'gelu'
+
+    def test_the_gate_activation_is_left_alone(self) -> None:
+        """The generic activation must not be routed onto the sigmoid gate."""
+        ffn = _build_block('differential', activation='relu').ffn_layer
+        assert keras.activations.serialize(ffn.gate_activation) == 'sigmoid'
+
+    @pytest.mark.parametrize('ffn_type', ['gelu_tanh', 'squared_relu', 'swiglu'])
+    def test_types_with_a_fixed_activation_discard_it(self, ffn_type) -> None:
+        """The other three formerly-dropping types are DISCARDS, deliberately.
+
+        `gelu_tanh`, `squared_relu` and `swiglu` have no `activation` parameter
+        and no renamed analogue -- their nonlinearity is definitional. The
+        correct outcome is that the site's `activation` never reaches them and
+        construction still succeeds.
+        """
+        ffn = _build_block(ffn_type, activation='relu').ffn_layer
+        assert ffn is not None
+        assert not hasattr(ffn, 'activation_name') or (
+            ffn.activation_name != 'relu'
+        )

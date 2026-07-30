@@ -547,17 +547,24 @@ class TestTransformerLayerExtendedAttention:
 # `dropout_rate`, the initializers, the dims) without checking whether the
 # selected `ffn_type` accepts them. `create_ffn_layer` discarded the surplus and
 # only logged it, so 6 of 21 types were about to become HARD construction
-# failures the moment that warning becomes a raise.
+# failures the moment that warning became a raise. As of step 6 (D-023) it IS a
+# raise, so these guards assert construction rather than log silence.
 #
-# The instrument below attaches to the logger named 'dl' -- `utils/logger.py`
-# does `logging.getLogger("dl")`, NOT "dl_techniques". A handler on the wrong
-# name captures ZERO records and every assertion here would pass vacuously,
-# which is why `test_..._harness_bites` exists and must never be deleted.
+# The instrument below (`_strictness_break`) must be RED-proved before any zero
+# it reports is trusted -- that is what `test_..._harness_bites` is for, and it
+# must never be deleted. Its predecessor was a handler on the logger named 'dl'
+# (`utils/logger.py` does `logging.getLogger("dl")`, NOT "dl_techniques"); the
+# same class of blindness applies here, since a classifier that never matches
+# also reports a clean zero.
 # ---------------------------------------------------------------------
 
-import logging as _logging
+from typing import Optional
 
-from dl_techniques.layers.ffn.factory import FFN_REGISTRY, assemble_ffn_config
+from dl_techniques.layers.ffn.factory import (
+    FFN_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
+    assemble_ffn_config,
+)
 from dl_techniques.layers.transformers.transformer import (
     build_transformer_ffn_config,
 )
@@ -571,29 +578,29 @@ _GRID_INTER = 64
 _ALL_FFN_TYPES = sorted(FFN_REGISTRY)
 
 
-class _DropRecorder(_logging.Handler):
-    """Captures `create_ffn_layer`'s dropped-key warnings off the 'dl' logger."""
+def _strictness_break(fn) -> Optional[str]:
+    """Run `fn`; return the strict-factory dropped-key message, or None.
 
-    def __init__(self) -> None:
-        super().__init__(level=_logging.WARNING)
-        self.dropped: list = []
+    The instrument this replaced was a `logging.Handler` on the `dl` logger,
+    because `create_ffn_layer` used to WARN about a key it had to drop. It now
+    RAISES (D-023), so a warning recorder would capture nothing, forever, and
+    every zero it reported would be vacuous. This classifier is the post-flip
+    equivalent: it separates the ONE failure mode strictness introduces (a
+    dropped caller key) from every other raise -- a missing required param, a
+    rank mismatch -- which were already loud before the flip and are therefore
+    not "newly broken by strictness".
 
-    def emit(self, record: _logging.LogRecord) -> None:
-        msg = record.getMessage()
-        if 'dropping' in msg and 'unsupported parameter' in msg:
-            self.dropped.append(msg)
-
-
-def _capture_drops(fn):
-    """Run `fn` with a recorder attached to 'dl'; return the captured messages."""
-    handler = _DropRecorder()
-    dl_logger = _logging.getLogger('dl')
-    dl_logger.addHandler(handler)
+    :param fn: A zero-argument callable that constructs an FFN-owning layer.
+    :return: The `ValueError` message if `fn` failed on a dropped key, else
+        None (both for success and for any other exception).
+    :rtype: Optional[str]
+    """
     try:
         fn()
-    finally:
-        dl_logger.removeHandler(handler)
-    return handler.dropped
+    except Exception as exc:  # noqa: BLE001 - classification is the point
+        msg = str(exc)
+        return msg if STRICT_DROPPED_KEY_MARKER in msg else None
+    return None
 
 
 def _required_ffn_args(ffn_type: str) -> Dict[str, Any]:
@@ -616,7 +623,7 @@ def _required_ffn_args(ffn_type: str) -> Dict[str, Any]:
 
 
 class TestFFNTypeGridEncoder:
-    """0 of 21 types may lose a key silently, at either grid condition."""
+    """0 of 21 types may lose a caller key, at either grid condition."""
 
     def _build(self, ffn_type: str, ffn_args: Dict[str, Any]) -> None:
         layer = TransformerLayer(
@@ -628,14 +635,27 @@ class TestFFNTypeGridEncoder:
 
     def test_ffn_type_grid_harness_bites(self) -> None:
         """RED-proof the instrument BEFORE trusting any zero it reports."""
-        dropped = _capture_drops(
+        broke = _strictness_break(
             lambda: self._build('mlp', {'hiden_dim_typo': 3})
         )
-        assert any('hiden_dim_typo' in m for m in dropped), (
-            f"the 'dl'-logger recorder saw {dropped} for a deliberately "
-            f"misspelled ffn_args key. It is blind, so its silence in the "
+        assert broke is not None and 'hiden_dim_typo' in broke, (
+            f"_strictness_break returned {broke!r} for a deliberately "
+            f"misspelled ffn_args key. It is blind, so its None in the "
             f"parametrized tests below would prove nothing."
         )
+
+    def test_ffn_type_grid_harness_does_not_always_fire(self) -> None:
+        """CONTROL: the classifier must not report a break for a clean build.
+
+        A `_strictness_break` that returned a message unconditionally would
+        make `test_ffn_type_grid_harness_bites` pass while turning the grid
+        below into 42 guaranteed failures -- and one that matched EVERY
+        exception would report a false break for the types that legitimately
+        raise on a missing required param.
+        """
+        assert _strictness_break(lambda: self._build('mlp', {})) is None
+        # `counting` raises for a MISSING required param, not a dropped one.
+        assert _strictness_break(lambda: self._build('counting', {})) is None
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
         """Anti-vacuity: the parametrization must not quietly shrink."""
@@ -647,25 +667,19 @@ class TestFFNTypeGridEncoder:
 
     @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
     @pytest.mark.parametrize('condition', ['site-default-only', 'caller-supplies-required'])
-    def test_ffn_type_grid_has_no_silent_drops(self, ffn_type, condition) -> None:
+    def test_ffn_type_grid_is_not_broken_by_strictness(
+            self, ffn_type, condition) -> None:
         args = (
             {} if condition == 'site-default-only'
             else _required_ffn_args(ffn_type)
         )
-
-        def build():
-            try:
-                self._build(ffn_type, args)
-            except Exception:
-                # A RAISE is already loud, so strictness cannot newly break it.
-                # Only a construction that SUCCEEDS while losing a key counts.
-                pass
-
-        dropped = _capture_drops(build)
-        assert dropped == [], (
-            f"TransformerLayer(ffn_type={ffn_type!r}) [{condition}] silently "
-            f"dropped {dropped}. Once create_ffn_layer raises, this becomes a "
-            f"hard construction failure."
+        broke = _strictness_break(lambda: self._build(ffn_type, args))
+        assert broke is None, (
+            f"TransformerLayer(ffn_type={ffn_type!r}) [{condition}] fails "
+            f"construction because it hands create_ffn_layer a key that type "
+            f"does not accept: {broke}. Fix the wrapper (route its generic "
+            f"conveniences through assemble_ffn_config) -- do not soften the "
+            f"factory."
         )
 
 
@@ -706,21 +720,18 @@ class TestFFNArgsSurviveThePreFilter:
     def test_invalid_caller_key_stays_visible_to_the_factory(self) -> None:
         """An unaccepted CALLER key must still reach `create_ffn_layer`.
 
-        Today that surfaces as the dropped-key warning; after the factory is
-        made strict it becomes the ValueError. Either way the key must not be
-        swallowed here -- if the pre-filter removes it, there is nothing left
-        for the factory to complain about.
+        This used to assert the dropped-key WARNING; the factory is strict now
+        (D-023) so it asserts the `ValueError`, NAMING the key. Same
+        discriminating power, stronger outcome: if the pre-filter removes the
+        key there is nothing left for the factory to complain about, and this
+        goes red.
         """
-        dropped = _capture_drops(lambda: TransformerLayer(
-            hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
-            intermediate_size=_GRID_INTER, ffn_type='mlp',
-            ffn_args={'branch_activation': 'relu'},
-        ))
-        assert any('branch_activation' in m for m in dropped), (
-            "a caller's inapplicable ffn_args key produced NO signal. The "
-            "pre-filter removed it before the factory could see it, which "
-            "defeats the strict raise entirely."
-        )
+        with pytest.raises(ValueError, match='branch_activation'):
+            TransformerLayer(
+                hidden_size=_GRID_HIDDEN, num_heads=_GRID_HEADS,
+                intermediate_size=_GRID_INTER, ffn_type='mlp',
+                ffn_args={'branch_activation': 'relu'},
+            )
 
     def test_the_helper_itself_owns_the_merge_order(self) -> None:
         """Unit-level: `assemble_ffn_config` filters arg 2, never arg 3.

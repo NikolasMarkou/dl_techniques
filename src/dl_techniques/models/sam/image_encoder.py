@@ -108,6 +108,7 @@ from typing import Optional, Tuple, Any, Dict, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.ffn.factory import assemble_ffn_config
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 
@@ -465,12 +466,26 @@ class ViTBlock(layers.Layer):
 
         self.norm2 = create_normalization_layer(normalization_type, name="norm2")
 
+        # DECISION plan-2026-07-30T140922-8af1028f/D-022
+        # `activation` is this block's own generic default, pre-filtered
+        # against what `ffn_type` accepts. This is NOT hypothetical here:
+        # `ffn_type` is declared `Literal['mlp', 'swiglu', 'geglu', 'glu']`
+        # and `SwiGLUFFN` takes no `activation` at all, so `swiglu` -- inside
+        # this block's own documented surface -- silently dropped it, and
+        # `create_ffn_layer` now RAISES on a dropped key. DISCARD is the right
+        # semantics for `swiglu` (its SiLU gate is definitional, and there is
+        # no renamed analogue to forward it to).
         self.ffn = create_ffn_layer(
             ffn_type,
-            hidden_dim=int(dim * mlp_ratio),
-            output_dim=dim,
-            activation=activation,
-            name="ffn"
+            name="ffn",
+            **assemble_ffn_config(
+                ffn_type,
+                {
+                    "hidden_dim": int(dim * mlp_ratio),
+                    "output_dim": dim,
+                    "activation": activation,
+                },
+            ),
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

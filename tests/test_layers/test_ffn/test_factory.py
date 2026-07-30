@@ -30,7 +30,10 @@ from dl_techniques.layers.ffn import (
     LogicFFN,
     CountingFFN
 )
-from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+from dl_techniques.layers.ffn.factory import (
+    FFN_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
+)
 
 
 class TestFFNFactory:
@@ -1209,7 +1212,6 @@ class TestOutputDimParamRegistryField:
 # regression this whole block exists to prevent.
 
 import ast as _sweep_ast
-import logging as _sweep_logging
 from pathlib import Path as _SweepPath
 
 _SWEEP_SRC_ROOT = _SweepPath(__file__).resolve().parents[3] / "src" / "dl_techniques"
@@ -1252,39 +1254,32 @@ def _derive_ffn_construction_files() -> set:
     return found
 
 
-class _SweepDropRecorder(_sweep_logging.Handler):
-    """Captures `create_ffn_layer(...): dropping ...` on the **`dl`** logger.
+def _strictness_break(fn) -> Optional[str]:
+    """Run ``fn``; return the strict-factory dropped-key message, or ``None``.
 
-    The logger is named `dl` (`dl_techniques/utils/logger.py`:
-    `logging.getLogger("dl")`), NOT `dl_techniques`. A handler on the wrong name
-    captures ZERO records while the warning sits plainly on stderr -- a silently
-    blind instrument that makes this entire sweep vacuous. This trap already bit
-    once during step 3 of this plan.
+    THE VACUITY TRAP THIS EXISTS TO AVOID: at step 5 this was a
+    ``logging.Handler`` on the **`dl`** logger, because ``create_ffn_layer``
+    WARNED about a key it had to drop. Step 6 turned that warning into a raise
+    (D-023). A warning recorder left in place would then capture nothing, ever
+    -- every site in the sweep below would report a clean zero, the suite would
+    stay green, and the guard would be measuring absolutely nothing. Changing
+    the instrument was mandatory, not cosmetic.
+
+    Any raise that is NOT a dropped key -- a missing required param, a rank
+    mismatch -- was already loud BEFORE the flip, so it is not something
+    strictness newly broke and is deliberately not reported here.
+
+    :param fn: A zero-argument callable that reaches an FFN construction.
+    :return: The ``ValueError`` message if ``fn`` failed on a dropped caller
+        key, else ``None`` (both for success and for any other exception).
+    :rtype: Optional[str]
     """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.dropped: List[str] = []
-
-    def emit(self, record: _sweep_logging.LogRecord) -> None:
-        try:
-            message = record.getMessage()
-        except Exception:  # pragma: no cover - defensive
-            return
-        if "dropping" in message and "unsupported parameter" in message:
-            self.dropped.append(message)
-
-
-def _capture_ffn_drops(fn) -> List[str]:
-    """Run ``fn``; return the dropped-key warnings it caused, de-duplicated."""
-    handler = _SweepDropRecorder()
-    dl_logger = _sweep_logging.getLogger("dl")
-    dl_logger.addHandler(handler)
     try:
         fn()
-    finally:
-        dl_logger.removeHandler(handler)
-    return sorted(set(handler.dropped))
+    except Exception as exc:  # noqa: BLE001 - classification is the point
+        message = str(exc)
+        return message if STRICT_DROPPED_KEY_MARKER in message else None
+    return None
 
 
 # --- the hand-written builders -------------------------------------------
@@ -1295,18 +1290,19 @@ def _capture_ffn_drops(fn) -> List[str]:
 #
 # DECISION plan-2026-07-30T140922-8af1028f/D-020
 # Every builder uses the site's OWN default `ffn_type` (or the literal the site
-# hardcodes). Do NOT "strengthen" this into a 21-type parametrization: 4 sites --
+# hardcodes). This sweep's job is the PRODUCTION-REACHABLE surface, which is
+# what the strict factory can break today -- it is deliberately NOT a 21-type
+# grid.
+#
+# It was RIGHT not to be one at step 5, when 4 sites --
 # `layers/time_series/mixed_sequential_block.py`, `models/nam/cell.py`,
 # `models/sam/image_encoder.py` and `models/tree_transformer/components.py` --
-# pass `activation` unconditionally and therefore DROP it for `differential`,
-# `gelu_tanh`, `squared_relu` and `swiglu`. Those cells are latent (no `src/`
-# caller selects those types at those sites) but they are REAL, and turning this
-# guard into a grid makes it RED without fixing them. The remedy is the one-line
-# `assemble_ffn_config` adoption those sites still need, tracked separately; the
-# measurement is in this plan's verification.md § "LATENT residue".
-#
-# This sweep's own job is narrower and is what A-4 actually claims: the
-# PRODUCTION-REACHABLE surface, which is what step 6's raise can break today.
+# passed `activation` unconditionally and dropped it for `differential`,
+# `gelu_tanh`, `squared_relu` and `swiglu`. All four adopted
+# `assemble_ffn_config` at step 6 (D-021/D-022) and now measure 0/21; per-site
+# grids live in the owning test suites. Turning THIS sweep into a grid would
+# duplicate them and couple a `src/`-wide coverage guard to every layer's
+# construction preconditions.
 
 def _b_fnet_encoder_block():
     from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
@@ -1598,37 +1594,52 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
 class TestFFNConstructionSiteSweep:
     """Zero dropped caller keys at EVERY FFN construction site in `src/`.
 
-    This is the gate that unblocks making `create_ffn_layer` raise. Each
-    builder constructs the real owning layer/model at ITS OWN defaults and the
-    sweep asserts the `dl` logger saw no `dropping ... unsupported parameter`
-    record.
+    This was the GATE that unblocked making `create_ffn_layer` raise. It is now
+    the REGRESSION guard for that raise: each builder constructs the real
+    owning layer/model at ITS OWN defaults, and a site that hands the factory a
+    key its `ffn_type` does not accept is a hard construction failure, not a
+    log record.
     """
 
-    def test_the_drop_recorder_bites(self) -> None:
-        """RED-proof: a zero from a blind recorder proves nothing.
+    def test_the_strictness_classifier_bites(self) -> None:
+        """RED-proof: a `None` from a blind classifier proves nothing.
 
-        Injects a deliberately misspelled key and requires the recorder to see
-        it, then runs the identical call WITHOUT the injection as a control.
-        Both halves are load-bearing: the first shows the recorder is wired to
-        the right logger, the second shows it is not simply always-firing.
+        Injects a deliberately misspelled key and requires the classifier to
+        see it, then runs the identical call WITHOUT the injection as a
+        control. Both halves are load-bearing: the first shows it recognises a
+        real strictness failure, the second shows it is not simply
+        always-firing.
         """
-        injected = _capture_ffn_drops(
+        injected = _strictness_break(
             lambda: create_ffn_layer(
                 'mlp', hidden_dim=8, output_dim=8, hiden_dim=512
             )
         )
-        assert any('hiden_dim' in m for m in injected), (
-            f"the recorder on the 'dl' logger saw {injected} for a deliberately "
-            f"misspelled 'hiden_dim'. It is BLIND -- most likely attached to a "
-            f"logger named 'dl_techniques', which does not exist. Every zero "
-            f"reported by the sweep below would be vacuous."
+        assert injected is not None and 'hiden_dim' in injected, (
+            f"_strictness_break returned {injected!r} for a deliberately "
+            f"misspelled 'hiden_dim'. It is BLIND, so every None reported by "
+            f"the sweep below would be vacuous."
         )
-        control = _capture_ffn_drops(
+        control = _strictness_break(
             lambda: create_ffn_layer('mlp', hidden_dim=8, output_dim=8)
         )
-        assert control == [], (
-            f"the recorder fired {control} on a clean call; it cannot "
+        assert control is None, (
+            f"the classifier fired {control!r} on a clean call; it cannot "
             f"distinguish a drop from a non-drop."
+        )
+
+    def test_the_strictness_classifier_ignores_other_raises(self) -> None:
+        """A raise that predates strictness must NOT be reported as a break.
+
+        Without this, `_strictness_break` could simply return `str(exc)` for
+        every exception, and the grid-style guards elsewhere in the suite would
+        report false breaks for every type that legitimately raises on a
+        missing required parameter.
+        """
+        other = _strictness_break(lambda: create_ffn_layer('mlp'))
+        assert other is None, (
+            f"a MISSING-required-param raise was classified as a strictness "
+            f"break ({other!r}); the classifier is too wide."
         )
 
     def test_every_file_with_a_construction_site_has_a_builder(self) -> None:
@@ -1672,12 +1683,12 @@ class TestFFNConstructionSiteSweep:
         "site", sorted(_FFN_CONSTRUCTION_SITE_BUILDERS)
     )
     def test_construction_site_drops_no_caller_key(self, site: str) -> None:
-        dropped = _capture_ffn_drops(_FFN_CONSTRUCTION_SITE_BUILDERS[site])
-        assert dropped == [], (
-            f"src/dl_techniques/{site} silently dropped a key it passed to "
-            f"create_ffn_layer: {dropped}. Once the factory raises this is a "
-            f"HARD construction failure. Fix the site (correct parameter name, "
-            f"or route its generic conveniences through assemble_ffn_config) -- "
+        broke = _strictness_break(_FFN_CONSTRUCTION_SITE_BUILDERS[site])
+        assert broke is None, (
+            f"src/dl_techniques/{site} hands create_ffn_layer a key its "
+            f"ffn_type does not accept, which is now a HARD construction "
+            f"failure: {broke}. Fix the site (correct the parameter name, or "
+            f"route its generic conveniences through assemble_ffn_config) -- "
             f"do not soften the factory."
         )
 
@@ -1694,3 +1705,296 @@ class TestFFNConstructionSiteSweep:
             f"the builder for {site} returned None, so its zero-drop result is "
             f"vacuous -- it never reached create_ffn_layer."
         )
+
+
+# =====================================================================
+# STEP 6 -- the strict factory (plan-2026-07-30T140922-8af1028f, D-023)
+# =====================================================================
+
+
+def _minimal_required_ffn_args(ffn_type: str) -> Dict[str, Any]:
+    """Smallest kwargs covering `ffn_type`'s `required_params`.
+
+    Construction only -- no `build()` -- so the widths need not be compatible
+    with any real input shape; they only need to pass `validate_ffn_config`.
+    """
+    sized = {
+        'hidden_dim': 16, 'output_dim': 8, 'units': 8,
+        'features': 8, 'filters': 8,
+    }
+    return {
+        p: sized.get(p, 8) for p in FFN_REGISTRY[ffn_type]['required_params']
+    }
+
+
+class TestStrictDroppedKeyRaise:
+    """`create_ffn_layer` RAISES on a caller key the ffn_type cannot accept.
+
+    Four guards, one per way this change can go wrong:
+
+    1. a caller-supplied unknown key RAISES, naming the key;
+    2. a registry `optional_params` DEFAULT never raises -- the wide-predicate
+       regression guard, RED-proved against `set(kwargs) - required_params`;
+    3. `validate_ffn_config`'s required-params raise still fires FIRST, with
+       its message unchanged (I-3);
+    4. a wrapper layer's `.keras` round-trip still loads, value-exact and with
+       an equal weight count (assumption A-5, which had only ever been
+       REASONED from reading the file).
+    """
+
+    # --- guard 1 ---------------------------------------------------------
+    def test_caller_supplied_unknown_key_raises_naming_the_key(self) -> None:
+        with pytest.raises(ValueError, match="definitely_not_an_mlp_param"):
+            create_ffn_layer(
+                'mlp', hidden_dim=8, output_dim=8,
+                definitely_not_an_mlp_param=1,
+            )
+
+    def test_the_raise_names_the_ffn_type_and_the_accepted_set(self) -> None:
+        """The message must be ACTIONABLE, not merely present.
+
+        A reader must be able to tell "I typed the wrong name" from "I chose
+        the wrong ffn_type" without opening the factory, so the message has to
+        carry the type AND the parameters it does accept.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            create_ffn_layer('mlp', hidden_dim=8, output_dim=8, hiden_dim=512)
+        message = str(excinfo.value)
+        assert 'hiden_dim' in message
+        assert "'mlp'" in message
+        # one real mlp parameter, quoted from the registry rather than typed
+        assert 'activation' in message
+        assert STRICT_DROPPED_KEY_MARKER in message
+
+    def test_a_valid_key_is_still_accepted(self) -> None:
+        """CONTROL: strictness must not reject a key the type DOES take."""
+        layer = create_ffn_layer(
+            'mlp', hidden_dim=8, output_dim=8, activation='relu'
+        )
+        assert layer is not None
+
+    # --- guard 2: the wide-predicate regression guard ---------------------
+    @pytest.mark.parametrize('ffn_type', sorted(FFN_REGISTRY))
+    def test_a_registry_optional_default_never_raises(self, ffn_type) -> None:
+        """The factory's OWN defaults must not trip its own strictness.
+
+        RED-PROOF (executed 2026-07-30, by exact-string edit in the shipped
+        factory -- never `git stash`/`git checkout`): replacing the predicate's
+        right-hand side with the too-narrow
+
+            dropped = sorted(set(kwargs) - set(ffn_info['required_params']))
+
+        fired this test for **21/21** types. That is the widening that actually
+        breaks: it makes every OPTIONAL parameter an error.
+
+        RECORDED NEGATIVE RESULT, because the plan predicted the opposite:
+        substituting `set(params) - valid_param_names` (the "merged dict"
+        variant D-002 called unworkable) changes NOTHING -- 205/205 green.
+        `params` is `optional_params` updated with `kwargs`, and
+        `optional_params`'s keys are a subset of `valid_param_names` by
+        construction, so the two expressions are extensionally EQUAL. The
+        `kwargs` form is still the right one to ship (see the anchor), but it
+        is not load-bearing for the reason the plan gave, and a RED proof
+        built on that reason would have quietly proved nothing.
+        """
+        entry = FFN_REGISTRY[ffn_type]
+        # Every registry default, handed back to the factory explicitly. These
+        # are by construction accepted keys, so none may be reported as dropped.
+        #
+        # The required params are supplied TOO, and that is load-bearing: with
+        # only the optional ones, `validate_ffn_config` raises first for 15 of
+        # the 21 types, `_strictness_break` correctly returns None, and this
+        # test passes without ever reaching the predicate it exists to guard.
+        # (Measured during the RED proof below: 21/21 "passed" vacuously.)
+        kwargs = dict(entry['optional_params'])
+        kwargs.update(_minimal_required_ffn_args(ffn_type))
+        assert set(entry['required_params']) <= set(kwargs)
+        broke = _strictness_break(lambda: create_ffn_layer(ffn_type, **kwargs))
+        assert broke is None, (
+            f"create_ffn_layer({ffn_type!r}) reported its OWN registry "
+            f"optional_params as unsupported: {broke}. The dropped-key "
+            f"predicate has been widened to read the merged `params` dict; "
+            f"revert it to `set(kwargs) - valid_param_names`."
+        )
+
+    def test_optional_defaults_pass_while_a_typo_raises(self) -> None:
+        """Both halves of the predicate, together, on one type.
+
+        A registry optional default passes while a caller typo raises. A
+        too-wide predicate fails the first half; a deleted predicate fails the
+        second. Neither half alone can see both failures.
+        """
+        defaults = dict(FFN_REGISTRY['mlp']['optional_params'])
+        assert defaults, "mlp has no optional_params; this test measures nothing"
+        create_ffn_layer('mlp', hidden_dim=8, output_dim=8, **defaults)
+        with pytest.raises(ValueError, match='not_a_real_key'):
+            create_ffn_layer(
+                'mlp', hidden_dim=8, output_dim=8, not_a_real_key=1, **defaults
+            )
+
+    # --- guard 3: I-3, the pre-existing required-params raise -------------
+    def test_required_params_raise_still_fires_first_and_unchanged(self) -> None:
+        """I-3: `validate_ffn_config` runs BEFORE the drop check, unchanged.
+
+        Both a missing REQUIRED key and an unsupported EXTRA key are present in
+        the same call. The required-params message must be the one that
+        surfaces, in its pre-existing wording -- if strictness ever moved ahead
+        of validation, a caller who simply forgot a required parameter would be
+        told about their extra key instead.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            create_ffn_layer('mlp', hidden_dim=8, bogus_extra_key=1)
+        message = str(excinfo.value)
+        assert "Required parameters missing for mlp: ['output_dim']" in message, (
+            f"the pre-existing required-params message changed or was "
+            f"pre-empted by the strictness raise: {message}"
+        )
+        assert STRICT_DROPPED_KEY_MARKER not in message, (
+            "the strictness raise fired before validate_ffn_config; the order "
+            "in create_ffn_layer must stay validate-then-filter (I-3)."
+        )
+
+    # --- guard 4: A-5, probed rather than reasoned ------------------------
+    @pytest.mark.parametrize(
+        'ffn_type', ['mlp', 'swiglu', 'differential', 'geglu', 'glu']
+    )
+    def test_keras_round_trip_survives_the_strict_factory(
+            self, ffn_type) -> None:
+        """A-5, PROBED: a strict raise cannot break `.keras` LOADING.
+
+        The plan REASONED this from reading the file -- `from_config`
+        reconstructs from already-resolved params rather than from
+        `ffn_type` + kwargs -- and never executed it. This executes it, on a
+        wrapper layer inside a real `keras.Model`, for five types whose
+        registry entries each carry 7-9 `optional_params` (so the merged-dict
+        hazard is genuinely present).
+
+        Weight COUNT is asserted, not just output shape: a shape-only
+        round-trip once passed on a model that restored ZERO weights.
+        """
+        from dl_techniques.layers.transformers.transformer import TransformerLayer
+
+        keras.utils.set_random_seed(1234)
+        inputs = keras.Input(shape=(6, 16))
+        outputs = TransformerLayer(
+            hidden_size=16, num_heads=2, intermediate_size=32,
+            ffn_type=ffn_type, activation='relu', name='blk',
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        x = np.random.RandomState(0).randn(3, 6, 16).astype('float32')
+        before = np.array(model(x, training=False))
+        n_before = len(model.weights)
+        assert n_before > 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'strict_round_trip.keras')
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        after = np.array(loaded(x, training=False))
+        assert len(loaded.weights) == n_before, (
+            f"{ffn_type}: weight COUNT changed across the round-trip "
+            f"({n_before} -> {len(loaded.weights)}); a shape-equal output does "
+            f"not prove the weights came back."
+        )
+        np.testing.assert_array_equal(before, after)
+
+
+class TestFormerlyDroppingConstructionSites:
+    """The 3 sites that adopted `assemble_ffn_config` with DISCARD semantics.
+
+    Step 5 measured four sites passing `activation` unconditionally, dropping
+    it for `differential`, `gelu_tanh`, `squared_relu` and `swiglu` (4/21 each,
+    except `mixed_sequential_block.py` at 1/21). The fourth,
+    `layers/time_series/mixed_sequential_block.py`, chose RENAME semantics for
+    `differential` and is guarded in its own suite, because a dropped-key grid
+    is structurally blind to a missing rename.
+
+    These three chose DISCARD (D-022) -- none of them ever enumerated FFN
+    types, so their `activation` is an unconditional default rather than an
+    expressed per-type intent. This class pins BOTH halves of that choice: the
+    21-type grid (no strictness break anywhere) AND the discard itself, which
+    the grid alone cannot see.
+
+    The grid lives HERE rather than in each model's own suite so it shares the
+    one `_strictness_break` classifier, whose bite is RED-proved above.
+    """
+
+    @staticmethod
+    def _nam(ffn_type: str):
+        from dl_techniques.models.nam.cell import NAMCell, NAMConfig
+        cell = NAMCell(NAMConfig(
+            hidden_size=16, num_heads=2, intermediate_size=32,
+            ffn_type=ffn_type, hidden_act='relu',
+        ))
+        cell.build((None, 8, 16))
+        return cell.ffn
+
+    @staticmethod
+    def _sam(ffn_type: str):
+        from dl_techniques.models.sam.image_encoder import ViTBlock
+        block = ViTBlock(dim=16, num_heads=2, ffn_type=ffn_type,
+                         activation='relu')
+        block.build((None, 8, 8, 16))
+        return block.ffn
+
+    @staticmethod
+    def _tree(ffn_type: str):
+        from dl_techniques.models.tree_transformer.components import (
+            TreeTransformerBlock,
+        )
+        block = TreeTransformerBlock(
+            hidden_size=16, num_heads=2, intermediate_size=32,
+            ffn_type=ffn_type, hidden_act='relu',
+        )
+        block.build(((None, 8, 16), (None, 8), (None, 8, 8)))
+        return block.ffn
+
+    @property
+    def _sites(self):
+        return {'nam': self._nam, 'sam': self._sam, 'tree': self._tree}
+
+    #: The 4 types each of these sites dropped `activation` for, measured at
+    #: HEAD before step 6 with a handler on the `dl` logger.
+    FORMERLY_DROPPED_TYPES = ('differential', 'gelu_tanh', 'squared_relu',
+                              'swiglu')
+
+    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    @pytest.mark.parametrize('ffn_type', sorted(FFN_REGISTRY))
+    def test_no_ffn_type_is_broken_by_strictness(self, site, ffn_type) -> None:
+        build = self._sites[site]
+        broke = _strictness_break(lambda: build(ffn_type))
+        assert broke is None, (
+            f"{site} with ffn_type={ffn_type!r} hands create_ffn_layer a key "
+            f"that type does not accept: {broke}"
+        )
+
+    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    def test_the_formerly_dropped_types_actually_construct(self, site) -> None:
+        """Anti-vacuity: a zero also comes from a site that raises EARLIER.
+
+        These four are exactly the cells the fix addressed, so if the adoption
+        had instead broken their construction with a non-strictness error, the
+        grid above would still be green.
+        """
+        build = self._sites[site]
+        for ffn_type in self.FORMERLY_DROPPED_TYPES:
+            assert build(ffn_type) is not None, (
+                f"{site} did not construct an FFN for {ffn_type!r}"
+            )
+
+    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    def test_differential_keeps_its_default_branch_activation(
+            self, site) -> None:
+        """D-022 DISCARD, stated as an assertion rather than only in prose.
+
+        These sites deliberately do NOT rename their generic activation onto
+        `DifferentialFFN.branch_activation`, because they never expressed a
+        per-type intent for it -- contrast D-021. If a future change routes it
+        through `build_transformer_ffn_config` (which owns that rename), this
+        test is the one that must be updated, deliberately, rather than a
+        silent behaviour change nobody notices.
+        """
+        ffn = self._sites[site]('differential')
+        assert keras.activations.serialize(ffn.branch_activation) == 'gelu'
