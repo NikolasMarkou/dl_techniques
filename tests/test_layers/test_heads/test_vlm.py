@@ -30,7 +30,10 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.ffn.factory import FFN_REGISTRY
-from dl_techniques.layers.heads.vlm.factory import _accepted_constructor_kwargs
+from dl_techniques.layers.heads.vlm.factory import (
+    _accepted_constructor_kwargs,
+    _is_single_shape,
+)
 from dl_techniques.layers.heads.vlm import (
     VLMTaskType,
     VLMTaskConfig,
@@ -1374,3 +1377,125 @@ class TestPostFusionFFNHiddenDimRule:
             f"the two FFN construction sites disagree on swiglu's derived "
             f"hidden width: captioning={cap_hidden}, matching={itm_hidden}"
         )
+
+
+# ---------------------------------------------------------------------
+# Fusion-strategy output contract (D-011).
+#
+# `MultiModalFusion` has 8 strategies. 6 return a single rank-preserving tensor
+# and work on both BaseVLMHead subclasses. 2 do not, and used to fail with an
+# error naming neither the strategy nor the reason.
+# ---------------------------------------------------------------------
+
+_SINGLE_TENSOR_STRATEGIES = [
+    "concatenation", "addition", "multiplication",
+    "gated", "bilinear", "tensor_fusion",
+]
+_UNSUPPORTED_STRATEGIES = {
+    # strategy -> the phrase the raise must contain
+    "cross_attention": "one output per modality",
+    "attention_pooling": "pools away an axis",
+}
+
+_BASE_SUBCLASSES = [
+    ("itm", ImageTextMatchingHead, VLMTaskType.IMAGE_TEXT_MATCHING),
+    ("grd", VisualGroundingHead, VLMTaskType.VISUAL_GROUNDING),
+]
+
+
+def _fusion_head(cls, name, task_type, strategy):
+    return cls(
+        task_config=_family_config(name, task_type),
+        vision_dim=_FAMILY_DIM, text_dim=_FAMILY_DIM,
+        fusion_strategy=strategy,
+    )
+
+
+class TestFusionStrategyOutputContract:
+    """A head must reject a fusion output its post-fusion stack cannot consume."""
+
+    @pytest.mark.parametrize("name,cls,task_type", _BASE_SUBCLASSES)
+    @pytest.mark.parametrize("strategy", sorted(_UNSUPPORTED_STRATEGIES))
+    def test_unsupported_strategy_raises_naming_the_cause(
+        self, name, cls, task_type, strategy
+    ) -> None:
+        """The message must name the strategy AND why it cannot work.
+
+        Before this guard: `cross_attention` died with `ValueError: Invalid
+        dtype: tuple` (Keras choking on a list-of-shapes it was handed as a
+        shape), and `attention_pooling` died in a squeeze on ITM but only much
+        later inside an ArgMax on VG. None of those name the strategy.
+
+        Deleting either check in `_build_fusion_stack` fails here: the raise
+        either does not happen or does not carry the required phrase.
+        """
+        expected_phrase = _UNSUPPORTED_STRATEGIES[strategy]
+        head = _fusion_head(cls, name, task_type, strategy)
+        payload = _family_payload()
+
+        with pytest.raises(ValueError, match=strategy) as excinfo:
+            head.build(_shapes_of(payload))
+        assert expected_phrase in str(excinfo.value), (
+            f"raise for {strategy} did not explain the cause; got: "
+            f"{excinfo.value}"
+        )
+
+    @pytest.mark.parametrize("name,cls,task_type", _BASE_SUBCLASSES)
+    @pytest.mark.parametrize("strategy", _SINGLE_TENSOR_STRATEGIES)
+    def test_supported_strategies_still_build_and_call(
+        self, name, cls, task_type, strategy
+    ) -> None:
+        """CONTROL: the 6 working strategies must keep working, on both heads.
+
+        Without this, a check that rejected EVERYTHING would satisfy the test
+        above. Asserts a real forward pass and finite outputs, not just
+        construction, so an over-broad guard or a dead pipeline also fails.
+        """
+        head = _fusion_head(cls, name, task_type, strategy)
+        payload = _family_payload()
+        out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        flat = _flatten_outputs(out)
+        assert flat.size > 0
+        assert np.all(np.isfinite(flat)), (
+            f"{name}/{strategy} produced non-finite outputs"
+        )
+
+    @pytest.mark.parametrize("name,cls,task_type", _BASE_SUBCLASSES)
+    @pytest.mark.parametrize("strategy", sorted(_UNSUPPORTED_STRATEGIES))
+    def test_lazy_and_explicit_build_fail_identically(
+        self, name, cls, task_type, strategy
+    ) -> None:
+        """The guard must not introduce a build-vs-lazy asymmetry.
+
+        Measured before the fix: these 2 strategies already failed IDENTICALLY
+        on both paths, i.e. this is a capability gap, not a `build()`-contract
+        defect. The fix must keep it that way -- a guard that fired only from
+        `build()` would leave `head(payload)` dying with the old opaque error.
+        """
+        payload = _family_payload()
+        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+
+        with pytest.raises(ValueError, match=strategy):
+            _fusion_head(cls, name, task_type, strategy).build(
+                _shapes_of(payload)
+            )
+        with pytest.raises(ValueError, match=strategy):
+            _fusion_head(cls, name, task_type, strategy)(tensors)
+
+    def test_is_single_shape_discriminates_shape_from_shape_list(self) -> None:
+        """The predicate cannot be `isinstance(x, (list, tuple))`.
+
+        Both a shape and a list of shapes are sequences; only the ELEMENT type
+        separates them. A dynamic axis is `None`, which must not be mistaken for
+        a nested sequence.
+        """
+        assert _is_single_shape((2, 5, 96))
+        assert _is_single_shape((None, 5, 96))
+        assert _is_single_shape([None, 96])
+        assert not _is_single_shape([(2, 5, 96), (2, 5, 96)])
+        assert not _is_single_shape(((None, 96), (None, 96)))
+        assert not _is_single_shape("not a shape")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

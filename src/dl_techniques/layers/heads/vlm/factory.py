@@ -83,6 +83,28 @@ def _accepted_constructor_kwargs(head_class: type) -> frozenset:
     return frozenset(accepted)
 
 
+def _is_single_shape(shape: Any) -> bool:
+    """Is this ONE shape, rather than a collection of shapes?
+
+    ``compute_output_shape`` may legitimately return either, and both are
+    sequences, so ``isinstance(shape, (list, tuple))`` cannot tell them apart.
+    The discriminator is the ELEMENT type: a single shape holds ints (or
+    ``None`` for a dynamic axis), a collection holds sequences.
+
+    Used by :meth:`BaseVLMHead._build_fusion_stack` to reject a fusion strategy
+    whose output is per-modality before the shape reaches Keras and surfaces as
+    ``ValueError: Invalid dtype: tuple`` (D-011).
+
+    :param shape: A shape tuple, or a list/tuple of shape tuples.
+    :type shape: Any
+    :return: ``True`` for a single shape, ``False`` for a collection of them.
+    :rtype: bool
+    """
+    if not isinstance(shape, (list, tuple)):
+        return False
+    return not any(isinstance(entry, (list, tuple)) for entry in shape)
+
+
 # ---------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------
@@ -311,6 +333,60 @@ class BaseVLMHead(keras.layers.Layer):
         """
         self.fusion.build(fusion_input_shapes)
         fused_shape = self.fusion.compute_output_shape(fusion_input_shapes)
+
+        # DECISION plan-2026-07-30T081929-1645aa52/D-011
+        # The post-fusion stack (norm -> dropout -> FFN -> task head) consumes ONE
+        # tensor, and each subclass's `call()` squeezes a known axis off it. Two of
+        # `MultiModalFusion`'s eight strategies do not meet that contract:
+        #
+        #   * `cross_attention` returns a TUPLE, one tensor per modality
+        #     (`multimodal_fusion.py::_call_cross_attention` -> `tuple(outputs)`).
+        #   * `attention_pooling` returns rank-2 `(batch, dim)`, having already
+        #     pooled away the axis the caller intends to squeeze.
+        #
+        # Both were reaching Keras as a shape and dying with an error that named
+        # neither the strategy nor the reason: `ValueError: Invalid dtype: tuple`
+        # for the first, and a squeeze/fully-defined-shape complaint for the
+        # second. Measured: 6 of the 8 strategies work on both heads, those 2 fail
+        # IDENTICALLY on the lazy and the explicit-build path -- so this is a
+        # pre-existing capability gap, not a `build()`-contract bug.
+        #
+        # Raise here, at the point of wiring, rather than teaching the post-fusion
+        # stack to consume a per-modality tuple: that would be a new fan-in
+        # mechanism (which tensor feeds the task head? both? concatenated?) and
+        # the answer is a modelling decision nobody has asked for. The check is
+        # derived from the fusion layer's declared OUTPUT CONTRACT rather than
+        # from a hardcoded strategy list, so a future strategy that returns a
+        # tuple is rejected automatically.
+        if not _is_single_shape(fused_shape):
+            raise ValueError(
+                f"fusion_strategy={self.fusion_strategy!r} produces one output "
+                f"per modality (compute_output_shape returned "
+                f"{fused_shape!r}), but {type(self).__name__}'s post-fusion "
+                f"stack consumes a single fused tensor. Use one of the "
+                f"single-tensor strategies (concatenation, addition, "
+                f"multiplication, gated, bilinear, tensor_fusion)."
+            )
+
+        # Rank must be PRESERVED. Both heads hand `self.fusion` rank-3
+        # `(batch, seq_or_region, dim)` tensors and consume a rank-3 result --
+        # `ImageTextMatchingHead` squeezes its length-1 axis back off,
+        # `VisualGroundingHead` keeps the region axis and scores per region. A
+        # strategy that pools an axis away (`attention_pooling` -> rank 2) breaks
+        # both, but at different places and with different errors: ITM died in the
+        # squeeze, VG only later inside an ArgMax ("Expected dimension in the
+        # range [-1, 1)"). One rank check upstream covers both heads and any
+        # future pooling strategy, and needs no `squeeze_axis` special-casing.
+        if len(fused_shape) != len(tuple(fusion_input_shapes[0])):
+            raise ValueError(
+                f"fusion_strategy={self.fusion_strategy!r} returns a "
+                f"rank-{len(fused_shape)} output {tuple(fused_shape)!r} for "
+                f"rank-{len(tuple(fusion_input_shapes[0]))} inputs, so it pools "
+                f"away an axis that {type(self).__name__} still needs. Use a "
+                f"rank-preserving strategy (concatenation, addition, "
+                f"multiplication, gated, bilinear, tensor_fusion)."
+            )
+
         if squeeze_axis is not None:
             fused_shape = tuple(
                 d for i, d in enumerate(fused_shape) if i != squeeze_axis
