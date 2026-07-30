@@ -218,7 +218,41 @@ class TestVLMForwardPass:
         self, vision_feats, text_feats
     ) -> None:
         """SC3 (optional): perturbing the LAST text position must not change the
-        logits at earlier positions (the causal mask blocks future leakage)."""
+        logits at earlier positions (the causal mask blocks future leakage).
+
+        # DECISION plan-2026-07-30T140922-8af1028f/D-026
+        MEASURED ON GPU (2026-07-30, RTX 4070, cc 8.9), the three regimes that
+        can differ for a float32 matmul stack in this repo:
+
+            TF32 ON, file-scoped (the GPU default) : max|diff| = 0.000000e+00
+            TF32 forced OFF                        : max|diff| = 0.000000e+00
+            co-collected behind
+            test_attention/test_linear_attention.py: max|diff| = 0.000000e+00
+              (that file's import-time, unrestored
+               `enable_tensor_float_32_execution(False)` really does leak --
+               TF32 was observed False here while the file-scoped run observed
+               True, so the regime genuinely changed and the number did not)
+
+        So `atol=1e-5` below is NOT a bare epsilon riding on ambient TF32 state.
+        The masked positions are bit-identical: an additive -1e9 mask makes the
+        future token's softmax weight exactly 0.0 in float32, and adding 0.0 is
+        exact, so the earlier positions' reduction is unchanged bit-for-bit
+        whatever precision the matmul uses.
+
+        DO NOT "fix" this by porting the `_TF32_ULP = 2**-11` ulp-relative bound
+        and the capture/restore/assert harness from
+        `test_transformers/test_gated_linear_attention_block.py`. That was the
+        recommended remedy before anyone measured; it is unnecessary here (the
+        diff is 0.0, not merely small) and a toggle harness would add a
+        process-global side effect to a test that provably does not need one.
+
+        NOT VACUOUS, RED-proved the same day: replacing `attention_mask=causal_mask`
+        with `attention_mask=None` in `ImageCaptioningHead.call`
+        (`layers/heads/vlm/factory.py`) makes this assertion fail at
+        max|diff| = 3.27e+00 (TF32 on) / 3.03e+00 (TF32 off), i.e. the defect
+        signal is ~5 orders of magnitude above `atol`, against a noise floor of
+        exactly zero.
+        """
         head = _captioning_head()
         base = {
             "vision_features": ops.convert_to_tensor(vision_feats),

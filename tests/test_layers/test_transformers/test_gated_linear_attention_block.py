@@ -1420,15 +1420,25 @@ class TestXLACompilation:
 
         # Tolerance, derived rather than guessed. Same weights, same input, so
         # only the arithmetic differs -- and on this GPU the difference is TF32,
-        # not XLA: measured max|diff| = 6.6e-05 with TF32 enabled (the default)
-        # and 2.2e-08 with `enable_tensor_float_32_execution(False)`, on an
-        # output whose scale is 0.179. TF32 keeps 10 explicit mantissa bits, so
-        # one TF32 ulp is 2**-11 relative; the measured gap is 0.76 ulp. Allow 4
-        # ulps of output scale -- ~5x above the measured value, still ~4 orders
-        # of magnitude below anything a miscompiled scan would produce.
+        # not XLA.
+        #
+        # RE-DERIVED FROM THE SHIPPED CODE (2026-07-30, plan step 9, on GPU 1 =
+        # RTX 4070, compute capability 8.9). The previous figures here (6.6e-05
+        # / 2.2e-08 / 0.76 ulp) predate D-009's exponent-masking rewrite and were
+        # never re-measured against it. They do NOT reproduce; the current
+        # numbers, deterministic across repeated runs, are:
+        #
+        #     TF32 ON  (GPU default): max|diff| = 6.960332e-05
+        #     TF32 OFF              : max|diff| = 2.980232e-08
+        #     output scale          : 0.17891
+        #
+        # TF32 keeps 10 explicit mantissa bits, so one TF32 ulp is 2**-11
+        # relative; the measured gap is 0.797 ulp. Allow 4 ulps of output scale
+        # -- ~5x above the measured value, still ~4 orders of magnitude below
+        # anything a miscompiled scan would produce.
         # (This matters because TF32 can be disabled process-globally by an
-        # unrelated test module, which swings this number by ~3000x; the bound
-        # must hold in BOTH regimes, and it does.)
+        # unrelated test module, which swings this number by ~2300x; the bound
+        # must hold in BOTH regimes, and it does -- verified in both on GPU.)
         err = float(np.abs(jitted - eager).max())
         scale = float(np.abs(eager).max())
         tol = 4.0 * (2.0 ** -11) * scale
