@@ -187,8 +187,61 @@ class BaseVLMHead(keras.layers.Layer):
             )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Builds the layer."""
+        """Builds the layer.
+
+        Deliberately does NOT build the common sub-layers created in
+        ``_build_common_layers()``. It cannot: the shapes they see depend on how
+        each subclass drives them (``VisualGroundingHead`` fuses per-region
+        ``(B, N, D)`` tensors, ``ImageTextMatchingHead`` fuses pooled
+        ``(B, 1, D)`` tensors and then squeezes), and one subclass does not use
+        the post-fusion stack at all. Subclasses call
+        :meth:`_build_fusion_stack` from their own ``build()`` with their actual
+        shapes -- see the note there about not building unused sub-layers.
+        """
         super().build(input_shape)
+
+    def _build_fusion_stack(
+        self,
+        fusion_input_shapes: List[Tuple[Optional[int], ...]],
+        squeeze_axis: Optional[int] = None,
+        build_post_fusion: bool = True,
+    ) -> Tuple[Optional[int], ...]:
+        """Build ``fusion`` and (optionally) the post-fusion stack; return its shape.
+
+        Shapes are DERIVED via each sub-layer's ``compute_output_shape`` rather
+        than recomputed from ``hidden_dim``, so this stays correct if a fusion
+        strategy changes its output width.
+
+        :param fusion_input_shapes: ``[vision_shape, text_shape]`` exactly as the
+            subclass passes them to ``self.fusion``.
+        :type fusion_input_shapes: List[Tuple[Optional[int], ...]]
+        :param squeeze_axis: Axis the subclass squeezes off the fusion output
+            before the post-fusion stack, or ``None`` if it does not squeeze.
+        :type squeeze_axis: Optional[int]
+        :param build_post_fusion: Whether this subclass's ``call()`` actually
+            runs the post-fusion norm/dropout/FFN. **Pass ``False`` when it does
+            not**: building an unused sub-layer would create weights that the
+            lazy path never created, changing the layer's weight count and its
+            ``.keras`` layout for no benefit.
+        :type build_post_fusion: bool
+        :return: Shape entering the post-fusion stack (post-squeeze).
+        :rtype: Tuple[Optional[int], ...]
+        """
+        self.fusion.build(fusion_input_shapes)
+        fused_shape = self.fusion.compute_output_shape(fusion_input_shapes)
+        if squeeze_axis is not None:
+            fused_shape = tuple(
+                d for i, d in enumerate(fused_shape) if i != squeeze_axis
+            )
+
+        if build_post_fusion:
+            self.post_fusion_norm.build(fused_shape)
+            self.post_fusion_dropout.build(fused_shape)
+            if self.use_post_fusion_ffn:
+                self.post_fusion_ffn.build(fused_shape)
+                fused_shape = self.post_fusion_ffn.compute_output_shape(fused_shape)
+
+        return tuple(fused_shape)
 
     def compute_output_shape(
         self, input_shape: Union[Dict, Tuple, List]
@@ -611,6 +664,51 @@ class VQAHead(keras.layers.Layer):
             self.task_config.num_classes, name="output_layer"
         )
 
+    def build(self, input_shape: Union[Dict, Tuple, List]) -> None:
+        """Explicitly build every sub-layer ``call()`` uses, in order.
+
+        Only the sub-layers this head's ``pooling_strategy`` actually exercises
+        are built: ``attention_pooling`` exists only for ``"attention"``, and
+        building it otherwise would create weights the lazy path never created.
+
+        The classifier's input width is derived from the ACTUAL input shapes
+        rather than from ``vision_dim``/``text_dim``, because the two pooling
+        branches produce different widths -- ``mean``/``max`` keep each
+        modality's own channel count, while ``attention`` maps both to
+        ``embed_dim``.
+
+        :param input_shape: Shape dict with ``vision_features`` and
+            ``question_features``.
+        :type input_shape: Union[Dict, Tuple, List]
+        """
+        if self.built:
+            return
+
+        vision_shape = tuple(input_shape["vision_features"])
+        question_shape = tuple(input_shape["question_features"])
+        batch = vision_shape[0]
+
+        if self.pooling_strategy == "attention":
+            # One cross-attention layer is reused in BOTH directions
+            # (vision<-question and question<-vision), so it is built once with
+            # [query, kv] = [vision, question]; the reversed call requires the
+            # two feature widths to match, which is a pre-existing contract of
+            # this head, not something introduced here.
+            self.attention_pooling.build([vision_shape, question_shape])
+            pooled_width = self.embed_dim * 2
+        else:
+            pooled_width = vision_shape[-1] + question_shape[-1]
+
+        x_shape = (batch, pooled_width)
+        for hidden_layer, dropout_layer in zip(self.hidden_layers, self.dropout_layers):
+            hidden_layer.build(x_shape)
+            x_shape = hidden_layer.compute_output_shape(x_shape)
+            dropout_layer.build(x_shape)
+
+        self.output_layer.build(x_shape)
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],
@@ -721,6 +819,46 @@ class VisualGroundingHead(BaseVLMHead):
             1, activation="sigmoid", name=f"{self.name}_confidence"
         )
 
+    def build(self, input_shape: Union[Dict, Tuple, List]) -> None:
+        """Explicitly build every sub-layer ``call()`` uses, in order.
+
+        ``call()`` pools the text features to one query vector and TILES it
+        across the vision regions, so the fusion sees two ``(B, N_regions, D)``
+        tensors -- the text side keeps its own channel count, not a pooled-away
+        one.
+
+        The post-fusion norm/dropout/FFN are NOT built: this head's ``call()``
+        never runs them (it goes straight from ``fusion`` to
+        ``confidence_scorer``). Building them would create weights the lazy path
+        never created, inflating the weight count and changing the ``.keras``
+        layout.
+
+        :param input_shape: Shape dict with ``vision_features`` (3-D, per-region)
+            and ``text_features``.
+        :type input_shape: Union[Dict, Tuple, List]
+        """
+        if self.built:
+            return
+
+        vision_shape = tuple(input_shape["vision_features"])
+        text_shape = tuple(input_shape["text_features"])
+        batch, num_regions = vision_shape[0], vision_shape[1]
+
+        # Text is mean-pooled over its sequence axis then tiled to num_regions.
+        text_tiled_shape = (batch, num_regions, text_shape[-1])
+
+        fused_shape = self._build_fusion_stack(
+            [vision_shape, text_tiled_shape], build_post_fusion=False
+        )
+
+        # confidence_scorer sees the per-region fused tensor; bbox_regressor sees
+        # only the single top-scoring region, i.e. the same width without the
+        # region axis.
+        self.confidence_scorer.build(fused_shape)
+        self.bbox_regressor.build((batch, fused_shape[-1]))
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],
@@ -752,9 +890,21 @@ class VisualGroundingHead(BaseVLMHead):
         region_scores = ops.squeeze(region_scores, axis=-1)  # [B, N_regions]
 
         # Regress bounding box from the top-scoring region's features.
+        #
+        # Gather one region per batch element with `ops.take_along_axis`, NOT with
+        # NumPy-style fancy indexing (`fused[batch_indices, top_indices]`). That
+        # form is a NumPy idiom that TF tensors reject outright --
+        # "Only integers, slices (`:`), ellipsis, tf.newaxis and scalar
+        # tf.int32/tf.int64 tensors are valid indices" -- so it failed EAGERLY,
+        # not merely under tracing, leaving this head dead on its forward pass.
         top_indices = ops.argmax(region_scores, axis=1)
-        batch_indices = ops.arange(ops.shape(vision_features)[0])
-        top_features = fused_per_region[batch_indices, top_indices]
+        gather_index = ops.reshape(ops.cast(top_indices, "int32"), (-1, 1, 1))
+        gather_index = ops.broadcast_to(
+            gather_index, (ops.shape(fused_per_region)[0], 1, ops.shape(fused_per_region)[2])
+        )
+        top_features = ops.squeeze(
+            ops.take_along_axis(fused_per_region, gather_index, axis=1), axis=1
+        )
         bbox = self.bbox_regressor(top_features)
 
         return {
@@ -862,6 +1012,45 @@ class ImageTextMatchingHead(BaseVLMHead):
             initializer=keras.initializers.Constant(temperature),
             trainable=True,
         )
+
+    def build(self, input_shape: Union[Dict, Tuple, List]) -> None:
+        """Explicitly build every sub-layer ``call()`` uses, in order.
+
+        ``call()`` mean-pools each modality to 2-D, projects both, and separately
+        expands the pooled tensors to ``(B, 1, D)`` for the fusion (which
+        requires 3-D) before squeezing axis 1 back off for the 2-D post-fusion
+        stack. ``_build_fusion_stack`` is told about that squeeze so the norm/FFN
+        are built at the rank they actually see.
+
+        ``temperature`` is already created by ``add_weight`` in ``__init__``, so
+        it needs nothing here.
+
+        :param input_shape: Shape dict with ``vision_features`` and
+            ``text_features``.
+        :type input_shape: Union[Dict, Tuple, List]
+        """
+        if self.built:
+            return
+
+        vision_shape = tuple(input_shape["vision_features"])
+        text_shape = tuple(input_shape["text_features"])
+        batch = vision_shape[0]
+
+        # Pooled to 2-D when the input is 3-D, otherwise passed through as-is.
+        vision_pooled_shape = (batch, vision_shape[-1])
+        text_pooled_shape = (batch, text_shape[-1])
+
+        self.vision_proj.build(vision_pooled_shape)
+        self.text_proj.build(text_pooled_shape)
+
+        processed_shape = self._build_fusion_stack(
+            [(batch, 1, vision_shape[-1]), (batch, 1, text_shape[-1])],
+            squeeze_axis=1,
+            build_post_fusion=True,
+        )
+        self.similarity_head.build(processed_shape)
+
+        super().build(input_shape)
 
     def call(
         self,
@@ -1009,6 +1198,25 @@ class MultiTaskVLMHead(keras.layers.Layer):
             )
             self.task_heads[task_name] = head
             setattr(self, f"head_{task_name}", head)
+
+    def build(self, input_shape: Dict) -> None:
+        """Build every task head against the shared input shapes.
+
+        ``call()`` hands the SAME ``inputs`` dict to every head, so each head is
+        built from the same shapes. A head that needs a key the caller did not
+        supply raises here rather than at first use -- the same failure ``call()``
+        would produce, just earlier, and deliberately not swallowed.
+
+        :param input_shape: Shared input shapes, keyed by feature name.
+        :type input_shape: Dict
+        """
+        if self.built:
+            return
+
+        for head in self.task_heads.values():
+            head.build(input_shape)
+
+        super().build(input_shape)
 
     def call(
         self,

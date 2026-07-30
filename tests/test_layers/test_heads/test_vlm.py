@@ -580,3 +580,265 @@ class TestCaptioningExplicitBuild:
                 w0, w1, rtol=1e-6, atol=1e-6,
                 err_msg=f"weight {i} (shape {w0.shape}) not restored",
             )
+
+
+# ---------------------------------------------------------------------
+# Explicit sub-layer build across the WHOLE VLM head family
+#
+# `BaseVLMHead.build()` only calls `super().build()`, and none of the five
+# subclasses built their sub-layers. They were created in `__init__` and left
+# unbuilt until Keras traced `call()`, so a Functional-model `.keras` round-trip
+# could not restore them ("A total of N objects could not be loaded").
+#
+# Each head is checked three ways, because each catches a different failure:
+#   1. `build()` alone must create weights   -> catches a missing/no-op build()
+#   2. explicit build must be numerically INERT vs the lazy path, at the same
+#      weight count -> catches a build() that builds the WRONG shapes, or builds
+#      sub-layers `call()` never uses (which would inflate the checkpoint)
+#   3. a round-trip must preserve VALUES     -> catches the original defect
+#
+# Check 2 is the one that constrains the fix rather than just asserting it ran:
+# `VisualGroundingHead` never runs the post-fusion stack, so building it would
+# add weights the lazy path never created and check 2 would fail.
+# ---------------------------------------------------------------------
+
+# Feature width 96: MultiTaskVLMHead's per-head defaults include num_heads=12,
+# and hidden_dim must be divisible by it. (`task_specific_kwargs`, which would
+# let a caller override that, is unusable -- MultiTaskVLMHead reads it out of
+# **kwargs but forwards kwargs to Layer.__init__, which rejects it.)
+_FAMILY_DIM = 96
+_FAMILY_SEQ = 7
+_FAMILY_BATCH = 3
+
+
+def _family_payload(text_key: str = "text_features"):
+    rng = np.random.default_rng(11)
+    return {
+        "vision_features": rng.normal(
+            size=(_FAMILY_BATCH, _FAMILY_SEQ, _FAMILY_DIM)
+        ).astype("float32"),
+        text_key: rng.normal(
+            size=(_FAMILY_BATCH, _FAMILY_SEQ, _FAMILY_DIM)
+        ).astype("float32"),
+    }
+
+
+def _family_config(name: str, task_type: VLMTaskType) -> VLMTaskConfig:
+    return VLMTaskConfig(
+        name=name, task_type=task_type, vocab_size=VOCAB,
+        hidden_size=_FAMILY_DIM, num_classes=NUM_CLASSES,
+    )
+
+
+# (id, task_type, text input key)
+_SINGLE_HEADS = [
+    ("captioning", VLMTaskType.IMAGE_CAPTIONING, "text_features"),
+    ("vqa", VLMTaskType.VISUAL_QUESTION_ANSWERING, "question_features"),
+    ("grounding", VLMTaskType.VISUAL_GROUNDING, "text_features"),
+    ("matching", VLMTaskType.IMAGE_TEXT_MATCHING, "text_features"),
+]
+
+
+def _make_single(task_type: VLMTaskType, name: str):
+    return create_vlm_head(
+        _family_config(name, task_type),
+        vision_dim=_FAMILY_DIM,
+        text_dim=_FAMILY_DIM,
+    )
+
+
+def _flatten_outputs(out) -> np.ndarray:
+    """Flatten a head's output (tensor, dict, or dict-of-dicts) to one vector."""
+    if isinstance(out, dict):
+        return np.concatenate(
+            [_flatten_outputs(out[k]).ravel() for k in sorted(out)]
+        )
+    return ops.convert_to_numpy(out).ravel()
+
+
+def _shapes_of(payload) -> dict:
+    return {k: (None,) + v.shape[1:] for k, v in payload.items()}
+
+
+class TestVLMHeadFamilyExplicitBuild:
+    """Every VLM head must build its sub-layers in `build()`, not lazily."""
+
+    @pytest.mark.parametrize("label,task_type,text_key", _SINGLE_HEADS)
+    def test_build_creates_weights_without_a_forward_pass(
+        self, label, task_type, text_key
+    ) -> None:
+        payload = _family_payload(text_key)
+        head = _make_single(task_type, label)
+        assert not head.built
+        head.build(_shapes_of(payload))
+        assert head.built
+
+        # `len(weights) > 0` is NOT a sufficient assertion here: this was caught
+        # by RED-proofing, where `ImageTextMatchingHead` satisfied it with
+        # `build()` deleted, because its `temperature` scalar is created by
+        # `add_weight` in `__init__` and exists unbuilt. The real invariant is
+        # that build() creates EVERY weight a forward pass would, so compare
+        # against a fresh instance driven by an actual call.
+        reference = _make_single(task_type, label)
+        reference({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        assert len(reference.weights) > 0, "the reference forward pass built nothing"
+        assert len(head.weights) == len(reference.weights), (
+            f"{label}: build() created {len(head.weights)} weights but a forward "
+            f"pass creates {len(reference.weights)} — sub-layers are left unbuilt "
+            f"and a .keras round-trip cannot restore them"
+        )
+
+    @pytest.mark.parametrize("label,task_type,text_key", _SINGLE_HEADS)
+    def test_explicit_build_is_numerically_inert(
+        self, label, task_type, text_key
+    ) -> None:
+        """Same weight count AND bit-identical output vs the lazy path.
+
+        The weight-count half is what forbids building sub-layers that `call()`
+        never runs: `VisualGroundingHead` skips the post-fusion stack entirely,
+        so building it would show up here as extra weights.
+        """
+        payload = _family_payload(text_key)
+        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+
+        keras.utils.set_random_seed(5)
+        explicit = _make_single(task_type, label)
+        explicit.build(_shapes_of(payload))
+        out_explicit = _flatten_outputs(explicit(tensors))
+
+        keras.utils.set_random_seed(5)
+        lazy = _make_single(task_type, label)
+        out_lazy = _flatten_outputs(lazy(tensors))
+
+        assert len(explicit.weights) == len(lazy.weights), (
+            f"{label}: explicit build created {len(explicit.weights)} weights vs "
+            f"{len(lazy.weights)} lazily — build() is building sub-layers that "
+            f"call() does not use, or missing some that it does"
+        )
+        assert np.array_equal(out_explicit, out_lazy), (
+            f"{label}: explicit build() changed the forward result; it must be inert"
+        )
+
+    @pytest.mark.parametrize("label,task_type,text_key", _SINGLE_HEADS)
+    def test_functional_round_trip_preserves_values(
+        self, label, task_type, text_key
+    ) -> None:
+        payload = _family_payload(text_key)
+        inputs = {
+            k: keras.Input(shape=v.shape[1:], name=k) for k, v in payload.items()
+        }
+        model = keras.Model(
+            list(inputs.values()), _make_single(task_type, label)(inputs)
+        )
+        xs = [payload[k] for k in inputs]
+        before = model.predict(xs, verbose=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, f"{label}.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = restored.predict(xs, verbose=0)
+
+        np.testing.assert_allclose(
+            _flatten_outputs(before), _flatten_outputs(after),
+            rtol=1e-6, atol=1e-6,
+            err_msg=f"{label}: values changed across a .keras round-trip — "
+                    f"weights were not restored",
+        )
+
+    def test_multi_task_head_builds_and_round_trips(self) -> None:
+        """The wrapper must build every task head it owns."""
+        payload = _family_payload()
+        cfgs = {
+            "cap": _family_config("cap", VLMTaskType.IMAGE_CAPTIONING),
+            "itm": _family_config("itm", VLMTaskType.IMAGE_TEXT_MATCHING),
+        }
+        mk = lambda: create_multi_task_vlm_head(
+            cfgs, shared_vision_dim=_FAMILY_DIM, shared_text_dim=_FAMILY_DIM
+        )
+
+        head = mk()
+        head.build(_shapes_of(payload))
+        assert head.built and len(head.weights) > 0
+
+        tensors = {k: ops.convert_to_tensor(v) for k, v in payload.items()}
+        keras.utils.set_random_seed(7)
+        explicit = mk()
+        explicit.build(_shapes_of(payload))
+        out_explicit = _flatten_outputs(explicit(tensors))
+        keras.utils.set_random_seed(7)
+        lazy = mk()
+        out_lazy = _flatten_outputs(lazy(tensors))
+        assert len(explicit.weights) == len(lazy.weights)
+        assert np.array_equal(out_explicit, out_lazy)
+
+        inputs = {
+            k: keras.Input(shape=v.shape[1:], name=k) for k, v in payload.items()
+        }
+        model = keras.Model(list(inputs.values()), mk()(inputs))
+        xs = [payload[k] for k in inputs]
+        before = model.predict(xs, verbose=0)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "multitask.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        np.testing.assert_allclose(
+            _flatten_outputs(before),
+            _flatten_outputs(restored.predict(xs, verbose=0)),
+            rtol=1e-6, atol=1e-6,
+            err_msg="multi-task: values changed across a .keras round-trip",
+        )
+
+
+class TestVisualGroundingForwardPass:
+    """`VisualGroundingHead` was dead on its forward pass — pin that it runs.
+
+    `call()` gathered the top-scoring region with NumPy-style fancy indexing,
+    `fused[batch_indices, top_indices]`. TF tensors reject that outright, so the
+    head raised `TypeError` on ANY call, eager included. It is absent from this
+    module's list of forward-pass-verified heads, which is why nothing caught it.
+    """
+
+    def test_forward_pass_runs_and_returns_the_documented_keys(self) -> None:
+        payload = _family_payload()
+        head = _make_single(VLMTaskType.VISUAL_GROUNDING, "grounding")
+        out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+
+        assert "bbox" in out and "confidence" in out
+        assert tuple(out["bbox"].shape) == (_FAMILY_BATCH, 4)
+        assert tuple(out["confidence"].shape) == (_FAMILY_BATCH, _FAMILY_SEQ)
+        assert np.isfinite(ops.convert_to_numpy(out["bbox"])).all()
+
+    def test_top_region_gather_selects_the_argmax_region(self) -> None:
+        """The gather must pick the region the confidence scorer ranked first.
+
+        A graph-safe gather that silently took region 0, or transposed the batch
+        and region axes, would still return correctly-shaped finite output. This
+        reproduces the gather on known values instead of trusting the shape.
+        """
+        batch, regions, feat = 3, 5, 4
+        fused = ops.convert_to_tensor(
+            np.arange(batch * regions * feat, dtype="float32").reshape(
+                batch, regions, feat
+            )
+        )
+        scores = ops.convert_to_tensor(
+            np.array([[0.1, 0.9, 0.2, 0.0, 0.3],
+                      [0.5, 0.1, 0.0, 0.2, 0.1],
+                      [0.0, 0.1, 0.2, 0.3, 0.7]], dtype="float32")
+        )
+        expected_rows = [1, 0, 4]
+
+        top_indices = ops.argmax(scores, axis=1)
+        gather_index = ops.reshape(ops.cast(top_indices, "int32"), (-1, 1, 1))
+        gather_index = ops.broadcast_to(gather_index, (batch, 1, feat))
+        got = ops.convert_to_numpy(
+            ops.squeeze(ops.take_along_axis(fused, gather_index, axis=1), axis=1)
+        )
+
+        fused_np = ops.convert_to_numpy(fused)
+        for b, r in enumerate(expected_rows):
+            np.testing.assert_array_equal(
+                got[b], fused_np[b, r],
+                err_msg=f"batch {b}: gathered the wrong region (expected {r})",
+            )
