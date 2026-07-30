@@ -145,6 +145,17 @@ def power_iteration(
         raise ValueError("Input matrix must be 2-dimensional")
 
     # Initialize random vector
+    #
+    # KNOWN FLAKE, measured 2026-07-30: this start vector is UNSEEDED, so
+    # `power_iteration` returns a slightly different estimate per call. At low
+    # `iterations` the estimate has not converged, and
+    # `tests/test_utils/test_tensors.py::TestPowerIteration::test_convergence_iterations`
+    # (which compares `iterations=2` against `iterations=20` at `rtol=1e-1`)
+    # therefore fails intermittently -- 2 failures in 6 runs, on unmodified code.
+    # It is a test/API-contract question, not a numerical bug in the loop below:
+    # fixing it means seeding the draw, raising the iteration floor, or loosening
+    # that test's tolerance. Deliberately left as-is; do not "fix" the flake by
+    # tightening the tolerance.
     matrix_shape = tf.shape(matrix)
     vector = tf.random.normal([matrix_shape[1], 1])
     vector = vector / (tf.norm(vector) + epsilon)

@@ -717,7 +717,15 @@ class ImageCaptioningHead(keras.layers.Layer):
         #
         # MaskFactory returns the BLOCK polarity (True where a position must be
         # suppressed, i.e. j > i); this site needs the complementary KEEP mask as
-        # a float, hence `logical_not` + cast. The cast target is
+        # a float, hence `logical_not` + cast.
+        #
+        # This block->keep adapter is now duplicated at TWO sites -- here and
+        # `models/mobile_clip/components.py`. Two is not yet enough to earn a
+        # shared helper, but a THIRD consumer should promote it into a
+        # keep-polarity variant in `utils/masking/factory.py` rather than copying
+        # this again. Deferred deliberately: promoting it touches two shipped,
+        # mixed-precision-sensitive call sites and must preserve the pinned
+        # `floatx()` cast target below. The cast target is
         # `backend.floatx()` because that is what the previous `ops.ones(...)`
         # defaulted to -- keeping the fix numerically inert.
         causal_mask = ops.cast(
