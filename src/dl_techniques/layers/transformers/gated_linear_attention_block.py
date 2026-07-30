@@ -639,7 +639,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             raise ValueError(f"Input feature dim ({features}) must match layer dim ({self.dim})")
 
         if seq_len is None:
-            # DECISION plan-2026-07-29-adbe605f/D-002
+            # DECISION plan-2026-07-29T173132-adbe605f/D-002
             # The overflow guard is STATIC-ONLY, deliberately. Do NOT "fix" this
             # branch by raising here (it would break every legitimate
             # `keras.Input(shape=(None, dim))` model) and do NOT replace it with
@@ -686,7 +686,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         q_shape = (batch_size, seq_len, self.qk_dim)
         k_shape = (batch_size, seq_len, self.qk_dim)
         v_shape = (batch_size, seq_len, self.v_dim)
-        # DECISION plan-2026-07-29-adbe605f/D-003
+        # DECISION plan-2026-07-29T173132-adbe605f/D-003
         # q_norm/k_norm are built on the PER-HEAD shape (batch, seq, heads, head_dim),
         # not on the flat (batch, seq, qk_dim). Their scale weight is therefore
         # (head_dim,), shared across heads -- the standard QK-Norm convention.
@@ -941,7 +941,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         compute_dtype = keras.backend.standardize_dtype(q.dtype)
-        # DECISION plan-2026-07-29-adbe605f/D-012
+        # DECISION plan-2026-07-29T173132-adbe605f/D-012
         # Every gate factor below is exp() of a DIFFERENCE of cumulative
         # log-gates whose argument is <= 0, so all of them lie in (0, 1].
         # Do NOT "simplify" this into the textbook two-vector form
@@ -1128,7 +1128,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         k = self.k_proj(inputs, training=training)
         v = self.v_proj(inputs, training=training)
 
-        # DECISION plan-2026-07-29-adbe605f/D-003
+        # DECISION plan-2026-07-29T173132-adbe605f/D-003
         # Per-head Q/K normalization. Only the SCOPE of the statistic changes; the
         # pipeline order `proj -> norm -> conv -> activation` is deliberately kept.
         # Moving the norm after the head reshape in the pipeline would also move it
