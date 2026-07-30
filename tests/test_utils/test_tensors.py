@@ -69,14 +69,94 @@ class TestPowerIteration:
         assert_allclose(result, 2.0, rtol=1e-3)
 
     def test_convergence_iterations(self):
-        """Test convergence with different iteration counts."""
+        """Test convergence with different iteration counts.
+
+        `iterations=2` is the POINT of this test -- it probes a low iteration
+        count -- so the floor is deliberately not raised, and `rtol=1e-1` is
+        deliberately not widened. Both calls pass a fixed `seed`, which is what
+        makes the comparison deterministic; see the DECISION note at
+        `src/dl_techniques/utils/tensors.py::power_iteration` for the measured
+        flake rate this replaces and for why the other two levers were rejected.
+
+        What this buys and what it costs: the test now proves that two
+        iterations suffice for ONE start vector, not for a random one. Measured
+        on this matrix at `seed=0`: relative difference 4.557e-04, i.e. ~219x
+        inside `rtol=1e-1`. It is not a tautology and the seed is load-bearing:
+        of seeds 0-19, `seed=14` (rel 4.8e-01) and `seed=18` (rel 2.4e-01) would
+        both FAIL this assertion. That is acceptable ONLY because
+        `utils.tensors.power_iteration` has zero production callers (verified
+        `grep -rn power_iteration src/`: the same-named methods in
+        `regularizers/srip.py` and `analyzer/spectral_metrics.py` are separate
+        implementations, not consumers), so no real caller's convergence risk is
+        being hidden. If a production caller ever appears at a low iteration
+        count, this test does NOT cover it -- that caller needs its own bound.
+        """
         matrix = tf.constant([[3.0, 1.0],
                               [1.0, 3.0]], dtype=tf.float32)
-        # Run with different iteration counts
-        result_few = power_iteration(matrix, iterations=2)
-        result_many = power_iteration(matrix, iterations=20)
+        # Run with different iteration counts, from the SAME start vector.
+        result_few = power_iteration(matrix, iterations=2, seed=0)
+        result_many = power_iteration(matrix, iterations=20, seed=0)
         # Results should be close despite different iteration counts
         assert_allclose(result_few, result_many, rtol=1e-1)
+
+    def test_seeded_calls_are_reproducible(self):
+        """A given `seed` must give a bit-identical estimate on every call.
+
+        RED-proof for the substitution the source comment forbids: with
+        `tf.random.normal(..., seed=seed)` instead of `stateless_normal`, two
+        consecutive same-seed calls draw DIFFERENT vectors, and this assertion
+        fires while `test_convergence_iterations` would keep flaking.
+        """
+        matrix = tf.constant([[3.0, 1.0],
+                              [1.0, 3.0]], dtype=tf.float32)
+        first = power_iteration(matrix, iterations=2, seed=11).numpy()
+        second = power_iteration(matrix, iterations=2, seed=11).numpy()
+        assert first == second, (
+            f"same seed gave different estimates across calls: {first} vs "
+            f"{second} -- the draw is not really seeded"
+        )
+        # Anti-vacuity: a different seed must actually move the estimate, so
+        # the equality above cannot be satisfied by a constant.
+        other = power_iteration(matrix, iterations=2, seed=14).numpy()
+        assert first != other, (
+            "two different seeds gave the identical estimate; the seed is not "
+            "reaching the start vector"
+        )
+
+    def test_seeded_draw_ignores_the_process_global_seed(self):
+        """`seed=` must not depend on `tf.random.set_seed` or on call order.
+
+        This is the property an op-level seed does NOT have, and the reason
+        `power_iteration` uses `tf.random.stateless_normal`. Without it the
+        seeded test above would still be order-dependent inside a suite that
+        calls `tf.random.set_seed` (this very module's fixtures do, with 42).
+        """
+        matrix = tf.constant([[3.0, 1.0],
+                              [1.0, 3.0]], dtype=tf.float32)
+        tf.random.set_seed(42)
+        under_42 = power_iteration(matrix, iterations=2, seed=5).numpy()
+        tf.random.set_seed(1234)
+        tf.random.normal([3, 1])  # advance the global stream
+        under_1234 = power_iteration(matrix, iterations=2, seed=5).numpy()
+        assert under_42 == under_1234, (
+            f"the seeded estimate moved with the global seed: {under_42} vs "
+            f"{under_1234}"
+        )
+
+    def test_unseeded_draw_is_still_random(self):
+        """I-5: `seed=None` must keep its historical UNSEEDED behaviour.
+
+        Guards the default in the other direction -- making `seed` default to an
+        integer would change behaviour for every existing caller, which is
+        exactly what this change promised not to do.
+        """
+        matrix = tf.constant([[3.0, 1.0],
+                              [1.0, 3.0]], dtype=tf.float32)
+        draws = {float(power_iteration(matrix, iterations=1)) for _ in range(25)}
+        assert len(draws) > 1, (
+            "25 unseeded calls returned a single value; the default draw is no "
+            "longer random"
+        )
 
     def test_scaled_matrix(self):
         """Test with scaled versions of the same matrix."""

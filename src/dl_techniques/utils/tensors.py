@@ -128,7 +128,8 @@ def wt_x_w_normalize(weights: tf.Tensor) -> tf.Tensor:
 def power_iteration(
         matrix: tf.Tensor,
         iterations: int = 10,
-        epsilon: float = DEFAULT_EPSILON
+        epsilon: float = DEFAULT_EPSILON,
+        seed: Optional[int] = None
 ) -> tf.Tensor:
     """
     Compute spectral norm using power iteration.
@@ -137,6 +138,15 @@ def power_iteration(
         matrix: Input matrix
         iterations: Number of power iterations
         epsilon: Small number for numerical stability
+        seed: Optional integer seed for the random start vector. ``None`` (the
+            default) keeps the historical UNSEEDED draw, so repeated calls
+            return slightly different estimates at low ``iterations``. An
+            integer makes the start vector -- and therefore the returned
+            estimate -- fully deterministic: same seed and same matrix give
+            bit-identical results across calls, across processes, and
+            regardless of any ``tf.random.set_seed`` the caller has made
+            (see the DECISION note below for why that last property is not
+            achievable with an op-level seed).
 
     Returns:
         tf.Tensor: Spectral norm (largest singular value)
@@ -146,18 +156,40 @@ def power_iteration(
 
     # Initialize random vector
     #
-    # KNOWN FLAKE, measured 2026-07-30: this start vector is UNSEEDED, so
-    # `power_iteration` returns a slightly different estimate per call. At low
-    # `iterations` the estimate has not converged, and
-    # `tests/test_utils/test_tensors.py::TestPowerIteration::test_convergence_iterations`
-    # (which compares `iterations=2` against `iterations=20` at `rtol=1e-1`)
-    # therefore fails intermittently -- 2 failures in 6 runs, on unmodified code.
-    # It is a test/API-contract question, not a numerical bug in the loop below:
-    # fixing it means seeding the draw, raising the iteration floor, or loosening
-    # that test's tolerance. Deliberately left as-is; do not "fix" the flake by
-    # tightening the tolerance.
+    # DECISION plan-2026-07-30T140922-8af1028f/D-025
+    # An UNSEEDED start vector (`seed=None`, the historical and still-default
+    # path) makes this function non-deterministic. At low `iterations` the
+    # estimate has not converged, so whether it lands inside a given tolerance
+    # depends on the draw: `TestPowerIteration::test_convergence_iterations`
+    # (`iterations=2` vs `iterations=20`, `rtol=1e-1`) failed at a measured
+    # 6.25% +/- 1.06% (95% CI, N=2000 executions of the real test body,
+    # 2026-07-30). That rate is measured HERE and nowhere else -- do not restate
+    # it elsewhere; cite this comment.
+    #
+    # Do NOT "fix" that flake by widening the test's tolerance: the bound is
+    # attainable, and the error tail at `iterations=2` reaches the
+    # wrong-eigenvector case (~50% relative error), so a safe rtol would have to
+    # be >=0.5, which makes the test vacuous. Do NOT raise an iteration floor
+    # either -- the empirical "8 is enough" floor was derived from ONE matrix's
+    # 2:1 eigenvalue gap and does not generalise, and the test exists precisely
+    # to probe a LOW iteration count. The fix is the optional `seed` below.
+    #
+    # Seeding convention follows the sibling implementation
+    # `SRIPRegularizer._power_iteration` (`regularizers/srip.py:236-244`), which
+    # draws with `keras.random.normal(..., seed=int)`. `stateless_normal` with
+    # `seed=[seed, 0]` is BIT-IDENTICAL to that call (verified) while keeping
+    # this module raw-`tf` like the rest of it.
+    #
+    # `tf.random.normal(..., seed=seed)` is NOT a substitute and must not be
+    # substituted here: an op-level seed is combined with the process-global
+    # seed and advances per call, so two consecutive same-seed calls return
+    # DIFFERENT vectors (measured) -- it would leave the flake in place while
+    # looking seeded. Only `seed=None` may reach `tf.random.normal`.
     matrix_shape = tf.shape(matrix)
-    vector = tf.random.normal([matrix_shape[1], 1])
+    if seed is None:
+        vector = tf.random.normal([matrix_shape[1], 1])
+    else:
+        vector = tf.random.stateless_normal([matrix_shape[1], 1], seed=[seed, 0])
     vector = vector / (tf.norm(vector) + epsilon)
 
     # Multiple iterations for convergence
