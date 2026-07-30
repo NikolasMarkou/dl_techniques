@@ -532,6 +532,25 @@ class TestGatedLinearAttentionBlock:
         assert len(gradients) > 0
         assert all(g is not None for g in gradients)
 
+        # `len(gradients) > 0` plus not-None is satisfied by an ALL-ZERO
+        # gradient, i.e. by a layer whose parameters cannot learn. Assert
+        # magnitude, and per-variable rather than in aggregate, so one dead
+        # sub-layer cannot hide behind a healthy one.
+        dead = [
+            v.name for v, g in zip(layer.trainable_variables, gradients)
+            if float(ops.max(ops.abs(g))) == 0.0
+        ]
+        assert not dead, (
+            f"{len(dead)} of {len(gradients)} trainable variables received an "
+            f"exactly-zero gradient, so they cannot learn: {dead}"
+        )
+        total = float(ops.max(ops.abs(ops.concatenate(
+            [ops.reshape(g, (-1,)) for g in gradients], axis=0
+        ))))
+        assert np.isfinite(total) and total > 0.0, (
+            f"gradient magnitude is {total} — no signal reaches the parameters"
+        )
+
     def test_model_training_loop_integration(self, default_config):
         """Tests integration into a standard training loop."""
         model = models.Sequential([
@@ -1311,9 +1330,18 @@ class TestXLACompilation:
 # same grid, by `test_chunked_matches_sequential_float32_without_tf32` below,
 # which turns TF32 off for the duration. Measured worst case there is 2.91e-06,
 # i.e. ~34x tighter than the plan required, versus 7.73e-04 with TF32 left on --
-# so the toggle is load-bearing, not decorative. The two tests are
-# complementary: one pins the bound the plan committed to, the other pins what
-# is achievable on the hardware's default matmul path.
+# so the toggle is load-bearing when this file is run on its own or as part of
+# this directory. The two tests are complementary: one pins the bound the plan
+# committed to, the other pins what is achievable on the hardware's default
+# matmul path.
+#
+# CAVEAT, measured: that "load-bearing" claim does NOT hold under a whole-suite
+# run. `tests/test_layers/test_attention/test_linear_attention.py` disables TF32
+# AT IMPORT for the entire pytest process, and it collects before this file, so
+# under `make test` TF32 is already off and the toggle below is a no-op. TF32 is
+# also GPU-only, so on a CPU-only run neither test is measuring a TF32 effect at
+# all. Do not read a green result here as evidence that the toggle did anything;
+# check the invocation scope first.
 # ---------------------------------------------------------------------------
 
 _TF32_ULP = 2.0 ** -11
@@ -1562,14 +1590,22 @@ class TestChunkedScanEquivalence:
             f"max|diff|={err:.3e}"
         )
 
-    def test_padding_contributes_exactly_nothing(self):
-        """A padded step must not perturb any real step.
+    def test_padding_is_causally_invisible_to_real_steps(self):
+        """Truncating to a length that needs padding reproduces the prefix exactly.
 
-        Chunk padding uses gate-neutral values (alpha=1 so the cumulative gate
-        stays flat, beta=0 and q=k=v=0 so nothing is written or read). The scan
-        is causal, so truncating the input to a length that needs padding must
-        reproduce the prefix of the unpadded run BIT-EXACTLY -- not merely
-        within a tolerance. 65 needs 63 padded steps; 128 needs none.
+        RENAMED and REPAIRED. The old name and docstring asserted the padding was
+        safe BECAUSE the padded values are "gate-neutral". That mechanism claim is
+        false and the test could not detect it: the pad occupies the TAIL of the
+        last chunk, causally downstream of every real step, so it is invisible no
+        matter what is padded in. Measured -- padding alpha with 1.0, 0.5 or 0.0
+        gives bit-identical output, and padding q/k/v/beta with 1e30 does too, so
+        this assertion held under mutations it appeared to forbid.
+
+        What it really pins is the CAUSAL claim, which is worth keeping: the
+        prefix of a longer run must match a shorter padded run bit-exactly. 65
+        needs 63 padded steps; 128 needs none. The value-independence claim is
+        tested separately below, and the constraint that actually exists (pads
+        must be FINITE) is tested after that.
         """
         layer = GatedLinearAttentionBlock(
             dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
@@ -1584,6 +1620,73 @@ class TestChunkedScanEquivalence:
             f"max|diff|={float(np.abs(out_full[:, :65] - out_prefix).max()):.3e} "
             "(expected exactly 0)"
         )
+
+    def test_pad_values_are_irrelevant_but_must_be_finite(self):
+        """The REAL padding contract, replacing the false gate-neutral claim.
+
+        Two halves, both measured:
+
+        * Any FINITE pad value gives bit-identical output. This is what makes the
+          "gate-neutral" framing wrong -- correctness comes from the causal mask
+          plus the final slice, not from alpha=1.
+        * A NaN or inf pad DOES reach real rows, because the mask is applied
+          multiplicatively and `NaN * 0 = NaN`. This is the constraint that
+          genuinely exists, and it is the reason the decay exponent is masked
+          BEFORE the exp rather than clamped after it (D-009).
+
+        Driven through `_chunked_scan` on a length that needs padding (65 with
+        chunk_size=64 pads 63 steps), by padding the inputs BY HAND to 128 with a
+        chosen filler and comparing against the layer's own internal padding.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
+        )
+        seq = 65
+        base = _scan_inputs(seq, 4, 8, "float64", seed=17)
+        with global_dtype_policy("float64"):
+            reference = keras.ops.convert_to_numpy(
+                layer._chunked_scan(*base, seq)
+            )
+
+            def run_with_pad(fill_qkvb, fill_alpha):
+                """Hand-pad to a chunk multiple, then scan at the padded length."""
+                q, k, v, alpha, beta = [
+                    keras.ops.convert_to_numpy(x) for x in base
+                ]
+                pad = 128 - seq
+
+                def padded(arr, fill):
+                    width = [(0, 0), (0, pad)] + [(0, 0)] * (arr.ndim - 2)
+                    return np.pad(arr, width, constant_values=fill)
+
+                args = [
+                    keras.ops.convert_to_tensor(padded(q, fill_qkvb)),
+                    keras.ops.convert_to_tensor(padded(k, fill_qkvb)),
+                    keras.ops.convert_to_tensor(padded(v, fill_qkvb)),
+                    keras.ops.convert_to_tensor(padded(alpha, fill_alpha)),
+                    keras.ops.convert_to_tensor(padded(beta, fill_qkvb)),
+                ]
+                out = keras.ops.convert_to_numpy(layer._chunked_scan(*args, 128))
+                return out[:, :seq]
+
+            # (a) finite pads are irrelevant, including deliberately hostile ones
+            for fill_qkvb, fill_alpha in ((0.0, 1.0), (0.0, 0.5), (0.0, 0.0),
+                                          (1e30, 1.0), (-1e30, 0.25)):
+                got = run_with_pad(fill_qkvb, fill_alpha)
+                assert np.array_equal(got, reference), (
+                    f"pad values (qkvb={fill_qkvb}, alpha={fill_alpha}) changed "
+                    f"the real rows by "
+                    f"{float(np.abs(got - reference).max()):.3e}; the padding is "
+                    f"NOT value-independent as documented"
+                )
+
+            # (b) a non-finite pad DOES poison real rows -- the real constraint
+            poisoned = run_with_pad(np.nan, 1.0)
+            assert not np.all(np.isfinite(poisoned)), (
+                "a NaN pad did NOT reach the real rows — the documented "
+                "`NaN * 0 = NaN` propagation no longer holds, so the source "
+                "note explaining why pads must be finite is now wrong"
+            )
 
 
 class TestChunkSizeParameter:
@@ -1667,21 +1770,110 @@ class TestScanDispatch:
             del layer._chunked_scan
         assert calls, "a static sequence length did not dispatch to _chunked_scan"
 
-    def test_symbolic_length_falls_back_to_the_sequential_path(self):
-        """A symbolic sequence axis has no concrete chunk grid, so it must fall
-        back -- and the fallback must still build a working model."""
+    def test_a_symbolic_input_model_reaches_BOTH_branches(self):
+        """RENAMED and REPAIRED, because the old name asserted a falsehood.
+
+        The old test claimed a symbolic sequence axis "falls back to the
+        sequential path", and then asserted only output shape and finiteness --
+        never which branch ran. It passed with the symbolic branch replaced by
+        `zeros`, which is how it was caught.
+
+        MEASURED behaviour, which is more interesting than the claim: with
+        `keras.Input(shape=(None, dim))`, the TF trainer RETRACES on the concrete
+        data spec, so the first `predict` at one length reaches
+        `_chunked_scan`. Only after a SECOND distinct length does TF relax the
+        signature to a dynamic shape, and `_sequential_scan` appear. So a single
+        model with a symbolic sequence axis exercises BOTH branches over its
+        lifetime, depending on how many distinct lengths it has seen.
+
+        That is exactly why the two branches must agree (see
+        `TestChunkedScanEquivalence` and `TestScanBranchAgreementAboveUnitGate`):
+        a user cannot predict from the model definition which one will run.
+        """
         layer = GatedLinearAttentionBlock(
             dim=32, num_heads=4, head_dim=8, max_seq_len=128, chunk_size=64
         )
-        inputs = keras.Input(shape=(None, 32))
-        model = keras.Model(inputs, layer(inputs))
-        for seq_len in (30, 70):
-            x = np.random.default_rng(seq_len).normal(
-                size=(2, seq_len, 32)
-            ).astype("float32")
-            out = model.predict(x, verbose=0)
-            assert out.shape == (2, seq_len, 32)
-            assert np.isfinite(out).all()
+        seen = {"chunked": 0, "sequential": 0}
+        real_chunked, real_sequential = layer._chunked_scan, layer._sequential_scan
+
+        def chunked_spy(*a, **k):
+            seen["chunked"] += 1
+            return real_chunked(*a, **k)
+
+        def sequential_spy(*a, **k):
+            seen["sequential"] += 1
+            return real_sequential(*a, **k)
+
+        layer._chunked_scan = chunked_spy
+        layer._sequential_scan = sequential_spy
+        try:
+            inputs = keras.Input(shape=(None, 32))
+            model = keras.Model(inputs, layer(inputs))
+            for seq_len in (30, 70):
+                x = np.random.default_rng(seq_len).normal(
+                    size=(2, seq_len, 32)
+                ).astype("float32")
+                out = model.predict(x, verbose=0)
+                assert out.shape == (2, seq_len, 32)
+                assert np.isfinite(out).all()
+        finally:
+            del layer._chunked_scan
+            del layer._sequential_scan
+
+        total = seen["chunked"] + seen["sequential"]
+        assert total > 0, (
+            "neither scan branch ran — the model produced output without "
+            "executing the recurrence at all"
+        )
+        assert seen["sequential"] > 0, (
+            f"the sequential fallback was never reached across two distinct "
+            f"sequence lengths, so the symbolic path is untested here: {seen}"
+        )
+
+    def test_fully_symbolic_signature_takes_the_sequential_path(self):
+        """An explicitly symbolic `TensorSpec` must dispatch to the fallback.
+
+        The complement of the test above, and the unambiguous case: when the
+        sequence axis is symbolic at trace time there IS no concrete chunk grid,
+        so `_chunked_scan` cannot be used. Asserts the dispatch itself rather
+        than inferring it from the output.
+        """
+        layer = GatedLinearAttentionBlock(
+            dim=32, num_heads=4, head_dim=8, max_seq_len=128, chunk_size=64
+        )
+        layer.build((None, None, 32))
+
+        seen = {"chunked": 0, "sequential": 0}
+        real_chunked, real_sequential = layer._chunked_scan, layer._sequential_scan
+
+        def chunked_spy(*a, **k):
+            seen["chunked"] += 1
+            return real_chunked(*a, **k)
+
+        def sequential_spy(*a, **k):
+            seen["sequential"] += 1
+            return real_sequential(*a, **k)
+
+        layer._chunked_scan = chunked_spy
+        layer._sequential_scan = sequential_spy
+        try:
+            traced = tf.function(
+                lambda t: layer(t),
+                input_signature=[tf.TensorSpec([None, None, 32], tf.float32)],
+            )
+            out = traced(tf.zeros((2, 40, 32)))
+        finally:
+            del layer._chunked_scan
+            del layer._sequential_scan
+
+        assert tuple(out.shape) == (2, 40, 32)
+        assert seen["sequential"] > 0, (
+            f"a fully symbolic signature did not reach _sequential_scan: {seen}"
+        )
+        assert seen["chunked"] == 0, (
+            f"_chunked_scan ran on a symbolic sequence axis, where it has no "
+            f"concrete chunk grid: {seen}"
+        )
 
 
 

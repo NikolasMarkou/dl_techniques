@@ -241,27 +241,50 @@ class TestVLMForwardPass:
 class TestVLMRoundtrip:
 
     def test_image_captioning_roundtrip(self, vision_feats, text_feats) -> None:
+        """A `.keras` round-trip must restore the head from ITS OWN config, with
+        identical values.
+
+        REPAIRED twice over:
+
+        1. It asserted SHAPES only, which a round-trip that rebuilt the
+           architecture but dropped every learned weight also satisfies.
+        2. More seriously, it wrapped the head in a subclassed `keras.Model`
+           whose `__init__` called `_captioning_head()` afresh. The head was
+           therefore reconstructed FROM CODE on load, never from its serialized
+           config -- so the test could not detect head-config lossiness at all.
+           Proved: making `ImageCaptioningHead.get_config` emit `num_heads: 1`
+           instead of the real value left the old test green.
+
+        It now builds a FUNCTIONAL model, so the head really is serialized and
+        revived through `get_config`/`from_config`, and asserts VALUE equality.
+        """
         vf = ops.convert_to_tensor(vision_feats)
-        tf = ops.convert_to_tensor(text_feats)
+        tf_ = ops.convert_to_tensor(text_feats)
 
-        @keras.saving.register_keras_serializable()
-        class _CapWrapper(keras.Model):
-            def __init__(self, **kw):
-                super().__init__(**kw)
-                self.head = _captioning_head()
+        v_in = keras.Input(shape=tuple(vf.shape[1:]), name="vision_features")
+        t_in = keras.Input(shape=tuple(tf_.shape[1:]), name="text_features")
+        head = _captioning_head()
+        outputs = head({"vision_features": v_in, "text_features": t_in})
+        model = keras.Model({"vision_features": v_in, "text_features": t_in}, outputs)
 
-            def call(self, inputs, training=None):
-                return self.head(inputs, training=training)
-
-        model = _CapWrapper()
-        inputs = {"vision_features": vf, "text_features": tf}
-        y0 = model(inputs)  # build before save (LESSONS)
+        inputs = {"vision_features": vf, "text_features": tf_}
+        y0 = model(inputs)
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "cap_head.keras")
             model.save(path)
             loaded = keras.models.load_model(path)
         y1 = loaded(inputs)
+
         assert tuple(y1["logits"].shape) == tuple(y0["logits"].shape) == (B, S, VOCAB)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(y1["logits"]),
+            ops.convert_to_numpy(y0["logits"]),
+            rtol=1e-6, atol=1e-6,
+            err_msg=(
+                "captioning logits changed across a .keras round-trip — the "
+                "reloaded head is not the saved one"
+            ),
+        )
 
 
 # ---------------------------------------------------------------------
@@ -435,26 +458,61 @@ class TestCaptioningCausalMaskGraphSafety:
         out = run(tf.constant(self._inputs()[0]), tf.constant(self._inputs()[1]))
         assert tuple(out["logits"].shape) == (B, S, VOCAB)
 
-    def test_causal_mask_is_lower_triangular_keep_form(self) -> None:
-        """The mask's SEMANTICS, not just its graph-safety.
+    def test_causal_mask_reaching_self_attention_is_lower_triangular_keep_form(
+        self,
+    ) -> None:
+        """The mask the head ACTUALLY HANDS to self-attention, not a rebuilt copy.
 
-        A graph-safe mask with the wrong polarity or a dropped diagonal would
-        pass every test above while silently letting the model attend to the
-        future. Rebuild the mask the way `call()` does and pin its content:
-        1 = attend (key j <= query i), 0 = future.
+        REPAIRED: this test used to construct the mask from `MaskFactory` in its
+        own body and assert on that. It therefore tested `MaskFactory`, not the
+        head -- replacing the head's own mask expression with `ones_like` (attend
+        to everything, including the future) left it green.
+
+        It now spies on `self_attention_layers[0]` and asserts on the
+        `attention_mask` value that arrives there: 1 = attend (key j <= query i),
+        0 = future. Complementary to
+        `test_image_captioning_causal_property`, which checks the end-to-end
+        behaviour; this pins the polarity at the point of use, which is where the
+        two possible mistakes (inverted polarity, dropped diagonal) live.
         """
-        from dl_techniques.utils.masking import MaskFactory
+        payload = _family_payload()
+        head = _make_single(VLMTaskType.IMAGE_CAPTIONING, "captioning")
+        head.build(_shapes_of(payload))
 
-        seq_len = 6
-        mask = ops.cast(
-            ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
-            keras.backend.floatx(),
+        captured = {}
+        real_attn = head.self_attention_layers[0]
+
+        def attn_spy(x, attention_mask=None, training=None):
+            captured["mask"] = (
+                None if attention_mask is None
+                else ops.convert_to_numpy(attention_mask)
+            )
+            return real_attn(x, attention_mask=attention_mask, training=training)
+
+        head.self_attention_layers[0] = attn_spy
+        try:
+            head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        finally:
+            head.self_attention_layers[0] = real_attn
+
+        assert "mask" in captured, "self-attention was never called"
+        mask = captured["mask"]
+        assert mask is not None, (
+            "self-attention received attention_mask=None — the causal mask is "
+            "not reaching the layer at all"
         )
-        got = ops.convert_to_numpy(mask)
-        assert np.array_equal(got, np.tril(np.ones((seq_len, seq_len), dtype=got.dtype)))
-        assert got[0, 0] == 1.0, "diagonal dropped: a token cannot attend to itself"
-        assert got[0, 1] == 0.0, "future not masked"
-        assert got[-1].sum() == seq_len, "last query must attend to the whole prefix"
+        # (1, S, S) full-mask form; drop the broadcast batch axis.
+        mask2d = mask[0] if mask.ndim == 3 else mask
+        expected = np.tril(np.ones((_FAMILY_SEQ, _FAMILY_SEQ), dtype=mask2d.dtype))
+        assert np.array_equal(mask2d, expected), (
+            f"the mask handed to self-attention is not lower-triangular KEEP "
+            f"form; got\n{mask2d}"
+        )
+        assert mask2d[0, 0] == 1.0, "diagonal dropped: a token cannot attend to itself"
+        assert mask2d[0, 1] == 0.0, "future not masked"
+        assert mask2d[-1].sum() == _FAMILY_SEQ, (
+            "last query must attend to the whole prefix"
+        )
 
 
 # ---------------------------------------------------------------------
@@ -818,36 +876,67 @@ class TestVisualGroundingForwardPass:
     def test_top_region_gather_selects_the_argmax_region(self) -> None:
         """The gather must pick the region the confidence scorer ranked first.
 
-        A graph-safe gather that silently took region 0, or transposed the batch
-        and region axes, would still return correctly-shaped finite output. This
-        reproduces the gather on known values instead of trusting the shape.
+        REPAIRED: this test used to recompute `argmax` + `take_along_axis` in its
+        own body on hand-made arrays and never construct a `VisualGroundingHead`
+        at all -- it exercised `keras.ops`, not the layer. Forcing the real gather
+        to region 0 left it green, which is how it was caught.
+
+        It now drives the REAL head: `confidence_scorer` is stubbed so the ranking
+        is known, `fusion` is spied so the expected rows are the layer's own fused
+        features, and the assertion is on the head's returned
+        `grounded_features`. A gather that took region 0, or transposed the batch
+        and region axes, now fails.
         """
-        batch, regions, feat = 3, 5, 4
-        fused = ops.convert_to_tensor(
-            np.arange(batch * regions * feat, dtype="float32").reshape(
-                batch, regions, feat
-            )
-        )
-        scores = ops.convert_to_tensor(
-            np.array([[0.1, 0.9, 0.2, 0.0, 0.3],
-                      [0.5, 0.1, 0.0, 0.2, 0.1],
-                      [0.0, 0.1, 0.2, 0.3, 0.7]], dtype="float32")
-        )
-        expected_rows = [1, 0, 4]
+        payload = _family_payload()
+        head = _make_single(VLMTaskType.VISUAL_GROUNDING, "grd")
+        head.build(_shapes_of(payload))
 
-        top_indices = ops.argmax(scores, axis=1)
-        gather_index = ops.reshape(ops.cast(top_indices, "int32"), (-1, 1, 1))
-        gather_index = ops.broadcast_to(gather_index, (batch, 1, feat))
-        got = ops.convert_to_numpy(
-            ops.squeeze(ops.take_along_axis(fused, gather_index, axis=1), axis=1)
+        # Known ranking, one distinct winner per batch row.
+        chosen = [1, 0, 4] if _FAMILY_SEQ > 4 else list(range(_FAMILY_BATCH))
+        scores = np.full((_FAMILY_BATCH, _FAMILY_SEQ), 0.1, dtype="float32")
+        for row, region in enumerate(chosen):
+            scores[row, region] = 0.9
+
+        captured = {}
+        real_fusion = head.fusion
+
+        def fusion_spy(tensors, training=None):
+            out = real_fusion(tensors, training=training)
+            captured["fused"] = ops.convert_to_numpy(out)
+            return out
+
+        class _ScoreStub:
+            """Emits the ranking above, shaped as the scorer's (B, N, 1)."""
+
+            def __call__(self, _fused, *args, **kwargs):
+                return ops.convert_to_tensor(scores[..., None])
+
+        head.fusion = fusion_spy
+        head.confidence_scorer = _ScoreStub()
+        try:
+            out = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        finally:
+            del head.fusion
+            del head.confidence_scorer
+
+        assert "fused" in captured, "the fusion layer was never called"
+        fused = captured["fused"]
+        grounded = ops.convert_to_numpy(out["grounded_features"])
+        expected = np.stack(
+            [fused[row, region] for row, region in enumerate(chosen)]
         )
 
-        fused_np = ops.convert_to_numpy(fused)
-        for b, r in enumerate(expected_rows):
-            np.testing.assert_array_equal(
-                got[b], fused_np[b, r],
-                err_msg=f"batch {b}: gathered the wrong region (expected {r})",
-            )
+        np.testing.assert_allclose(
+            grounded, expected, rtol=1e-6, atol=1e-6,
+            err_msg=(
+                f"grounded_features are not the fused features of the "
+                f"argmax regions {chosen} — the gather picked the wrong region"
+            ),
+        )
+        # And the head must report the ranking it was given.
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(out["confidence"]), scores, rtol=1e-6, atol=1e-6
+        )
 
 
 # ---------------------------------------------------------------------
@@ -1598,6 +1687,87 @@ class TestMultiTaskConfigPreservesKerasBaseKwargs:
             assert sub.name.startswith(task_name), (
                 f"sub-head {task_name!r} lost its generated name: {sub.name!r}"
             )
+
+
+class TestHeadsActuallyConsumeTheirInputs:
+    """A head that ignores one of its inputs must fail something.
+
+    Found by a dead-component probe, not by a bug report: replacing
+    `ImageCaptioningHead`'s `text_features` with `zeros_like` -- so the head
+    generates captions from the image alone and ignores the text stream entirely
+    -- left the ENTIRE VLM suite green (126/126 at the time of writing, including
+    the round-trip, causality, explicit-build and weight-count tests).
+
+    The repo's standing lesson is to inject a DEAD COMPONENT, not just the
+    specific bug. Shape, weight-count and finiteness assertions all survive a
+    dead input; only a sensitivity assertion does not. These tests perturb ONE
+    input at a time and require the output to move.
+    """
+
+    @staticmethod
+    def _perturb(head, payload, key):
+        """Return (baseline, perturbed) outputs after changing only `key`."""
+        base = _flatten_outputs(
+            head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        )
+        bumped = {k: v.copy() for k, v in payload.items()}
+        # A large, structured shift: a tiny epsilon could vanish into a
+        # saturating nonlinearity and make a live input look dead.
+        bumped[key] = bumped[key] + 7.0
+        after = _flatten_outputs(
+            head({k: ops.convert_to_tensor(v) for k, v in bumped.items()})
+        )
+        return base, after
+
+    @pytest.mark.parametrize("label,task_type,text_key", _SINGLE_HEADS)
+    @pytest.mark.parametrize("which", ["vision", "text"])
+    def test_output_responds_to_each_input(
+        self, label, task_type, text_key, which
+    ) -> None:
+        """Every head must respond to BOTH of its feature inputs.
+
+        Parametrized over both inputs deliberately: asserting only on
+        `text_features` would let a head that ignores the IMAGE pass, which is
+        the same defect mirrored.
+        """
+        payload = _family_payload(text_key)
+        key = "vision_features" if which == "vision" else text_key
+        head = _make_single(task_type, label)
+
+        base, after = self._perturb(head, payload, key)
+
+        assert np.all(np.isfinite(base)) and np.all(np.isfinite(after))
+        delta = float(np.max(np.abs(after - base)))
+        assert delta > 1e-6, (
+            f"{label}: perturbing {key!r} by +7.0 changed the output by "
+            f"{delta:.3e} — this head is IGNORING that input"
+        )
+
+    def test_captioning_logits_depend_on_the_text_stream(self) -> None:
+        """The specific dead component the probe found, pinned directly.
+
+        `ImageCaptioningHead` is autoregressive: `text_features` is the decoder
+        stream and `vision_features` is what it cross-attends to. Zeroing the
+        text stream must not leave the logits unchanged.
+        """
+        payload = _family_payload()
+        head = _make_single(VLMTaskType.IMAGE_CAPTIONING, "captioning")
+
+        live = head({k: ops.convert_to_tensor(v) for k, v in payload.items()})
+        zeroed = head({
+            "vision_features": ops.convert_to_tensor(payload["vision_features"]),
+            "text_features": ops.zeros_like(
+                ops.convert_to_tensor(payload["text_features"])
+            ),
+        })
+        live_logits = ops.convert_to_numpy(live["logits"])
+        zero_logits = ops.convert_to_numpy(zeroed["logits"])
+
+        delta = float(np.max(np.abs(live_logits - zero_logits)))
+        assert delta > 1e-6, (
+            "captioning logits are identical with the text stream zeroed — the "
+            "decoder input is not reaching the output"
+        )
 
 
 if __name__ == "__main__":
