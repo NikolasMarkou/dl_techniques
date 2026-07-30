@@ -336,3 +336,116 @@ class TestVLMComputeOutputShape:
         )
         for key in out:
             assert tuple(out[key].shape) == tuple(shapes[key])
+
+
+# ---------------------------------------------------------------------
+# Graph-safety of the causal mask (regression, `ops.tril` trap)
+#
+# `ImageCaptioningHead.call()` builds a causal mask. It used to do so with
+# `keras.ops.tril`, which routes through a `tf.cond` that rejects a Python-bool
+# predicate the moment it is traced:
+#
+#     TypeError: pred must not be a Python bool
+#
+# That failure is EAGER-INVISIBLE. A direct call works; every graph path fails
+# (`tf.function`, `Model.predict` with a static or a dynamic sequence axis,
+# `jit_compile=True`). Worse, Keras downgrades a `call()` crash during
+# build-tracing to a `UserWarning`, so before this test the whole VLM suite
+# reported PASS while the exception text appeared twice in its own output.
+# A green exit code was not evidence; these tests make it evidence.
+#
+# NOTE ON SCOPE: `.keras` save/load is deliberately NOT asserted here. Fixing
+# the mask exposed a SECOND, unrelated defect that the crash had been masking --
+# `ImageCaptioningHead` declares no `build()`, so a Functional-model round-trip
+# reports "12 objects could not be loaded (<Dense name=kv, built=False>)".
+# That is a serialization defect, not a mask defect, and is tracked separately;
+# asserting it here would make this test fail for a reason it does not govern.
+# ---------------------------------------------------------------------
+
+
+class TestCaptioningCausalMaskGraphSafety:
+    """The causal mask must survive tracing, not just eager execution."""
+
+    @staticmethod
+    def _inputs():
+        rng = np.random.default_rng(7)
+        return (
+            rng.normal(size=(B, S, DIM)).astype("float32"),
+            rng.normal(size=(B, S, DIM)).astype("float32"),
+        )
+
+    def test_eager_call_still_works(self) -> None:
+        """Control: the path that was ALWAYS green must stay green.
+
+        Without this, a fix that broke eager while fixing graph would look
+        like a pass on the three tests below.
+        """
+        vf, tf_ = self._inputs()
+        out = _captioning_head()(
+            {"vision_features": ops.convert_to_tensor(vf),
+             "text_features": ops.convert_to_tensor(tf_)}
+        )
+        assert tuple(out["logits"].shape) == (B, S, VOCAB)
+
+    def test_traced_tf_function(self) -> None:
+        """`tf.function` tracing — the minimal reproducer of the trap."""
+        import tensorflow as tf
+
+        head = _captioning_head()
+
+        @tf.function
+        def run(v, t):
+            return head({"vision_features": v, "text_features": t})
+
+        out = run(tf.constant(self._inputs()[0]), tf.constant(self._inputs()[1]))
+        assert tuple(out["logits"].shape) == (B, S, VOCAB)
+
+    def test_functional_model_predict_static_sequence(self) -> None:
+        vf, tf_ = self._inputs()
+        vi = keras.Input(shape=(S, DIM))
+        ti = keras.Input(shape=(S, DIM))
+        out = _captioning_head()({"vision_features": vi, "text_features": ti})
+        model = keras.Model([vi, ti], out)
+        assert model.predict([vf, tf_], verbose=0)["logits"].shape == (B, S, VOCAB)
+
+    def test_functional_model_predict_dynamic_sequence(self) -> None:
+        """A `None` sequence axis makes the mask size symbolic at trace time."""
+        vf, tf_ = self._inputs()
+        vi = keras.Input(shape=(None, DIM))
+        ti = keras.Input(shape=(None, DIM))
+        out = _captioning_head()({"vision_features": vi, "text_features": ti})
+        model = keras.Model([vi, ti], out)
+        assert model.predict([vf, tf_], verbose=0)["logits"].shape == (B, S, VOCAB)
+
+    def test_jit_compiled(self) -> None:
+        import tensorflow as tf
+
+        head = _captioning_head()
+
+        @tf.function(jit_compile=True)
+        def run(v, t):
+            return head({"vision_features": v, "text_features": t})
+
+        out = run(tf.constant(self._inputs()[0]), tf.constant(self._inputs()[1]))
+        assert tuple(out["logits"].shape) == (B, S, VOCAB)
+
+    def test_causal_mask_is_lower_triangular_keep_form(self) -> None:
+        """The mask's SEMANTICS, not just its graph-safety.
+
+        A graph-safe mask with the wrong polarity or a dropped diagonal would
+        pass every test above while silently letting the model attend to the
+        future. Rebuild the mask the way `call()` does and pin its content:
+        1 = attend (key j <= query i), 0 = future.
+        """
+        from dl_techniques.utils.masking import MaskFactory
+
+        seq_len = 6
+        mask = ops.cast(
+            ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
+            keras.backend.floatx(),
+        )
+        got = ops.convert_to_numpy(mask)
+        assert np.array_equal(got, np.tril(np.ones((seq_len, seq_len), dtype=got.dtype)))
+        assert got[0, 0] == 1.0, "diagonal dropped: a token cannot attend to itself"
+        assert got[0, 1] == 0.0, "future not masked"
+        assert got[-1].sum() == seq_len, "last query must attend to the whole prefix"

@@ -20,6 +20,7 @@ from ...ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
 from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
 from ...norms import NormalizationType
 from ...norms.factory import create_normalization_layer
+from ....utils.masking import MaskFactory
 from .task_types import VLMTaskConfig, VLMTaskType
 
 
@@ -383,7 +384,28 @@ class ImageCaptioningHead(keras.layers.Layer):
 
         x = text_features
         seq_len = ops.shape(x)[1]
-        causal_mask = ops.tril(ops.ones((seq_len, seq_len)))   # 1=attend (current+past), 0=future
+        # Lower-triangular KEEP mask: 1 = attend (current+past), 0 = future.
+        #
+        # Built from `MaskFactory.create_causal_mask` (an arange index comparison)
+        # rather than `ops.tril`. `ops.tril` routes through a `tf.cond` that
+        # rejects a Python-bool predicate once traced, raising
+        # `TypeError: pred must not be a Python bool` -- it works EAGERLY and
+        # fails on every graph path (`tf.function`, `Model.predict`, `.keras`
+        # save/load, `jit_compile=True`), for both static and symbolic sequence
+        # lengths. The same trap is documented at
+        # `models/sd3_mmdit/text_encoders.py`. Note that Keras downgrades such a
+        # `call()` crash during build-tracing to a UserWarning, so this was
+        # invisible in a green test suite.
+        #
+        # MaskFactory returns the BLOCK polarity (True where a position must be
+        # suppressed, i.e. j > i); this site needs the complementary KEEP mask as
+        # a float, hence `logical_not` + cast. The cast target is
+        # `backend.floatx()` because that is what the previous `ops.ones(...)`
+        # defaulted to -- keeping the fix numerically inert.
+        causal_mask = ops.cast(
+            ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
+            keras.backend.floatx(),
+        )
         causal_mask = ops.expand_dims(causal_mask, 0)           # (1, S, S) full-mask form
 
         for i in range(self.num_layers):

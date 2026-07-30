@@ -561,5 +561,159 @@ class TestMobileClipIntegration:
         assert keras.ops.all(keras.ops.isfinite(image_embeddings))
         assert keras.ops.all(keras.ops.isfinite(text_embeddings))
 
+
+class TestTextEncoderCausalMaskGraphSafety:
+    """The causal mask must survive tracing, not just eager execution.
+
+    `MobileClipTextEncoder.call()` builds a causal mask when
+    `use_causal_mask=True`. It used to do so with `keras.ops.tril`, which routes
+    through a `tf.cond` that rejects a Python-bool predicate the moment it is
+    traced::
+
+        TypeError: pred must not be a Python bool
+
+    That failure is EAGER-INVISIBLE: a direct call works, and every graph path
+    fails (`tf.function`, `Model.predict` with a static or dynamic sequence
+    axis, `.keras` save/load, `jit_compile=True`). Keras also downgrades a
+    `call()` crash during build-tracing to a `UserWarning`, so this whole suite
+    reported PASS while the exception text appeared in its own output. These
+    tests turn the graph paths into real assertions.
+
+    Every test below is parametrized over `use_causal_mask` so the
+    mask-disabled path is a control: if a "fix" broke the encoder generally
+    rather than the mask specifically, the `False` case fails too and the
+    diagnosis is unambiguous.
+    """
+
+    ENC_KWARGS = {
+        'vocab_size': 64,
+        'max_seq_len': 16,
+        'embed_dim': 32,
+        'num_layers': 1,
+        'num_heads': 4,
+        'intermediate_size': 64,
+        'projection_dim': 32,
+    }
+    BATCH, SEQ = 2, 16
+
+    @classmethod
+    def _encoder(cls, use_causal_mask: bool) -> MobileClipTextEncoder:
+        return MobileClipTextEncoder(use_causal_mask=use_causal_mask, **cls.ENC_KWARGS)
+
+    @classmethod
+    def _tokens(cls) -> np.ndarray:
+        return np.random.default_rng(0).integers(
+            0, cls.ENC_KWARGS['vocab_size'], size=(cls.BATCH, cls.SEQ)
+        ).astype('int32')
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_eager_call_still_works(self, use_causal_mask):
+        """Control: the path that was ALWAYS green must stay green."""
+        out = self._encoder(use_causal_mask)(keras.ops.convert_to_tensor(self._tokens()))
+        assert out.shape == (self.BATCH, self.ENC_KWARGS['projection_dim'])
+        assert keras.ops.all(keras.ops.isfinite(out))
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_traced_tf_function(self, use_causal_mask):
+        """`tf.function` tracing — the minimal reproducer of the trap."""
+        encoder = self._encoder(use_causal_mask)
+
+        @tf.function
+        def run(tokens):
+            return encoder(tokens)
+
+        out = run(tf.constant(self._tokens()))
+        assert tuple(out.shape) == (self.BATCH, self.ENC_KWARGS['projection_dim'])
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_functional_model_predict_static_sequence(self, use_causal_mask):
+        inputs = keras.Input(shape=(self.SEQ,), dtype='int32')
+        model = keras.Model(inputs, self._encoder(use_causal_mask)(inputs))
+        out = model.predict(self._tokens(), verbose=0)
+        assert out.shape == (self.BATCH, self.ENC_KWARGS['projection_dim'])
+        assert np.isfinite(out).all()
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_functional_model_predict_dynamic_sequence(self, use_causal_mask):
+        """A `None` sequence axis makes the mask size symbolic at trace time."""
+        inputs = keras.Input(shape=(None,), dtype='int32')
+        model = keras.Model(inputs, self._encoder(use_causal_mask)(inputs))
+        out = model.predict(self._tokens(), verbose=0)
+        assert out.shape == (self.BATCH, self.ENC_KWARGS['projection_dim'])
+        assert np.isfinite(out).all()
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_keras_save_load_round_trip_preserves_values(self, use_causal_mask):
+        """Save/load must both SUCCEED and restore the same numbers.
+
+        Asserting values, not just shapes: a round-trip that silently fails to
+        restore weights still produces a correctly-shaped output, so a
+        shape-only assertion cannot tell a working round-trip from a broken one.
+        """
+        tokens = self._tokens()
+        inputs = keras.Input(shape=(self.SEQ,), dtype='int32')
+        model = keras.Model(inputs, self._encoder(use_causal_mask)(inputs))
+        before = model.predict(tokens, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'text_encoder.keras')
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        np.testing.assert_allclose(
+            before, restored.predict(tokens, verbose=0), rtol=1e-6, atol=1e-6
+        )
+
+    @pytest.mark.parametrize('use_causal_mask', [True, False])
+    def test_jit_compiled(self, use_causal_mask):
+        encoder = self._encoder(use_causal_mask)
+
+        @tf.function(jit_compile=True)
+        def run(tokens):
+            return encoder(tokens)
+
+        out = run(tf.constant(self._tokens()))
+        assert tuple(out.shape) == (self.BATCH, self.ENC_KWARGS['projection_dim'])
+
+    def test_causal_mask_actually_masks_the_future(self):
+        """The mask's SEMANTICS, not merely its graph-safety.
+
+        A graph-safe mask with inverted polarity or a dropped diagonal would
+        pass every test above while letting the model attend to the future.
+        Two checks: the mask content matches a lower-triangular keep mask
+        exactly, and enabling the mask actually changes the encoder's output
+        (so `use_causal_mask=True` is not silently a no-op).
+        """
+        from dl_techniques.utils.masking import MaskFactory
+
+        seq_len = 5
+        mask = keras.ops.convert_to_numpy(
+            keras.ops.cast(
+                keras.ops.logical_not(
+                    MaskFactory.create_causal_mask(seq_len, dtype='bool')
+                ),
+                keras.backend.floatx(),
+            )
+        )
+        assert np.array_equal(
+            mask, np.tril(np.ones((seq_len, seq_len), dtype=mask.dtype))
+        )
+        assert mask[0, 0] == 1.0, 'diagonal dropped: a token cannot attend to itself'
+        assert mask[0, -1] == 0.0, 'future not masked'
+
+        tokens = self._tokens()
+        keras.utils.set_random_seed(99)
+        with_mask = keras.ops.convert_to_numpy(
+            self._encoder(True)(keras.ops.convert_to_tensor(tokens))
+        )
+        keras.utils.set_random_seed(99)
+        without_mask = keras.ops.convert_to_numpy(
+            self._encoder(False)(keras.ops.convert_to_tensor(tokens))
+        )
+        assert not np.allclose(with_mask, without_mask), (
+            'use_causal_mask=True produced the same output as False — the mask '
+            'is not reaching attention at all'
+        )
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -7,6 +7,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 
@@ -500,9 +501,30 @@ class MobileClipTextEncoder(keras.layers.Layer):
         causal_mask = None
         if self.use_causal_mask:
             seq_len = ops.shape(x)[1]
-            # Create a lower-triangular mask to prevent attending to future tokens.
-            # The mask should be 3D to be broadcastable across the batch and head dimensions.
-            causal_mask = ops.tril(ops.ones((1, seq_len, seq_len)))
+            # Lower-triangular KEEP mask (1 = attend to current+past, 0 = future),
+            # 3D so it broadcasts across the batch and head dimensions.
+            #
+            # Built from `MaskFactory.create_causal_mask` (which is an arange index
+            # comparison) rather than `ops.tril`. `ops.tril` routes through a
+            # `tf.cond` that rejects a Python-bool predicate the moment it is
+            # traced, raising `TypeError: pred must not be a Python bool` -- it
+            # works EAGERLY and fails on every graph path (`tf.function`,
+            # `Model.predict`, `.keras` save/load, `jit_compile=True`), for both
+            # static and symbolic sequence lengths. The same trap is documented
+            # at `models/sd3_mmdit/text_encoders.py`.
+            #
+            # MaskFactory returns the BLOCK polarity (True where a position must
+            # be suppressed, i.e. j > i); this layer needs the complementary KEEP
+            # mask as a float, hence the `logical_not` + cast. Verified
+            # bit-identical to the previous `ops.tril` expression.
+            # dtype: `ops.ones(...)` defaulted to `backend.floatx()`, NOT this
+            # layer's compute dtype -- keep that exactly, so the fix stays a pure
+            # graph-safety change and does not alter mixed-precision behaviour.
+            causal_mask = ops.cast(
+                ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
+                keras.backend.floatx(),
+            )
+            causal_mask = ops.expand_dims(causal_mask, axis=0)
 
         for transformer_layer in self.transformer_layers:
             x = transformer_layer(x, attention_mask=causal_mask, training=training)
