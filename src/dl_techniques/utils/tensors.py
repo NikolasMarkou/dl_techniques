@@ -168,21 +168,6 @@ def power_iteration(
 
 # ---------------------------------------------------------------------
 
-def create_causal_mask(size: int) -> tf.Tensor:
-    """Create causal mask for attention.
-
-    Args:
-        size: Sequence length
-
-    Returns:
-        Causal mask tensor
-    """
-    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-    return tf.cast(mask == 0, tf.float32)
-
-
-# ---------------------------------------------------------------------
-
 def safe_divide(
         x: tf.Tensor,
         y: tf.Tensor,

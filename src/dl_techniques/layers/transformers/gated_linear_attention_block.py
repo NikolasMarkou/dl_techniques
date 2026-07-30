@@ -904,10 +904,25 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         time; both the intra-chunk triangle and the per-chunk state
         contributions are computed for every chunk at once.
 
-        Sequences shorter than a whole number of chunks are padded with
-        gate-neutral values (``alpha = 1`` so the cumulative gate stays flat,
-        ``beta = 0`` and ``q = k = v = 0`` so nothing is written or read) and the
-        output is sliced back.
+        Sequences shorter than a whole number of chunks are padded up to a chunk
+        boundary and the output is sliced back.
+
+        **What makes the padding safe is the causal mask plus that final slice --
+        NOT the particular values padded in.** The pad occupies the TAIL of the
+        last chunk, so it is causally downstream of every real timestep: no real
+        row can read it, and the state it would contribute to is never consumed.
+        Measured: padding ``alpha`` with 1.0, 0.5 or 0.0 gives BIT-IDENTICAL
+        output, and padding ``q``/``k``/``v``/``beta`` with 1e30 does too. The
+        ``alpha = 1`` constant below is therefore a readability choice (it keeps
+        the cumulative log-gate flat, so an intermediate dump is easier to read),
+        not a correctness requirement -- do not describe it as "gate-neutral for
+        correctness", and do not rely on that framing when editing.
+
+        The one real constraint is that pads must be **FINITE**. ``NaN``/``inf``
+        DOES reach real rows, because the mask is applied multiplicatively and
+        ``NaN * 0 = NaN`` (equally ``inf * 0``). That is why ``alpha`` is floored
+        before ``log`` and why the decay exponent is masked BEFORE the ``exp``
+        (D-009) rather than clamped after it.
 
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
         :type q: keras.KerasTensor

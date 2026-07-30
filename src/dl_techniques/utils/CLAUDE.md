@@ -5,7 +5,7 @@ Shared utilities used across the library — tensor operations, geometry, maskin
 ## Structure
 
 ### Top-level Modules
-- `tensors.py` — Core tensor ops: `gram_matrix()`, `power_iteration()`, `create_causal_mask()`, `window_partition()`/`window_reverse()`, Gaussian kernels, orthonormality validation
+- `tensors.py` — Core tensor ops: `gram_matrix()`, `power_iteration()`, `window_partition()`/`window_reverse()`, Gaussian kernels, orthonormality validation
 - `constants.py` — Shared constants for config keys
 - `convert.py` — `convert_numpy_to_python()` for JSON serialization
 - `random.py` — `rayleigh()` distribution generator with statistical validation

@@ -237,7 +237,18 @@ class BaseVLMHead(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
 
-        self.hidden_dim = task_config.hidden_size or max(vision_dim, text_dim)
+        # DECISION plan-2026-07-30T081929-1645aa52/D-014
+        # No `or <fallback>` here: it was unreachable dead code.
+        # `VLMTaskConfig.__post_init__` (task_types.py) already fills
+        # `hidden_size` -- with `max(vision_hidden_size, text_hidden_size)`,
+        # both defaulting to 768 -- so it is never None by the time a head
+        # reads it. Proved: constructing with `hidden_size=None` and dims
+        # 64/96 yielded 768, NOT 96, i.e. the fallback never once decided the
+        # value it appeared to guard. The three sites had drifted to two
+        # DIFFERENT fallback expressions (`max(vision_dim, text_dim)` twice,
+        # bare `text_dim` once), which read as a deliberate per-head policy
+        # and was really just dead code diverging. Do not re-add either form.
+        self.hidden_dim = task_config.hidden_size
         self._build_common_layers()
 
     def _build_common_layers(self) -> None:
@@ -543,7 +554,8 @@ class ImageCaptioningHead(keras.layers.Layer):
         self.task_config = task_config
         self.vision_dim = vision_dim
         self.text_dim = text_dim
-        self.hidden_dim = task_config.hidden_size or text_dim
+        # D-014: dead fallback removed (see BaseVLMHead.__init__).
+        self.hidden_dim = task_config.hidden_size
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.ffn_type = ffn_type
@@ -823,7 +835,8 @@ class VQAHead(keras.layers.Layer):
         self.text_dim = text_dim
         self.hidden_dims = hidden_dims
         self.pooling_strategy = pooling_strategy
-        self.embed_dim = self.task_config.hidden_size or max(vision_dim, text_dim)
+        # D-014: dead fallback removed (see BaseVLMHead.__init__).
+        self.embed_dim = self.task_config.hidden_size
 
         # CREATE sub-layers
         if self.pooling_strategy == "attention":
