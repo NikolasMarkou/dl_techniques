@@ -1282,12 +1282,17 @@ class TestXLACompilation:
 # One TF32 ulp is 2**-11 = 4.88e-04 relative. That is a hard floor on how
 # closely two differently-associated float32 matmul chains can agree on this
 # GPU, and it sits ABOVE the 1e-4 float32 bound the plan pre-committed before
-# TF32 was known to be in play. So the float32 assertions below are expressed
-# in TF32 ulps, exactly as the step-6 XLA test does, and the bound holds in
-# both TF32 regimes (an unrelated test module can disable TF32 process-wide).
-# Evidence that the implementation itself is well inside the plan's original
-# bound: with `enable_tensor_float_32_execution(False)` this same grid measures
-# a worst-case relative error of 4.70e-06, i.e. 21x tighter than 1e-4.
+# TF32 was known to be in play. So the per-point float32 assertions below are
+# expressed in TF32 ulps, exactly as the step-6 XLA test does, and hold in both
+# TF32 regimes (an unrelated test module can disable TF32 process-wide).
+#
+# The plan's original 1e-4 is NOT abandoned: it is asserted directly, over the
+# same grid, by `test_chunked_matches_sequential_float32_without_tf32` below,
+# which turns TF32 off for the duration. Measured worst case there is 2.91e-06,
+# i.e. ~34x tighter than the plan required, versus 7.73e-04 with TF32 left on --
+# so the toggle is load-bearing, not decorative. The two tests are
+# complementary: one pins the bound the plan committed to, the other pins what
+# is achievable on the hardware's default matmul path.
 # ---------------------------------------------------------------------------
 
 _TF32_ULP = 2.0 ** -11
@@ -1366,6 +1371,61 @@ class TestChunkedScanEquivalence:
             f"seq_len={seq_len}, heads={num_heads}, head_dim={head_dim}: "
             f"max|diff|={err:.3e} > tol={tol:.3e} "
             f"({err / scale / _TF32_ULP:.2f} TF32 ulps of output scale)"
+        )
+
+    def test_chunked_matches_sequential_float32_without_tf32(self):
+        """The plan's pre-committed float32 bound of 1e-4, honoured directly.
+
+        The per-point float32 test above asserts 4 TF32 ulps because TF32 is the
+        GPU's default matmul path and one ulp (4.88e-04) already exceeds 1e-4 --
+        no correct implementation can meet the plan's number while TF32 is on.
+        Turning TF32 off removes that floor and lets the original bound be
+        asserted as written, which is the honest way to discharge the criterion
+        rather than quietly relaxing it.
+
+        Measured: 2.91e-06 with TF32 off, versus 7.73e-04 with it on. Removing
+        the toggle makes this test fail, so the toggle is load-bearing.
+
+        The whole grid runs inside ONE toggle. TF32 is process-global, and this
+        repo has a standing lesson about a module that disabled it at import and
+        swung unrelated measurements by ~3000x -- so the prior value is captured
+        (not assumed to be True, since another module may already have disabled
+        it), restored in a `finally`, and the restoration is asserted.
+        """
+        previous = tf.config.experimental.tensor_float_32_execution_enabled()
+        worst = 0.0
+        worst_case = None
+        try:
+            tf.config.experimental.enable_tensor_float_32_execution(False)
+            for seq_len, num_heads, head_dim in _EQUIV_GRID:
+                layer = GatedLinearAttentionBlock(
+                    dim=num_heads * head_dim, num_heads=num_heads,
+                    head_dim=head_dim, max_seq_len=512, chunk_size=64,
+                )
+                args = _scan_inputs(seq_len, num_heads, head_dim, "float32")
+                reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
+                chunked = keras.ops.convert_to_numpy(
+                    layer._chunked_scan(*args, seq_len)
+                )
+                assert np.isfinite(reference).all() and np.isfinite(chunked).all()
+                rel = float(np.abs(reference - chunked).max()) / (
+                    float(np.abs(reference).max()) or 1.0
+                )
+                if rel > worst:
+                    worst, worst_case = rel, (seq_len, num_heads, head_dim)
+        finally:
+            tf.config.experimental.enable_tensor_float_32_execution(previous)
+
+        # A leaked toggle would silently change every later precision assertion
+        # in the session, which is exactly the failure this repo has recorded.
+        assert (
+            tf.config.experimental.tensor_float_32_execution_enabled() == previous
+        ), "TF32 setting leaked out of this test"
+
+        assert worst <= 1e-4, (
+            f"chunked scan exceeds the plan's pre-committed float32 bound with "
+            f"TF32 disabled: worst rel={worst:.3e} > 1e-4 at "
+            f"(seq_len, num_heads, head_dim)={worst_case}"
         )
 
     def test_equivalence_gate_rejects_an_exclusive_intra_chunk_mask(self):
