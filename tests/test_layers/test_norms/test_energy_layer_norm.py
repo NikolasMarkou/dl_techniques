@@ -32,11 +32,49 @@ import tensorflow as tf
 
 # LESSONS [I:4]: TF32 truncates matmul mantissas on Ampere+ and makes an exact numeric
 # comparison a coin-flip. The Jacobian-symmetry check below is exactly that kind of test.
-tf.config.experimental.enable_tensor_float_32_execution(False)
+#
+# MEASURED INERT, unlike its three siblings (GPU 1, RTX 4070 cc 8.9, 2026-07-30):
+# this file is 26 passed with TF32 ON and 26 passed with TF32 OFF, so no tolerance
+# here currently depends on it -- whereas test_linear_attention.py (3 failed),
+# test_energy_attention.py (1) and test_transformers/test_energy_transformer.py (6)
+# all do. Deleting it outright was therefore measured-safe and was CONSIDERED and
+# REJECTED: the defect being fixed is the process-global LEAK, not the disable, and
+# scoping removes the leak identically while keeping the intent stated above alive
+# for `TestJacobianSymmetry` (inert TODAY, on ONE device, for TODAY's 26 tests).
+# See plan-2026-07-30T140922-8af1028f D-031.
+#
+# It used to be a TOP-LEVEL statement with no restore, i.e. PROCESS-GLOBAL for the rest
+# of the session: whichever of the four such files pytest collected first decided TF32
+# for every test after it, so unrelated files' float32 numbers silently depended on
+# collection order (that leak was directly observed on GPU -- see D-026/D-029). It is
+# now scoped to this module by the shared restore-safe fixture in
+# `tests/test_layers/conftest.py` (capture the prior value / restore in `finally` /
+# ASSERT the restoration), which reuses the harness at
+# `tests/test_layers/test_transformers/test_gated_linear_attention_block.py`
+# (`test_chunked_matches_sequential_float32_without_tf32`). Do NOT restore the top-level
+# call.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm, _GAMMA_FLOOR
 from dl_techniques.layers.norms.factory import create_normalization_layer
+
+
+def test_this_module_really_runs_with_tf32_disabled():
+    """Anti-vacuity for the `pytestmark` opt-in directly above.
+
+    The opt-in is one deletable line, and on CPU -- where TF32 is inert -- deleting
+    it changes NOTHING observable, so nothing else in this file would notice. This
+    asserts the fixture is actually in force. A typo'd fixture name errors by itself
+    (pytest: "fixture not found"); a DELETED `pytestmark` is what this catches.
+
+    It cannot live in `conftest.py`: the fact asserted is per-module opt-in state,
+    and a shared fixture cannot know which modules intended to opt in.
+    """
+    assert not tf.config.experimental.tensor_float_32_execution_enabled(), (
+        "this module's tests must run with TF32 disabled (see the comment above "
+        "`pytestmark`); the `tf32_disabled` opt-in is missing or was removed"
+    )
 
 
 # ---------------------------------------------------------------------

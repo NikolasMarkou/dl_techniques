@@ -39,13 +39,53 @@ import tensorflow as tf
 # LESSONS [I:4]: TF32 on Ampere+ truncates matmul mantissas and makes an einsum
 # equivalence check fail spuriously at ~5e-4 against an fp32 reference. Without this, the
 # gradient oracle below is a coin-flip that WILL be misread as "the gradient is wrong".
-tf.config.experimental.enable_tensor_float_32_execution(False)
+#
+# LOAD-BEARING, and now MEASURED rather than argued (GPU 1, RTX 4070 cc 8.9,
+# 2026-07-30): with TF32 ON this file is 6 failed / 162 passed versus 168 passed with
+# TF32 OFF. The six are TestHopfieldNetwork::test_gradient_oracle (x4, max|diff|
+# 1.891e-02 / 4.423e-04 / 1.891e-02 / 3.198e-04 on scales 3.29e+01 / 1.55e+00 /
+# 2.69e+01 / 1.12e+00 against rtol=1e-4),
+# TestKerasMaskIsHonored::test_block_energy_is_pad_invariant[9] and
+# TestRank2AttentionMaskEqualsKerasMask::test_energy_is_pad_invariant_under_a_rank2_attention_mask
+# (2.232e+00 / 5.453e+00 on scales 1.93e+04 / 3.82e+04 against rtol=1e-4, atol=1e-3).
+# That set is DISJOINT from `reassociation_atol`'s four consumers (D-024), whose
+# derived bound was separately measured to survive real TF32 with a 428x margin
+# (D-028) -- so this disable is not what makes those pass.
+#
+# It used to be a TOP-LEVEL statement with no restore, i.e. PROCESS-GLOBAL for the rest
+# of the session: whichever of the four such files pytest collected first decided TF32
+# for every test after it, so unrelated files' float32 numbers silently depended on
+# collection order (that leak was directly observed on GPU -- see
+# plan-2026-07-30T140922-8af1028f D-026/D-029). It is now scoped to this module by the
+# shared restore-safe fixture in `tests/test_layers/conftest.py` (capture the prior value
+# / restore in `finally` / ASSERT the restoration), which reuses the harness at
+# `test_gated_linear_attention_block.py`
+# (`test_chunked_matches_sequential_float32_without_tf32`). Do NOT restore the top-level
+# call.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
 from dl_techniques.layers.transformers.energy_transformer import (
     EnergyTransformer,
     HopfieldNetwork,
     WeightedAdjacencyProjector,
 )
+
+
+def test_this_module_really_runs_with_tf32_disabled():
+    """Anti-vacuity for the `pytestmark` opt-in directly above.
+
+    The opt-in is one deletable line, and on CPU -- where TF32 is inert -- deleting
+    it changes NOTHING observable, so nothing else in this file would notice. This
+    asserts the fixture is actually in force. A typo'd fixture name errors by itself
+    (pytest: "fixture not found"); a DELETED `pytestmark` is what this catches.
+
+    It cannot live in `conftest.py`: the fact asserted is per-module opt-in state,
+    and a shared fixture cannot know which modules intended to opt in.
+    """
+    assert not tf.config.experimental.tensor_float_32_execution_enabled(), (
+        "this module's tests must run with TF32 disabled (see the comment above "
+        "`pytestmark`); the `tf32_disabled` opt-in is missing or was removed"
+    )
 
 
 # ---------------------------------------------------------------------

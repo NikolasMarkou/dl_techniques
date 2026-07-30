@@ -1,19 +1,23 @@
 """
 Shared pytest fixtures for `tests/test_layers/`.
 
-Currently hosts exactly one thing: the global mixed-precision policy fixture used by the
-Energy Transformer dtype tests (plan plan_2026-07-13_57c9833e, success criterion S13).
+Hosts the two PROCESS-GLOBAL settings this tree mutates: the Keras mixed-precision
+policy (`dtype_policy`, used by the Energy Transformer dtype tests, plan
+plan_2026-07-13_57c9833e success criterion S13) and TensorFloat-32 matmul
+(`tf32_disabled` + `_tf32_leak_canary`).
 
-**Why it lives HERE and not in each test module.** `keras.mixed_precision.set_global_policy`
-is PROCESS-GLOBAL. A test that sets it and fails to reset it corrupts every subsequent test
-in the session (the signature is a rising failure count in test files you never touched).
-The reset therefore lives in exactly ONE place, in a fixture teardown that runs even when
-the test body raises — rather than being copy-pasted into three test modules, where the
-third copy is the one that forgets the `finally`.
+**Why they live HERE and not in each test module.** `keras.mixed_precision.set_global_policy`
+and `tf.config.experimental.enable_tensor_float_32_execution` are both PROCESS-GLOBAL. A
+test that sets one and fails to reset it corrupts every subsequent test in the session (the
+signature is a rising failure count in test files you never touched). The reset therefore
+lives in exactly ONE place, in a fixture teardown that runs even when the test body raises —
+rather than being copy-pasted into three test modules, where the third copy is the one that
+forgets the `finally`.
 """
 
 import keras
 import pytest
+import tensorflow as tf
 
 # ---------------------------------------------------------------------
 
@@ -40,3 +44,94 @@ def dtype_policy(request):
     finally:
         # Runs even if the test body raises. A leaked policy poisons the whole session.
         keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# TensorFloat-32
+# ---------------------------------------------------------------------
+
+# The ambient TF32 setting at conftest import, i.e. BEFORE any test module under
+# `tests/test_layers/` has been imported. `True` on a stock process (measured:
+# `tf.config.experimental.tensor_float_32_execution_enabled()` is True even with no
+# CUDA device, because it is a config flag whose NUMERIC effect — not its value — is
+# device-dependent). Captured rather than assumed, because a pytest invocation wider
+# than this tree may legitimately have set it first.
+_TF32_SESSION_BASELINE = tf.config.experimental.tensor_float_32_execution_enabled()
+
+# Set by `tf32_disabled` for the duration of a module that opted in, so the canary
+# below can tell "a module deliberately scoped TF32 off" from "a module leaked".
+_TF32_SCOPED_OFF = False
+
+
+# DECISION plan-2026-07-30T140922-8af1028f/D-031
+# Four test modules used to call `enable_tensor_float_32_execution(False)` as a
+# TOP-LEVEL statement with no restore, so whichever of them pytest collected first
+# decided TF32 for every test that ran after it in the process. Do NOT reintroduce
+# that: an import-time global with no teardown is why an unrelated measurement in
+# `test_capsule_routing_attention.py` swings ~1500x between "this file alone" and
+# "the whole directory", and why a guard in `test_clifford_block_ds_v2.py` was
+# passing on TF32 rounding noise until an unrelated module removed it.
+# Do NOT replace this with a per-module `try/finally` either — that is the copy that
+# gets forgotten (this file's own docstring records why the dtype policy is
+# centralised for exactly the same reason).
+@pytest.fixture(scope="module")
+def tf32_disabled():
+    """Disable TF32 tensor-core matmul for ONE module, then ALWAYS restore it.
+
+    Opt in per module with `pytestmark = pytest.mark.usefixtures("tf32_disabled")`.
+
+    Same capture / restore-in-`finally` / ASSERT-the-restoration harness as
+    `test_transformers/test_gated_linear_attention_block.py`'s
+    `test_chunked_matches_sequential_float32_without_tf32` (~`:1705-1733`) — one
+    convention, not two. The prior value is CAPTURED, never assumed to be `True`,
+    because another module may already have disabled it.
+
+    :yield: `False`, the TF32 state in force for the module's tests.
+    :rtype: bool
+    """
+    global _TF32_SCOPED_OFF
+    previous = tf.config.experimental.tensor_float_32_execution_enabled()
+    tf.config.experimental.enable_tensor_float_32_execution(False)
+    _TF32_SCOPED_OFF = True
+    try:
+        yield False
+    finally:
+        # Runs even if a test body raises. A leaked toggle silently changes every
+        # later float32 precision assertion in the session.
+        tf.config.experimental.enable_tensor_float_32_execution(previous)
+        _TF32_SCOPED_OFF = False
+        assert (
+            tf.config.experimental.tensor_float_32_execution_enabled() == previous
+        ), "TF32 setting leaked out of this module"
+
+
+@pytest.fixture(autouse=True)
+def _tf32_leak_canary():
+    """Fail the FIRST test that runs after any TF32 leak in this tree.
+
+    Checked at setup, so a module that mutates TF32 without restoring it is caught
+    by the next test to run — which is precisely the cross-file, collection-order
+    coupling the four import-time disables used to create.
+
+    This canary is device-independent and therefore fully verifiable on CPU: it
+    asserts on the process-global FLAG (the coupling mechanism), not on any number
+    the flag influences (the device-dependent consequence).
+
+    It is safe as an autouse over the whole tree because
+    `grep -rn tensor_float_32 tests/` shows exactly two mutation sites left, both
+    restore-safe: `tf32_disabled` above and the self-contained toggle in
+    `test_gated_linear_attention_block.py`. A new unrestored mutation anywhere
+    under `tests/test_layers/` is exactly what this is meant to turn RED.
+    """
+    if not _TF32_SCOPED_OFF:
+        assert (
+            tf.config.experimental.tensor_float_32_execution_enabled()
+            == _TF32_SESSION_BASELINE
+        ), (
+            "TF32 leaked: the process-global tensor-float-32 setting is "
+            f"{tf.config.experimental.tensor_float_32_execution_enabled()} at the "
+            f"start of this test but was {_TF32_SESSION_BASELINE} at session start. "
+            "Some module mutated it without restoring; every float32 tolerance that "
+            "runs after it now depends on collection order."
+        )
+    yield

@@ -364,7 +364,10 @@ def test_dsv2_post_sum_orchestration_guard():
     runs the moment another test module called
     `tf.config.experimental.enable_tensor_float_32_execution(False)` -- a PROCESS-WIDE
     setting with no teardown -- which removed the noise it was living on. The test was
-    always broken; TF32 was masking it.
+    always broken; TF32 was masking it. (Those import-time disables are now scoped to
+    their own modules by the `tf32_disabled` fixture in
+    `tests/test_layers/conftest.py`, so the ordering hazard described above no longer
+    exists — but the history is why this test is written the way it is.)
 
     Assigning a real bias makes `out - wrong == -bias`, an actual signal of the property
     under test, deterministic and independent of TF32, GPU/CPU and test ordering.

@@ -327,9 +327,13 @@ _MP_SEED = 1234
 # dtype error measured on unfixed HEAD, max |policy - float32| = 0.0108
 # (mixed_float16) and 0.0054 (float64) against an output absmax of 5.94. The
 # entries below carry ~5x headroom on that. Both are UPPER bounds, so a
-# TF32-disabled session (which only shrinks the float64 figure — see
-# `test_linear_attention.py`'s process-global
-# `enable_tensor_float_32_execution(False)` at import time) is covered too.
+# TF32-disabled session (which only shrinks the float64 figure) is covered too.
+# That regime is no longer something this file can INHERIT: the four import-time
+# process-global `enable_tensor_float_32_execution(False)` calls (including
+# `test_linear_attention.py`'s) are now scoped to their own modules by the
+# `tf32_disabled` fixture in `tests/test_layers/conftest.py`, so this file runs at
+# the ambient default in both file-scoped and directory-scoped runs. The bounds are
+# unchanged because they were already sized for the WORSE (TF32-on) regime.
 _MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.05, "float64": 0.05}
 
 

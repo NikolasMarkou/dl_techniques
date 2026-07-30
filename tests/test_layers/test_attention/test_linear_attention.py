@@ -34,7 +34,42 @@ from dl_techniques.layers.attention.linear_attention import LinearAttention
 # associativity test compares a TF32 GPU contraction (~1e-3 rel precision) against
 # a full-precision numpy reference and spuriously fails at atol=1e-5. TF32 off makes
 # the two contraction orders agree to genuine fp32 tolerance.
-tf.config.experimental.enable_tensor_float_32_execution(False)
+#
+# LOAD-BEARING, and now MEASURED rather than argued (GPU 1, RTX 4070 cc 8.9,
+# 2026-07-30): with TF32 ON this file is 3 failed / 37 passed --
+# TestAssociativity::test_associative_equals_naive[relu|relu_squared|abs] at
+# max|diff| 5.065e-04 / 3.420e-04 / 2.179e-04 against atol=1e-5 -- versus 40
+# passed with TF32 OFF.
+#
+# It used to be a TOP-LEVEL statement with no restore, i.e. PROCESS-GLOBAL for the
+# rest of the session: whichever of the four such files pytest collected first
+# decided TF32 for every test after it, so unrelated files' float32 numbers
+# silently depended on collection order (that leak was directly observed on GPU --
+# see plan-2026-07-30T140922-8af1028f D-026/D-029). It is now scoped to this module
+# by the shared restore-safe fixture in `tests/test_layers/conftest.py`
+# (capture the prior value / restore in `finally` / ASSERT the restoration), which
+# reuses the harness at
+# `tests/test_layers/test_transformers/test_gated_linear_attention_block.py`
+# (`test_chunked_matches_sequential_float32_without_tf32`). Do NOT restore the
+# top-level call.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
+
+def test_this_module_really_runs_with_tf32_disabled():
+    """Anti-vacuity for the `pytestmark` opt-in directly above.
+
+    The opt-in is one deletable line, and on CPU -- where TF32 is inert -- deleting
+    it changes NOTHING observable, so nothing else in this file would notice. This
+    asserts the fixture is actually in force. A typo'd fixture name errors by itself
+    (pytest: "fixture not found"); a DELETED `pytestmark` is what this catches.
+
+    It cannot live in `conftest.py`: the fact asserted is per-module opt-in state,
+    and a shared fixture cannot know which modules intended to opt in.
+    """
+    assert not tf.config.experimental.tensor_float_32_execution_enabled(), (
+        "this module's tests must run with TF32 disabled (see the comment above "
+        "`pytestmark`); the `tf32_disabled` opt-in is missing or was removed"
+    )
 
 
 # ==============================================================================

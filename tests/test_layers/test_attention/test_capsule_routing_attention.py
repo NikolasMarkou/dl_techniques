@@ -1007,11 +1007,17 @@ _MP_SEED = 1234
 # factor of ~1500. The numbers above were taken running THIS FILE ALONE, where
 # TensorFloat-32 tensor-core matmul is enabled (the Ampere+ default, ~1e-3 relative
 # precision for a float32 matmul). Running the whole `tests/test_layers/
-# test_attention/` directory, the SAME measurement gives 3e-06 / 5.5e-06 / 6e-06,
-# because `test_linear_attention.py` calls
+# test_attention/` directory, the SAME measurement USED TO give 3e-06 / 5.5e-06 /
+# 6e-06, because `test_linear_attention.py` called
 # `tf.config.experimental.enable_tensor_float_32_execution(False)` AT IMPORT TIME —
 # process-globally, for the rest of the session, for every test file collected
-# alongside it. So this layer is ~0.1% "dtype-sensitive" under TF32 and ~1e-6
+# alongside it. That leak is GONE: all four such disables are now scoped to their own
+# modules by the `tf32_disabled` fixture in `tests/test_layers/conftest.py`, so the
+# directory-scoped run now sees the same ambient TF32 state as the file-scoped one.
+# The historical divergence is kept here because it is what these tolerances are sized
+# against, and because `test_the_float32_float64_divergence_justifies_the_tolerance`
+# below still reads the LIVE flag rather than assuming either regime.
+# So this layer is ~0.1% "dtype-sensitive" under TF32 and ~1e-6
 # dtype-sensitive in true fp32; the routing loop (three iterations of `_squash`,
 # which divides by `sqrt(squared_norm + epsilon)` with `epsilon = 1e-8`, added back
 # onto the logits before a softmax) amplifies whatever the matmul gave it.
@@ -1266,11 +1272,19 @@ class TestCapsuleRoutingConditioning:
 
     It is TF32-AWARE, because the quantity it measures is not a property of this
     layer alone. `tf.config.experimental.enable_tensor_float_32_execution(False)`
-    is a PROCESS-GLOBAL switch that `test_linear_attention.py` flips at import time,
-    so the identical measurement reads 0.0083 when this file runs alone (TF32 on,
-    the GPU default) and 6e-06 when the attention directory runs as a session (TF32
-    off). A single hard-coded lower bound here would therefore pass in isolation and
-    fail in the gate — which is exactly what happened when it was first written.
+    is a PROCESS-GLOBAL switch that `test_linear_attention.py` used to flip at
+    import time, so the identical measurement read 0.0083 when this file ran alone
+    (TF32 on, the GPU default) and 6e-06 when the attention directory ran as a
+    session (TF32 off). A single hard-coded lower bound here would therefore pass in
+    isolation and fail in the gate — which is exactly what happened when it was
+    first written.
+
+    That leak has since been scoped away (`tf32_disabled` in
+    `tests/test_layers/conftest.py`), so both runs now see the same ambient state —
+    but the branch below is KEPT and still reads the live flag. It is what makes
+    this test correct under a future toggle, on CPU (where TF32 is inert), and under
+    any wider pytest invocation that sets the flag itself; a test that hard-codes the
+    regime it expects is the defect this one exists to avoid.
     """
 
     @pytest.mark.parametrize("kind", ["degenerate", "padding", "causal"])
@@ -1297,7 +1311,23 @@ class TestCapsuleRoutingConditioning:
             f"{divergence:.4g}, which EXCEEDS the tolerance {budget:.4g} the "
             "agreement tests rely on; re-derive the tolerances"
         )
-        if tf.config.experimental.tensor_float_32_execution_enabled():
+        # DECISION plan-2026-07-30T140922-8af1028f/D-031
+        # The FLAG is not the REGIME: TF32 is a tensor-core path, so the flag being
+        # enabled changes nothing without an Ampere+ GPU present. Reading the flag
+        # alone made this test RED on CPU at floor=1e-4 (measured: 3.1e-06 - 6.4e-06,
+        # true-fp32 numbers under an "enabled" flag). It only ever passed on CPU
+        # because `test_linear_attention.py`'s import-time process-global disable
+        # leaked the flag to False for whole-directory runs -- i.e. this test was
+        # itself a consumer of the collection-order coupling that leak created, and
+        # it was ALREADY RED when this file was run alone on CPU, before that leak
+        # was scoped away. Requiring a GPU here restores the intended meaning on both
+        # devices and leaves the GPU behaviour (flag on + GPU present -> 1e-4)
+        # unchanged. plan-2026-07-30T140922-8af1028f D-031.
+        tf32_in_effect = bool(
+            tf.config.experimental.tensor_float_32_execution_enabled()
+            and tf.config.list_physical_devices("GPU")
+        )
+        if tf32_in_effect:
             # TF32 matmul (~1e-3 relative). Measured 0.0059 - 0.0083 across the
             # three masks; this is the regime `_MP_ATOL['float64']` is sized for.
             floor = 1e-4
@@ -1308,7 +1338,7 @@ class TestCapsuleRoutingConditioning:
             # different — a divergence of exactly 0.0 would mean the float64
             # policy never took effect and this test is measuring nothing.
             floor = 1e-7
-            regime = "TF32-disabled"
+            regime = "true-fp32 (TF32 disabled, or enabled with no GPU present)"
         assert divergence > floor, (
             f"a {kind!r}-masked forward is now better conditioned than expected in "
             f"the {regime} regime ({divergence:.4g} <= {floor:.4g}); either the "

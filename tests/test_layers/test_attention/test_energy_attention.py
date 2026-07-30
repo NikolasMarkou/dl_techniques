@@ -31,10 +31,43 @@ import tensorflow as tf
 # LESSONS [I:4]: TF32 on Ampere+ truncates matmul mantissas and makes an einsum
 # equivalence check fail spuriously at ~5e-4 against an fp32 reference. Without this, the
 # gradient oracle below is a coin-flip that WILL be misread as "the gradient is wrong".
-tf.config.experimental.enable_tensor_float_32_execution(False)
+#
+# LOAD-BEARING, and now MEASURED rather than argued (GPU 1, RTX 4070 cc 8.9,
+# 2026-07-30): with TF32 ON this file is 1 failed / 87 passed --
+# TestKerasMaskIsHonored::test_pads_do_not_shift_real_token_outputs at max|diff|
+# 3.815e-06 against atol=1e-6 -- versus 88 passed with TF32 OFF.
+#
+# It used to be a TOP-LEVEL statement with no restore, i.e. PROCESS-GLOBAL for the rest
+# of the session: whichever of the four such files pytest collected first decided TF32
+# for every test after it, so unrelated files' float32 numbers silently depended on
+# collection order (that leak was directly observed on GPU -- see
+# plan-2026-07-30T140922-8af1028f D-026/D-029). It is now scoped to this module by the
+# shared restore-safe fixture in `tests/test_layers/conftest.py` (capture the prior value
+# / restore in `finally` / ASSERT the restoration), which reuses the harness at
+# `tests/test_layers/test_transformers/test_gated_linear_attention_block.py`
+# (`test_chunked_matches_sequential_float32_without_tf32`). Do NOT restore the top-level
+# call.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
 
 from dl_techniques.layers.attention.energy_attention import EnergyAttention
 from dl_techniques.layers.attention.factory import create_attention_layer
+
+
+def test_this_module_really_runs_with_tf32_disabled():
+    """Anti-vacuity for the `pytestmark` opt-in directly above.
+
+    The opt-in is one deletable line, and on CPU -- where TF32 is inert -- deleting
+    it changes NOTHING observable, so nothing else in this file would notice. This
+    asserts the fixture is actually in force. A typo'd fixture name errors by itself
+    (pytest: "fixture not found"); a DELETED `pytestmark` is what this catches.
+
+    It cannot live in `conftest.py`: the fact asserted is per-module opt-in state,
+    and a shared fixture cannot know which modules intended to opt in.
+    """
+    assert not tf.config.experimental.tensor_float_32_execution_enabled(), (
+        "this module's tests must run with TF32 disabled (see the comment above "
+        "`pytestmark`); the `tf32_disabled` opt-in is missing or was removed"
+    )
 
 
 # ---------------------------------------------------------------------
@@ -460,6 +493,15 @@ class TestKerasMaskIsHonored:
         )
 
         max_abs_diff = float(np.abs(y_pad - y_short).max())
+        # KNOWN RED ON CPU, and NOT caused by the TF32 scoping (plan
+        # plan-2026-07-30T140922-8af1028f step 10): measured on the pre-change file
+        # at HEAD, `CUDA_VISIBLE_DEVICES=""` gives 1.907e-06 against this atol=1e-6,
+        # i.e. the bound sits below float32's own cross-shape reduction noise on this
+        # path -- the same unattainable-tolerance class that D-024 fixed for
+        # `test_energy_transformer.py` by DERIVING the bound in-test. On GPU it is
+        # green with TF32 off and RED at 3.815e-06 with TF32 on (D-029), which is why
+        # this module scopes TF32 off. Do NOT "fix" this by bumping the literal:
+        # derive it from the noise source, as `reassociation_atol` does.
         np.testing.assert_allclose(
             y_pad, y_short, atol=1e-6,
             err_msg=(

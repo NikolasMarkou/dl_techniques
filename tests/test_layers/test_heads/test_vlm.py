@@ -20,6 +20,7 @@ The three forward-pass-fixed heads are locked here:
 """
 
 import json
+import linecache
 import logging
 import os
 import tempfile
@@ -27,6 +28,9 @@ import tempfile
 import numpy as np
 import pytest
 import keras
+# `tf` is used ONLY by `TestSite1PostFusionWidthAssertion`'s site-2 guard, for the
+# device-invariant exception type and the GPU-presence check (D-030).
+import tensorflow as tf
 from keras import ops
 
 from dl_techniques.layers.ffn.factory import (
@@ -228,10 +232,16 @@ class TestVLMForwardPass:
             TF32 forced OFF                        : max|diff| = 0.000000e+00
             co-collected behind
             test_attention/test_linear_attention.py: max|diff| = 0.000000e+00
-              (that file's import-time, unrestored
-               `enable_tensor_float_32_execution(False)` really does leak --
+              (at the time of measurement that file's import-time, unrestored
+               `enable_tensor_float_32_execution(False)` really did leak --
                TF32 was observed False here while the file-scoped run observed
-               True, so the regime genuinely changed and the number did not)
+               True, so the regime genuinely changed and the number did not.
+               That leak has since been scoped away by the `tf32_disabled`
+               fixture in `tests/test_layers/conftest.py` (D-031), so a
+               co-collected run now sees the ambient default here -- which is
+               the FIRST row above, also 0.0. All three regimes were measured;
+               removing the leak cannot move a number that is exactly zero in
+               every one of them.)
 
         So `atol=1e-5` below is NOT a bare epsilon riding on ambient TF32 state.
         The masked positions are bit-identical: an additive -1e9 mask makes the
@@ -1496,24 +1506,85 @@ class TestSite1PostFusionWidthAssertion:
         `ImageCaptioningHead.call()` does `x + ffn_output` with no projection, so
         a wrong FFN width must raise. This is why site 2 gets no explicit
         assertion of its own.
+
+        # DECISION plan-2026-07-30T140922-8af1028f/D-030
+        This guard used to assert on the backend's ERROR TEXT (both widths named
+        in the message). That is DEVICE-DEPENDENT and was measured RED on GPU:
+        CPU `AddV2` says `Incompatible shapes: [3,7,96] vs. [3,7,48] [Op:AddV2]`,
+        GPU `AddV2` says only `required broadcastable shapes [Op:AddV2]` — no
+        dimensions at all. The subject of the guard (it raises, at the residual
+        add) holds on both; only the phrasing differs.
+
+        So the discriminating core below is device-INVARIANT: the exception TYPE,
+        the failing OP (`AddV2`, which both wordings name), and the deepest Python
+        frame — eager execution raises at the line that ISSUED the op, and Keras's
+        `traceback_utils` filters its own frames, so that frame is exactly
+        `heads/vlm/factory.py`'s `x + ffn_output`. A Python traceback is a property
+        of the program, not of the kernel. Together these are STRICTER than the old
+        text match, which would have accepted a shape error raised anywhere else as
+        long as it happened to mention 48 and 96.
+
+        DO NOT weaken this to a bare `pytest.raises(Exception)`: a guard that
+        cannot tell its target from any other failure is close to vacuous.
         """
         original = vlm_factory._ffn_width_kwargs
+
+        # Precondition: the SAME head at the CORRECT width builds and forwards.
+        # Without this, a generally-broken `_cap_width_head` would satisfy the
+        # `raises` below for entirely the wrong reason.
+        control = _cap_width_head("mlp")
+        control({k: ops.convert_to_tensor(v)
+                 for k, v in _family_payload().items()})
 
         def half_width(ffn_type, width):
             return {k: width // 2 for k in original(ffn_type, width)}
 
         vlm_factory._ffn_width_kwargs = half_width
         try:
-            with pytest.raises(Exception) as excinfo:
+            with pytest.raises(tf.errors.InvalidArgumentError) as excinfo:
                 head = _cap_width_head("mlp")
                 head({k: ops.convert_to_tensor(v)
                       for k, v in _family_payload().items()})
         finally:
             vlm_factory._ffn_width_kwargs = original
+
         message = str(excinfo.value)
-        assert str(_FAMILY_DIM // 2) in message and str(_FAMILY_DIM) in message, (
-            f"expected a shape-mismatch naming both widths, got: {message}"
+        assert "AddV2" in message, (
+            f"the failure must come from the residual ADD, not from some other "
+            f"op: {message}"
         )
+
+        frames = []
+        tb = excinfo.value.__traceback__
+        while tb is not None:
+            frames.append((
+                tb.tb_frame.f_code.co_filename,
+                tb.tb_lineno,
+                tb.tb_frame.f_code.co_name,
+            ))
+            tb = tb.tb_next
+        frame_file, frame_line, frame_func = frames[-1]
+        source = linecache.getline(frame_file, frame_line).strip()
+        assert os.path.abspath(frame_file) == os.path.abspath(
+            vlm_factory.__file__
+        ), f"raised in {frame_file}, not in the VLM factory: {frames}"
+        assert frame_func == "call", (
+            f"raised in {frame_func!r}, not in `ImageCaptioningHead.call`: {frames}"
+        )
+        assert "ffn_output" in source and "+" in source, (
+            f"raised at {frame_file}:{frame_line} ({source!r}), which is not the "
+            f"unprojected residual add this invariant is about"
+        )
+
+        # Device-CONDITIONAL extra, stated rather than silently dropped: only the
+        # CPU kernel names the two widths (see the docstring). Skipping when a GPU
+        # is present cannot produce a false RED in either direction — if the op
+        # were placed on CPU anyway the dims would be there and we merely forgo a
+        # check.
+        if not tf.config.list_physical_devices("GPU"):
+            assert (
+                str(_FAMILY_DIM // 2) in message and str(_FAMILY_DIM) in message
+            ), f"expected a shape-mismatch naming both widths, got: {message}"
 
 
 class TestSwiGLUComputeOutputShapeHonesty:
