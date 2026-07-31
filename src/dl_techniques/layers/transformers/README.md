@@ -29,7 +29,7 @@ This layer is the workhorse of any Transformer model. Its primary function is to
 -   **Factory-Based Components**: Utilizes the attention and FFN factories to allow for dynamic selection of mechanisms like standard Multi-Head Attention, Window Attention, SwiGLU, or even a Mixture of Experts (MoE) block.
 -   **Flexible Normalization**: Supports multiple normalization strategies (`LayerNorm`, `RMSNorm`, etc.) and positions (pre-norm vs. post-norm), allowing for replication of various architectures and improved training stability.
 -   **Stochastic Depth**: Integrates optional stochastic depth for regularization, a technique proven to improve the performance and generalization of deep Transformer models by randomly dropping entire residual blocks during training.
--   **Fine-Grained Control**: Exposes dedicated argument dictionaries (`attention_args`, `norm_args`, `ffn_args`) for passing custom configurations to child components, enabling advanced and precise architectural tuning.
+-   **Fine-Grained Control**: Exposes dedicated argument dictionaries (`attention_args`, `attention_norm_args`, `ffn_norm_args`, `ffn_args`) for passing custom configurations to child components, enabling advanced and precise architectural tuning. There is no `norm_args` parameter on `TransformerLayer` — the two normalization sites are configured separately (`TextEncoder` and `VisionEncoder` do have a single `norm_args`; `TransformerLayer` does not).
 
 ### Usage
 
@@ -72,27 +72,47 @@ moe_config = MoEConfig(
 moe_transformer_block = TransformerLayer(
     hidden_size=512,
     num_heads=8,
-    intermediate_size=2048,  # This will be ignored
+    intermediate_size=2048,  # NOT ignored -- see the note below
     moe_config=moe_config
 )
 outputs_moe = moe_transformer_block(inputs)
 ```
 
+> **`intermediate_size` is not ignored under `moe_config`.** `ffn_type` and `ffn_args` are (the FFN is replaced by a `MixtureOfExperts` layer), but `intermediate_size` is still consulted as the fallback for the expert FFN's `hidden_dim` whenever `moe_config.expert_config.ffn_config` omits that key **and** the expert type is one of `{'mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp'}`. In the example above the expert type is `'swiglu'`, which is not in that set, so `intermediate_size` genuinely goes unused *there* — but change the expert to `'mlp'` and drop its `hidden_dim` and the `2048` becomes load-bearing. The type list lives in one place in the source, `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` in `transformer.py`.
+
 ### Arguments
 
-| Argument                 | Type                | Description                                                                                             | Default        |
-| ------------------------ | ------------------- | ------------------------------------------------------------------------------------------------------- | -------------- |
-| `hidden_size`            | `int`               | **Required.** The dimensionality of the input and output embeddings.                                      |                |
-| `num_heads`              | `int`               | **Required.** The number of parallel attention heads.                                                     |                |
-| `intermediate_size`      | `int`               | **Required.** The dimensionality of the FFN's hidden layer.                                               |                |
-| `attention_type`         | `str`               | The type of attention mechanism to use (e.g., `'multi_head'`, `'window'`).                              | `'multi_head'` |
-| `attention_args`         | `dict`              | Optional dictionary of custom arguments for the attention layer.                                        | `None`         |
-| `normalization_type`     | `str`               | The type of normalization to use (e.g., `'layer_norm'`, `'rms_norm'`).                                  | `'layer_norm'` |
-| `normalization_position` | `str`               | The position of the normalization layer (`'pre'` or `'post'`).                                          | `'post'`       |
-| `ffn_type`               | `str`               | The type of feed-forward network to use (e.g., `'mlp'`, `'swiglu'`). Ignored if `moe_config` is set.      | `'mlp'`        |
-| `moe_config`             | `dict` or `MoEConfig` | Configuration for a Mixture of Experts layer. If provided, replaces the FFN.                            | `None`         |
-| `use_stochastic_depth`   | `bool`              | If `True`, enables stochastic depth regularization.                                                       | `False`        |
-| `stochastic_depth_rate`  | `float`             | The drop probability for stochastic depth.                                                              | `0.1`          |
+All 27 constructor parameters, generated from `TransformerLayer.__init__`'s signature (plus `**kwargs`, forwarded to `keras.layers.Layer`).
+
+| Argument                 | Type                  | Description                                                                                                                                                                    | Default            |
+| ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `hidden_size`            | `int`                 | **Required.** Dimensionality of the input and output embeddings. Must be positive and divisible by `num_heads`.                                                                   |                    |
+| `num_heads`              | `int`                 | **Required.** Number of parallel attention heads. Must be positive.                                                                                                              |                    |
+| `intermediate_size`      | `int`                 | **Required.** FFN hidden dimension. Must be positive unless `moe_config` is set. Still used under `moe_config` as the expert FFN's `hidden_dim` fallback — see the MoE note above. |                    |
+| `attention_type`         | `str`                 | Attention mechanism (e.g. `'multi_head'`, `'window'`, `'group_query'`, `'differential'`, `'multi_head_latent'`, `'fnet'`).                                                        | `'multi_head'`     |
+| `attention_args`         | `Optional[dict]`      | Caller kwargs merged last into the attention factory call. Never pre-filtered, so an unknown key is reported by the factory rather than swallowed.                                | `None`             |
+| `normalization_type`     | `str`                 | Normalization type built via `create_normalization_layer` (e.g. `'layer_norm'`, `'rms_norm'`).                                                                                   | `'layer_norm'`     |
+| `normalization_position` | `str`                 | `'pre'` or `'post'`. **Validated** — any other value raises `ValueError` (it used to silently select post-norm).                                                                  | `'post'`           |
+| `attention_norm_args`    | `Optional[dict]`      | Extra kwargs for the attention-side normalization layer only.                                                                                                                    | `None`             |
+| `ffn_norm_args`          | `Optional[dict]`      | Extra kwargs for the FFN-side normalization layer only.                                                                                                                          | `None`             |
+| `ffn_type`               | `str`                 | Feed-forward network type (e.g. `'mlp'`, `'swiglu'`). Ignored when `moe_config` is set.                                                                                          | `'mlp'`            |
+| `ffn_args`               | `Optional[dict]`      | Caller kwargs merged last into the FFN factory call. Ignored when `moe_config` is set.                                                                                            | `None`             |
+| `moe_config`             | `Optional[MoEConfig \| dict]` | Mixture-of-Experts configuration. When provided, the FFN sub-layer becomes a `MixtureOfExperts`.                                                                          | `None`             |
+| `dropout_rate`           | `float`               | FFN-output dropout rate. The **only** dropout this layer applies itself, and it is applied after the FFN only — never after attention.                                            | `0.1`              |
+| `attention_dropout_rate` | `float`               | Attention-**internal** (weight) dropout. Forwarded as the attention sub-layer's own `dropout_rate`; not an output dropout.                                                        | `0.1`              |
+| `use_stochastic_depth`   | `bool`                | Enables stochastic depth (drop-path) on both residual branches.                                                                                                                  | `False`            |
+| `stochastic_depth_rate`  | `float`               | Drop probability for stochastic depth.                                                                                                                                           | `0.1`              |
+| `activation`             | `str \| Callable`     | FFN activation.                                                                                                                                                                  | `'gelu'`           |
+| `use_bias`               | `bool`                | Whether linear sub-layers use a bias term.                                                                                                                                       | `True`             |
+| `kernel_initializer`     | `str \| Initializer`  | Kernel initializer forwarded to the sub-layer factories.                                                                                                                         | `'glorot_uniform'` |
+| `bias_initializer`       | `str \| Initializer`  | Bias initializer forwarded to the sub-layer factories.                                                                                                                           | `'zeros'`          |
+| `kernel_regularizer`     | `Optional[Regularizer]` | Kernel regularizer forwarded to the sub-layer factories.                                                                                                                       | `None`             |
+| `bias_regularizer`       | `Optional[Regularizer]` | Bias regularizer forwarded to the sub-layer factories.                                                                                                                         | `None`             |
+| `window_size`            | `int`                 | Window size supplied to `attention_type='window'`.                                                                                                                               | `8`                |
+| `n_kv_head`              | `Optional[int]`       | Key/value head count for `attention_type='group_query'`. `None` means `num_heads`.                                                                                               | `None`             |
+| `lambda_init`            | `float`               | Initial lambda for `attention_type='differential'`.                                                                                                                              | `0.8`              |
+| `use_layer_scale`        | `bool`                | Enables LayerScale on both residual branches.                                                                                                                                    | `False`            |
+| `layer_scale_init_value` | `float`               | LayerScale initial value.                                                                                                                                                        | `1e-5`             |
 
 ## VisionEncoder
 
@@ -234,7 +254,7 @@ mean_pooled_output = modern_encoder(keras.random.randint(0, 50000, shape=(2, 256
 | `embed_dim`                | `int`   | **Required.** The dimensionality of the token embeddings and hidden states.              |             |
 | `depth`                    | `int`   | The number of `TransformerLayer` blocks in the encoder stack.                              | `12`        |
 | `num_heads`                | `int`   | The number of attention heads in each `TransformerLayer`.                                  | `12`        |
-| `max_seq_len`              | `int`   | The maximum sequence length the model can process.                                       | `512`       |
+| `max_seq_len`              | `int`   | The declared capacity of the layer. **Enforced**: `build()` raises `ValueError` naming both `seq_len` and `max_seq_len` when the STATIC input sequence length exceeds it — for every `positional_type`. The bound is `max_seq_len`, not the internal `seq_len` (`max_seq_len + 1` under `use_cls_token`), so the CLS slot never costs the caller an input token. A dynamic (`None`) sequence axis cannot be checked; see the limitation documented at the guard in `text_encoder.py`. | `512`       |
 | `embedding_type`           | `str`   | The word embedding strategy: `'learned'` or `'factorized'`. `'shared'` raises — see below. | `'learned'` |
 | `positional_type`          | `str`   | The positional encoding strategy: `'learned'`, `'rope'`, `'sincos'`, etc.                  | `'learned'` |
 | `use_token_type_embedding` | `bool`  | If `True`, adds token type (segment) embeddings.                                         | `False`     |
@@ -307,7 +327,7 @@ output_features_modern = modern_decoder(keras.random.randint(0, 32000, shape=(2,
 | `embed_dim`     | `int` | **Required.** The dimensionality of the token embeddings and hidden states.              |             |
 | `depth`         | `int` | **Required.** The number of `TransformerLayer` blocks in the decoder stack.              |             |
 | `num_heads`     | `int` | **Required.** The number of attention heads in each `TransformerLayer`.                    |             |
-| `max_seq_len`   | `int` | The maximum sequence length for positional embeddings.                                   | `512`       |
+| `max_seq_len`   | `int` | The declared capacity of the layer. **Enforced**: `build()` raises `ValueError` naming both `seq_len` and `max_seq_len` when the STATIC input sequence length exceeds it — for every `positional_type`, including `'sincos'`, where nothing would have crashed. A dynamic (`None`) sequence axis cannot be checked; see the limitation documented at the guard in `text_decoder.py`. | `512`       |
 | `embedding_type`| `str` | The word embedding strategy: `'learned'` or `'factorized'`. `'shared'` raises — see below. | `'learned'` |
 | `positional_type`| `str` | The positional encoding strategy: `'learned'` or `'sincos'`.                             | `'learned'` |
 

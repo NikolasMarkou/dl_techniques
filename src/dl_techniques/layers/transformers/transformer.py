@@ -22,13 +22,13 @@ with the exact data flow determined by `normalization_position`.
 ```
 Input
   |
-  +-- Norm → Attention → Dropout → StochasticDepth --+
-  |                                                       |
-  +----------------------- Add ---------------------------+
+  +-- Norm → Attention → [StochasticDepth] → [LayerScale] --+
+  |                                                          |
+  +--------------------------- Add --------------------------+
                                 |
-  +-- Norm → FFN/MoE → Dropout → StochasticDepth --+
-  |                                                     |
-  +----------------------- Add -------------------------+
+  +-- Norm → FFN/MoE → Dropout → [StochasticDepth] → [LayerScale] --+
+  |                                                                 |
+  +------------------------------ Add ------------------------------+
                                 |
                               Output
 ```
@@ -37,12 +37,22 @@ Input
 ```
 Input
   |
-  +-- Attention → Dropout → StochasticDepth → Add → Norm --+
-                                                                |
-  +-------- FFN/MoE → Dropout → StochasticDepth → Add → Norm --+
+  +-- Attention → [StochasticDepth] → [LayerScale] → Add → Norm --+
+                                                                  |
+  +-- FFN/MoE → Dropout → [StochasticDepth] → [LayerScale] → Add → Norm --+
                                                                     |
                                                                   Output
 ```
+
+Note the asymmetry, which is deliberate and MEASURED, not a drawing shortcut:
+``self.dropout`` (the ``dropout_rate`` layer) is applied to the FFN sub-block
+ONLY -- it is invoked exactly once per forward pass, at both normalization
+positions, and its input is the FFN output. There is NO dropout step after
+attention. ``attention_dropout_rate`` is a different thing entirely: it is
+forwarded to the attention sub-layer's own ``dropout_rate`` constructor
+argument (attention-WEIGHT dropout, applied inside the attention layer), not
+an output dropout applied here. The bracketed steps are optional and present
+only when ``use_stochastic_depth`` / ``use_layer_scale`` are enabled.
 
 **Mathematical Operations**:
 1.  **Multi-Head Self-Attention (MHSA)**:
@@ -218,6 +228,16 @@ _DEFAULT_ATTENTION_WINDOW_SIZE: int = 8
 #: readers as ``_DEFAULT_ATTENTION_WINDOW_SIZE`` above.
 _DEFAULT_ATTENTION_LAMBDA_INIT: float = 0.8
 
+#: MoE expert FFN types whose ``hidden_dim`` falls back to
+#: ``TransformerLayer.intermediate_size`` when the caller's
+#: ``moe_config.expert_config.ffn_config`` omits it. Defined once and read by
+#: BOTH the fallback itself and the ``moe_config`` warning text, so the warning
+#: cannot drift away from the behaviour again (F-17: it previously claimed
+#: ``intermediate_size`` was ignored while this fallback consulted it).
+_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE: Tuple[str, ...] = (
+    'mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp',
+)
+
 
 def build_transformer_attention_required_params(
         *,
@@ -318,13 +338,15 @@ class TransformerLayer(keras.layers.Layer):
         └───────────────────┬───────────────────┘
                             ▼
         ┌───────────────────────────────────────┐
-        │  [Norm] ─► Attention ─► [Dropout]     │
-        │  ─► [StochasticDepth] ─► + Residual   │
+        │  [Norm] ─► Attention                  │
+        │  ─► [StochasticDepth] ─► [LayerScale] │
+        │  ─► + Residual                        │
         └───────────────────┬───────────────────┘
                             ▼
         ┌───────────────────────────────────────┐
-        │  [Norm] ─► FFN/MoE ─► [Dropout]       │
-        │  ─► [StochasticDepth] ─► + Residual   │
+        │  [Norm] ─► FFN/MoE ─► Dropout         │
+        │  ─► [StochasticDepth] ─► [LayerScale] │
+        │  ─► + Residual                        │
         └───────────────────┬───────────────────┘
                             ▼
         ┌───────────────────────────────────────┐
@@ -335,8 +357,14 @@ class TransformerLayer(keras.layers.Layer):
     :type hidden_size: int
     :param num_heads: Number of attention heads.
     :type num_heads: int
-    :param intermediate_size: FFN intermediate dimension (ignored when
-        ``moe_config`` is provided).
+    :param intermediate_size: FFN intermediate dimension. NOT ignored when
+        ``moe_config`` is provided: it is then used as the fallback for the
+        expert FFN's ``hidden_dim`` whenever
+        ``moe_config.expert_config.ffn_config`` omits that key and the expert
+        type is one of ``{'mlp', 'differential', 'glu', 'geglu', 'residual',
+        'swin_mlp'}``. It is only genuinely unused when ``moe_config`` is set
+        AND the expert config already carries its own ``hidden_dim`` (or the
+        expert type is not one of those six).
     :type intermediate_size: int
     :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
     :type attention_type: AttentionType
@@ -361,9 +389,15 @@ class TransformerLayer(keras.layers.Layer):
     :type ffn_args: Optional[Dict[str, Any]]
     :param moe_config: Mixture-of-Experts configuration replacing the FFN.
     :type moe_config: Optional[Union[MoEConfig, Dict[str, Any]]]
-    :param dropout_rate: FFN output dropout rate. Default: 0.1.
+    :param dropout_rate: FFN output dropout rate. This is the ONLY dropout this
+        layer applies itself, and it is applied to the FFN sub-block only --
+        never after attention (see the architecture note above). Default: 0.1.
     :type dropout_rate: float
-    :param attention_dropout_rate: Attention output dropout rate. Default: 0.1.
+    :param attention_dropout_rate: Attention-INTERNAL (weight) dropout rate.
+        Not an output dropout: this value is forwarded verbatim as the
+        attention sub-layer's own ``dropout_rate`` constructor argument (e.g.
+        ``MultiHeadAttention(dropout_rate=...)``), so it acts on the attention
+        probabilities inside that layer. Default: 0.1.
     :type attention_dropout_rate: float
     :param use_stochastic_depth: Enable stochastic depth. Default: False.
     :type use_stochastic_depth: bool
@@ -465,6 +499,15 @@ class TransformerLayer(keras.layers.Layer):
             raise ValueError(
                 f"intermediate_size must be positive when moe_config is None, got {intermediate_size}"
             )
+        # `call()` dispatches on `== 'pre'` with an unguarded `else` for post-norm,
+        # so without this check ANY other spelling ('Pre', 'PRE', 'postt', '')
+        # silently ran the POST-norm branch -- a typo became a different
+        # architecture with no error. Same check, same message, as the sibling
+        # `TransformerDecoderLayer.__init__`.
+        if normalization_position not in ('pre', 'post'):
+            raise ValueError(
+                f"normalization_position must be 'pre' or 'post', got {normalization_position}"
+            )
 
         # --- Configuration Storage ---
         self.hidden_size = hidden_size
@@ -503,9 +546,13 @@ class TransformerLayer(keras.layers.Layer):
         if self.moe_config is not None:
             if self.ffn_type != 'mlp' or self.ffn_args:
                 warnings.warn(
-                    "moe_config is provided, so `ffn_type`, `ffn_args`, and `intermediate_size` "
-                    "parameters of TransformerLayer will be ignored. The FFN will be a "
-                    "MixtureOfExperts layer configured by `moe_config`."
+                    "moe_config is provided, so the `ffn_type` and `ffn_args` parameters "
+                    "of TransformerLayer are ignored. The FFN will be a MixtureOfExperts "
+                    "layer configured by `moe_config`. NOTE: `intermediate_size` is NOT "
+                    "ignored -- it is still used as the fallback for the expert FFN's "
+                    "`hidden_dim` when `moe_config.expert_config.ffn_config` omits it and "
+                    "the expert type is one of "
+                    f"{set(_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE)}."
                 )
 
             ffn_config = self.moe_config.expert_config.ffn_config
@@ -523,8 +570,13 @@ class TransformerLayer(keras.layers.Layer):
 
             # If expert_config is for an MLP-like FFN and doesn't have its intermediate size set,
             # use TransformerLayer's intermediate_size as a sensible default.
+            # This block is UNCONDITIONAL (it is not gated by the warning's `if`
+            # above), which is why the warning must not claim intermediate_size
+            # is ignored. The type list lives in exactly one place --
+            # `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` -- which the warning
+            # text above interpolates, so the two cannot drift.
             ffn_type = ffn_config.get('type')
-            if ffn_type in ['mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']:
+            if ffn_type in _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE:
                 if 'hidden_dim' not in ffn_config:
                     ffn_config['hidden_dim'] = self.intermediate_size
 

@@ -481,7 +481,15 @@ class TextDecoder(keras.layers.Layer):
             x = ops.add(x, pos_embed)
         elif self.positional_type == 'sincos':
             # Reshape positions to (batch, seq_len, 1) for sincos layer
-            pos_coords = ops.cast(positions, "float32")
+            # Cast to THIS layer's active compute dtype rather than a hardcoded
+            # "float32", for consistency with the rest of the forward path.
+            # Cosmetic only: measured bit-identical under the float32 policy.
+            # It does NOT make `positional_type='sincos'` work under
+            # mixed_float16 / float64 -- that crash originates inside
+            # `layers/embedding/continuous_sin_cos_embedding.py`, which does its
+            # own forced float32 cast against an autocast weight, and is out of
+            # scope here. Do not add a docstring claiming that gap is closed.
+            pos_coords = ops.cast(positions, self.compute_dtype)
             pos_coords = ops.expand_dims(pos_coords, axis=-1)
             pos_coords = ops.expand_dims(pos_coords, axis=0)
             pos_coords = ops.broadcast_to(pos_coords, (batch_size, seq_len, 1))

@@ -888,3 +888,136 @@ class TestTransformerFFNPolicyPreserved:
     def test_unknown_type_raises_from_the_helper(self) -> None:
         with pytest.raises(ValueError, match="Unknown ffn_type"):
             self._cfg('no_such_ffn')
+
+
+# ---------------------------------------------------------------------
+# F-18 -- `normalization_position` validation
+# ---------------------------------------------------------------------
+
+_F18_HIDDEN = 16
+_F18_HEADS = 4
+_F18_INTER = 32
+_F18_SEED = 4242
+
+
+def _f18_seeded_layer(**kwargs: Any) -> TransformerLayer:
+    """Build a TransformerLayer and overwrite EVERY weight from a seeded RNG.
+
+    Default initializers leave every bias at zero, which makes a residual /
+    branch-selection difference structurally harder to observe. This assigns
+    non-zero kernels AND non-zero biases and asserts at least one bias is
+    non-zero before the caller uses it.
+    """
+    layer = TransformerLayer(
+        hidden_size=_F18_HIDDEN, num_heads=_F18_HEADS,
+        intermediate_size=_F18_INTER, use_bias=True, dropout_rate=0.0,
+        attention_dropout_rate=0.0, **kwargs
+    )
+    x = _f18_inputs()
+    layer(x)  # force build
+    rng = np.random.RandomState(_F18_SEED)
+    weights = layer.get_weights()
+    assert weights, "fixture is vacuous: the layer built no weights"
+    new = [rng.normal(0.0, 0.3, size=w.shape).astype(w.dtype) for w in weights]
+    layer.set_weights(new)
+    # at least one 1-D (bias-shaped) weight must be non-zero
+    assert any(w.ndim == 1 and np.any(w != 0.0) for w in new), (
+        "fixture is vacuous: no non-zero bias-shaped weight was assigned"
+    )
+    return layer
+
+
+def _f18_inputs() -> Any:
+    return ops.convert_to_tensor(
+        np.random.RandomState(_F18_SEED).normal(size=(2, 5, _F18_HIDDEN)
+                                                ).astype('float32')
+    )
+
+
+class TestNormalizationPositionValidation:
+    """F-18: a typo'd `normalization_position` used to silently select post-norm.
+
+    Pre-fix MEASUREMENT (executed at `643f5382`): `'Pre'`, `'PRE'`, `'postt'`,
+    `'pre '` and `''` all constructed WITHOUT error and produced output
+    bit-identical to `normalization_position='post'` -- i.e. asking for pre-norm
+    with a capital P silently gave you a different architecture. `call()`
+    dispatches on `== 'pre'` with an unguarded `else`, so every non-`'pre'`
+    spelling is post-norm.
+    """
+
+    @pytest.mark.parametrize(
+        'bad', ['Pre', 'PRE', 'Post', 'postt', 'pre ', '', 'none', None, 0]
+    )
+    def test_invalid_normalization_position_raises(self, bad) -> None:
+        with pytest.raises(ValueError, match="normalization_position must be"):
+            TransformerLayer(
+                hidden_size=_F18_HIDDEN, num_heads=_F18_HEADS,
+                intermediate_size=_F18_INTER, normalization_position=bad,
+            )
+
+    @pytest.mark.parametrize('good', ['pre', 'post'])
+    def test_legal_values_still_construct_and_run(self, good: str) -> None:
+        """FALSE-POSITIVE family: the guard must not over-reject."""
+        layer = _f18_seeded_layer(normalization_position=good)
+        out = np.array(layer(_f18_inputs(), training=False))
+        assert out.shape == (2, 5, _F18_HIDDEN)
+        assert np.all(np.isfinite(out))
+        assert layer.get_config()['normalization_position'] == good
+
+    @pytest.mark.parametrize('good', ['pre', 'post'])
+    def test_legal_values_survive_a_keras_round_trip(self, good: str, tmp_path
+                                                     ) -> None:
+        """FALSE-POSITIVE family, across the DESERIALIZATION boundary.
+
+        `from_config` re-runs `__init__`, so a guard that is correct on fresh
+        construction can still break `.keras` load. Both legal values must
+        round-trip and reproduce their outputs exactly.
+        """
+        layer = _f18_seeded_layer(normalization_position=good)
+        inp = keras.Input(shape=(5, _F18_HIDDEN))
+        model = keras.Model(inp, layer(inp))
+        x = _f18_inputs()
+        before = np.array(model(x, training=False))
+
+        path = os.path.join(str(tmp_path), f'f18_{good}.keras')
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        after = np.array(reloaded(x, training=False))
+        np.testing.assert_allclose(before, after, rtol=1e-6, atol=1e-6)
+
+    def test_a_tampered_saved_config_is_rejected_on_load(self) -> None:
+        """A config carrying an illegal value must not deserialize silently.
+
+        `Operation.from_config` catches the constructor exception and re-raises
+        it as `TypeError` with the original message appended, so this asserts on
+        the MESSAGE and accepts either type across that boundary.
+        """
+        config = TransformerLayer(
+            hidden_size=_F18_HIDDEN, num_heads=_F18_HEADS,
+            intermediate_size=_F18_INTER, normalization_position='pre',
+        ).get_config()
+        config['normalization_position'] = 'Pre'
+        with pytest.raises((ValueError, TypeError),
+                           match="normalization_position must be"):
+            TransformerLayer.from_config(config)
+
+    def test_the_two_legal_branches_are_genuinely_different(self) -> None:
+        """ANTI-VACUITY control for the whole class.
+
+        If `'pre'` and `'post'` produced the same numbers, the silent
+        fall-through this guard prevents would be harmless and the guard would
+        be guarding nothing. Same seeded weights, same input, both branches.
+        """
+        pre = _f18_seeded_layer(normalization_position='pre')
+        post = _f18_seeded_layer(normalization_position='post')
+        np.testing.assert_array_equal(
+            np.concatenate([w.ravel() for w in pre.get_weights()]),
+            np.concatenate([w.ravel() for w in post.get_weights()]),
+            err_msg="control is invalid: the two layers do not share weights",
+        )
+        x = _f18_inputs()
+        out_pre = np.array(pre(x, training=False))
+        out_post = np.array(post(x, training=False))
+        assert not np.allclose(out_pre, out_post, rtol=1e-4, atol=1e-4), (
+            "pre-norm and post-norm produced the same output"
+        )
