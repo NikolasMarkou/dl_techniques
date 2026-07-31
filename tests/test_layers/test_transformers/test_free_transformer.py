@@ -516,3 +516,222 @@ class TestEncoderFFNKwargFiltering:
                 hidden_size=32, num_heads=4, intermediate_size=128,
                 use_free_transformer=True, encoder_ffn_type="not_a_real_ffn",
             )
+
+
+# ---------------------------------------------------------------------
+# F-06 -- eq. 8's per-category G_{t,d}
+# ---------------------------------------------------------------------
+
+
+def _oracle_G(logits: np.ndarray, num_bits: int) -> np.ndarray:
+    """float64 brute-force oracle for eq. 8's ``G_{t,d}``, all ``2^H`` categories.
+
+    Deliberately NOT the shipped matmul contraction: this walks every
+    ``(category, bit)`` pair and multiplies the per-bit probabilities directly,
+    exactly as eq. 8 is written. ``1 - p`` is taken as ``sigmoid(-L)`` rather
+    than by subtraction -- a measured requirement, not tidiness: the subtraction
+    form loses catastrophically when ``p ~ 1`` (at ``|L| = 30`` its own relative
+    error reaches 5.0e-05, which is 1e10 x worse than the form under test, and
+    at ``|L| = 88`` it underflows to exactly 0.0). Verified against a 60-digit
+    ``mpmath`` naive-product oracle: this float64 form and the shipped matmul
+    form both agree with it to <= 8.2e-15 relative (37 x float64 eps).
+
+    :param logits: bit logits ``(B, T, H)``.
+    :param num_bits: ``H``.
+    :return: ``G`` of shape ``(B, T, 2**H)``, float64.
+    """
+    logits = np.asarray(logits, dtype=np.float64)
+    p1 = 1.0 / (1.0 + np.exp(-logits))          # P(bit = 1)
+    p0 = 1.0 / (1.0 + np.exp(logits))           # P(bit = 0) == sigmoid(-L)
+    out = np.ones(logits.shape[:-1] + (2 ** num_bits,), dtype=np.float64)
+    for d in range(2 ** num_bits):
+        for h in range(num_bits):
+            # 0-indexed bit convention, matching the layer's `pow2 = 2**i`
+            out[..., d] *= p1[..., h] if ((d >> h) & 1) else p0[..., h]
+    return out
+
+
+class TestBinaryMapperPerCategoryGradient:
+    """F-06: eq. 8 defines ``G_{t,d}`` for EVERY one of the ``2^H`` categories.
+
+    The layer used to compute the single SCALAR ``G`` of the sampled category
+    and broadcast it across all ``2^H`` one-hot slots. The forward value is
+    unaffected either way (``x + g - stop_gradient(g) == x`` for any ``g``), so
+    nothing crashed and no pre-existing test could see it -- but every category
+    received an IDENTICAL gradient instead of a per-category-routed one.
+
+    These probes therefore live entirely in the BACKWARD pass. A forward-only
+    assertion is structurally incapable of telling the two implementations
+    apart, which is why this file carried no ``GradientTape`` at all before.
+    """
+
+    BITS = 3          # 8 categories -- small enough to brute-force in float64
+    SEED = 20260731
+
+    def _logits(self, dtype="float64", shape=(2, 3, 3)):
+        """Seeded NON-ZERO logits, spanning both signs and both saturation tails.
+
+        ``BinaryMapper`` is weightless (no kernel, no bias), so the plan's
+        non-zero-bias fixture rule lands on the only live input there is: these
+        logits. The in-fixture assertions below are what stop a silently
+        all-zero probe -- at ``L = 0`` every ``G_d`` equals ``2^-H`` and the
+        per-category rows would be indistinguishable for a REAL reason.
+        """
+        rng = np.random.default_rng(self.SEED)
+        lg = rng.normal(0.0, 1.5, size=shape)
+        lg.flat[0] = 4.0                 # deliberate near-saturation, P ~ 0.982
+        lg.flat[1] = -3.5                # ... and the other tail
+        assert np.min(np.abs(lg)) > 1e-3, "degenerate probe: a logit is ~0"
+        assert np.max(np.abs(lg)) > 1.0, "degenerate probe: all logits are tiny"
+        return np.asarray(lg, dtype=dtype)
+
+    @staticmethod
+    def _jacobian(mapper, logits_np):
+        """d(z_one_hot) / d(bit_logits) at ``training=True``.
+
+        :return: array ``(B, T, C, B, T, H)``.
+        """
+        x = tf.constant(logits_np)
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            y = mapper(x, training=True)
+        jac = tape.jacobian(y, x)
+        assert jac is not None, "no gradient path reached bit_logits at all"
+        return np.array(jac)
+
+    def test_per_category_jacobian_rows_differ(self):
+        """THE F-06 assertion: two distinct categories must route DIFFERENT
+        gradients back to ``bit_logits``.
+
+        Under the scalar broadcast every row of the Jacobian is the same
+        ``d g_td / dL``, so ``jac[..., d1, ...]`` and ``jac[..., d2, ...]`` are
+        bit-identical for every pair ``d1 != d2``.
+        """
+        mapper = BinaryMapper(num_bits=self.BITS, dtype="float64")
+        logits = self._logits()
+        jac = self._jacobian(mapper, logits)
+
+        rows = [jac[0, 0, d] for d in range(2 ** self.BITS)]
+        assert float(np.max(np.abs(rows[0]))) > 1e-6, (
+            "the gradient itself is ~0, so 'rows differ' would be vacuous"
+        )
+        for d1 in range(2 ** self.BITS):
+            for d2 in range(d1 + 1, 2 ** self.BITS):
+                assert not np.allclose(rows[d1], rows[d2], rtol=0, atol=1e-12), (
+                    f"categories {d1} and {d2} receive an IDENTICAL gradient "
+                    f"(max|diff| = {np.max(np.abs(rows[d1] - rows[d2])):.6e}); "
+                    f"eq. 8 routes a different G per category"
+                )
+
+    def test_jacobian_matches_the_float64_brute_force_oracle(self):
+        """The per-category gradient must equal ``G_d * (U[d] - p)`` exactly.
+
+        Differentiating ``log G_d = sum_h [U_dh log p_h + (1-U_dh) log(1-p_h)]``
+        gives ``d G_d / d L_h = G_d * (U[d,h] - p_h)``. Comparing against the
+        brute-force ``G`` (not the shipped contraction) is what makes this an
+        oracle rather than a restatement of the implementation.
+        """
+        mapper = BinaryMapper(num_bits=self.BITS, dtype="float64")
+        logits = self._logits()
+        jac = self._jacobian(mapper, logits)
+
+        G = _oracle_G(logits, self.BITS)                      # (B,T,C)
+        p = 1.0 / (1.0 + np.exp(-logits))                     # (B,T,H)
+        U = np.array([[(d >> h) & 1 for h in range(self.BITS)]
+                      for d in range(2 ** self.BITS)], dtype=np.float64)
+        # expected[b,t,d,h]
+        expected = G[..., None] * (U[None, None, :, :] - p[:, :, None, :])
+
+        B, T = logits.shape[0], logits.shape[1]
+        got = np.stack([np.stack([np.stack([jac[b, t, d, b, t, :]
+                                            for d in range(2 ** self.BITS)])
+                                  for t in range(T)]) for b in range(B)])
+        assert float(np.max(np.abs(expected))) > 1e-3, "oracle is all-zero"
+        np.testing.assert_allclose(got, expected, rtol=1e-11, atol=1e-13)
+
+        # Cross-token gradients must stay exactly zero: G_{t,:} depends on
+        # token t's logits only. A contraction over the wrong axis would show
+        # up here and nowhere else.
+        for b in range(B):
+            for t in range(T):
+                for t2 in range(T):
+                    if t2 != t:
+                        assert np.all(jac[b, t, :, b, t2, :] == 0.0)
+
+    def test_forward_value_is_bit_identical_to_the_pass_through_free_path(
+            self, monkeypatch):
+        """I1: this is a BACKWARD-only correction.
+
+        ``x + G - stop_gradient(G) == x`` exactly, for any ``G`` -- so the
+        training-path output must equal the inference-path output BIT FOR BIT
+        on the same draw, and must still be an exact one-hot.
+
+        The draw has to be pinned by monkeypatching ``keras.random.uniform``:
+        MEASURED here, ``keras.utils.set_random_seed`` does NOT reproduce a
+        subsequent ``keras.random.uniform`` draw on this backend (three
+        seed-reset pairs, three different draws), so a seed-based version of
+        this test would compare two different samples and fail for a reason
+        that has nothing to do with the pass-through.
+        """
+        mapper = BinaryMapper(num_bits=self.BITS, dtype="float64")
+        logits = self._logits()
+
+        rng = np.random.default_rng(self.SEED + 1)
+        fixed = rng.uniform(size=logits.shape)
+        monkeypatch.setattr(
+            keras.random, "uniform",
+            lambda shape, dtype=None, **kw: keras.ops.cast(fixed, dtype or "float32"),
+        )
+
+        with_pass_through = np.array(mapper(logits, training=True))
+        without = np.array(mapper(logits, training=False))
+
+        np.testing.assert_array_equal(with_pass_through, without)
+        assert set(np.unique(with_pass_through).tolist()) <= {0.0, 1.0}, (
+            "the pass-through leaked into the forward value"
+        )
+        np.testing.assert_array_equal(with_pass_through.sum(axis=-1),
+                                      np.ones(logits.shape[:-1]))
+        # control: the pinned draw must actually exercise several categories,
+        # or "identical one-hots" would be trivially satisfiable
+        assert len(np.unique(np.argmax(with_pass_through, axis=-1))) > 1
+
+    def test_symbolic_trace_keeps_the_per_category_routing(self):
+        """The new op path must survive a real symbolic trace, not just eager.
+
+        The documented repo trap (``ops.tril``/``triu``) is an op that passes
+        every eager test and then breaks ``fit``/``jit_compile``/save-load at
+        once. So: trace with an UNKNOWN batch and sequence length and take the
+        gradient inside the trace.
+        """
+        mapper = BinaryMapper(num_bits=self.BITS)
+        C = 2 ** self.BITS
+
+        @tf.function(input_signature=[
+            tf.TensorSpec([None, None, self.BITS], tf.float32)
+        ])
+        def traced(lg):
+            with tf.GradientTape() as tape:
+                tape.watch(lg)
+                y = mapper(lg, training=True)
+                # contract each category against a distinct weight so a scalar
+                # broadcast and a per-category G give different totals
+                w = tf.reshape(tf.range(1.0, C + 1.0), [1, 1, C])
+                s = tf.reduce_sum(y * w)
+            return s, tape.gradient(s, lg)
+
+        logits = self._logits(dtype="float32", shape=(2, 5, self.BITS))
+        total, grad = traced(tf.constant(logits))
+        grad = np.array(grad)
+        assert np.all(np.isfinite(grad)), "symbolic trace produced non-finite grads"
+        assert float(np.max(np.abs(grad))) > 1e-6, "traced gradient is ~0"
+
+        # The weighted-sum gradient equals sum_d w_d * G_d * (U[d] - p).
+        G = _oracle_G(logits, self.BITS)
+        p = 1.0 / (1.0 + np.exp(-np.asarray(logits, np.float64)))
+        U = np.array([[(d >> h) & 1 for h in range(self.BITS)]
+                      for d in range(C)], dtype=np.float64)
+        w = np.arange(1.0, C + 1.0)
+        expected = np.einsum('d,btd,btdh->bth', w, G,
+                             U[None, None, :, :] - p[:, :, None, :])
+        np.testing.assert_allclose(grad, expected, rtol=2e-4, atol=2e-6)

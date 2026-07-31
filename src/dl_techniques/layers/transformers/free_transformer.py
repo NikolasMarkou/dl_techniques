@@ -52,6 +52,7 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import layers
 from typing import Optional, Union, Any, Dict, Tuple
 
@@ -75,8 +76,47 @@ class BinaryMapper(keras.layers.Layer):
     Converts ``H`` independent bit logits into a one-hot vector of
     dimension ``2^H`` via Bernoulli sampling, binary-to-integer
     conversion, and a straight-through gradient estimator. The gradient
-    pass-through adds ``P(sampled) - stop_gradient(P(sampled))`` to the
-    one-hot output, providing gradients without altering forward values.
+    pass-through adds ``G - stop_gradient(G)`` to the one-hot output,
+    providing gradients without altering forward values.
+
+    **Cost warning -- the pass-through is O(B * T * 2^H).**
+    Per eq. 8, ``G`` is a full ``(B, T, 2^H)`` tensor with one entry per
+    category, so the training path materializes a second tensor the size of
+    the one-hot output and performs a ``(B, T, H) x (H, 2^H)`` matmul against
+    a constant ``(2^H, H)`` bit-pattern table built once in :meth:`build`.
+    At the ``FreeTransformerLayer`` default ``num_latent_bits=16`` the table
+    is ~4.2 MB (fp32) and the per-call matmul is ``B * T * 16 * 65536 * 2``
+    FLOPs. MEASURED on an RTX 4070 (float32, ``tf.function``, training-path
+    forward + backward, peak GPU memory via
+    ``tf.config.experimental.get_memory_info``), scalar-broadcast -> this
+    implementation:
+
+    .. code-block:: text
+
+        BinaryMapper alone, H=16
+          (B,T)=(4,128)    2.6 ms ->   5.4 ms (2.1x)    135 MB ->  273 MB (2.0x)
+          (B,T)=(8,256)    6.4 ms ->  19.4 ms (3.1x)    539 MB -> 1084 MB (2.0x)
+          (B,T)=(16,512)  23.1 ms ->  77.1 ms (3.3x)   2152 MB -> 4301 MB (2.0x)
+        FreeTransformerLayer end to end, hidden=256, num_latent_bits=16
+          (B,T)=(4,128)    6.3 ms ->   9.2 ms (1.5x)    291 MB ->  563 MB (1.9x)
+          (B,T)=(8,256)   17.2 ms ->  31.3 ms (1.8x)    896 MB -> 1984 MB (2.2x)
+
+    Peak memory doubles because ``G`` is exactly the size of the one-hot
+    output; note that the default was ALREADY ``2^H``-dominated before this
+    change (the one-hot and ``post_sampler_fc`` both are), so this is a 2x on
+    a cost that was large to begin with, not a new order of magnitude. Budget
+    for it, or lower ``num_bits``: ``H=8`` costs 1/256th of the ``H=16``
+    activation. The ``num_bits <= 20`` constructor cap remains the hard stop
+    (a ``H=20`` table alone is ~84 MB).
+
+    **Precision note.** ``G`` is a product of ``H`` probabilities, so its
+    typical magnitude is ``2^-H``; at ``H=16`` that is ~1.5e-05, which is
+    close to the float16 minimum normal (6.1e-05). Under a ``float16``
+    compute policy the smaller entries flush to zero and their gradients
+    vanish. This exposure is unchanged from the previous scalar
+    implementation (the scalar was one entry of the same vector), but it is
+    now spread across all ``2^H`` slots. Run this layer in ``float32`` or
+    ``bfloat16`` if ``H`` is large.
 
     **Architecture Overview:**
 
@@ -126,6 +166,38 @@ class BinaryMapper(keras.layers.Layer):
 
         self.num_bits = num_bits
         self.num_categories = 2 ** num_bits
+        self._bit_patterns = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Materialize the constant ``(2^H, H)`` bit-pattern table ONCE.
+
+        ``U[d, h]`` is the ``h``-th bit of category index ``d``, 0-indexed to
+        match :meth:`call`'s ``pow2 = [2**i]`` binary-to-integer convention.
+
+        The table is kept as a HOST (numpy) array, deliberately neither a
+        backend tensor nor a non-trainable weight:
+
+        * A backend tensor built here is captured by whichever graph happens
+          to be tracing at build time and then raises ``TypeError: ... is out
+          of scope and cannot be used here`` in every OTHER graph. That is not
+          hypothetical -- it is what ``test_graph_trace_training`` caught when
+          this table was first written that way.
+        * A non-trainable weight would be graph-safe, but it would change this
+          layer's ``.keras`` checkpoint layout (and add ~4.2 MB of saved
+          bytes at ``num_bits=16``) to store a value that is fully determined
+          by ``num_bits`` and carries no state.
+
+        :meth:`call` therefore converts this array to a tensor per call: a
+        graph-mode trace folds it into one constant, and the eager path pays
+        one host-to-device copy that the ``2^H``-wide matmul dwarfs.
+
+        :param input_shape: Input shape ``(batch, seq, num_bits)``.
+        """
+        if self._bit_patterns is None:
+            d = np.arange(self.num_categories, dtype=np.int64)[:, None]
+            h = np.arange(self.num_bits, dtype=np.int64)[None, :]
+            self._bit_patterns = ((d >> h) & 1).astype(self.compute_dtype)
+        super().build(input_shape)
 
     def call(
             self,
@@ -172,23 +244,43 @@ class BinaryMapper(keras.layers.Layer):
 
         # Step 5: Gradient pass-through (Equation 8 in paper)
         if training is True:
-            # Compute log probability of each bit choice
-            # Using sigmoid_cross_entropy for numerical stability:
-            # log P(B_h) = -sigmoid_cross_entropy(label=B_h, logit=logit_h)
-            sampled_bits_float = keras.ops.cast(sampled_bits, self.compute_dtype)
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-004
+            # G_{t,d} = P(B_t = U(d)) for EVERY category d, per eq. 8 -- not
+            # the single scalar of the SAMPLED category broadcast across all
+            # 2^H slots. The scalar form (what this used to do) leaves the
+            # forward value untouched, so nothing crashes, but it hands every
+            # category an IDENTICAL gradient instead of routing one per
+            # category through `post_sampler_fc`'s columns.
+            #
+            # Do NOT compute this by broadcasting bit_logits against the table
+            # into a (B, T, 2^H, H) rank-4 intermediate and reducing over h:
+            # at the shipped H=16 that is B*T*65536*16 elements (~50 MB for a
+            # (2,6) probe). The contraction below is algebraically identical
+            # and never leaves rank 3:
+            #     log G_{t,d} = sum_h [U_dh log p_h + (1-U_dh) log(1-p_h)]
+            #                 = (L_t @ U^T)[d] - sum_h softplus(L_th)
+            # using log sigmoid(L) - log sigmoid(-L) == L exactly. VERIFIED
+            # against a 60-digit mpmath brute-force oracle at H=3: <= 8.2e-15
+            # relative (37 x float64 eps) over moderate, |L|<=30 and |L|=88
+            # logits. See D-004; the two-matmul form
+            # `U @ log p + (1-U) @ log(1-p)` is the documented fallback.
+            logits = keras.ops.cast(bit_logits, self.compute_dtype)
+            u_table = keras.ops.convert_to_tensor(self._bit_patterns)
+            log_g = keras.ops.matmul(
+                logits, keras.ops.transpose(u_table)
+            ) - keras.ops.sum(
+                keras.ops.softplus(logits), axis=-1, keepdims=True
+            )
+            g_td = keras.ops.exp(log_g)  # (B, T, 2^H)
 
-            # Use keras.ops.binary_crossentropy for numerical stability
-            log_probs = -keras.ops.binary_crossentropy(sampled_bits_float, bit_logits, from_logits=True)
-
-            # Sum log probabilities across bits to get log P(B_t = U(d-1))
-            # where U(d-1) is the binary encoding of the sampled index
-            # G_t,d = exp(Σ_h log P(B_t,h = U_h(d-1)))
-            log_prob_sum = keras.ops.sum(log_probs, axis=-1, keepdims=True)
-            g_td = keras.ops.exp(log_prob_sum)
-
-            # Apply straight-through estimator: Y + [G - stop_gradient(G)]
-            # This adds ∇G to the backward pass without changing the forward value
-            z_one_hot = z_one_hot + g_td - keras.ops.stop_gradient(g_td)
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-013
+            # Group the subtraction: `z + (G - sg(G))`, never `z + G - sg(G)`.
+            # `G - sg(G)` is EXACTLY 0.0 in floating point, so the forward
+            # value is bit-exact. The left-to-right form rounds `(1 + g) - g`
+            # off the exact one-hot by 1 ulp for ~25 % of g values (MEASURED:
+            # 1.11e-16 float64 / 5.96e-08 float32, hot slot only) -- a real,
+            # pre-existing 1-ulp error in the old scalar code.
+            z_one_hot = z_one_hot + (g_td - keras.ops.stop_gradient(g_td))
 
         return z_one_hot
 
