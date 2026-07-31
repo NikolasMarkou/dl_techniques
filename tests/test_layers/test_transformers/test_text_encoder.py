@@ -739,3 +739,392 @@ class TestTextEncoder:
             ops.convert_to_numpy(reconstructed_output),
             rtol=1e-6, atol=1e-6
         )
+
+# =====================================================================
+# G-01 (finding F-24) -- coverage over the three formerly-BROKEN
+# `SequencePooling` strategies.
+#
+# `TextEncoder.output_mode` is the full, unrestricted `PoolingStrategy`
+# surface, and `call()` forwards the caller's `attention_mask` straight into
+# `self.pooling_layer(x, mask=..., ...)`. Until this section existed the module
+# parametrized `output_mode` over `['none','mean','max','first','last']` ONLY,
+# so `weighted`, `top_k_mean` and `top_k_max` had NEVER been exercised here --
+# masked or unmasked.
+#
+# Those three strategies leaked a masked position into the pooled output
+# (F-24): `WeightedPooling` multiplied the position weights by the mask BEFORE
+# the softmax, so a masked position kept weight `softmax(0) != 0`; the
+# `top_k_*` branches ranked the MASKED norms but gathered from the UNMASKED
+# inputs, which leaks whenever `k` exceeds a row's kept count. The root fix
+# lives in `layers/sequence_pooling/`; `VisionEncoder`'s `NotImplementedError`
+# containment (prior-plan D-013) is gone, and `TextEncoder` -- which never had
+# any containment -- gets the coverage instead.
+#
+# BOUNDARY DISCIPLINE (measured, not assumed): the leak is exactly 0.0 even
+# BEFORE the fix when `k == kept_count`, so a probe resting on that cell proves
+# nothing. `TextEncoder` never exposes `top_k`, so `k = min(10, seq_len)` with
+# `SequencePooling`'s default of 10. The geometry below is chosen so that
+# `k = 10 < seq_len` (the ranking sentinel is observable -- with `k >= seq_len`
+# every position is selected and that half of the fix is a no-op) AND
+# `k > kept_count` (the gathered-validity half is observable).
+# `test_the_probe_geometry_is_not_on_the_k_equals_kept_count_boundary` pins
+# both inequalities so the suite cannot silently drift onto the dead cell.
+# =====================================================================
+
+G01_STRATEGIES = ['weighted', 'top_k_mean', 'top_k_max']
+
+G01_CFG: Dict[str, Any] = {
+    'vocab_size': 97,
+    'embed_dim': 32,
+    'depth': 2,
+    'num_heads': 4,
+    'max_seq_len': 16,
+    'use_bias': True,
+}
+G01_B = 2
+G01_S = 12                      # > 10 so `k = min(10, seq_len) = 10 < seq_len`
+G01_MASKED_POSITIONS = [8, 9, 10, 11]   # kept = 8 (no CLS) / 9 (CLS) < k = 10
+G01_LIVE_POS = 0                # perturbed for the mandatory live control
+
+
+def _g01_encoder(seed: int = 1234, **overrides: Any) -> TextEncoder:
+    """Build a `TextEncoder` and assign EVERY weight from a seeded RNG.
+
+    Fresh Keras initialisers leave biases at zero, which makes a masking site
+    unobservable by construction (invariant I8 / prior-plan D-008): a zeroed
+    bias can null the very activation whose leakage the probe is trying to
+    measure. These fixtures therefore put the encoder in the state a *trained*
+    model is in -- non-zero biases, non-unit normalisation gains.
+
+    :param seed: RNG seed for the weight assignment.
+    :param overrides: Keyword overrides merged over ``G01_CFG``.
+    :return: A built encoder with fully randomised, non-degenerate weights.
+    """
+    cfg = {**G01_CFG, **overrides}
+    encoder = TextEncoder(**cfg)
+    encoder.build((None, G01_S))
+
+    rng = np.random.default_rng(seed)
+    saw_nonzero_bias = False
+    for w in encoder.weights:
+        shape = tuple(w.shape)
+        name = w.path.split('/')[-1]
+        if 'gamma' in name or 'scale' in name:
+            # Keep normalisation gains near 1 -- a near-zero gain collapses the
+            # signal and makes the whole probe vacuous.
+            value = 1.0 + 0.05 * rng.normal(size=shape)
+        elif 'beta' in name or 'bias' in name:
+            value = 0.05 * rng.normal(size=shape)
+            saw_nonzero_bias = True
+        else:
+            value = 0.1 * rng.normal(size=shape)
+        w.assign(ops.cast(ops.convert_to_tensor(value), w.dtype))
+
+    assert saw_nonzero_bias, (
+        "Fixture is degenerate: no bias weight was assigned a non-zero value, "
+        "so masking sites downstream of a zeroed activation cannot be observed."
+    )
+    return encoder
+
+
+def _g01_ids(seed: int = 7) -> np.ndarray:
+    """Return a deterministic ``(B, S)`` batch of token ids.
+
+    Ids start at 1: the word embedding is built with ``mask_zero=True``, so id
+    0 would attach a SECOND, implicit Keras mask and confound the explicit
+    ``attention_mask`` this suite is measuring.
+    """
+    rng = np.random.default_rng(seed)
+    return rng.integers(1, G01_CFG['vocab_size'], size=(G01_B, G01_S)).astype('int32')
+
+
+def _g01_perturb(
+        input_ids: np.ndarray,
+        positions: list,
+        rows: Any = None,
+        seed: int = 99,
+) -> np.ndarray:
+    """Replace the token id at ``positions`` with a DIFFERENT random id.
+
+    The replacement is guaranteed to differ from the original, so the
+    perturbation cannot silently be a no-op (which would make both the live
+    control and the isolation assertion meaningless).
+
+    :param input_ids: Batch of token ids ``(B, S)``.
+    :param positions: Sequence positions to perturb.
+    :param rows: Batch rows to perturb; ``None`` means all rows.
+    :param seed: RNG seed for the replacement ids.
+    :return: A copy of ``input_ids`` with those cells changed.
+    """
+    rng = np.random.default_rng(seed)
+    out = np.array(input_ids, copy=True)
+    target_rows = range(out.shape[0]) if rows is None else rows
+    for row in target_rows:
+        for pos in positions:
+            new = int(rng.integers(1, G01_CFG['vocab_size']))
+            while new == out[row, pos]:
+                new = int(rng.integers(1, G01_CFG['vocab_size']))
+            out[row, pos] = new
+    return out
+
+
+def _g01_mask(masked_per_row: list) -> np.ndarray:
+    """Return a ``(B, S)`` keep-mask (1 = attend) with the listed positions masked."""
+    m = np.ones((G01_B, G01_S), dtype='float32')
+    for row, positions in enumerate(masked_per_row):
+        for pos in positions:
+            m[row, pos] = 0.0
+    return m
+
+
+def _g01_np(x: Any) -> np.ndarray:
+    return ops.convert_to_numpy(x)
+
+
+def _g01_pooling_mask(encoder: TextEncoder, mask: np.ndarray) -> Any:
+    """Reproduce `TextEncoder.call`'s CLS extension of the pooling mask."""
+    m = ops.convert_to_tensor(mask)
+    if encoder.use_cls_token:
+        m = ops.concatenate([ops.ones((mask.shape[0], 1), dtype=m.dtype), m], axis=1)
+    return m
+
+
+class TestFormerlyBrokenPoolingStrategies:
+    """G-01: `weighted` / `top_k_mean` / `top_k_max` through `TextEncoder`.
+
+    Every masked test carries a LIVE CONTROL -- the same perturbation applied
+    to an UNMASKED position must move the pooled output by a wide margin -- so
+    a test that passes because *nothing* moves is impossible.
+    """
+
+    @pytest.mark.parametrize("use_cls_token", [False, True])
+    def test_the_probe_geometry_is_not_on_the_k_equals_kept_count_boundary(
+            self, use_cls_token
+    ):
+        """Pin the two inequalities the whole masked suite below depends on.
+
+        `TextEncoder` does not expose `top_k`, so the effective `k` is
+        `min(SequencePooling.top_k, seq_len)`. Both halves of the F-24 fix are
+        unobservable unless:
+
+        * `k < seq_len`   -- otherwise every position is selected and the
+          masked-norm RANKING sentinel is a no-op;
+        * `k > kept_count` -- the leak measures exactly 0.0 at
+          `k == kept_count` even BEFORE the fix, so a probe on that cell would
+          be vacuous.
+
+        If `SequencePooling`'s default `top_k` ever moves, this fires first and
+        names the reason rather than letting the suite quietly go green on a
+        dead cell.
+        """
+        encoder = _g01_encoder(output_mode='top_k_mean', use_cls_token=use_cls_token)
+        assert encoder.pooling_layer.top_k == 10, (
+            "SequencePooling's default top_k moved; re-derive G01_S and "
+            "G01_MASKED_POSITIONS so that k < seq_len and k > kept_count."
+        )
+
+        seq_len = G01_S + (1 if use_cls_token else 0)
+        k = min(encoder.pooling_layer.top_k, seq_len)
+        kept = seq_len - len(G01_MASKED_POSITIONS)
+
+        assert k < seq_len, f"k={k} must be < seq_len={seq_len}"
+        assert k > kept, f"k={k} must be > kept_count={kept}"
+
+    @pytest.mark.parametrize("use_cls_token", [False, True])
+    @pytest.mark.parametrize("output_mode", G01_STRATEGIES)
+    def test_masked_position_is_isolated_through_call(self, output_mode, use_cls_token):
+        """SC-4: perturbing MASKED tokens must leave `call()`'s output bit-identical.
+
+        ALL FOUR masked positions are perturbed, not just one, and that is
+        load-bearing rather than thorough-for-its-own-sake. `ops.top_k` breaks
+        the tie between equally-ranked masked positions by ASCENDING INDEX, so
+        with `k - kept_count == 2` only the two LOWEST-indexed masked positions
+        are ever selected. A probe that perturbed only the last masked position
+        measured 0.0 even with the gathered-validity half of the F-24 fix
+        neutered -- i.e. it was half-vacuous. Perturbing the whole masked set
+        removes the dependence on `top_k`'s tie-breaking order.
+        """
+        encoder = _g01_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        input_ids = _g01_ids()
+        mask = ops.convert_to_tensor(_g01_mask([G01_MASKED_POSITIONS] * G01_B))
+
+        base = _g01_np(encoder(
+            ops.convert_to_tensor(input_ids), attention_mask=mask, training=False
+        ))
+
+        live = _g01_np(encoder(
+            ops.convert_to_tensor(_g01_perturb(input_ids, [G01_LIVE_POS])),
+            attention_mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe for output_mode={output_mode!r}, use_cls_token="
+            f"{use_cls_token}: perturbing the UNMASKED position "
+            f"{G01_LIVE_POS} moved the output by only {live_delta:.6e}, so the "
+            f"isolation assertion below proves nothing."
+        )
+
+        leaked = _g01_np(encoder(
+            ops.convert_to_tensor(_g01_perturb(input_ids, G01_MASKED_POSITIONS)),
+            attention_mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"output_mode={output_mode!r}, use_cls_token={use_cls_token}: a "
+                f"MASKED token leaked into the pooled output by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("use_cls_token", [False, True])
+    @pytest.mark.parametrize("output_mode", G01_STRATEGIES)
+    def test_isolation_holds_at_the_pooling_layer_itself(self, output_mode, use_cls_token):
+        """The same contract measured AT the pooling layer, not only through `call()`.
+
+        Kept distinct from the `call()`-level test on purpose: it proves the
+        isolation comes from the POOLING fix and not merely from self-attention
+        already excluding the masked position upstream. `get_sequence_features`
+        returns the un-pooled sequence (CLS included when configured), which is
+        exactly the tensor `call()` hands to `self.pooling_layer`.
+
+        Perturbs the WHOLE masked set, for the `top_k` tie-order reason spelled
+        out on `test_masked_position_is_isolated_through_call`.
+        """
+        encoder = _g01_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        input_ids = _g01_ids()
+        mask_np = _g01_mask([G01_MASKED_POSITIONS] * G01_B)
+        mask = ops.convert_to_tensor(mask_np)
+        pooling_mask = _g01_pooling_mask(encoder, mask_np)
+
+        def _pooled(arr: np.ndarray) -> np.ndarray:
+            features = encoder.get_sequence_features(
+                inputs=ops.convert_to_tensor(arr),
+                attention_mask=mask,
+                training=False,
+            )
+            return _g01_np(encoder.pooling_layer(
+                features, mask=pooling_mask, training=False
+            ))
+
+        base = _pooled(input_ids)
+        live = _pooled(_g01_perturb(input_ids, [G01_LIVE_POS]))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe for output_mode={output_mode!r}: the live control "
+            f"moved only {live_delta:.6e} at the pooling layer."
+        )
+
+        leaked = _pooled(_g01_perturb(input_ids, G01_MASKED_POSITIONS))
+        delta = float(np.max(np.abs(leaked - base)))
+        assert delta == 0.0, (
+            f"output_mode={output_mode!r}, use_cls_token={use_cls_token}: the "
+            f"masked position leaked into the pooled output by {delta:.6e}; "
+            f"F-24 has regressed in `layers/sequence_pooling/`."
+        )
+
+    @pytest.mark.parametrize("output_mode", G01_STRATEGIES)
+    def test_heterogeneous_kept_counts_are_isolated(self, output_mode):
+        """`k` is batch-GLOBAL while the kept count is PER-ROW -- that asymmetry IS the defect.
+
+        Row 0 masks a single position (kept 11 > k = 10); row 1 masks five
+        (kept 7 < k = 10). A fix that clamped `k` to the batch-wide minimum
+        would make row 0's answer depend on row 1's mask; a fix that does not
+        exclude invalid SELECTED positions leaks in row 1.
+        """
+        encoder = _g01_encoder(output_mode=output_mode)
+        input_ids = _g01_ids(seed=11)
+        masked_per_row = [[11], [7, 8, 9, 10, 11]]
+        mask = ops.convert_to_tensor(_g01_mask(masked_per_row))
+
+        base = _g01_np(encoder(
+            ops.convert_to_tensor(input_ids), attention_mask=mask, training=False
+        ))
+
+        live = _g01_np(encoder(
+            ops.convert_to_tensor(_g01_perturb(input_ids, [G01_LIVE_POS])),
+            attention_mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe for output_mode={output_mode!r}: the live control "
+            f"moved only {live_delta:.6e} with heterogeneous kept counts."
+        )
+
+        perturbed = np.array(input_ids, copy=True)
+        for row, positions in enumerate(masked_per_row):
+            perturbed = _g01_perturb(perturbed, positions, rows=[row])
+        leaked = _g01_np(encoder(
+            ops.convert_to_tensor(perturbed), attention_mask=mask, training=False
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"output_mode={output_mode!r}: masked positions leaked with "
+                f"heterogeneous per-row kept counts (11 and 7) by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("use_cls_token", [False, True])
+    @pytest.mark.parametrize("output_mode", G01_STRATEGIES)
+    def test_unmasked_forward_pass(self, output_mode, use_cls_token):
+        """`mask=None` coverage the module also lacked: shape, finiteness, mask liveness.
+
+        The final assertion is the non-vacuity control for the whole unmasked
+        family: supplying a mask must CHANGE the answer. If it did not, every
+        "isolation" result above would be explained by the mask being ignored
+        outright rather than honoured.
+        """
+        encoder = _g01_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        input_ids = ops.convert_to_tensor(_g01_ids())
+
+        out = encoder(input_ids, training=False)
+        expected = encoder.compute_output_shape((G01_B, G01_S))
+        assert tuple(out.shape) == (G01_B, G01_CFG['embed_dim'])
+        assert tuple(out.shape)[1:] == tuple(expected)[1:]
+        assert np.all(np.isfinite(_g01_np(out)))
+
+        explicit_none = encoder(input_ids, attention_mask=None, training=False)
+        np.testing.assert_allclose(
+            _g01_np(explicit_none), _g01_np(out), rtol=0, atol=0,
+            err_msg="An explicit attention_mask=None must equal the default path.",
+        )
+
+        masked = encoder(
+            input_ids,
+            attention_mask=ops.convert_to_tensor(
+                _g01_mask([G01_MASKED_POSITIONS] * G01_B)
+            ),
+            training=False,
+        )
+        assert float(np.max(np.abs(_g01_np(masked) - _g01_np(out)))) > 1e-3, (
+            f"output_mode={output_mode!r}: masking four positions did not change "
+            f"the output at all, so the mask is being ignored."
+        )
+
+    @pytest.mark.parametrize("output_mode", G01_STRATEGIES)
+    def test_unmasked_serialization_cycle(self, output_mode):
+        """Full `.keras` round trip for the three strategies, plus a config round trip."""
+        config = {**G01_CFG, 'output_mode': output_mode}
+        input_ids = _g01_np(ops.convert_to_tensor(_g01_ids(seed=23)))
+
+        inputs = layers.Input(shape=(G01_S,), dtype='int32')
+        outputs = TextEncoder(**config)(inputs)
+        model = models.Model(inputs, outputs)
+        original = _g01_np(model(input_ids, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, f"text_encoder_{output_mode}.keras")
+            model.save(filepath)
+            loaded = models.load_model(filepath)
+            np.testing.assert_allclose(
+                _g01_np(loaded(input_ids, training=False)), original,
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"output_mode={output_mode!r} failed its .keras round trip",
+            )
+
+        encoder = TextEncoder(**config)
+        rebuilt = TextEncoder.from_config(encoder.get_config())
+        assert rebuilt.output_mode == output_mode
+        assert rebuilt.pooling_layer.strategy == encoder.pooling_layer.strategy
