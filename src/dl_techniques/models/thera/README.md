@@ -254,19 +254,37 @@ both THERA and a bicubic baseline.
   an independently derived wrap-status oracle — and bit-identical output between
   a statically-shaped and a dynamically-shaped build — are asserted in
   `tests/test_layers/test_transformers/test_swin_shift_mask.py`. Non-divisible
-  inputs remain handled by pad-to-multiple + crop (D-007). Two static-shape
-  rules exist and neither applies to this tail: a **statically known** `H`/`W`
-  equal to `window_size` drops the shift to `0` (the reference Swin fallback),
-  and one strictly below `window_size` raises. A dynamic (`None`) dim is
-  deliberately neither downgraded nor guarded, because that is this tail's
-  normal case; at a single-window resolution the dynamic path keeps the shift
-  and relies on the mask, which is correct there.
+  inputs remain handled by pad-to-multiple + crop (D-007). Two rules apply on
+  top of the mask, and they differ in *when* they are evaluated:
 
-  > Historical note: before `plan-2026-07-31-ddc92265` this section described a
-  > dynamic shift mask that did not exist — `SwinTransformerBlock` built no mask
-  > at all, so every shifted block ran unmasked full attention over each physical
-  > window. Shifted-block numerics changed when the mask landed; any checkpoint
-  > trained before that commit will produce different outputs.
+  - **Single-window fallback** (`min(H, W) <= window_size` ⇒ shift `0`, the
+    reference Swin rule). Evaluated **at runtime**, so it applies to this tail
+    too: with a dynamic dim the block computes the shift as an int32 scalar
+    rather than a Python `int`, and a resolved shift of `0` makes the keep mask
+    all-ones, which is bit-identical to passing no mask at all. A statically
+    shaped and a dynamically shaped trace therefore give the **same answer on
+    the same tensor**, asserted in `test_swin_shift_mask.py`.
+  - **Below-window-size raise** (`H` or `W` strictly `< window_size`).
+    Evaluated **statically only** — a dynamic (`None`) dim is never guarded,
+    because a data-dependent raise cannot be expressed inside a trace and
+    guarding it would break this tail outright.
+
+  > Historical note, in two parts. Before `plan-2026-07-31-ddc92265` this
+  > section described a dynamic shift mask that did not exist —
+  > `SwinTransformerBlock` built no mask at all, so every shifted block ran
+  > unmasked full attention over each physical window. Shifted-block numerics
+  > changed when the mask landed; any checkpoint trained before that commit will
+  > produce different outputs. Then, within the same plan, the single-window
+  > fallback was **static-only** for two commits (`e25d2bac`..`373aa826`), which
+  > made this block shape-dependent: at `min(H, W) == window_size` an eager call
+  > dropped the shift while a dynamically-shaped trace kept it, so this tail
+  > silently took the opposite branch from `models/swin_transformer` at
+  > identical geometry (measured 512/512 elements, ~97% relative). `7200487b`
+  > made the rule runtime-conditional. Measured cost to `TheraTailPro`
+  > (`embed_dim=32, depths=(2,2), window_size=8`, seeded weights, dynamic trace):
+  > `8x8` max |diff| `3.627e-03`, `16x8` `2.528e-03`; `16x16`, `24x24` and
+  > `20x12` bit-identical, because the pro tail reflect-pads to a window
+  > multiple and never reaches the single-window rule at those sizes.
 - **No `chunkax` tiling** (G5): very large single-image inference may OOM; the
   documented fallback is a plain-Python coord-axis tiling loop (not yet
   implemented).

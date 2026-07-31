@@ -1,12 +1,13 @@
 """SW-MSA cross-region leakage guard for :class:`SwinTransformerBlock`.
 
-At ``HEAD`` (plan ``plan-2026-07-31-ddc92265``, finding F-01) the block applies
-the cyclic roll and the window partition of shifted-window attention but never
-builds or applies the SW-MSA attention mask.  Every shifted block therefore
-performs *full* attention over each physical window, so tokens that the roll
-brought together from opposite edges of the feature map attend to one another.
+Before ``e25d2bac`` (plan ``plan-2026-07-31-ddc92265``, finding F-01) the block
+applied the cyclic roll and the window partition of shifted-window attention but
+never built or applied the SW-MSA attention mask.  Every shifted block therefore
+performed *full* attention over each physical window, so tokens that the roll
+brought together from opposite edges of the feature map attended to one another.
+That mask now exists, and this module is what keeps it honest.
 
-This module proves that defect with a perturbation-isolation probe, and it
+This module proved that defect with a perturbation-isolation probe, and it
 derives the ground truth for "which token pairs are allowed" **twice, by two
 independent routes**, so that a wrong oracle cannot silently define the bug
 away:
@@ -29,23 +30,34 @@ exactly.  :func:`TestSwMsaOracle.test_wrap_status_matches_reference_regions`
 asserts that; if it ever fails, the oracle is wrong and the leakage probe below
 proves nothing (plan Pre-Mortem #1: STOP, do not tune the oracle to match).
 
-Test inventory:
+Test inventory (kept in step with the file -- it was stale once already):
 
-* ``TestSwMsaOracle`` -- the oracle self-check described above.
+* ``TestSwMsaOracle`` -- the oracle self-check described above, plus a
+  non-vacuity check that the probe config really does mix wrap statuses inside
+  a window.
 * ``TestSwMsaLeakage`` -- the F-01 leakage probe.  It was RED at the pre-fix
   commit (perturbing token ``(2, 6)`` moved same-window token ``(2, 0)`` by
   ``1.001258e-01`` on 32/32 channels) and is green at ``rtol=0, atol=0`` now
-  that the mask is built and applied.
+  that the mask is built and applied.  A second, parametrized test repeats the
+  same isolation assertion under ``mixed_float16`` and ``mixed_bfloat16``,
+  where the additive mask bias is ``-inf`` and this package has shipped a
+  ``0 * -inf = NaN`` defect before.
 * ``TestSwinShiftMaskControls`` -- controls that were green both before and
   after that fix: window isolation at ``shift_size=0`` (the probe harness
   itself works) and a full ``.keras`` save/load round-trip of a shifted block.
 * ``TestSwMsaMaskConstruction`` -- the shipped mask against the oracle, the
   D-006 single-window fallback (``H == window_size`` reduces to
-  ``shift_size=0``), the strictly-below-``window_size`` raise, and dynamic
-  spatial dims.
+  ``shift_size=0``), the strictly-below-``window_size`` raise, that the raise is
+  specific to ``shift_size > 0``, and dynamic spatial dims (never raise,
+  supported at several resolutions, dynamic-vs-static build agreement).
 * ``TestShapeIndependenceAtTraceTime`` -- the D-012 guard: the same block on
   the same tensor must answer identically whether or not the tracer knows the
-  spatial extent.
+  spatial extent, plus a self-check that the guard can see a wrong runtime
+  shift.
+
+The two *shipped consumers* of this block are guarded numerically elsewhere, and
+not here: ``tests/test_models/test_scunet/test_golden_values.py`` and
+``tests/test_models/test_swin_transformer/test_golden_values.py``.
 """
 
 import contextlib
@@ -354,16 +366,21 @@ class TestSwMsaOracle:
 
 
 # ---------------------------------------------------------------------------
-# 2. The leakage probe -- EXPECTED RED until plan step 3 lands
+# 2. The leakage probe
 # ---------------------------------------------------------------------------
 
 
 class TestSwMsaLeakage:
     """Cross-region leakage inside a shifted window.
 
-    EXPECTED RED at HEAD. The block never builds an SW-MSA mask, so a token in
-    wrap-region A influences same-window tokens in wrap-region B. Plan step 3
-    builds and wires the mask and removes the ``xfail`` marker below.
+    Historically this class was the plan's RED probe and carried an
+    ``xfail(strict=True)`` marker: before ``e25d2bac`` the block never built an
+    SW-MSA mask, so a token in wrap-region A influenced same-window tokens in
+    wrap-region B (measured: perturbing ``(2, 6)`` moved ``(2, 0)`` by
+    ``1.001258e-01`` on 32/32 channels). The mask landed, the marker was
+    removed, and both tests below are ordinary green guards asserting exact
+    isolation -- one at the session default precision, one under mixed
+    precision.
     """
 
     def test_no_cross_region_leakage_within_window(self):

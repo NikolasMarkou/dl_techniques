@@ -228,7 +228,13 @@ class TestEncoderHonoursPadding:
     # 1. padding is excluded
     # ------------------------------------------------------------------
     def test_bit_logits_at_real_positions_ignore_pad_content(self):
-        """The posterior must not be conditioned on PAD content. RED at HEAD."""
+        """The posterior must not be conditioned on PAD content.
+
+        RED at the pre-fix commit ``9ee28342``'s predecessor ``e38a9c3c``:
+        perturbing PAD inputs moved ``bit_logits`` at REAL positions on 48/48
+        elements, max ``3.606e-02``, where exactly ``0.0`` is required. Green
+        since ``03980608`` (F-13).
+        """
         layer = self._fresh_layer()
         x, x_pad, x_real = self._inputs()
         mask = self._pad_mask()
