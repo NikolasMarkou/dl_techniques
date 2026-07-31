@@ -538,10 +538,20 @@ class SingleWindowAttention(keras.layers.Layer):
         #     combined as `(B, 1, N_target)` — key-only — exactly as the rank-2
         #     branch does, so the two branches agree BIT-for-BIT on a mask that is
         #     constant over queries (pinned by
-        #     `test_a_query_broadcast_rank_3_mask_equals_the_rank_2_mask`). Masking
-        #     query rows too would zero out the internal-padding rows and hand the
-        #     `apply_attention_mask` fully-masked-row rescue live work to do, on
-        #     rows whose output is sliced off unread.
+        #     `test_a_query_broadcast_rank_3_mask_equals_the_rank_2_mask`).
+        #     NOTE what this does and does NOT avoid, because an earlier version
+        #     of this comment claimed more than is true. It keeps the INTERNAL
+        #     padding mask off the query axis; it does NOT keep the query axis
+        #     unmasked, because the `ops.pad` below zero-pads the USER's rank-3
+        #     mask on BOTH axes. So whenever `N_actual < N_target` the padded
+        #     query rows ARE fully masked and `apply_attention_mask`'s
+        #     fully-masked-row rescue DOES fire on them. MEASURED at
+        #     `(window_size=4, N_actual=10, B=2)`: 12 of 32 query slices keep
+        #     nothing on this branch, versus 0 on the rank-2 branch and 0 with no
+        #     mask at all. It is harmless — those rows' outputs are sliced off
+        #     unread below, and the rescue keeps them finite rather than NaN —
+        #     and it is unreachable from the Swin caller, which always passes
+        #     `N == window_size ** 2` exactly (measured: 0 of 32 there).
         # ACCEPTED COST: the predicate handed to `apply_attention_mask` is
         # `(B, 1, N, N)` rather than `(B, 1, 1, N)`, i.e. O(N^2) mask memory on this
         # path only. The rank-2 and `None` paths are untouched (I1/I2).

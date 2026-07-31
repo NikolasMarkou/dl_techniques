@@ -48,6 +48,7 @@ Test inventory:
   spatial extent.
 """
 
+import contextlib
 import os
 import tempfile
 
@@ -245,6 +246,44 @@ def _forward(block: SwinTransformerBlock, x: np.ndarray) -> np.ndarray:
     )
 
 
+@contextlib.contextmanager
+def global_dtype_policy(name: str):
+    """Run a block under a global Keras dtype policy, restoring it afterwards.
+
+    Restoration is in a ``finally`` so a failing assertion cannot leak
+    ``mixed_float16`` into the rest of the session -- a leaked policy would
+    silently change every later test in the module.
+    """
+    previous = keras.mixed_precision.dtype_policy()
+    keras.mixed_precision.set_dtype_policy(name)
+    try:
+        yield
+    finally:
+        keras.mixed_precision.set_dtype_policy(previous)
+
+
+def _pick_leakage_pair(status: np.ndarray) -> tuple[int, int, int, int]:
+    """Find a window holding two wrap statuses, and pick a probe triple in it.
+
+    Returns ``(window_index, slot_a, slot_b, slot_same)`` where ``slot_a`` and
+    ``slot_b`` carry DIFFERENT wrap statuses (so they must not attend to each
+    other) and ``slot_same`` shares ``slot_a``'s status (so it must move, which
+    is the live-probe control that stops the isolation assertion from being
+    satisfiable by a dead probe).
+    """
+    for window_index in range(status.shape[0]):
+        row = status[window_index]
+        differing = np.argwhere(row[:, None] != row[None, :])
+        if not differing.size:
+            continue
+        slot_a, slot_b = (int(v) for v in differing[0])
+        same = [int(s) for s in np.argwhere(row == row[slot_a]).ravel() if int(s) != slot_a]
+        if not same:
+            continue
+        return window_index, slot_a, slot_b, same[0]
+    raise AssertionError("No mixed-status window in the probe config.")
+
+
 # ---------------------------------------------------------------------------
 # 1. Oracle self-check
 # ---------------------------------------------------------------------------
@@ -340,23 +379,8 @@ class TestSwMsaLeakage:
         )
 
         # Pick a window that mixes wrap statuses, then a disallowed (A, B) pair
-        # inside it.
-        pair = None
-        for window_index in range(status.shape[0]):
-            row = status[window_index]
-            differing = np.argwhere(row[:, None] != row[None, :])
-            if not differing.size:
-                continue
-            slot_a, slot_b = (int(v) for v in differing[0])
-            # A same-status partner for the live-probe control below.
-            same = np.argwhere(row == row[slot_a]).ravel()
-            same = [int(s) for s in same if int(s) != slot_a]
-            if not same:
-                continue
-            pair = (window_index, slot_a, slot_b, same[0])
-            break
-        assert pair is not None, "No mixed-status window in the probe config."
-        window_index, slot_a, slot_b, slot_same = pair
+        # inside it (plus a same-status partner as the live-probe control).
+        window_index, slot_a, slot_b, slot_same = _pick_leakage_pair(status)
 
         def _coord(slot: int) -> tuple[int, int]:
             return (
@@ -421,6 +445,78 @@ class TestSwMsaLeakage:
                 f"adjacent before the cyclic roll and must not attend to each "
                 f"other."
             ),
+        )
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "mixed_bfloat16"])
+    def test_no_cross_region_leakage_under_mixed_precision(self, policy):
+        """The SW-MSA mask must still isolate regions at reduced precision.
+
+        The rest of this module runs at the session default (float32). That is
+        NOT where this mask is most fragile: the additive bias is
+        ``MASK_BIAS_VALUE``, which is ``-inf`` in float16, and the arithmetic
+        form ``attn + (1 - keep) * -1e9`` that ``apply_attention_mask``
+        replaced produced ``0 * -inf = NaN`` at every UNMASKED position under
+        ``mixed_float16``. This repo has shipped that exact defect before, in
+        this very attention primitive, so the property gets a standing guard
+        instead of a one-off hand probe.
+
+        Bit-identity is still the honest bar: a correctly masked key's softmax
+        weight is exactly ``0.0`` in any precision, so its value contributes an
+        exact zero. The finiteness assertion comes first because a NaN output
+        would otherwise fail the equality check for entirely the wrong reason.
+        """
+        status, orig_row, orig_col = wrap_status_windows(
+            HEIGHT, WIDTH, WINDOW_SIZE, SHIFT_SIZE
+        )
+        window_index, slot_a, slot_b, slot_same = _pick_leakage_pair(status)
+
+        def _coord(slot: int) -> tuple[int, int]:
+            return (
+                int(orig_row[window_index, slot]),
+                int(orig_col[window_index, slot]),
+            )
+
+        coord_a, coord_b, coord_same = (
+            _coord(slot_a),
+            _coord(slot_b),
+            _coord(slot_same),
+        )
+
+        with global_dtype_policy(policy):
+            block = _make_block(shift_size=SHIFT_SIZE)
+            x_base = _probe_input()
+            x_perturbed = x_base.copy()
+            x_perturbed[0, coord_a[0], coord_a[1], :] += _perturbation()
+            out_base = _forward(block, x_base)
+            out_perturbed = _forward(block, x_perturbed)
+
+        assert np.isfinite(out_base).all() and np.isfinite(out_perturbed).all(), (
+            f"[{policy}] the masked shifted block produced non-finite output "
+            f"({int((~np.isfinite(out_base)).sum())} / {out_base.size} in the "
+            "base run) -- this is the fp16 mask-NaN failure mode"
+        )
+
+        moved = float(
+            np.abs(
+                out_perturbed[0, coord_same[0], coord_same[1], :]
+                - out_base[0, coord_same[0], coord_same[1], :]
+            ).max()
+        )
+        assert moved > 1e-2, (
+            f"[{policy}] probe is dead: the same-region token {coord_same} "
+            f"moved by only {moved:.3e}"
+        )
+
+        delta_b = float(
+            np.abs(
+                out_perturbed[0, coord_b[0], coord_b[1], :]
+                - out_base[0, coord_b[0], coord_b[1], :]
+            ).max()
+        )
+        assert delta_b == 0.0, (
+            f"[{policy}] SW-MSA cross-region leakage: perturbing {coord_a} "
+            f"moved same-window token {coord_b} by up to {delta_b:.6e} "
+            "(must be exactly 0.0)"
         )
 
 

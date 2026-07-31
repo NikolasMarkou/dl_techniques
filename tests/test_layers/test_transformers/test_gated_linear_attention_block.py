@@ -2272,10 +2272,26 @@ PAD_MASK_CFG = dict(
 )
 
 
+def _split_pad(pad_len, side):
+    """Turn a total PAD count plus a side into an explicit ``(left, right)`` pair.
+
+    ``'both'`` puts the smaller half in front, so an odd count still produces a
+    genuinely two-sided row (``5 -> (2, 3)``) rather than degenerating into a
+    one-sided one.
+    """
+    if side == "left":
+        return pad_len, 0
+    if side == "right":
+        return 0, pad_len
+    if side == "both":
+        return pad_len // 2, pad_len - pad_len // 2
+    raise ValueError(f"side must be 'left', 'right' or 'both', got {side!r}")
+
+
 def _padded_case(pad_lens, total=18, dim=16, seed=7, side="left"):
     """Build one padded batch plus the per-row unpadded reference sequences.
 
-    Row ``b`` carries ``pad_lens[b]`` PAD steps on ``side`` and
+    Row ``b`` carries ``pad_lens[b]`` PAD steps distributed per ``side`` and
     ``total - pad_lens[b]`` real steps. PAD slots are filled with LARGE random
     garbage (x8), not zeros: a mask that silently does nothing must not be able
     to pass by accident because the pads happened to be harmless.
@@ -2288,10 +2304,15 @@ def _padded_case(pad_lens, total=18, dim=16, seed=7, side="left"):
     :type dim: int
     :param seed: RNG seed.
     :type seed: int
-    :param side: ``'left'`` or ``'right'`` -- which end the PADs occupy.
+    :param side: ``'left'``, ``'right'`` or ``'both'`` -- which end(s) the PADs
+        occupy. ``'both'`` splits the count across the two ends; it is still
+        EDGE padding (no PAD sits between two real steps), so it is inside the
+        contract documented at ``GatedLinearAttentionBlock.call``'s
+        ``attention_mask`` parameter.
     :type side: str
-    :return: ``(x_padded, mask, [real_row_0, real_row_1, ...])`` as float64
-        numpy arrays; each ``real_row_b`` has shape ``(1, total - p_b, dim)``.
+    :return: ``(x_padded, mask, [real_row_0, ...], [(left_0, right_0), ...])``
+        as float64 numpy arrays; each ``real_row_b`` has shape
+        ``(1, total - p_b, dim)``.
     :rtype: tuple
     """
     rng = np.random.default_rng(seed)
@@ -2299,22 +2320,23 @@ def _padded_case(pad_lens, total=18, dim=16, seed=7, side="left"):
     x = np.zeros((batch, total, dim), dtype="float64")
     mask = np.zeros((batch, total), dtype="float64")
     reals = []
+    spans = []
     for b, p in enumerate(pad_lens):
+        left, right = _split_pad(p, side)
         real = rng.normal(size=(total - p, dim))
-        garbage = rng.normal(size=(p, dim)) * 8.0
-        if side == "left":
-            x[b] = np.concatenate([garbage, real], axis=0)
-            mask[b, p:] = 1.0
-        else:
-            x[b] = np.concatenate([real, garbage], axis=0)
-            mask[b, : total - p] = 1.0
+        head = rng.normal(size=(left, dim)) * 8.0
+        tail = rng.normal(size=(right, dim)) * 8.0
+        x[b] = np.concatenate([head, real, tail], axis=0)
+        mask[b, left : total - right] = 1.0
         reals.append(real[None].copy())
-    return x, mask, reals
+        spans.append((left, right))
+    return x, mask, reals, spans
 
 
-def _real_slice(arr_row, pad_len, side):
-    """Return the real-token span of one padded row."""
-    return arr_row[pad_len:] if side == "left" else arr_row[: arr_row.shape[0] - pad_len]
+def _real_slice(arr_row, span):
+    """Return the real-token span of one padded row, given its ``(left, right)``."""
+    left, right = span
+    return arr_row[left : arr_row.shape[0] - right]
 
 
 class TestPaddingMask:
@@ -2371,13 +2393,13 @@ class TestPaddingMask:
         pad_lens = [0, 5]
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, _, reals = _padded_case(pad_lens)
+            x, _, reals, spans = _padded_case(pad_lens)
             padded_out = ops.convert_to_numpy(layer(x, training=False))
             refs = [ops.convert_to_numpy(layer(r, training=False))[0] for r in reals]
 
         deltas = []
-        for b, p in enumerate(pad_lens):
-            got = _real_slice(padded_out[b], p, "left")
+        for b, span in enumerate(spans):
+            got = _real_slice(padded_out[b], span)
             deltas.append(float(np.abs(got - refs[b]).max()))
 
         assert deltas[0] == 0.0, (
@@ -2395,12 +2417,12 @@ class TestPaddingMask:
         """`call()` must take a rank-2 keep mask. RED pre-fix: `TypeError`."""
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, mask, _ = _padded_case([0, 5])
+            x, mask, _, _ = _padded_case([0, 5])
             out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
         assert out.shape == x.shape
         assert np.isfinite(out).all()
 
-    @pytest.mark.parametrize("side", ["left", "right"])
+    @pytest.mark.parametrize("side", ["left", "right", "both"])
     def test_padded_outputs_match_the_unpadded_run(self, side):
         """The contract: masked padded row == the same real tokens run alone.
 
@@ -2415,24 +2437,50 @@ class TestPaddingMask:
         different order. Structural leakage, by contrast, is orders of
         magnitude outside this bound -- the mask-free test above measures it
         at ~1e-1 against a ~1e-16 tolerance.
+
+        **The three arms are NOT equally strong, and that is worth stating
+        rather than discovering.** Measured with the mask neutered (``keep =
+        None`` immediately after the rank check in ``call``):
+
+        ===========  ======  ==========================================
+        arm          bites?  why
+        ===========  ======  ==========================================
+        ``left``     YES     the PADs precede every real step, so their
+                             content flows through the causal conv and
+                             the scan state into every real output.
+        ``right``    NO      trailing PADs are in the *future* of every
+                             real step. A causal model cannot see them,
+                             so this arm is true by CAUSALITY ALONE and
+                             stays green with the mask entirely dead.
+        ``both``     YES     it carries a leading span, so it inherits
+                             the ``left`` arm's bite while also
+                             exercising the two-sided geometry.
+        ===========  ======  ==========================================
+
+        The ``right`` arm is kept because the *documented* contract covers it
+        and a shape/API break there should still fail -- but it is NOT
+        evidence that right-hand masking works. The two guards that actually
+        hold up the right half of the claim are
+        ``test_pad_positions_are_zeroed_in_the_output[right]`` (the read-out
+        zeroing) and this test's ``both`` arm.
         """
         pad_lens = [0, 5]
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, mask, reals = _padded_case(pad_lens, side=side)
+            x, mask, reals, spans = _padded_case(pad_lens, side=side)
             cap = capture_scan_io(layer, x, training=False, attention_mask=mask)
             ref_caps = [capture_scan_io(layer, r, training=False) for r in reals]
 
         total = x.shape[1]
-        for b, p in enumerate(pad_lens):
+        for b, span in enumerate(spans):
             for key in ("scan_out", "block_out"):
-                got = _real_slice(cap[key][b], p, side)
+                got = _real_slice(cap[key][b], span)
                 expected = ref_caps[b][key][0]
                 assert got.shape == expected.shape
                 tol = oracle_tolerance(total, PAD_MASK_CFG["head_dim"], expected)
                 err = float(np.abs(got - expected).max())
                 assert err <= tol, (
-                    f"[{side} pad] row {b} (pad={p}) disagrees with its "
+                    f"[{side} pad] row {b} (pad={span}) disagrees with its "
                     f"unpadded run on '{key}': max|diff|={err:.3e} > "
                     f"tol={tol:.3e} (accumulation length {total}, output "
                     f"scale {np.abs(expected).max():.3e})"
@@ -2448,7 +2496,7 @@ class TestPaddingMask:
         pad_lens = [0, 5]
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, mask, _ = _padded_case(pad_lens)
+            x, mask, _, _ = _padded_case(pad_lens)
             out_a = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
             x2 = x.copy()
             x2[1, :5] = np.random.default_rng(99).normal(size=(5, x.shape[-1])) * 30.0
@@ -2463,15 +2511,118 @@ class TestPaddingMask:
             f"{float(np.abs(real_a - real_b).max()):.3e} (must be exactly 0.0)"
         )
 
-    def test_pad_positions_are_zeroed_in_the_output(self):
-        """PAD outputs are exactly 0, so a caller cannot consume PAD garbage."""
+    @pytest.mark.parametrize("side", ["left", "right", "both"])
+    def test_pad_positions_are_zeroed_in_the_output(self, side):
+        """PAD outputs are exactly 0, so a caller cannot consume PAD garbage.
+
+        Parametrized over the side deliberately: this is the guard that carries
+        the RIGHT half of the documented left/right contract. The equivalence
+        test's ``right`` arm is true by causality alone and stays green with the
+        mask entirely dead (see its docstring), whereas a trailing PAD whose
+        output is not zeroed is visible here and nowhere else -- the read-out
+        zeroing is the only masking site a right-padded row exercises.
+        """
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, mask, _ = _padded_case([0, 5])
+            x, mask, _, spans = _padded_case([0, 5], side=side)
             out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
-        assert np.array_equal(out[1, :5], np.zeros_like(out[1, :5]))
+
+        left, right = spans[1]
+        total = out.shape[1]
+        pad_rows = np.concatenate(
+            [out[1, :left], out[1, total - right :]], axis=0
+        )
+        assert pad_rows.shape[0] == 5, "harness lost a PAD row"
+        assert np.array_equal(pad_rows, np.zeros_like(pad_rows)), (
+            f"[{side} pad] PAD outputs are not exactly zero: max|out|="
+            f"{float(np.abs(pad_rows).max()):.3e}"
+        )
         # Non-vacuity: the REAL positions of that same row are not zero.
-        assert float(np.abs(out[1, 5:]).max()) > 1e-6
+        assert float(np.abs(_real_slice(out[1], spans[1])).max()) > 1e-6
+
+    def test_mixed_left_and_right_padding_cannot_influence_real_outputs(self):
+        """A two-sided row's real outputs must ignore BOTH PAD spans.
+
+        Perturbation isolation at ``rtol=0, atol=0``, on the geometry the
+        contract's "left and/or right" wording actually promises but that no
+        single-sided test reaches. The leading span is what makes this bite
+        (a trailing span is causally invisible on its own); the trailing span
+        is here so that a future change which, say, reversed the mask or
+        applied it only to a prefix would still be caught by this one test.
+        """
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, _, spans = _padded_case([0, 5], side="both")
+            left, right = spans[1]
+            assert left > 0 and right > 0, "the 'both' case degenerated"
+            out_a = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            x2 = x.copy()
+            rng = np.random.default_rng(2718)
+            x2[1, :left] = rng.normal(size=(left, x.shape[-1])) * 30.0
+            x2[1, x.shape[1] - right :] = rng.normal(
+                size=(right, x.shape[-1])
+            ) * 30.0
+            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+
+        assert float(np.abs(x - x2).max()) > 1.0, "the perturbation is vacuous"
+        real_a = _real_slice(out_a[1], spans[1])
+        real_b = _real_slice(out_b[1], spans[1])
+        assert np.array_equal(real_a, real_b), (
+            f"mixed ({left} left / {right} right) PAD content reached the real "
+            f"outputs: max|diff|={float(np.abs(real_a - real_b).max()):.3e} "
+            "(must be exactly 0.0)"
+        )
+
+    @pytest.mark.parametrize("policy", ["float32", "mixed_float16"])
+    def test_pad_isolation_holds_at_training_precision(self, policy):
+        """The mask must still isolate PADs OUTSIDE the float64 harness.
+
+        Every other test in this class runs under
+        ``global_dtype_policy("float64")``, which is the right choice for the
+        equivalence bound but leaves the mask with **no coverage at the
+        precision a Qwen3-Next actually trains in**. This repo has a documented
+        history of fp16 mask defects (``-1e9`` is ``-inf`` in float16, and
+        ``0 * -inf = NaN``), so the two policies that matter get a standing
+        guard rather than a one-shot hand probe.
+
+        The bar is bit-identity, not a tolerance: masking here is multiplicative
+        zeroing, not a softmax bias, so a PAD's contribution is exactly zero in
+        every precision or the mask is broken. Finiteness is asserted too --
+        under ``mixed_float16`` a NaN would otherwise satisfy nothing and fail
+        the equality check for the wrong reason.
+        """
+        with global_dtype_policy(policy):
+            layer = self._fresh_layer()
+            x, mask, _, spans = _padded_case([0, 5], side="both")
+            xf = x.astype("float32")
+            out_a = ops.convert_to_numpy(layer(xf, attention_mask=mask, training=False))
+            x2 = xf.copy()
+            left, right = spans[1]
+            rng = np.random.default_rng(161803)
+            x2[1, :left] = rng.normal(size=(left, x.shape[-1])) * 30.0
+            x2[1, xf.shape[1] - right :] = rng.normal(size=(right, x.shape[-1])) * 30.0
+            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+
+        assert np.isfinite(out_a).all() and np.isfinite(out_b).all(), (
+            f"[{policy}] the masked forward produced non-finite values "
+            f"({int((~np.isfinite(out_a)).sum())} / {out_a.size} in the base run)"
+        )
+        # PAD read-out zeroing, at this precision.
+        pads = np.concatenate(
+            [out_a[1, :left], out_a[1, out_a.shape[1] - right :]], axis=0
+        )
+        assert np.array_equal(pads, np.zeros_like(pads)), (
+            f"[{policy}] PAD outputs are not exactly zero: "
+            f"max|out|={float(np.abs(pads).max()):.3e}"
+        )
+        real_a = _real_slice(out_a[1], spans[1])
+        real_b = _real_slice(out_b[1], spans[1])
+        assert float(np.abs(real_a).max()) > 1e-4, "vacuous: real outputs are ~zero"
+        assert np.array_equal(real_a, real_b), (
+            f"[{policy}] PAD content reached the real-position outputs: "
+            f"max|diff|={float(np.abs(real_a - real_b).max()):.3e} "
+            "(must be exactly 0.0)"
+        )
 
     def test_an_all_ones_mask_is_bit_identical_to_no_mask(self):
         """I1 containment, in-repo half: the mask path must be a no-op when it keeps all.
@@ -2482,7 +2633,7 @@ class TestPaddingMask:
         """
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, _, _ = _padded_case([0, 0])
+            x, _, _, _ = _padded_case([0, 0])
             plain = ops.convert_to_numpy(layer(x, training=False))
             ones = ops.convert_to_numpy(
                 layer(x, attention_mask=np.ones(x.shape[:2]), training=False)
@@ -2496,7 +2647,7 @@ class TestPaddingMask:
         """Only a rank-2 `(batch, seq)` mask is accepted; anything else is loud."""
         with global_dtype_policy("float64"):
             layer = self._fresh_layer()
-            x, mask, _ = _padded_case([0, 5])
+            x, mask, _, _ = _padded_case([0, 5])
             with pytest.raises(ValueError, match="rank-2"):
                 layer(x, attention_mask=mask[:, :, None], training=False)
 
@@ -2507,7 +2658,7 @@ class TestPaddingMask:
         lesson), so this compares the reloaded model's masked output against
         the pre-save one.
         """
-        x, mask, _ = _padded_case([0, 5])
+        x, mask, _, _ = _padded_case([0, 5])
         inp = keras.Input(shape=(x.shape[1], PAD_MASK_CFG["dim"]))
         msk = keras.Input(shape=(x.shape[1],))
         layer = self._fresh_layer()
