@@ -215,7 +215,7 @@ class PFTBlock(keras.layers.Layer):
 
         if self._drop_path_rate > 0.0:
             self._drop_path = StochasticDepth(
-                drop_rate=self._drop_path_rate,
+                drop_path_rate=self._drop_path_rate,
                 name="stochastic_depth"
             )
         else:

@@ -121,9 +121,17 @@ class PFTSR(keras.Model):
 
         # Stochastic depth decay rule
         if drop_path_rate > 0.0:
+            # `keras.ops.linspace` returns a backend tensor; TF's EagerTensor has
+            # no `.item()`, so the original `x.item()` raised AttributeError and
+            # this whole branch was dead -- the SECOND blocker on
+            # `drop_path_rate > 0`, after the `StochasticDepth(drop_rate=)`
+            # kwarg. Constructor-time only, so numpy here is not a forward-path
+            # rule violation.
             dpr = [
-                x.item()
-                for x in keras.ops.linspace(0.0, drop_path_rate, self.total_blocks)
+                float(x)
+                for x in keras.ops.convert_to_numpy(
+                    keras.ops.linspace(0.0, drop_path_rate, self.total_blocks)
+                )
             ]
         else:
             dpr = [0.0] * self.total_blocks
