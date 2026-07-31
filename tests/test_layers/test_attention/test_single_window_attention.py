@@ -706,3 +706,286 @@ class TestSingleWindowAttentionClipDoesNotFloorTheMask:
             f"being floored by `clip(attn, -30, 30)` instead of suppressing the "
             f"position (measured 0.439 at -50 on unfixed HEAD)."
         )
+
+
+# ---------------------------------------------------------------------
+# Pairwise (rank-3) keep-mask contract (plan-2026-07-31-ddc92265, step 2)
+# ---------------------------------------------------------------------
+#
+# WHAT IS BEING GUARDED HERE.
+#
+# Before this step `call()` accepted a rank-2 `(B, N)` KEY-ONLY predicate and
+# reshaped it to `(B, 1, 1, N)`, so every query row saw the same keys. That
+# contract is structurally incapable of expressing shifted-window self-attention
+# (SW-MSA): after Swin's cyclic roll, one physical window holds tokens from up to
+# four different pre-roll regions, and which keys a query may see depends on the
+# QUERY's region. No key-only mask can say that.
+#
+# The layer now ALSO accepts a rank-3 `(B, N, N)` pairwise keep-mask
+# (`mask[b, q, k] == 1` means "query q may attend to key k"), combined with the
+# internal padding mask broadcast over the query axis and handed to
+# `apply_attention_mask` as a `(B, 1, N, N)` predicate. The rank-2 branch is
+# untouched (I2) and `attention_mask=None` is untouched (I1).
+#
+# RED BEFORE THE CHANGE (measured on ff4f2aa6, CPU, float32): every test in this
+# section died at
+#
+#     ValueError: Cannot reshape a tensor with 512 elements to shape (2, 1, 1, 16)
+#     (32 elements) for '{{node Reshape_3}} = Reshape[...]'
+#
+# raised from `reshape(final_attention_mask, (B, 1, 1, N))` — i.e. the rank-3 mask
+# could not even reach the softmax, which is the point of A1 in the plan.
+
+_PW_B, _PW_WS, _PW_DIM, _PW_HEADS = 2, 4, 16, 2
+_PW_N = _PW_WS * _PW_WS          # 16 tokens: a FULL window, no internal padding
+_PW_SEED = 20260731
+
+
+def _pw_regions():
+    """Two disjoint token regions, SW-MSA-shaped: rows 0-1 vs rows 2-3 of the 4x4 window.
+
+    :return: ``(N,)`` int array of region ids in ``{0, 1}``.
+    :rtype: np.ndarray
+    """
+    rows = np.arange(_PW_N) // _PW_WS
+    return (rows >= 2).astype("int32")
+
+
+def _pw_pairwise_mask():
+    """``(B, N, N)`` block-diagonal keep-mask: a query may attend only within its region."""
+    r = _pw_regions()
+    keep = (r[:, None] == r[None, :]).astype("float32")
+    return np.broadcast_to(keep, (_PW_B, _PW_N, _PW_N)).copy()
+
+
+def _pw_input():
+    return np.random.default_rng(_PW_SEED).standard_normal(
+        (_PW_B, _PW_N, _PW_DIM)
+    ).astype("float32")
+
+
+def _pw_layer():
+    """A built layer with deterministic weights, independent of construction order."""
+    layer = SingleWindowAttention(
+        dim=_PW_DIM, window_size=_PW_WS, num_heads=_PW_HEADS,
+    )
+    layer.build((_PW_B, _PW_N, _PW_DIM))
+    rng = np.random.default_rng(_PW_SEED + 1)
+    for w in layer.weights:
+        w.assign(keras.ops.cast(
+            keras.ops.convert_to_tensor(
+                rng.standard_normal(tuple(w.shape)).astype("float32") * 0.2
+            ),
+            w.dtype,
+        ))
+    return layer
+
+
+def _pw_forward(layer, array, mask):
+    out = layer(
+        keras.ops.convert_to_tensor(array),
+        attention_mask=(
+            None if mask is None else keras.ops.convert_to_tensor(mask)
+        ),
+        training=False,
+    )
+    return np.asarray(keras.ops.convert_to_numpy(out))
+
+
+class TestSingleWindowAttentionPairwiseMask:
+    """A rank-3 ``(B, N, N)`` keep-mask must make masked (query, key) pairs powerless.
+
+    Polarity is the silent failure mode: an inverted pairwise mask raises nothing,
+    changes no shape and stays finite — the layer simply attends to exactly the
+    pairs it was told to forbid. Only a perturbation-isolation test can see it, so
+    the inverted-mask and all-ones DEAD-COMPONENT controls are measured in the same
+    test rather than assumed.
+    """
+
+    @staticmethod
+    def _cross_region_influence(mask):
+        """max |delta| at the region-0 query rows when a region-1 KEY is perturbed."""
+        layer = _pw_layer()
+        base_input = _pw_input()
+        perturbed = base_input.copy()
+        perturbed[:, 12, :] += 5.0        # token 12 is in region 1
+        rows = _pw_regions() == 0
+        base = _pw_forward(layer, base_input, mask)
+        moved = _pw_forward(layer, perturbed, mask)
+        return float(np.abs(moved[:, rows] - base[:, rows]).max())
+
+    def test_a_region_1_key_cannot_influence_a_region_0_query(self):
+        keep = _pw_pairwise_mask()
+        leak = self._cross_region_influence(keep)
+
+        # DEAD-COMPONENT probe, run live: with the mask made a no-op (all ones) the
+        # very same perturbation MUST move the very same rows. A guard that survives
+        # its own component being dead is worthless.
+        dead = self._cross_region_influence(np.ones_like(keep))
+        assert dead > 1e-2, (
+            f"the all-ones (dead-mask) control moved the region-0 rows by only "
+            f"{dead:.6g}; this test cannot detect a mask that does nothing and is "
+            "therefore vacuous"
+        )
+        # POLARITY probe: an inverted pairwise mask must also move them.
+        inverted = self._cross_region_influence(1.0 - keep)
+        assert inverted > 1e-2, (
+            f"the INVERTED-polarity control moved the region-0 rows by only "
+            f"{inverted:.6g}; it cannot detect an inversion, so the assertion "
+            "below would be vacuous"
+        )
+
+        assert leak == 0.0, (
+            f"perturbing a region-1 token moved the region-0 query rows by "
+            f"{leak:.6g}. A correct pairwise mask drives the forbidden key's "
+            f"softmax weight to exactly 0.0, so this must be BIT-identical "
+            f"(dead-mask control {dead:.6g}, inverted-polarity control "
+            f"{inverted:.6g})."
+        )
+
+    def test_a_same_region_key_still_influences_its_query(self):
+        """Anti-vacuity: the mask must not simply switch the layer off."""
+        keep = _pw_pairwise_mask()
+        layer = _pw_layer()
+        base_input = _pw_input()
+        perturbed = base_input.copy()
+        perturbed[:, 3, :] += 5.0         # token 3 is in region 0
+        rows = _pw_regions() == 0
+        base = _pw_forward(layer, base_input, keep)
+        moved = _pw_forward(layer, perturbed, keep)
+        delta = float(np.abs(moved[:, rows] - base[:, rows]).max())
+        assert delta > 1e-2, (
+            f"perturbing a SAME-region token moved the region-0 rows by only "
+            f"{delta:.6g}; the pairwise mask is suppressing everything, not just "
+            "the cross-region pairs"
+        )
+
+    def test_a_query_broadcast_rank_3_mask_equals_the_rank_2_mask(self):
+        """I2, expressed executably: the pairwise branch is a strict GENERALIZATION.
+
+        A rank-3 mask that is constant over the query axis carries exactly the
+        information of the rank-2 key mask it was built from, so the two branches
+        must agree BIT-for-BIT. This is what pins the new branch as additive rather
+        than as a second, subtly different mask implementation.
+        """
+        rng = np.random.default_rng(_PW_SEED + 2)
+        key_mask = (rng.random((_PW_B, _PW_N)) > 0.4).astype("float32")
+        key_mask[:, 0] = 1.0              # never fully mask a row
+        rank3 = np.broadcast_to(
+            key_mask[:, None, :], (_PW_B, _PW_N, _PW_N)
+        ).copy()
+
+        layer = _pw_layer()
+        x = _pw_input()
+        out2 = _pw_forward(layer, x, key_mask)
+        out3 = _pw_forward(layer, x, rank3)
+        np.testing.assert_array_equal(
+            out2, out3,
+            err_msg=(
+                "a query-broadcast rank-3 mask disagrees with the equivalent "
+                "rank-2 mask; the rank-3 branch is not a generalization of the "
+                "rank-2 one"
+            ),
+        )
+
+    def test_the_fully_masked_row_rescue_never_fires_on_an_sw_msa_mask(self):
+        """The `apply_attention_mask` rescue must stay dormant for SW-MSA geometry.
+
+        The rescue's convention is "a query row that keeps NOTHING keeps
+        EVERYTHING" — silent un-masking if it ever fires on a real mask. In SW-MSA
+        no row can keep nothing, because a token always shares a region with
+        itself. That is asserted here two ways:
+
+        1. structurally, on the predicate the layer will build (every row keeps
+           >= 1 key, and there is no internal padding to zero a row out); and
+        2. by its OBSERVABLE CONSEQUENCE — a mask whose rows genuinely keep
+           nothing reproduces the ALL-ONES output exactly (the rescue firing),
+           while the SW-MSA mask provably does not.
+        """
+        keep = _pw_pairwise_mask()
+        assert keep.shape[1] == _PW_N == _PW_WS ** 2, (
+            "this config has internal padding, so a padded query row would zero "
+            "out and the rescue could fire for a reason unrelated to SW-MSA"
+        )
+        assert (keep.sum(axis=-1) > 0).all(), (
+            "the SW-MSA mask has a query row that keeps nothing"
+        )
+
+        layer = _pw_layer()
+        x = _pw_input()
+        all_ones = _pw_forward(layer, x, np.ones_like(keep))
+        dead_rows = _pw_forward(layer, x, np.zeros_like(keep))
+        np.testing.assert_array_equal(
+            dead_rows, all_ones,
+            err_msg=(
+                "an all-ZERO pairwise mask did not reproduce the all-ONES output, "
+                "so the rescue is not observable this way and the assertion below "
+                "proves nothing"
+            ),
+        )
+        sw_msa = _pw_forward(layer, x, keep)
+        assert np.abs(sw_msa - all_ones).max() > 1e-2, (
+            "the SW-MSA-masked output is identical to the unmasked one — the "
+            "fully-masked-row rescue fired (or the mask is being ignored)"
+        )
+
+    def test_the_pairwise_mask_survives_a_config_round_trip(self):
+        """I3: the new branch adds no state, so `from_config` must reproduce it."""
+        layer = _pw_layer()
+        rebuilt = SingleWindowAttention.from_config(layer.get_config())
+        rebuilt.build((_PW_B, _PW_N, _PW_DIM))
+        for src, dst in zip(layer.weights, rebuilt.weights):
+            dst.assign(src)
+        keep = _pw_pairwise_mask()
+        x = _pw_input()
+        np.testing.assert_array_equal(
+            _pw_forward(layer, x, keep), _pw_forward(rebuilt, x, keep),
+            err_msg="the rebuilt layer disagrees with the original on the rank-3 path",
+        )
+
+
+class TestWindowAttentionPairwiseMaskPassThrough:
+    """`WindowAttention._call_grid` must forward a rank-3 mask verbatim.
+
+    A rank-3 mask is expressed in ALREADY-PARTITIONED window coordinates, so it is
+    only meaningful when the internal grid is degenerate (one window per batch
+    element, `N == window_size ** 2`) — which is exactly how `SwinTransformerBlock`
+    calls this layer. Any other `N` is a caller error and must be LOUD, never a
+    silently re-partitioned wrong-geometry mask.
+    """
+
+    @staticmethod
+    def _layer(window_size=_PW_WS):
+        from dl_techniques.layers.attention.window_attention import (
+            WindowAttention,
+        )
+        return WindowAttention(
+            dim=_PW_DIM, window_size=window_size, num_heads=_PW_HEADS,
+            partition_mode="grid",
+        )
+
+    def test_a_rank_3_mask_reaches_the_inner_attention(self):
+        layer = self._layer()
+        x = keras.ops.convert_to_tensor(_pw_input())
+        keep = _pw_pairwise_mask()
+        base = np.asarray(keras.ops.convert_to_numpy(
+            layer(x, attention_mask=keras.ops.convert_to_tensor(keep))
+        ))
+        unmasked = np.asarray(keras.ops.convert_to_numpy(
+            layer(x, attention_mask=keras.ops.convert_to_tensor(
+                np.ones_like(keep)
+            ))
+        ))
+        assert base.shape == (_PW_B, _PW_N, _PW_DIM)
+        assert np.isfinite(base).all()
+        assert np.abs(base - unmasked).max() > 1e-4, (
+            "the rank-3 mask made no difference — it is being dropped somewhere "
+            "between `WindowAttention` and `SingleWindowAttention`"
+        )
+
+    def test_a_rank_3_mask_on_a_non_degenerate_grid_raises(self):
+        layer = self._layer(window_size=2)      # N=16 -> a 4x4 grid of 2x2 windows
+        x = keras.ops.convert_to_tensor(_pw_input())
+        keep = keras.ops.convert_to_tensor(_pw_pairwise_mask())
+        with pytest.raises(ValueError, match="rank-3"):
+            layer(x, attention_mask=keep)

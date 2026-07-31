@@ -85,9 +85,13 @@ Complete Architecture Flow (`partition_mode='grid'`)::
     │                      ▼                                      │
     │  OUTPUT: 1-D sequence  [B, N, dim]                          │
     │                                                             │
-    │  an optional mask takes the identical pad ► reshape ►       │
-    │  pad ► partition path and rides into each window with       │
-    │  its tokens.                                                │
+    │  an optional RANK-2 (B, N) key mask takes the identical      │
+    │  pad ► reshape ► pad ► partition path and rides into each    │
+    │  window with its tokens.  A RANK-3 (B, ws^2, ws^2) PAIRWISE  │
+    │  mask is already in window coordinates and is forwarded      │
+    │  verbatim to stage 4 — only valid when N == ws^2 (one        │
+    │  window), which is how SwinTransformerBlock calls this       │
+    │  layer; any other N raises.                                  │
     └─────────────────────────────────────────────────────────────┘
 
 ================================================
@@ -519,10 +523,19 @@ class WindowAttention(keras.layers.Layer):
 
         :param inputs: Sequence tensor ``(B, N, dim)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional mask ``(B, N)``.
+        :param attention_mask: Optional keep predicate (``1 = attend``), either
+            rank-2 ``(B, N)`` (a key mask over the UNPARTITIONED sequence, which
+            is re-partitioned here alongside the data) or rank-3
+            ``(B, ws**2, ws**2)`` (a PAIRWISE mask already expressed in
+            partitioned window coordinates, forwarded verbatim — see the
+            ``ValueError`` below).
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
+        :raises ValueError: If ``attention_mask`` is rank-3 while ``N`` is not
+            statically equal to ``window_size ** 2``. A rank-3 mask is in
+            already-partitioned coordinates, so it is only meaningful for a
+            degenerate one-window grid.
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
@@ -551,7 +564,42 @@ class WindowAttention(keras.layers.Layer):
         windows = keras.ops.reshape(windows, (-1, ws * ws, C))
 
         window_mask = None
-        if attention_mask is not None:
+        if attention_mask is not None and len(attention_mask.shape) == 3:
+            # DECISION plan-2026-07-31T042809-ddc92265/D-001
+            # A rank-3 mask is already expressed in PARTITIONED WINDOW
+            # coordinates — `(num_windows, ws**2, ws**2)`, the layout
+            # `SwinTransformerBlock` builds — so it is forwarded VERBATIM and
+            # must NOT go through the re-partition path below.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT run it through the rank-2 pipeline (pad -> reshape to
+            #     (B,H,W) -> window_partition). That pipeline reads its input as
+            #     an UNPARTITIONED (B, N) image mask; feeding it a pairwise mask
+            #     re-partitions the KEY axis as if it were spatial, which is a
+            #     silent wrong-geometry mask, not an error.
+            #   * Do NOT skip the guard below and "let it work when it works".
+            #     The verbatim forward is only meaningful when this layer's own
+            #     internal grid is DEGENERATE (exactly one window per batch
+            #     element), because only then do the caller's window index and
+            #     this layer's batch index coincide. On any other `N` the mask
+            #     would land on the wrong windows silently.
+            # See decisions.md D-001 (plan-2026-07-31T042809-ddc92265).
+            static_n = inputs.shape[1]
+            if static_n is None or int(static_n) != ws * ws:
+                raise ValueError(
+                    f"WindowAttention(partition_mode='grid') received a rank-3 "
+                    f"pairwise attention_mask of shape "
+                    f"{tuple(attention_mask.shape)}, but the sequence length is "
+                    f"{static_n} rather than window_size**2 = {ws * ws}. A rank-3 "
+                    f"mask is expressed in already-partitioned window coordinates, "
+                    f"so it is only meaningful when this layer's internal grid is "
+                    f"degenerate (one window per batch element) — which is how "
+                    f"`SwinTransformerBlock` calls it, after partitioning "
+                    f"externally. Partition your input into windows first, or pass "
+                    f"a rank-2 (B, N) key mask instead."
+                )
+            window_mask = attention_mask
+        elif attention_mask is not None:
             mask = keras.ops.pad(attention_mask, [[0, 0], [0, pad_amount_seq]])
             mask = keras.ops.reshape(mask, (B, H, W))
             mask = keras.ops.pad(mask, [[0, 0], [0, pad_h], [0, pad_w]])

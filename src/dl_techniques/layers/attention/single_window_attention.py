@@ -470,9 +470,19 @@ class SingleWindowAttention(keras.layers.Layer):
 
         :param inputs: Token embeddings of shape ``(B, N_actual, dim)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional mask of shape ``(B, N_actual)`` with
-            1 for valid tokens and 0 for padding. Combined with the internal
-            padding mask.
+        :param attention_mask: Optional **keep predicate** (``1 = attend``),
+            in one of two ranks:
+
+            * rank 2, ``(B, N_actual)`` — a KEY-only mask (1 for valid tokens,
+              0 for padding), broadcast over every query row. This is the
+              original contract and is unchanged.
+            * rank 3, ``(B, N_actual, N_actual)`` — a PAIRWISE
+              ``(query, key)`` mask: ``mask[b, q, k] == 1`` means query ``q``
+              may attend to key ``k``. Required for shifted-window attention
+              (SW-MSA), whose permitted keys genuinely depend on the query.
+
+            Either rank is combined multiplicatively with the internal padding
+            mask (over the KEY axis in both cases).
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating whether in training mode.
         :type training: Optional[bool]
@@ -498,8 +508,61 @@ class SingleWindowAttention(keras.layers.Layer):
             axis=1,
         )
 
+        # DECISION plan-2026-07-31T042809-ddc92265/D-001
+        # A rank-3 `(B, N_actual, N_actual)` mask is a PAIRWISE (query, key) keep
+        # predicate and gets its OWN branch. It is not a variant spelling of the
+        # rank-2 `(B, N_actual)` key-only mask below.
+        #
+        # WHY IT EXISTS: shifted-window self-attention (SW-MSA) cannot be expressed
+        # any other way. After Swin's cyclic roll, one physical window holds tokens
+        # from up to four different pre-roll regions, and which keys a query may see
+        # depends on the QUERY's region — so the predicate genuinely varies along
+        # the query axis. The rank-2 contract broadcasts one key predicate over
+        # every query row and is structurally incapable of saying that.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT collapse this back into the rank-2 `reshape(..., (B,1,1,N))`
+        #     path, e.g. by reducing the pairwise mask to a key mask with
+        #     `any(mask, axis=-2)`. That reduction is exactly the information loss
+        #     the branch exists to avoid: for an SW-MSA mask every key is kept by
+        #     SOME query, so the reduction yields all-ones and masks NOTHING, with
+        #     no shape error and a perfectly finite output.
+        #   * Do NOT invert the polarity "to match" some other site. This is a
+        #     `1 = attend` predicate handed to `apply_attention_mask`, which
+        #     performs no polarity inference by design (its D-002 anchor). An
+        #     inversion raises nothing, changes no shape, stays finite, and makes
+        #     the layer attend to exactly the pairs it was told to forbid.
+        #     `TestSingleWindowAttentionPairwiseMask` is the only guard that sees
+        #     it, and it measures the inverted control in the same test.
+        #   * Do NOT mask the QUERY axis with the internal padding mask here. It is
+        #     combined as `(B, 1, N_target)` — key-only — exactly as the rank-2
+        #     branch does, so the two branches agree BIT-for-BIT on a mask that is
+        #     constant over queries (pinned by
+        #     `test_a_query_broadcast_rank_3_mask_equals_the_rank_2_mask`). Masking
+        #     query rows too would zero out the internal-padding rows and hand the
+        #     `apply_attention_mask` fully-masked-row rescue live work to do, on
+        #     rows whose output is sliced off unread.
+        # ACCEPTED COST: the predicate handed to `apply_attention_mask` is
+        # `(B, 1, N, N)` rather than `(B, 1, 1, N)`, i.e. O(N^2) mask memory on this
+        # path only. The rank-2 and `None` paths are untouched (I1/I2).
+        # See decisions.md D-001 (plan-2026-07-31T042809-ddc92265).
+        user_mask_is_pairwise = (
+                attention_mask is not None and len(attention_mask.shape) == 3
+        )
+
         final_attention_mask = internal_padding_mask
-        if attention_mask is not None:
+        if user_mask_is_pairwise:
+            # Shape: (B, N_actual, N_actual) -> (B, N_target, N_target)
+            padded_user_mask = keras.ops.pad(
+                attention_mask,
+                [[0, 0], [0, padding_amount], [0, padding_amount]],
+            )
+            # Shape: (B, N_target, N_target) * (B, 1, N_target) -> (B, N_t, N_t)
+            final_attention_mask = (
+                    keras.ops.cast(padded_user_mask, "int32")
+                    * keras.ops.expand_dims(internal_padding_mask, axis=1)
+            )
+        elif attention_mask is not None:
             # Shape: (B, N_actual) -> (B, N_target)
             padded_user_mask = keras.ops.pad(
                 attention_mask, [[0, 0], [0, padding_amount]]
@@ -651,8 +714,17 @@ class SingleWindowAttention(keras.layers.Layer):
         # and opting out also restores the NaN GRADIENT. The full argument lives at
         # the D-009 / D-008 anchors in `common.py`.
         # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
-        # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis]
-        broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
+        # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis], or
+        #        (B, N, N) -> (B, 1, N, N) on the pairwise branch (D-001 above),
+        #        which broadcasts over heads ONLY.
+        if user_mask_is_pairwise:
+            broadcast_mask = keras.ops.reshape(
+                final_attention_mask, (B, 1, N, N)
+            )
+        else:
+            broadcast_mask = keras.ops.reshape(
+                final_attention_mask, (B, 1, 1, N)
+            )
         attn = apply_attention_mask(
             attn,
             broadcast_mask,
