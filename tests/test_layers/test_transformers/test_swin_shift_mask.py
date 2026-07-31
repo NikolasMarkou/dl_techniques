@@ -46,14 +46,23 @@ Test inventory (kept in step with the file -- it was stale once already):
   after that fix: window isolation at ``shift_size=0`` (the probe harness
   itself works) and a full ``.keras`` save/load round-trip of a shifted block.
 * ``TestSwMsaMaskConstruction`` -- the shipped mask against the oracle, the
-  D-006 single-window fallback (``H == window_size`` reduces to
-  ``shift_size=0``), the strictly-below-``window_size`` raise, that the raise is
-  specific to ``shift_size > 0``, and dynamic spatial dims (never raise,
-  supported at several resolutions, dynamic-vs-static build agreement).
+  D-006 single-window fallback (``H <= window_size`` reduces to
+  ``shift_size=0``), that a strictly-below-``window_size`` map is now PADDED
+  rather than rejected (the raise was removed with F-05's block-internal
+  padding; the scope pin is inverted in place, not deleted), that a
+  single-window map is fine without a shift, and dynamic spatial dims (never
+  raise, supported at several resolutions, dynamic-vs-static build agreement).
 * ``TestShapeIndependenceAtTraceTime`` -- the D-012 guard: the same block on
   the same tensor must answer identically whether or not the tracer knows the
   spatial extent, plus a self-check that the guard can see a wrong runtime
   shift.
+* ``TestPaddedPositionIsolation`` -- the G-05 guard added with F-05's
+  block-internal padding: no real token may attend into the padding the block
+  adds for a non-divisible ``(H, W)``, eagerly and under a dynamic-shape trace,
+  plus the keep mask checked directly against an independent padding oracle.
+* ``TestPaddedGeometryShiftRule`` -- D-006 re-derived against the UNPADDED
+  dims: ``window_size < H < 2 * window_size`` is a geometry padding newly makes
+  reachable, and it must KEEP its shift.
 
 The two *shipped consumers* of this block are guarded numerically elsewhere, and
 not here: ``tests/test_models/test_scunet/test_golden_values.py`` and
@@ -743,8 +752,22 @@ class TestSwMsaMaskConstruction:
             ),
         )
 
-    def test_geometry_below_window_size_raises(self):
-        """A statically-known ``H``/``W`` *strictly* below ``window_size`` must fail."""
+    def test_geometry_below_window_size_is_padded_not_rejected(self):
+        """SCOPE PIN, updated in place: D-006's ``H < ws`` raise no longer holds.
+
+        This method was ``test_geometry_below_window_size_raises`` and asserted
+        the opposite::
+
+            with pytest.raises(ValueError, match="smaller than window_size"):
+                block(too_small)
+
+        That raise fired only for ``shift_size > 0`` and rejected a geometry the
+        identical block accepted at ``shift_size == 0``. Now that the block pads
+        internally (F-05), an ``H < window_size`` map is padded up to exactly
+        one window and the plain reference rule
+        ``min(input_resolution) <= window_size -> shift 0`` covers it, so the
+        raise is gone and the assertion here is inverted rather than deleted.
+        """
         block = SwinTransformerBlock(
             dim=DIM,
             num_heads=NUM_HEADS,
@@ -752,10 +775,14 @@ class TestSwMsaMaskConstruction:
             shift_size=SHIFT_SIZE,
         )
         too_small = ops.convert_to_tensor(
-            np.zeros((1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM), dtype="float32")
+            np.random.default_rng(SEED).standard_normal(
+                (1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM)
+            ).astype("float32")
         )
-        with pytest.raises(ValueError, match="smaller than window_size"):
-            block(too_small)
+        assert block._resolve_shift_size(too_small) == 0
+        out = block(too_small)
+        assert tuple(out.shape) == (1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM)
+        assert np.isfinite(ops.convert_to_numpy(out)).all()
 
     def test_dynamic_spatial_dims_never_raise(self):
         """A dynamic (``None``) spatial dim must never hit the raise (D-002 / A2).
@@ -1023,3 +1050,224 @@ class TestShapeIndependenceAtTraceTime:
             y = np.asarray(fn(tf.convert_to_tensor(x)))
             assert y.shape == x.shape
             assert np.isfinite(y).all()
+
+
+# ---------------------------------------------------------------------------
+# 6. Padded-position isolation (plan step 3, G-05 / SC-6)
+#
+# `SwinTransformerBlock.call` now pads bottom/right up to a `window_size`
+# multiple. A naive pad-then-mask that reused the region formula on the PADDED
+# `H, W` would hand the padding an ordinary region id and let real tokens
+# attend into it -- a SILENT LEAK (no shape error, finite output, wrong
+# attention), which is why this lives in its own section rather than beside the
+# crash tests in `test_swin_transformer_block.py`.
+#
+# The padding is manufactured INSIDE the layer, so a caller can never perturb
+# it directly. The probe therefore perturbs the pad FILL VALUE instead, via the
+# module-level `_PADDING_FILL_VALUE` seam, and requires the output to be
+# bit-identical: if any real token could see the padding, changing 0.0 to 1e3
+# would move the output enormously.
+# ---------------------------------------------------------------------------
+
+import dl_techniques.layers.transformers.swin_transformer_block as swin_block_module
+
+PAD_GARBAGE = 1.0e3
+
+#: Non-divisible probe geometries, at ``WINDOW_SIZE = 4``.
+#:
+#: BOTH are required, and ``(5, 7)`` is the load-bearing one. At ``(6, 6)`` the
+#: pad amount (2) happens to EQUAL ``SHIFT_SIZE`` (2), so the pre-existing 3x3
+#: region bands -- whose lower boundary sits at ``H_pad - shift`` -- already
+#: fall exactly on the real/pad boundary and separate padding from real tokens
+#: by accident. Measured: with the padding exclusion neutered in place, the
+#: ``(6, 6)`` / ``shift=2`` cell still PASSES. ``(5, 7)`` (pad 3 and 1) puts
+#: real and padded slots inside the same region band, which is what makes the
+#: dead-component probe bite at every cell.
+PAD_GEOMETRIES = [(6, 6), (5, 7)]
+
+
+def _make_padding_block(shift_size, build_shape=(None, None, None, DIM)):
+    """A block with seeded NON-ZERO weights *and* biases (invariant I8).
+
+    ``_make_block`` above leans on the default initializers, which leave every
+    bias and every LayerNormalization beta at zero; a masking probe driven by
+    such a block cannot observe a bias-carrying path.
+    """
+    keras.utils.set_random_seed(SEED)
+    block = SwinTransformerBlock(
+        dim=DIM,
+        num_heads=NUM_HEADS,
+        window_size=WINDOW_SIZE,
+        shift_size=shift_size,
+        use_bias=True,
+        dropout_rate=0.0,
+        attention_dropout_rate=0.0,
+        stochastic_depth_rate=0.0,
+    )
+    block.build(build_shape)
+
+    rng = np.random.default_rng(SEED)
+    block.set_weights([
+        (rng.standard_normal(v.shape).astype("float32") * 0.1)
+        + (0.37 if len(v.shape) == 1 else 0.0)
+        for v in block.weights
+    ])
+    rank1 = [np.asarray(v) for v in block.get_weights() if np.asarray(v).ndim == 1]
+    assert rank1, "Fixture has no bias-like variable to check."
+    assert any(np.abs(v).max() > 0.0 for v in rank1), (
+        "Fixture assertion failed: all bias-like variables are zero."
+    )
+    return block
+
+
+def _padding_probe_input(height, width):
+    return np.random.default_rng(SEED + 5).standard_normal(
+        (1, height, width, DIM)
+    ).astype("float32")
+
+
+class TestPaddedPositionIsolation:
+    """G-05 / SC-6: no real token may attend into internally-added padding."""
+
+    @pytest.mark.parametrize("height,width", PAD_GEOMETRIES)
+    @pytest.mark.parametrize("shift_size", [0, SHIFT_SIZE])
+    def test_padding_content_cannot_reach_the_output_eagerly(
+        self, shift_size, height, width, monkeypatch
+    ):
+        """Changing what the padding CONTAINS must move nothing, exactly."""
+        block = _make_padding_block(shift_size)
+        x = ops.convert_to_tensor(_padding_probe_input(height, width))
+
+        baseline = np.asarray(ops.convert_to_numpy(block(x)))
+        monkeypatch.setattr(swin_block_module, "_PADDING_FILL_VALUE", PAD_GARBAGE)
+        with_garbage = np.asarray(ops.convert_to_numpy(block(x)))
+
+        # Non-vacuity control: the same block, same probe, must move a lot when
+        # a REAL token is perturbed. Without this, a dead layer (or a probe
+        # that never reaches the padded path) would "pass" the assertion below.
+        perturbed = _padding_probe_input(height, width)
+        perturbed[0, 0, 0, :] += 5.0
+        moved = float(
+            np.abs(
+                baseline
+                - np.asarray(
+                    ops.convert_to_numpy(block(ops.convert_to_tensor(perturbed)))
+                )
+            ).max()
+        )
+        assert moved > 1e-2, (
+            f"Live control is dead: perturbing a real token moved the output "
+            f"by only {moved:.3e}."
+        )
+
+        np.testing.assert_array_equal(
+            baseline,
+            with_garbage,
+            err_msg=(
+                "A real token's output changed when the INTERNAL padding fill "
+                "value changed -- real tokens are attending into padding "
+                "(G-05 silent leak)."
+            ),
+        )
+
+    @pytest.mark.parametrize("height,width", PAD_GEOMETRIES)
+    @pytest.mark.parametrize("shift_size", [0, SHIFT_SIZE])
+    def test_padding_content_cannot_reach_the_output_symbolically(
+        self, shift_size, height, width, monkeypatch
+    ):
+        """The same isolation on the dynamic-shape path (``models/thera``'s).
+
+        Each measurement gets its OWN ``tf.function`` trace: the fill value is
+        baked into the graph as a constant, so reusing one trace across the
+        monkeypatch would compare a graph with itself and prove nothing.
+        """
+        block = _make_padding_block(shift_size)
+        x = tf.constant(_padding_probe_input(height, width))
+        signature = [tf.TensorSpec([None, None, None, DIM], tf.float32)]
+
+        baseline = tf.function(
+            lambda t: block(t), input_signature=signature
+        )(x).numpy()
+        monkeypatch.setattr(swin_block_module, "_PADDING_FILL_VALUE", PAD_GARBAGE)
+        with_garbage = tf.function(
+            lambda t: block(t), input_signature=signature
+        )(x).numpy()
+
+        assert np.isfinite(baseline).all()
+        np.testing.assert_array_equal(
+            baseline,
+            with_garbage,
+            err_msg=(
+                "Padded positions leak into the output on the DYNAMIC path, "
+                "where the pad amount is unknown at trace time."
+            ),
+        )
+
+    @pytest.mark.parametrize("height,width", PAD_GEOMETRIES)
+    @pytest.mark.parametrize("shift_size", [0, SHIFT_SIZE])
+    def test_keep_mask_forbids_every_mixed_real_pad_pair(
+        self, shift_size, height, width
+    ):
+        """The mask itself, checked against an independent padding oracle.
+
+        The isolation test above measures the END of the pipeline; this one
+        pins the mask tensor, so a future refactor that achieves isolation by
+        accident (e.g. by zeroing something downstream) still has to keep the
+        mask honest.
+        """
+        block = _make_padding_block(shift_size)
+        padded_h = height + (WINDOW_SIZE - height % WINDOW_SIZE) % WINDOW_SIZE
+        padded_w = width + (WINDOW_SIZE - width % WINDOW_SIZE) % WINDOW_SIZE
+        mask = np.asarray(ops.convert_to_numpy(
+            block._build_swmsa_keep_mask(
+                1, padded_h, padded_w, shift_size,
+                valid_height=height, valid_width=width,
+            )
+        ))
+
+        # Independent oracle: `orig_row`/`orig_col` are the PRE-ROLL coordinates
+        # of the token occupying each window slot, so a slot holds padding iff
+        # its pre-roll coordinate is outside the caller's (H, W).
+        _, orig_row, orig_col = wrap_status_windows(
+            padded_h, padded_w, WINDOW_SIZE, shift_size
+        )
+        is_pad = (orig_row >= height) | (orig_col >= width)
+
+        assert is_pad.any() and not is_pad.all(), (
+            "Probe geometry has no mixed real/pad window -- the assertion "
+            "below would be vacuous."
+        )
+        mixed = is_pad[:, :, None] != is_pad[:, None, :]
+        assert mixed.any(), "No real/pad pair shares a window in this geometry."
+        assert (mask[: mixed.shape[0]][mixed] == 0).all(), (
+            "The keep mask permits at least one real<->pad attention pair."
+        )
+        # And no slot may be fully masked (that would hand live work to the
+        # fully-masked-row rescue in `layers/attention/common.py`).
+        assert mask.max(axis=-1).min() == 1, "Some query row is fully masked."
+
+
+class TestPaddedGeometryShiftRule:
+    """D-006 re-derived against the UNPADDED dims (plan step 3)."""
+
+    def test_multi_window_geometry_between_ws_and_2ws_keeps_its_shift(self):
+        """D-006's falsified premise, pinned.
+
+        D-006 reasoned that "a static ``H < 2*ws`` can only ever mean
+        ``H == ws``, because ``window_partition`` requires ``H % ws == 0``".
+        Padding falsifies that premise: ``ws < H < 2*ws`` is now reachable.
+        The CONCLUSION still holds -- such an ``H`` is a genuine multi-window
+        case and must KEEP its shift -- and this test is what makes that a
+        measured fact rather than an inherited argument.
+        """
+        block = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+        )
+        between = ops.convert_to_tensor(
+            np.zeros((1, WINDOW_SIZE + 2, WINDOW_SIZE + 2, DIM), dtype="float32")
+        )
+        assert WINDOW_SIZE < WINDOW_SIZE + 2 < 2 * WINDOW_SIZE
+        assert block._resolve_shift_size(between) == SHIFT_SIZE

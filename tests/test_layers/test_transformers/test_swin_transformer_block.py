@@ -447,18 +447,257 @@ class TestSwinTransformerBlock:
             actual_hidden_dim = layer.mlp.hidden_dim
             assert actual_hidden_dim == expected_hidden_dim
 
-    def test_window_size_compatibility(self):
-        """Test that the layer handles window size compatibility properly."""
+    def test_window_size_divisibility_is_handled_by_internal_padding(self):
+        """A spatial extent that is not a multiple of ``window_size`` must WORK.
+
+        SCOPE PIN, updated in place (plan step 3, F-05). Until this change the
+        method at this site was ``test_window_size_compatibility`` and asserted
+        the OPPOSITE::
+
+            incompatible_input = keras.random.normal([2, 32, 32, 64])
+            with pytest.raises(Exception):
+                layer(incompatible_input)
+
+        "Compatibility" there meant "the layer raises cleanly", which was
+        generous: the raise was an unhandled backend ``InvalidArgumentError``
+        from ``window_partition``'s reshape ("Input to reshape is a tensor with
+        288 values, but the requested shape has 128" at the probe geometry),
+        fired late from inside the forward pass, and for a functional model it
+        did not fire at construction at all. ``SwinTransformerBlock.call`` now
+        pads bottom/right internally and crops back, so the assertion is
+        inverted rather than deleted: the same geometry that used to raise must
+        now round-trip at its ORIGINAL shape.
+        """
         layer = SwinTransformerBlock(dim=64, num_heads=8, window_size=7)
 
-        # Test with compatible dimensions (56 is divisible by 7)
+        # Divisible: 56 == 8 * 7. Unchanged behaviour.
         compatible_input = keras.random.normal([2, 56, 56, 64])
         output = layer(compatible_input)
         assert output.shape == compatible_input.shape
         assert not np.any(np.isnan(output.numpy()))
 
-        # Test with incompatible dimensions (32 is not divisible by 7)
-        # This should raise an error during window partitioning
+        # NOT divisible: 32 % 7 == 4, so the block pads to 35 internally.
         incompatible_input = keras.random.normal([2, 32, 32, 64])
-        with pytest.raises(Exception):  # Should raise InvalidArgumentError from TensorFlow
-            layer(incompatible_input)
+        output = layer(incompatible_input)
+        assert tuple(output.shape) == (2, 32, 32, 64), (
+            "The block must return the CALLER's (H, W), not the padded extent."
+        )
+        assert np.isfinite(output.numpy()).all()
+
+# ---------------------------------------------------------------------------
+# F-05 / SC-5 -- block-internal padding for non-divisible (H, W).
+#
+# `SwinTransformerBlock.call` used to be a hard crash on any `(H, W)` that was
+# not a multiple of `window_size`, in ALL FOUR of {static, symbolic} x
+# {shift = 0, shift > 0}. Measured at the pre-fix commit `8f60e2e6`, geometry
+# `(1, 6, 6, 8)` with `window_size=4`:
+#
+#   static   shift=0 -> InvalidArgumentError "Input to reshape is a tensor with
+#                       288 values, but the requested shape has 128", raised
+#                       from `utils/tensors.py::window_partition` via
+#                       `swin_transformer_block.py::call`'s DATA partition.
+#   static   shift=2 -> InvalidArgumentError "Input to reshape is a tensor with
+#                       36 values, but the requested shape has 16", raised one
+#                       call EARLIER, from `_build_swmsa_keep_mask`'s own
+#                       `window_partition` on the 1-channel region image.
+#   symbolic shift=0 -> InvalidArgumentError, 288 -> 128 (graph execution).
+#   symbolic shift=2 -> InvalidArgumentError, 288 -> 128 (graph execution).
+#                       NOTE: the plan predicted the 36 -> 16 mask-builder
+#                       failure here too. It does NOT reproduce symbolically --
+#                       both nodes are in the graph and TF surfaces the DATA
+#                       partition's failure. The CLASS of failure held; the
+#                       predicted message did not.
+#
+# The symbolic half needs an explicit `tf.function(input_signature=...)` trace.
+# A `keras.Input` functional build with a static non-divisible shape does NOT
+# raise at construction (G-03): Keras 3 skips `Reshape` element-count
+# validation for `KerasTensor`s, so it "succeeds" with a wrong
+# `model.output_shape` and defers the crash to the first real forward call. A
+# construction-only test is therefore structurally vacuous.
+# ---------------------------------------------------------------------------
+
+import tensorflow as tf  # noqa: E402  (test-local, used only by the block below)
+
+PAD_DIM = 8
+PAD_HEADS = 2
+PAD_WS = 4
+PAD_SEED = 1234
+
+#: Every ``(H, W, window_size)`` a SwinTransformerBlock actually sees inside the
+#: two CPU-pinned golden-value probes. Derived by instrumenting
+#: ``SwinTransformerBlock.call`` across a full forward pass of
+#: ``SCUNet(config=[2]*7, dim=16, head_dim=8, window_size=8,
+#: input_resolution=64)`` (28 blocks) and
+#: ``SwinTransformer(embed_dim=16, depths=[2,2,2,2], num_heads=[1,2,4,8],
+#: window_size=2, patch_size=4, input_shape=(64,64,3))`` (8 blocks) -- i.e. the
+#: frozen CONFIGs of ``tests/test_models/test_scunet/test_golden_values.py``
+#: and ``tests/test_models/test_swin_transformer/test_golden_values.py``.
+#: Re-derive by instrumentation if either CONFIG ever changes; do not hand-edit.
+GOLDEN_BLOCK_GEOMETRIES = (
+    # SCUNet golden probe, window_size = 8.
+    (64, 64, 8), (32, 32, 8), (16, 16, 8), (8, 8, 8),
+    # SwinTransformer golden probe, window_size = 2.
+    (16, 16, 2), (8, 8, 2), (4, 4, 2), (2, 2, 2),
+)
+
+
+def _seeded_padding_block(shift_size, window_size=PAD_WS, dim=PAD_DIM):
+    """A built block with seeded NON-ZERO weights *and* non-zero biases.
+
+    Keras' default ``bias_initializer='zeros'`` (plus LayerNormalization's
+    zero-init beta) makes several of this block's sub-paths structurally
+    unobservable, so every probe below drives a block whose rank-1 variables
+    are provably non-zero.
+    """
+    keras.utils.set_random_seed(PAD_SEED)
+    block = SwinTransformerBlock(
+        dim=dim,
+        num_heads=PAD_HEADS,
+        window_size=window_size,
+        shift_size=shift_size,
+        use_bias=True,
+        dropout_rate=0.0,
+        attention_dropout_rate=0.0,
+        stochastic_depth_rate=0.0,
+    )
+    block.build((None, 4 * window_size, 4 * window_size, dim))
+
+    rng = np.random.default_rng(PAD_SEED)
+    weights = []
+    for variable in block.weights:
+        value = rng.standard_normal(variable.shape).astype("float32") * 0.1
+        if len(variable.shape) == 1:
+            value = value + 0.37
+        weights.append(value)
+    block.set_weights(weights)
+
+    rank1 = [
+        np.asarray(v) for v in block.get_weights()
+        if np.asarray(v).ndim == 1
+    ]
+    assert rank1, "Fixture has no bias-like variable to check."
+    assert any(np.abs(v).max() > 0.0 for v in rank1), (
+        "Fixture assertion failed: every bias-like variable is zero, so the "
+        "probe cannot see a bias-carrying code path."
+    )
+    return block
+
+
+class TestSwinBlockInternalPadding:
+    """F-05: any ``(H, W)`` runs; already-divisible ``(H, W)`` is untouched."""
+
+    @pytest.mark.parametrize("shift_size", [0, 2])
+    def test_static_non_divisible_input_round_trips(self, shift_size):
+        """Was ``InvalidArgumentError``; must now return the unpadded shape."""
+        block = _seeded_padding_block(shift_size)
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(3).standard_normal(
+                (1, 6, 6, PAD_DIM)
+            ).astype("float32")
+        )
+        y = block(x)
+        assert tuple(y.shape) == (1, 6, 6, PAD_DIM)
+        assert np.isfinite(keras.ops.convert_to_numpy(y)).all()
+
+    @pytest.mark.parametrize("shift_size", [0, 2])
+    def test_symbolic_non_divisible_input_round_trips(self, shift_size):
+        """The dynamic-shape path (``models/thera``'s path) must run too.
+
+        Traced against an explicit ``TensorSpec([None, None, None, C])`` rather
+        than compared eagerly: an eager-vs-eager comparison takes the SAME
+        branch on both sides and is structurally blind to this.
+        """
+        block = _seeded_padding_block(shift_size)
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([None, None, None, PAD_DIM], tf.float32)
+            ]
+        )
+        def traced(t):
+            return block(t)
+
+        x = tf.constant(
+            np.random.default_rng(3).standard_normal(
+                (1, 6, 6, PAD_DIM)
+            ).astype("float32")
+        )
+        y = traced(x)
+        assert tuple(y.shape) == (1, 6, 6, PAD_DIM)
+        assert np.isfinite(y.numpy()).all()
+
+    @pytest.mark.parametrize("height,width,window_size", GOLDEN_BLOCK_GEOMETRIES)
+    def test_golden_geometries_need_zero_padding(
+        self, height, width, window_size
+    ):
+        """Pad amount must be EXACTLY 0 at every geometry a golden probe reaches.
+
+        This is proof (i) of three that the padding is a no-op for the shipped
+        models; proof (ii) is the pre/post bit-identity measurement recorded in
+        ``verification.md``, and proof (iii) is running the two golden-value
+        modules themselves.
+        """
+        pad_h = (window_size - height % window_size) % window_size
+        pad_w = (window_size - width % window_size) % window_size
+        assert (pad_h, pad_w) == (0, 0)
+
+    def test_divisible_unshifted_call_passes_no_attention_mask(self):
+        """The no-op fast path must stay structurally no-op, not merely equal.
+
+        On an already-divisible, unshifted call the block must still hand
+        ``attention_mask=None`` to its attention layer. That is what keeps the
+        golden values bit-identical; an all-ones mask happens to be numerically
+        equivalent (measured), so a value-only check would not notice the fast
+        path silently disappearing.
+        """
+        block = _seeded_padding_block(0)
+        seen = {}
+        original = block.attn.call
+
+        def spy(inputs, attention_mask=None, training=None, **kwargs):
+            seen["mask"] = attention_mask
+            return original(
+                inputs, attention_mask=attention_mask, training=training,
+                **kwargs
+            )
+
+        block.attn.call = spy
+        try:
+            block(keras.ops.convert_to_tensor(
+                np.zeros((1, 8, 8, PAD_DIM), dtype="float32")
+            ))
+            assert "mask" in seen, "Spy never fired -- the probe is dead."
+            assert seen["mask"] is None
+
+            seen.clear()
+            block(keras.ops.convert_to_tensor(
+                np.zeros((1, 6, 6, PAD_DIM), dtype="float32")
+            ))
+            assert seen["mask"] is not None, (
+                "A padded call must carry a keep mask, or padded positions "
+                "are attended to (G-05)."
+            )
+        finally:
+            block.attn.call = original
+
+    def test_geometry_below_window_size_is_padded_not_rejected(self):
+        """SCOPE PIN, updated in place: D-006's ``H < ws`` raise no longer holds.
+
+        Before this change ``_resolve_shift_size`` raised
+        ``ValueError("... smaller than window_size ...")`` for a statically
+        known ``H < window_size`` whenever ``shift_size > 0`` -- while the very
+        same geometry ran fine at ``shift_size == 0``. Padding makes such an
+        ``H`` legally paddable up to exactly one window, so the rule is now the
+        plain reference-Swin ``min(input_resolution) <= window_size -> shift 0``
+        and the raise is gone.
+        """
+        block = _seeded_padding_block(2)
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(5).standard_normal(
+                (1, 3, 3, PAD_DIM)
+            ).astype("float32")
+        )
+        assert block._resolve_shift_size(x) == 0
+        y = block(x)
+        assert tuple(y.shape) == (1, 3, 3, PAD_DIM)
+        assert np.isfinite(keras.ops.convert_to_numpy(y)).all()
