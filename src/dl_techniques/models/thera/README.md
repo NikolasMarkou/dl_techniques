@@ -242,12 +242,31 @@ both THERA and a bicubic baseline.
 - **`pro`/`plus` are memory-heavy** (`hidden_dim=512`). The per-pixel field + the
   nested-tape Jacobian are memory-intensive; use small crops/batch and prefer the
   24GB GPU for these variants. `air` (`hidden_dim=32`) is the light variant.
-- **`pro` RSTB shift-mask caveat.** The reused `SwinTransformerBlock` builds its
-  shift mask **dynamically at call time**, whereas the reference builds it at
-  build-time from a fixed `img_size`. For window-divisible inputs these are
-  functionally equivalent; non-divisible inputs are handled by pad-to-multiple +
-  crop (D-007), but the dynamic-mask path has not been bit-exactly cross-validated
-  against the reference build-time mask.
+- **`pro` RSTB shift mask is built at call time.** The reused
+  `SwinTransformerBlock` derives its SW-MSA pairwise keep mask inside `call()`
+  from the runtime `(B, H, W)` using `keras.ops` only, whereas the reference
+  implementation builds it once at build time from a fixed `img_size`. That is a
+  requirement here, not a stylistic choice: this tail builds every Swin block
+  with `(B, None, None, embed_dim)` and reflect-pads `H`/`W` up to a window-size
+  multiple with *symbolic* amounts (D-007), so there is no static resolution to
+  build from. The mask is partitioned with the same `window_partition` that
+  partitions the data, so its window order matches by construction; equality with
+  an independently derived wrap-status oracle — and bit-identical output between
+  a statically-shaped and a dynamically-shaped build — are asserted in
+  `tests/test_layers/test_transformers/test_swin_shift_mask.py`. Non-divisible
+  inputs remain handled by pad-to-multiple + crop (D-007). Two static-shape
+  rules exist and neither applies to this tail: a **statically known** `H`/`W`
+  equal to `window_size` drops the shift to `0` (the reference Swin fallback),
+  and one strictly below `window_size` raises. A dynamic (`None`) dim is
+  deliberately neither downgraded nor guarded, because that is this tail's
+  normal case; at a single-window resolution the dynamic path keeps the shift
+  and relies on the mask, which is correct there.
+
+  > Historical note: before `plan-2026-07-31-ddc92265` this section described a
+  > dynamic shift mask that did not exist — `SwinTransformerBlock` built no mask
+  > at all, so every shifted block ran unmasked full attention over each physical
+  > window. Shifted-block numerics changed when the mask landed; any checkpoint
+  > trained before that commit will produce different outputs.
 - **No `chunkax` tiling** (G5): very large single-image inference may OOM; the
   documented fallback is a plain-Python coord-axis tiling loop (not yet
   implemented).

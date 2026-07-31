@@ -157,12 +157,12 @@ class SwinTransformerBlock(keras.layers.Layer):
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  [Cyclic Shift]                      │
+        │  [Cyclic Shift + SW-MSA keep mask]   │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
         │  Window Partition ─► Window Attention│
-        │  ─► Window Merge                     │
+        │  (masked when shifted) ─► Merge      │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
@@ -190,6 +190,15 @@ class SwinTransformerBlock(keras.layers.Layer):
     :type window_size: int
     :param shift_size: Cyclic shift amount for SW-MSA. Use
         ``window_size // 2`` for standard shifted windows, 0 for regular.
+        Any nonzero value additionally activates the SW-MSA pairwise keep
+        mask, built per call from the runtime spatial extent, which forbids
+        attention between tokens the roll brought together from non-adjacent
+        regions. Following the reference Swin implementation, the shift is
+        treated as ``0`` (no roll, no mask, full attention over the single
+        window) whenever a statically-known ``H``/``W`` *equals*
+        ``window_size``; a statically-known dim strictly below
+        ``window_size`` raises. Dynamic (``None``) dims are never checked and
+        never downgraded.
     :type shift_size: int
     :param mlp_ratio: MLP hidden dim / embedding dim ratio. Default: 4.0.
     :type mlp_ratio: float
@@ -414,6 +423,192 @@ class SwinTransformerBlock(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
+    def _build_swmsa_keep_mask(
+        self,
+        batch_size: Union[int, keras.KerasTensor],
+        height: Union[int, keras.KerasTensor],
+        width: Union[int, keras.KerasTensor],
+    ) -> keras.KerasTensor:
+        """Build the SW-MSA pairwise keep mask for the current feature map.
+
+        After the cyclic roll by ``-shift_size``, one physical window can hold
+        tokens that came from up to four spatially distant regions of the
+        pre-roll feature map. Those tokens must not attend to one another. The
+        standard Swin construction labels every pre-roll position with one of
+        nine region ids (a 3x3 product of row/column bands) and permits a
+        ``(query, key)`` pair inside a window iff both carry the same label.
+
+        The region image is partitioned with the very same
+        :func:`~dl_techniques.utils.tensors.window_partition` that partitions
+        the data in :meth:`call`, so the mask's window order matches the data's
+        window order **by construction** rather than by a re-derived index
+        formula.
+
+        :param batch_size: Batch size ``B`` (may be a dynamic scalar).
+        :type batch_size: Union[int, keras.KerasTensor]
+        :param height: Feature-map height ``H`` (may be a dynamic scalar).
+        :type height: Union[int, keras.KerasTensor]
+        :param width: Feature-map width ``W`` (may be a dynamic scalar).
+        :type width: Union[int, keras.KerasTensor]
+        :return: Int32 keep predicate (``1 = attend``) of shape
+            ``(B * num_windows, window_size**2, window_size**2)``, laid out
+            B-major / window-minor to match ``window_partition``.
+        :rtype: keras.KerasTensor
+        """
+        ws = self.window_size
+        shift = self.shift_size
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-002
+        # The mask is built HERE, per call, from the DYNAMIC `(B, H, W)` of the
+        # incoming tensor — not in `build()` from static dims.
+        #
+        # WHY: `models/thera/tails.py` builds every one of its Swin blocks with
+        # `(B, None, None, embed_dim)` on purpose, and its `call()` reflect-pads
+        # H and W up to a window-size multiple using SYMBOLIC `ops.mod` amounts.
+        # The spatial extent is therefore unknown at build time AND varies per
+        # call by design (THERA's hypernetwork feeds arbitrary crop sizes).
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT move this to `build()` and read `input_shape[1:3]`. They are
+        #     `None` for the only production consumer with a shifted block, so
+        #     the mask would be built from `None` — a `TypeError` at best and a
+        #     wrong-geometry mask at worst.
+        #   * Do NOT copy `progressive_focused_attention.py`'s build-time
+        #     `ValueError` on dynamic `H`/`W`. That layer has no dynamic-shape
+        #     consumer; this one does, and the raise would make `thera/pro` and
+        #     `thera/plus` dead on forward — trading a silent correctness bug for
+        #     a loud outage. `_resolve_shift_size` deliberately skips a `None`
+        #     dim -- it neither raises nor downgrades -- for exactly this reason.
+        #   * Do NOT cache the mask on `self` keyed by nothing. The geometry
+        #     changes per call; a stale cache is a silent wrong-geometry mask.
+        #   * Do NOT re-derive the window order with an index formula instead of
+        #     calling `window_partition` below. A mismatch between the mask's
+        #     window order and the data's is SILENT: no shape error, finite
+        #     output, wrong attention.
+        # ACCEPTED COST: a handful of cheap elementwise ops per forward pass,
+        # negligible next to the attention matmul.
+        # See decisions.md D-002 (plan-2026-07-31T042809-ddc92265).
+        rows = ops.arange(height, dtype="int32")
+        cols = ops.arange(width, dtype="int32")
+
+        # Region bands, equivalent to the canonical slice-counter construction
+        # (0, -ws), (-ws, -shift), (-shift, None) applied to rows and columns.
+        row_id = (
+            ops.cast(rows >= height - ws, "int32")
+            + ops.cast(rows >= height - shift, "int32")
+        )
+        col_id = (
+            ops.cast(cols >= width - ws, "int32")
+            + ops.cast(cols >= width - shift, "int32")
+        )
+        # Shape: (H, 1) * 3 + (1, W) -> (H, W), values in 0..8
+        region = (
+            ops.expand_dims(row_id, axis=-1) * 3
+            + ops.expand_dims(col_id, axis=0)
+        )
+
+        # Shape: (H, W) -> (1, H, W, 1) -> (num_windows, ws, ws, 1)
+        region_windows = window_partition(
+            ops.reshape(ops.cast(region, "float32"), (1, height, width, 1)),
+            ws,
+        )
+        # Shape: (num_windows, ws, ws, 1) -> (num_windows, ws*ws)
+        region_windows = ops.reshape(region_windows, (-1, ws * ws))
+
+        # Shape: (nw, ws*ws, 1) == (nw, 1, ws*ws) -> (nw, ws*ws, ws*ws)
+        keep = ops.cast(
+            ops.equal(
+                ops.expand_dims(region_windows, axis=-1),
+                ops.expand_dims(region_windows, axis=-2),
+            ),
+            "int32",
+        )
+
+        # Tile over the batch in the SAME order `window_partition` folds it:
+        # B-major / window-minor (assumption A3, `utils/tensors.py:431-435`).
+        # Shape: (B, 1, 1, 1) * (1, nw, ws*ws, ws*ws) -> (B, nw, ws*ws, ws*ws)
+        keep = ops.ones((batch_size, 1, 1, 1), dtype="int32") * ops.expand_dims(
+            keep, axis=0
+        )
+        return ops.reshape(keep, (-1, ws * ws, ws * ws))
+
+    def _resolve_shift_size(self, x: keras.KerasTensor) -> int:
+        """Resolve the shift actually applied to this input's geometry.
+
+        Returns ``self.shift_size`` in the normal case, and ``0`` when the
+        feature map is statically known to be exactly one window across.
+
+        :param x: The block's ``(B, H, W, C)`` input.
+        :type x: keras.KerasTensor
+        :return: The effective shift for this call: ``0`` or ``self.shift_size``.
+        :rtype: int
+        :raises ValueError: If ``shift_size > 0`` and a statically-known
+            ``H``/``W`` is strictly smaller than ``window_size``.
+        """
+        if self.shift_size == 0:
+            return 0
+
+        ws = self.window_size
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-006
+        # At a statically-known `H == window_size` (or `W == window_size`) the
+        # feature map is a SINGLE window, and this block follows the reference
+        # Swin rule: `if min(input_resolution) <= window_size: shift_size = 0`.
+        # The shift is dropped entirely -- no roll, no mask, plain full W-MSA.
+        #
+        # The single return value is deliberate: `call()` derives BOTH the roll
+        # and the mask from it, so they cannot desynchronize. A roll without a
+        # mask is exactly the F-01 bug this plan fixes; a mask without a roll is
+        # equally wrong.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT restore a `H < 2 * window_size` guard. Its premise -- that
+        #     the 3x3 region bands "degenerate" below that size -- was FALSIFIED
+        #     by measurement: `_build_swmsa_keep_mask` is array-equal to two
+        #     independent oracles at `(8,8,8,4)` and `(7,7,7,3)`. The guard
+        #     rejects provably correct geometry, and it crashed 9 passing tests
+        #     across `models/scunet` (8x8 bottleneck, ws=8) and
+        #     `models/swin_transformer` (7x7 stage 4, ws=7 -- canonical Swin-T
+        #     at 224x224). Because `window_partition` requires `H % ws == 0`, a
+        #     static `H < 2*ws` can only ever mean `H == ws`.
+        #   * Do NOT region-mask the single full window instead. It is a legal
+        #     mask, but it is not what upstream Swin does, and this block is
+        #     meant to be checkpoint-compatible with that lineage.
+        #   * Do NOT raise on a dynamic (`None`) dim. `models/thera/tails.py`
+        #     builds every Swin block with `(B, None, None, C)` on purpose; a
+        #     raise there trades a silent correctness bug for a dead model
+        #     (D-002, assumption A2). A dynamic dim that happens to be `ws` at
+        #     runtime therefore keeps the shift and gets the mask -- correct
+        #     attention, just not the upstream fallback, since the fallback is
+        #     by definition a static-resolution decision.
+        #   * Do NOT push this into `models/scunet` / `models/swin_transformer`
+        #     by passing `shift_size=0` there. That widens the blast radius and
+        #     leaves every future caller exposed to the same trap.
+        # ACCEPTED COST: not numerically neutral. `use_relative_position_bias`
+        # defaults to True, so dropping the roll changes which token sits at
+        # which within-window position and therefore changes the RPB pairing.
+        # `scunet` and `swin_transformer` numerics move at their `H == ws`
+        # stages. Accepted as an extension of invariant I5 (F-01 is
+        # deliberately not output-neutral).
+        # See decisions.md D-006 (plan-2026-07-31T042809-ddc92265).
+        single_window = False
+        for axis_name, axis_index in (("height", 1), ("width", 2)):
+            static_dim = x.shape[axis_index]
+            if static_dim is None:
+                continue
+            if static_dim < ws:
+                raise ValueError(
+                    f"SwinTransformerBlock(shift_size={self.shift_size}, "
+                    f"window_size={ws}) received {axis_name}={static_dim}, "
+                    f"which is smaller than window_size={ws}. A feature map "
+                    f"smaller than one window cannot be partitioned; enlarge "
+                    f"the feature map or reduce window_size."
+                )
+            if static_dim == ws:
+                single_window = True
+
+        return 0 if single_window else self.shift_size
+
     def call(
         self,
         x: keras.KerasTensor,
@@ -421,19 +616,33 @@ class SwinTransformerBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass of the SwinTransformerBlock.
 
+        When the effective shift is nonzero the block builds the SW-MSA
+        pairwise keep mask for the current (possibly dynamic) spatial extent
+        and passes it to the window attention, so tokens the cyclic roll
+        brought together from non-adjacent regions cannot attend to one
+        another. The effective shift comes from :meth:`_resolve_shift_size`,
+        which drops it to ``0`` on a statically-known single-window feature map
+        (D-006) — the roll and the mask are therefore always in agreement.
+
         :param x: Input tensor ``(B, H, W, C)``.
         :type x: keras.KerasTensor
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Output tensor ``(B, H, W, C)``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If input tensor is not 4-D.
+        :raises ValueError: If the input tensor is not 4-D, or if
+            ``shift_size > 0`` and a statically-known ``H``/``W`` is strictly
+            smaller than ``window_size``.
         """
         input_shape = ops.shape(x)
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape, got shape {input_shape}"
             )
+
+        # Single source of truth for this call's shift; both the roll and the
+        # mask below are derived from it (D-006).
+        shift = self._resolve_shift_size(x)
 
         B, H, W, C = input_shape[0], input_shape[1], input_shape[2], input_shape[3]
         shortcut = x
@@ -446,15 +655,18 @@ class SwinTransformerBlock(keras.layers.Layer):
         x = self.norm1(x, training=training)
 
         # Apply cyclic shift for shifted window attention
-        if self.shift_size > 0:
-            # Shift windows by (-shift_size, -shift_size)
+        if shift > 0:
+            # Shift windows by (-shift, -shift)
             shifted_x = ops.roll(
                 x,
-                shift=(-self.shift_size, -self.shift_size),
+                shift=(-shift, -shift),
                 axis=(1, 2)
             )
+            # SW-MSA pairwise keep mask, (B*num_windows, ws**2, ws**2).
+            attention_mask = self._build_swmsa_keep_mask(B, H, W)
         else:
             shifted_x = x
+            attention_mask = None
 
         # Partition into windows: (B, H, W, C) -> (B*num_windows, window_size, window_size, C)
         x_windows = window_partition(shifted_x, self.window_size)
@@ -465,8 +677,13 @@ class SwinTransformerBlock(keras.layers.Layer):
             (-1, self.window_size * self.window_size, C)
         )
 
-        # Apply window-based multi-head self-attention
-        attn_windows = self.attn(x_windows, training=training)
+        # Apply window-based multi-head self-attention. `attention_mask` is the
+        # rank-3 pairwise keep predicate (D-001 in the attention primitives);
+        # it is None for regular (unshifted) W-MSA, which keeps that path
+        # bit-identical to pre-mask behaviour (invariant I1).
+        attn_windows = self.attn(
+            x_windows, attention_mask=attention_mask, training=training
+        )
 
         # Reshape back to window format: (B*num_windows, window_size, window_size, C)
         attn_windows = ops.reshape(
@@ -478,10 +695,10 @@ class SwinTransformerBlock(keras.layers.Layer):
         x = window_reverse(attn_windows, self.window_size, H, W)
 
         # Reverse cyclic shift if it was applied
-        if self.shift_size > 0:
+        if shift > 0:
             x = ops.roll(
                 x,
-                shift=(self.shift_size, self.shift_size),
+                shift=(shift, shift),
                 axis=(1, 2)
             )
 

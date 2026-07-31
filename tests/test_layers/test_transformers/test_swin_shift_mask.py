@@ -306,10 +306,6 @@ class TestSwMsaLeakage:
     builds and wires the mask and removes the ``xfail`` marker below.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="F-01: SW-MSA mask not yet implemented, fixed in step 3",
-    )
     def test_no_cross_region_leakage_within_window(self):
         """Perturbing a region-A token must not move any same-window region-B token.
 
@@ -505,3 +501,227 @@ class TestSwinShiftMaskControls:
         # Values, not just shapes: a shape-only check passes with zero weights.
         np.testing.assert_allclose(original, restored, rtol=1e-6, atol=1e-6)
         assert np.abs(original).max() > 0.0
+
+
+# ---------------------------------------------------------------------------
+# 4. Mask-construction contract (plan step 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSwMsaMaskConstruction:
+    """The shipped mask, its degenerate-geometry guard and its dynamic shapes."""
+
+    def test_shipped_mask_equals_the_independent_oracle(self):
+        """``_build_swmsa_keep_mask`` must reproduce the wrap-status relation.
+
+        This compares the tensor the block actually feeds to its attention
+        against the oracle derived at the top of this module, window by window
+        and for both batch elements -- so a window-order (assumption A3) or
+        batch-tiling mistake, both of which are otherwise silent, shows up here.
+        """
+        block = _make_block(shift_size=SHIFT_SIZE)
+        mask = np.asarray(
+            ops.convert_to_numpy(
+                block._build_swmsa_keep_mask(BATCH, HEIGHT, WIDTH)
+            )
+        )
+
+        status, _, _ = wrap_status_windows(
+            HEIGHT, WIDTH, WINDOW_SIZE, SHIFT_SIZE
+        )
+        expected = _same_class(status).astype(mask.dtype)
+        num_windows = expected.shape[0]
+
+        assert mask.shape == (
+            BATCH * num_windows,
+            WINDOW_SIZE**2,
+            WINDOW_SIZE**2,
+        )
+        # B-major / window-minor: sample b occupies rows [b*nw, (b+1)*nw).
+        for sample in range(BATCH):
+            np.testing.assert_array_equal(
+                mask[sample * num_windows: (sample + 1) * num_windows],
+                expected,
+                err_msg=(
+                    f"Shipped SW-MSA mask disagrees with the independent "
+                    f"wrap-status oracle for batch element {sample}."
+                ),
+            )
+
+        # The mask must actually forbid something, and never forbid a token
+        # from attending to itself (which would hand the fully-masked-row
+        # rescue live work to do).
+        assert mask.min() == 0, "Mask forbids nothing -- it is dead."
+        eye = np.eye(WINDOW_SIZE**2, dtype=mask.dtype)
+        assert (mask * eye == eye).all(), "Mask forbids a self-attention pair."
+
+    def test_single_window_geometry_matches_shift_size_zero(self):
+        """A statically single-window feature map must behave as ``shift_size=0``.
+
+        This is decision D-006 and the reference Swin rule
+        (``if min(input_resolution) <= window_size: shift_size = 0``): at
+        ``H == W == window_size`` there is exactly one window, so the roll and
+        the mask are both dropped and the block degenerates to plain W-MSA.
+
+        The assertion is the sharpest one available -- bit-identity against an
+        independently constructed ``shift_size=0`` block carrying the *same*
+        weights -- rather than a weaker "does not raise". A block that rolled
+        but did not mask (the F-01 bug), or masked but did not roll, would
+        differ here.
+        """
+        rng = np.random.default_rng(SEED)
+        x = rng.standard_normal(
+            (BATCH, WINDOW_SIZE, WINDOW_SIZE, DIM)
+        ).astype("float32")
+
+        def _single_window_block(shift_size: int) -> SwinTransformerBlock:
+            keras.utils.set_random_seed(SEED)
+            block = SwinTransformerBlock(
+                dim=DIM,
+                num_heads=NUM_HEADS,
+                window_size=WINDOW_SIZE,
+                shift_size=shift_size,
+                dropout_rate=0.0,
+                attention_dropout_rate=0.0,
+                stochastic_depth_rate=0.0,
+            )
+            block.build((None, WINDOW_SIZE, WINDOW_SIZE, DIM))
+            return block
+
+        shifted = _single_window_block(SHIFT_SIZE)
+        unshifted = _single_window_block(0)
+
+        # Same weight layout is a precondition for the comparison to mean
+        # anything; assert it rather than assuming it.
+        assert [w.name for w in shifted.weights] == [
+            w.name for w in unshifted.weights
+        ]
+        for target, source in zip(shifted.weights, unshifted.weights):
+            target.assign(source)
+
+        np.testing.assert_allclose(
+            _forward(shifted, x), _forward(unshifted, x), rtol=0, atol=0,
+            err_msg=(
+                "A statically single-window shifted block must be bit-"
+                "identical to the same block with shift_size=0 (D-006)."
+            ),
+        )
+
+    def test_geometry_below_window_size_raises(self):
+        """A statically-known ``H``/``W`` *strictly* below ``window_size`` must fail."""
+        block = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+        )
+        too_small = ops.convert_to_tensor(
+            np.zeros((1, WINDOW_SIZE - 2, WINDOW_SIZE - 2, DIM), dtype="float32")
+        )
+        with pytest.raises(ValueError, match="smaller than window_size"):
+            block(too_small)
+
+    def test_dynamic_spatial_dims_never_raise(self):
+        """A dynamic (``None``) spatial dim must never hit the raise (D-002 / A2).
+
+        ``models/thera`` builds every Swin block with ``(B, None, None, C)``,
+        so a static-shape check that fired on ``None`` would kill it. Feeding
+        the single-window resolution through a dynamic graph exercises the one
+        case where the static path would have downgraded the shift: dynamically
+        the shift is kept and the mask carries the correctness instead.
+        """
+        keras.utils.set_random_seed(SEED)
+        inputs = keras.Input(shape=(None, None, DIM))
+        outputs = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+            name="dynamic_single_window_swin",
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        rng = np.random.default_rng(SEED)
+        x = rng.standard_normal(
+            (1, WINDOW_SIZE, WINDOW_SIZE, DIM)
+        ).astype("float32")
+        y = model.predict(x, verbose=0)
+        assert y.shape == x.shape
+        assert np.isfinite(y).all()
+
+    def test_single_window_geometry_is_allowed_without_shift(self):
+        """The raise is specific to ``shift_size > 0`` and must not fire otherwise."""
+        block = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=0,
+        )
+        small = ops.convert_to_tensor(
+            np.zeros((1, WINDOW_SIZE, WINDOW_SIZE, DIM), dtype="float32")
+        )
+        assert tuple(block(small).shape) == (1, WINDOW_SIZE, WINDOW_SIZE, DIM)
+
+    def test_dynamic_spatial_dims_are_supported(self):
+        """A block built with ``(B, None, None, C)`` must run at two resolutions.
+
+        This is the ``models/thera`` contract (plan assumption A2): the ``pro``
+        tail builds every Swin block with dynamic spatial dims and reflect-pads
+        H/W to a window-size multiple with symbolic amounts at call time. The
+        guard above must therefore stay silent on a ``None`` dim, and the mask
+        must be derived from the runtime shape.
+        """
+        keras.utils.set_random_seed(SEED)
+        inputs = keras.Input(shape=(None, None, DIM))
+        outputs = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+            name="dynamic_swin",
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        rng = np.random.default_rng(SEED)
+        for size in (HEIGHT, 3 * WINDOW_SIZE):
+            x = rng.standard_normal((1, size, size, DIM)).astype("float32")
+            y = model.predict(x, verbose=0)
+            assert y.shape == x.shape
+            assert np.isfinite(y).all()
+
+    def test_dynamic_build_matches_static_build(self):
+        """Dynamic-shape execution must produce the same numbers as static.
+
+        A mask derived from a *wrong* runtime shape would still be finite and
+        correctly shaped; only a comparison against the statically-shaped
+        reference can see it.
+        """
+        x = _probe_input()
+
+        keras.utils.set_random_seed(SEED)
+        static_block = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+        )
+        static_block.build((None, HEIGHT, WIDTH, DIM))
+
+        keras.utils.set_random_seed(SEED)
+        dynamic_block = SwinTransformerBlock(
+            dim=DIM,
+            num_heads=NUM_HEADS,
+            window_size=WINDOW_SIZE,
+            shift_size=SHIFT_SIZE,
+        )
+        dynamic_block.build((None, None, None, DIM))
+
+        for target, source in zip(
+            dynamic_block.weights, static_block.weights
+        ):
+            target.assign(source)
+
+        np.testing.assert_allclose(
+            _forward(dynamic_block, x), _forward(static_block, x),
+            rtol=0, atol=0,
+        )
