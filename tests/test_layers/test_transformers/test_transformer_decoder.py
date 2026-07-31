@@ -670,3 +670,221 @@ class TestMasklessSelfAttentionTypes:
                 use_causal_mask=False,
             )
         assert not any("causal" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# F-09 -- `layer_idx` forwarding through `TransformerDecoderLayer.call`
+# ---------------------------------------------------------------------------
+
+_F09_HIDDEN, _F09_HEADS, _F09_INTER = 32, 4, 64
+_F09_DEC_SEQ, _F09_ENC_SEQ, _F09_BATCH = 6, 5, 2
+_F09_HEAD_DIM = 8
+
+# 0 is `DifferentialMultiHeadAttention.call`'s OWN default -- the value that
+# silently ran at every stack depth before this fix -- so it is the shallow
+# end of the probe. 5 is deep enough that the schedule has visibly moved:
+# MEASURED `get_lambda(0) = 0.1600` vs `get_lambda(5) = 0.4954` (>3x).
+_F09_SHALLOW_IDX, _F09_DEEP_IDX = 0, 5
+
+
+def _f09_seed_non_zero_weights(layer: TransformerDecoderLayer, seed: int) -> None:
+    """Overwrite every built variable with seeded NON-ZERO values.
+
+    Default initializers put ZEROS in every bias and beta, which makes several
+    sub-paths structurally unobservable (prior-plan D-008). This assigns from a
+    seeded numpy RNG instead and asserts in-fixture that at least one bias is
+    genuinely non-zero.
+
+    `lambda_param` is deliberately EXCLUDED from the randomization and pinned to
+    the layer's own default `0.8`. `get_lambda` computes
+    ``clip(lambda_param * schedule(layer_idx), 0.1, 0.9)``, so a randomly drawn
+    negative or near-zero `lambda_param` would saturate the clip at `0.1` for
+    BOTH indices and make the depth-variance probe vacuous through no fault of
+    the code under test.
+    """
+    rng = np.random.default_rng(seed)
+    for w in layer.weights:
+        dtype = keras.backend.standardize_dtype(w.dtype)
+        if w.path.endswith('lambda_param'):
+            w.assign(np.full(w.shape, 0.8, dtype=dtype))
+        else:
+            w.assign(rng.normal(0.0, 0.35, size=w.shape).astype(dtype))
+
+    biases = [w for w in layer.weights if w.path.endswith(('bias', 'beta'))]
+    assert biases, "fixture found no bias/beta variables to seed"
+    assert any(np.any(np.asarray(b) != 0.0) for b in biases), (
+        "fixture failed: every bias is still zero, so bias-dependent paths "
+        "would be unobservable"
+    )
+
+
+def _f09_build_decoder(
+        normalization_position: str = 'post',
+        self_attention_type: str = 'differential',
+        seed: int = 1234,
+) -> TransformerDecoderLayer:
+    """Construct, BUILD (by one call) and seed a decoder layer."""
+    attention_args = (
+        {'head_dim': _F09_HEAD_DIM} if self_attention_type == 'differential' else {}
+    )
+    layer = TransformerDecoderLayer(
+        hidden_size=_F09_HIDDEN, num_heads=_F09_HEADS,
+        intermediate_size=_F09_INTER,
+        self_attention_type=self_attention_type,
+        attention_args=attention_args,
+        normalization_position=normalization_position,
+        dropout_rate=0.0, attention_dropout_rate=0.0,
+    )
+    x = np.zeros((_F09_BATCH, _F09_DEC_SEQ, _F09_HIDDEN), dtype='float32')
+    e = np.zeros((_F09_BATCH, _F09_ENC_SEQ, _F09_HIDDEN), dtype='float32')
+    layer(x, e, training=False)
+    _f09_seed_non_zero_weights(layer, seed)
+    return layer
+
+
+def _f09_inputs(seed: int = 7):
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(_F09_BATCH, _F09_DEC_SEQ, _F09_HIDDEN)).astype('float32')
+    e = rng.normal(size=(_F09_BATCH, _F09_ENC_SEQ, _F09_HIDDEN)).astype('float32')
+    return x, e
+
+
+class TestDecoderLayerIdxForwarding:
+    """F-09: the decoder must forward `layer_idx` to `differential` self-attention.
+
+    `TransformerDecoderLayer.call()` had NO `layer_idx` parameter at all, so
+    `DifferentialMultiHeadAttention.call()`'s own default `layer_idx=0` ran at
+    every stack depth and the per-layer lambda schedule was inert. The sibling
+    `TransformerLayer.call()` has accepted and forwarded `layer_idx` at both its
+    pre-norm and post-norm `differential` branches all along; this suite pins the
+    decoder to the same contract.
+
+    RED captures at `5500c6bc` (before the fix):
+
+    * mechanical -- `layer(x, e, layer_idx=5)` raised
+      ``ValueError: Arguments `target` and `attr` must have the same structure``
+      from Keras' own kwarg handling, NOT the predicted
+      ``TypeError: unexpected keyword argument``. The CLASS of failure held
+      (the parameter does not exist); the predicted type did not.
+    * behavioural -- two identically-weighted decoders at `layer_idx` 0 vs 5
+      produced `np.allclose(out0, out5) == True`, max |diff| exactly `0.0`:
+      the decoder was provably depth-invariant.
+
+    NOTE for future readers: `TransformerDecoderLayer` has ZERO production
+    consumers, so nothing in `src/` currently builds a stack that would supply a
+    real per-layer index. The forwarding is correct but unexercised outside these
+    tests; a future stack builder must pass its own loop index.
+    """
+
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    def test_call_accepts_layer_idx(self, normalization_position):
+        """MECHANICAL: the parameter must exist at all (RED-today by itself)."""
+        layer = _f09_build_decoder(normalization_position)
+        x, e = _f09_inputs()
+        out = np.asarray(layer(x, e, layer_idx=_F09_DEEP_IDX, training=False))
+        assert out.shape == (_F09_BATCH, _F09_DEC_SEQ, _F09_HIDDEN)
+        assert np.all(np.isfinite(out))
+
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    def test_depth_changes_the_output(self, normalization_position):
+        """BEHAVIOURAL (SC-8): two IDENTICALLY-weighted decoders at different
+        depths must produce DIFFERENT outputs.
+
+        Weights are copied with `set_weights` rather than re-seeded, because
+        `keras.utils.set_random_seed` does NOT reproduce a subsequent
+        `keras.random.*` draw on this backend (measured at step 4) -- two layers
+        built under the same seed are not guaranteed identical.
+        """
+        shallow = _f09_build_decoder(normalization_position, seed=1234)
+        deep = _f09_build_decoder(normalization_position, seed=4321)
+        deep.set_weights(shallow.get_weights())
+
+        x, e = _f09_inputs()
+        out_shallow = np.asarray(
+            shallow(x, e, layer_idx=_F09_SHALLOW_IDX, training=False))
+        out_deep = np.asarray(
+            deep(x, e, layer_idx=_F09_DEEP_IDX, training=False))
+
+        max_diff = float(np.max(np.abs(out_shallow - out_deep)))
+        assert not np.allclose(out_shallow, out_deep), (
+            f"decoder output is depth-INVARIANT (max |diff| = {max_diff:.3e}): "
+            f"layer_idx={_F09_DEEP_IDX} produced the same result as "
+            f"layer_idx={_F09_SHALLOW_IDX}, so the per-layer lambda schedule is "
+            f"not reaching the differential attention"
+        )
+
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    def test_same_depth_is_identical(self, normalization_position):
+        """CONTROL: the difference above must come from `layer_idx`, not from
+        the two layers holding different weights."""
+        a = _f09_build_decoder(normalization_position, seed=1234)
+        b = _f09_build_decoder(normalization_position, seed=4321)
+        b.set_weights(a.get_weights())
+
+        x, e = _f09_inputs()
+        out_a = np.asarray(a(x, e, layer_idx=_F09_DEEP_IDX, training=False))
+        out_b = np.asarray(b(x, e, layer_idx=_F09_DEEP_IDX, training=False))
+        np.testing.assert_allclose(out_a, out_b, rtol=1e-6, atol=1e-6)
+
+    def test_the_lambda_schedule_itself_moves(self):
+        """ORACLE: pins the magnitude the decoder is supposed to be exposing.
+
+        If this ever goes flat, `test_depth_changes_the_output` would be
+        measuring nothing even with the forwarding correct.
+        """
+        layer = _f09_build_decoder('post')
+        lam0 = float(np.asarray(layer.self_attention.get_lambda(_F09_SHALLOW_IDX)))
+        lam5 = float(np.asarray(layer.self_attention.get_lambda(_F09_DEEP_IDX)))
+        assert abs(lam5 - lam0) > 0.1, (
+            f"lambda schedule is flat: get_lambda({_F09_SHALLOW_IDX})={lam0:.4f} "
+            f"vs get_lambda({_F09_DEEP_IDX})={lam5:.4f}"
+        )
+
+    def test_layer_idx_is_accepted_by_a_non_differential_type(self):
+        """`layer_idx` is a uniform `call()` parameter, as on `TransformerLayer`:
+        a type that has no use for it must ignore it, not crash."""
+        layer = _f09_build_decoder('post', self_attention_type='multi_head')
+        x, e = _f09_inputs()
+        out = np.asarray(layer(x, e, layer_idx=_F09_DEEP_IDX, training=False))
+        assert out.shape == (_F09_BATCH, _F09_DEC_SEQ, _F09_HIDDEN)
+        assert np.all(np.isfinite(out))
+
+    def test_symbolic_trace_honours_layer_idx(self):
+        """The new parameter must work under a real `tf.function` trace with a
+        dynamic batch/sequence, not only eagerly.
+
+        `layer_idx` is a PYTHON int baked into the trace (exactly as on
+        `TransformerLayer`), so the two traces below are two different concrete
+        functions -- which is precisely what must be exercised.
+        """
+        shallow = _f09_build_decoder('post', seed=1234)
+        deep = _f09_build_decoder('post', seed=4321)
+        deep.set_weights(shallow.get_weights())
+
+        spec = [
+            tf.TensorSpec(shape=[None, None, _F09_HIDDEN], dtype=tf.float32),
+            tf.TensorSpec(shape=[None, None, _F09_HIDDEN], dtype=tf.float32),
+        ]
+        fn_shallow = tf.function(
+            lambda x, e: shallow(x, e, layer_idx=_F09_SHALLOW_IDX, training=False),
+            input_signature=spec)
+        fn_deep = tf.function(
+            lambda x, e: deep(x, e, layer_idx=_F09_DEEP_IDX, training=False),
+            input_signature=spec)
+
+        x, e = _f09_inputs()
+        out_shallow = np.asarray(fn_shallow(x, e))
+        out_deep = np.asarray(fn_deep(x, e))
+
+        assert out_shallow.shape == (_F09_BATCH, _F09_DEC_SEQ, _F09_HIDDEN)
+        assert np.all(np.isfinite(out_deep))
+        max_diff = float(np.max(np.abs(out_shallow - out_deep)))
+        assert not np.allclose(out_shallow, out_deep), (
+            f"symbolic path is depth-INVARIANT (max |diff| = {max_diff:.3e})"
+        )
+
+    def test_layer_idx_is_not_a_constructor_parameter(self):
+        """I7: `layer_idx` is a `call()` argument. It must NOT leak into
+        `get_config()`, which would change the serialized surface."""
+        layer = _f09_build_decoder('post')
+        assert 'layer_idx' not in layer.get_config()

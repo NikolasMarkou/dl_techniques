@@ -333,6 +333,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             encoder_output: keras.KerasTensor,
             self_attention_mask: Optional[keras.KerasTensor] = None,
             cross_attention_mask: Optional[keras.KerasTensor] = None,
+            layer_idx: int = 0,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass.
@@ -342,6 +343,26 @@ class TransformerDecoderLayer(keras.layers.Layer):
         :param self_attention_mask: Optional keep-mask ``(B, T, T)``. If None and
             ``use_causal_mask`` is True, a causal mask is generated.
         :param cross_attention_mask: Optional keep-mask ``(B, T, S)`` for cross-attn.
+        :param layer_idx: 0-based index of this layer in the decoder stack. Only
+            ``self_attention_type='differential'`` consumes it, for the paper's
+            per-layer lambda schedule
+            (``clip(lambda_param * (0.8 - 0.6*exp(-0.3*max(idx-1, 0))), 0.1, 0.9)``);
+            every other type ignores it. It is a ``call()`` argument, NOT a
+            constructor parameter, and therefore does not appear in
+            :meth:`get_config` -- mirroring
+            :meth:`TransformerLayer.call`, which has carried the same parameter
+            all along.
+
+            .. warning::
+               **The caller owns this value.** Leaving it at the default ``0``
+               makes an entire stack of ``differential`` decoder layers share one
+               lambda and be provably depth-invariant, which is exactly the defect
+               this parameter closed (MEASURED before the fix: two
+               identically-weighted layers differed by ``0.0`` while
+               ``get_lambda(0) = 0.1600`` vs ``get_lambda(5) = 0.4954``).
+               ``TransformerDecoderLayer`` has no stack builder in this repo
+               today, so nothing supplies a real index yet; any future stack must
+               pass its own loop index here.
         :param training: Training mode flag.
         :return: Decoder output ``(B, T, H)``.
         """
@@ -354,7 +375,12 @@ class TransformerDecoderLayer(keras.layers.Layer):
             # 1. Self-attention
             residual = inputs
             x = self.self_attention_norm(inputs, training=training)
-            if self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
+            # Branch order mirrors `TransformerLayer.call` exactly (DRY): the
+            # `differential` type is the ONE type that takes `layer_idx`.
+            if self.self_attention_type == 'differential':
+                x = self.self_attention(
+                    x, attention_mask=self_mask, layer_idx=layer_idx, training=training)
+            elif self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
                 x = self.self_attention(x, training=training)
             else:
                 x = self.self_attention(x, attention_mask=self_mask, training=training)
@@ -375,7 +401,13 @@ class TransformerDecoderLayer(keras.layers.Layer):
         else:
             # 1. Self-attention
             residual = inputs
-            if self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
+            # Same three-way branch as the pre-norm path above; `call()` has TWO
+            # self-attention call sites and a fix applied to only one of them
+            # leaves the default `normalization_position` broken.
+            if self.self_attention_type == 'differential':
+                x = self.self_attention(
+                    inputs, attention_mask=self_mask, layer_idx=layer_idx, training=training)
+            elif self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
                 x = self.self_attention(inputs, training=training)
             else:
                 x = self.self_attention(inputs, attention_mask=self_mask, training=training)
