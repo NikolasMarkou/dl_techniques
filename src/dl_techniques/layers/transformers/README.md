@@ -495,7 +495,8 @@ outputs = eomt_layer(inputs={'inputs': inputs, 'mask': masks}, training=True)
 | ------------------------ | ------- | ------------------------------------------------------------------------------ | ------------ |
 | `hidden_size`            | `int`   | **Required.** The dimensionality of the input and output embeddings.           |              |
 | `num_heads`              | `int`   | The number of attention heads.                                                 | `8`          |
-| `use_masked_attention`   | `bool`  | If `True`, enables the segmentation-specific masked attention mechanism.       | `False`      |
+| `attention_type`         | `str`   | Factory key for the attention sub-block. Must be maskable when `use_masked_attention=True`: `'fnet'`, `'anchor'` and `'lighthouse'` take no attention mask and are rejected in that combination. | `'multi_head'` |
+| `use_masked_attention`   | `bool`  | If `True`, enables the segmentation-specific masked attention mechanism. Raises a `ValueError` if `attention_type` is one of the maskless types listed above. | `False`      |
 | `mask_probability`       | `float` | The probability of applying the mask during a training step.                   | `1.0`        |
 | `mask_annealing_steps`   | `int`   | Linearly anneals the mask probability from 0 to its target value over these steps. | `0`          |
 | `...`                    |         | Inherits all other arguments from `TransformerLayer` (e.g., `ffn_type`).       |              |

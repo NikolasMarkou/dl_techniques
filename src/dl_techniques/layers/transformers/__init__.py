@@ -29,7 +29,8 @@ Specialized and Hybrid Blocks:
 - PerceiverTransformerLayer: A block implementing Perceiver-style
   cross-attention for handling very large input sequences.
 - EomtTransformer: A specialized layer for instance segmentation that
-  uses masked self-attention with object queries.
+  uses masked self-attention with object queries. `use_masked_attention=True`
+  requires a maskable `attention_type` (not 'fnet'/'anchor'/'lighthouse').
 - AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
   conditional transformer block; norms/attention/FFN/AdaLN activation are
   factory-configurable.

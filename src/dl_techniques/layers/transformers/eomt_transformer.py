@@ -138,7 +138,10 @@ class EomtTransformer(keras.layers.Layer):
     :type activation: Union[str, keras.layers.Activation]
     :param use_bias: Whether layers use bias. Default: True.
     :type use_bias: bool
-    :param use_masked_attention: Enable segmentation masked attention.
+    :param use_masked_attention: Enable segmentation masked attention. Requires
+        a maskable ``attention_type``; combining it with ``'fnet'``,
+        ``'anchor'`` or ``'lighthouse'`` raises, because those attention layers
+        accept no ``attention_mask``.
     :type use_masked_attention: bool
     :param mask_probability: Probability of applying mask. Default: 1.0.
     :type mask_probability: float
@@ -154,7 +157,23 @@ class EomtTransformer(keras.layers.Layer):
     :type bias_regularizer: Optional[regularizers.Regularizer]
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
+
+    :raises ValueError: If ``use_masked_attention`` is True while
+        ``attention_type`` is one of :attr:`_MASKLESS_ATTENTION_TYPES` --
+        those attention layers take no ``attention_mask``, so the keep-mask
+        this layer builds could never reach them.
     """
+
+    # Attention types whose `call()` takes NO `attention_mask`, so
+    # `TransformerLayer.call` drops the mask argument entirely for them. This
+    # is an ALIAS, deliberately not a re-declaration: `TransformerLayer` owns
+    # the set, and a locally written `frozenset({...})` would compare EQUAL
+    # today and then silently drift the day a fourth maskless type is added on
+    # one side only -- at which point the guard below would stop firing for it.
+    # `TransformerDecoderLayer` aliases it the same way for the same reason,
+    # and `TestMasklessSelfAttentionTypes` there asserts object identity, not
+    # equality, precisely to catch a re-declaration.
+    _MASKLESS_ATTENTION_TYPES = TransformerLayer._MASKLESS_ATTENTION_TYPES
 
     def __init__(
             self,
@@ -225,6 +244,26 @@ class EomtTransformer(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+
+        if self.use_masked_attention and self.attention_type in self._MASKLESS_ATTENTION_TYPES:
+            # A RAISE, not a warning -- unlike `TransformerDecoderLayer`, whose
+            # conflicting flag (`use_causal_mask=True`) is the DEFAULT and is
+            # therefore reached passively, BOTH flags here are non-default
+            # opt-ins (`use_masked_attention=False`, `attention_type='multi_head'`).
+            # A caller must explicitly ask for both to land here, so there is no
+            # passive path to protect and nothing is served by continuing: the
+            # `(B, seq, seq)` keep-mask built in `_compute_attention_keep_mask`
+            # would be handed to `TransformerLayer.call`, which drops the
+            # `attention_mask` argument for these types, making the whole
+            # masked-attention feature a silent no-op.
+            raise ValueError(
+                f"use_masked_attention=True requires a maskable attention_type, "
+                f"but attention_type='{self.attention_type}' takes no attention "
+                f"mask: the segmentation keep-mask would be built and then "
+                f"silently discarded. Choose an attention_type outside "
+                f"{sorted(self._MASKLESS_ATTENTION_TYPES)}, or pass "
+                f"use_masked_attention=False to run this mixer unmasked."
+            )
 
         # Training step counter for mask annealing (set as keras.Variable in build())
         self.current_step = None  # set in build()
