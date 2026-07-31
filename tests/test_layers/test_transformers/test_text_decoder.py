@@ -153,14 +153,20 @@ class TestTextDecoder:
         assert not hasattr(decoder, 'word_embeddings')
 
     def test_all_embedding_types(self, basic_config):
-        """Test all embedding type configurations."""
-        embedding_types = ['learned', 'shared', 'factorized']
+        """Test all embedding type configurations.
+
+        F-11: `'shared'` was removed from this list -- it is now rejected in
+        `__init__` (it was an unimplemented alias of `'learned'`). Its
+        replacement coverage lives in `TestSharedEmbeddingTypeIsRejected` at
+        the end of this file.
+        """
+        embedding_types = ['learned', 'factorized']
 
         for embedding_type in embedding_types:
             config = {**basic_config, 'embedding_type': embedding_type}
             decoder = TextDecoder(**config)
 
-            if embedding_type in ['learned', 'shared']:
+            if embedding_type == 'learned':
                 assert hasattr(decoder, 'word_embeddings')
                 assert not hasattr(decoder, 'factorized_embed_layer')
             elif embedding_type == 'factorized':
@@ -722,3 +728,110 @@ class TestTextDecoder:
         finally:
             # Restore original policy
             keras.mixed_precision.set_global_policy(original_policy)
+
+# ===============================================
+# F-11 -- `embedding_type='shared'` is rejected
+# ===============================================
+
+class TestSharedEmbeddingTypeIsRejected:
+    """F-11: `'shared'` was dead code -- `_create_word_embeddings` took the
+    literally identical ``if self.embedding_type in ['learned', 'shared']:``
+    branch for both values, with no tying mechanism and no accessor.
+
+    MEASURED before the fix (seeded, weights copied from the `'learned'`
+    instance onto the `'shared'` one): 18 weights vs 18 weights, shapes
+    identical, **0 differing output elements**, ``max|delta| = 0.0``, no
+    tying accessor anywhere on the instance. The two values named the same
+    layer.
+
+    Real tying is not merely unbuilt here, it is structurally inapplicable:
+    `TextDecoder` has no output/LM-head projection to tie the embedding TO
+    (`call()` returns raw hidden states ``(B, seq, embed_dim)``; the only
+    `Dense` in the file is the factorized path's ``embed_projection``, which
+    maps ``factorized_dim -> embed_dim``, not ``embed_dim -> vocab_size``).
+    The repo's genuine tying sites -- `models/masked_language_model/clm.py`,
+    `models/gpt2/gpt2.py`, `models/nano_vlm/model.py` -- all tie to an output
+    projection the MODEL owns, which is where tying belongs.
+    """
+
+    @pytest.fixture
+    def cfg(self) -> Dict[str, Any]:
+        return {
+            'vocab_size': 200,
+            'embed_dim': 16,
+            'depth': 1,
+            'num_heads': 2,
+            'max_seq_len': 8,
+        }
+
+    @pytest.fixture
+    def ids(self) -> keras.KerasTensor:
+        rng = np.random.default_rng(20260731)
+        return ops.convert_to_tensor(
+            rng.integers(0, 200, size=(2, 8)).astype('int32')
+        )
+
+    def test_shared_raises_and_says_why(self, cfg):
+        """The raise must name the legal values AND the reason, not just refuse."""
+        with pytest.raises(ValueError) as exc:
+            TextDecoder(**cfg, embedding_type='shared')
+        message = str(exc.value)
+        assert "'shared'" in message
+        assert "'learned'" in message and "'factorized'" in message
+        # The WHY, not just the WHAT: there is no output projection to tie to.
+        assert "tie" in message.lower()
+
+    @pytest.mark.parametrize("embedding_type", ['learned', 'factorized'])
+    def test_legal_embedding_types_still_construct_and_run(self, cfg, ids, embedding_type):
+        """NEGATIVE CONTROL: a guard that rejects too much is as wrong as one
+        that rejects too little. Every remaining legal value must still run."""
+        decoder = TextDecoder(**cfg, embedding_type=embedding_type)
+        out = decoder(ids, training=False)
+        assert out.shape == (2, 8, cfg['embed_dim'])
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("embedding_type", ['learned', 'factorized'])
+    def test_legal_embedding_types_survive_the_keras_round_trip(
+            self, cfg, ids, embedding_type
+    ):
+        """`embedding_type` is a `get_config()` key, so a reloaded layer runs
+        `__init__` again and re-executes the new raise. Prove the guard does
+        not break deserialization for the values it permits."""
+        inputs = layers.Input(shape=(8,), dtype='int32')
+        outputs = TextDecoder(**cfg, embedding_type=embedding_type)(inputs)
+        model = models.Model(inputs, outputs)
+        original = ops.convert_to_numpy(model(ids, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, f"decoder_{embedding_type}.keras")
+            model.save(filepath)
+            loaded = models.load_model(filepath)
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(loaded(ids, training=False)),
+                original, rtol=1e-6, atol=1e-6,
+            )
+
+    def test_unknown_embedding_type_is_still_rejected(self, cfg):
+        """The pre-existing enumeration guard must survive the F-11 change --
+        `'shared'` is now rejected as an ILLEGAL value, not special-cased into
+        a branch that silently accepts anything else."""
+        with pytest.raises(ValueError, match="embedding_type"):
+            TextDecoder(**cfg, embedding_type='bogus')
+
+    def test_no_from_config_compatibility_shim_maps_shared(self, cfg):
+        """SCOPE PIN: no shipped checkpoint uses `'shared'` (grep-clean), so no
+        `'shared' -> 'learned'` load-time mapping was added. If one is ever
+        added on positive checkpoint evidence, this pin is the site to flip --
+        deliberately, with a decision entry, not as a silent widening.
+
+        MEASURED: `keras.src.ops.operation.Operation.from_config` catches the
+        constructor's exception and re-raises it as a `TypeError` ("Error when
+        deserializing class 'TextDecoder' using config=...") with the original
+        message appended, so the TYPE seen here is `TypeError`, not the
+        `ValueError` `__init__` actually raised. Assert on the MESSAGE, which
+        survives the wrapping, rather than on the type."""
+        config = TextDecoder(**cfg, embedding_type='learned').get_config()
+        config['embedding_type'] = 'shared'
+        with pytest.raises((ValueError, TypeError)) as exc:
+            TextDecoder.from_config(config)
+        assert "embedding_type='shared' is not supported" in str(exc.value)

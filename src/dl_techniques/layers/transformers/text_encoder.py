@@ -104,7 +104,9 @@ from .transformer import TransformerLayer, AttentionType, NormalizationPositionT
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-EmbeddingType = Literal['learned', 'shared', 'factorized']
+# F-11: 'shared' is NOT a member -- it was dead code (an alias of 'learned' with
+# no tying mechanism) and is now rejected in __init__. See the raise there.
+EmbeddingType = Literal['learned', 'factorized']
 PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
 
 # ---------------------------------------------------------------------
@@ -167,7 +169,10 @@ class TextEncoder(keras.layers.Layer):
     :type mlp_ratio: float
     :param max_seq_len: Maximum sequence length. Default: 512.
     :type max_seq_len: int
-    :param embedding_type: Word embedding strategy. Default: ``'learned'``.
+    :param embedding_type: Word embedding strategy, ``'learned'`` or
+        ``'factorized'``. Default: ``'learned'``. ``'shared'`` (a tied
+        input/output embedding) is REJECTED: this layer has no output
+        projection to tie to -- do the tying in the model that owns one.
     :type embedding_type: EmbeddingType
     :param positional_type: Positional encoding strategy. Default: ``'learned'``.
     :type positional_type: PositionalType
@@ -226,7 +231,8 @@ class TextEncoder(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
 
-    :raises ValueError: If dimension parameters are invalid.
+    :raises ValueError: If dimension parameters are invalid, or if
+        ``embedding_type`` is not one of ``'learned'`` / ``'factorized'``.
     """
 
     def __init__(
@@ -298,6 +304,46 @@ class TextEncoder(keras.layers.Layer):
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
         if layer_norm_eps <= 0:
             raise ValueError(f"layer_norm_eps must be positive, got {layer_norm_eps}")
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-017
+        # Do NOT "fix" this by implementing tying here, and do NOT add a
+        # from_config 'shared' -> 'learned' compatibility shim. There is no
+        # output projection in this class to tie to (see below), and no shipped
+        # checkpoint uses 'shared' (grep-clean at 2026-07-31) -- a shim would be
+        # untested surface guarding a file that does not exist. If positive
+        # checkpoint evidence ever appears, flip the scope pin
+        # tests/.../test_text_encoder.py::TestSharedEmbeddingTypeIsRejected::
+        # test_no_from_config_compatibility_shim_maps_shared deliberately.
+        #
+        # F-11: 'shared' used to be accepted here and took the LITERALLY IDENTICAL
+        # branch as 'learned' in _create_embedding_layers -- no tying mechanism, no
+        # accessor, measurably 0 differing output elements between the two. It is
+        # rejected rather than implemented because tying is structurally
+        # inapplicable to this class: TextEncoder has no output/vocabulary
+        # projection to tie the embedding TO (the only Dense here is the
+        # factorized path's embed_projection, factorized_dim -> embed_dim). Weight
+        # tying belongs in the MODEL that owns the vocabulary projection -- see
+        # models/masked_language_model/clm.py (tie_weights), models/gpt2/gpt2.py
+        # and models/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
+        # they build themselves.
+        #
+        # The second check is not redundant: _create_embedding_layers routes
+        # everything that is not 'learned'/'shared' into its `else:  # factorized`
+        # branch, so before this guard a typo silently built a FACTORIZED
+        # embedding instead of failing.
+        if embedding_type == 'shared':
+            raise ValueError(
+                "embedding_type='shared' is not supported: TextEncoder has no "
+                "output/vocabulary projection to tie the word embedding to, so "
+                "there is nothing to share with. Use 'learned' here and perform "
+                "the tying in the model that owns the output projection (see "
+                "models/masked_language_model/clm.py's tie_weights). "
+                "Legal values: 'learned', 'factorized'."
+            )
+        if embedding_type not in ('learned', 'factorized'):
+            raise ValueError(
+                f"embedding_type must be one of 'learned', 'factorized', "
+                f"got {embedding_type!r}"
+            )
         if not use_cls_token and output_mode == 'cls':
             raise ValueError("output_mode='cls' requires use_cls_token=True")
         if positional_type in ['rope', 'dual_rope'] and rope_theta <= 0:
@@ -444,7 +490,7 @@ class TextEncoder(keras.layers.Layer):
         self.factorized_embed_layer = None
         self.embed_projection_layer = None
 
-        if self.embedding_type in ['learned', 'shared']:
+        if self.embedding_type == 'learned':
             self.word_embeddings = layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=self.embed_dim,

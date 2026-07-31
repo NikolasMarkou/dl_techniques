@@ -176,7 +176,7 @@ This layer implements the encoder-side of the Transformer architecture, famously
 
 ### Architectural Highlights
 
--   **Configurable Embeddings**: Supports multiple strategies for both word embeddings (`learned`, `shared`, `factorized`) and positional encodings (`learned`, `rope`, `sincos`), enabling the construction of both classic and modern architectures.
+-   **Configurable Embeddings**: Supports multiple strategies for both word embeddings (`learned`, `factorized`) and positional encodings (`learned`, `rope`, `sincos`), enabling the construction of both classic and modern architectures.
 -   **Token Type Support**: Includes optional support for token type (segment) embeddings, essential for tasks involving multiple text segments, such as sentence-pair classification or question answering.
 -   **Factory-Based Composition**: Built upon a stack of `TransformerLayer` blocks, inheriting their full configurability for attention, normalization, and FFN mechanisms.
 -   **Flexible Output Modes**: Integrated with a `SequencePooling` layer to provide various output formats suitable for different downstream tasks, such as using the `[CLS]` token for classification or mean pooling for sentence embeddings.
@@ -235,11 +235,13 @@ mean_pooled_output = modern_encoder(keras.random.randint(0, 50000, shape=(2, 256
 | `depth`                    | `int`   | The number of `TransformerLayer` blocks in the encoder stack.                              | `12`        |
 | `num_heads`                | `int`   | The number of attention heads in each `TransformerLayer`.                                  | `12`        |
 | `max_seq_len`              | `int`   | The maximum sequence length the model can process.                                       | `512`       |
-| `embedding_type`           | `str`   | The word embedding strategy: `'learned'`, `'shared'`, or `'factorized'`.                   | `'learned'` |
+| `embedding_type`           | `str`   | The word embedding strategy: `'learned'` or `'factorized'`. `'shared'` raises — see below. | `'learned'` |
 | `positional_type`          | `str`   | The positional encoding strategy: `'learned'`, `'rope'`, `'sincos'`, etc.                  | `'learned'` |
 | `use_token_type_embedding` | `bool`  | If `True`, adds token type (segment) embeddings.                                         | `False`     |
 | `use_cls_token`            | `bool`  | If `True`, prepends a learnable `[CLS]` token to the sequence.                             | `False`     |
 | `output_mode`              | `str`   | The pooling strategy for the final output: `'cls'`, `'mean'`, `'none'`, etc.               | `'none'`    |
+
+> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextEncoder` has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/masked_language_model/clm.py`'s `tie_weights`).
 
 ## TextDecoder
 
@@ -252,7 +254,7 @@ This layer implements the decoder-side of the Transformer architecture, which fo
 ### Architectural Highlights
 
 -   **Automatic Causal Masking**: The layer automatically generates and applies the necessary causal mask to the self-attention mechanism, ensuring the autoregressive property is maintained. It can also seamlessly combine this with a user-provided padding mask.
--   **Configurable Embeddings**: Supports multiple strategies for both word embeddings (`learned`, `shared`, `factorized`) and positional encodings (`learned`, `sincos`).
+-   **Configurable Embeddings**: Supports multiple strategies for both word embeddings (`learned`, `factorized`) and positional encodings (`learned`, `sincos`).
 -   **Factory-Based Composition**: Built upon a stack of `TransformerLayer` blocks, inheriting their full configurability for attention, normalization, and FFN mechanisms.
 -   **Designed for Generation**: The output is the full sequence of contextually-aware token representations, which can be directly fed into a final linear layer to produce logits for next-token prediction.
 
@@ -306,8 +308,10 @@ output_features_modern = modern_decoder(keras.random.randint(0, 32000, shape=(2,
 | `depth`         | `int` | **Required.** The number of `TransformerLayer` blocks in the decoder stack.              |             |
 | `num_heads`     | `int` | **Required.** The number of attention heads in each `TransformerLayer`.                    |             |
 | `max_seq_len`   | `int` | The maximum sequence length for positional embeddings.                                   | `512`       |
-| `embedding_type`| `str` | The word embedding strategy: `'learned'`, `'shared'`, or `'factorized'`.                   | `'learned'` |
+| `embedding_type`| `str` | The word embedding strategy: `'learned'` or `'factorized'`. `'shared'` raises — see below. | `'learned'` |
 | `positional_type`| `str` | The positional encoding strategy: `'learned'` or `'sincos'`.                             | `'learned'` |
+
+> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextDecoder` returns raw hidden states `(B, seq, embed_dim)` and has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/masked_language_model/clm.py`'s `tie_weights`).
 
 ## Specialized and Hybrid Blocks
 

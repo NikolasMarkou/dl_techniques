@@ -114,7 +114,10 @@ class TestTextEncoder:
         assert not encoder.use_cls_token
         assert not encoder.use_token_type_embedding
 
-    @pytest.mark.parametrize("embedding_type", ['learned', 'shared', 'factorized'])
+    # F-11: 'shared' was removed from this parametrization -- it is now rejected
+    # in __init__ (it was an unimplemented alias of 'learned'). Its replacement
+    # coverage lives in TestSharedEmbeddingTypeIsRejected at the end of the file.
+    @pytest.mark.parametrize("embedding_type", ['learned', 'factorized'])
     def test_initialization_embedding_types(self, basic_config, embedding_type):
         """Tests initialization with different embedding types."""
         config = {**basic_config, 'embedding_type': embedding_type}
@@ -1128,3 +1131,109 @@ class TestFormerlyBrokenPoolingStrategies:
         rebuilt = TextEncoder.from_config(encoder.get_config())
         assert rebuilt.output_mode == output_mode
         assert rebuilt.pooling_layer.strategy == encoder.pooling_layer.strategy
+
+
+# ===============================================
+# F-11 -- `embedding_type='shared'` is rejected
+# ===============================================
+
+class TestSharedEmbeddingTypeIsRejected:
+    """F-11: `'shared'` was dead code -- `_create_embedding_layers` took the
+    literally identical ``if self.embedding_type in ['learned', 'shared']:``
+    branch for both values, with no tying mechanism and no accessor.
+
+    MEASURED before the fix (seeded, weights copied from the `'learned'`
+    instance onto the `'shared'` one): 16 weights vs 16 weights, shapes
+    identical, **0 differing output elements**, ``max|delta| = 0.0``, no
+    tying accessor anywhere on the instance.
+
+    Real tying is not merely unbuilt here, it is structurally inapplicable:
+    `TextEncoder` has no output/LM-head projection to tie the embedding TO
+    (`call()` returns hidden states / a pooled vector, never vocabulary
+    logits; the only `Dense` in the file is the factorized path's
+    ``embed_projection``). The repo's genuine tying sites all tie to an
+    output projection the MODEL owns, which is where tying belongs.
+
+    `TextEncoder` additionally had NO `embedding_type` enumeration check at
+    all -- `_create_embedding_layers` routed every non-`'learned'`/`'shared'`
+    value into the ``else:  # factorized`` branch, so a typo silently built a
+    factorized embedding. The F-11 raise closes that too.
+    """
+
+    @pytest.fixture
+    def cfg(self) -> Dict[str, Any]:
+        return {
+            'vocab_size': 200,
+            'embed_dim': 16,
+            'depth': 1,
+            'num_heads': 2,
+            'max_seq_len': 8,
+        }
+
+    @pytest.fixture
+    def ids(self) -> tf.Tensor:
+        rng = np.random.default_rng(20260731)
+        return tf.constant(rng.integers(0, 200, size=(2, 8)).astype('int32'))
+
+    def test_shared_raises_and_says_why(self, cfg):
+        """The raise must name the legal values AND the reason, not just refuse."""
+        with pytest.raises(ValueError) as exc:
+            TextEncoder(**cfg, embedding_type='shared')
+        message = str(exc.value)
+        assert "'shared'" in message
+        assert "'learned'" in message and "'factorized'" in message
+        assert "tie" in message.lower()
+
+    @pytest.mark.parametrize("embedding_type", ['learned', 'factorized'])
+    def test_legal_embedding_types_still_construct_and_run(self, cfg, ids, embedding_type):
+        """NEGATIVE CONTROL: a guard that rejects too much is as wrong as one
+        that rejects too little. Every remaining legal value must still run."""
+        encoder = TextEncoder(**cfg, embedding_type=embedding_type)
+        out = encoder(ids, training=False)
+        assert out.shape == (2, 8, cfg['embed_dim'])
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("embedding_type", ['learned', 'factorized'])
+    def test_legal_embedding_types_survive_the_keras_round_trip(
+            self, cfg, ids, embedding_type
+    ):
+        """`embedding_type` is a `get_config()` key, so a reloaded layer runs
+        `__init__` again and re-executes the new raise. Prove the guard does
+        not break deserialization for the values it permits."""
+        inputs = layers.Input(shape=(8,), dtype='int32')
+        outputs = TextEncoder(**cfg, embedding_type=embedding_type)(inputs)
+        model = models.Model(inputs, outputs)
+        original = ops.convert_to_numpy(model(ids, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, f"encoder_{embedding_type}.keras")
+            model.save(filepath)
+            loaded = models.load_model(filepath)
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(loaded(ids, training=False)),
+                original, rtol=1e-6, atol=1e-6,
+            )
+
+    def test_unknown_embedding_type_is_now_rejected(self, cfg):
+        """Before F-11 an unknown value silently fell through to the
+        ``else:  # factorized`` branch. It must now raise."""
+        with pytest.raises(ValueError, match="embedding_type"):
+            TextEncoder(**cfg, embedding_type='bogus')
+
+    def test_no_from_config_compatibility_shim_maps_shared(self, cfg):
+        """SCOPE PIN: no shipped checkpoint uses `'shared'` (grep-clean), so no
+        `'shared' -> 'learned'` load-time mapping was added. If one is ever
+        added on positive checkpoint evidence, this pin is the site to flip --
+        deliberately, with a decision entry, not as a silent widening.
+
+        MEASURED: `keras.src.ops.operation.Operation.from_config` catches the
+        constructor's exception and re-raises it as a `TypeError` ("Error when
+        deserializing class 'TextEncoder' using config=...") with the original
+        message appended, so the TYPE seen here is `TypeError`, not the
+        `ValueError` `__init__` actually raised. Assert on the MESSAGE, which
+        survives the wrapping, rather than on the type."""
+        config = TextEncoder(**cfg, embedding_type='learned').get_config()
+        config['embedding_type'] = 'shared'
+        with pytest.raises((ValueError, TypeError)) as exc:
+            TextEncoder.from_config(config)
+        assert "embedding_type='shared' is not supported" in str(exc.value)

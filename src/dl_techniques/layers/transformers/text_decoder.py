@@ -100,7 +100,9 @@ from .transformer import TransformerLayer, AttentionType, FFNType, Normalization
 # ---------------------------------------------------------------------
 
 PositionalType = Literal['learned', 'sincos']
-EmbeddingType = Literal['learned', 'shared', 'factorized']
+# F-11: 'shared' is NOT a member -- it was dead code (an alias of 'learned' with
+# no tying mechanism) and is now rejected in __init__. See the raise there.
+EmbeddingType = Literal['learned', 'factorized']
 
 # ---------------------------------------------------------------------
 
@@ -154,7 +156,10 @@ class TextDecoder(keras.layers.Layer):
     :type num_heads: int
     :param max_seq_len: Maximum sequence length. Default: 512.
     :type max_seq_len: int
-    :param embedding_type: Word embedding strategy. Default: ``'learned'``.
+    :param embedding_type: Word embedding strategy, ``'learned'`` or
+        ``'factorized'``. Default: ``'learned'``. ``'shared'`` (a tied
+        input/output embedding) is REJECTED: this layer has no output
+        projection to tie to -- do the tying in the model that owns one.
     :type embedding_type: EmbeddingType
     :param positional_type: Positional encoding strategy. Default: ``'learned'``.
     :type positional_type: PositionalType
@@ -179,7 +184,8 @@ class TextDecoder(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
 
-    :raises ValueError: If dimension parameters are invalid.
+    :raises ValueError: If dimension parameters are invalid, or if
+        ``embedding_type`` is not one of ``'learned'`` / ``'factorized'``.
     """
 
     def __init__(
@@ -215,12 +221,44 @@ class TextDecoder(keras.layers.Layer):
             raise ValueError(f"attention_dropout must be between 0.0 and 1.0, got {attention_dropout_rate}")
         if not 0.0 <= stochastic_depth_rate <= 1.0:
             raise ValueError(f"stochastic_depth_rate must be between 0.0 and 1.0, got {stochastic_depth_rate}")
-        # Fail loud on an unknown embedding_type: build() only handles these three,
+        # Fail loud on an unknown embedding_type: build() only handles these two,
         # and call() unconditionally reads self.word_embeddings -- an invalid value
         # would otherwise raise an opaque AttributeError at first forward pass.
-        if embedding_type not in ('learned', 'shared', 'factorized'):
+        #
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-017
+        # Do NOT "fix" this by implementing tying here, and do NOT add a
+        # from_config 'shared' -> 'learned' compatibility shim. There is no
+        # output projection in this class to tie to (see below), and no shipped
+        # checkpoint uses 'shared' (grep-clean at 2026-07-31) -- a shim would be
+        # untested surface guarding a file that does not exist. If positive
+        # checkpoint evidence ever appears, flip the scope pin
+        # tests/.../test_text_decoder.py::TestSharedEmbeddingTypeIsRejected::
+        # test_no_from_config_compatibility_shim_maps_shared deliberately.
+        #
+        # F-11: 'shared' used to be accepted here and took the LITERALLY IDENTICAL
+        # branch as 'learned' in _create_word_embeddings -- no tying mechanism, no
+        # accessor, measurably 0 differing output elements between the two. It is
+        # rejected rather than implemented because tying is structurally
+        # inapplicable to this class: TextDecoder has no output/LM-head projection
+        # to tie the embedding TO (call() returns raw hidden states
+        # (B, seq, embed_dim); the only Dense here is the factorized path's
+        # embed_projection, factorized_dim -> embed_dim). Weight tying belongs in
+        # the MODEL that owns the vocabulary projection -- see
+        # models/masked_language_model/clm.py (tie_weights), models/gpt2/gpt2.py
+        # and models/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
+        # they build themselves.
+        if embedding_type == 'shared':
             raise ValueError(
-                f"embedding_type must be one of 'learned', 'shared', 'factorized', "
+                "embedding_type='shared' is not supported: TextDecoder has no "
+                "output/vocabulary projection to tie the word embedding to, so "
+                "there is nothing to share with. Use 'learned' here and perform "
+                "the tying in the model that owns the output projection (see "
+                "models/masked_language_model/clm.py's tie_weights). "
+                "Legal values: 'learned', 'factorized'."
+            )
+        if embedding_type not in ('learned', 'factorized'):
+            raise ValueError(
+                f"embedding_type must be one of 'learned', 'factorized', "
                 f"got {embedding_type!r}"
             )
 
@@ -282,7 +320,7 @@ class TextDecoder(keras.layers.Layer):
         """Create word embedding layers based on the specified strategy."""
         initializer = initializers.TruncatedNormal(stddev=self.initializer_range)
 
-        if self.embedding_type in ['learned', 'shared']:
+        if self.embedding_type == 'learned':
             self.word_embeddings = layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=self.embed_dim,
