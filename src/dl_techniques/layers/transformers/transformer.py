@@ -207,6 +207,93 @@ def build_transformer_ffn_config(
 
 # ---------------------------------------------------------------------
 
+#: Default ``window_size`` for ``attention_type='window'``. Read by BOTH
+#: :meth:`TransformerLayer.__init__` (as its signature default) and
+#: :func:`build_transformer_attention_required_params` (as the fallback for a
+#: block that has no dedicated ``window_size`` constructor parameter, i.e.
+#: ``TransformerDecoderLayer``).
+_DEFAULT_ATTENTION_WINDOW_SIZE: int = 8
+
+#: Default ``lambda_init`` for ``attention_type='differential'``. Same two
+#: readers as ``_DEFAULT_ATTENTION_WINDOW_SIZE`` above.
+_DEFAULT_ATTENTION_LAMBDA_INIT: float = 0.8
+
+
+def build_transformer_attention_required_params(
+        *,
+        attention_type: str,
+        hidden_size: int,
+        num_heads: int,
+        window_size: int = _DEFAULT_ATTENTION_WINDOW_SIZE,
+        num_kv_heads: Optional[int] = None,
+        lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
+) -> Dict[str, Any]:
+    """The params the attention factory REQUIRES beyond ``dim``/``num_heads``.
+
+    Interface contract (2 call sites:
+    :meth:`TransformerLayer._get_attention_params` and
+    :meth:`TransformerDecoderLayer._self_attention_params`; the two agreeing on
+    every type is the reason this exists):
+
+    * Returns ONLY the type-specific keys that
+      ``dl_techniques.layers.attention.factory`` lists as REQUIRED and that are
+      not already covered by ``dim``/``num_heads`` — never the generic
+      conveniences (``dropout_rate``, ``use_bias``, initializers), which the two
+      blocks legitimately differ on.
+    * Returns an EMPTY dict for every type with no such extra requirement
+      (``multi_head``, ``multi_head_cross``, ``anchor``, ``lighthouse``,
+      ``fnet``), and for an unknown type — validating the type is the FACTORY's
+      job, and this function must not turn a factory error into a different one.
+    * Never raises.
+
+    # DECISION plan-2026-07-31T132403-b3f540cb/D-015
+    Do NOT re-inline this table into either caller. Two hand-maintained copies of
+    the per-type attention parameter table are exactly what F-07 was: the
+    decoder's copy listed no type-specific params at all, so ``window``,
+    ``group_query``, ``differential`` and ``multi_head_latent`` were
+    unconstructable on the decoder (``ValueError: ... Required parameters:
+    ['dim', 'window_size', 'num_heads']``) while ``TransformerLayer`` handled all
+    four. This is the SAME defect class as D-018 (the FFN table, whose two copies
+    produced the ``differential``/``activation`` silent drop plus five
+    decoder-only coverage gaps), in the same pair of files, one method over.
+
+    The four default VALUES here are the encoder's, verbatim, so a block without
+    a dedicated constructor parameter (the decoder has none of ``window_size`` /
+    ``n_kv_head`` / ``lambda_init``) gets the same answer the encoder would give.
+    A caller's ``attention_args`` still overrides everything, since both callers
+    merge it last.
+
+    :param attention_type: An ``ATTENTION_REGISTRY`` key.
+    :type attention_type: str
+    :param hidden_size: The block's model width (the factory's ``dim``).
+    :type hidden_size: int
+    :param num_heads: The block's head count.
+    :type num_heads: int
+    :param window_size: ``'window'`` only. The spatial window edge length.
+    :type window_size: int
+    :param num_kv_heads: ``'group_query'`` only. ``None`` means ``num_heads``
+        (i.e. degrade to plain MHA), matching ``TransformerLayer.n_kv_head``.
+    :type num_kv_heads: Optional[int]
+    :param lambda_init: ``'differential'`` only. Initial lambda.
+    :type lambda_init: float
+    :return: The type-specific required params; possibly empty.
+    :rtype: Dict[str, Any]
+    """
+    if attention_type == 'window':
+        return {'window_size': window_size}
+    if attention_type == 'group_query':
+        return {'num_kv_heads': num_kv_heads if num_kv_heads is not None else num_heads}
+    if attention_type == 'differential':
+        return {'head_dim': hidden_size // num_heads, 'lambda_init': lambda_init}
+    if attention_type == 'multi_head_latent':
+        # MLA requires kv_latent_dim and NEITHER block has a dedicated ctor
+        # param for it, so this documented default is the only source.
+        return {'kv_latent_dim': max(1, hidden_size // 4)}
+    return {}
+
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class TransformerLayer(keras.layers.Layer):
@@ -316,6 +403,20 @@ class TransformerLayer(keras.layers.Layer):
     #   - 'lighthouse' -> LighthouseAttention.call(inputs, training)
     # 'multi_head_latent' DOES accept attention_mask and stays on the standard
     # branch. Do NOT add a type here unless its `call` genuinely rejects mask.
+    #
+    # DECISION plan-2026-07-31T132403-b3f540cb/D-016
+    # Do NOT add 'window' here. It was CONSIDERED and REFUTED BY MEASUREMENT
+    # (G-07, 2026-07-31): `WindowAttention` (the layer behind the 'window' key)
+    # both accepts AND genuinely honours a rank-3 causal keep-mask -- perturbing
+    # the last token moved every earlier position by exactly 0.0, against an
+    # unmasked control of 1.97e+02 -- whenever `seq_len == window_size ** 2`,
+    # and raises a loud ValueError at any other length. Adding it here would
+    # convert that into a SILENT non-causal block: the dead-component probe for
+    # this decision added 'window' to this very frozenset and measured
+    # `TransformerDecoderLayer` leaking the future by 3.713046e+00 at the exact
+    # geometry where it is otherwise bit-exactly causal. "Accepts the kwarg" is
+    # not the test either way -- 'fnet' accepts it and then dies on a shape
+    # mismatch. See decisions.md D-016 and `TestWindowSelfAttentionIsMaskedNotMaskless`.
     _MASKLESS_ATTENTION_TYPES = frozenset({'fnet', 'anchor', 'lighthouse'})
 
     def __init__(
@@ -342,9 +443,9 @@ class TransformerLayer(keras.layers.Layer):
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
-            window_size: int = 8,
+            window_size: int = _DEFAULT_ATTENTION_WINDOW_SIZE,
             n_kv_head: Optional[int] = None,
-            lambda_init: float = 0.8,
+            lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
             use_layer_scale: bool = False,
             layer_scale_init_value: float = 1e-5,
             **kwargs: Any
@@ -503,6 +604,25 @@ class TransformerLayer(keras.layers.Layer):
                 f"Original error: {e}"
             )
 
+    def _required_attention_params(self) -> Dict[str, Any]:
+        """This block's type-specific REQUIRED attention params.
+
+        Thin binding of :func:`build_transformer_attention_required_params` to
+        this layer's own constructor parameters. It exists so that
+        ``TransformerDecoderLayer`` — which has no ``window_size`` /
+        ``n_kv_head`` / ``lambda_init`` constructor parameters — reads the same
+        table from the same function rather than carrying a second copy (D-015;
+        the second copy being absent is exactly what F-07 was).
+        """
+        return build_transformer_attention_required_params(
+            attention_type=self.attention_type,
+            hidden_size=self.hidden_size,
+            num_heads=self.num_heads,
+            window_size=self.window_size,
+            num_kv_heads=self.n_kv_head,
+            lambda_init=self.lambda_init,
+        )
+
     def _get_attention_params(self, name: str) -> Dict[str, Any]:
         """Consolidate parameters for attention layer creation.
 
@@ -524,7 +644,7 @@ class TransformerLayer(keras.layers.Layer):
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
-                'window_size': self.window_size,
+                **self._required_attention_params(),
                 'dropout_rate': self.attention_dropout_rate,
                 'name': name
             }
@@ -532,7 +652,7 @@ class TransformerLayer(keras.layers.Layer):
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
-                'num_kv_heads': self.n_kv_head,
+                **self._required_attention_params(),
                 'dropout_rate': self.attention_dropout_rate,
                 'use_bias': self.use_bias,
                 'name': name
@@ -541,9 +661,8 @@ class TransformerLayer(keras.layers.Layer):
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
-                'head_dim': self.hidden_size // self.num_heads,
+                **self._required_attention_params(),
                 'dropout_rate': self.attention_dropout_rate,
-                'lambda_init': self.lambda_init,
                 'name': name
             }
         # --- DECISION plan_2026-06-12_0bb1729b/D-001: additionally-wired
@@ -558,7 +677,7 @@ class TransformerLayer(keras.layers.Layer):
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
-                'kv_latent_dim': max(1, self.hidden_size // 4),
+                **self._required_attention_params(),
                 'name': name
             }
         elif self.attention_type == 'anchor':

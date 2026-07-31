@@ -611,24 +611,103 @@ class TestMasklessSelfAttentionTypes:
         )
         assert dec._self_attention_params('a') == enc._get_attention_params('a')
 
-    # --- scope pin: F-07 is deliberately NOT fixed here ---
+    # --- the flipped scope pin: F-07 is now CLOSED for all four types ---
 
-    @pytest.mark.parametrize("attention_type, missing", [
-        ('window', 'window_size'),
-        ('group_query', 'num_kv_heads'),
-        ('differential', 'head_dim'),
-        ('multi_head_latent', 'kv_latent_dim'),
+    @pytest.mark.parametrize("attention_type, param, expected", [
+        # `window_size` is `TransformerLayer`'s own default (8), read from the
+        # shared `_DEFAULT_ATTENTION_WINDOW_SIZE`, NOT re-typed here.
+        ('window', 'window_size', 8),
+        # `num_kv_heads` degrades to `num_heads` (= plain MHA), matching
+        # `TransformerLayer.n_kv_head`'s `None -> num_heads` resolution.
+        ('group_query', 'num_kv_heads', HEADS),
+        ('differential', 'head_dim', HIDDEN // HEADS),
+        ('multi_head_latent', 'kv_latent_dim', max(1, HIDDEN // 4)),
     ])
-    def test_f07_parameter_gaps_still_raise(self, attention_type, missing):
-        """SCOPE PIN. F-07 (the decoder supplies no defaults for these types) is
-        explicitly out of scope this iteration. These must keep raising, so that
-        closing F-07 later is a deliberate act with a test to flip, not a
-        side effect that nobody notices."""
-        with pytest.raises(ValueError, match=missing):
-            TransformerDecoderLayer(
-                hidden_size=self.HIDDEN, num_heads=self.HEADS,
-                intermediate_size=self.INTER, self_attention_type=attention_type,
-            )
+    def test_f07_parameter_gaps_now_carry_a_default(
+            self, attention_type, param, expected):
+        """The flipped F-07 SCOPE PIN — same site, same four pairs, inverted.
+
+        Until step 6 of `plan-2026-07-31T132403-b3f540cb` this was
+        `test_f07_parameter_gaps_still_raise`, a `pytest.raises(ValueError,
+        match=<param>)` asserting that the decoder supplied NO type-specific
+        attention params and that all four types were therefore unconstructable.
+        Its docstring said closing F-07 must be "a deliberate act with a test to
+        flip, not a side effect that nobody notices". This is that flip, at the
+        same site: construction must now SUCCEED and the defaulted value must be
+        the one `TransformerLayer` would have used.
+
+        RED captures at `5727c907`, before the fix — all four
+        `ValueError`, all four raised by the attention factory's own strict
+        required-params check (there was no decoder-side wrapper to reword
+        them):
+
+        * `window` — "Failed to create 'window' attention layer
+          (create_grid_window_attention). Required parameters: ['dim',
+          'window_size', 'num_heads']. Provided parameters: ['dim', 'num_heads']."
+        * `group_query` — same shape, "Required parameters: ['dim', 'num_heads',
+          'num_kv_heads']".
+        * `differential` — "... ['dim', 'num_heads', 'head_dim']".
+        * `multi_head_latent` — "... ['dim', 'num_heads', 'kv_latent_dim']".
+
+        `window` is included: G-07 was resolved BY EXECUTION rather than by
+        argument (see
+        :meth:`TestWindowSelfAttentionIsMaskedNotMaskless.test_window_honours_the_causal_mask_at_window_size_squared`)
+        and the verdict was that `window` genuinely HONOURS a causal mask, so it
+        earns a default rather than joining `_MASKLESS_ATTENTION_TYPES`.
+        """
+        layer = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+        )
+        params = layer._self_attention_params('self_attention')
+        assert param in params, (
+            f"'{attention_type}' still supplies no '{param}' — F-07 is not closed"
+        )
+        assert params[param] == expected
+
+    # `head_dim` is the one override that is not free: the factory enforces
+    # `dim == num_heads * head_dim`, so overriding it requires moving
+    # `num_heads` with it (MEASURED: `head_dim=8` at `num_heads=4` raises
+    # "dim (64) must equal num_heads * head_dim (4 * 8 = 32)").
+    @pytest.mark.parametrize("attention_type, param, override, num_heads", [
+        ('window', 'window_size', 4, HEADS),
+        ('group_query', 'num_kv_heads', 2, HEADS),
+        ('differential', 'head_dim', 32, 2),
+        ('multi_head_latent', 'kv_latent_dim', 5, HEADS),
+    ])
+    def test_f07_defaults_are_overridable_by_attention_args(
+            self, attention_type, param, override, num_heads):
+        """A default must not become a ceiling: `attention_args` merges LAST."""
+        layer = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=num_heads,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+            attention_args={param: override},
+        )
+        assert layer._self_attention_params('self_attention')[param] == override
+
+    @pytest.mark.parametrize("attention_type", [
+        'window', 'group_query', 'differential', 'multi_head_latent'])
+    def test_f07_types_agree_with_TransformerLayer_on_the_required_params(
+            self, attention_type):
+        """D-015: both dispatchers must read ONE table, not two copies.
+
+        Compares only the type-specific REQUIRED keys, because the two blocks
+        legitimately differ on the generic conveniences (the encoder forwards
+        `dropout_rate`/`use_bias`/`kernel_initializer` to more types than the
+        decoder does). It is the required keys whose divergence WAS F-07.
+        """
+        dec = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+        )._self_attention_params('a')
+        enc = TransformerLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, attention_type=attention_type,
+        )._get_attention_params('a')
+        required = {'window_size', 'num_kv_heads', 'head_dim',
+                    'lambda_init', 'kv_latent_dim'}
+        assert {k: v for k, v in dec.items() if k in required} == \
+               {k: v for k, v in enc.items() if k in required}
 
     def test_maskless_type_warns_that_causality_is_not_enforced(self, caplog):
         """A maskless self-attention makes `use_causal_mask=True` a no-op.
@@ -888,3 +967,197 @@ class TestDecoderLayerIdxForwarding:
         `get_config()`, which would change the serialized surface."""
         layer = _f09_build_decoder('post')
         assert 'layer_idx' not in layer.get_config()
+
+
+# ---------------------------------------------------------------------
+# F-07 / G-06 / G-07: decoder self-attention defaults, and the measured
+# verdict on `window`.
+# ---------------------------------------------------------------------
+
+_F07_HIDDEN, _F07_HEADS, _F07_INTER = 64, 4, 128
+_F07_ENC_SEQ, _F07_BATCH = 10, 2
+#: `window` self-attention is causal ONLY at `seq_len == window_size ** 2`
+#: (measured; see `TestWindowSelfAttentionIsMaskedNotMaskless`). 4**2 = 16.
+_F07_WINDOW_SIZE = 4
+_F07_WINDOW_SEQ = _F07_WINDOW_SIZE ** 2
+
+
+def _f07_seeded_inputs(seq_len: int, seed: int = 20260731):
+    """I8/(c): seeded NON-ZERO decoder + encoder activations."""
+    rng = np.random.default_rng(seed)
+    x = ops.convert_to_tensor(
+        rng.normal(size=(_F07_BATCH, seq_len, _F07_HIDDEN)).astype("float32"))
+    enc = ops.convert_to_tensor(
+        rng.normal(size=(_F07_BATCH, _F07_ENC_SEQ, _F07_HIDDEN)).astype("float32"))
+    assert float(np.max(np.abs(np.asarray(x)))) > 1e-2
+    return x, enc
+
+
+def _f07_decoder(attention_type: str, **kwargs):
+    return TransformerDecoderLayer(
+        hidden_size=_F07_HIDDEN, num_heads=_F07_HEADS,
+        intermediate_size=_F07_INTER, self_attention_type=attention_type,
+        dropout_rate=0.0, attention_dropout_rate=0.0, **kwargs)
+
+
+class TestF07DecoderAttentionDefaults:
+    """The four formerly-unconstructable types must also RUN and round-trip."""
+
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    @pytest.mark.parametrize("attention_type, extra_args, seq_len", [
+        ('window', {'window_size': _F07_WINDOW_SIZE}, _F07_WINDOW_SEQ),
+        ('group_query', {}, 8),
+        ('differential', {}, 8),
+        ('multi_head_latent', {}, 8),
+    ])
+    def test_constructs_and_runs(self, attention_type, extra_args, seq_len,
+                                 normalization_position):
+        """Construction alone proves nothing: the defaulted VALUE has to be a
+        value the layer can actually build and run with. `call()` has two
+        self-attention sites, so both `normalization_position` branches run."""
+        layer = _f07_decoder(attention_type, attention_args=extra_args,
+                             normalization_position=normalization_position)
+        x, enc = _f07_seeded_inputs(seq_len)
+        out = np.asarray(layer(x, enc, training=False))
+        assert out.shape == (_F07_BATCH, seq_len, _F07_HIDDEN)
+        assert np.all(np.isfinite(out))
+        assert float(np.max(np.abs(out))) > 1e-6, "output is all-zero"
+
+    @pytest.mark.parametrize("attention_type, extra_args, seq_len", [
+        ('window', {'window_size': _F07_WINDOW_SIZE}, _F07_WINDOW_SEQ),
+        ('group_query', {}, 8),
+        ('differential', {}, 8),
+        ('multi_head_latent', {}, 8),
+    ])
+    def test_serialization_round_trip_by_value(self, attention_type,
+                                               extra_args, seq_len):
+        """I7: a `.keras` round-trip must restore VALUES on the new path."""
+        dec_in = keras.Input(shape=(seq_len, _F07_HIDDEN))
+        enc_in = keras.Input(shape=(_F07_ENC_SEQ, _F07_HIDDEN))
+        out = _f07_decoder(attention_type, attention_args=extra_args)(dec_in, enc_in)
+        model = models.Model([dec_in, enc_in], out)
+        x, enc = _f07_seeded_inputs(seq_len)
+        ref = np.asarray(model([x, enc], training=False))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, f"dec_f07_{attention_type}.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+        got = np.asarray(loaded([x, enc], training=False))
+        assert float(np.max(np.abs(ref))) > 1e-3, "round-trip compared all-zero values"
+        np.testing.assert_allclose(ref, got, rtol=0, atol=0)
+
+
+class TestWindowSelfAttentionIsMaskedNotMaskless:
+    """G-07, RESOLVED BY EXECUTION: `window` HONOURS the causal mask.
+
+    The finding left open whether `create_grid_window_attention`'s layer merely
+    ACCEPTS `attention_mask` or actually applies it — "accepts" proves nothing
+    here, since `fnet` also accepts the kwarg and then dies on a shape mismatch.
+    Measured at plan step 6: it applies it exactly, at `seq_len ==
+    window_size ** 2`, and raises loudly at every other length. So `window` must
+    NOT join `_MASKLESS_ATTENTION_TYPES` — that would silently drop a mask the
+    layer would have honoured — and instead earns a `window_size` default.
+    """
+
+    def _mask(self, T):
+        r = ops.arange(T)[:, None]
+        c = ops.arange(T)[None, :]
+        return ops.cast(r >= c, "float32")[None, :, :]
+
+    def test_window_is_not_in_the_maskless_set(self):
+        assert 'window' not in TransformerDecoderLayer._MASKLESS_ATTENTION_TYPES
+        assert 'window' not in TransformerLayer._MASKLESS_ATTENTION_TYPES
+
+    def test_window_honours_the_causal_mask_at_window_size_squared(self):
+        """The verdict, with its own live control.
+
+        Perturb the LAST token and require every earlier position to move by
+        exactly `0.0` under the causal mask, while the SAME perturbation with
+        no mask moves them a lot. Without the control this test would pass for
+        a layer that returned a constant.
+        """
+        from dl_techniques.layers.attention import create_attention_layer
+        keras.utils.set_random_seed(7)
+        attn = create_attention_layer(
+            'window', dim=_F07_HIDDEN, window_size=_F07_WINDOW_SIZE,
+            num_heads=_F07_HEADS, dropout_rate=0.0)
+        rng = np.random.default_rng(99)
+        x = rng.normal(size=(_F07_BATCH, _F07_WINDOW_SEQ, _F07_HIDDEN)).astype("float32")
+        x2 = x.copy()
+        x2[:, -1, :] += 100.0
+        m = self._mask(_F07_WINDOW_SEQ)
+
+        masked = np.asarray(attn(ops.convert_to_tensor(x), attention_mask=m, training=False))
+        masked_p = np.asarray(attn(ops.convert_to_tensor(x2), attention_mask=m, training=False))
+        leak = float(np.max(np.abs(masked_p - masked)[:, :-1, :]))
+        assert leak == 0.0, f"causal mask is NOT honoured: leak {leak:.6e}"
+
+        plain = np.asarray(attn(ops.convert_to_tensor(x), training=False))
+        plain_p = np.asarray(attn(ops.convert_to_tensor(x2), training=False))
+        control = float(np.max(np.abs(plain_p - plain)[:, :-1, :]))
+        assert control > 1e-2, (
+            f"UNMASKED control did not move ({control:.6e}) — this probe cannot "
+            f"distinguish a honoured mask from a dead layer")
+        assert float(np.max(np.abs(masked - plain))) > 1e-2, (
+            "masked and unmasked outputs are identical — the mask is ignored")
+
+    def test_window_decoder_is_causal_end_to_end(self):
+        """The same verdict through the block the fix actually changed."""
+        layer = _f07_decoder('window', attention_args={'window_size': _F07_WINDOW_SIZE})
+        x, enc = _f07_seeded_inputs(_F07_WINDOW_SEQ)
+        base = np.asarray(layer(x, enc, training=False))
+        x2 = np.asarray(x).copy()
+        x2[:, -1, :] += 50.0
+        pert = np.asarray(layer(ops.convert_to_tensor(x2), enc, training=False))
+        # Cross-attention and the FFN are position-wise, so a self-attention
+        # leak is the only way an earlier position can move.
+        leak = float(np.max(np.abs(pert - base)[:, :-1, :]))
+        assert leak == 0.0, f"decoder `window` self-attention leaks the future: {leak:.6e}"
+        assert float(np.max(np.abs(pert - base)[:, -1, :])) > 1e-2, \
+            "the perturbed position itself did not move — probe is vacuous"
+
+    @pytest.mark.parametrize("seq_len", [8, 32])
+    def test_window_raises_loudly_at_any_other_sequence_length(self, seq_len):
+        """The documented cost of the verdict: it is a CALL-time raise, not a
+        silent non-causal block. Pinned so the docstring cannot go stale."""
+        layer = _f07_decoder('window', attention_args={'window_size': _F07_WINDOW_SIZE})
+        x, enc = _f07_seeded_inputs(seq_len)
+        with pytest.raises(ValueError, match=r"rank-3 pairwise attention_mask"):
+            layer(x, enc, training=False)
+
+    def test_window_without_a_causal_mask_runs_at_any_length(self):
+        """The documented escape hatch: `use_causal_mask=False` works anywhere."""
+        layer = _f07_decoder('window', attention_args={'window_size': _F07_WINDOW_SIZE},
+                             use_causal_mask=False)
+        x, enc = _f07_seeded_inputs(12)
+        out = np.asarray(layer(x, enc, training=False))
+        assert out.shape == (_F07_BATCH, 12, _F07_HIDDEN)
+        assert np.all(np.isfinite(out))
+
+
+class TestDecoderAttentionConstructionErrorIsFriendly:
+    """F-07's second half: the decoder built both attention layers bare.
+
+    RED capture at `5727c907`: an invalid override produced the attention
+    factory's own message only — "Failed to create 'multi_head' attention layer
+    (MultiHeadAttention). Required parameters: ['dim']. Provided parameters:
+    ['dim', 'num_heads', 'dropout_rate', 'use_bias']." — which names neither
+    which of the block's TWO attention layers failed nor which of the caller's
+    keys were overrides. `TransformerLayer` has carried such a wrapper all along.
+    """
+
+    @pytest.mark.parametrize("kwargs, role, args_name, key", [
+        ({'attention_args': {'num_heads': 0}}, 'self-attention', 'attention_args', 'num_heads'),
+        ({'cross_attention_args': {'num_heads': 0}}, 'cross-attention', 'cross_attention_args', 'num_heads'),
+    ])
+    def test_message_names_the_role_and_the_caller_args(
+            self, kwargs, role, args_name, key):
+        with pytest.raises(ValueError) as exc:
+            TransformerDecoderLayer(
+                hidden_size=_F07_HIDDEN, num_heads=_F07_HEADS,
+                intermediate_size=_F07_INTER, **kwargs)
+        msg = str(exc.value)
+        assert role in msg, f"message does not say which attention failed: {msg}"
+        assert args_name in msg, f"message does not name the arg dict: {msg}"
+        assert key in msg, f"message does not list the caller's key: {msg}"
+        assert "Original error" in msg, "the underlying factory error was swallowed"
