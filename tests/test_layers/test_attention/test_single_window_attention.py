@@ -989,3 +989,57 @@ class TestWindowAttentionPairwiseMaskPassThrough:
         keep = keras.ops.convert_to_tensor(_pw_pairwise_mask())
         with pytest.raises(ValueError, match="rank-3"):
             layer(x, attention_mask=keep)
+
+    def test_the_rank_3_path_survives_a_keras_round_trip_by_value(self):
+        """I3/SC-8: a ``.keras`` round-trip on the NEW path, compared by VALUE.
+
+        The module's pre-existing ``test_model_save_load`` round-trips
+        ``WindowAttention`` on its DEFAULT (mask-free) config, which cannot
+        observe the rank-3 branch at all — the same class of gap step 6 found
+        for ``use_free_transformer`` (a round-trip test that exists but
+        exercises the default configuration). This one feeds the pairwise mask
+        as a second model input so the reloaded graph must reconstruct the
+        rank-3 call path, not merely the weights.
+        """
+        from dl_techniques.layers.attention.window_attention import (
+            WindowAttention,
+        )
+
+        x_in = keras.Input(shape=(_PW_N, _PW_DIM), name="tokens")
+        m_in = keras.Input(shape=(_PW_N, _PW_N), name="pairwise_mask")
+        out = WindowAttention(
+            dim=_PW_DIM, window_size=_PW_WS, num_heads=_PW_HEADS,
+            partition_mode="grid", name="pairwise_window_attention",
+        )(x_in, attention_mask=m_in)
+        model = keras.Model([x_in, m_in], out)
+
+        x = _pw_input()
+        keep = _pw_pairwise_mask()
+        before = np.asarray(keras.ops.convert_to_numpy(
+            model([x, keep], training=False)
+        ))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "window_attention_pairwise.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+            after = np.asarray(keras.ops.convert_to_numpy(
+                reloaded([x, keep], training=False)
+            ))
+            assert isinstance(
+                reloaded.get_layer("pairwise_window_attention"), WindowAttention
+            )
+
+        assert float(np.abs(before).max()) > 1e-4, (
+            "round-trip compared all-zero values"
+        )
+        np.testing.assert_allclose(before, after, rtol=0, atol=1e-6)
+
+        # Non-vacuity: the RELOADED model must still honour the mask, i.e. the
+        # rank-3 branch survived deserialization rather than being ignored.
+        after_all_ones = np.asarray(keras.ops.convert_to_numpy(
+            reloaded([x, np.ones_like(keep)], training=False)
+        ))
+        assert float(np.abs(after_all_ones - after).max()) > 1e-4, (
+            "the reloaded model ignores the pairwise mask"
+        )
