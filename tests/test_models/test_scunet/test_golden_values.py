@@ -37,6 +37,18 @@ bit-identical across three separate interpreter processes on CPU. ``atol=1e-8``
 keeps two orders of magnitude of headroom over that floor while staying far
 under the ``3.2e-05`` movement this plan actually produced.
 
+Device
+------
+
+The probe is pinned to the ``golden_reference_device`` fixture
+(``tests/conftest.py``), which carries the measurement and the rationale.
+Unpinned on GPU 1 this model's output lands ``4.062057e-05`` from the CPU
+reference (whole-array statistics ``1.186132e-05`` off), which is ordinary
+reduced-precision matmul reassociation -- dominated by TF32 -- and not a
+device-dependent code path, but it is far outside ``atol`` and the tolerance is
+not negotiable here. So: this module pins **CPU** numerics. The GPU answer
+differs by the amount above and is guarded by nothing.
+
 What this guard does NOT cover
 ------------------------------
 
@@ -54,6 +66,7 @@ full forward pass returns "resolved shift differs from configured shift" for
 ``tests/test_models/test_swin_transformer/test_golden_values.py``.
 """
 
+import keras
 import numpy as np
 import pytest
 from keras import ops
@@ -109,9 +122,13 @@ ATOL = 1e-8
 RTOL = 0.0
 
 
-@pytest.fixture(scope="module")
-def golden_output() -> np.ndarray:
-    """Build the probe model with seeded weights and run one forward pass."""
+def _run_probe() -> np.ndarray:
+    """Build the probe model with seeded weights and run one forward pass.
+
+    The caller is responsible for the device scope; see ``golden_output``.
+
+    :return: the ``(1, 64, 64, 3)`` denoised output, as ``float32`` numpy.
+    """
     model = SCUNet(**CONFIG)
     x = np.asarray(
         np.random.default_rng(INPUT_SEED).standard_normal(INPUT_SHAPE), "float32"
@@ -121,6 +138,16 @@ def golden_output() -> np.ndarray:
     for w in model.weights:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
     return np.asarray(ops.convert_to_numpy(model(x, training=False)))
+
+
+@pytest.fixture(scope="module")
+def golden_output(golden_reference_device) -> np.ndarray:
+    """The pinned probe run. See this module's "Device" section."""
+    # The scope must cover CONSTRUCTION as well as the forward pass: it is what
+    # places the variables, and a model whose weights live on GPU computes on
+    # GPU no matter where the call happens.
+    with keras.device(golden_reference_device):
+        return _run_probe()
 
 
 class TestSCUNetGoldenValues:
@@ -180,22 +207,21 @@ class TestSCUNetGoldenValues:
             ),
         )
 
-    def test_the_probe_is_reproducible_within_a_process(self, golden_output):
+    def test_the_probe_is_reproducible_within_a_process(
+        self, golden_output, golden_reference_device
+    ):
         """Two identical builds must agree bit-exactly.
 
         Without this, a failure above could equally be nondeterminism rather
         than a numerics change, and the guard would be untrustworthy in exactly
         the situation it exists for.
+
+        Pinned to the same device as the fixture on purpose: this comparison is
+        against ``golden_output``, so leaving it unpinned would measure the
+        device difference rather than reproducibility.
         """
-        model = SCUNet(**CONFIG)
-        x = np.asarray(
-            np.random.default_rng(INPUT_SEED).standard_normal(INPUT_SHAPE), "float32"
-        )
-        model(x)
-        rng = np.random.default_rng(WEIGHT_SEED)
-        for w in model.weights:
-            w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
-        again = np.asarray(ops.convert_to_numpy(model(x, training=False)))
+        with keras.device(golden_reference_device):
+            again = _run_probe()
         assert np.array_equal(again, golden_output), (
             "the probe is not reproducible within one process: max|diff|="
             f"{float(np.abs(again - golden_output).max()):.6e}"

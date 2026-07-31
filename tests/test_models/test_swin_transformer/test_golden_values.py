@@ -34,8 +34,26 @@ tokens are then global-pooled. A ``1e-6`` tolerance would have let that probe
 pass, i.e. the guard would have been blind to half of what it is here to watch.
 ``1e-8`` is still two orders of magnitude above the measured floor: the probe is
 bit-identical across separate interpreter processes on CPU.
+
+Device
+------
+
+Both the probe below and the reference it is compared against are pinned to the
+``golden_reference_device`` fixture (``tests/conftest.py``), which is where the
+justification and the measurement table live. Short version: unpinned on GPU 1
+these logits land ``2.254173e-05`` away from the reference (8/8 elements), which
+is 216x the 1.04e-07 signal the tolerance is calibrated for. That gap is
+reduced-precision matmul reassociation, ~99.93% of it TF32 -- with TF32 off the
+GPU is ``1.490116e-08`` away and at float64 ``2.08e-17`` -- so it is a precision
+artifact, not a device-dependent Swin code path. It is nevertheless larger than
+``atol``, so the probe is pinned rather than the tolerance widened.
+
+Consequence, stated so it is not misread: this module pins the shipped
+classifier's **CPU** numerics. The GPU answer differs by the amount above and is
+guarded by nothing.
 """
 
+import keras
 import numpy as np
 import pytest
 from keras import ops
@@ -77,9 +95,13 @@ ATOL = 1e-8
 RTOL = 0.0
 
 
-@pytest.fixture(scope="module")
-def golden_output() -> np.ndarray:
-    """Build the probe model with seeded weights and run one forward pass."""
+def _run_probe() -> np.ndarray:
+    """Build the probe model with seeded weights and run one forward pass.
+
+    The caller is responsible for the device scope; see ``golden_output``.
+
+    :return: the ``(2, 4)`` logit array, as ``float32`` numpy.
+    """
     model = SwinTransformer(**CONFIG)
     x = np.asarray(
         np.random.default_rng(INPUT_SEED).standard_normal(INPUT_SHAPE), "float32"
@@ -89,6 +111,16 @@ def golden_output() -> np.ndarray:
     for w in model.weights:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
     return np.asarray(ops.convert_to_numpy(model(x, training=False)))
+
+
+@pytest.fixture(scope="module")
+def golden_output(golden_reference_device) -> np.ndarray:
+    """The pinned probe run. See this module's "Device" section."""
+    # The scope must cover CONSTRUCTION as well as the forward pass: it is what
+    # places the variables, and a model whose weights live on GPU computes on
+    # GPU no matter where the call happens.
+    with keras.device(golden_reference_device):
+        return _run_probe()
 
 
 class TestSwinTransformerGoldenValues:
@@ -128,17 +160,17 @@ class TestSwinTransformerGoldenValues:
             "discriminating between inputs"
         )
 
-    def test_the_probe_is_reproducible_within_a_process(self, golden_output):
-        """Two identical builds must agree bit-exactly."""
-        model = SwinTransformer(**CONFIG)
-        x = np.asarray(
-            np.random.default_rng(INPUT_SEED).standard_normal(INPUT_SHAPE), "float32"
-        )
-        model(x)
-        rng = np.random.default_rng(WEIGHT_SEED)
-        for w in model.weights:
-            w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
-        again = np.asarray(ops.convert_to_numpy(model(x, training=False)))
+    def test_the_probe_is_reproducible_within_a_process(
+        self, golden_output, golden_reference_device
+    ):
+        """Two identical builds must agree bit-exactly.
+
+        Pinned to the same device as the fixture on purpose: this comparison is
+        against ``golden_output``, so leaving it unpinned would measure the
+        device difference rather than reproducibility.
+        """
+        with keras.device(golden_reference_device):
+            again = _run_probe()
         assert np.array_equal(again, golden_output), (
             "the probe is not reproducible within one process: max|diff|="
             f"{float(np.abs(again - golden_output).max()):.6e}"
