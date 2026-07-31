@@ -35,9 +35,10 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_from_config, FFNType
-from .transformer import build_transformer_ffn_config
+from .transformer import TransformerLayer, build_transformer_ffn_config
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
+from ...utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -56,6 +57,11 @@ class TransformerDecoderLayer(keras.layers.Layer):
     connection and a normalization layer; the data flow is determined by
     ``normalization_position`` (``'pre'`` or ``'post'``), mirroring
     :class:`TransformerLayer` exactly so the two compose predictably in a stack.
+
+    Self-attention types listed in :attr:`_MASKLESS_ATTENTION_TYPES` take no
+    ``attention_mask`` at all; for those, ``use_causal_mask`` cannot be honoured
+    and the block is **not** autoregressive (a warning is logged at
+    construction).
 
     **Architecture Overview:**
 
@@ -108,6 +114,16 @@ class TransformerDecoderLayer(keras.layers.Layer):
 
     :raises ValueError: If dimension parameters are invalid.
     """
+
+    # Self-attention types whose `call()` takes NO `attention_mask`. This is an
+    # ALIAS, deliberately not a re-declaration: `TransformerLayer` owns the set
+    # and both dispatchers must read the same frozenset OBJECT, so that adding a
+    # fourth maskless type cannot update one dispatcher and not the other. This
+    # file already had to unwind exactly that class of hand-maintained duplicate
+    # once (D-018, the per-type FFN parameter table). Do NOT write
+    # `frozenset({...})` here -- `TestMasklessSelfAttentionTypes` asserts object
+    # identity, not equality, precisely to catch that.
+    _MASKLESS_ATTENTION_TYPES = TransformerLayer._MASKLESS_ATTENTION_TYPES
 
     def __init__(
             self,
@@ -166,6 +182,21 @@ class TransformerDecoderLayer(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.use_causal_mask = bool(use_causal_mask)
+
+        if (self.self_attention_type in self._MASKLESS_ATTENTION_TYPES
+                and self.use_causal_mask):
+            # Not a raise: a non-autoregressive decoder over a maskless mixer is
+            # a legitimate configuration. What is NOT acceptable is the silence
+            # -- `use_causal_mask=True` is the default, so a caller reaches this
+            # combination without ever asking for it.
+            logger.warning(
+                f"self_attention_type='{self.self_attention_type}' takes no "
+                f"attention mask, so use_causal_mask=True cannot be honoured: "
+                f"this decoder block is NOT causal and every position sees the "
+                f"whole sequence. Pass use_causal_mask=False to say so "
+                f"explicitly, or choose a maskable self_attention_type "
+                f"(anything outside {sorted(self._MASKLESS_ATTENTION_TYPES)})."
+            )
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -200,6 +231,18 @@ class TransformerDecoderLayer(keras.layers.Layer):
     # --- Sub-layer param builders ---
 
     def _self_attention_params(self, name: str) -> Dict[str, Any]:
+        if self.self_attention_type == 'fnet':
+            # FNetFourierTransform is parameter-free -- no `dim`, no `num_heads`
+            # -- exactly as `TransformerLayer._get_attention_params` already
+            # handles it. The attention factory currently DROPS the two keys
+            # silently rather than rejecting them (measured), so injecting them
+            # is not what makes 'fnet' fail; it is nonetheless a latent break,
+            # because the sibling FFN factory has already turned that same
+            # silent drop into a hard raise (D-023). Keep the two dispatchers
+            # in agreement -- `test_fnet_self_attention_params_match_TransformerLayer`
+            # compares them.
+            return {'name': name, **self.attention_args}
+
         params: Dict[str, Any] = {'dim': self.hidden_size, 'num_heads': self.num_heads, 'name': name}
         if self.self_attention_type in ('multi_head', 'multi_head_cross'):
             params['dropout_rate'] = self.attention_dropout_rate
@@ -311,7 +354,10 @@ class TransformerDecoderLayer(keras.layers.Layer):
             # 1. Self-attention
             residual = inputs
             x = self.self_attention_norm(inputs, training=training)
-            x = self.self_attention(x, attention_mask=self_mask, training=training)
+            if self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
+                x = self.self_attention(x, training=training)
+            else:
+                x = self.self_attention(x, attention_mask=self_mask, training=training)
             x = x + residual
 
             # 2. Cross-attention
@@ -329,7 +375,10 @@ class TransformerDecoderLayer(keras.layers.Layer):
         else:
             # 1. Self-attention
             residual = inputs
-            x = self.self_attention(inputs, attention_mask=self_mask, training=training)
+            if self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
+                x = self.self_attention(inputs, training=training)
+            else:
+                x = self.self_attention(inputs, attention_mask=self_mask, training=training)
             x = self.self_attention_norm(x + residual, training=training)
 
             # 2. Cross-attention

@@ -464,3 +464,209 @@ class TestFFNArgsSurviveThePreFilter:
                 intermediate_size=_GRID_INTER, ffn_type='mlp',
                 ffn_args={'branch_activation': 'relu'},
             )
+
+
+# ---------------------------------------------------------------------
+# F-03: maskless self-attention types
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.transformers.transformer import TransformerLayer
+
+# Per-type minimum decoder sequence length. `lighthouse` defaults to
+# num_levels=3 / pooling_factor=4, so it requires seq_len % 16 == 0 and
+# raises a ValueError about divisibility long before any mask question is
+# reached -- at T=8 this test class would have measured that constraint
+# instead of the defect.
+_MASKLESS_SEQ_LEN = {'anchor': 8, 'lighthouse': 32, 'fnet': 8}
+
+
+class TestMasklessSelfAttentionTypes:
+    """F-03: `{'anchor', 'lighthouse', 'fnet'}` must construct AND run.
+
+    `TransformerLayer` already owns the dispatch (`_MASKLESS_ATTENTION_TYPES`)
+    and skips `attention_mask=` for those types. The decoder passed it
+    unconditionally at both of its self-attention call sites.
+
+    RED captures at HEAD (`03980608`), which differ from the plan's prediction
+    for two of the three types:
+
+    * `anchor`  -- `TypeError: got an unexpected keyword argument
+      'attention_mask'`, as predicted. Raised by Keras' `inspect`-based
+      signature check, not by `call` itself.
+    * `lighthouse` -- the SAME `TypeError`, but only at a legal sequence length.
+      At the module's usual `DEC_SEQ = 8` it dies earlier and unrelatedly on
+      `seq_len N=8 must be divisible by pooling_factor ** (num_levels - 1) = 16`.
+    * `fnet` -- NOT a construction-time error, contrary to the plan. It
+      constructs fine (the attention factory silently drops the `dim` /
+      `num_heads` the decoder injects rather than rejecting them) and its
+      `call()` DOES accept `attention_mask`. It dies at run time inside
+      `FNetFourierTransform.call` with
+      `InvalidArgumentError: Incompatible shapes: [2,8,64] vs. [1,8,8,1]` --
+      it interprets the mask as a rank-2 padding mask and the decoder hands it
+      the rank-3 causal mask. The prescribed fix (do not pass a mask at all)
+      still fixes it, for a different reason than the plan gave.
+    """
+
+    HIDDEN, HEADS, INTER, ENC_SEQ, BATCH = 64, 4, 128, 10, 2
+
+    def _run(self, attention_type: str, normalization_position: str = 'post'):
+        layer = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+            normalization_position=normalization_position,
+        )
+        seq = _MASKLESS_SEQ_LEN[attention_type]
+        x = keras.random.normal([self.BATCH, seq, self.HIDDEN])
+        enc = keras.random.normal([self.BATCH, self.ENC_SEQ, self.HIDDEN])
+        return layer, np.array(layer(x, enc, training=False)), seq
+
+    # `normalization_position` is parametrized because `call()` has TWO
+    # self-attention call sites, one per branch, and 'post' is the default:
+    # a suite that only used the default would leave the 'pre' site unfixed
+    # and unmeasured.
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    @pytest.mark.parametrize("attention_type", ['anchor', 'lighthouse', 'fnet'])
+    def test_constructs_and_runs(self, attention_type, normalization_position):
+        layer, out, seq = self._run(attention_type, normalization_position)
+        assert out.shape == (self.BATCH, seq, self.HIDDEN)
+        assert np.all(np.isfinite(out))
+
+    @pytest.mark.parametrize("normalization_position", ['post', 'pre'])
+    @pytest.mark.parametrize("attention_type", ['anchor', 'lighthouse', 'fnet'])
+    def test_an_explicit_self_attention_mask_is_also_tolerated(
+            self, attention_type, normalization_position):
+        """A caller may pass a mask; a maskless type must ignore it, not crash."""
+        layer = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+            normalization_position=normalization_position,
+        )
+        seq = _MASKLESS_SEQ_LEN[attention_type]
+        x = keras.random.normal([self.BATCH, seq, self.HIDDEN])
+        enc = keras.random.normal([self.BATCH, self.ENC_SEQ, self.HIDDEN])
+        mask = ops.ones((self.BATCH, seq, seq))
+        out = np.array(layer(x, enc, self_attention_mask=mask, training=False))
+        assert out.shape == (self.BATCH, seq, self.HIDDEN)
+
+    @pytest.mark.parametrize("attention_type", ['anchor', 'lighthouse', 'fnet'])
+    def test_serialization_round_trip_by_value(self, attention_type):
+        """I3: a `.keras` round-trip must restore VALUES on the new path."""
+        seq = _MASKLESS_SEQ_LEN[attention_type]
+        dec_in = keras.Input(shape=(seq, self.HIDDEN))
+        enc_in = keras.Input(shape=(self.ENC_SEQ, self.HIDDEN))
+        out = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type=attention_type,
+            dropout_rate=0.0, attention_dropout_rate=0.0,
+        )(dec_in, enc_in)
+        model = models.Model([dec_in, enc_in], out)
+        x = keras.random.normal([self.BATCH, seq, self.HIDDEN])
+        enc = keras.random.normal([self.BATCH, self.ENC_SEQ, self.HIDDEN])
+        ref = np.array(model([x, enc], training=False))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, f"dec_{attention_type}.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+        got = np.array(loaded([x, enc], training=False))
+        assert float(np.max(np.abs(ref))) > 1e-3, "round-trip compared all-zero values"
+        np.testing.assert_allclose(ref, got, rtol=0, atol=0)
+
+    # --- the DRY guard ---
+
+    def test_maskless_set_is_the_SAME_frozenset_object_as_TransformerLayer(self):
+        """The decoder must READ `TransformerLayer`'s set, never redeclare it.
+
+        Object identity, not equality: a locally re-declared
+        `frozenset({'fnet', 'anchor', 'lighthouse'})` would compare EQUAL and
+        then silently drift the day a fourth maskless type is added to one
+        side only. That drift is exactly what D-018 already had to undo for
+        the FFN parameter table in this same file.
+        """
+        assert (
+            TransformerDecoderLayer._MASKLESS_ATTENTION_TYPES
+            is TransformerLayer._MASKLESS_ATTENTION_TYPES
+        ), "the decoder re-declared the maskless set instead of reading it"
+
+    def test_every_maskless_type_is_covered_by_this_suite(self):
+        """If a fourth maskless type is added, this suite must be extended."""
+        assert set(TransformerLayer._MASKLESS_ATTENTION_TYPES) == set(_MASKLESS_SEQ_LEN)
+
+    def test_fnet_self_attention_params_match_TransformerLayer(self):
+        """`fnet` is parameter-free; neither dispatcher may inject dim/num_heads.
+
+        Measured: the attention factory does NOT reject the injected
+        `dim`/`num_heads` -- it drops them silently, so this is not what made
+        `fnet` fail (the plan predicted it was). It is fixed anyway because the
+        FFN factory already turned exactly this silent drop into a hard raise
+        (D-023), and the decoder should not be the one site left holding a
+        latent break.
+        """
+        dec = TransformerDecoderLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, self_attention_type='fnet',
+        )
+        enc = TransformerLayer(
+            hidden_size=self.HIDDEN, num_heads=self.HEADS,
+            intermediate_size=self.INTER, attention_type='fnet',
+        )
+        assert dec._self_attention_params('a') == enc._get_attention_params('a')
+
+    # --- scope pin: F-07 is deliberately NOT fixed here ---
+
+    @pytest.mark.parametrize("attention_type, missing", [
+        ('window', 'window_size'),
+        ('group_query', 'num_kv_heads'),
+        ('differential', 'head_dim'),
+        ('multi_head_latent', 'kv_latent_dim'),
+    ])
+    def test_f07_parameter_gaps_still_raise(self, attention_type, missing):
+        """SCOPE PIN. F-07 (the decoder supplies no defaults for these types) is
+        explicitly out of scope this iteration. These must keep raising, so that
+        closing F-07 later is a deliberate act with a test to flip, not a
+        side effect that nobody notices."""
+        with pytest.raises(ValueError, match=missing):
+            TransformerDecoderLayer(
+                hidden_size=self.HIDDEN, num_heads=self.HEADS,
+                intermediate_size=self.INTER, self_attention_type=attention_type,
+            )
+
+    def test_maskless_type_warns_that_causality_is_not_enforced(self, caplog):
+        """A maskless self-attention makes `use_causal_mask=True` a no-op.
+
+        The decoder cannot hand these types a mask at all, so a caller who
+        asked for causality does not get it. That must be said out loud at
+        construction rather than discovered as a leak during training. It is a
+        warning and not a raise because the combination is legitimate for a
+        non-autoregressive decoder -- it is the SILENCE that is the defect.
+        """
+        with caplog.at_level(logging.WARNING):
+            TransformerDecoderLayer(
+                hidden_size=self.HIDDEN, num_heads=self.HEADS,
+                intermediate_size=self.INTER, self_attention_type='fnet',
+                use_causal_mask=True,
+            )
+        assert any("causal" in r.message.lower() for r in caplog.records), (
+            "constructing a maskless-attention decoder with use_causal_mask=True "
+            "produced no warning; the causality request is silently dropped"
+        )
+
+    def test_no_causality_warning_on_the_ordinary_path(self, caplog):
+        """CONTROL: a warning that always fires would carry no information."""
+        with caplog.at_level(logging.WARNING):
+            layer = TransformerDecoderLayer(
+                hidden_size=self.HIDDEN, num_heads=self.HEADS,
+                intermediate_size=self.INTER, self_attention_type='multi_head',
+                use_causal_mask=True,
+            )
+        assert layer.use_causal_mask is True
+        assert not any("causal" in r.message.lower() for r in caplog.records)
+
+    def test_no_causality_warning_when_causality_was_not_requested(self, caplog):
+        """CONTROL: maskless + `use_causal_mask=False` is a coherent request."""
+        with caplog.at_level(logging.WARNING):
+            TransformerDecoderLayer(
+                hidden_size=self.HIDDEN, num_heads=self.HEADS,
+                intermediate_size=self.INTER, self_attention_type='fnet',
+                use_causal_mask=False,
+            )
+        assert not any("causal" in r.message.lower() for r in caplog.records)
