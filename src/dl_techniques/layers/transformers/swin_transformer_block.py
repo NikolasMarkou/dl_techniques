@@ -428,6 +428,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         batch_size: Union[int, keras.KerasTensor],
         height: Union[int, keras.KerasTensor],
         width: Union[int, keras.KerasTensor],
+        shift: Union[int, keras.KerasTensor],
     ) -> keras.KerasTensor:
         """Build the SW-MSA pairwise keep mask for the current feature map.
 
@@ -450,13 +451,34 @@ class SwinTransformerBlock(keras.layers.Layer):
         :type height: Union[int, keras.KerasTensor]
         :param width: Feature-map width ``W`` (may be a dynamic scalar).
         :type width: Union[int, keras.KerasTensor]
+        :param shift: The effective shift for this call, as returned by
+            :meth:`_resolve_shift_size`. May be a **runtime scalar** that is
+            ``0`` on a single-window feature map, in which case the returned
+            predicate is all-ones (see the D-012 note below).
+        :type shift: Union[int, keras.KerasTensor]
         :return: Int32 keep predicate (``1 = attend``) of shape
             ``(B * num_windows, window_size**2, window_size**2)``, laid out
             B-major / window-minor to match ``window_partition``.
         :rtype: keras.KerasTensor
         """
         ws = self.window_size
-        shift = self.shift_size
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-012
+        # `shift` is a PARAMETER, never `self.shift_size`, because the effective
+        # shift can be decided at RUNTIME (see `_resolve_shift_size`). Reading
+        # `self.shift_size` here would rebuild the region bands for a shift the
+        # roll did not apply -- a mask/roll desynchronization, which is silent.
+        #
+        # A runtime `shift == 0` yields an ALL-ONES predicate, structurally:
+        # `rows >= height - 0` is false for every row in `0..H-1`, so the second
+        # band term vanishes and `row_id = cast(rows >= H - ws)`. Because
+        # `window_partition` requires `H % ws == 0`, the `H - ws` boundary always
+        # lands on a window edge, so every window is uniform in `row_id` (and
+        # likewise in `col_id`) and `equal(m_i, m_j)` is 1 everywhere. An
+        # all-ones keep predicate is bit-identical to `attention_mask=None`
+        # (`apply_attention_mask` builds its bias with `ops.where`, so an
+        # all-kept row receives no bias at all) -- measured, not assumed.
+        # See decisions.md D-012 (plan-2026-07-31T042809-ddc92265).
 
         # DECISION plan-2026-07-31T042809-ddc92265/D-002
         # The mask is built HERE, per call, from the DYNAMIC `(B, H, W)` of the
@@ -532,16 +554,24 @@ class SwinTransformerBlock(keras.layers.Layer):
         )
         return ops.reshape(keep, (-1, ws * ws, ws * ws))
 
-    def _resolve_shift_size(self, x: keras.KerasTensor) -> int:
+    def _resolve_shift_size(
+        self, x: keras.KerasTensor
+    ) -> Union[int, keras.KerasTensor]:
         """Resolve the shift actually applied to this input's geometry.
 
-        Returns ``self.shift_size`` in the normal case, and ``0`` when the
-        feature map is statically known to be exactly one window across.
+        Returns ``self.shift_size`` in the normal case and ``0`` when the
+        feature map is exactly one window across — the reference Swin rule
+        ``if min(input_resolution) <= window_size: shift_size = 0``. When the
+        spatial dims are statically known the answer is a Python ``int``; when
+        either is dynamic the answer is a **runtime int32 scalar** carrying the
+        same rule, so a dynamically-shaped block and a statically-shaped block
+        agree on the same tensor (D-012).
 
         :param x: The block's ``(B, H, W, C)`` input.
         :type x: keras.KerasTensor
-        :return: The effective shift for this call: ``0`` or ``self.shift_size``.
-        :rtype: int
+        :return: The effective shift for this call: ``0``, ``self.shift_size``,
+            or a runtime scalar equal to one of the two.
+        :rtype: Union[int, keras.KerasTensor]
         :raises ValueError: If ``shift_size > 0`` and a statically-known
             ``H``/``W`` is strictly smaller than ``window_size``.
         """
@@ -577,10 +607,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         #   * Do NOT raise on a dynamic (`None`) dim. `models/thera/tails.py`
         #     builds every Swin block with `(B, None, None, C)` on purpose; a
         #     raise there trades a silent correctness bug for a dead model
-        #     (D-002, assumption A2). A dynamic dim that happens to be `ws` at
-        #     runtime therefore keeps the shift and gets the mask -- correct
-        #     attention, just not the upstream fallback, since the fallback is
-        #     by definition a static-resolution decision.
+        #     (D-002, assumption A2).
         #   * Do NOT push this into `models/scunet` / `models/swin_transformer`
         #     by passing `shift_size=0` there. That widens the blast radius and
         #     leaves every future caller exposed to the same trap.
@@ -592,9 +619,11 @@ class SwinTransformerBlock(keras.layers.Layer):
         # deliberately not output-neutral).
         # See decisions.md D-006 (plan-2026-07-31T042809-ddc92265).
         single_window = False
+        has_dynamic_dim = False
         for axis_name, axis_index in (("height", 1), ("width", 2)):
             static_dim = x.shape[axis_index]
             if static_dim is None:
+                has_dynamic_dim = True
                 continue
             if static_dim < ws:
                 raise ValueError(
@@ -607,7 +636,54 @@ class SwinTransformerBlock(keras.layers.Layer):
             if static_dim == ws:
                 single_window = True
 
-        return 0 if single_window else self.shift_size
+        if single_window:
+            return 0
+        if not has_dynamic_dim:
+            return self.shift_size
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-012
+        # A dynamic (`None`) spatial dim gets the SAME single-window rule, but
+        # evaluated at RUNTIME rather than at trace time.
+        #
+        # WHY: without this the block is SHAPE-DEPENDENT. The identical layer,
+        # with identical weights, on the identical tensor, returned two
+        # different answers depending only on whether `H` was statically known:
+        # traced against `TensorSpec([None, None, None, C])` at `H == W == ws`
+        # the loop above could not see the geometry, the static fallback could
+        # not fire, and the block kept the roll + region mask while an eager
+        # call on the same tensor dropped both. Measured at
+        # `(dim=32, heads=4, ws=4, shift=2)`, `(1,4,4,32)`, seeded weights:
+        # 512/512 elements differed, max |diff| 251.4 (97% relative).
+        # `models/thera/tails.py` is the one consumer that builds every block
+        # with `(B, None, None, C)`, so it took the opposite branch from
+        # `models/swin_transformer` at identical geometry.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT "fix" this by making the dynamic path region-mask a single
+        #     window instead. That is a legal mask but it is NOT the reference
+        #     rule, so it would leave the two paths disagreeing anyway (the RPB
+        #     pairing differs the moment the roll is applied).
+        #   * Do NOT branch in Python on `ops.shape(x)[1] > ws`. Inside a trace
+        #     that is a symbolic bool; `if` on it either raises or silently
+        #     picks whichever branch the tracer folded, which is precisely the
+        #     shape-dependence being removed here.
+        #   * Do NOT hoist this to `build()`. The dim is `None` there by
+        #     construction for the only dynamic consumer (D-002).
+        #   * Do NOT return a float or a bool. The value is multiplied into
+        #     `ops.arange` band comparisons and fed to `ops.roll`; int32 is what
+        #     both accept.
+        # ACCEPTED COST: `ops.roll` now receives a tensor shift on the dynamic
+        # path (measured to work eagerly, under `tf.function` and under
+        # `jit_compile=True`), and the mask is built unconditionally on that
+        # path — an all-ones predicate when the runtime shift is 0, which is
+        # bit-identical to `attention_mask=None` (measured).
+        # See decisions.md D-012 (plan-2026-07-31T042809-ddc92265).
+        runtime_shape = ops.shape(x)
+        multi_window = ops.logical_and(
+            ops.greater(runtime_shape[1], ws),
+            ops.greater(runtime_shape[2], ws),
+        )
+        return ops.cast(multi_window, "int32") * self.shift_size
 
     def call(
         self,
@@ -621,8 +697,11 @@ class SwinTransformerBlock(keras.layers.Layer):
         and passes it to the window attention, so tokens the cyclic roll
         brought together from non-adjacent regions cannot attend to one
         another. The effective shift comes from :meth:`_resolve_shift_size`,
-        which drops it to ``0`` on a statically-known single-window feature map
-        (D-006) — the roll and the mask are therefore always in agreement.
+        which drops it to ``0`` on a single-window feature map (D-006) — the
+        roll and the mask are therefore always in agreement. That rule is
+        applied at trace time when ``H``/``W`` are static and at runtime when
+        they are not, so the block's output does **not** depend on whether its
+        spatial extent happened to be statically known (D-012).
 
         :param x: Input tensor ``(B, H, W, C)``.
         :type x: keras.KerasTensor
@@ -641,8 +720,14 @@ class SwinTransformerBlock(keras.layers.Layer):
             )
 
         # Single source of truth for this call's shift; both the roll and the
-        # mask below are derived from it (D-006).
+        # mask below are derived from it (D-006). On a statically-shaped input
+        # it is a Python int and the shift branch is decided at trace time; on
+        # a dynamically-shaped one it is a runtime int32 scalar that is 0 on a
+        # single-window feature map, so the branch is taken unconditionally and
+        # the shift itself carries the decision (D-012).
         shift = self._resolve_shift_size(x)
+        shift_is_static = isinstance(shift, int)
+        apply_shift = shift > 0 if shift_is_static else True
 
         B, H, W, C = input_shape[0], input_shape[1], input_shape[2], input_shape[3]
         shortcut = x
@@ -655,7 +740,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         x = self.norm1(x, training=training)
 
         # Apply cyclic shift for shifted window attention
-        if shift > 0:
+        if apply_shift:
             # Shift windows by (-shift, -shift)
             shifted_x = ops.roll(
                 x,
@@ -663,7 +748,7 @@ class SwinTransformerBlock(keras.layers.Layer):
                 axis=(1, 2)
             )
             # SW-MSA pairwise keep mask, (B*num_windows, ws**2, ws**2).
-            attention_mask = self._build_swmsa_keep_mask(B, H, W)
+            attention_mask = self._build_swmsa_keep_mask(B, H, W, shift)
         else:
             shifted_x = x
             attention_mask = None
@@ -695,7 +780,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         x = window_reverse(attn_windows, self.window_size, H, W)
 
         # Reverse cyclic shift if it was applied
-        if shift > 0:
+        if apply_shift:
             x = ops.roll(
                 x,
                 shift=(shift, shift),

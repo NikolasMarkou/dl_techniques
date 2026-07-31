@@ -31,13 +31,21 @@ proves nothing (plan Pre-Mortem #1: STOP, do not tune the oracle to match).
 
 Test inventory:
 
-* ``TestSwMsaOracle`` -- the oracle self-check described above (green at HEAD).
-* ``TestSwMsaLeakage`` -- **EXPECTED RED until plan step 3 lands.**  Marked
-  ``xfail(strict=True)`` so the committed suite is green now *and* fails loudly
-  the moment the fix arrives without the marker being removed.
-* ``TestSwinShiftMaskControls`` -- controls that are green both before and after
-  the fix: window isolation at ``shift_size=0`` (the probe harness itself works)
-  and a full ``.keras`` save/load round-trip of a shifted block.
+* ``TestSwMsaOracle`` -- the oracle self-check described above.
+* ``TestSwMsaLeakage`` -- the F-01 leakage probe.  It was RED at the pre-fix
+  commit (perturbing token ``(2, 6)`` moved same-window token ``(2, 0)`` by
+  ``1.001258e-01`` on 32/32 channels) and is green at ``rtol=0, atol=0`` now
+  that the mask is built and applied.
+* ``TestSwinShiftMaskControls`` -- controls that were green both before and
+  after that fix: window isolation at ``shift_size=0`` (the probe harness
+  itself works) and a full ``.keras`` save/load round-trip of a shifted block.
+* ``TestSwMsaMaskConstruction`` -- the shipped mask against the oracle, the
+  D-006 single-window fallback (``H == window_size`` reduces to
+  ``shift_size=0``), the strictly-below-``window_size`` raise, and dynamic
+  spatial dims.
+* ``TestShapeIndependenceAtTraceTime`` -- the D-012 guard: the same block on
+  the same tensor must answer identically whether or not the tracer knows the
+  spatial extent.
 """
 
 import os
@@ -46,6 +54,7 @@ import tempfile
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 from keras import ops
 
 from dl_techniques.layers.attention.window_attention import WindowAttention
@@ -182,8 +191,20 @@ def _same_class(labels: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _make_block(shift_size: int) -> SwinTransformerBlock:
-    """Build a deterministic probe block (no dropout, no stochastic depth)."""
+def _make_block(
+    shift_size: int, build_shape: tuple = (None, HEIGHT, WIDTH, DIM)
+) -> SwinTransformerBlock:
+    """Build a deterministic probe block (no dropout, no stochastic depth).
+
+    Args:
+        shift_size: Cyclic shift for the block.
+        build_shape: Shape passed to ``build()``. Pass ``(None, None, None,
+            DIM)`` to reproduce the ``models/thera`` construction, whose
+            spatial dims are unknown at build time.
+
+    Returns:
+        A built ``SwinTransformerBlock`` with seeded weights.
+    """
     keras.utils.set_random_seed(SEED)
     block = SwinTransformerBlock(
         dim=DIM,
@@ -194,7 +215,7 @@ def _make_block(shift_size: int) -> SwinTransformerBlock:
         attention_dropout_rate=0.0,
         stochastic_depth_rate=0.0,
     )
-    block.build((None, HEIGHT, WIDTH, DIM))
+    block.build(build_shape)
     return block
 
 
@@ -522,7 +543,9 @@ class TestSwMsaMaskConstruction:
         block = _make_block(shift_size=SHIFT_SIZE)
         mask = np.asarray(
             ops.convert_to_numpy(
-                block._build_swmsa_keep_mask(BATCH, HEIGHT, WIDTH)
+                block._build_swmsa_keep_mask(
+                    BATCH, HEIGHT, WIDTH, SHIFT_SIZE
+                )
             )
         )
 
@@ -627,8 +650,10 @@ class TestSwMsaMaskConstruction:
         ``models/thera`` builds every Swin block with ``(B, None, None, C)``,
         so a static-shape check that fired on ``None`` would kill it. Feeding
         the single-window resolution through a dynamic graph exercises the one
-        case where the static path would have downgraded the shift: dynamically
-        the shift is kept and the mask carries the correctness instead.
+        case where the static path downgrades the shift; since D-012 the
+        dynamic path downgrades it too, at runtime. This test asserts only that
+        nothing raises -- the *numeric* agreement of the two paths is
+        :class:`TestShapeIndependenceAtTraceTime`'s job.
         """
         keras.utils.set_random_seed(SEED)
         inputs = keras.Input(shape=(None, None, DIM))
@@ -689,14 +714,32 @@ class TestSwMsaMaskConstruction:
             assert y.shape == x.shape
             assert np.isfinite(y).all()
 
-    def test_dynamic_build_matches_static_build(self):
-        """Dynamic-shape execution must produce the same numbers as static.
+    @pytest.mark.parametrize(
+        "height,width",
+        [
+            (HEIGHT, WIDTH),                    # 2 x window_size
+            (WINDOW_SIZE, WINDOW_SIZE),         # exactly one window
+            (HEIGHT, WINDOW_SIZE),              # one window wide only
+        ],
+        ids=["two_windows", "single_window", "mixed"],
+    )
+    def test_dynamic_build_matches_static_build(self, height, width):
+        """Dynamic-shape *build* execution must produce the same numbers as static.
 
         A mask derived from a *wrong* runtime shape would still be finite and
         correctly shaped; only a comparison against the statically-shaped
         reference can see it.
+
+        **This test cannot see the D-012 defect and is not meant to.** Both
+        blocks are called *eagerly* here, so both see concrete integers in
+        ``x.shape`` regardless of what shape they were BUILT with, and both
+        therefore take the same ``_resolve_shift_size`` branch. Build-time
+        shape independence and call-time shape independence are different
+        properties; the second one is
+        :class:`TestShapeIndependenceAtTraceTime`'s job.
         """
-        x = _probe_input()
+        rng = np.random.default_rng(SEED)
+        x = rng.standard_normal((BATCH, height, width, DIM)).astype("float32")
 
         keras.utils.set_random_seed(SEED)
         static_block = SwinTransformerBlock(
@@ -705,7 +748,7 @@ class TestSwMsaMaskConstruction:
             window_size=WINDOW_SIZE,
             shift_size=SHIFT_SIZE,
         )
-        static_block.build((None, HEIGHT, WIDTH, DIM))
+        static_block.build((None, height, width, DIM))
 
         keras.utils.set_random_seed(SEED)
         dynamic_block = SwinTransformerBlock(
@@ -725,3 +768,145 @@ class TestSwMsaMaskConstruction:
             _forward(dynamic_block, x), _forward(static_block, x),
             rtol=0, atol=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. Shape independence at TRACE time (plan step 10, decision D-012)
+# ---------------------------------------------------------------------------
+
+
+def _traced_forward(
+    block: SwinTransformerBlock, x: np.ndarray, spec_shape
+) -> np.ndarray:
+    """Run ``block`` inside a graph traced against ``spec_shape``.
+
+    Both comparands in this section go through ``tf.function``, so the only
+    difference between them is what the tracer *knew about the shape* --
+    graph-vs-eager float reassociation is held constant and cannot be mistaken
+    for a branch divergence. (That reassociation is real and is not small: at
+    these weight scales an eager call and a traced call of the *same* block on
+    the *same* tensor differ by ~1e-3 at ``H = 2 * window_size``, where no
+    branch is in dispute at all.)
+
+    Args:
+        block: A built ``SwinTransformerBlock``.
+        x: Concrete input array.
+        spec_shape: The shape given to ``tf.TensorSpec``; ``None`` entries are
+            the dims the trace must treat as unknown.
+
+    Returns:
+        The traced forward pass as a numpy array.
+    """
+    fn = tf.function(
+        lambda t: block(t, training=False),
+        input_signature=[tf.TensorSpec(spec_shape, tf.float32)],
+    )
+    return np.asarray(fn(tf.convert_to_tensor(x)))
+
+
+class TestShapeIndependenceAtTraceTime:
+    """The same block, weights and tensor must give one answer (D-012).
+
+    Before plan step 10 the D-006 single-window fallback was a *static-shape*
+    decision: ``_resolve_shift_size`` read ``x.shape[1:3]`` and skipped any
+    ``None``. Traced against ``TensorSpec([None, None, None, C])`` at
+    ``H == W == window_size`` the fallback therefore could not fire, and the
+    block kept the roll and the region mask while an eager call on the very
+    same tensor dropped both.
+
+    Measured RED at the pre-fix commit, config ``dim=32, num_heads=4,
+    window_size=4, shift_size=2``, ``(1, 4, 4, 32)``, weights assigned from a
+    seeded RNG: **512/512 elements differed, max |diff| 251.4, 97% relative.**
+    ``models/thera/tails.py`` builds every Swin block with
+    ``(B, None, None, C)``, so it was the one consumer taking the branch that
+    ``models/swin_transformer`` never takes at identical geometry.
+    """
+
+    @pytest.mark.parametrize(
+        "height,width",
+        [
+            (WINDOW_SIZE, WINDOW_SIZE),
+            (HEIGHT, WIDTH),
+            (HEIGHT, WINDOW_SIZE),
+            (WINDOW_SIZE, WIDTH),
+            (3 * WINDOW_SIZE, 3 * WINDOW_SIZE),
+        ],
+        ids=["1x1", "2x2", "2x1", "1x2", "3x3"],
+    )
+    def test_unknown_spatial_dims_give_the_static_answer(self, height, width):
+        """A trace that does not know ``H``/``W`` must answer like one that does.
+
+        ``rtol=0, atol=0``: the two graphs execute the identical op sequence
+        once the shift agrees, so anything other than bit-identity means the
+        runtime fallback did not reproduce the static one.
+        """
+        block = _make_block(shift_size=SHIFT_SIZE, build_shape=(None, None, None, DIM))
+        rng = np.random.default_rng(SEED)
+        x = rng.standard_normal((BATCH, height, width, DIM)).astype("float32")
+
+        dynamic = _traced_forward(block, x, [None, None, None, DIM])
+        static = _traced_forward(block, x, [BATCH, height, width, DIM])
+
+        np.testing.assert_allclose(
+            dynamic, static, rtol=0, atol=0,
+            err_msg=(
+                f"Shape-dependent output at H={height}, W={width}: the same "
+                "block, weights and tensor answered differently depending on "
+                "whether the tracer knew the spatial extent (D-012)."
+            ),
+        )
+
+    def test_the_probe_can_see_a_wrong_runtime_shift(self):
+        """Non-vacuity: the comparison above must be able to fail.
+
+        A block whose *static* answer is a shifted one (``H = 2 * ws``) and a
+        block whose static answer is unshifted (``H == ws``) must produce
+        visibly different numbers on the same tensor -- otherwise the geometry
+        this suite compares is not observable and the bit-identity assertion
+        above would hold for a block that ignored the shift entirely.
+        """
+        block = _make_block(shift_size=SHIFT_SIZE, build_shape=(None, None, None, DIM))
+        rng = np.random.default_rng(SEED)
+        x = rng.standard_normal(
+            (BATCH, WINDOW_SIZE, WINDOW_SIZE, DIM)
+        ).astype("float32")
+
+        unshifted = _traced_forward(block, x, [BATCH, WINDOW_SIZE, WINDOW_SIZE, DIM])
+
+        forced = _make_block(shift_size=0, build_shape=(None, None, None, DIM))
+        for target, source in zip(forced.weights, block.weights):
+            target.assign(source)
+        control = _traced_forward(
+            forced, x, [BATCH, WINDOW_SIZE, WINDOW_SIZE, DIM]
+        )
+
+        # The single-window geometry must reduce to the shift_size=0 block...
+        np.testing.assert_allclose(unshifted, control, rtol=0, atol=0)
+
+        # ...while a genuinely shifted geometry must NOT be the same numbers,
+        # so "bit-identical" above is a real constraint and not a tautology.
+        bigger = rng.standard_normal((BATCH, HEIGHT, WIDTH, DIM)).astype("float32")
+        shifted = _traced_forward(block, bigger, [None, None, None, DIM])
+        plain = _traced_forward(forced, bigger, [None, None, None, DIM])
+        assert float(np.abs(shifted - plain).max()) > 1e-2
+
+    def test_the_runtime_shift_survives_xla(self):
+        """``ops.roll`` with a *tensor* shift must still compile under XLA.
+
+        The dynamic path feeds ``ops.roll`` a runtime scalar rather than a
+        Python int. That is the one construct in this fix that a backend could
+        refuse, and refusing it would be a hard outage for any consumer using
+        ``jit_compile=True`` -- so it is pinned rather than assumed.
+        """
+        block = _make_block(shift_size=SHIFT_SIZE, build_shape=(None, None, None, DIM))
+        rng = np.random.default_rng(SEED)
+        fn = tf.function(
+            lambda t: block(t, training=False),
+            input_signature=[tf.TensorSpec([None, None, None, DIM], tf.float32)],
+            jit_compile=True,
+        )
+        for size in (WINDOW_SIZE, HEIGHT, 3 * WINDOW_SIZE):
+            x = rng.standard_normal((1, size, size, DIM)).astype("float32")
+            y = np.asarray(fn(tf.convert_to_tensor(x)))
+            assert y.shape == x.shape
+            assert np.isfinite(y).all()
