@@ -11,7 +11,8 @@ from dl_techniques.layers.transformers.vision_encoder import (
     VisionEncoder,
     create_vision_encoder,
     create_vit_encoder,
-    create_siglip_encoder
+    create_siglip_encoder,
+    MASK_INCOMPATIBLE_OUTPUT_MODES,
 )
 
 
@@ -416,13 +417,21 @@ ALL_OUTPUT_MODES = [
 ]
 
 # Strategies whose output provably excludes the masked patch, so a perturbation
-# of that patch must leave the output BIT-IDENTICAL. The three exclusions are
-# `SequencePooling` limitations, not VisionEncoder ones, and are out of scope:
+# of that patch must leave the output BIT-IDENTICAL. The four exclusions are
+# `SequencePooling` limitations, not VisionEncoder ones (finding F-24), and are
+# out of scope to FIX -- but three of them are now REFUSED rather than silently
+# answered (D-013, `MASK_INCOMPATIBLE_OUTPUT_MODES`), so with a mask they raise:
 #   * 'weighted'   - the mask multiplies the position weights BEFORE the softmax,
-#                    so a masked position keeps weight softmax(0) != 0.
-#   * 'top_k_*'    - `top_k` defaults to 10 >= seq_len here, so every position is
-#                    selected, and the gather reads the UNMASKED `inputs`.
-#   * 'flatten'    - the output literally contains the masked position.
+#                    so a masked position keeps weight softmax(0) != 0. Refused.
+#   * 'top_k_*'    - ranks by the norms of the MASKED inputs but selects
+#                    `k = min(top_k, seq_len)` of them and gathers from the
+#                    UNMASKED `inputs`, so it leaks exactly when `k` exceeds the
+#                    number of KEPT positions (measured: at seq_len=5 with 4
+#                    kept, top_k<=4 leaks 0.0 and top_k>=5 leaks 2.349049e-01).
+#                    `VisionEncoder` never exposes `top_k`, so it is always the
+#                    default 10. Refused.
+#   * 'flatten'    - the output literally contains the masked position. NOT
+#                    refused: returning every token is what the mode means.
 ISOLATING_OUTPUT_MODES = [
     'cls', 'first', 'last', 'middle',
     'mean', 'max', 'min', 'sum',
@@ -668,6 +677,21 @@ class TestPoolingMaskIsClsExtended:
             pytest.skip("output_mode='cls' requires use_cls_token=True")
 
         encoder = _seeded_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+
+        if output_mode in MASK_INCOMPATIBLE_OUTPUT_MODES:
+            # These three are REFUSED with a mask rather than accepted (F-24,
+            # D-013). The shape defect this class was written for is still
+            # fixed for them -- see
+            # `TestMaskIncompatiblePooling::test_the_refused_modes_still_work_without_a_mask`,
+            # which runs the very same config mask-free.
+            with pytest.raises(NotImplementedError, match="does not support"):
+                encoder(
+                    ops.convert_to_tensor(_mask_images()),
+                    attention_mask=ops.convert_to_tensor(_patch_mask()),
+                    training=False,
+                )
+            return
+
         out = encoder(
             ops.convert_to_tensor(_mask_images()),
             attention_mask=ops.convert_to_tensor(_patch_mask()),
@@ -719,3 +743,145 @@ class TestAttentionMaskSerialization:
         # Non-vacuity: the reloaded model must still honour the mask.
         after_nomask = _np(loaded([images, np.ones_like(mask)], training=False))
         assert float(np.max(np.abs(after_nomask - after))) > 1e-4
+
+class TestMaskIncompatiblePooling:
+    """F-24 / D-013: a crash must not be downgraded to a silent wrong answer.
+
+    Before this plan, ``VisionEncoder(use_cls_token=True,
+    output_mode='weighted' | 'top_k_mean' | 'top_k_max')`` plus any
+    ``attention_mask`` raised a raw backend ``InvalidArgumentError``: the mask
+    was one position short of the CLS-extended sequence (D-009). Step 5 fixed
+    that shape defect -- and thereby turned the crash into a **silent wrong
+    answer** for exactly these three, because the ``SequencePooling`` mask
+    handling underneath them is itself broken.
+
+    Measured leakage of a masked patch into the pooled output, one patch
+    masked and that patch's pixels perturbed, seeded weights, where the
+    required movement is exactly ``0.0``:
+
+    =============  ==================  ===================
+    output_mode    use_cls_token=True  use_cls_token=False
+    =============  ==================  ===================
+    weighted       2.317689e-01        1.119100e-01
+    top_k_mean     2.349049e-01        1.266325e-01
+    top_k_max      4.473200e-01        2.670361e-01
+    =============  ==================  ===================
+
+    All 14 other pooling strategies measured exactly ``0.0`` on the same probe
+    with a live no-mask control moving by 0.42 to 3.52, so the machinery is not
+    vacuous. ``call()`` now raises ``NotImplementedError`` for the three when a
+    mask is supplied; the ``SequencePooling`` defects themselves stay out of
+    scope (F-24).
+    """
+
+    @pytest.mark.parametrize("use_cls_token", [True, False])
+    @pytest.mark.parametrize("output_mode", sorted(MASK_INCOMPATIBLE_OUTPUT_MODES))
+    def test_a_mask_is_refused_rather_than_silently_leaked(
+        self, output_mode, use_cls_token
+    ):
+        """The combination must fail loudly, and name the mode and the finding."""
+        encoder = _seeded_encoder(
+            output_mode=output_mode, use_cls_token=use_cls_token
+        )
+        with pytest.raises(NotImplementedError) as excinfo:
+            encoder(
+                ops.convert_to_tensor(_mask_images()),
+                attention_mask=ops.convert_to_tensor(_patch_mask()),
+                training=False,
+            )
+        message = str(excinfo.value)
+        assert output_mode in message
+        assert 'F-24' in message
+
+    @pytest.mark.parametrize("use_cls_token", [True, False])
+    @pytest.mark.parametrize("output_mode", sorted(MASK_INCOMPATIBLE_OUTPUT_MODES))
+    def test_the_refused_modes_still_work_without_a_mask(
+        self, output_mode, use_cls_token
+    ):
+        """The guard must not break the mask-free use of these strategies.
+
+        Refusing the *combination* is the point; these are legitimate pooling
+        strategies on their own, and a guard that broke them would be a worse
+        regression than the one it fixes.
+        """
+        encoder = _seeded_encoder(
+            output_mode=output_mode, use_cls_token=use_cls_token
+        )
+        out = encoder(ops.convert_to_tensor(_mask_images()), training=False)
+        expected = encoder.compute_output_shape(
+            (2, MASK_CFG['img_size'], MASK_CFG['img_size'], 3)
+        )
+        assert tuple(out.shape)[1:] == tuple(expected)[1:]
+        assert np.all(np.isfinite(_np(out)))
+
+        # Explicit `attention_mask=None` must be the same path, not a raise.
+        explicit = encoder(
+            ops.convert_to_tensor(_mask_images()),
+            attention_mask=None,
+            training=False,
+        )
+        np.testing.assert_allclose(_np(explicit), _np(out), rtol=0, atol=0)
+
+    @pytest.mark.parametrize("use_cls_token", [True, False])
+    @pytest.mark.parametrize("output_mode", sorted(MASK_INCOMPATIBLE_OUTPUT_MODES))
+    def test_the_leak_the_guard_prevents_is_real(self, output_mode, use_cls_token):
+        """Non-vacuity: without the guard these modes DO leak the masked patch.
+
+        Reaches past ``call()`` straight into the sequence features and the
+        pooling layer -- i.e. exactly what ``call()`` used to do -- and asserts
+        that a masked patch's perturbation moves the pooled output. If this
+        ever measures ``0.0``, the ``SequencePooling`` defect has been fixed
+        upstream and the guard in ``call()`` is obsolete rather than
+        load-bearing; treat that as a signal to remove it, not as a pass.
+        """
+        encoder = _seeded_encoder(
+            output_mode=output_mode, use_cls_token=use_cls_token
+        )
+        images = _mask_images()
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        def _pooled(arr: np.ndarray) -> np.ndarray:
+            features = encoder._get_full_sequence_features(
+                ops.convert_to_tensor(arr), attention_mask=mask, training=False
+            )
+            pooling_mask = encoder._extend_mask_for_cls(mask, 2)
+            return _np(encoder.pooling_layer(
+                features, mask=pooling_mask, training=False
+            ))
+
+        base = _pooled(images)
+        leaked = _pooled(_perturb_patch(images, MASKED_PATCH))
+        delta = float(np.max(np.abs(leaked - base)))
+        assert delta > 1e-3, (
+            f"output_mode={output_mode!r}, use_cls_token={use_cls_token}: the "
+            f"masked patch moved the pooled output by only {delta:.6e}, so "
+            f"the D-013 guard is guarding nothing."
+        )
+
+    def test_the_isolating_modes_are_not_refused(self):
+        """Scope pin: the guard must bite ONLY the three measured strategies.
+
+        A guard that refused every mode with a mask would pass the raise tests
+        above while breaking the whole mask feature this plan added.
+        """
+        for output_mode in ISOLATING_OUTPUT_MODES:
+            encoder = _seeded_encoder(output_mode=output_mode, use_cls_token=True)
+            out = encoder(
+                ops.convert_to_tensor(_mask_images()),
+                attention_mask=ops.convert_to_tensor(_patch_mask()),
+                training=False,
+            )
+            assert np.all(np.isfinite(_np(out))), output_mode
+
+    def test_helper_methods_are_not_refused(self):
+        """``get_*_features`` do not pool, so the guard must not reach them."""
+        encoder = _seeded_encoder(output_mode='weighted', use_cls_token=True)
+        images = ops.convert_to_tensor(_mask_images())
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        assert np.all(np.isfinite(_np(
+            encoder.get_cls_features(images, attention_mask=mask)
+        )))
+        assert np.all(np.isfinite(_np(
+            encoder.get_patch_features(images, attention_mask=mask)
+        )))
