@@ -529,12 +529,80 @@ class VisionEncoder(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
+    def _extend_mask_for_cls(
+            self,
+            attention_mask: Optional[keras.KerasTensor],
+            batch_size: Any
+    ) -> Optional[keras.KerasTensor]:
+        """Splice an always-attend CLS entry onto a patch-level attention mask.
+
+        Shared contract (2 call sites: ``_get_full_sequence_features`` and
+        ``call``). Given the caller's ``(B, num_patches)`` keep-mask, returns a
+        ``(B, 1 + num_patches)`` mask whose position 0 is 1 whenever
+        ``use_cls_token`` is True; returns the argument unchanged when it is
+        ``None`` or when there is no CLS token. Never raises; validation of the
+        mask's rank happens once, at the public entry points.
+
+        :param attention_mask: Patch-level keep-mask ``(B, num_patches)``, 1 = attend.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param batch_size: Dynamic batch size, from ``ops.shape(inputs)[0]``.
+        :type batch_size: Any
+        :return: CLS-extended mask, or the input unchanged.
+        :rtype: Optional[keras.KerasTensor]
+        """
+        if attention_mask is None or not self.use_cls_token:
+            return attention_mask
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-009
+        # The caller's mask is over PATCHES. The CLS token is not a patch: it is
+        # never masked and always attends, so a ones column is spliced at
+        # position 0 - exactly the pattern `text_encoder.py:640-646` uses.
+        # Do NOT hand the un-extended `(B, num_patches)` mask to the
+        # TransformerLayer stack or to `self.pooling_layer` when
+        # `use_cls_token=True`. The attended/pooled sequence is `1 + num_patches`
+        # long, so an un-extended mask is misaligned by exactly one position: it
+        # masks the WRONG patch wherever the shapes happen to broadcast, and
+        # raises a raw backend `InvalidArgumentError` wherever they do not (13 of
+        # the 18 pooling strategies did exactly that at HEAD - measured, see
+        # decisions.md D-009).
+        cls_mask = ops.ones((batch_size, 1), dtype=attention_mask.dtype)
+        return ops.concatenate([cls_mask, attention_mask], axis=1)
+
+    def _validate_attention_mask(self, attention_mask: Optional[keras.KerasTensor]) -> None:
+        """Fail loudly on a mask that does not match the documented contract.
+
+        :param attention_mask: Candidate mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :raises ValueError: If the mask is not rank-2.
+        """
+        if attention_mask is None:
+            return
+        if len(attention_mask.shape) != 2:
+            raise ValueError(
+                f"attention_mask must be a rank-2 keep-mask of shape "
+                f"(batch, num_patches); got shape {tuple(attention_mask.shape)}. "
+                f"The mask is over patches - the CLS token is excluded and is "
+                f"spliced in internally."
+            )
+
     def _get_full_sequence_features(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Internal helper to run the full forward pass and return sequence features."""
+        """Internal helper to run the full forward pass and return sequence features.
+
+        :param inputs: Image tensor ``(B, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional patch-level keep-mask ``(B, num_patches)``,
+            1 = attend. CLS excluded; spliced in here when ``use_cls_token=True``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Sequence features ``(B, seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
+        """
         batch_size = ops.shape(inputs)[0]
         x = self.patch_embed(inputs, training=training)
 
@@ -547,10 +615,12 @@ class VisionEncoder(keras.layers.Layer):
             cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
             x = ops.concatenate([cls_tokens, x], axis=1)
 
+        attention_mask = self._extend_mask_for_cls(attention_mask, batch_size)
+
         x = self.pos_embed(x, training=training)
 
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attention_mask, training=training)
 
         if self.norm is not None:
             x = self.norm(x, training=training)
@@ -567,55 +637,80 @@ class VisionEncoder(keras.layers.Layer):
 
         :param inputs: Image tensor ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional mask ``(B, seq_len)``.
+        :param attention_mask: Optional keep-mask ``(B, num_patches)``, 1 = attend,
+            0 = mask. The mask is over **patches**: the CLS token is excluded from
+            it and is always kept (a ones column is spliced in internally when
+            ``use_cls_token=True``). It gates every ``TransformerLayer`` in the
+            stack as well as the final pooling.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Output features (shape depends on ``output_mode``).
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``attention_mask`` is not rank-2.
         """
-        x = self._get_full_sequence_features(inputs, training=training)
+        self._validate_attention_mask(attention_mask)
 
-        output = self.pooling_layer(x, mask=attention_mask, training=training)
+        x = self._get_full_sequence_features(
+            inputs, attention_mask=attention_mask, training=training
+        )
+
+        pooling_mask = self._extend_mask_for_cls(attention_mask, ops.shape(inputs)[0])
+        output = self.pooling_layer(x, mask=pooling_mask, training=training)
 
         return output
 
     def get_cls_features(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Extract CLS token features for classification.
 
         :param inputs: Image tensor.
         :type inputs: keras.KerasTensor
+        :param attention_mask: Optional patch-level keep-mask ``(B, num_patches)``;
+            see :meth:`call`.
+        :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: CLS features ``(B, embed_dim)``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If ``use_cls_token=False``.
+        :raises ValueError: If ``use_cls_token=False`` or the mask is not rank-2.
         """
         if not self.use_cls_token:
             raise ValueError("CLS token is not available when use_cls_token=False")
 
-        features = self._get_full_sequence_features(inputs, training=training)
+        self._validate_attention_mask(attention_mask)
+        features = self._get_full_sequence_features(
+            inputs, attention_mask=attention_mask, training=training
+        )
         return features[:, 0, :]
 
     def get_patch_features(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Extract patch token features for dense prediction.
 
         :param inputs: Image tensor.
         :type inputs: keras.KerasTensor
+        :param attention_mask: Optional patch-level keep-mask ``(B, num_patches)``;
+            see :meth:`call`.
+        :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Patch features ``(B, num_patches, embed_dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``attention_mask`` is not rank-2.
         """
-        features = self._get_full_sequence_features(inputs, training=training)
+        self._validate_attention_mask(attention_mask)
+        features = self._get_full_sequence_features(
+            inputs, attention_mask=attention_mask, training=training
+        )
         if self.use_cls_token:
             return features[:, 1:, :]
         else:
@@ -624,18 +719,25 @@ class VisionEncoder(keras.layers.Layer):
     def get_spatial_features(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Get spatial features reshaped for dense prediction.
 
         :param inputs: Image tensor.
         :type inputs: keras.KerasTensor
+        :param attention_mask: Optional patch-level keep-mask ``(B, num_patches)``;
+            see :meth:`call`.
+        :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Spatial features ``(B, patch_H, patch_W, embed_dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``attention_mask`` is not rank-2.
         """
-        patch_features = self.get_patch_features(inputs, training=training)
+        patch_features = self.get_patch_features(
+            inputs, attention_mask=attention_mask, training=training
+        )
         batch_size = ops.shape(patch_features)[0]
 
         patches_h = self.img_size // self.patch_size

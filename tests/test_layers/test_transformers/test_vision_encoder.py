@@ -371,3 +371,351 @@ class TestVisionEncoder:
             assert output.dtype == tf.float16
         finally:
             keras.mixed_precision.set_global_policy('float32')
+
+
+# =====================================================================
+# F-04 — `attention_mask` must reach the TransformerLayer stack.
+#
+# Before plan-2026-07-31T042809-ddc92265/iter-1/step-5, ``VisionEncoder.call``
+# forwarded ``attention_mask`` *only* to ``self.pooling_layer``; the helper that
+# actually runs the transformer stack never received it. Two separate defects
+# followed, and both are pinned below:
+#
+#   1. Masked patches still participated in every self-attention layer, so they
+#      influenced the representation of every *unmasked* token (and, for
+#      ``output_mode='cls'``, the mask had no observable effect whatsoever).
+#   2. The mask handed to ``self.pooling_layer`` was over PATCHES only, while the
+#      pooled sequence carries a CLS token at position 0. With
+#      ``use_cls_token=True`` that is a length mismatch: 13 of the 18 pooling
+#      strategies raised ``InvalidArgumentError`` at runtime, and ``'last'``
+#      silently selected a position one off.
+# =====================================================================
+
+# Small, fast geometry: 16/8 -> 2x2 = 4 patches.
+MASK_CFG: Dict[str, Any] = {
+    'img_size': 16,
+    'patch_size': 8,
+    'embed_dim': 32,
+    'depth': 2,
+    'num_heads': 4,
+    'use_bias': True,
+}
+MASK_PATCHES_PER_DIM = MASK_CFG['img_size'] // MASK_CFG['patch_size']  # 2
+MASK_NUM_PATCHES = MASK_PATCHES_PER_DIM ** 2  # 4
+MASKED_PATCH = 3  # the LAST patch; chosen so no positional strategy selects it
+
+# Every pooling strategy `SequencePooling` accepts, as reachable through
+# `VisionEncoder(output_mode=...)`.
+ALL_OUTPUT_MODES = [
+    'cls', 'first', 'last', 'middle',
+    'mean', 'max', 'min', 'sum',
+    'mean_max', 'mean_std', 'mean_max_min',
+    'attention', 'multi_head_attention', 'weighted',
+    'top_k_mean', 'top_k_max',
+    'none', 'flatten',
+]
+
+# Strategies whose output provably excludes the masked patch, so a perturbation
+# of that patch must leave the output BIT-IDENTICAL. The three exclusions are
+# `SequencePooling` limitations, not VisionEncoder ones, and are out of scope:
+#   * 'weighted'   - the mask multiplies the position weights BEFORE the softmax,
+#                    so a masked position keeps weight softmax(0) != 0.
+#   * 'top_k_*'    - `top_k` defaults to 10 >= seq_len here, so every position is
+#                    selected, and the gather reads the UNMASKED `inputs`.
+#   * 'flatten'    - the output literally contains the masked position.
+ISOLATING_OUTPUT_MODES = [
+    'cls', 'first', 'last', 'middle',
+    'mean', 'max', 'min', 'sum',
+    'mean_max', 'mean_std', 'mean_max_min',
+    'attention', 'multi_head_attention',
+    'none',
+]
+NON_ISOLATING_OUTPUT_MODES = ['weighted', 'top_k_mean', 'top_k_max', 'flatten']
+assert sorted(ISOLATING_OUTPUT_MODES + NON_ISOLATING_OUTPUT_MODES) == sorted(ALL_OUTPUT_MODES)
+
+
+def _seeded_encoder(seed: int = 1234, **overrides: Any) -> VisionEncoder:
+    """Build a `VisionEncoder` and assign EVERY weight from a seeded RNG.
+
+    Fresh Keras initialisers leave biases at zero, which (per decision D-008 of
+    this plan, recorded for `GatedLinearAttentionBlock`) can make a masking site
+    unobservable by construction. These fixtures therefore put the layer in the
+    state a *trained* model is in: non-zero biases, non-unit norm gains.
+
+    :param seed: RNG seed for the weight assignment.
+    :param overrides: Keyword overrides merged over ``MASK_CFG``.
+    :return: A built encoder with fully randomised, non-degenerate weights.
+    """
+    cfg = {**MASK_CFG, **overrides}
+    encoder = VisionEncoder(**cfg)
+    encoder.build((None, cfg['img_size'], cfg['img_size'], 3))
+
+    rng = np.random.default_rng(seed)
+    saw_nonzero_bias = False
+    for w in encoder.weights:
+        shape = tuple(w.shape)
+        name = w.path.split('/')[-1]
+        if 'gamma' in name or 'scale' in name:
+            # Keep normalisation gains near 1 - a near-zero gain would collapse
+            # the signal and make the whole probe vacuous.
+            value = 1.0 + 0.05 * rng.normal(size=shape)
+        elif 'beta' in name or 'bias' in name:
+            value = 0.05 * rng.normal(size=shape)
+            saw_nonzero_bias = True
+        else:
+            value = 0.1 * rng.normal(size=shape)
+        w.assign(ops.cast(ops.convert_to_tensor(value), w.dtype))
+
+    assert saw_nonzero_bias, (
+        "Fixture is degenerate: no bias weight was assigned a non-zero value, so "
+        "masking sites downstream of a zeroed activation cannot be observed."
+    )
+    return encoder
+
+
+def _mask_images(seed: int = 7, batch: int = 2) -> np.ndarray:
+    """Return a deterministic batch of images."""
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(batch, MASK_CFG['img_size'], MASK_CFG['img_size'], 3)).astype('float32')
+
+
+def _perturb_patch(images: np.ndarray, patch_index: int, seed: int = 99) -> np.ndarray:
+    """Perturb one patch's PIXELS with a large, NON-UNIFORM signal.
+
+    A uniform per-channel offset is mean-centred away by the first LayerNorm
+    (measured in step 1 of this plan: a real leak read as 3.58e-07 of
+    reassociation noise). The perturbation here varies per pixel and per channel.
+
+    :param images: Batch of images ``(B, H, W, C)``.
+    :param patch_index: Row-major patch index to perturb.
+    :param seed: RNG seed for the perturbation.
+    :return: A copy of ``images`` with that patch perturbed.
+    """
+    ps = MASK_CFG['patch_size']
+    r = (patch_index // MASK_PATCHES_PER_DIM) * ps
+    c = (patch_index % MASK_PATCHES_PER_DIM) * ps
+    rng = np.random.default_rng(seed)
+    out = np.array(images, copy=True)
+    out[:, r:r + ps, c:c + ps, :] += (
+        5.0 * rng.normal(size=(images.shape[0], ps, ps, images.shape[-1]))
+    ).astype(images.dtype)
+    return out
+
+
+def _patch_mask(masked_patch: int = MASKED_PATCH, batch: int = 2, dtype: str = 'float32') -> np.ndarray:
+    """Return a ``(B, num_patches)`` keep-mask (1 = attend) with one patch masked."""
+    m = np.ones((batch, MASK_NUM_PATCHES), dtype=dtype)
+    m[:, masked_patch] = 0
+    return m
+
+
+def _np(x: Any) -> np.ndarray:
+    return ops.convert_to_numpy(x)
+
+
+class TestAttentionMaskReachesSelfAttention:
+    """F-04: the caller's ``attention_mask`` must gate self-attention, not just pooling."""
+
+    def test_masked_patch_perturbation_cannot_reach_cls(self):
+        """Perturbing a MASKED patch's pixels must leave the CLS output bit-identical.
+
+        This is the SC-5 guard. It carries its own in-band live control: the same
+        perturbation applied to an UNMASKED patch must move CLS by a wide margin,
+        so a test that passes because *nothing* moves is impossible.
+        """
+        encoder = _seeded_encoder(output_mode='cls', use_cls_token=True)
+        images = _mask_images()
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        base = _np(encoder(ops.convert_to_tensor(images), attention_mask=mask, training=False))
+
+        # LIVE CONTROL: an unmasked patch must move the output a lot.
+        live = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, 0)),
+            attention_mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe: perturbing UNMASKED patch 0 moved CLS by only "
+            f"{live_delta:.3e}; the isolation assertion below would prove nothing."
+        )
+
+        # THE GUARD: the masked patch must be unable to reach CLS at all.
+        masked = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, MASKED_PATCH)),
+            attention_mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(masked, base, rtol=0, atol=0)
+
+    def test_mask_is_not_vacuous_for_cls_output(self):
+        """A mask must CHANGE the CLS output relative to no mask at all.
+
+        Pre-fix this was measured byte-identical (max abs diff 0.0) - the mask
+        never reached self-attention and, for ``output_mode='cls'``, never even
+        reached pooling.
+        """
+        encoder = _seeded_encoder(output_mode='cls', use_cls_token=True)
+        images = ops.convert_to_tensor(_mask_images())
+
+        unmasked = _np(encoder(images, attention_mask=None, training=False))
+        masked = _np(encoder(images, attention_mask=ops.convert_to_tensor(_patch_mask()), training=False))
+        delta = float(np.max(np.abs(masked - unmasked)))
+        assert delta > 1e-3, (
+            f"attention_mask has no observable effect on the CLS output "
+            f"(max abs diff {delta:.6e}) - it is being dropped before self-attention."
+        )
+
+    @pytest.mark.parametrize("use_cls_token", [True, False])
+    @pytest.mark.parametrize("output_mode", ISOLATING_OUTPUT_MODES)
+    def test_masked_patch_is_isolated_for_every_output_mode(self, output_mode, use_cls_token):
+        """Bit-identity under masked-patch perturbation, across pooling modes.
+
+        Covering both ``use_cls_token`` settings is what stops a CLS-splice
+        off-by-one from hiding: with the mask misaligned by one position the
+        WRONG patch would be masked and this assertion would fire.
+        """
+        if output_mode == 'cls' and not use_cls_token:
+            pytest.skip("output_mode='cls' requires use_cls_token=True")
+
+        encoder = _seeded_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        images = _mask_images()
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        base = _np(encoder(ops.convert_to_tensor(images), attention_mask=mask, training=False))
+        masked = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, MASKED_PATCH)),
+            attention_mask=mask, training=False,
+        ))
+        live = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, 0)),
+            attention_mask=mask, training=False,
+        ))
+
+        if output_mode == 'none':
+            # The full sequence is returned, so the masked patch's OWN row does
+            # change; every other row must not.
+            masked_pos = MASKED_PATCH + (1 if use_cls_token else 0)
+            keep = [i for i in range(base.shape[1]) if i != masked_pos]
+            base, masked, live = base[:, keep], masked[:, keep], live[:, keep]
+
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-3, (
+            f"Vacuous probe for output_mode={output_mode!r}, use_cls_token="
+            f"{use_cls_token}: the live control moved only {live_delta:.3e}."
+        )
+        np.testing.assert_allclose(masked, base, rtol=0, atol=0)
+
+    def test_helper_methods_honour_attention_mask(self):
+        """``get_cls_features``/``get_patch_features``/``get_spatial_features`` pass the mask through."""
+        encoder = _seeded_encoder(output_mode='cls', use_cls_token=True)
+        images = _mask_images()
+        pert = _perturb_patch(images, MASKED_PATCH)
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        cls_base = _np(encoder.get_cls_features(ops.convert_to_tensor(images), attention_mask=mask))
+        cls_pert = _np(encoder.get_cls_features(ops.convert_to_tensor(pert), attention_mask=mask))
+        np.testing.assert_allclose(cls_pert, cls_base, rtol=0, atol=0)
+
+        keep = [i for i in range(MASK_NUM_PATCHES) if i != MASKED_PATCH]
+        patch_base = _np(encoder.get_patch_features(ops.convert_to_tensor(images), attention_mask=mask))
+        patch_pert = _np(encoder.get_patch_features(ops.convert_to_tensor(pert), attention_mask=mask))
+        np.testing.assert_allclose(patch_pert[:, keep], patch_base[:, keep], rtol=0, atol=0)
+        # Live control: the masked patch's own representation DOES change.
+        assert float(np.max(np.abs(patch_pert[:, MASKED_PATCH] - patch_base[:, MASKED_PATCH]))) > 1e-3
+
+        spat_base = _np(encoder.get_spatial_features(ops.convert_to_tensor(images), attention_mask=mask))
+        spat_pert = _np(encoder.get_spatial_features(ops.convert_to_tensor(pert), attention_mask=mask))
+        spat_base = spat_base.reshape(spat_base.shape[0], -1, MASK_CFG['embed_dim'])
+        spat_pert = spat_pert.reshape(spat_pert.shape[0], -1, MASK_CFG['embed_dim'])
+        np.testing.assert_allclose(spat_pert[:, keep], spat_base[:, keep], rtol=0, atol=0)
+
+    def test_boolean_mask_is_accepted(self):
+        """A boolean keep-mask must survive the CLS splice (dtype-preserving concat)."""
+        encoder = _seeded_encoder(output_mode='cls', use_cls_token=True)
+        images = _mask_images()
+        bool_mask = ops.convert_to_tensor(_patch_mask(dtype='bool'))
+        base = _np(encoder(ops.convert_to_tensor(images), attention_mask=bool_mask, training=False))
+        pert = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, MASKED_PATCH)),
+            attention_mask=bool_mask, training=False,
+        ))
+        np.testing.assert_allclose(pert, base, rtol=0, atol=0)
+
+    def test_rank_3_mask_fails_loud(self):
+        """The documented contract is rank-2 ``(B, num_patches)``; anything else must raise."""
+        encoder = _seeded_encoder(output_mode='cls', use_cls_token=True)
+        images = ops.convert_to_tensor(_mask_images())
+        bad = ops.convert_to_tensor(
+            np.ones((2, MASK_NUM_PATCHES, MASK_NUM_PATCHES), dtype='float32')
+        )
+        with pytest.raises(ValueError, match="rank-2"):
+            encoder(images, attention_mask=bad, training=False)
+
+
+class TestPoolingMaskIsClsExtended:
+    """Second defect: the un-extended patch mask was mis-sized at the pooling call.
+
+    With ``use_cls_token=True`` the pooled sequence is ``1 + num_patches`` long
+    while the caller's mask is ``num_patches`` long. Measured at HEAD before this
+    step: 13 of the 18 strategies raised ``InvalidArgumentError`` and ``'last'``
+    silently picked a position one short.
+    """
+
+    @pytest.mark.parametrize("use_cls_token", [True, False])
+    @pytest.mark.parametrize("output_mode", ALL_OUTPUT_MODES)
+    def test_every_pooling_strategy_accepts_a_patch_mask(self, output_mode, use_cls_token):
+        if output_mode == 'cls' and not use_cls_token:
+            pytest.skip("output_mode='cls' requires use_cls_token=True")
+
+        encoder = _seeded_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        out = encoder(
+            ops.convert_to_tensor(_mask_images()),
+            attention_mask=ops.convert_to_tensor(_patch_mask()),
+            training=False,
+        )
+        expected = encoder.compute_output_shape((2, MASK_CFG['img_size'], MASK_CFG['img_size'], 3))
+        assert tuple(out.shape)[1:] == tuple(expected)[1:]
+        assert np.all(np.isfinite(_np(out)))
+
+    def test_last_strategy_indexes_the_cls_extended_sequence(self):
+        """``'last'`` picks ``sum(mask) - 1``; with the un-extended mask that is off by one."""
+        encoder = _seeded_encoder(output_mode='last', use_cls_token=True)
+        images = ops.convert_to_tensor(_mask_images())
+        mask = ops.convert_to_tensor(_patch_mask())
+
+        pooled = _np(encoder(images, attention_mask=mask, training=False))
+        sequence = _np(encoder._get_full_sequence_features(
+            images, attention_mask=mask, training=False
+        ))
+
+        # 4 valid positions in the CLS-extended mask -> index 3.
+        np.testing.assert_allclose(pooled, sequence[:, 3, :], rtol=0, atol=0)
+        # And it must NOT be the un-extended answer (index 2).
+        assert float(np.max(np.abs(pooled - sequence[:, 2, :]))) > 1e-4
+
+
+class TestAttentionMaskSerialization:
+    """I3: a ``.keras`` round-trip must restore VALUES on a config using the mask path."""
+
+    def test_roundtrip_preserves_values_on_the_mask_path(self):
+        img_size = MASK_CFG['img_size']
+        image_in = layers.Input(shape=(img_size, img_size, 3), name='image')
+        mask_in = layers.Input(shape=(MASK_NUM_PATCHES,), name='patch_mask')
+        encoder = VisionEncoder(**MASK_CFG, output_mode='mean', use_cls_token=True)
+        out = encoder(image_in, attention_mask=mask_in)
+        model = models.Model([image_in, mask_in], out)
+
+        images = _mask_images()
+        mask = _patch_mask()
+        before = _np(model([images, mask], training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'vision_encoder_mask.keras')
+            model.save(path)
+            loaded = models.load_model(path)
+            after = _np(loaded([images, mask], training=False))
+
+        np.testing.assert_allclose(after, before, rtol=1e-6, atol=1e-6)
+        # Non-vacuity: the reloaded model must still honour the mask.
+        after_nomask = _np(loaded([images, np.ones_like(mask)], training=False))
+        assert float(np.max(np.abs(after_nomask - after))) > 1e-4
