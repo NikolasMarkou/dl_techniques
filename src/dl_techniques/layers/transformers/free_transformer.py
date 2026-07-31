@@ -209,6 +209,22 @@ class BinaryMapper(keras.layers.Layer):
         :param bit_logits: Logits tensor ``(B, T, num_bits)``.
         :type bit_logits: keras.KerasTensor
         :param training: Training flag; enables gradient pass-through.
+            Evaluated with plain Python truthiness, so ``None`` and ``False``
+            both disable the pass-through.
+
+            .. warning::
+
+               A genuinely **symbolic** (traced) ``training`` tensor is NOT
+               supported and will RAISE. Inside a ``tf.function`` the branch
+               below raises ``OperatorNotAllowedInGraphError`` ("Using a
+               symbolic ``tf.Tensor`` as a Python ``bool`` is not allowed") --
+               MEASURED, and deliberate: the alternative was the previous
+               ``is True`` identity test, under which a tensor ``training``
+               silently compared ``False`` and the eq. 8 pass-through was
+               dropped with no error at all. ``fit``/``predict``/
+               ``jit_compile=True`` all resolve ``training`` to a Python bool
+               before tracing, so only a hand-written train step that threads a
+               ``tf.Tensor`` into ``training=`` can reach this.
         :type training: Optional[bool]
         :return: One-hot tensor ``(B, T, 2^num_bits)``.
         :rtype: keras.KerasTensor
@@ -243,7 +259,15 @@ class BinaryMapper(keras.layers.Layer):
         )
 
         # Step 5: Gradient pass-through (Equation 8 in paper)
-        if training is True:
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-020
+        # Plain truthiness, NOT `if training is True:`. `tf.constant(True) is
+        # True` is Python False, so the identity test made an EAGER tensor
+        # `training` skip the pass-through silently. Do NOT restore it, and do
+        # NOT try to rescue the symbolic case with `ops.where`/`tf.cond`: the
+        # two branches here differ in the GRAPH they build, not just in their
+        # values, so a blend would compute the whole (B,T,2^H) contraction on
+        # every inference call. See D-020 and the `:param training:` warning.
+        if training:
             # DECISION plan-2026-07-31T132403-b3f540cb/D-004
             # G_{t,d} = P(B_t = U(d)) for EVERY category d, per eq. 8 -- not
             # the single scalar of the SAMPLED category broadcast across all
@@ -632,7 +656,26 @@ class FreeTransformerLayer(TransformerLayer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index for differential attention.
         :type layer_idx: int
-        :param training: Training mode flag.
+        :param training: Training mode flag. Selects the encoder path (``True``)
+            or the uniform-sampling inference path (``None``/``False``), using
+            plain Python truthiness.
+
+            .. warning::
+
+               A genuinely **symbolic** (traced) ``training`` tensor is NOT
+               supported by this layer and will RAISE, rather than being
+               handled. In graph mode it is refused TWICE, and the first
+               refusal is not even this layer's: Keras' own ``Dropout.call``
+               does ``if training and self.rate > 0`` and raises
+               ``OperatorNotAllowedInGraphError`` at the attention-sub-block
+               dropout above, before the encoder/inference branch is reached
+               (MEASURED). The branch itself raises the same error for the same
+               reason. This is deliberate -- the previous ``is True`` identity
+               test made an EAGER tensor ``training=True`` run the INFERENCE
+               path silently: no encoder sub-network, zero ``bit_logits``, no
+               KL signal, and no error. ``fit``/``predict``/``jit_compile``
+               resolve ``training`` to a Python bool before tracing, so only a
+               hand-written train step can reach this.
         :type training: Optional[bool]
         :return: If ``use_free_transformer`` is False, the output ``(B, T, D)``.
             If True, ALWAYS the tuple ``(output, bit_logits)`` -- in both training
@@ -755,7 +798,16 @@ class FreeTransformerLayer(TransformerLayer):
         # Step 2: Encoder path (training/prefill) or uniform sampling (inference)
         # ---------------------------------------------------------------------
 
-        if training is True:
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-020
+        # Plain truthiness, NOT `if training is True:`. Do NOT restore the
+        # identity test (an eager tensor `training=True` then silently runs the
+        # inference path below -- no encoder, zero bit_logits, VAE never
+        # trains), and do NOT replace this with `ops.where`/`tf.cond` to make a
+        # symbolic `training` work: the two branches run structurally DIFFERENT
+        # sub-networks (cross-attention + FFN + readout + sampling vs a bare
+        # `keras.random.uniform`), so a blend pays for both on every call.
+        # The symbolic case is documented as unsupported in `:param training:`.
+        if training:
             # === Encoder Path (Training) ===
             # Run the non-causal encoder block to infer Z from the sequence
 

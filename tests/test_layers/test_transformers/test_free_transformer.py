@@ -735,3 +735,239 @@ class TestBinaryMapperPerCategoryGradient:
         expected = np.einsum('d,btd,btdh->bth', w, G,
                              U[None, None, :, :] - p[:, :, None, :])
         np.testing.assert_allclose(grad, expected, rtol=2e-4, atol=2e-6)
+
+
+# =============================================================================
+# F-21 + G-08: `if training is True:` -> `if training:` at BOTH sites
+# =============================================================================
+
+def _seeded_free_layer(bits=3, hidden=32, heads=4, inter=64, seq=6, batch=2):
+    """A BUILT ``FreeTransformerLayer`` with seeded NON-ZERO weights.
+
+    The default initializers put zeros in every bias; with a zero-init
+    ``encoder_readout`` bias the training-path ``bit_logits`` could be all-zero
+    for a reason that has nothing to do with which branch ran, which would make
+    the "did the encoder run" assertion below vacuous. Dropout is disabled so
+    the only stochastic op left is the sampler.
+    """
+    layer = FreeTransformerLayer(
+        hidden_size=hidden, num_heads=heads, intermediate_size=inter,
+        use_free_transformer=True, num_latent_bits=bits,
+        dropout_rate=0.0, attention_dropout_rate=0.0,
+    )
+    x = np.asarray(np.random.default_rng(7).normal(size=(batch, seq, hidden)),
+                   np.float32)
+    layer(keras.ops.convert_to_tensor(x), training=False)  # build
+    rng = np.random.default_rng(99)
+    layer.set_weights([np.asarray(rng.normal(0.0, 0.25, size=w.shape), w.dtype)
+                       for w in layer.get_weights()])
+    assert all(np.any(np.abs(w) > 1e-6) for w in layer.get_weights()), (
+        "degenerate fixture: some weight/bias is all-zero"
+    )
+    return layer, keras.ops.convert_to_tensor(x)
+
+
+def _pin_uniform(monkeypatch):
+    """Make ``keras.random.uniform`` reproducible across calls.
+
+    MEASURED at step 4 and re-confirmed here: ``keras.utils.set_random_seed``
+    does NOT reproduce a subsequent ``keras.random.*`` draw on this backend, so
+    a seed-based version of the negative control would compare two different
+    samples and fail for a reason unrelated to the branch.
+    """
+    counter = {"n": 0}
+
+    def fake(shape, minval=0.0, maxval=1.0, dtype=None, seed=None, **kw):
+        shp = tuple(int(s) for s in np.array(shape).reshape(-1))
+        rng = np.random.default_rng(1234 + counter["n"])
+        counter["n"] += 1
+        return keras.ops.cast(
+            rng.uniform(float(minval), float(maxval), size=shp),
+            dtype or "float32")
+
+    monkeypatch.setattr(keras.random, "uniform", fake)
+    return counter
+
+
+class TestTrainingFlagTruthiness:
+    """F-21 / G-08: both sites used ``if training is True:``.
+
+    ``tf.constant(True) is True`` is Python ``False``, so a tensor-valued
+    ``training`` used to fall to the ``else`` branch: ``FreeTransformerLayer``
+    ran the uniform-sampling INFERENCE path (no encoder sub-network, zero
+    ``bit_logits``) and ``BinaryMapper`` dropped its gradient pass-through --
+    silently, with no exception, while the caller believed it was training.
+
+    ``if training:`` fixes the EAGER tensor case outright and converts the
+    traced-symbolic case into a loud refusal. It cannot make a symbolic
+    ``training`` work: the two branches run structurally different
+    sub-networks (cross-attention + FFN + readout + sampling vs a bare
+    ``keras.random.uniform``), so there is no ``ops.where`` blend that does not
+    pay for both unconditionally.
+    """
+
+    BITS = 3
+
+    def _mapper_logits(self):
+        rng = np.random.default_rng(20260731)
+        lg = rng.normal(0.0, 1.5, size=(2, 4, self.BITS))
+        lg.flat[0], lg.flat[1] = 4.0, -3.5
+        assert np.min(np.abs(lg)) > 1e-3, "degenerate probe: a logit is ~0"
+        return np.asarray(lg, np.float64)
+
+    # ---------------------------------------------------------------- EAGER
+    @pytest.mark.parametrize("site", ["free_transformer_layer", "binary_mapper"])
+    def test_eager_tensor_training_runs_the_training_path(self, site):
+        """THE F-21/G-08 assertion, eager.
+
+        RED before the fix: the layer returned all-zero ``bit_logits`` (the
+        uniform-prior stand-in, i.e. the inference branch) and the mapper's
+        pass-through never ran, so ``bit_logits`` received NO gradient at all.
+        """
+        if site == "free_transformer_layer":
+            layer, x = _seeded_free_layer(bits=self.BITS)
+            _, bl_true = layer(x, training=True)          # Python-bool control
+            _, bl_tensor = layer(x, training=tf.constant(True))
+            bl_true, bl_tensor = np.array(bl_true), np.array(bl_tensor)
+            assert float(np.max(np.abs(bl_true))) > 1e-3, (
+                "control is degenerate: even Python training=True gives ~0 "
+                "bit_logits, so 'non-zero' would prove nothing"
+            )
+            assert not np.all(bl_tensor == 0.0), (
+                "tensor-valued training=True ran the INFERENCE path: "
+                f"bit_logits are the all-zero uniform prior (max|bl| = "
+                f"{float(np.max(np.abs(bl_tensor))):.6e})"
+            )
+            # the encoder is deterministic given the weights, so the tensor
+            # flag must reproduce the Python flag exactly
+            np.testing.assert_array_equal(bl_tensor, bl_true)
+        else:
+            mapper = BinaryMapper(num_bits=self.BITS, dtype="float64")
+            logits = tf.constant(self._mapper_logits())
+            # Contract each category against a DISTINCT weight. An unweighted
+            # reduction is zero by construction -- `sum_d G_d == 1` exactly, so
+            # `d(sum_d G_d)/dL == 0` and the probe would be vacuous (MEASURED:
+            # max|grad| = 1.11e-16, i.e. float64 round-off, with the fix in).
+            w = np.arange(1.0, 2 ** self.BITS + 1.0).reshape(1, 1, -1)
+            with tf.GradientTape() as tape:
+                tape.watch(logits)
+                y = mapper(logits, training=tf.constant(True))
+                s = tf.reduce_sum(y * tf.constant(w))
+            grad = tape.gradient(s, logits)
+            assert grad is not None, (
+                "tensor-valued training=True skipped the eq. 8 gradient "
+                "pass-through entirely: bit_logits got NO gradient"
+            )
+            assert float(np.max(np.abs(np.array(grad)))) > 1e-6, (
+                "the pass-through ran but its gradient is ~0"
+            )
+
+    # ---------------------------------------------------------------- GRAPH
+    @pytest.mark.parametrize("site", ["free_transformer_layer", "binary_mapper"])
+    def test_traced_symbolic_training_raises_instead_of_mis_routing(self, site):
+        """A genuinely traced symbolic ``training`` must be REFUSED, loudly.
+
+        MEASURED, not cited (the repo's ``energy_transformer.py`` D-003 comment
+        was the only source for this claim): the exception is
+        ``tensorflow.python.framework.errors_impl.OperatorNotAllowedInGraphError``,
+        "Using a symbolic `tf.Tensor` as a Python `bool` is not allowed".
+
+        Which cell was RED-proven:
+
+        * ``binary_mapper`` -- RED before the fix (it traced CLEANLY and
+          returned a one-hot with no pass-through and no error).
+        * ``free_transformer_layer`` -- already loud before the fix, but NOT at
+          this branch: Keras' own ``Dropout.call`` does ``if training and ...``
+          and raises the identical error ~11 lines earlier, so a symbolic
+          ``training`` never reached the F-21 site at all in graph mode. Pinned
+          here so the layer cannot silently become permissive again.
+
+        Note that AutoGraph rewrites a bare ``if <tensor>:`` in USER code into
+        ``tf.cond`` (measured: it does NOT raise there). Keras ``call()``
+        methods are ``do_not_convert``-allowlisted, which is why the same
+        statement raises inside a layer.
+        """
+        if site == "free_transformer_layer":
+            layer, x = _seeded_free_layer(bits=self.BITS)
+
+            @tf.function(input_signature=[
+                tf.TensorSpec([2, 6, 32], tf.float32),
+                tf.TensorSpec([], tf.bool)])
+            def traced(inp, trn):
+                out, bl = layer(inp, training=trn)
+                return out, bl
+
+            args = (x, tf.constant(True))
+        else:
+            mapper = BinaryMapper(num_bits=self.BITS)
+
+            @tf.function(input_signature=[
+                tf.TensorSpec([None, None, self.BITS], tf.float32),
+                tf.TensorSpec([], tf.bool)])
+            def traced(lg, trn):
+                return mapper(lg, training=trn)
+
+            args = (tf.constant(np.asarray(self._mapper_logits(), np.float32)),
+                    tf.constant(True))
+
+        with pytest.raises(tf.errors.OperatorNotAllowedInGraphError) as exc:
+            traced(*args)
+        assert "as a Python `bool` is not allowed" in str(exc.value)
+
+    # ------------------------------------------------------- NEGATIVE CONTROL
+    def test_python_training_values_behave_exactly_as_before(self, monkeypatch):
+        """The false-positive family: ``None`` / ``True`` / ``False``.
+
+        All three already resolved identically under ``is True`` (``None`` and
+        ``False`` both fell to ``else``), so this change must be a no-op for
+        every reachable caller. Verified by EXECUTION rather than asserted.
+        """
+        results = {}
+        for flag in (None, True, False):
+            layer, x = _seeded_free_layer(bits=self.BITS)
+            _pin_uniform(monkeypatch)
+            out, bl = layer(x, training=flag)
+            results[repr(flag)] = (np.array(out), np.array(bl))
+            monkeypatch.undo()
+
+            mapper = BinaryMapper(num_bits=self.BITS, dtype="float64")
+            _pin_uniform(monkeypatch)
+            z = np.array(mapper(self._mapper_logits(), training=flag))
+            monkeypatch.undo()
+            assert set(np.unique(z).tolist()) <= {0.0, 1.0}, (
+                f"training={flag!r}: the mapper's forward is not a one-hot")
+            np.testing.assert_array_equal(z.sum(axis=-1), np.ones(z.shape[:-1]))
+
+        # None and False take the inference branch, bit-identically
+        np.testing.assert_array_equal(results["None"][0], results["False"][0])
+        np.testing.assert_array_equal(results["None"][1], results["False"][1])
+        assert np.all(results["None"][1] == 0.0), (
+            "training=None must still emit the all-zero uniform prior")
+        # True takes the encoder branch and is therefore DIFFERENT
+        assert not np.all(results["True"][1] == 0.0)
+        assert not np.allclose(results["True"][0], results["None"][0])
+
+    # ------------------------------------------------------- SHIPPED CAVEAT
+    def test_the_symbolic_training_limitation_is_documented_in_the_source(self):
+        """``plans/`` is gitignored, so the caveat has to live in the file."""
+        import inspect
+        for fn in (FreeTransformerLayer.call, BinaryMapper.call):
+            src = inspect.getsource(fn)
+            assert "symbolic" in src and "training" in src, (
+                f"{fn.__qualname__} does not document the symbolic-`training` "
+                f"limitation; a decisions.md-only caveat does not ship"
+            )
+            # Match the STATEMENT line-exactly, not the words: both the
+            # docstrings and the D-020 anchors deliberately QUOTE
+            # ``if training is True:`` while explaining why it is gone, so a
+            # substring test would fire on the very prose it should protect.
+            stmts = [ln.strip() for ln in src.splitlines()
+                     if ln.strip().startswith("if training")]
+            assert "if training is True:" not in stmts, (
+                f"{fn.__qualname__} still branches on an `is True` identity "
+                f"test: {stmts}"
+            )
+            assert "if training:" in stmts, (
+                f"{fn.__qualname__} has no plain-truthiness `if training:` "
+                f"branch at all: {stmts}"
+            )
