@@ -1139,7 +1139,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         return out + v_residual
 
     def call(
-        self, inputs: keras.KerasTensor, training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         """Forward pass: project, normalize, convolve, scan, then project out.
 
@@ -1149,16 +1152,101 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         :param inputs: Input tensor of shape (batch, seq_len, dim).
         :type inputs: keras.KerasTensor
+        :param attention_mask: Optional **rank-2** ``(batch, seq_len)`` padding
+            mask, ``1 = keep`` / ``0 = PAD`` (the house keep-predicate
+            convention). ``None`` (the default) is the historical behaviour and
+            is bit-identical to it.
+
+            **Scope: EDGE padding only -- PADs contiguous at the start
+            (left) and/or the end (right) of a row.** For those, a masked row's
+            real-position outputs equal the same real tokens run alone, to
+            floating-point reassociation (the padded row is chunked
+            differently). **Interior padding is NOT supported**: a PAD between
+            two real tokens still consumes ``conv_kernel_size`` worth of the
+            causal convolution's receptive field, so the second real token's
+            convolution sees a zero where the shorter sequence would have seen
+            its predecessor, and no gating choice can recover that. This is not
+            detected and does not raise -- a data-dependent check cannot raise
+            from inside a traced graph on any portable ``keras.ops`` path (the
+            same constraint documented for ``max_seq_len`` above). Do not pass
+            an interior-padded mask and expect the equivalence.
+        :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating training mode.
         :type training: Optional[bool]
-        :return: Output tensor of shape (batch, seq_len, dim).
+        :return: Output tensor of shape (batch, seq_len, dim). PAD positions
+            are exactly zero when a mask is given.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``attention_mask`` is given and is not rank 2.
         """
         # DECISION plan-2026-07-30T081929-1645aa52/D-018
         # No length check here, and none in `_sequential_scan` either: since
         # D-018 neither branch truncates, so there is nothing to reject.
         # `max_seq_len` is advisory only.
         batch_size, seq_len, _ = ops.shape(inputs)
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-004
+        # The padding mask is applied at THREE places, and the placement is the
+        # whole content of this feature -- there are no attention logits here to
+        # add a -inf bias to.
+        #
+        # (1) PRE-CONVOLUTION, on q/k/v. Do NOT move this to after the scan.
+        #     `q_conv`/`k_conv`/`v_conv` are CAUSAL depthwise convolutions with
+        #     a `conv_kernel_size`-wide receptive field, so a PAD step's content
+        #     leaks forward into the next `conv_kernel_size - 1` REAL timesteps.
+        #     Masking after the scan would zero the PAD rows of the output while
+        #     leaving that leak inside every real row -- a mask that looks
+        #     applied and is not. It has to be zeroed BEFORE the conv, and
+        #     zeroing (rather than dropping) is what reproduces the shorter
+        #     sequence exactly: `padding='causal'` left-pads with ZEROS, so a
+        #     zeroed left-PAD is indistinguishable from the conv's own implicit
+        #     pad (measured bit-identical at float64, with a nonzero-pad control
+        #     that moves by 1.27).
+        # (2) The conv carries a BIAS, and `silu(bias) != 0`, so the PAD rows
+        #     come back non-zero after `q_conv`/`activation_layer`. They are
+        #     re-zeroed below, after the activation, or the scan would write
+        #     `beta * (k_pad (x) v_pad)` into the state.
+        # (3) `alpha = 1` at PAD steps. MEASURED, and the measurement says
+        #     something narrower than the obvious claim, so state it precisely.
+        #
+        #     It is NOT what makes the padded/unpadded equivalence hold. The
+        #     PAD alphas cancel on their own: the weight linking real j to real
+        #     t is `exp(sum_{l=j+1..t} log alpha_l)`, no PAD lies between two
+        #     real steps of an EDGE-padded row, and `_chunked_scan`'s `cum` is
+        #     a PER-CHUNK cumsum consumed only inside differences, so the
+        #     shared PAD offset cancels numerically too. Measured at float64,
+        #     max|diff| of a masked padded row's real positions against the
+        #     same tokens run alone (tolerances 2.2e-13 / 5.4e-13):
+        #         alpha at PAD      pad=5/len=18   pad=35/len=48
+        #         = 1               2.776e-17      2.776e-17
+        #         left untouched    2.776e-17      2.776e-17
+        #         = 0               2.082e-17      2.776e-17
+        #     -- indistinguishable. Do NOT restate the prior plan's falsified
+        #     "gate-neutral, therefore required" framing on the strength of
+        #     that table.
+        #
+        #     What it IS load-bearing for is EXACT isolation. Left untouched,
+        #     `alpha` at a PAD step is `sigmoid(alpha_proj(PAD content))`, so
+        #     PAD content reaches the real-position outputs through the gate
+        #     arithmetic: perturbing only the PAD inputs then moves them by
+        #     6.722e-17 (~1 ulp) instead of exactly 0.0. Pinned by
+        #     `test_pad_content_cannot_influence_real_outputs`, which fails if
+        #     this line is deleted. That, plus being the correct statement of
+        #     intent ("a PAD step must not age the state"), is why it stays.
+        # See decisions.md D-004.
+        keep = None
+        if attention_mask is not None:
+            keep = ops.cast(attention_mask, self.compute_dtype)
+            if len(keep.shape) != 2:
+                raise ValueError(
+                    "attention_mask must be a rank-2 (batch, seq_len) keep "
+                    f"mask (1 = keep, 0 = PAD), got rank {len(keep.shape)} "
+                    f"with shape {tuple(keep.shape)}. This layer's recurrence "
+                    "has no query-key score matrix, so a pairwise or per-head "
+                    "mask has nothing to attach to."
+                )
+            # (batch, seq_len, 1): broadcasts over the feature axis of
+            # q/k/v and over the head axis of alpha alike.
+            keep = ops.expand_dims(keep, -1)
 
         q = self.q_proj(inputs, training=training)
         k = self.k_proj(inputs, training=training)
@@ -1184,9 +1272,22 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         )
         v_norm = self.v_norm(v, training=training)
 
+        if keep is not None:
+            # (1) pre-convolution -- see the D-004 anchor above.
+            q_norm = q_norm * keep
+            k_norm = k_norm * keep
+            v_norm = v_norm * keep
+
         q_conv = self.activation_layer(self.q_conv(q_norm, training=training))
         k_conv = self.activation_layer(self.k_conv(k_norm, training=training))
         v_conv = self.activation_layer(self.v_conv(v_norm, training=training))
+
+        if keep is not None:
+            # (2) post-activation -- the conv bias and the activation make the
+            # PAD rows non-zero again; the scan must not write them.
+            q_conv = q_conv * keep
+            k_conv = k_conv * keep
+            v_conv = v_conv * keep
 
         q_heads = ops.reshape(q_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
         k_heads = ops.reshape(k_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
@@ -1222,6 +1323,13 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         alpha = ops.sigmoid(self.alpha_proj(inputs, training=training))
         beta = ops.sigmoid(self.beta_proj(inputs, training=training))
 
+        if keep is not None:
+            # (3) alpha = 1 at PAD steps -- see the D-004 anchor above. `beta`
+            # is deliberately left alone: k and v are already exactly zero
+            # there, so `beta * (k (x) v)` is zero whatever beta is, and
+            # touching it would add an op for no effect.
+            alpha = alpha * keep + (1.0 - keep)
+
         if training and self.dropout is not None:
             q_heads = self.dropout(q_heads, training=training)
             k_heads = self.dropout(k_heads, training=training)
@@ -1236,6 +1344,11 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             gated_output = gate * projected_output
         else:
             gated_output = self.output_ffn(scan_output, training=training)
+
+        if keep is not None:
+            # PAD rows carry the FFN/gate's bias and the residual half of v;
+            # zero them so a caller cannot consume PAD garbage downstream.
+            gated_output = gated_output * keep
 
         return gated_output
 

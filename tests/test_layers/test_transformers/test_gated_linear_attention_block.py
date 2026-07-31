@@ -756,7 +756,12 @@ def global_dtype_policy(name: str):
         keras.mixed_precision.set_global_policy(previous)
 
 
-def capture_scan_io(layer: GatedLinearAttentionBlock, x, training: bool = False):
+def capture_scan_io(
+    layer: GatedLinearAttentionBlock,
+    x,
+    training: bool = False,
+    attention_mask=None,
+):
     """Capture the tensors the scan ACTUALLY receives, plus what it returns.
 
     This wraps ``gated_linear_scan`` itself, so the recorded ``q, k, v,
@@ -772,6 +777,10 @@ def capture_scan_io(layer: GatedLinearAttentionBlock, x, training: bool = False)
     :param x: Input tensor of shape ``(batch, seq, dim)``.
     :param training: Training flag forwarded to ``call``.
     :type training: bool
+    :param attention_mask: Optional rank-2 ``(batch, seq)`` keep mask. Forwarded
+        to ``call`` ONLY when it is not ``None``, so the no-mask call path this
+        helper's older callers exercise is byte-for-byte the same call as
+        before (no ``attention_mask=None`` kwarg is injected).
     :return: Dict with numpy ``q``, ``k``, ``v``, ``alpha``, ``beta``,
         ``scan_out`` (the scan's return value) and ``block_out``.
     :rtype: Dict[str, np.ndarray]
@@ -793,7 +802,10 @@ def capture_scan_io(layer: GatedLinearAttentionBlock, x, training: bool = False)
 
     layer.gated_linear_scan = spy
     try:
-        captured["block_out"] = ops.convert_to_numpy(layer(x, training=training))
+        kwargs = {} if attention_mask is None else {"attention_mask": attention_mask}
+        captured["block_out"] = ops.convert_to_numpy(
+            layer(x, training=training, **kwargs)
+        )
     finally:
         del layer.gated_linear_scan
     assert "scan_out" in captured, "gated_linear_scan was never called"
@@ -2227,6 +2239,289 @@ class TestScanBranchAgreementAboveUnitGate:
                 f"alpha={alpha_value} deviates from the oracle by "
                 f"{rel:.3e} (relative); all of {sorted(results)} must hold"
             )
+
+
+# =========================================================================
+# 15. Padding mask (F-14)
+# =========================================================================
+
+PAD_MASK_CFG = dict(
+    dim=16,
+    num_heads=2,
+    head_dim=8,
+    max_seq_len=64,
+    # Deliberately SMALL relative to the sequence lengths below, so a padded
+    # run and its unpadded reference land on DIFFERENT chunk grids. A pad of 5
+    # in front of 13 real tokens turns a 2-chunk run into a 3-chunk run and
+    # moves every real token to a different within-chunk offset -- which is
+    # exactly the reassociation the tolerance below has to absorb, and which a
+    # chunk-aligned pad would hide.
+    chunk_size=8,
+    conv_kernel_size=4,
+    dropout_rate=0.0,
+    # NOT the layer default (False), and not cosmetic. A freshly built block has
+    # `bias_initializer='zeros'` everywhere, so a PAD step whose q/k/v were
+    # zeroed pre-convolution comes out of the conv as exactly 0, silu(0) = 0,
+    # and the read-out projection has no bias to add either. Under those
+    # weights TWO of the three masking sites are literally unobservable: a
+    # dead-component probe that deleted the post-activation re-zeroing, and one
+    # that deleted the output zeroing, both left all nine tests GREEN. Biases
+    # (and the randomized weights in `_fresh_layer`) put the layer in the state
+    # a TRAINED model is in, where each site is load-bearing.
+    use_bias=True,
+)
+
+
+def _padded_case(pad_lens, total=18, dim=16, seed=7, side="left"):
+    """Build one padded batch plus the per-row unpadded reference sequences.
+
+    Row ``b`` carries ``pad_lens[b]`` PAD steps on ``side`` and
+    ``total - pad_lens[b]`` real steps. PAD slots are filled with LARGE random
+    garbage (x8), not zeros: a mask that silently does nothing must not be able
+    to pass by accident because the pads happened to be harmless.
+
+    :param pad_lens: Per-row PAD count.
+    :type pad_lens: Sequence[int]
+    :param total: Padded sequence length (identical for every row).
+    :type total: int
+    :param dim: Feature width.
+    :type dim: int
+    :param seed: RNG seed.
+    :type seed: int
+    :param side: ``'left'`` or ``'right'`` -- which end the PADs occupy.
+    :type side: str
+    :return: ``(x_padded, mask, [real_row_0, real_row_1, ...])`` as float64
+        numpy arrays; each ``real_row_b`` has shape ``(1, total - p_b, dim)``.
+    :rtype: tuple
+    """
+    rng = np.random.default_rng(seed)
+    batch = len(pad_lens)
+    x = np.zeros((batch, total, dim), dtype="float64")
+    mask = np.zeros((batch, total), dtype="float64")
+    reals = []
+    for b, p in enumerate(pad_lens):
+        real = rng.normal(size=(total - p, dim))
+        garbage = rng.normal(size=(p, dim)) * 8.0
+        if side == "left":
+            x[b] = np.concatenate([garbage, real], axis=0)
+            mask[b, p:] = 1.0
+        else:
+            x[b] = np.concatenate([real, garbage], axis=0)
+            mask[b, : total - p] = 1.0
+        reals.append(real[None].copy())
+    return x, mask, reals
+
+
+def _real_slice(arr_row, pad_len, side):
+    """Return the real-token span of one padded row."""
+    return arr_row[pad_len:] if side == "left" else arr_row[: arr_row.shape[0] - pad_len]
+
+
+class TestPaddingMask:
+    """`attention_mask` must make a padded batch equal its unpadded equivalent.
+
+    The recurrence has no logits, so a padding mask cannot be added to a score
+    matrix; it has to be applied at the three places the recurrence actually
+    consumes a timestep (pre-conv q/k/v, the decay gate, and the read-out).
+    These tests pin that contract, and the mask-free test below pins that the
+    corruption it fixes is real rather than merely an absent kwarg.
+
+    All comparisons run at float64 with ``rtol=0`` and an ``atol`` derived by
+    ``oracle_tolerance`` from the PADDED accumulation length (the longer of the
+    two runs). Nothing here may be made green by widening a tolerance.
+    """
+
+    @staticmethod
+    def _fresh_layer(build_seq_len=18, **overrides):
+        """A built block whose weights -- INCLUDING every bias -- are non-zero.
+
+        `bias_initializer='zeros'` is the layer default, and a zero conv bias
+        makes a zeroed PAD step stay exactly zero all the way through the
+        convolution, the activation, the scan and the output projection. That
+        hides two of the three places the mask has to be applied (measured: two
+        separate neutering probes stayed green under fresh weights). Assigning
+        every weight from a seeded RNG puts the block in the state a trained
+        model is in, and is what makes the probes bite.
+        """
+        cfg = dict(PAD_MASK_CFG)
+        cfg.update(overrides)
+        keras.utils.set_random_seed(4242)
+        layer = GatedLinearAttentionBlock(**cfg)
+        layer.build((None, build_seq_len, cfg["dim"]))
+        rng = np.random.default_rng(31337)
+        for w in layer.weights:
+            w.assign(np.asarray(rng.normal(size=w.shape) * 0.3, dtype=w.dtype))
+        # Non-vacuity: at least one BIAS must actually be non-zero, or this
+        # helper silently degenerates back to the case it exists to avoid.
+        biases = [w for w in layer.weights if "bias" in w.path]
+        assert biases and any(
+            float(np.abs(ops.convert_to_numpy(w)).max()) > 0 for w in biases
+        ), "no non-zero bias was assigned; the masking probes would go blind"
+        return layer
+
+    # -- part 2 of the RED: the corruption is real, not just a missing kwarg --
+    def test_left_padding_corrupts_real_outputs_without_a_mask(self):
+        """WITHOUT a mask, a left-padded row's real outputs are simply wrong.
+
+        This is the test that proves F-14 is a defect. It is green before AND
+        after the fix (the mask is opt-in, so an unmasked call is still
+        corrupted by design) -- its job is to establish that the equivalence
+        test below is measuring a real repair, not the arrival of an API.
+        """
+        pad_lens = [0, 5]
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, _, reals = _padded_case(pad_lens)
+            padded_out = ops.convert_to_numpy(layer(x, training=False))
+            refs = [ops.convert_to_numpy(layer(r, training=False))[0] for r in reals]
+
+        deltas = []
+        for b, p in enumerate(pad_lens):
+            got = _real_slice(padded_out[b], p, "left")
+            deltas.append(float(np.abs(got - refs[b]).max()))
+
+        assert deltas[0] == 0.0, (
+            f"the UNPADDED control row moved by {deltas[0]:.3e}; the harness "
+            "itself is not reproducible, so nothing below can be trusted"
+        )
+        assert deltas[1] > 1e-3, (
+            f"left padding did NOT corrupt the real-position outputs "
+            f"(max|diff|={deltas[1]:.3e}). Then there is no F-14 defect to fix "
+            "and the equivalence test below would prove nothing."
+        )
+
+    # -- part 1 of the RED: the kwarg does not exist yet --
+    def test_call_accepts_an_attention_mask(self):
+        """`call()` must take a rank-2 keep mask. RED pre-fix: `TypeError`."""
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, _ = _padded_case([0, 5])
+            out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+        assert out.shape == x.shape
+        assert np.isfinite(out).all()
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_padded_outputs_match_the_unpadded_run(self, side):
+        """The contract: masked padded row == the same real tokens run alone.
+
+        Compared at BOTH the scan boundary (where ``oracle_tolerance``'s
+        roundoff derivation literally applies -- ~3 rounded ops per timestep
+        per state entry plus a length-``head_dim`` read-out dot) and at the
+        block output (one extra position-wise dense + gate, whose cost is far
+        inside the ``3*T`` term the bound already charges).
+
+        Bit-identity is NOT the bar here and could not honestly be: the padded
+        run has a different chunk grid, so the same mathematics is summed in a
+        different order. Structural leakage, by contrast, is orders of
+        magnitude outside this bound -- the mask-free test above measures it
+        at ~1e-1 against a ~1e-16 tolerance.
+        """
+        pad_lens = [0, 5]
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, reals = _padded_case(pad_lens, side=side)
+            cap = capture_scan_io(layer, x, training=False, attention_mask=mask)
+            ref_caps = [capture_scan_io(layer, r, training=False) for r in reals]
+
+        total = x.shape[1]
+        for b, p in enumerate(pad_lens):
+            for key in ("scan_out", "block_out"):
+                got = _real_slice(cap[key][b], p, side)
+                expected = ref_caps[b][key][0]
+                assert got.shape == expected.shape
+                tol = oracle_tolerance(total, PAD_MASK_CFG["head_dim"], expected)
+                err = float(np.abs(got - expected).max())
+                assert err <= tol, (
+                    f"[{side} pad] row {b} (pad={p}) disagrees with its "
+                    f"unpadded run on '{key}': max|diff|={err:.3e} > "
+                    f"tol={tol:.3e} (accumulation length {total}, output "
+                    f"scale {np.abs(expected).max():.3e})"
+                )
+
+    def test_pad_content_cannot_influence_real_outputs(self):
+        """Perturbation isolation: change the PAD values, real outputs must not move.
+
+        Bit-identity is the right bar here (unlike the equivalence test): both
+        runs have the SAME shape and the same chunk grid, so a correct mask
+        makes the PAD contribution exactly zero, not merely small.
+        """
+        pad_lens = [0, 5]
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, _ = _padded_case(pad_lens)
+            out_a = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+            x2 = x.copy()
+            x2[1, :5] = np.random.default_rng(99).normal(size=(5, x.shape[-1])) * 30.0
+            out_b = ops.convert_to_numpy(layer(x2, attention_mask=mask, training=False))
+
+        # Non-vacuity: the perturbation must actually be a different input.
+        assert float(np.abs(x - x2).max()) > 1.0
+
+        real_a, real_b = out_a[1, 5:], out_b[1, 5:]
+        assert np.array_equal(real_a, real_b), (
+            "PAD content reached the real-position outputs: max|diff|="
+            f"{float(np.abs(real_a - real_b).max()):.3e} (must be exactly 0.0)"
+        )
+
+    def test_pad_positions_are_zeroed_in_the_output(self):
+        """PAD outputs are exactly 0, so a caller cannot consume PAD garbage."""
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, _ = _padded_case([0, 5])
+            out = ops.convert_to_numpy(layer(x, attention_mask=mask, training=False))
+        assert np.array_equal(out[1, :5], np.zeros_like(out[1, :5]))
+        # Non-vacuity: the REAL positions of that same row are not zero.
+        assert float(np.abs(out[1, 5:]).max()) > 1e-6
+
+    def test_an_all_ones_mask_is_bit_identical_to_no_mask(self):
+        """I1 containment, in-repo half: the mask path must be a no-op when it keeps all.
+
+        The out-of-band half (a `mask=None` capture taken from a pristine
+        worktree at the pre-change commit) is recorded in the plan's
+        progress.md; this test is what keeps the guarantee live in CI.
+        """
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, _, _ = _padded_case([0, 0])
+            plain = ops.convert_to_numpy(layer(x, training=False))
+            ones = ops.convert_to_numpy(
+                layer(x, attention_mask=np.ones(x.shape[:2]), training=False)
+            )
+        assert np.array_equal(plain, ones), (
+            "an all-ones keep mask changed the output: max|diff|="
+            f"{float(np.abs(plain - ones).max()):.3e} (must be exactly 0.0)"
+        )
+
+    def test_a_non_rank_2_mask_raises(self):
+        """Only a rank-2 `(batch, seq)` mask is accepted; anything else is loud."""
+        with global_dtype_policy("float64"):
+            layer = self._fresh_layer()
+            x, mask, _ = _padded_case([0, 5])
+            with pytest.raises(ValueError, match="rank-2"):
+                layer(x, attention_mask=mask[:, :, None], training=False)
+
+    def test_the_mask_survives_a_functional_model_round_trip(self):
+        """The mask must work through `keras.Model` save/load, by VALUE.
+
+        A shape-only round-trip passes with zero weights restored (repo
+        lesson), so this compares the reloaded model's masked output against
+        the pre-save one.
+        """
+        x, mask, _ = _padded_case([0, 5])
+        inp = keras.Input(shape=(x.shape[1], PAD_MASK_CFG["dim"]))
+        msk = keras.Input(shape=(x.shape[1],))
+        layer = self._fresh_layer()
+        model = models.Model([inp, msk], layer(inp, attention_mask=msk))
+
+        before = ops.convert_to_numpy(model([x, mask]))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "gla_mask.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+            after = ops.convert_to_numpy(reloaded([x, mask]))
+
+        assert float(np.abs(before).max()) > 1e-6, "vacuous: output is ~zero"
+        np.testing.assert_allclose(before, after, rtol=0, atol=1e-6)
 
 
 if __name__ == "__main__":
