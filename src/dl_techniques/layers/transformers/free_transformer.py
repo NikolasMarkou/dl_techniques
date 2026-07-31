@@ -508,10 +508,15 @@ class FreeTransformerLayer(TransformerLayer):
         self.encoder_ffn.build(input_shape)
         self.encoder_output_norm.build(input_shape)
         self.encoder_readout.build(input_shape)
+        # Deserialization hands `build()` a LIST, not a tuple, so the two
+        # derived shapes below raised `TypeError: can only concatenate list
+        # (not "tuple") to list` on every `.keras` load of a layer with
+        # `use_free_transformer=True`. Normalize once.
+        base_shape = tuple(input_shape)
         # Binary mapper input shape: (batch, seq, num_bits)
-        self.binary_mapper.build(input_shape[:-1] + (self.num_latent_bits,))
+        self.binary_mapper.build(base_shape[:-1] + (self.num_latent_bits,))
         # Post-sampler input shape: (batch, seq, 2^H)
-        self.post_sampler_fc.build(input_shape[:-1] + (self.num_latent_categories,))
+        self.post_sampler_fc.build(base_shape[:-1] + (self.num_latent_categories,))
 
     def call(
             self,
@@ -524,7 +529,14 @@ class FreeTransformerLayer(TransformerLayer):
 
         :param inputs: Input tensor ``(B, T, hidden_size)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask.
+        :param attention_mask: Optional attention mask, a ``1 = attend`` keep
+            predicate of rank 2 ``(B, S)``, rank 3 ``(B, T, S)`` or rank 4
+            ``(B, heads, T, S)``. It is forwarded verbatim to the causal
+            self-attention. The non-causal encoder cross-attention instead
+            receives a **key-validity** reduction of it (``max`` over every
+            query-side axis), so it honours padding without inheriting
+            causality -- see the D-005 anchor in ``call``. Any other rank
+            raises ``ValueError``.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index for differential attention.
         :type layer_idx: int
@@ -551,6 +563,47 @@ class FreeTransformerLayer(TransformerLayer):
         # ---------------------------------------------------------------------
 
         bit_logits = None  # Will be populated during training
+
+        # DECISION plan-2026-07-31T042809-ddc92265/D-005
+        # Derive the encoder's KEY-VALIDITY mask from the caller's mask.
+        #
+        # The encoder cross-attention (Q = learned zeta, K/V = the sequence S)
+        # is DELIBERATELY non-causal -- that is the whole point of a posterior
+        # Q(Z|S) that sees the entire sequence. So:
+        #
+        #   * do NOT keep passing ``attention_mask=None`` (the pre-fix
+        #     behaviour): on a padded batch the posterior then pools over PAD
+        #     keys and values, and because ``z_projected`` is added to
+        #     ``attention_output`` BEFORE the FFN, PAD content reaches the
+        #     layer output at every REAL position -- silently, finite, plausible.
+        #   * do NOT forward the caller's rank-3/rank-4 mask VERBATIM either:
+        #     that mask is typically causal, and the encoder would silently
+        #     inherit causality it is designed not to have.
+        #
+        # What the encoder wants is only "which KEYS exist", so reduce every
+        # query-side axis with ``max``: a key is valid iff SOME query may attend
+        # to it. That maps a pure causal mask to all-ones (correct -- no key is
+        # padding) and a causal+padding mask to the padding mask (correct). The
+        # reduction is a union, so any genuinely per-query structure a caller
+        # encoded in a rank-3 mask is intentionally discarded here.
+        if attention_mask is None:
+            encoder_key_mask = None
+        else:
+            mask_rank = len(attention_mask.shape)
+            if mask_rank == 2:
+                encoder_key_mask = attention_mask
+            elif mask_rank in (3, 4):
+                encoder_key_mask = keras.ops.max(
+                    attention_mask, axis=tuple(range(1, mask_rank - 1))
+                )
+            else:
+                raise ValueError(
+                    f"attention_mask must have rank 2 (batch, keys), 3 "
+                    f"(batch, queries, keys) or 4 (batch, heads, queries, keys) "
+                    f"so the Free Transformer encoder can derive a key-validity "
+                    f"mask from it; got rank {mask_rank} with shape "
+                    f"{attention_mask.shape}."
+                )
 
         # Step 1: Standard self-attention (first sub-layer)
         residual = inputs
@@ -634,10 +687,15 @@ class FreeTransformerLayer(TransformerLayer):
             # (the first-half sequence representation S). This makes the posterior
             # Q(Z|S) genuinely conditional on the sequence. ``encoder_attention`` is a
             # cross-attention layer ('multi_head_cross') taking ``kv_input`` separately.
+            #
+            # ``encoder_key_mask`` is the rank-2 key-validity predicate derived
+            # above (see the D-005 anchor at the top of this branch): non-causal
+            # over real tokens, PAD keys excluded. ``None`` when the caller
+            # supplied no mask, which restores full attention exactly.
             encoder_attn_out = self.encoder_attention(
                 zeta_norm,
                 kv_input=attention_output,
-                attention_mask=None,  # Non-causal, full attention over the sequence
+                attention_mask=encoder_key_mask,
                 training=training
             )
             encoder_attn_out = self.encoder_attention_dropout(
