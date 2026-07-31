@@ -280,6 +280,76 @@ class SequencePooling(keras.layers.Layer):
 
         return inputs, mask
 
+    def _select_top_k(
+        self,
+        inputs: keras.KerasTensor,
+        mask: Optional[keras.KerasTensor],
+        seq_len: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
+        """Select the ``top_k`` highest-norm positions and report their validity.
+
+        Shared by the ``top_k_mean`` and ``top_k_max`` branches, which must rank
+        and exclude identically or the two strategies drift apart.
+
+        :param inputs: Input sequence ``(batch, seq_len, hidden_dim)``.
+        :param mask: Optional keep-mask ``(batch, seq_len)``, 1/True = keep, or
+            ``None``.
+        :param seq_len: Sequence length (a scalar tensor is fine; this path is
+            graph-safe under a symbolic ``seq_len``).
+        :return: ``(top_k_embeds, validity)`` where ``top_k_embeds`` is
+            ``(batch, k, hidden_dim)`` gathered from the RAW ``inputs`` and
+            ``validity`` is ``(batch, k)`` in ``inputs.dtype``, 1.0 for a
+            selected position that is genuinely kept and 0.0 for one that is
+            masked. ``validity`` is ``None`` exactly when ``mask is None``, in
+            which case the caller must aggregate over all ``k`` positions
+            unconditionally — that path is bit-identical to the pre-F-24 code.
+        """
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-002: masked positions are
+        # excluded in TWO places, and BOTH are required or the leak persists.
+        # (i) RANKING - a masked position's norm is forced to a very negative
+        #     sentinel so it always sorts LAST. Real norms are sums of squares
+        #     and therefore >= 0, so any negative sentinel is strictly below
+        #     every kept position; `-1e4` is used because it is finite under
+        #     float16 (`float16(-1e9)` is `-inf`).
+        # (ii) AGGREGATION - `k` is a BATCH-GLOBAL scalar while the kept count is
+        #     PER-ROW, so a row with fewer kept positions than `k` is still
+        #     forced to select masked ones. Their validity is gathered at the
+        #     SAME indices and used to exclude them from the reduction.
+        # Do NOT "simplify" this by clamping `k` to the batch-wide minimum kept
+        # count (`ops.min(ops.sum(mask, axis=1))`): it is graph-safe but makes
+        # one row's answer depend on the OTHER rows in its batch, and throws
+        # away capacity for every row above the minimum.
+        # Do NOT drop (i) and keep only (ii) either: without the sentinel a
+        # masked position can outrank a kept one whose embedding is near zero.
+        if mask is not None:
+            mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+            masked_inputs = inputs * mask_expanded
+        else:
+            masked_inputs = inputs
+
+        norms = ops.sum(masked_inputs ** 2, axis=-1)
+        if mask is not None:
+            norms = ops.where(
+                ops.cast(mask, "bool"), norms, ops.cast(-1e4, norms.dtype)
+            )
+
+        k = ops.minimum(self.top_k, seq_len)
+        _, top_k_indices = ops.top_k(norms, k=k)
+
+        top_k_embeds = ops.take_along_axis(
+            inputs,
+            ops.expand_dims(top_k_indices, -1),
+            axis=1
+        )
+
+        validity = None
+        if mask is not None:
+            validity = ops.take_along_axis(
+                ops.cast(mask, inputs.dtype), top_k_indices, axis=1
+            )
+
+        return top_k_embeds, validity
+
     def _apply_single_strategy(
         self,
         strategy: str,
@@ -404,40 +474,39 @@ class SequencePooling(keras.layers.Layer):
 
         # Top-k strategies
         elif strategy == 'top_k_mean':
-            if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
-                masked_inputs = inputs * mask_expanded
-            else:
-                masked_inputs = inputs
-
-            norms = ops.sum(masked_inputs ** 2, axis=-1)
-            k = ops.minimum(self.top_k, seq_len)
-            _, top_k_indices = ops.top_k(norms, k=k)
-
-            top_k_embeds = ops.take_along_axis(
-                inputs,
-                ops.expand_dims(top_k_indices, -1),
-                axis=1
+            top_k_embeds, validity = self._select_top_k(inputs, mask, seq_len)
+            if validity is None:
+                return ops.mean(top_k_embeds, axis=1)
+            # Divide by the number of VALID selected positions, never by `k`.
+            # A fully-masked row floors the denominator at 1 and returns zeros
+            # rather than dividing by zero; it is deliberately NOT rescued.
+            validity_expanded = ops.expand_dims(validity, -1)
+            valid_sum = ops.sum(top_k_embeds * validity_expanded, axis=1)
+            valid_count = ops.maximum(
+                ops.sum(validity_expanded, axis=1),
+                ops.cast(1.0, top_k_embeds.dtype)
             )
-            return ops.mean(top_k_embeds, axis=1)
+            return valid_sum / valid_count
 
         elif strategy == 'top_k_max':
-            if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
-                masked_inputs = inputs * mask_expanded
-            else:
-                masked_inputs = inputs
-
-            norms = ops.sum(masked_inputs ** 2, axis=-1)
-            k = ops.minimum(self.top_k, seq_len)
-            _, top_k_indices = ops.top_k(norms, k=k)
-
-            top_k_embeds = ops.take_along_axis(
-                inputs,
-                ops.expand_dims(top_k_indices, -1),
-                axis=1
+            top_k_embeds, validity = self._select_top_k(inputs, mask, seq_len)
+            if validity is None:
+                return ops.max(top_k_embeds, axis=1)
+            # Bias the INVALID SELECTED embeddings below every real value before
+            # the max. This mirrors the `max` strategy above, but uses the
+            # `ops.where` form with the finite `-1e4` sentinel rather than
+            # `+ (1 - mask) * -1e9`: the additive form is `0 * -inf = NaN` once
+            # `-1e9` underflows to `-inf` under `mixed_float16`.
+            # A fully-masked row therefore returns the sentinel itself; it is
+            # deliberately NOT rescued (the `max` strategy already returns
+            # `-1e9` in the same situation).
+            validity_expanded = ops.expand_dims(validity, -1)
+            biased = ops.where(
+                ops.cast(validity_expanded, "bool"),
+                top_k_embeds,
+                ops.cast(-1e4, top_k_embeds.dtype)
             )
-            return ops.max(top_k_embeds, axis=1)
+            return ops.max(biased, axis=1)
 
         # Special strategies
         elif strategy == 'none':

@@ -92,68 +92,45 @@ from ..sequence_pooling import SequencePooling, PoolingStrategy
 
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
-# DECISION plan-2026-07-31T042809-ddc92265/D-013
-# Pooling strategies whose pooled output is NOT isolated from a masked patch.
-# `VisionEncoder.call` REFUSES these when an `attention_mask` is supplied,
-# rather than returning a plausible wrong number (finding F-24).
+# DECISION plan-2026-07-31T132403-b3f540cb/D-003
+# SUPERSEDES `# DECISION plan-2026-07-31T042809-ddc92265/D-013`, which used to
+# live here as a `MASK_INCOMPATIBLE_OUTPUT_MODES` frozenset plus a
+# `_reject_mask_incompatible_pooling` raise in `call()`.
 #
-# MEASURED, one patch masked and that patch's pixels perturbed
-# (`img_size=8, patch_size=4, embed_dim=32, depth=1`, seeded weights; the
-# required movement is exactly 0.0, and a live no-mask control moved by
-# 0.42..3.52 in every cell):
+# D-013 made `VisionEncoder.call` raise `NotImplementedError` for
+# `{'weighted', 'top_k_mean', 'top_k_max'}` whenever an `attention_mask` was
+# supplied, because the pooled output of those three was NOT isolated from a
+# masked patch (finding F-24, measured 2.3e-01 / 2.3e-01 / 4.5e-01 where 0.0 is
+# required). That was explicitly CONTAINMENT of a defect in a different
+# package, not a statement about this layer.
 #
-#   mode          use_cls_token=True   use_cls_token=False
-#   weighted      2.317689e-01         1.119100e-01
-#   top_k_mean    2.349049e-01         1.266325e-01
-#   top_k_max     4.473200e-01         2.670361e-01
-#
-# The other 14 strategies (`cls`, `first`, `last`, `middle`, `mean`, `max`,
-# `min`, `sum`, `mean_max`, `mean_std`, `mean_max_min`, `attention`,
-# `multi_head_attention`, `none`) all measured EXACTLY 0.0 and are unaffected.
-#
-# WHY THIS EXISTS: before this plan the same three combinations raised a raw
-# backend `InvalidArgumentError` (the mask was one position short of the
-# CLS-extended sequence, D-009). Fixing that shape bug turned a loud crash
-# into a SILENT WRONG ANSWER for exactly these three -- the failure shape
-# `plans/LESSONS.md` warns about, and the same one step 7 guarded against in
-# `transformer_decoder.py`.
-#
-# ROOT CAUSE, verified by execution and OUT OF SCOPE to fix here (F-24 lives
-# in `layers/sequence_pooling/`, not in this file):
-#   * `weighted` -- `weighted_pooling.py:133-137` multiplies the position
-#     weights by the mask and THEN softmaxes, so a masked position keeps
-#     weight `softmax(0) != 0`. Always leaks.
-#   * `top_k_mean` / `top_k_max` -- `sequence_pooling.py:406-440` ranks by the
-#     norms of the MASKED inputs (so masked positions rank last) but selects
-#     `k = min(top_k, seq_len)` of them and then gathers from the UNMASKED
-#     `inputs`. It therefore leaks exactly when `k` exceeds the number of kept
-#     positions -- measured: at `seq_len=5` with 4 kept, `top_k <= 4` leaks
-#     0.0 and `top_k >= 5` leaks 2.349049e-01. `VisionEncoder` never exposes
-#     `top_k`, so it is always the `SequencePooling` default of 10 and the
-#     leak is unavoidable for any sequence shorter than 11 tokens.
+# The root cause is now FIXED in `layers/sequence_pooling/`
+# (`# DECISION plan-2026-07-31T132403-b3f540cb/D-002`): `WeightedPooling.call`
+# masks the softmax LOGITS with `ops.where` + a finite `-1e4` sentinel, and
+# `SequencePooling._select_top_k` both ranks masked positions last and excludes
+# invalid SELECTED positions from the aggregation. All three modes now measure
+# EXACTLY 0.0 movement under a masked-patch perturbation, at both
+# `use_cls_token` values. Keeping the raise would therefore be OVER-refusal:
+# it would forbid a combination that is now correct.
 #
 # WHAT NOT TO DO, and why:
-#   * Do NOT warn at CONSTRUCTION time instead. Whether a mask will be passed
-#     is a `call()` argument, unknown in `__init__`; a construction-time
-#     warning would fire for every mask-free user of these modes, which is a
-#     legitimate and correct use that must not be broken.
-#   * Do NOT downgrade this to a `logger.warning` in `call()`. A warning
-#     inside `call()` is emitted once per trace in graph mode and is trivially
-#     lost in a training log; the pre-plan behaviour was a hard raise, and
-#     restoring a hard raise is what keeps this plan from being a net
-#     regression in failure loudness.
-#   * Do NOT add `none` or `flatten` here. They measurably "leak" too
-#     (1.174525e+00), but they return the per-token sequence rather than a
-#     pooled vector -- the masked token's own row being present is the
-#     documented meaning of those modes, and the existing suite asserts
-#     isolation of every OTHER row for `none`.
-#   * Do NOT "fix" this by masking inside `SequencePooling` from here. The
-#     defect is in that layer and changing it would move the numerics of
-#     every other consumer of these strategies.
-# See decisions.md D-013 (plan-2026-07-31T042809-ddc92265).
-MASK_INCOMPATIBLE_OUTPUT_MODES: frozenset = frozenset(
-    {'weighted', 'top_k_mean', 'top_k_max'}
-)
+#   * Do NOT reintroduce a mode allowlist/denylist here. Whether a pooling
+#     strategy isolates a masked position is a property of
+#     `layers/sequence_pooling/`, and duplicating that judgement in this file is
+#     what made the guard go stale in the first place. The guard against a
+#     regression now lives where the behaviour lives:
+#     `tests/test_layers/test_sequence_pooling.py::TestMaskedPositionIsolation`,
+#     plus `TestMaskedPoolingIsIsolated` in this layer's own test module.
+#   * Do NOT read the removal as "the leak was not real". It was real and is
+#     recorded above; it was closed, and the self-obsoleting guard test that
+#     watched for exactly this moment
+#     (`test_the_leak_the_guard_prevents_is_real`) was removed on its own
+#     instruction, replaced at the same site by an ISOLATION assertion.
+#   * `none` and `flatten` were never refused and still are not: they return the
+#     per-token sequence, so the masked token's own row being present is the
+#     documented meaning of those modes rather than a leak.
+# See decisions.md D-003 (plan-2026-07-31T132403-b3f540cb) for the supersede
+# record; the prior plan's D-013 entry is append-only and stays as written.
 
 # ---------------------------------------------------------------------
 
@@ -648,38 +625,6 @@ class VisionEncoder(keras.layers.Layer):
                 f"spliced in internally."
             )
 
-    def _reject_mask_incompatible_pooling(
-            self, attention_mask: Optional[keras.KerasTensor]
-    ) -> None:
-        """Refuse pooling strategies that cannot isolate a masked patch.
-
-        Only consulted by :meth:`call`, which is the one entry point that pools;
-        ``get_cls_features`` / ``get_patch_features`` / ``get_spatial_features``
-        return sequence slices and are unaffected. Silent on ``attention_mask
-        is None``, so these strategies remain fully usable without a mask.
-
-        :param attention_mask: The caller's mask, or ``None``.
-        :type attention_mask: Optional[keras.KerasTensor]
-        :raises NotImplementedError: If a mask is supplied and ``output_mode``
-            is in :data:`MASK_INCOMPATIBLE_OUTPUT_MODES`.
-        """
-        if attention_mask is None:
-            return
-        if self.output_mode not in MASK_INCOMPATIBLE_OUTPUT_MODES:
-            return
-        raise NotImplementedError(
-            f"VisionEncoder(output_mode={self.output_mode!r}) does not support "
-            f"attention_mask: the pooled output is NOT isolated from a masked "
-            f"patch. Measured leakage of a masked patch into the output: "
-            f"2.3e-01 ('weighted'), 2.3e-01 ('top_k_mean'), 4.5e-01 "
-            f"('top_k_max') where 0.0 is required. The cause is in "
-            f"SequencePooling, not here ('weighted' applies the mask before "
-            f"the softmax; 'top_k_*' gather from the unmasked inputs) - see "
-            f"finding F-24. Use one of the mask-isolating strategies "
-            f"('cls', 'mean', 'max', 'min', 'sum', 'attention', "
-            f"'multi_head_attention', ...), or drop the attention_mask."
-        )
-
     def _get_full_sequence_features(
             self,
             inputs: keras.KerasTensor,
@@ -743,13 +688,16 @@ class VisionEncoder(keras.layers.Layer):
         :return: Output features (shape depends on ``output_mode``).
         :rtype: keras.KerasTensor
         :raises ValueError: If ``attention_mask`` is not rank-2.
-        :raises NotImplementedError: If ``attention_mask`` is supplied and
-            ``output_mode`` is in :data:`MASK_INCOMPATIBLE_OUTPUT_MODES` — the
-            pooled output of those strategies is not isolated from a masked
-            patch (F-24, D-013). They remain usable without a mask.
+
+        Every ``output_mode`` accepts a mask. ``'weighted'``, ``'top_k_mean'``
+        and ``'top_k_max'`` used to be REFUSED here because their pooled output
+        was not isolated from a masked patch (F-24); that defect is fixed in
+        ``layers/sequence_pooling/`` and the refusal is gone — see the
+        ``# DECISION plan-2026-07-31T132403-b3f540cb/D-003`` note at the top of
+        this module. ``'none'`` and ``'flatten'`` return the per-token sequence,
+        so a masked token's own row is present by definition.
         """
         self._validate_attention_mask(attention_mask)
-        self._reject_mask_incompatible_pooling(attention_mask)
 
         x = self._get_full_sequence_features(
             inputs, attention_mask=attention_mask, training=training

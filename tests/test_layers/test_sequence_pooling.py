@@ -996,6 +996,406 @@ class TestIntegrationScenarios:
         assert pooled.shape == (batch_size, features)
 
 
+# ---------------------------------------------------------------------
+# F-24 — masked-position ISOLATION for `weighted` / `top_k_mean` / `top_k_max`
+#
+# Before this suite existed, ZERO tests in this module passed a `mask` to these
+# three strategies, so the defect was completely unguarded at package level.
+# Measured leak before the fix by THIS suite (seeded weights, `seq_len=6`,
+# `top_k=10`, position 5 masked and perturbed), where the required movement is
+# exactly 0.0:
+#
+#   weighted      1.129423e+00   (at every `top_k`; the defect is `softmax(0) != 0`)
+#   top_k_mean    1.463992e+00   (only at `top_k=10`, i.e. `k > kept_count`)
+#   top_k_max     5.990623e+00   (only at `top_k=10`, i.e. `k > kept_count`)
+#
+# ---------------------------------------------------------------------
+
+ISO_LEAKY_STRATEGIES = ['weighted', 'top_k_mean', 'top_k_max']
+
+ISO_ALL_STRATEGIES = [
+    'cls', 'first', 'last', 'middle',
+    'mean', 'max', 'min', 'sum',
+    'mean_max', 'mean_std', 'mean_max_min',
+    'attention', 'multi_head_attention', 'weighted',
+    'top_k_mean', 'top_k_max',
+    'none', 'flatten',
+]
+
+ISO_B, ISO_S, ISO_D = 2, 6, 8
+ISO_MASKED_POS = 5      # last position; no positional strategy selects it here
+ISO_LIVE_POS = 0        # perturbed for the mandatory live control
+
+# SC-2 / I1 pin: `mask=None` outputs for all 18 strategies, captured from the
+# code BEFORE the F-24 fix with the fixture below (`_iso_layer(..., top_k=10)`,
+# `_iso_ref_inputs()`), as ``(sum, sum_of_abs, first_element)`` in float64.
+# A fix that moves ANY unmasked numeric moves at least the sum-of-abs.
+# Tolerance is 1e-6 relative rather than 0: this module is not device-pinned and
+# GPU reduction order makes bitwise equality unavailable across devices, while a
+# real regression of this defect's shape is O(1e-1), five orders of magnitude up.
+I1_UNMASKED_GOLDEN = {
+    'cls': (-2.4325768099e+00, 1.3625477175e+01, 1.2301533716e-03),
+    'first': (-2.4325768099e+00, 1.3625477175e+01, 1.2301533716e-03),
+    'last': (-4.8015104979e-01, 1.7474361904e+01, -6.4147037268e-01),
+    'middle': (-9.0585865807e+00, 1.2501058457e+01, 1.5675108135e-01),
+    'mean': (-4.2395858765e+00, 7.4127014056e+00, -4.5542362332e-01),
+    'max': (2.4226868525e+01, 2.4226868525e+01, 1.5675108135e-01),
+    'min': (-3.3379035980e+01, 3.3379035980e+01, -1.3442145586e+00),
+    'sum': (-2.9677100927e+01, 5.1888909429e+01, -3.1879653931e+00),
+    'mean_max': (1.9987282649e+01, 3.1639569931e+01, -4.5542362332e-01),
+    'mean_std': (1.4443011433e+01, 2.6095298715e+01, -4.5542362332e-01),
+    'mean_max_min': (-1.3391753331e+01, 6.5018605910e+01, -4.5542362332e-01),
+    'attention': (-1.2140299166e+00, 9.4650178207e+00, -7.8558260202e-01),
+    'multi_head_attention': (6.3527483121e-01, 1.1215872373e+01, -4.8161357641e-01),
+    'weighted': (-4.9283401147e+00, 9.4189609364e+00, -3.5132110119e-01),
+    'top_k_mean': (-4.2395857349e+00, 7.4127013832e+00, -4.5542362332e-01),
+    'top_k_max': (2.4226868525e+01, 2.4226868525e+01, 1.5675108135e-01),
+    'none': (-2.9677100304e+01, 1.1939868845e+02, 1.2301533716e-03),
+    'flatten': (-2.9677100304e+01, 1.1939868845e+02, 1.2301533716e-03),
+}
+
+# The I1 golden values above were captured at this geometry, which differs from
+# the isolation probes' geometry on purpose (a longer sequence exercises the
+# `weighted` position-weight slice further).
+I1_B, I1_S, I1_D = 3, 7, 8
+
+
+def _np(x: Any) -> np.ndarray:
+    return keras.ops.convert_to_numpy(x)
+
+
+def _iso_layer(
+    strategy: str, top_k: int = 10, seed: int = 1234, seq_len: int = ISO_S
+) -> SequencePooling:
+    """Build a `SequencePooling` and assign EVERY weight from a seeded RNG.
+
+    Fresh Keras initialisers leave biases at zero and `WeightedPooling`'s
+    position weights at a constant ``1.0``; both make a masking site far less
+    observable than it is in a trained model (prior-plan D-008). These fixtures
+    therefore put the layer in the state a *trained* model is in.
+
+    `weighted` and `top_k_*` carry no bias weights at all (`WeightedPooling` has
+    only `position_weights`; the top-k branches are weightless), so the
+    "at least one non-zero bias" assertion is applied where biases EXIST and
+    the strategy is otherwise checked to be a known biasless one. Non-vacuity
+    for those strategies rests on the seeded non-uniform position weights and on
+    the mandatory live control that every test below carries.
+    """
+    layer = SequencePooling(
+        strategy=strategy,
+        attention_hidden_dim=16,
+        attention_num_heads=2,
+        weighted_max_seq_len=32,
+        top_k=top_k,
+        use_bias=True,
+    )
+    layer.build((None, seq_len, ISO_D))
+
+    rng = np.random.default_rng(seed)
+    saw_nonzero_bias = False
+    for w in layer.weights:
+        shape = tuple(w.shape)
+        name = w.path.split('/')[-1]
+        if 'bias' in name or 'beta' in name:
+            value = 0.3 + 0.2 * rng.normal(size=shape)
+            saw_nonzero_bias = True
+        else:
+            value = 0.5 * rng.normal(size=shape) + 0.2
+        w.assign(keras.ops.cast(keras.ops.convert_to_tensor(value), w.dtype))
+
+    if strategy in ('attention', 'multi_head_attention'):
+        assert saw_nonzero_bias, (
+            f"Fixture is degenerate for {strategy!r}: no bias weight was assigned "
+            f"a non-zero value, so a masking site downstream of a zeroed "
+            f"activation would be structurally unobservable."
+        )
+    else:
+        assert not saw_nonzero_bias, (
+            f"{strategy!r} unexpectedly grew a bias weight; the fixture's "
+            f"non-zero-bias assertion must now cover it too."
+        )
+    return layer
+
+
+def _iso_inputs(seed: int = 7, batch: int = ISO_B, seq_len: int = ISO_S) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(batch, seq_len, ISO_D)).astype('float32')
+
+
+def _iso_ref_inputs() -> np.ndarray:
+    """The exact inputs the `I1_UNMASKED_GOLDEN` triples were captured on."""
+    rng = np.random.default_rng(7)
+    return rng.normal(size=(I1_B, I1_S, I1_D)).astype('float32')
+
+
+def _iso_perturb(
+    x: np.ndarray, positions, seed: int = 99, rows=None
+) -> np.ndarray:
+    """Return a copy of ``x`` with the given positions perturbed, per row.
+
+    The perturbation is large and NON-UNIFORM across the embedding axis: a
+    uniform offset can be cancelled by a downstream mean/normalisation and read
+    as reassociation noise rather than as a real leak.
+    """
+    rng = np.random.default_rng(seed)
+    out = np.array(x, copy=True)
+    rows = range(x.shape[0]) if rows is None else rows
+    for r in rows:
+        for p in positions:
+            out[r, p, :] += (5.0 * rng.normal(size=(x.shape[-1],))).astype(x.dtype)
+    return out
+
+
+def _iso_mask(masked_per_row, batch: int = ISO_B, seq_len: int = ISO_S) -> np.ndarray:
+    """Build a ``(B, seq_len)`` keep-mask (1 = keep) from per-row masked positions."""
+    m = np.ones((batch, seq_len), dtype='float32')
+    for r, positions in enumerate(masked_per_row):
+        for p in positions:
+            m[r, p] = 0.0
+    return m
+
+
+class TestMaskedPositionIsolation:
+    """F-24: `weighted` / `top_k_mean` / `top_k_max` must isolate a masked position.
+
+    Every test carries a LIVE CONTROL — the same perturbation applied to an
+    UNMASKED position must move the pooled output by a wide margin — so a test
+    that passes because *nothing* moves is impossible.
+    """
+
+    @pytest.mark.parametrize("top_k", [3, 5, 10])
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_masked_position_is_isolated(self, strategy: str, top_k: int) -> None:
+        """Perturbing a masked position must leave the pooled output bit-identical.
+
+        `top_k` is swept ACROSS the `k == kept_count` boundary deliberately.
+        With `seq_len=6` and one masked position the kept count is 5, so:
+        `top_k=3` selects fewer than the kept count (green before the fix too),
+        `top_k=5` sits exactly on the boundary (measured 0.0 before the fix —
+        the probe must not rest on this cell), and `top_k=10` clamps to
+        `k = min(10, 6) = 6 > 5`, which is the cell that actually leaked.
+        """
+        layer = _iso_layer(strategy, top_k=top_k)
+        x = _iso_inputs()
+        mask = keras.ops.convert_to_tensor(_iso_mask([[ISO_MASKED_POS]] * ISO_B))
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_LIVE_POS])),
+            mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe for strategy={strategy!r}, top_k={top_k}: perturbing "
+            f"the UNMASKED position {ISO_LIVE_POS} moved the output by only "
+            f"{live_delta:.6e}, so the isolation assertion below proves nothing."
+        )
+
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_MASKED_POS])),
+            mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}, top_k={top_k}: a MASKED position leaked "
+                f"into the pooled output by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_heterogeneous_kept_counts_are_isolated(self, strategy: str) -> None:
+        """`k` is batch-GLOBAL while the kept count is PER-ROW — that asymmetry is the defect.
+
+        Row 0 keeps 5 positions, row 1 keeps 3. Any fix that clamps `k` to the
+        batch-wide minimum would make row 0's answer depend on row 1's mask; any
+        fix that does not exclude invalid SELECTED positions leaks in row 1.
+        """
+        layer = _iso_layer(strategy, top_k=10)
+        x = _iso_inputs(seed=11)
+        masked_per_row = [[ISO_MASKED_POS], [3, 4, ISO_MASKED_POS]]
+        mask = keras.ops.convert_to_tensor(_iso_mask(masked_per_row))
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_LIVE_POS])),
+            mask=mask, training=False,
+        ))
+        assert float(np.max(np.abs(live - base))) > 1e-2, (
+            f"Vacuous probe for strategy={strategy!r}: the live control did not move."
+        )
+
+        perturbed = np.array(x, copy=True)
+        for row, positions in enumerate(masked_per_row):
+            perturbed = _iso_perturb(perturbed, positions, rows=[row])
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(perturbed), mask=mask, training=False
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}: masked positions leaked with "
+                f"heterogeneous per-row kept counts (5 and 3) by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_fully_masked_row_is_finite_and_documented(self, strategy: str) -> None:
+        """A fully-masked row does NOT raise and does NOT rescue — it degenerates.
+
+        Documented per strategy (see this plan's decisions.md D-008 and the
+        source docstrings); the sibling `AttentionPooling` has no rescue path
+        either, so NOT adding one here keeps the package consistent:
+
+        * `weighted`   — every logit is the same `-1e4` sentinel, so the softmax
+          is uniform and the output is the plain mean over the sequence.
+        * `top_k_mean` — no selected position is valid, the denominator floors
+          at 1 and the output is exactly zero.
+        * `top_k_max`  — every selected embedding is replaced by the `-1e4`
+          sentinel, so the output is that sentinel.
+
+        The point of the test is that all three are FINITE (no NaN from a
+        `0 * -inf`, no division by zero) and that the degenerate value is a
+        deliberate, pinned choice rather than whatever fell out.
+        """
+        layer = _iso_layer(strategy, top_k=10)
+        x = _iso_inputs(seed=13)
+        mask = keras.ops.convert_to_tensor(
+            _iso_mask([[ISO_MASKED_POS], list(range(ISO_S))])
+        )
+
+        out = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+        assert np.all(np.isfinite(out)), (
+            f"strategy={strategy!r}: a fully-masked row produced non-finite "
+            f"output {out[1]}."
+        )
+
+        row = out[1]
+        if strategy == 'weighted':
+            np.testing.assert_allclose(row, x[1].mean(axis=0), rtol=1e-5, atol=1e-5)
+        elif strategy == 'top_k_mean':
+            np.testing.assert_allclose(row, np.zeros_like(row), rtol=0, atol=0)
+        else:
+            np.testing.assert_allclose(row, np.full_like(row, -1e4), rtol=1e-6, atol=0)
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_isolation_holds_under_every_dtype_policy(
+        self, strategy: str, dtype_policy: str
+    ) -> None:
+        """The `-1e4` sentinel must stay FINITE and NaN-free at every policy.
+
+        `mixed_float16` is the reason the sentinel is `-1e4` and not
+        `layers/attention/common.py`'s `-1e9`: `float16(-1e9)` is `-inf`, and an
+        `-inf` in a softmax logit or a `(1 - mask) * -inf` product produces NaN.
+        The findings probe for F-24 ran float32/CPU only, so this re-runs it
+        across the restore-safe `dtype_policy` fixture in
+        `tests/test_layers/conftest.py`.
+        """
+        layer = _iso_layer(strategy, top_k=10)
+        x = _iso_inputs(seed=17)
+        mask = keras.ops.convert_to_tensor(_iso_mask([[ISO_MASKED_POS]] * ISO_B))
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+        assert np.all(np.isfinite(base)), (
+            f"strategy={strategy!r} under {dtype_policy}: non-finite pooled output."
+        )
+
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_LIVE_POS])),
+            mask=mask, training=False,
+        ))
+        assert float(np.max(np.abs(live.astype('float64') - base.astype('float64')))) > 1e-2
+
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_MASKED_POS])),
+            mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=f"strategy={strategy!r} leaked under policy {dtype_policy}.",
+        )
+
+    def test_ranking_sentinel_keeps_masked_positions_out_of_the_selection(self) -> None:
+        """The F-24 fix has TWO halves; this is the one the isolation tests cannot see.
+
+        Excluding invalid SELECTED positions from the aggregation (half ii) is
+        enough for isolation, so with ``k >= seq_len`` — where every position is
+        selected anyway — the RANKING sentinel (half i) is unobservable and a
+        dead-component probe on it comes back green.
+
+        This test makes it observable. With ``k < seq_len`` a masked position
+        competes for a slot on norm alone, and a masked position's mask-zeroed
+        norm is ``0.0``, which TIES with a genuinely kept position whose
+        embedding happens to be the zero vector. ``ops.top_k`` breaks ties by
+        the LOWER index, so without the sentinel the masked position at index 1
+        displaces the kept zero-vector position at index 3: the valid count
+        falls from 5 to 4 and ``top_k_mean`` divides by the wrong denominator
+        (the answer is 5/4 of the correct one) while remaining perfectly
+        isolated from the masked position's actual content.
+        """
+        seq_len = 6
+        layer = _iso_layer('top_k_mean', top_k=5, seq_len=seq_len)
+
+        rng = np.random.default_rng(41)
+        x = rng.normal(size=(1, seq_len, ISO_D)).astype('float32') + 1.5
+        x[0, 3, :] = 0.0                       # a KEPT position with a zero norm
+        mask = np.ones((1, seq_len), dtype='float32')
+        mask[0, 1] = 0.0                       # masked, at a LOWER index (ties go here)
+
+        out = _np(layer(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(mask),
+            training=False,
+        ))
+
+        kept = [0, 2, 3, 4, 5]
+        expected = x[0, kept, :].sum(axis=0) / len(kept)
+        np.testing.assert_allclose(out[0], expected, rtol=1e-6, atol=1e-6)
+
+        # And the wrong answer must be genuinely distinguishable, not a tie.
+        wrong = x[0, [0, 2, 4, 5], :].sum(axis=0) / 4
+        assert float(np.max(np.abs(expected - wrong))) > 1e-2, (
+            "Degenerate probe: the correct and the drop-a-kept-position answers "
+            "are numerically indistinguishable at this fixture."
+        )
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_all_ones_mask_matches_no_mask(self, strategy: str) -> None:
+        """An all-keep mask must be equivalent to passing no mask at all.
+
+        This is the scope pin on the fix: it must change the answer ONLY where a
+        position is actually masked. It is also what makes an over-correction
+        (e.g. a sentinel that biases kept positions too) visible.
+        """
+        layer = _iso_layer(strategy, top_k=10)
+        x = keras.ops.convert_to_tensor(_iso_inputs(seed=23))
+
+        no_mask = _np(layer(x, mask=None, training=False))
+        ones_mask = _np(layer(
+            x, mask=keras.ops.ones((ISO_B, ISO_S)), training=False
+        ))
+        np.testing.assert_allclose(ones_mask, no_mask, rtol=1e-6, atol=1e-6)
+
+
+class TestUnmaskedNumericsAreFrozen:
+    """I1 / SC-2: no F-24 fix may move the `mask=None` output of ANY strategy."""
+
+    @pytest.mark.parametrize("strategy", ISO_ALL_STRATEGIES)
+    def test_unmasked_output_matches_the_pre_fix_reference(self, strategy: str) -> None:
+        layer = _iso_layer(strategy, top_k=10, seq_len=I1_S)
+        x = keras.ops.convert_to_tensor(_iso_ref_inputs())
+        out = _np(layer(x, mask=None, training=False)).astype('float64')
+
+        expected_sum, expected_abs, expected_first = I1_UNMASKED_GOLDEN[strategy]
+        np.testing.assert_allclose(out.sum(), expected_sum, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(np.abs(out).sum(), expected_abs, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(out.ravel()[0], expected_first, rtol=1e-6, atol=1e-6)
+
+
 if __name__ == "__main__":
     """Run tests with pytest."""
     pytest.main([__file__, "-v", "--tb=short"])

@@ -117,7 +117,12 @@ class WeightedPooling(keras.layers.Layer):
 
         Args:
             inputs: Input sequence ``(batch, seq_len, embed_dim)``.
-            mask: Optional boolean mask ``(batch, seq_len)``.
+            mask: Optional boolean mask ``(batch, seq_len)``, 1/True = keep.
+                A masked position contributes EXACTLY zero to the output.
+                A fully-masked row is not rescued: every logit becomes the same
+                sentinel, so the softmax is uniform and the result is the plain
+                mean over the sequence (finite, never NaN). The sibling
+                ``AttentionPooling`` behaves the same way.
             training: Whether in training mode.
 
         Returns:
@@ -131,7 +136,27 @@ class WeightedPooling(keras.layers.Layer):
 
         # Apply mask if provided
         if mask is not None:
-            weights = weights * ops.cast(mask, weights.dtype)
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-002: mask the softmax
+            # LOGITS with `ops.where` and the finite, fp16-representable `-1e4`
+            # sentinel, after broadcasting the shared position weights to
+            # (batch, seq_len).
+            # Do NOT revert to `weights * cast(mask, dtype)` before the softmax:
+            # that sends a masked position in as logit 0, and `softmax(0)`
+            # among finite logits is NOT zero, so the masked token keeps real
+            # weight in the weighted sum (measured leak 1.129423e+00 where 0.0
+            # is required - finding F-24).
+            # Do NOT use `-1e9` (the `layers/attention/common.py` value):
+            # `float16(-1e9)` is `-inf`, and Do NOT use the additive form
+            # `weights + (1 - mask) * bias` either - `0 * -inf` is NaN under
+            # `mixed_float16`. The `ops.where` + `-1e4` shape mirrors the
+            # in-package precedent in `attention_pooling.py`
+            # (`# DECISION plan-2026-07-15T114613-5add9baa/D-001`).
+            # The broadcast is load-bearing: `position_weights` is ONE vector
+            # shared by the whole batch, while the mask is per-batch-row.
+            weights = ops.broadcast_to(weights, ops.shape(mask))
+            keep = ops.cast(mask, "bool")
+            neg = ops.cast(-1e4, weights.dtype)
+            weights = ops.where(keep, weights, neg)
 
         # Normalize weights
         weights = ops.softmax(weights, axis=-1)
