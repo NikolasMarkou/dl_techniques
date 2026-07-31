@@ -422,8 +422,19 @@ ALL_OUTPUT_MODES = [
     'none', 'flatten',
 ]
 
-# Strategies whose output provably excludes the masked patch, so a perturbation
-# of that patch must leave the output BIT-IDENTICAL.
+# Strategies whose output excludes the masked patch AT `MASKED_PATCH = 3`, so a
+# perturbation of that patch must leave the output BIT-IDENTICAL.
+#
+# SCOPE — this list is MASK-PATTERN-DEPENDENT, not a universal property.
+# `MASKED_PATCH = 3` is the LAST patch, i.e. a contiguous-prefix keep-mask, and
+# the four POSITIONAL modes (`cls`, `first`, `last`, `middle`) are in this list
+# only because of that. MEASURED with patch 2 masked instead (4 patches,
+# non-prefix): `use_cls_token=True` `last` leaks 9.1e-01; `use_cls_token=False`
+# `last` and `middle` leak 1.3e+00; with patch 0 masked, `cls`/`first` leak.
+# `cls`/`first`/`middle` select a POSITION and never consult the mask, which is
+# their contract; `last` DOES consult it (`sum(mask) - 1`) and is wrong off
+# prefix — a genuine defect carried forward as F-25. Do NOT read the name of
+# this constant as "these modes isolate under any mask".
 #
 # `weighted`, `top_k_mean` and `top_k_max` are in this list as of G-02. They
 # used to sit in the exclusions because `SequencePooling` leaked a masked

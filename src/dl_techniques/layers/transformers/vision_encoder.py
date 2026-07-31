@@ -129,6 +129,30 @@ PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 #   * `none` and `flatten` were never refused and still are not: they return the
 #     per-token sequence, so the masked token's own row being present is the
 #     documented meaning of those modes rather than a leak.
+#   * Do NOT read any of the above as "every OTHER `output_mode` isolates a
+#     masked token". MEASURED here after the fix, on a bare `SequencePooling`
+#     at `seq_len=6` with the NON-PREFIX keep-mask `{0,1,4,5}`, perturbing the
+#     masked position 3 by +50 (required movement 0.0):
+#         `last` 5.0e+01, `middle` 5.0e+01; the other 14 exactly 0.0
+#     and with the keep-mask `{1,2,3,4,5}` (position 0 masked) instead:
+#         `cls` 5.0e+01, `first` 5.0e+01; `last`/`middle` 0.0
+#     Under a CONTIGUOUS-PREFIX keep-mask -- the padding convention these
+#     layers are built for, and the only pattern the isolation suites use --
+#     all four measure 0.0. So the isolation property of the four POSITIONAL
+#     modes is MASK-PATTERN-DEPENDENT, and any blanket claim that "the other
+#     14/15 strategies already measure exactly 0.0" is true only of the mask
+#     the probe happened to use. Through this layer the same measurement gives
+#     (`img_size=8, patch_size=4, depth=1`, 4 patches, patch 2 masked):
+#     `use_cls_token=True` `last` 9.1e-01; `use_cls_token=False`
+#     `last`/`middle` 1.3e+00; every non-positional mode 0.0.
+#     `cls`/`first`/`middle` select a POSITION by construction and never
+#     consult the mask (they are the modes that deliberately skip
+#     `SequencePooling._apply_mask_and_exclusions`), so that is their contract,
+#     not a defect. `last` is DIFFERENT and is a genuine open defect: it DOES
+#     derive its index from the mask (`ops.sum(mask) - 1`), which is correct
+#     ONLY for a contiguous-prefix mask and returns a MASKED position for any
+#     other pattern. It is deliberately NOT fixed here (out of scope for the
+#     D-003 supersede) and is carried forward as finding F-25.
 # See decisions.md D-003 (plan-2026-07-31T132403-b3f540cb) for the supersede
 # record; the prior plan's D-013 entry is append-only and stays as written.
 
@@ -689,13 +713,32 @@ class VisionEncoder(keras.layers.Layer):
         :rtype: keras.KerasTensor
         :raises ValueError: If ``attention_mask`` is not rank-2.
 
-        Every ``output_mode`` accepts a mask. ``'weighted'``, ``'top_k_mean'``
-        and ``'top_k_max'`` used to be REFUSED here because their pooled output
-        was not isolated from a masked patch (F-24); that defect is fixed in
-        ``layers/sequence_pooling/`` and the refusal is gone — see the
+        Every ``output_mode`` is ACCEPTED with a mask — no mode raises any more.
+        ``'weighted'``, ``'top_k_mean'`` and ``'top_k_max'`` used to be REFUSED
+        here because their pooled output was not isolated from a masked patch
+        (F-24); that defect is fixed in ``layers/sequence_pooling/`` and the
+        refusal is gone — see the
         ``# DECISION plan-2026-07-31T132403-b3f540cb/D-003`` note at the top of
-        this module. ``'none'`` and ``'flatten'`` return the per-token sequence,
-        so a masked token's own row is present by definition.
+        this module.
+
+        Acceptance is NOT a promise of isolation, and which modes isolate
+        depends on the MASK PATTERN:
+
+        * ``'none'`` and ``'flatten'`` return the per-token sequence, so a
+          masked token's own row is present by definition.
+        * The four POSITIONAL modes — ``'cls'``, ``'first'``, ``'last'``,
+          ``'middle'`` — return whatever token sits at a chosen index. Under a
+          contiguous-prefix keep-mask (the padding convention) they all measure
+          exactly ``0.0`` movement, but under a non-prefix mask they return a
+          MASKED token: measured through this layer at 4 patches with patch 2
+          masked, ``'last'`` moves ``9.1e-01`` (``use_cls_token=True``) and
+          ``'last'``/``'middle'`` move ``1.3e+00`` (``use_cls_token=False``).
+          For ``'cls'``/``'first'``/``'middle'`` that is the documented meaning
+          of selecting a position. ``'last'`` is a genuine open defect (it
+          derives its index from the mask and gets it wrong off-prefix) —
+          carried forward as F-25, not fixed here.
+        * Every non-positional mode measured exactly ``0.0`` in that same
+          probe.
         """
         self._validate_attention_mask(attention_mask)
 

@@ -11,7 +11,7 @@ import os
 import numpy as np
 import keras
 from keras import ops
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from dl_techniques.layers.sequence_pooling import (
     AttentionPooling,
@@ -1026,13 +1026,51 @@ ISO_B, ISO_S, ISO_D = 2, 6, 8
 ISO_MASKED_POS = 5      # last position; no positional strategy selects it here
 ISO_LIVE_POS = 0        # perturbed for the mandatory live control
 
-# SC-2 / I1 pin: `mask=None` outputs for all 18 strategies, captured from the
-# code BEFORE the F-24 fix with the fixture below (`_iso_layer(..., top_k=10)`,
-# `_iso_ref_inputs()`), as ``(sum, sum_of_abs, first_element)`` in float64.
+# SC-2 / I1 pin: `mask=None` AND `exclude_positions=None` outputs for all 18
+# strategies, captured from the code BEFORE the F-24 fix with the fixture below
+# (`_iso_layer(..., top_k=10)`, `_iso_ref_inputs()`), as
+# ``(sum, sum_of_abs, first_element)`` in float64.
 # A fix that moves ANY unmasked numeric moves at least the sum-of-abs.
-# Tolerance is 1e-6 relative rather than 0: this module is not device-pinned and
-# GPU reduction order makes bitwise equality unavailable across devices, while a
-# real regression of this defect's shape is O(1e-1), five orders of magnitude up.
+#
+# SCOPE, measured — this pin covers `exclude_positions=None` ONLY.
+# `SequencePooling._apply_mask_and_exclusions` SYNTHESISES an all-ones mask
+# whenever `exclude_positions` is set, so `exclude_positions` is a SECOND entry
+# point into the D-002 masking fix that fires even at `mask=None`.
+#
+# RE-DERIVED A/B against a pristine `git worktree` at `5500c6bc`, CPU, with this
+# module's own fixture at `_iso_layer(..., top_k=10, exclude_positions=[1])`,
+# reported as max|elementwise diff| (the metric is named because the earlier
+# draft of this note quoted three numbers that could not be reproduced):
+#
+#   `_iso_inputs()`      weighted 1.307e-01  top_k_mean 2.435e-01  top_k_max 2.807e-01
+#   `_iso_ref_inputs()`  weighted 2.660e-01  top_k_mean 3.618e-01  top_k_max 4.558e-01
+#
+# In BOTH fixtures the SAME 15 of 18 strategies are bit-identical and the SAME 3
+# (exactly the D-002 repaired ones) move. The movement is the fix REACHING a path
+# it never reached, not a regression: pre-fix, `top_k_max` at
+# `exclude_positions=[1]` was BIT-IDENTICAL to `exclude_positions=None` (the
+# exclusion was ignored outright) and `top_k_mean` differed from it by only
+# 2.98e-08; post-fix `top_k_max` equals `max` over the non-excluded positions
+# EXACTLY (0.0) and `top_k_mean` equals `mean` over them to 5.96e-08 -- float32
+# round-off in the validity divide, NOT "to the last bit".
+# No shipped consumer is affected: the only two callers that pass
+# `exclude_positions` (`vision_encoder.py:396` and `models/vit/model.py:442`,
+# re-grepped at write time) restrict the strategy to `mean`/`max`, and both
+# measure exactly 0.0 movement in the A/B above. It is guarded by
+# `TestExcludePositionsIsAlsoIsolated` below.
+#
+# THE COMPARISON BELOW IS DEVICE-PINNED (`golden_reference_device`,
+# `tests/conftest.py`) and the triples were captured under the same pin. Without
+# it the `multi_head_attention` cell FAILS on GPU: measured on GPU 1 (RTX 4070),
+# ACTUAL sum 0.63481028 vs DESIRED 0.63527483, relative 7.3e-04 -- 730x the
+# rtol=1e-6 below -- a pure TF32 matmul artifact amplified by cancellation
+# (sum 0.635 against sum_of_abs 11.2). It passes with `NVIDIA_TF32_OVERRIDE=0`
+# and on CPU. WHAT NOT TO DO: do not widen the tolerance to absorb it (a real
+# regression of this defect's shape is O(1e-1), and the margin is what makes the
+# pin meaningful), and do not pin only one of the two sites -- pinning the
+# capture but not the comparison converts one failure into a different one.
+# Tolerance stays 1e-6 relative rather than 0 because the triples are stored as
+# decimal literals, not bits.
 I1_UNMASKED_GOLDEN = {
     'cls': (-2.4325768099e+00, 1.3625477175e+01, 1.2301533716e-03),
     'first': (-2.4325768099e+00, 1.3625477175e+01, 1.2301533716e-03),
@@ -1065,7 +1103,11 @@ def _np(x: Any) -> np.ndarray:
 
 
 def _iso_layer(
-    strategy: str, top_k: int = 10, seed: int = 1234, seq_len: int = ISO_S
+    strategy: str,
+    top_k: int = 10,
+    seed: int = 1234,
+    seq_len: int = ISO_S,
+    exclude_positions: Optional[List[int]] = None,
 ) -> SequencePooling:
     """Build a `SequencePooling` and assign EVERY weight from a seeded RNG.
 
@@ -1083,6 +1125,7 @@ def _iso_layer(
     """
     layer = SequencePooling(
         strategy=strategy,
+        exclude_positions=exclude_positions,
         attention_hidden_dim=16,
         attention_num_heads=2,
         weighted_max_seq_len=32,
@@ -1382,18 +1425,81 @@ class TestMaskedPositionIsolation:
 
 
 class TestUnmaskedNumericsAreFrozen:
-    """I1 / SC-2: no F-24 fix may move the `mask=None` output of ANY strategy."""
+    """I1 / SC-2: no F-24 fix may move the `mask=None` output of ANY strategy.
+
+    Scoped to `exclude_positions=None`; `TestExcludePositionsIsAlsoIsolated`
+    covers the other entry point. See the note above `I1_UNMASKED_GOLDEN`.
+    """
 
     @pytest.mark.parametrize("strategy", ISO_ALL_STRATEGIES)
-    def test_unmasked_output_matches_the_pre_fix_reference(self, strategy: str) -> None:
-        layer = _iso_layer(strategy, top_k=10, seq_len=I1_S)
-        x = keras.ops.convert_to_tensor(_iso_ref_inputs())
-        out = _np(layer(x, mask=None, training=False)).astype('float64')
+    def test_unmasked_output_matches_the_pre_fix_reference(
+        self, strategy: str, golden_reference_device: str
+    ) -> None:
+        # The stored triples are a CPU capture, so the layer must be BUILT, RUN
+        # and COMPARED inside the same pin -- see the note above the dict.
+        with keras.device(golden_reference_device):
+            layer = _iso_layer(strategy, top_k=10, seq_len=I1_S)
+            x = keras.ops.convert_to_tensor(_iso_ref_inputs())
+            out = _np(layer(x, mask=None, training=False)).astype('float64')
 
-        expected_sum, expected_abs, expected_first = I1_UNMASKED_GOLDEN[strategy]
-        np.testing.assert_allclose(out.sum(), expected_sum, rtol=1e-6, atol=1e-6)
-        np.testing.assert_allclose(np.abs(out).sum(), expected_abs, rtol=1e-6, atol=1e-6)
-        np.testing.assert_allclose(out.ravel()[0], expected_first, rtol=1e-6, atol=1e-6)
+            expected_sum, expected_abs, expected_first = I1_UNMASKED_GOLDEN[strategy]
+            np.testing.assert_allclose(out.sum(), expected_sum, rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(
+                np.abs(out).sum(), expected_abs, rtol=1e-6, atol=1e-6
+            )
+            np.testing.assert_allclose(
+                out.ravel()[0], expected_first, rtol=1e-6, atol=1e-6
+            )
+
+
+class TestExcludePositionsIsAlsoIsolated:
+    """`exclude_positions` is the SECOND entry point into the D-002 fix.
+
+    `_apply_mask_and_exclusions` synthesises an all-ones mask whenever
+    `exclude_positions` is non-empty, so the three formerly-leaky strategies
+    reach the masked code path even when the caller passes `mask=None`. Before
+    D-002 this path leaked exactly as the explicit-mask path did:
+    `top_k_mean`/`top_k_max` ignored the exclusion outright (their output was
+    bit-identical to the no-exclusion output), and `weighted` merely reweighted
+    a still-live position.
+
+    This suite is deliberately NOT device-pinned: it compares two outputs
+    produced on the SAME device, so there is no cross-device reference to
+    protect.
+    """
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_excluded_position_is_isolated_at_mask_none(self, strategy: str) -> None:
+        layer = _iso_layer(
+            strategy, top_k=10, exclude_positions=[ISO_MASKED_POS]
+        )
+        x = _iso_inputs()
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=None, training=False))
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_MASKED_POS])),
+            mask=None,
+            training=False,
+        ))
+
+        # Live control FIRST: a probe that cannot see any movement is vacuous.
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_LIVE_POS])),
+            mask=None,
+            training=False,
+        ))
+        assert np.abs(live - base).max() > 1e-2, (
+            f"{strategy!r}: perturbing a NON-excluded position moved the output "
+            f"by only {np.abs(live - base).max():.6e}; the probe is vacuous."
+        )
+
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}, exclude_positions=[{ISO_MASKED_POS}], "
+                f"mask=None: the EXCLUDED position leaked into the pooled output "
+                f"by {np.abs(leaked - base).max():.6e}; required exactly 0.0."
+            ),
+        )
 
 
 if __name__ == "__main__":
