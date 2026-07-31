@@ -835,3 +835,113 @@ class TestSharedEmbeddingTypeIsRejected:
         with pytest.raises((ValueError, TypeError)) as exc:
             TextDecoder.from_config(config)
         assert "embedding_type='shared' is not supported" in str(exc.value)
+
+
+# ===================================================================
+# F-12 -- `seq_len <= max_seq_len` guard at `build()` (static shape)
+# ===================================================================
+
+class TestF12StaticSeqLenGuard:
+    """`TextDecoder` accepted an over-length sequence with NO guard at all, and
+    the consequence was DEVICE-DIVERGENT. MEASURED at `5500c6bc` with
+    `TextDecoder(vocab_size=100, embed_dim=32, depth=1, num_heads=4,
+    max_seq_len=8, positional_type=...)` fed `(2, 16)`:
+
+    | positional_type | GPU (`CUDA_VISIBLE_DEVICES=1`) | CPU (`CUDA_VISIBLE_DEVICES=""`) |
+    |---|---|---|
+    | `'learned'` | NO exception; `(2,16,32)`, all-finite, `absmean=0.8185` -- a SILENT WRONG ANSWER (the table has 8 rows; positions 8-15 read out of bounds and TF's GPU `GatherV2` clips silently) | `InvalidArgumentError: indices[8] = 8 is not in [0, 8) [Op:GatherV2]` -- an opaque op error naming neither `seq_len` nor `max_seq_len` |
+    | `'sincos'` | NO exception; `(2,16,32)`, all-finite, `absmean=0.8459` | NO exception; byte-identical to the GPU run |
+
+    So the defect had FOUR faces across two devices and two positional paths,
+    only one of which was even loud. That is why this suite is run twice, once
+    per device, and why it covers both positional types: a single-device,
+    single-positional-type test would prove one of four cells closed.
+
+    The guard lives in `build()` against the STATIC `input_shape[1]`. It CANNOT
+    fire when that dimension is `None` -- see
+    `test_dynamic_seq_axis_is_not_guarded_and_says_so`, which pins that
+    limitation and requires it to be documented IN THE SOURCE FILE (`plans/` is
+    gitignored, so a decision-log-only caveat does not ship).
+    """
+
+    @pytest.fixture
+    def cfg(self) -> Dict[str, Any]:
+        return {
+            'vocab_size': 100,
+            'embed_dim': 32,
+            'depth': 1,
+            'num_heads': 4,
+            'max_seq_len': 8,
+        }
+
+    @staticmethod
+    def _ids(batch: int, seq_len: int) -> keras.KerasTensor:
+        """SEEDED NON-ZERO token ids (never an all-zeros probe)."""
+        rng = np.random.default_rng(20260731)
+        arr = rng.integers(1, 100, size=(batch, seq_len)).astype('int32')
+        assert np.all(arr != 0), "fixture must be non-zero to be observable"
+        return ops.convert_to_tensor(arr)
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_over_length_static_shape_raises_naming_both_lengths(self, cfg, positional_type):
+        """RED before the fix in all four (device x positional_type) cells:
+        no `ValueError` is raised at all on GPU (either type) or on CPU/sincos,
+        and CPU/learned raises `InvalidArgumentError`, not `ValueError`."""
+        decoder = TextDecoder(**cfg, positional_type=positional_type)
+        with pytest.raises(ValueError) as exc:
+            decoder(self._ids(2, 16), training=False)
+        message = str(exc.value)
+        # The message must name BOTH quantities AND their values -- an error
+        # that says only "too long" sends the reader back to the source.
+        assert "seq_len" in message
+        assert "max_seq_len" in message
+        assert "16" in message and "8" in message
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_over_length_raises_through_a_functional_static_input(self, cfg, positional_type):
+        """The guard must fire on a symbolic build whose seq axis is STATICALLY
+        known (`keras.Input(shape=(16,))`), not only on a concrete array --
+        that is the path a model author actually takes."""
+        decoder = TextDecoder(**cfg, positional_type=positional_type)
+        inp = layers.Input(shape=(16,), dtype='int32')
+        with pytest.raises(ValueError) as exc:
+            decoder(inp)
+        assert "seq_len" in str(exc.value) and "max_seq_len" in str(exc.value)
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    @pytest.mark.parametrize("seq_len", [8, 7, 1])
+    def test_legal_lengths_still_build_and_run(self, cfg, positional_type, seq_len):
+        """NEGATIVE CONTROL / over-rejection family. `seq_len == max_seq_len`
+        (the boundary, 8) MUST NOT raise -- an off-by-one here would reject
+        exactly the maximum-length sequence the config advertises -- and neither
+        may any shorter length."""
+        decoder = TextDecoder(**cfg, positional_type=positional_type)
+        out = decoder(self._ids(2, seq_len), training=False)
+        assert out.shape == (2, seq_len, cfg['embed_dim'])
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_dynamic_seq_axis_is_not_guarded_and_says_so(self, cfg, positional_type):
+        """A genuinely DYNAMIC seq axis (`input_shape[1] is None`) must build and
+        run without raising -- the guard has nothing static to check and must not
+        invent a refusal. This is also the guard's honest LIMITATION: such a
+        caller feeding `seq_len > max_seq_len` at runtime is still not caught,
+        and the resulting failure is device-dependent. That limitation must be
+        documented in the SOURCE FILE, not only in a gitignored plan directory,
+        so this test asserts the documentation exists."""
+        import inspect
+        from dl_techniques.layers.transformers import text_decoder as _mod
+
+        decoder = TextDecoder(**cfg, positional_type=positional_type)
+        inp = layers.Input(shape=(None,), dtype='int32')
+        out_symbolic = decoder(inp)  # must NOT raise
+        assert out_symbolic.shape[-1] == cfg['embed_dim']
+
+        model = models.Model(inp, out_symbolic)
+        out = model(self._ids(2, 5), training=False)
+        assert out.shape == (2, 5, cfg['embed_dim'])
+
+        source = inspect.getsource(_mod.TextDecoder.build)
+        assert "LIMITATION" in source
+        assert "None" in source and "max_seq_len" in source
+        assert "device" in source.lower()

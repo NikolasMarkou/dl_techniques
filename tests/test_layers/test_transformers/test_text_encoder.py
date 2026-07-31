@@ -1237,3 +1237,110 @@ class TestSharedEmbeddingTypeIsRejected:
         with pytest.raises((ValueError, TypeError)) as exc:
             TextEncoder.from_config(config)
         assert "embedding_type='shared' is not supported" in str(exc.value)
+
+
+# ===================================================================
+# F-12 -- `seq_len <= max_seq_len` guard at `build()` (static shape)
+# ===================================================================
+
+class TestF12StaticSeqLenGuard:
+    """`TextEncoder` accepted an over-length sequence with no guard, and it did
+    not even fail the same way its sibling `TextDecoder` did. MEASURED at
+    `5500c6bc` with `TextEncoder(vocab_size=100, embed_dim=32, depth=1,
+    num_heads=4, max_seq_len=8, positional_type=...)` fed `(2, 16)`:
+
+    | positional_type | GPU (`CUDA_VISIBLE_DEVICES=1`) | CPU (`CUDA_VISIBLE_DEVICES=""`) |
+    |---|---|---|
+    | `'learned'` | `InvalidArgumentError: Expected size[1] in [0, 8], but got 16 [Op:Slice]` from `PositionalEmbedding.call()` -- opaque, and naming neither `seq_len` nor `max_seq_len` | identical `[Op:Slice]` error (device-CONSISTENT, unlike `TextDecoder`) |
+    | `'sincos'` | NO exception; `(2,16,32)`, all-finite, `absmean=0.8962` -- a SILENT WRONG ANSWER | NO exception; identical |
+
+    `TextEncoder` faults via `Slice` (it routes through the shared
+    `create_embedding_layer('positional_learned', ...)` factory, which slices a
+    fixed table) where `TextDecoder` faults via `GatherV2` (a raw
+    `layers.Embedding` gather). Neither op error is a `ValueError` and neither
+    names the two quantities the caller must reconcile.
+
+    Capacity note: `self.seq_len = max_seq_len + (1 if use_cls_token else 0)`,
+    so the positional table has room for the prepended CLS token. The guard is
+    therefore against `max_seq_len` -- the number of INPUT tokens -- not against
+    `self.seq_len`, and `use_cls_token=True` must not shrink the accepted input
+    length by one.
+    """
+
+    @pytest.fixture
+    def cfg(self) -> Dict[str, Any]:
+        return {
+            'vocab_size': 100,
+            'embed_dim': 32,
+            'depth': 1,
+            'num_heads': 4,
+            'max_seq_len': 8,
+        }
+
+    @staticmethod
+    def _ids(batch: int, seq_len: int) -> tf.Tensor:
+        """SEEDED NON-ZERO token ids (never an all-zeros probe)."""
+        rng = np.random.default_rng(20260731)
+        arr = rng.integers(1, 100, size=(batch, seq_len)).astype('int32')
+        assert np.all(arr != 0), "fixture must be non-zero to be observable"
+        return tf.constant(arr)
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_over_length_static_shape_raises_naming_both_lengths(self, cfg, positional_type):
+        """RED before the fix in all four (device x positional_type) cells: the
+        `'learned'` cells raise `InvalidArgumentError` (not `ValueError`) on both
+        devices, and the `'sincos'` cells raise nothing at all."""
+        encoder = TextEncoder(**cfg, positional_type=positional_type)
+        with pytest.raises(ValueError) as exc:
+            encoder(self._ids(2, 16), training=False)
+        message = str(exc.value)
+        assert "seq_len" in message
+        assert "max_seq_len" in message
+        assert "16" in message and "8" in message
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_over_length_raises_through_a_functional_static_input(self, cfg, positional_type):
+        """The guard must fire on a symbolic build whose seq axis is STATICALLY
+        known -- the path a model author actually takes."""
+        encoder = TextEncoder(**cfg, positional_type=positional_type)
+        inp = layers.Input(shape=(16,), dtype='int32')
+        with pytest.raises(ValueError) as exc:
+            encoder(inp)
+        assert "seq_len" in str(exc.value) and "max_seq_len" in str(exc.value)
+
+    @pytest.mark.parametrize("use_cls_token", [False, True])
+    @pytest.mark.parametrize("seq_len", [8, 7, 1])
+    def test_legal_lengths_still_build_and_run(self, cfg, seq_len, use_cls_token):
+        """NEGATIVE CONTROL / over-rejection family. `seq_len == max_seq_len`
+        (the boundary, 8) MUST NOT raise, at BOTH `use_cls_token` values -- the
+        CLS token is extra table capacity, not a token budget the caller pays
+        for."""
+        encoder = TextEncoder(**cfg, use_cls_token=use_cls_token)
+        out = encoder(self._ids(2, seq_len), training=False)
+        expected_seq = seq_len + (1 if use_cls_token else 0)
+        assert out.shape == (2, expected_seq, cfg['embed_dim'])
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
+    def test_dynamic_seq_axis_is_not_guarded_and_says_so(self, cfg, positional_type):
+        """A genuinely DYNAMIC seq axis (`input_shape[1] is None`) must build and
+        run without raising -- the guard has nothing static to check and must not
+        invent a refusal. That is also its honest LIMITATION, which must be
+        documented in the SOURCE FILE (`plans/` is gitignored), so this test
+        asserts the documentation exists."""
+        import inspect
+        from dl_techniques.layers.transformers import text_encoder as _mod
+
+        encoder = TextEncoder(**cfg, positional_type=positional_type)
+        inp = layers.Input(shape=(None,), dtype='int32')
+        out_symbolic = encoder(inp)  # must NOT raise
+        assert out_symbolic.shape[-1] == cfg['embed_dim']
+
+        model = models.Model(inp, out_symbolic)
+        out = model(self._ids(2, 5), training=False)
+        assert out.shape == (2, 5, cfg['embed_dim'])
+
+        source = inspect.getsource(_mod.TextEncoder.build)
+        assert "LIMITATION" in source
+        assert "None" in source and "max_seq_len" in source
+        assert "device" in source.lower()

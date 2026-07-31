@@ -367,10 +367,50 @@ class TextDecoder(keras.layers.Layer):
 
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         This ensures all weight variables exist before weight restoration during loading.
+
+        :param input_shape: Input shape ``(batch, seq_len)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the STATIC sequence length exceeds ``max_seq_len``.
         """
         # Build word embedding layers
         if self.built:
             return
+
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-018
+        # Static `seq_len <= max_seq_len` guard. Do NOT move this into `call()`
+        # and do NOT rewrite it against `ops.shape(input_ids)[1]`: that value is
+        # a traced tensor under `@tf.function`/`fit()` and a Python `if` cannot
+        # branch on it. Do NOT relocate it into a lower-level helper either --
+        # `GatedLinearAttentionBlock` did exactly that with its own `max_seq_len`
+        # raise and turned a loud error into a silent wrong answer (52 of 60
+        # timesteps returned all-zero on a symbolic-input model).
+        #
+        # LIMITATION (deliberate, and unfixable at this placement): when the
+        # sequence axis is dynamic (`input_shape[1] is None`) the guard has
+        # nothing to check and CANNOT fire. `build()` also runs only ONCE, so a
+        # later call with a longer sequence on an already-built layer is not
+        # re-checked either. In both cases an over-length sequence reaches the
+        # positional embedding unguarded, and the resulting failure is
+        # DEVICE-DEPENDENT -- MEASURED at max_seq_len=8, seq_len=16:
+        #   positional_type='learned': GPU returns finite, plausible-looking
+        #     garbage with NO exception (`GatherV2` clips out-of-range indices);
+        #     CPU raises `InvalidArgumentError: indices[8] = 8 is not in [0, 8)`.
+        #   positional_type='sincos' : NO exception on EITHER device -- the
+        #     coordinates are simply extrapolated past the declared range.
+        # Callers on a dynamic sequence axis must bound `seq_len` themselves.
+        if input_shape is not None and len(input_shape) >= 2:
+            static_seq_len = input_shape[1]
+            if static_seq_len is not None and static_seq_len > self.max_seq_len:
+                raise ValueError(
+                    f"seq_len={static_seq_len} exceeds max_seq_len={self.max_seq_len}. "
+                    f"This TextDecoder was configured with max_seq_len="
+                    f"{self.max_seq_len}, so its positional encoding covers only "
+                    f"{self.max_seq_len} positions and positions "
+                    f"{self.max_seq_len}..{static_seq_len - 1} have no defined "
+                    f"encoding. Construct the layer with max_seq_len >= "
+                    f"{static_seq_len}, or truncate the input to at most "
+                    f"{self.max_seq_len} tokens."
+                )
 
         if hasattr(self, 'word_embeddings'):
             self.word_embeddings.build(input_shape)

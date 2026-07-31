@@ -564,7 +564,8 @@ class TextEncoder(keras.layers.Layer):
 
         :param input_shape: Shape tuple(s) or dict of shapes.
         :type input_shape: Union[Tuple, List[Tuple], Dict]
-        :raises ValueError: If shape is invalid.
+        :raises ValueError: If shape is invalid, or if the STATIC sequence
+            length exceeds ``max_seq_len``.
         """
         # Handle multiple input shapes
         if self.built:
@@ -581,6 +582,48 @@ class TextEncoder(keras.layers.Layer):
             raise ValueError(
                 f"Expected 2D input shape (batch_size, seq_len), got {main_input_shape}"
             )
+
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-018
+        # Static `seq_len <= max_seq_len` guard. Do NOT move this into `call()`
+        # and do NOT rewrite it against `ops.shape(input_ids)[1]`: that value is
+        # a traced tensor under `@tf.function`/`fit()` and a Python `if` cannot
+        # branch on it. Do NOT relocate it into a lower-level helper either --
+        # `GatedLinearAttentionBlock` did exactly that with its own `max_seq_len`
+        # raise and turned a loud error into a silent wrong answer (52 of 60
+        # timesteps returned all-zero on a symbolic-input model).
+        #
+        # The bound is `max_seq_len`, NOT `self.seq_len` (= max_seq_len + 1 when
+        # `use_cls_token`): the extra positional slot exists FOR the prepended
+        # CLS token, so enabling it must not cost the caller an input token.
+        #
+        # LIMITATION (deliberate, and unfixable at this placement): when the
+        # sequence axis is dynamic (`main_input_shape[1] is None`) the guard has
+        # nothing to check and CANNOT fire. `build()` also runs only ONCE, so a
+        # later call with a longer sequence on an already-built layer is not
+        # re-checked either. In both cases an over-length sequence reaches the
+        # positional embedding unguarded, and the resulting failure is
+        # DEVICE-DEPENDENT -- MEASURED at max_seq_len=8, seq_len=16:
+        #   positional_type='learned': both GPU and CPU raise an opaque
+        #     `InvalidArgumentError: Expected size[1] in [0, 8], but got 16
+        #     [Op:Slice]`, naming neither `seq_len` nor `max_seq_len`. (The
+        #     sibling `TextDecoder` diverges harder still: it gathers instead of
+        #     slicing, so its GPU path returns finite garbage with NO exception.)
+        #   positional_type='sincos' : NO exception on EITHER device -- the
+        #     coordinates are simply extrapolated past the declared range.
+        # Callers on a dynamic sequence axis must bound `seq_len` themselves.
+        if main_input_shape is not None and len(main_input_shape) >= 2:
+            static_seq_len = main_input_shape[1]
+            if static_seq_len is not None and static_seq_len > self.max_seq_len:
+                raise ValueError(
+                    f"seq_len={static_seq_len} exceeds max_seq_len={self.max_seq_len}. "
+                    f"This TextEncoder was configured with max_seq_len="
+                    f"{self.max_seq_len}, so its positional encoding covers only "
+                    f"{self.max_seq_len} input positions and positions "
+                    f"{self.max_seq_len}..{static_seq_len - 1} have no defined "
+                    f"encoding. Construct the layer with max_seq_len >= "
+                    f"{static_seq_len}, or truncate the input to at most "
+                    f"{self.max_seq_len} tokens."
+                )
 
         # Create CLS token weight if needed
         if self.use_cls_token:
