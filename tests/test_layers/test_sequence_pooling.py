@@ -1054,21 +1054,35 @@ ISO_LIVE_POS = 0        # perturbed for the mandatory live control
 # EXACTLY (0.0) and `top_k_mean` equals `mean` over them to 5.96e-08 -- float32
 # round-off in the validity divide, NOT "to the last bit".
 # No shipped consumer is affected: the only two callers that pass
-# `exclude_positions` (`vision_encoder.py:396` and `models/vit/model.py:442`,
-# re-grepped at write time) restrict the strategy to `mean`/`max`, and both
+# `exclude_positions` are `vision_encoder.py:420`/`:424` (one gate, one kwarg)
+# and `models/vit/model.py:442` -- line numbers re-grepped at write time, step
+# 15; an earlier revision of this comment carried a stale `vision_encoder.py:396`
+# from a previous HEAD. Both restrict the strategy to `mean`/`max`, and both
 # measure exactly 0.0 movement in the A/B above. It is guarded by
 # `TestExcludePositionsIsAlsoIsolated` below.
 #
-# THE COMPARISON BELOW IS DEVICE-PINNED (`golden_reference_device`,
+# THE CAPTURE/RUN SITE BELOW IS DEVICE-PINNED (`golden_reference_device`,
 # `tests/conftest.py`) and the triples were captured under the same pin. Without
 # it the `multi_head_attention` cell FAILS on GPU: measured on GPU 1 (RTX 4070),
-# ACTUAL sum 0.63481028 vs DESIRED 0.63527483, relative 7.3e-04 -- 730x the
-# rtol=1e-6 below -- a pure TF32 matmul artifact amplified by cancellation
-# (sum 0.635 against sum_of_abs 11.2). It passes with `NVIDIA_TF32_OVERRIDE=0`
-# and on CPU. WHAT NOT TO DO: do not widen the tolerance to absorb it (a real
-# regression of this defect's shape is O(1e-1), and the margin is what makes the
-# pin meaningful), and do not pin only one of the two sites -- pinning the
-# capture but not the comparison converts one failure into a different one.
+# ACTUAL sum 0.6348102763295174 vs DESIRED 0.63527483121, relative 7.31e-04 --
+# 731x the rtol=1e-6 below -- a pure TF32 matmul artifact amplified by
+# cancellation (sum 0.635 against sum_of_abs 11.2). It passes with
+# `NVIDIA_TF32_OVERRIDE=0` and on CPU.
+# WHAT NOT TO DO: do not widen the tolerance to absorb it -- a real regression of
+# this defect's shape is O(1e-1), and the margin is what makes the pin
+# meaningful.
+# WHAT IS *NOT* LOAD-BEARING HERE, measured rather than assumed: the pin belongs
+# on the BUILD/RUN site ONLY. The comparison is `np.testing.assert_allclose` over
+# a HOST numpy array (`_np(...)` has already left the backend), so `keras.device`
+# cannot reach it. All four variants run over all 18 strategies on GPU 1, step 15:
+#     build/run PINNED   | compare PINNED    -> 0 FAIL   (the shipped shape)
+#     build/run PINNED   | compare unpinned  -> 0 FAIL   (identical; the pin is inert)
+#     build/run unpinned | compare PINNED    -> 1 FAIL   multi_head_attention, rel 7.31e-04
+#     build/run unpinned | compare unpinned  -> 1 FAIL   the SAME cell, the SAME numbers
+# So a second `keras.device` around the asserts buys nothing and was removed. An
+# earlier revision of this comment claimed the opposite ("pinning the capture but
+# not the comparison converts one failure into a different one") on the strength
+# of a CITED prior-plan measurement; executing it here refuted that for this site.
 # Tolerance stays 1e-6 relative rather than 0 because the triples are stored as
 # decimal literals, not bits.
 I1_UNMASKED_GOLDEN = {
@@ -1435,21 +1449,24 @@ class TestUnmaskedNumericsAreFrozen:
     def test_unmasked_output_matches_the_pre_fix_reference(
         self, strategy: str, golden_reference_device: str
     ) -> None:
-        # The stored triples are a CPU capture, so the layer must be BUILT, RUN
-        # and COMPARED inside the same pin -- see the note above the dict.
+        # The stored triples are a CPU capture, so the layer must be BUILT and
+        # RUN inside the pin. The comparison below is deliberately OUTSIDE it:
+        # `out` is already a host numpy array by then, and the four-variant
+        # measurement in the note above the dict shows the extra wrap changes
+        # nothing (0 FAIL either way, 1 FAIL either way without this one).
         with keras.device(golden_reference_device):
             layer = _iso_layer(strategy, top_k=10, seq_len=I1_S)
             x = keras.ops.convert_to_tensor(_iso_ref_inputs())
             out = _np(layer(x, mask=None, training=False)).astype('float64')
 
-            expected_sum, expected_abs, expected_first = I1_UNMASKED_GOLDEN[strategy]
-            np.testing.assert_allclose(out.sum(), expected_sum, rtol=1e-6, atol=1e-6)
-            np.testing.assert_allclose(
-                np.abs(out).sum(), expected_abs, rtol=1e-6, atol=1e-6
-            )
-            np.testing.assert_allclose(
-                out.ravel()[0], expected_first, rtol=1e-6, atol=1e-6
-            )
+        expected_sum, expected_abs, expected_first = I1_UNMASKED_GOLDEN[strategy]
+        np.testing.assert_allclose(out.sum(), expected_sum, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            np.abs(out).sum(), expected_abs, rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            out.ravel()[0], expected_first, rtol=1e-6, atol=1e-6
+        )
 
 
 class TestExcludePositionsIsAlsoIsolated:
@@ -1498,6 +1515,58 @@ class TestExcludePositionsIsAlsoIsolated:
                 f"strategy={strategy!r}, exclude_positions=[{ISO_MASKED_POS}], "
                 f"mask=None: the EXCLUDED position leaked into the pooled output "
                 f"by {np.abs(leaked - base).max():.6e}; required exactly 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ISO_LEAKY_STRATEGIES)
+    def test_exclusion_and_an_explicit_mask_compose(self, strategy: str) -> None:
+        """`exclude_positions` AND a caller mask, together, in ONE call.
+
+        The two entry points MULTIPLY in `_apply_mask_and_exclusions` (the
+        caller's mask replaces the synthesised all-ones one and is then scaled
+        by the exclusion), so neither cell above exercises the composition:
+        `test_excluded_position_is_isolated_at_mask_none` covers exclusion
+        alone and `TestMaskedPositionIsolation` covers the mask alone. This is
+        the configuration `models/vit` would hit if it ever passed a mask
+        (`model.py:442` builds the pool with `exclude_positions=[0]`).
+
+        Both suppressed positions are perturbed in the SAME call, so a fix that
+        honoured only one of the two entry points would leak here.
+        """
+        mask_off = ISO_MASKED_POS - 1        # suppressed by the caller's mask
+        excluded = ISO_MASKED_POS            # suppressed by `exclude_positions`
+        assert mask_off != ISO_LIVE_POS and excluded != ISO_LIVE_POS
+
+        layer = _iso_layer(strategy, top_k=10, exclude_positions=[excluded])
+        x = _iso_inputs()
+        mask = keras.ops.convert_to_tensor(_iso_mask([[mask_off]] * ISO_B))
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [mask_off, excluded])),
+            mask=mask,
+            training=False,
+        ))
+
+        # Live control FIRST: a probe that cannot see any movement is vacuous.
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, [ISO_LIVE_POS])),
+            mask=mask,
+            training=False,
+        ))
+        assert np.abs(live - base).max() > 1e-2, (
+            f"{strategy!r}: perturbing a position that is neither masked nor "
+            f"excluded moved the output by only {np.abs(live - base).max():.6e}; "
+            f"the probe is vacuous."
+        )
+
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}, exclude_positions=[{excluded}] AND an "
+                f"explicit mask suppressing position {mask_off}: perturbing both "
+                f"moved the pooled output by {np.abs(leaked - base).max():.6e}; "
+                f"required exactly 0.0."
             ),
         )
 
