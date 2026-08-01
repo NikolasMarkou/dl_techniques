@@ -216,6 +216,28 @@ class TrainingConfig:
     # before it. Moving this default is a measurement, not a cleanup.
     stateless_augmentation: bool = False
 
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-011
+    # Seed the TRAINING stream's TFDS file interleave, the way `build_knn_datasets`
+    # already seeds the k-NN memory bank's (D-040). Without it, `--seed` fixes the
+    # measuring instrument but NOT the data the model is trained on: `seed=` reaches
+    # the element `.shuffle()` and the augmentation, not the file order, so two
+    # same-seed runs interleave the TFDS shards differently and see a different
+    # example ORDER from step 0.
+    #
+    # Do NOT "simplify" this to always-on to match `build_knn_datasets`. The bank is
+    # a frozen probe -- reseeding it changes only which images the score is read
+    # against, and it was already unseeded-and-wrong. The TRAINING stream is
+    # different: pinning the file order changes what every batch contains from step 0
+    # onward, so a run with this on is not comparable to `results/dino_smoke_step12/`
+    # or to any arm measured before it. Default OFF for the same reason
+    # `stateless_augmentation` is: moving this default is a measurement, not a cleanup.
+    #
+    # Do NOT pass `shuffle_files_seed=None` on the default path either. `build_dataset`
+    # omits the kwarg entirely so the default call is byte-for-byte the call it was
+    # before; the guard in tests/test_train/test_dino/test_train_dino.py asserts
+    # ABSENCE, not `None`.
+    seed_training_stream: bool = False
+
     # Model
     variant: str = "small"
     patch_size: Optional[int] = None  # None defers to the variant (D-017)
@@ -429,6 +451,13 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
         else {"element_map_fn": map_fn}
     )
 
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-011
+    # Built as a dict so the DEFAULT call passes NO `shuffle_files_seed` at all,
+    # rather than `shuffle_files_seed=None`. See `TrainingConfig.seed_training_stream`.
+    stream_seed_kwarg = (
+        {"shuffle_files_seed": config.seed} if config.seed_training_stream else {}
+    )
+
     train_ds, num_train, _ = build_raw_image_dataset(
         config.dataset,
         source_size,
@@ -437,6 +466,7 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
         augment=False,
         seed=config.seed,
         **map_fn_kwarg,
+        **stream_seed_kwarg,
     )
 
     steps_per_epoch = max(1, num_train // config.batch_size)
@@ -824,6 +854,17 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "differ, maxdiff 1.5312). Default OFF because it "
                              "changes what every batch contains, so a run with it "
                              "on is not comparable to the runs measured without it")
+    parser.add_argument("--seed-training-stream", action="store_true",
+                        help="Seed the TRAINING stream's TFDS file interleave with "
+                             "--seed, the way the k-NN memory bank already is "
+                             "(D-040). Without it --seed fixes the measuring "
+                             "instrument but not the data: `seed` reaches the "
+                             "element shuffle and the augmentation, NOT the file "
+                             "order, so two same-seed runs see a different example "
+                             "order from step 0. Default OFF because pinning the "
+                             "file order changes what every batch contains, so a "
+                             "run with it on is not comparable to the runs measured "
+                             "without it")
 
     # Model
     parser.add_argument("--variant", type=str, default="small", choices=list(VARIANTS))
@@ -959,6 +1000,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         local_crop_size=args.local_crop_size,
         source_image_size=args.source_image_size,
         stateless_augmentation=args.stateless_augmentation,
+        seed_training_stream=args.seed_training_stream,
         n_local_crops=args.n_local_crops,
         variant=args.variant,
         patch_size=args.patch_size,

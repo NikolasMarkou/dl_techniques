@@ -77,6 +77,7 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     # view even further, which is the opposite of what the field is for.
     "source_image_size": ("--source-image-size", 128),            # default: None
     "stateless_augmentation": ("--stateless-augmentation", True),  # default: False
+    "seed_training_stream": ("--seed-training-stream", True),      # default: False
     "variant": ("--variant", "tiny"),                             # default: small
     "patch_size": ("--patch-size", 8),                            # default: None
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
@@ -364,6 +365,53 @@ class TestConfigValidation:
             f"both map-fn slots were passed; build_raw_image_dataset refuses "
             f"that combination, so this run would die at pipeline construction"
         )
+
+    @pytest.mark.parametrize("seed_training_stream,expected", [
+        (False, None),   # non-vacuity control: the DEFAULT must pass NO kwarg
+        (True, 1234),
+    ])
+    def test_seed_training_stream_reaches_the_training_file_order(
+            self, monkeypatch, seed_training_stream, expected) -> None:
+        """D-011: the half `TestCLIWiring` cannot see -- config -> the actual call.
+
+        `build_knn_datasets` seeds the k-NN bank's TFDS file interleave (D-040) but
+        `build_dataset` does not seed the TRAINING stream's, so two same-seed runs
+        share the measuring instrument and NOT the data they are trained on.
+
+        The `False` arm is the non-vacuity control, and it asserts ABSENCE rather
+        than `None`: `build_raw_image_dataset` is shared by 6 other `src/train/`
+        consumers and its own guard
+        (`test_shuffle_files_seed_is_strictly_additive`) pins that
+        `shuffle_files_seed=None` must pass no `read_config`. Keeping the kwarg out
+        of the default call entirely means the default path is byte-for-byte the
+        call it was before this flag existed.
+        """
+        seen: Dict[str, Any] = {}
+
+        def spy(dataset, image_size, batch_size, **kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop: the training-stream kwargs have been captured")
+
+        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        config = trainer.TrainingConfig(
+            variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
+            n_local_crops=1, batch_size=2, dataset="cifar10", seed=1234,
+            seed_training_stream=seed_training_stream)
+        with pytest.raises(RuntimeError, match="training-stream kwargs"):
+            trainer.build_dataset(config)
+
+        if expected is None:
+            assert "shuffle_files_seed" not in seen, (
+                f"the DEFAULT training pipeline passed "
+                f"shuffle_files_seed={seen.get('shuffle_files_seed')!r}; it must "
+                f"pass the kwarg not at all, so the default call stays byte-for-"
+                f"byte what it was. Got keys {sorted(seen)}")
+        else:
+            assert seen.get("shuffle_files_seed") == expected, (
+                f"--seed-training-stream did not reach the training pipeline (got "
+                f"shuffle_files_seed={seen.get('shuffle_files_seed')!r}, wanted "
+                f"{expected}); the TFDS file interleave stays unseeded and two "
+                f"same-seed runs train on a different example order from step 0")
 
     def test_the_knn_memory_bank_seeds_the_TFDS_FILE_order(
             self, monkeypatch) -> None:
