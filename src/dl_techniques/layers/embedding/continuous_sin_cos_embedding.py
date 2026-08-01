@@ -171,13 +171,19 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
        region (run it under a float32 policy and cast the result), which is
        UNTESTED here.
 
-       *float64 frequency ceiling.* ``build()`` computes the frequency table at
-       float32 at every policy, so a ``float64``-policy caller gets float32-accurate
-       frequencies: max relative deviation from the float64 frequencies is
-       ``2.79e-07`` (at ``dim=64, ndim=3, max_wavelength=10000``; ``3.02e-07`` at
-       ``max_wavelength=1e5``). Widening it was measured and DELIBERATELY REJECTED:
-       it moves the float32 output at 10 of 10 configurations swept, and float32
-       bit-identity is a hard invariant for this layer.
+       *float64 frequencies -- no longer a ceiling.* ``build()`` computes the
+       frequency table at float64 whenever the layer's ``variable_dtype`` is
+       ``float64``, and at float32 otherwise. Under a ``float64`` policy the layer is
+       therefore float64-accurate end to end: measured against a float64 oracle at
+       ``dim=64, ndim=3``, coordinates in ``[0, 64)``, the max abs error is exactly
+       ``0.0`` (it was ``4.36e-07`` while the table was float32 at every policy).
+       The widening is deliberately CONDITIONAL. Computing the table at float64
+       unconditionally was measured and REJECTED: a float64 frequency rounded to the
+       nearest float32 is not the float32-computed frequency, so it moves the
+       ``float32`` output at 10 of 10 configurations swept -- and float32
+       bit-identity is a hard invariant for this layer. The condition is on
+       ``variable_dtype``, not ``compute_dtype``, because the table is a weight; that
+       is what leaves every non-float64 policy on a textually unchanged code path.
     """
 
     def __init__(
@@ -240,8 +246,26 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             raise ValueError(f"Last dimension of input ({input_shape[-1]}) "
                              f"must match ndim ({self.ndim})")
 
-        # Create frequency weights
-        arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=np.float32)
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-009
+        # Compute the frequency table at float64 ONLY when the layer's weights are
+        # float64 (i.e. under a `float64` policy). Do NOT make this unconditional, and
+        # do NOT key it off `compute_dtype`.
+        #   * Unconditional `np.float64` WAS measured (D-008) and is REJECTED: a float64
+        #     frequency rounded to the nearest float32 is NOT the float32-computed
+        #     frequency (2-10 of the 6-32 entries differ, up to 3 ULP), and that moved
+        #     the layer's FLOAT32 output at 10 of 10 corpora swept -- including all
+        #     three bit-identity corpora. float32 bit-identity is a hard invariant here.
+        #   * Keying off `variable_dtype` is what makes this float32-safe BY
+        #     CONSTRUCTION rather than by measurement luck: when the weight cannot HOLD
+        #     float64, the expression below is textually the pre-existing float32 one.
+        #     `compute_dtype` would be wrong -- under `mixed_float16`/`mixed_bfloat16`
+        #     the compute dtype is narrow while `variable_dtype` is float32, and the
+        #     frequency table is a WEIGHT.
+        # Effect, measured on CPU vs a float64 oracle at coords in [0, 64): the
+        # float64-policy error goes 4.364258e-07 -> exactly 0.0. Pinned by
+        # `test_float64_policy_accuracy_floor_is_machine_precision`.
+        arange_dtype = np.float64 if self.variable_dtype == "float64" else np.float32
+        arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=arange_dtype)
         omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / self.effective_dim_per_wave))
 
         # Create layer's own weights

@@ -44,8 +44,10 @@ _G10_COORD_HI = 64.0
 # documented in the layer's own class docstring.
 # A SINGLE policy-wide tolerance is rejected on purpose: the span is 5 orders of
 # magnitude, so a bound loose enough for bfloat16 is vacuous at float32.
-# (float64 does not reach ~1e-16 because `omega` is still computed at float32 —
-# a separate, known precision ceiling.)
+# (The float64 row is the LOOSE, policy-uniform bound. The tight float64 floor that
+# `build()`'s policy-conditional widening actually delivers is pinned separately by
+# `test_float64_policy_accuracy_floor_is_machine_precision` and lives with
+# `_H11_F64_FLOOR`, not here.)
 _G10_TOL = {
     "float32": 2.0e-06,
     "float64": 1.0e-06,
@@ -63,6 +65,23 @@ _G10_TOL = {
 _G10_LARGE_POS_BOUND = {
     "mixed_float16": (0.30, 0.60),
     "mixed_bfloat16": (1.50, 2.00),
+}
+
+# H-11 (step 6b): the float64-policy accuracy FLOOR, after `build()` computes the
+# frequency table at float64 whenever `variable_dtype == "float64"`.
+# MEASURED on CPU against the float64 oracle, at both cells below: EXACTLY 0.0.
+# The bound shipped is 1e-15 (~4.5 ulp at 1.0) rather than a literal 0.0, so a future
+# libm/backend that differs in the last bit of a sin/cos is not a false alarm; it is
+# still ~4.4e8x tighter than the float32-frequency ceiling this replaced.
+# WHAT THE BOUND MUST SEE: with a float32 frequency table the SAME cells measure
+# 4.364258e-07 and 1.255198e-07 -- that is the 2.795e-07 max relative frequency
+# deviation propagating into the output. A bound anywhere near `_G10_TOL["float64"]`
+# (1e-06) would pass BOTH ways and be vacuous.
+_H11_F64_FLOOR = 1.0e-15
+_H11_F64_CELLS = {
+    # name: (dim, ndim, float32-frequency-table error at this cell)
+    "dim64_ndim3": (64, 3, 4.364258e-07),
+    "padded_dim66_ndim4": (66, 4, 1.255198e-07),
 }
 
 # I-B: float32 output must stay BIT-IDENTICAL to HEAD. Captured on CPU at HEAD 5b1a966e
@@ -304,6 +323,42 @@ class TestContinuousSinCosEmbed:
             f"left the pinned band ({lo}, {hi}]. Below the band means the documented "
             f"limitation no longer holds as written (update the class docstring "
             f"note); above it means something else broke."
+        )
+
+    @pytest.mark.parametrize("cell", sorted(_H11_F64_CELLS))
+    @pytest.mark.parametrize("dtype_policy", ["float64"], indirect=True)
+    def test_float64_policy_accuracy_floor_is_machine_precision(
+            self, dtype_policy, cell):
+        """H-11: under a float64 policy the layer must be float64-ACCURATE.
+
+        REGIME: coords drawn uniformly from [0, 64), `max_wavelength=10000`, CPU,
+        compared against the float64 numpy oracle.
+
+        This is the one assertion that can see the frequency table's dtype. At HEAD
+        `build()` computed `omega` at float32 under EVERY policy, so a float64-policy
+        caller inherited a float32-accurate frequency table -- max relative deviation
+        2.795e-07 -- and the output bottomed out at the per-cell figure recorded in
+        `_H11_F64_CELLS`, four to five orders of magnitude above float64 resolution.
+        The loose `_G10_TOL["float64"]` bound (1e-06) sits ABOVE both of those, so it
+        passes either way; only this bound discriminates.
+        """
+        dim, ndim, f32_table_error = _H11_F64_CELLS[cell]
+        with tf.device("/CPU:0"):
+            layer = ContinuousSinCosEmbed(dim=dim, ndim=ndim)
+            coords = _g10_coords((2, 5, ndim), _G10_COORD_HI)
+            x = keras.ops.cast(
+                keras.ops.convert_to_tensor(coords), layer.compute_dtype)
+            out = layer(x)
+            actual = np.asarray(keras.ops.convert_to_numpy(out), dtype=np.float64)
+
+        assert keras.backend.standardize_dtype(out.dtype) == "float64"
+        reference = _g10_reference_f64(coords.astype(np.float64), dim=dim, ndim=ndim)
+        err = float(np.max(np.abs(actual - reference)))
+        assert err <= _H11_F64_FLOOR, (
+            f"{cell}: float64-policy max abs error {err:.6e} exceeds the machine-"
+            f"precision floor {_H11_F64_FLOOR:.0e}, coords in [0, {_G10_COORD_HI}). "
+            f"A float32 frequency table measures {f32_table_error:.6e} here, so an "
+            f"error at that order means `build()` narrowed `omega` again."
         )
 
     # ---- serialization (continued) ----------------------------------
