@@ -1344,3 +1344,56 @@ class TestF12StaticSeqLenGuard:
         assert "LIMITATION" in source
         assert "None" in source and "max_seq_len" in source
         assert "device" in source.lower()
+
+
+class TestOutputModeValidation:
+    """H-03: ``output_mode`` must be validated against ``PoolingStrategy``.
+
+    Before this guard the ONLY ``output_mode`` check was
+    ``not use_cls_token and output_mode == 'cls'``, so a typo constructed
+    happily and the failure (if any) was deferred to the first pooled call.
+    """
+
+    CFG = dict(vocab_size=1000, embed_dim=64, depth=1, num_heads=4, max_seq_len=16)
+
+    def test_output_mode_typo_is_rejected_by_message(self):
+        """The raise must NAME the offending value.
+
+        Asserting only the exception TYPE is not enough: `Operation.from_config`
+        re-types a constructor exception to `TypeError` across a deserialization
+        boundary, so a type-only assertion cannot survive a `.keras` round-trip.
+        The MESSAGE is the stable contract.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            TextEncoder(**self.CFG, output_mode='mena')
+        message = str(excinfo.value)
+        assert 'mena' in message, message
+        assert 'output_mode' in message, message
+        # The legal set must be discoverable from the message itself.
+        assert 'mean' in message, message
+
+    @pytest.mark.parametrize("output_mode,use_cls_token", [
+        ('mean', False),
+        ('none', False),
+        ('cls', True),
+    ])
+    def test_valid_output_modes_still_construct(self, output_mode, use_cls_token):
+        """FALSE-POSITIVE FAMILY.
+
+        A guard whose predicate cannot separate invalid from unusual-but-valid
+        destroys correct answers. These three must construct AND run.
+        """
+        encoder = TextEncoder(
+            **self.CFG, output_mode=output_mode, use_cls_token=use_cls_token
+        )
+        assert encoder.output_mode == output_mode
+        out = encoder(np.random.randint(0, 1000, size=(2, 8)).astype('int32'),
+                      training=False)
+        assert np.all(np.isfinite(ops.convert_to_numpy(out)))
+
+    def test_cls_without_cls_token_still_raises_its_own_error(self):
+        """The pre-existing ``'cls'`` + ``use_cls_token=False`` raise is INTACT
+        and is not shadowed by the new membership check ('cls' IS a legal
+        `PoolingStrategy`, so the membership check must pass it through)."""
+        with pytest.raises(ValueError, match="output_mode='cls' requires use_cls_token=True"):
+            TextEncoder(**self.CFG, output_mode='cls', use_cls_token=False)

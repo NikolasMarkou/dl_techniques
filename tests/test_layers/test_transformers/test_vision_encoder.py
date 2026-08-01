@@ -922,3 +922,46 @@ class TestMaskedPoolingIsIsolated:
         assert np.all(np.isfinite(_np(
             encoder.get_patch_features(images, attention_mask=mask)
         )))
+
+
+class TestOutputModeValidation:
+    """H-03: ``output_mode`` must be validated against ``PoolingStrategy``.
+
+    Mirror of ``test_text_encoder.py::TestOutputModeValidation`` -- the two
+    encoders shared the same hole (only ``not use_cls_token and
+    output_mode == 'cls'`` was checked) and must share the same closure.
+    """
+
+    CFG = dict(img_size=32, patch_size=8, embed_dim=32, depth=1, num_heads=4)
+
+    def test_output_mode_typo_is_rejected_by_message(self):
+        """The raise must NAME the offending value; asserting only the exception
+        TYPE is not enough (`Operation.from_config` re-types a constructor
+        exception to `TypeError` across a deserialization boundary)."""
+        with pytest.raises(ValueError) as excinfo:
+            VisionEncoder(**self.CFG, output_mode='mena')
+        message = str(excinfo.value)
+        assert 'mena' in message, message
+        assert 'output_mode' in message, message
+        assert 'mean' in message, message
+
+    @pytest.mark.parametrize("output_mode,use_cls_token", [
+        ('mean', False),
+        ('none', False),
+        ('cls', True),
+    ])
+    def test_valid_output_modes_still_construct(self, output_mode, use_cls_token):
+        """FALSE-POSITIVE FAMILY: unusual-but-valid values must survive."""
+        encoder = VisionEncoder(
+            **self.CFG, output_mode=output_mode, use_cls_token=use_cls_token
+        )
+        assert encoder.output_mode == output_mode
+        images = np.random.default_rng(3).standard_normal((2, 32, 32, 3)).astype('float32')
+        out = encoder(ops.convert_to_tensor(images), training=False)
+        assert np.all(np.isfinite(_np(out)))
+
+    def test_cls_without_cls_token_still_raises_its_own_error(self):
+        """The pre-existing ``'cls'`` + ``use_cls_token=False`` raise is INTACT
+        and is not shadowed by the new membership check."""
+        with pytest.raises(ValueError, match="output_mode='cls' requires use_cls_token=True"):
+            VisionEncoder(**self.CFG, output_mode='cls', use_cls_token=False)

@@ -88,7 +88,7 @@ The modern, configurable components are based on subsequent innovations:
 
 import keras
 from keras import ops, layers, initializers, regularizers
-from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List
+from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List, get_args
 
 # ---------------------------------------------------------------------
 # local imports
@@ -343,6 +343,19 @@ class TextEncoder(keras.layers.Layer):
             raise ValueError(
                 f"embedding_type must be one of 'learned', 'factorized', "
                 f"got {embedding_type!r}"
+            )
+        # H-03: `output_mode` is forwarded verbatim to `SequencePooling(strategy=)`.
+        # Until this check existed, the ONLY `output_mode` validation was the
+        # `use_cls_token` one below, so a typo constructed happily and failed
+        # (if at all) much later, inside the pooling layer. The legal set is
+        # DERIVED from `PoolingStrategy` -- never restate the literal list here,
+        # a value list maintained in two places is a lockstep invariant that
+        # drifts the moment a strategy is added.
+        _legal_output_modes = get_args(PoolingStrategy)
+        if output_mode not in _legal_output_modes:
+            raise ValueError(
+                f"output_mode must be one of {list(_legal_output_modes)}, "
+                f"got {output_mode!r}"
             )
         if not use_cls_token and output_mode == 'cls':
             raise ValueError("output_mode='cls' requires use_cls_token=True")

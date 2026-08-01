@@ -69,7 +69,7 @@ References:
 
 import keras
 from keras import ops, layers, initializers, regularizers
-from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable
+from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, get_args
 
 # ---------------------------------------------------------------------
 # local imports
@@ -346,6 +346,19 @@ class VisionEncoder(keras.layers.Layer):
             raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout_rate}")
         if not (0.0 <= pos_dropout_rate <= 1.0):
             raise ValueError(f"pos_dropout must be between 0 and 1, got {pos_dropout_rate}")
+        # H-03: `output_mode` is forwarded verbatim to `SequencePooling(strategy=)`.
+        # Until this check existed, the ONLY `output_mode` validation was the
+        # `use_cls_token` one below, so a typo constructed happily and failed
+        # (if at all) much later, inside the pooling layer. The legal set is
+        # DERIVED from `PoolingStrategy` -- never restate the literal list here,
+        # a value list maintained in two places is a lockstep invariant that
+        # drifts the moment a strategy is added.
+        _legal_output_modes = get_args(PoolingStrategy)
+        if output_mode not in _legal_output_modes:
+            raise ValueError(
+                f"output_mode must be one of {list(_legal_output_modes)}, "
+                f"got {output_mode!r}"
+            )
         if not use_cls_token and output_mode == 'cls':
             raise ValueError("output_mode='cls' requires use_cls_token=True")
 
