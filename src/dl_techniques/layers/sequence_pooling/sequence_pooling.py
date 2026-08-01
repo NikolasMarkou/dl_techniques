@@ -160,7 +160,16 @@ class SequencePooling(keras.layers.Layer):
 
     ``cls`` and ``first`` return index 0 BY INTENT, mask or no mask: the caller
     asked for the token at index 0, so a mask covering position 0 does not
-    redirect them.
+    redirect them. This asymmetry between the mask-aware pair and the
+    by-intent pair is deliberate; it is pinned by
+    ``tests/test_layers/test_sequence_pooling.py::TestPositionalModesIsolateMaskedPositions``.
+
+    The ``last``/``middle`` quantifier above ("never a masked position") was
+    MEASURED against this shipped implementation, not inferred: over EVERY
+    non-empty keep-mask at ``seq_len = 1..9`` — 1013 masks — both modes
+    returned exactly the expected kept token, 0 mismatches (``batch=1``,
+    ``hidden_dim=4``, ``float32``, CPU, no ``exclude_positions``). This is the
+    ONE home for that figure; do not restate it in a consumer module.
 
     A FULLY-MASKED row degenerates to index 0 for ``last`` and ``middle``,
     i.e. the returned token is itself masked. This is a deliberate, documented

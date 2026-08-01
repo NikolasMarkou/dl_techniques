@@ -190,6 +190,16 @@ pool = create_sequence_pooling_layer(
 )
 ```
 
+`exclude_positions` is honoured by **every** strategy except `none`/`flatten`
+(which return the sequence, so there is no index to move and no reduction to
+exclude from). It used to be a silent no-op for the four positional strategies;
+it is not any more. Unlike a keep-mask it is an EXPLICIT caller instruction, so
+it outranks a positional mode's default: `cls`/`first` with position 0 excluded
+return the first NON-excluded position, while still ignoring the keep-mask. If
+the mask and the exclusions together leave nothing kept, every positional mode
+degenerates to index 0 — the same documented, no-rescue degeneration as a
+fully-masked row.
+
 #### Pooling strategies (`PoolingStrategy`)
 
 `strategy` accepts a single strategy name or a list of names. The full catalog of
@@ -197,10 +207,10 @@ pool = create_sequence_pooling_layer(
 
 | Category | Strategy | Output dim | Description |
 |----------|----------|------------|-------------|
-| Positional | `cls` | `dim` | First token (`inputs[:, 0, :]`); alias of `first`. |
-| Positional | `first` | `dim` | First token of the sequence. |
-| Positional | `last` | `dim` | Last token (mask-aware: last unmasked position). |
-| Positional | `middle` | `dim` | Token at `seq_len // 2`. |
+| Positional | `cls` | `dim` | Token at index 0 (`inputs[:, 0, :]`), BY INTENT — a keep-mask does not redirect it; alias of `first`. |
+| Positional | `first` | `dim` | Token at index 0, BY INTENT (see `cls`). |
+| Positional | `last` | `dim` | Mask-aware: the LAST KEPT position (not `sum(mask) - 1`, which is only the last kept index for a contiguous-prefix mask). |
+| Positional | `middle` | `dim` | Mask-aware: the middle of the KEPT positions (not `seq_len // 2` of the padded length). |
 | Statistical | `mean` | `dim` | Mask-aware mean over the sequence. |
 | Statistical | `max` | `dim` | Mask-aware max over the sequence. |
 | Statistical | `min` | `dim` | Mask-aware min over the sequence. |

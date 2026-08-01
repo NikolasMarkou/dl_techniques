@@ -425,16 +425,33 @@ ALL_OUTPUT_MODES = [
 # Strategies whose output excludes the masked patch AT `MASKED_PATCH = 3`, so a
 # perturbation of that patch must leave the output BIT-IDENTICAL.
 #
-# SCOPE — this list is MASK-PATTERN-DEPENDENT, not a universal property.
+# SCOPE — this is the ONE home for the measured through-`VisionEncoder`
+# isolation sweep. No figure below is repeated in `vision_encoder.py`; that
+# module cross-references this constant instead.
+#
+# The list used to be MASK-PATTERN-DEPENDENT for the four POSITIONAL modes:
 # `MASKED_PATCH = 3` is the LAST patch, i.e. a contiguous-prefix keep-mask, and
-# the four POSITIONAL modes (`cls`, `first`, `last`, `middle`) are in this list
-# only because of that. MEASURED with patch 2 masked instead (4 patches,
-# non-prefix): `use_cls_token=True` `last` leaks 9.1e-01; `use_cls_token=False`
-# `last` and `middle` leak 1.3e+00; with patch 0 masked, `cls`/`first` leak.
-# `cls`/`first`/`middle` select a POSITION and never consult the mask, which is
-# their contract; `last` DOES consult it (`sum(mask) - 1`) and is wrong off
-# prefix — a genuine defect carried forward as F-25. Do NOT read the name of
-# this constant as "these modes isolate under any mask".
+# `last`/`middle` were in this list only because of that (with patch 2 masked
+# they leaked). F-25 is now CLOSED — `last` returns the last KEPT position and
+# `middle` the middle of the KEPT positions — so the dependence is gone for
+# those two. RE-DERIVED BY EXECUTION at this HEAD, not inherited: the sweep
+# below drives THIS layer over ALL 14 non-trivial keep-masks of the 4 patches
+# and perturbs every masked patch, at `MASK_CFG` (16/8 -> 4 patches, depth 2,
+# embed 32), batch 2, float32, seeded non-zero weights, CPU. Required movement
+# is exactly 0.0.
+#
+#   use_cls_token=True   cls / first / last / middle : 0 of 14 leak
+#   use_cls_token=False  last / middle               : 0 of 14 leak
+#   use_cls_token=False  first                       : 7 of 14 leak,
+#       2.1e+00 - 2.7e+00 — EXACTLY the 7 masks in which patch 0 is masked
+#
+# That last row is INTENT, not a defect: `cls`/`first` return index 0 by
+# contract. With `use_cls_token=True` index 0 is the CLS token, which
+# `_extend_mask_for_cls` always keeps, which is why the same modes measure 0
+# there. `MASKED_PATCH = 3` never exercises it either way.
+#
+# Do NOT read the name of this constant as "these modes isolate under any
+# mask": `first` at `use_cls_token=False` is a standing counter-example.
 #
 # `weighted`, `top_k_mean` and `top_k_max` are in this list as of G-02. They
 # used to sit in the exclusions because `SequencePooling` leaked a masked
@@ -711,7 +728,16 @@ class TestPoolingMaskIsClsExtended:
         assert np.all(np.isfinite(_np(out)))
 
     def test_last_strategy_indexes_the_cls_extended_sequence(self):
-        """``'last'`` picks ``sum(mask) - 1``; with the un-extended mask that is off by one."""
+        """``'last'`` picks the LAST KEPT index; with the un-extended mask that is off by one.
+
+        The mechanism used to be ``sum(mask) - 1``; F-25 replaced it with the
+        last kept index. The two AGREE here — ``MASKED_PATCH = 3`` makes the
+        CLS-extended keep-mask a contiguous prefix, which is exactly the family
+        where they coincide — so this test does NOT discriminate the two
+        mechanisms and must not be read as pinning either. It pins the
+        CLS-EXTENSION (index 3, not index 2), which is its point.
+        ``TestPositionalModesIsolateOffPrefix`` carries the discriminating cells.
+        """
         encoder = _seeded_encoder(output_mode='last', use_cls_token=True)
         images = ops.convert_to_tensor(_mask_images())
         mask = ops.convert_to_tensor(_patch_mask())
@@ -965,3 +991,93 @@ class TestOutputModeValidation:
         and is not shadowed by the new membership check."""
         with pytest.raises(ValueError, match="output_mode='cls' requires use_cls_token=True"):
             VisionEncoder(**self.CFG, output_mode='cls', use_cls_token=False)
+
+
+# OFF-PREFIX cells, chosen PER (output_mode, use_cls_token) so that each one
+# DISCRIMINATES -- i.e. the pre-F-25 index is the masked one. A single shared
+# cell does not: `MASKED_PATCH = 3` (the last patch) is a contiguous-prefix
+# keep-mask, where `sum(mask) - 1` coincides with the last kept index, so the
+# pre-F-25 `last` passed it; and patch 2 is degenerate for `middle` at
+# `use_cls_token=True`, because the CLS token shifts the padded midpoint of the
+# 5-long pooled sequence onto index 2 = patch 1, which that mask KEEPS.
+# MEASURED: with the pre-F-25 index expressions injected, these four cells go
+# RED and the two-cell variant (patch 2 everywhere) leaves `[middle-True]`
+# GREEN against broken code.
+#
+#   (output_mode, use_cls_token) -> masked patch
+OFF_PREFIX_CELLS = [
+    ('last', True, 2),
+    ('last', False, 2),
+    ('middle', True, 1),
+    ('middle', False, 2),
+]
+
+
+class TestPositionalModesIsolateOffPrefix:
+    """F-25 closed, asserted THROUGH ``VisionEncoder`` rather than at the layer.
+
+    This is the executable content of the ``ISOLATING_OUTPUT_MODES`` scope
+    comment above. That comment used to record `last`/`middle` LEAKING at this
+    exact cell; the assertion is inverted here rather than the comment merely
+    reworded, because a prose correction is not RED-provable.
+    """
+
+    @pytest.mark.parametrize("output_mode,use_cls_token,masked_patch", OFF_PREFIX_CELLS)
+    def test_off_prefix_masked_patch_is_isolated(self, output_mode, use_cls_token, masked_patch):
+        """The cells `MASKED_PATCH = 3` is structurally blind to."""
+        encoder = _seeded_encoder(output_mode=output_mode, use_cls_token=use_cls_token)
+        images = _mask_images()
+        mask = ops.convert_to_tensor(_patch_mask(masked_patch=masked_patch))
+
+        base = _np(encoder(ops.convert_to_tensor(images), attention_mask=mask, training=False))
+
+        live = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, 0)),
+            attention_mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe for output_mode={output_mode!r}, use_cls_token="
+            f"{use_cls_token}: the UNMASKED live control moved only "
+            f"{live_delta:.6e}."
+        )
+
+        leaked = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, masked_patch)),
+            attention_mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"output_mode={output_mode!r}, use_cls_token={use_cls_token}: "
+                f"the OFF-PREFIX masked patch moved the pooled output by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    def test_first_still_returns_index_zero_when_patch_zero_is_masked(self):
+        """INTENT, not isolation — the standing counter-example.
+
+        ``'first'`` at ``use_cls_token=False`` reads patch 0 whether or not it is
+        masked. Asserting ISOLATION here would go RED against CORRECT code, so
+        this asserts the CONTRACT instead: the output equals the pooled
+        sequence's position 0, and it MOVES when patch 0 moves.
+        """
+        encoder = _seeded_encoder(output_mode='first', use_cls_token=False)
+        images = _mask_images()
+        mask = ops.convert_to_tensor(_patch_mask(masked_patch=0))
+
+        base = _np(encoder(ops.convert_to_tensor(images), attention_mask=mask, training=False))
+        moved = _np(encoder(
+            ops.convert_to_tensor(_perturb_patch(images, 0)),
+            attention_mask=mask, training=False,
+        ))
+        assert float(np.max(np.abs(moved - base))) > 1e-2, (
+            "'first' must keep reading the masked position 0 by intent; a 0.0 "
+            "here would mean it silently became mask-aware."
+        )
+
+        sequence = _np(encoder.get_patch_features(
+            ops.convert_to_tensor(images), attention_mask=mask, training=False
+        ))
+        np.testing.assert_allclose(base, sequence[:, 0, :], rtol=0, atol=0)

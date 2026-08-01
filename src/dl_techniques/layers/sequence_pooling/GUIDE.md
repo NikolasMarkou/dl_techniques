@@ -75,9 +75,14 @@ Use the canonical parameter names already established across the package:
 
 **Masking convention:** `call(inputs, mask=None, training=None)`. `mask` is a
 boolean/0-1 tensor of shape `(batch, seq_len)`. Statistical strategies apply the
-mask numerically (additive `-1e9` for `max`, multiplicative for `mean`/`sum`),
-positional strategies (`cls`, `first`, `last`, `middle`, `none`, `flatten`) are
-mask-aware only where meaningful (`last` selects the last unmasked position).
+mask numerically (additive `-1e9` for `max`, multiplicative for `mean`/`sum`).
+Of the positional strategies, `last` and `middle` ARE mask-aware — the last
+KEPT position and the middle of the KEPT positions respectively; `cls`/`first`
+return index 0 BY INTENT and ignore the mask; `none`/`flatten` return the
+sequence, so the mask does not apply. `exclude_positions` is honoured by every
+strategy except `none`/`flatten`, positional ones included. Per-mode semantics
+and the fully-masked degeneration are stated once, in `SequencePooling`'s class
+docstring.
 
 ---
 

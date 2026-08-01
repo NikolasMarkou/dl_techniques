@@ -130,52 +130,34 @@ PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 #     per-token sequence, so the masked token's own row being present is the
 #     documented meaning of those modes rather than a leak.
 #   * Do NOT read any of the above as "every OTHER `output_mode` isolates a
-#     masked token", and do NOT read "contiguous-prefix keep-mask" as a safe
-#     case either -- an earlier revision of this comment said exactly that and
-#     it was measurably FALSE for `middle`. Each of the four POSITIONAL modes
-#     leaks under its OWN, exactly-characterised set of masks; the four
-#     statements below are ENUMERATED rather than quantified, and each was
-#     obtained by SWEEPING every one of the 62 non-trivial keep-masks of a bare
-#     `SequencePooling`, not by measuring one mask. Held fixed across that
-#     sweep, and therefore NOT claimed beyond it: `seq_len=6`, `batch=2`,
-#     `float32`, a single +50 perturbation of every masked position (required
-#     movement 0.0). Identical results on CPU and on GPU 1 (RTX 4070).
+#     masked token" — that is a UNIVERSAL claim and it is still false. What is
+#     true is narrower and is stated per mode, in ONE place: the "Positional
+#     strategies and the keep-mask" section of
+#     `layers/sequence_pooling/sequence_pooling.py::SequencePooling`. Read it
+#     there rather than re-deriving it here; a rule restated in two files is a
+#     hand-maintained lockstep invariant, and an earlier revision of THIS
+#     comment is what went stale.
 #
-#       - `cls` / `first`: `inputs[:, 0, :]`. The mask is NEVER consulted.
-#         Isolates IFF position 0 is kept. Leaks in 31 of the 57 non-prefix
-#         masks and in 0 of the 5 contiguous-prefix masks (5.0e+01 each).
-#       - `middle`: `inputs[:, seq_len // 2, :]`, indexed against the FULL
-#         PADDED length. The mask is NEVER consulted. Isolates IFF position
-#         `seq_len // 2` is kept, so it LEAKS UNDER A CONTIGUOUS-PREFIX MASK
-#         TOO -- whenever the kept prefix is <= `seq_len // 2`, which is the
-#         ordinary short-sample-in-a-padded-batch case. Measured 5.0e+01 at
-#         prefix lengths 1, 2 and 3 of 6 and exactly 0.0 from 4 up; 3 of the 5
-#         prefix masks and 28 of the 57 non-prefix masks leak.
-#       - `last`: the ONLY positional mode that consults the mask
-#         (`ops.sum(mask) - 1`). That index is the last KEPT position only when
-#         the kept positions form a prefix, so it isolates in all 5
-#         contiguous-prefix masks and leaks in 31 of the 57 non-prefix ones.
-#     A predicate check over the full sweep confirmed all four rules with zero
-#     mismatches: each mode leaks EXACTLY when its own selected index is masked
-#     (`0`, `0`, `seq_len // 2`, and `sum(mask) - 1` respectively).
-#     Through THIS layer the same structure reproduces; the magnitudes are
-#     fixture-specific, so they are quoted only as evidence of non-zero
-#     (`img_size=8, patch_size=4, embed_dim=16, depth=1`, 4 patches, seeded
-#     non-zero weights, contiguous-prefix patch mask): `use_cls_token=False`
-#     `middle` 1.549e-01 at keep 1/4 and 2.143e-01 at keep 2/4;
-#     `use_cls_token=True` `middle` 1.275e-01 at keep 1/4; `cls`, `first` and
-#     `last` exactly 0.0 in EVERY prefix cell, and every non-positional mode
-#     exactly 0.0.
-#     VERDICT, split by intent rather than by outcome: `cls`/`first` select
-#     position 0 and say so, and a caller that masks position 0 while asking
-#     for `cls` has asked for a contradiction. `middle` and `last` are BOTH
-#     silent wrong answers with no exception -- `middle` under the padding
-#     convention itself (it indexes the padded length), `last` only off-prefix.
-#     Neither is fixed here (out of scope for the D-003 supersede) and BOTH are
-#     carried forward as finding F-25; see decisions.md D-022 for the corrected
-#     scope. Neither has a shipped `src/` caller today: grepping `src/` for
-#     `strategy=`/`output_mode=` set to `'last'` or `'middle'` returns only
-#     this comment; the defaults are `'mean'` and `'cls'`.
+# F-25 IS CLOSED (plan-2026-07-31T210633-b63a35aa). Two mask entry points were
+# fixed inside `layers/sequence_pooling/`, not here:
+#   * `middle` used to index the FULL PADDED length (`ops.shape(inputs)[1] // 2`)
+#     and `last` used to take `ops.sum(mask) - 1` — the last index of a
+#     contiguous PREFIX and nothing else. Both now derive their index from the
+#     keep-mask: `middle` is the middle of the KEPT positions and `last` the
+#     LAST KEPT index. `cls`/`first` still return index 0 BY INTENT, mask or no
+#     mask — that asymmetry is DELIBERATE and pinned by a test, not an oversight.
+#   * `exclude_positions` used to be a silent no-op for all four positional
+#     modes. It is now honoured by every strategy except `none`/`flatten`.
+# Do NOT re-add a "middle/last leak" warning anywhere in this file: the
+# behaviour is now pinned by `TestPositionalModesIsolateMaskedPositions` and
+# `TestExcludePositionsIsLiveForPositionalModes` in
+# `tests/test_layers/test_sequence_pooling.py`, and by
+# `ISOLATING_OUTPUT_MODES` in this layer's own test module — which is also the
+# ONE home for the measured through-this-layer isolation sweep. No figure from
+# that sweep is repeated here.
+#
+# `output_mode` is validated against `PoolingStrategy` in `__init__` (H-03); a
+# typo raises at construction rather than deferring to the first pooled call.
 # See decisions.md D-003 (plan-2026-07-31T132403-b3f540cb) for the supersede
 # record; the prior plan's D-013 entry is append-only and stays as written.
 
@@ -757,40 +739,33 @@ class VisionEncoder(keras.layers.Layer):
         ``# DECISION plan-2026-07-31T132403-b3f540cb/D-003`` note at the top of
         this module.
 
-        Acceptance is NOT a promise of isolation, and which modes isolate
-        depends on the MASK PATTERN:
+        Acceptance is NOT a blanket promise of isolation. Two modes are
+        exempt BY DEFINITION and one is exempt BY INTENT:
 
         * ``'none'`` and ``'flatten'`` return the per-token sequence, so a
           masked token's own row is present by definition.
-        * The four POSITIONAL modes — ``'cls'``, ``'first'``, ``'last'``,
-          ``'middle'`` — return whatever token sits at a chosen index, and each
-          one isolates a masked token under a DIFFERENT set of masks. Do not
-          read "contiguous-prefix keep-mask" as a blanket safe case; that
-          reading was measured FALSE for ``'middle'``. Enumerated, and swept
-          over all 62 non-trivial keep-masks of a bare ``SequencePooling`` at
-          ``seq_len=6`` (``batch=2``, ``float32``, +50 perturbation; identical
-          on CPU and GPU 1):
+        * ``'cls'`` and ``'first'`` return the token at index 0 BY INTENT,
+          mask or no mask. With ``use_cls_token=True`` index 0 is the CLS
+          token, which is never masked (see :meth:`_extend_mask_for_cls`), so
+          they isolate; with ``use_cls_token=False`` index 0 is patch 0, and
+          masking patch 0 while asking for ``'cls'``/``'first'`` is a
+          contradiction the layer answers literally rather than redirecting.
+        * ``'last'`` and ``'middle'`` ARE mask-aware as of F-25's closure:
+          ``'last'`` returns the last KEPT position and ``'middle'`` the
+          middle of the KEPT positions, both derived from the mask rather than
+          from the padded length. They no longer return a masked token for any
+          mask that keeps at least one position — see ``SequencePooling``'s
+          class docstring for the exhaustive-mask measurement that backs that
+          quantifier and for its exact scope. Do NOT re-add a "leaks under a
+          contiguous-prefix mask" caveat for ``'middle'``: that was true of the
+          pre-F-25 code and is now measurably false.
+        * Every NON-positional mode isolates.
 
-          - ``'cls'`` / ``'first'`` index position 0 and never consult the
-            mask. They isolate iff position 0 is kept — all 5 prefix masks,
-            26 of the 57 non-prefix ones.
-          - ``'middle'`` indexes ``seq_len // 2`` of the PADDED length and
-            never consults the mask. It isolates iff that index is kept, so it
-            LEAKS UNDER A CONTIGUOUS-PREFIX MASK whenever the kept prefix is
-            ``<= seq_len // 2`` (measured ``5.0e+01`` at prefix lengths 1, 2
-            and 3 of 6; exactly ``0.0`` from 4 up). Through this layer, with a
-            prefix patch mask: ``1.549e-01`` at keep 1/4 and ``2.143e-01`` at
-            keep 2/4 (``use_cls_token=False``), ``1.275e-01`` at keep 1/4
-            (``use_cls_token=True``) — magnitudes are fixture-specific.
-          - ``'last'`` is the only positional mode that consults the mask
-            (``sum(mask) - 1``); that is the last KEPT index only for a
-            contiguous-prefix mask, so it isolates in all 5 prefix masks and
-            returns a MASKED token in 31 of the 57 non-prefix ones.
-
-          ``'middle'`` and ``'last'`` are therefore both silent wrong answers
-          — carried forward as F-25 (see decisions.md D-022), not fixed here.
-        * Every NON-positional mode measured exactly ``0.0`` in every cell of
-          that sweep, on both devices.
+        The per-mode semantics live ONCE, in
+        :class:`~dl_techniques.layers.sequence_pooling.sequence_pooling.SequencePooling`'s
+        class docstring; the measured through-this-layer sweep that backs the
+        four bullets above lives ONCE, next to ``ISOLATING_OUTPUT_MODES`` in
+        ``tests/test_layers/test_transformers/test_vision_encoder.py``.
         """
         self._validate_attention_mask(attention_mask)
 
