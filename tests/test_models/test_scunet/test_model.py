@@ -337,6 +337,13 @@ class TestSCUNetPaddingBehavior:
         (50, 70),    # Asymmetric padding
         (63, 63),    # Just under 64
         (65, 65),    # Just over 64
+        # H-16 FALSE-POSITIVE cell. The grid above stops at extent 50, one step
+        # short of the reflect-pad boundary. 33 is the MEASURED smallest legal
+        # height (pad 31 < 33); 32 raises (pad 32, not less than 32). W=40 is
+        # deliberately different from H, and pad_w=24 != pad_h=31, so an axis
+        # swap in the guard cannot hide here. A guard that cannot tell 33 from
+        # 32 would destroy this correct answer.
+        (33, 40),
     ])
     def test_padding_with_various_sizes(self, height: int, width: int) -> None:
         """Test that padding works correctly for various input sizes."""
@@ -359,6 +366,38 @@ class TestSCUNetPaddingBehavior:
             output = model(test_input, training=False)
 
             assert output.shape == (1, size, size, 3)
+
+    def test_reflect_pad_larger_than_the_extent_raises_a_clear_value_error(
+        self
+    ) -> None:
+        """**H-16**: ``pad >= extent`` must fail as a ``ValueError``, not as a
+        raw backend ``InvalidArgumentError``.
+
+        Geometry is mandated and strictly ``pad > extent``: ``H=8`` needs a pad
+        of ``56``. Deliberately NOT ``H=32`` (``pad == extent``, the weaker
+        boundary), not ``H == W``, not ``pad_h == pad_w`` (56 vs 24), and not a
+        64-divisible extent (where the pad is a literal no-op).
+
+        The assertion discriminates the ERROR CLASS. Measured at HEAD
+        ``3a188f3b``, before the guard existed, this same call raised
+        ``tensorflow.python.framework.errors_impl.InvalidArgumentError:
+        ... paddings must be less than the dimension size: 0, 56 not less
+        than 8 [Op:MirrorPad]`` -- which is an ``InvalidArgumentError``, NOT a
+        ``ValueError``, so a bare ``pytest.raises(Exception)`` would have
+        passed against the unguarded code.
+        """
+        model = SCUNet(in_nc=3, config=[1] * 7, dim=16, head_dim=8,
+                       window_size=8, input_resolution=64)
+        bad = keras.random.normal((1, 8, 40, 3))
+
+        with pytest.raises(ValueError, match=r"height=8 needs a pad of 56"):
+            model(bad, training=False)
+
+        # The W axis is guarded independently of the H axis.
+        model_w = SCUNet(in_nc=3, config=[1] * 7, dim=16, head_dim=8,
+                         window_size=8, input_resolution=64)
+        with pytest.raises(ValueError, match=r"width=8 needs a pad of 56"):
+            model_w(keras.random.normal((1, 40, 8, 3)), training=False)
 
     def test_padding_preserves_content(self) -> None:
         """Test that padding and unpadding preserves the central region."""

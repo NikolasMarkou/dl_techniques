@@ -433,7 +433,55 @@ class SCUNet(keras.Model):
 
         Returns:
             Output tensor of shape (B, H, W, C).
+
+        Raises:
+            ValueError: If a statically-known spatial extent is so small that
+                the reflect pad up to the next multiple of 64 would be at least
+                as large as the extent itself. See the D-004 block below.
         """
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
+        # `mode="REFLECT"` below is not total. TensorFlow's `MirrorPad` requires
+        # every pad amount to be STRICTLY LESS than the dimension it pads, so a
+        # small enough H or W dies inside the op with a raw, site-free
+        # `InvalidArgumentError: paddings must be less than the dimension size:
+        # 0, 56 not less than 8 [Op:MirrorPad]`. Measured on TF 2.18 / CPU:
+        # SCUNet raised at H = 32, 31, 8 (and at W likewise) and worked at 33,
+        # 65, 100x70, 63. Because the pad is `(-H) % 64`, the boundary is
+        # exactly `64 // 2 + 1 = 33`.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT "fix" this with an automatic fallback -- a two-stage pad,
+        #     or `mode="symmetric"`. Both silently INVENT pad content for a
+        #     geometry that today fails loudly, and reflect-vs-other content is
+        #     real data to the encoder (it is not masked out anywhere in this
+        #     model). A clear raise is the honest answer.
+        #   * Do NOT promote this to a helper shared with
+        #     `models/thera/tails.py`, which carries the identical constraint.
+        #     Two sites duplicate; a THIRD triggers promotion. A shared helper
+        #     here buys a three-line dedup for a new cross-package dependency
+        #     edge between two model packages.
+        #   * Do NOT make this a runtime (`ops`) check. It is deliberately
+        #     STATIC-ONLY and skips a `None` extent: a symbolic build must stay
+        #     legal, and a graph-mode raise on a traced tensor is not a raise.
+        # BACKEND SCOPE: the constraint was measured only on the TensorFlow
+        # backend (CPU). It is a `MirrorPad` op constraint and another backend
+        # may not share it; this guard is therefore stricter than strictly
+        # necessary elsewhere, which is the safe direction.
+        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
+        for axis_name, extent in (("height", x.shape[1]), ("width", x.shape[2])):
+            if extent is None:
+                continue
+            pad_amount = (-extent) % 64
+            if pad_amount >= extent:
+                raise ValueError(
+                    f"SCUNet reflect-pads {axis_name} up to the next multiple of "
+                    f"64, but a reflect pad must be strictly smaller than the "
+                    f"extent it pads: {axis_name}={extent} needs a pad of "
+                    f"{pad_amount}, which is not less than {extent}. The "
+                    f"smallest {axis_name} SCUNet accepts is 33. Pass a larger "
+                    f"input, or pad it yourself before calling."
+                )
+
         h, w = ops.shape(x)[1], ops.shape(x)[2]
 
         # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps)

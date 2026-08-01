@@ -511,6 +511,22 @@ class TheraTailPro(keras.layers.Layer):
         x: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
+        """Run the Swin stack over a window-size-aligned reflect pad.
+
+        Args:
+            x: Input tensor of shape (B, H, W, C).
+            training: Whether to run the sub-layers in training mode.
+
+        Returns:
+            Output tensor of shape (B, H, W, num_feat).
+
+        Raises:
+            ValueError: If a statically-known spatial extent is so small that
+                the reflect pad up to the next multiple of ``window_size``
+                would be at least as large as the extent itself (the smallest
+                accepted extent is ``window_size // 2 + 1``). Skipped for a
+                dynamic (``None``) extent. See the D-004 block below.
+        """
         # Original spatial dims for the post-stack crop (E1).
         shape = ops.shape(x)
         h, w = shape[1], shape[2]
@@ -528,6 +544,49 @@ class TheraTailPro(keras.layers.Layer):
         # Reflect-pad H, W up to a multiple of window_size (E1). The Swin window
         # attention requires divisibility; conv-first output keeps NHWC layout.
         ws = self.window_size
+
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
+        # `mode="reflect"` below is not total. TensorFlow's `MirrorPad` requires
+        # every pad amount to be STRICTLY LESS than the dimension it pads, so a
+        # small enough H or W dies inside the op with a raw, site-free
+        # `InvalidArgumentError: paddings must be less than the dimension size
+        # [Op:MirrorPad]`. Measured on TF 2.18 / CPU: `TheraTailPro` raised at
+        # `ws=8, H in {4,3,2,1}` and worked at `H=5`; at `ws=64, H=8` it raised
+        # and at `H=80` it worked; and `ws=8, (H,W) = (5,3)` raised on the W
+        # axis alone, so both axes need the check. Because the pad is
+        # `(-H) % ws`, the boundary is exactly `ws // 2 + 1`.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT fall back to a two-stage pad or `mode="symmetric"`. The
+        #     reflected border is real data to `rstb_convs` / `conv_after_body`
+        #     (this stack has no padding mask), so a fallback silently invents
+        #     content for a geometry that today fails loudly.
+        #   * Do NOT share this with `models/scunet/model.py`, which carries the
+        #     identical constraint. Two sites duplicate; a THIRD triggers
+        #     promotion. See decisions.md D-004.
+        #   * Do NOT make it a runtime (`ops`) check. `pad_h`/`pad_w` below are
+        #     SYMBOLIC on purpose (D-007: THERA's hypernetwork feeds arbitrary
+        #     crop sizes and every block is built with `(B, None, None, C)`), so
+        #     this guard is STATIC-ONLY and skips a `None` extent by design. A
+        #     dynamic build must stay legal.
+        # BACKEND SCOPE: measured only on the TensorFlow backend (CPU). It is a
+        # `MirrorPad` op constraint; another backend may not share it.
+        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
+        for axis_name, extent in (("height", x.shape[1]), ("width", x.shape[2])):
+            if extent is None:
+                continue
+            pad_amount = (-extent) % ws
+            if pad_amount >= extent:
+                raise ValueError(
+                    f"TheraTailPro reflect-pads {axis_name} up to the next "
+                    f"multiple of window_size={ws}, but a reflect pad must be "
+                    f"strictly smaller than the extent it pads: "
+                    f"{axis_name}={extent} needs a pad of {pad_amount}, which "
+                    f"is not less than {extent}. The smallest {axis_name} this "
+                    f"tail accepts at window_size={ws} is {ws // 2 + 1}. Pass a "
+                    f"larger input, or a smaller window_size."
+                )
+
         # Pad up to the next window-size multiple (0 if already a multiple).
         # Use keras.ops.mod (NOT Python % on the symbolic ops.shape scalars h,w).
         pad_h = ops.mod(ws - ops.mod(h, ws), ws)

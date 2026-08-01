@@ -101,6 +101,67 @@ def test_pro_non_window_divisible_non_square():
     assert _finite(y)
 
 
+def _pro(window_size: int = 8) -> TheraTailPro:
+    return TheraTailPro(embed_dim=60, depths=(2, 2), num_heads=(3, 3),
+                        num_feat=64, window_size=window_size)
+
+
+def test_pro_reflect_pad_larger_than_the_extent_raises_a_clear_value_error():
+    """**H-16**: ``pad >= extent`` must fail as a ``ValueError``, not as a raw
+    backend ``InvalidArgumentError``.
+
+    Geometry is mandated and strictly ``pad > extent``: ``window_size=64`` with
+    ``H=8`` needs a pad of ``56``. Deliberately not ``ws=2``, not ``H == W``,
+    not ``pad_h == pad_w`` (56 vs 48), and not an already-divisible extent.
+
+    The assertion discriminates the ERROR CLASS. Measured at HEAD ``3a188f3b``,
+    before the guard existed, this call raised
+    ``tensorflow.python.framework.errors_impl.InvalidArgumentError: ...
+    paddings must be less than the dimension size ... [Op:MirrorPad]``.
+    ``InvalidArgumentError`` is NOT a subclass of ``ValueError`` (its MRO is
+    ``OpError -> Exception``), so this ``pytest.raises`` really does tell the
+    two classes apart -- a bare ``pytest.raises(Exception)`` would not.
+    """
+    with pytest.raises(ValueError, match=r"height=8 needs a pad of 56"):
+        _pro(window_size=64)(keras.random.normal((1, 8, 80, 64)), training=False)
+
+    # The W axis is guarded independently of the H axis: at ws=8, (H,W)=(5,3)
+    # is legal in H (pad 3 < 5) and illegal in W (pad 5 >= 3). Measured to
+    # raise at HEAD.
+    with pytest.raises(ValueError, match=r"width=3 needs a pad of 5"):
+        _pro(window_size=8)(keras.random.normal((1, 5, 3, 64)), training=False)
+
+
+@pytest.mark.parametrize("height,width", [
+    # H-16 FALSE-POSITIVE family. ``H=5`` at ``ws=8`` is the MEASURED smallest
+    # legal height (pad 3 < 5); ``H=4`` raises (pad 4, not less than 4). A
+    # guard that cannot tell 5 from 4 destroys these correct answers.
+    (5, 12),
+    (80, 80),   # legal at ws=64 too, exercised below via the ws parametrization
+])
+def test_pro_unusual_but_legal_extents_are_not_rejected(height, width):
+    tail = _pro(window_size=8)
+    y = tail(keras.random.normal((1, height, width, 64)), training=False)
+    assert tuple(y.shape) == (1, height, width, 64)
+    assert _finite(y)
+
+
+def test_pro_dynamic_extent_is_not_rejected_by_the_static_guard():
+    """The guard is STATIC-ONLY by design and must skip a ``None`` extent.
+
+    THERA builds every Swin block with ``(B, None, None, C)`` on purpose
+    (D-007), so a guard that fired on an unknown extent -- or that could not
+    evaluate and raised -- would make the shipped ``pro`` tail dead on a
+    symbolic build.
+    """
+    inp = keras.Input(shape=(None, None, 64))
+    out = _pro(window_size=8)(inp)
+    model = keras.Model(inp, out)
+
+    y = model(keras.random.normal((1, 20, 28, 64)), training=False)
+    assert tuple(y.shape) == (1, 20, 28, 64)
+
+
 # ---------------------------------------------------------------------
 # 5. .keras round-trip for each tail
 # ---------------------------------------------------------------------
