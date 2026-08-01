@@ -230,7 +230,7 @@ and the apps additionally need a checkpoint that no clone contains.
 
 `src/dl_techniques/callbacks/` cannot answer "where are the callbacks", and a map that
 sent you there alone would be lying by omission. Of the 56 files under `src/` that
-subclass `keras.callbacks.Callback`, only 11 live in that package. The answer has three
+name `keras.callbacks.Callback`, only 11 live in that package. The answer has three
 parts:
 
 1. **`src/dl_techniques/callbacks/`** — the reusable, model-agnostic ones (curricula and
@@ -284,7 +284,7 @@ thing you will meet and should not be surprised by.
 
 **Before writing a new layer or model, read
 `research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
-it as mandatory and it is the longest single document in the repo (3105 lines).
+it as mandatory and at 3105 lines it is among the longest documents in the repo.
 Its load-bearing rules, so you know what you are agreeing to:
 
 - **Create/build separation** — `__init__` may only create sub-layers and store
@@ -386,14 +386,14 @@ table are named precisely *because* they do not resolve.
 | `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md` | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
-| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` define a `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
+| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: 16 of the 73 model packages have no top-level `create_*`. Command in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it
 summarizes — are gitignored and will not be in your clone. The root `CLAUDE.md`
-is tracked, and the claims this ledger attributes to it are corrected in the same
-change that added this file.
+is tracked, and the claims this ledger attributes to it were corrected in
+`a3685599`, the commit that immediately follows the one adding this file.
 
 A closing note on dependencies, since the routing table defers to it: `pyproject.toml`
 and `requirements.txt` are two sources of truth that disagree — most visibly on the
@@ -456,7 +456,7 @@ the prose above is a Value from this table. Run these from the repo root.
 | Trainer dirs under `src/train/` (excl. `src/train/common/`) | 45 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
 | Test dirs under `tests/test_models/` | 79 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Files under `src/` subclassing `keras.callbacks.Callback` | 56 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
+| Files under `src/` naming `keras.callbacks.Callback` | 56 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 11 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
 | …of those, under `src/train/` | 38 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
 | Files using `@keras.saving.register_keras_serializable` | 461 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
