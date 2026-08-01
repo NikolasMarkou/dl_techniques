@@ -43,6 +43,7 @@ Related, outside this package:
 | Path | Relationship |
 |---|---|
 | `src/dl_techniques/losses/dino_loss.py` | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss`. Re-exported from `dl_techniques.losses`. See § 5. |
+| `src/dl_techniques/datasets/vision/multi_crop.py` | `make_multi_crop_map_fn` — the `tf.data` transform producing the multi-crop element `DINOTrainingModel` consumes. See § 5.6. |
 | `src/dl_techniques/models/depth_anything/teacher_ema.py` | `TeacherEMACallback` plus `cosine_ema_schedule` / `linear_ema_schedule`. Model-agnostic: it drives the teacher EMA of any model exposing `update_teacher_ema(decay)`. |
 | `src/dl_techniques/models/depth_anything/model.py` | Uses a **placeholder** encoder described in prose as "a placeholder for DINOv2". It does **not** import from this package. Wiring it to a real `DINOv2` is a named backlog item (§ 7). |
 | `tests/test_models/test_dino/` | This package's tests. See § 8. |
@@ -458,6 +459,37 @@ model.fit(                       # NOTE: no validation_data (Rule 1)
 )
 ```
 
+### 5.6 — The multi-crop dataset element
+
+`src/dl_techniques/datasets/vision/multi_crop.py`'s `make_multi_crop_map_fn` produces
+exactly the element § 5.5 consumes. It is a per-sample `tf.data` transform, so it enters
+a pipeline through `build_raw_image_dataset(..., element_map_fn=...)` in
+`src/train/energy_transformer/common.py` (applied after normalization, before batching).
+
+```python
+from dl_techniques.datasets.vision.multi_crop import make_multi_crop_map_fn
+
+map_fn = make_multi_crop_map_fn(global_crop_size=96, n_local_crops=4, seed=42)
+# (image, label) -> (views, label), views shape (2 + 4, 96, 96, 3);
+# views 0 and 1 are the global crops. Batching gives (batch, 6, 96, 96, 3).
+```
+
+Two things about it are worth reading before use:
+
+- **Local views are rendered at the GLOBAL resolution** — a smaller *area* is cropped and
+  resized up (§ 7, item 1). `local_crop_size != global_crop_size` raises
+  `NotImplementedError` naming positional-embedding interpolation, rather than silently
+  mis-shaping the batch. The cost is that local views are exactly as expensive as global
+  ones. Measured on GPU 1 (RTX 4070, 12 GB) at the smoke scale — `tiny`, 96 px, 4 local
+  crops, batch 32, `dino_out_dim=4096` — one forward+backward peaks at **1.5 GiB**, so
+  the trade-off is affordable at this scale.
+- **Its augmentation is weaker than the paper's, and says so.** RandomResizedCrop,
+  horizontal flip, brightness/contrast jitter, random grayscale and Gaussian blur are
+  implemented; **saturation/hue jitter and solarization are not**, because this transform
+  runs on mean/std-normalized images and both of those operators are defined against a
+  `[0, 1]` value domain. The module docstring lists this; nothing infers the full recipe
+  from the file's name.
+
 ---
 
 ## 6. Why there is no shared base class
@@ -486,6 +518,8 @@ silent omission again.
    embedding table. Not implemented. The consequence is that a multi-crop pipeline built on
    these models must render local crops at the **same** pixel resolution as global crops
    (crop a smaller area, resize up), which loses the paper's compute saving on local views.
+   `src/dl_techniques/datasets/vision/multi_crop.py` does exactly that, and refuses a
+   different `local_crop_size` with a `NotImplementedError` naming this gap.
 2. **Gram anchoring** (DINOv3). Needs a third, frozen "Gram teacher" network and an extra
    loss term on patch-feature Gram matrices. None of that machinery exists here.
 3. **Sinkhorn-Knopp centering.** `src/dl_techniques/losses/dino_loss.py` provides EMA
@@ -507,11 +541,11 @@ silent omission again.
    warning and is otherwise ignored.
 
 > **Training pipeline — PARTIAL.** `src/dl_techniques/models/dino/dino_training.py`
-> (§ 5.5) is the trainable model, and it runs under stock `fit()` today. The two pieces
-> still missing are the multi-crop dataset element map and the runnable trainer script
-> with its k-NN evaluation callback. Deliberately, **no path is named here for those**,
-> because a README naming a path that does not resolve is exactly the rot this file's
-> path checker exists to prevent.
+> (§ 5.5) is the trainable model and `src/dl_techniques/datasets/vision/multi_crop.py`
+> (§ 5.6) is its data side; both run under stock `fit()` today. The piece still missing
+> is the runnable trainer script with its k-NN evaluation callback. Deliberately, **no
+> path is named here for that**, because a README naming a path that does not resolve is
+> exactly the rot this file's path checker exists to prevent.
 
 ---
 
@@ -530,6 +564,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_loss
 | `tests/test_models/test_dino/conftest.py` | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
 | `tests/test_models/test_dino/test_dino_package.py` | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
 | `tests/test_models/test_dino/test_dino_training.py` | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
+| `tests/test_datasets/test_multi_crop.py` | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
 | `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
 
 ---
