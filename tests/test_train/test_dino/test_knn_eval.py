@@ -30,6 +30,7 @@ Run:
 """
 
 import csv
+import json
 from typing import Any, Dict, List, Tuple
 
 import keras
@@ -740,6 +741,158 @@ class TestCallbackOrdering:
         assert isinstance(knn.dino_loss, DINOLoss)
 
 
+class TestZeroStepControl:
+    """PROBE (vi): the run must produce its OWN random-init baseline.
+
+    Before this hook existed the earliest k-NN number any shipped code produced was
+    ``on_epoch_end(epoch=0)`` -- POST one full epoch -- and every "control" ever
+    quoted (0.2754 / 0.2900 / 0.2910 / 0.2949) came from an uncommitted scratch
+    script. A delta quoted against no baseline is the measured failure mode of this
+    module, so the baseline now ships.
+    """
+
+    def _callback(self, tmp_path: Any, **overrides: Any) -> KNNEvalCallback:
+        kwargs: Dict[str, Any] = dict(
+            bank_batches=2,
+            query_batches=2,
+            control_json_path=tmp_path / "random_init_control.json",
+            random_init_repeats=2,
+        )
+        kwargs.update(overrides)
+        return KNNEvalCallback(
+            _labelled_dataset(41), _labelled_dataset(42), **kwargs)
+
+    def test_the_control_json_carries_every_key_with_its_spread(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        callback = self._callback(tmp_path, random_init_repeats=3)
+        callback.set_model(dino_model)
+
+        callback.on_train_begin()
+
+        payload = json.loads((tmp_path / "random_init_control.json").read_text())
+        assert payload["random_init_repeats"] == 3
+        assert list(payload["ks"]) == list(DEFAULT_KS)
+        assert "ZERO-OPTIMIZER-STEP" in payload["note"], (
+            "the JSON must state on its face that it predates every update; a "
+            "reader with only the run directory cannot otherwise tell it from an "
+            "epoch row")
+        for key in callback.log_keys:
+            entry = payload["metrics"][key]
+            assert len(entry["values"]) == 3, (
+                f"{key} has {len(entry['values'])} per-repeat values, expected 3")
+            for statistic in ("min", "max", "mean", "range"):
+                assert statistic in entry, f"{key} is missing {statistic!r}"
+            finite = [v for v in entry["values"] if np.isfinite(v)]
+            if finite:
+                assert entry["min"] == pytest.approx(min(finite))
+                assert entry["max"] == pytest.approx(max(finite))
+                assert entry["range"] == pytest.approx(max(finite) - min(finite))
+
+    def test_a_dead_feature_extractor_collapses_the_control_to_chance(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        """DEAD-COMPONENT PROBE: constant features must NOT score above chance.
+
+        RED-PROVEN: with the monkeypatch removed (i.e. the live extractor), the
+        same assertion fails -- the real network scores well above chance on the
+        separable fixture. That is what makes this test able to see a dead
+        extractor at all; a shape-only assertion could not.
+        """
+        live = self._callback(tmp_path, random_init_repeats=1)
+        live.set_model(dino_model)
+        live.on_train_begin()
+        live_score = json.loads(
+            (tmp_path / "random_init_control.json").read_text()
+        )["metrics"][f"dino_knn_top1_k{DEFAULT_KS[0]}"]["mean"]
+
+        dead_path = tmp_path / "dead.json"
+        dead = self._callback(
+            dead_path.parent, random_init_repeats=1, control_json_path=dead_path)
+        dead.set_model(dino_model)
+
+        def _constant_extract(dataset: Any, n_batches: int) -> Tuple[Any, Any, Any]:
+            n = BATCH * n_batches
+            return (
+                _collapsed(n),
+                (np.arange(n) % N_CLASSES).astype("int64"),
+                None,
+            )
+
+        dead._extract = _constant_extract  # type: ignore[assignment]
+        dead.on_train_begin()
+
+        payload = json.loads(dead_path.read_text())
+        dead_score = payload["metrics"][f"dino_knn_top1_k{DEFAULT_KS[0]}"]["mean"]
+
+        assert dead_score == pytest.approx(1.0 / N_CLASSES, abs=1e-9), (
+            f"a feature extractor returning a CONSTANT must drive the k-NN to "
+            f"chance ({1.0 / N_CLASSES}), got {dead_score}. If this passes with "
+            f"the live extractor too, the control cannot see a dead component.")
+        assert payload["metrics"]["dino_collapse_flag"]["mean"] == 1.0, (
+            "constant features are collapse; the flag must fire in the control too")
+        assert live_score > dead_score + 0.1, (
+            f"NON-VACUITY: the live extractor scored {live_score} and the dead one "
+            f"{dead_score}; if these are close the assertion above is decorative")
+
+    def test_zero_repeats_writes_no_json_and_extracts_nothing(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        callback = self._callback(tmp_path, random_init_repeats=0)
+        callback.set_model(dino_model)
+
+        def _explode(dataset: Any, n_batches: int) -> Tuple[Any, Any, Any]:
+            raise AssertionError(
+                "random_init_repeats=0 must skip the probe ENTIRELY, not run it "
+                "and discard the result -- the flag exists to buy back the cost")
+
+        callback._extract = _explode  # type: ignore[assignment]
+        callback.on_train_begin()
+
+        assert not (tmp_path / "random_init_control.json").exists()
+
+    def test_no_control_path_also_skips_the_probe(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        """Nowhere to write it => do not pay for it. Guards every other test's cost."""
+        callback = self._callback(tmp_path, control_json_path=None)
+        callback.set_model(dino_model)
+        callback._extract = None  # type: ignore[assignment]
+        callback.on_train_begin()
+        assert not any(tmp_path.iterdir())
+
+    def test_repeat_independence_is_measured_not_asserted(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        """D-005: the JSON must SAY whether repeats redrew, and be right about it.
+
+        A cached probe dataset replays bit-identically, so a 0.0 range is a fact
+        about the instrument's determinism, not evidence that the probe is
+        noise-free. Reporting it without the flag would be a fake spread.
+        """
+        cached = _labelled_dataset(43).cache()
+        callback = KNNEvalCallback(
+            cached, _labelled_dataset(44), bank_batches=2, query_batches=2,
+            control_json_path=tmp_path / "control.json", random_init_repeats=2)
+        callback.set_model(dino_model)
+        callback.on_train_begin()
+
+        payload = json.loads((tmp_path / "control.json").read_text())
+        assert len(payload["bank_fingerprints"]) == 2
+        assert payload["repeats_are_independent"] is (
+            len(set(payload["bank_fingerprints"])) == 2), (
+            "the reported independence must agree with the fingerprints it is "
+            "derived from")
+        assert payload["repeats_are_independent"] is False, (
+            f"a cached bank replays the SAME samples, so the repeats cannot be "
+            f"independent; fingerprints were {payload['bank_fingerprints']}")
+        assert payload["metrics"][f"dino_knn_top1_k{DEFAULT_KS[1]}"]["range"] == 0.0
+
+    def test_a_non_dino_model_raises_at_train_begin(self, tmp_path: Any) -> None:
+        """Edge case: the control must RAISE, never self-disable."""
+        callback = self._callback(tmp_path)
+        callback.set_model(keras.Sequential([keras.layers.Dense(2)]))
+
+        with pytest.raises(ValueError, match="no `student` attribute"):
+            callback.on_train_begin()
+        assert not (tmp_path / "random_init_control.json").exists()
+
+
 class TestConfigValidation:
     @pytest.mark.parametrize(
         "overrides, message",
@@ -748,6 +901,7 @@ class TestConfigValidation:
             ({"knn_bank_batches": 0}, "must be positive"),
             ({"knn_query_batches": 0}, "must be positive"),
             ({"knn_temperature": 0.0}, "knn_temperature must be positive"),
+            ({"random_init_repeats": -1}, "random_init_repeats must be >= 0"),
         ],
     )
     def test_bad_knn_config_raises_on_the_message(

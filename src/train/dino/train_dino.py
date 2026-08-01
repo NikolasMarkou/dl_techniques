@@ -237,6 +237,15 @@ class TrainingConfig:
     knn_bank_batches: int = 16  # memory-bank batches drawn from the TRAIN split
     knn_query_batches: int = 8  # query batches drawn from the VALIDATION split
     knn_temperature: float = DEFAULT_KNN_TEMPERATURE
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-004
+    # Repeats of the ZERO-OPTIMIZER-STEP k-NN control that `KNNEvalCallback
+    # .on_train_begin` writes to `<run_dir>/random_init_control.json` before
+    # `fit()` performs a single update. DEFAULT-ON: the measured failure mode of
+    # this codebase is quoting a `dino_knn_top1_*` delta with no baseline at all
+    # (D-032/D-037), and every control ever quoted came from an uncommitted
+    # scratch script. `0` is the escape hatch for a pure-throughput run; the cost
+    # otherwise is two feature extractions (seconds) per run.
+    random_init_repeats: int = 2
 
     # Debug
     max_steps: Optional[int] = None  # cap steps_per_epoch (smoke runs); None = full epoch
@@ -332,6 +341,11 @@ class TrainingConfig:
         if self.knn_temperature <= 0:
             raise ValueError(
                 f"knn_temperature must be positive, got {self.knn_temperature}")
+        if self.random_init_repeats < 0:
+            raise ValueError(
+                f"random_init_repeats must be >= 0 (0 disables the zero-step "
+                f"control), got {self.random_init_repeats}"
+            )
 
     @property
     def n_views(self) -> int:
@@ -570,6 +584,13 @@ def create_callbacks(
             temperature=config.knn_temperature,
             every_n_epochs=config.knn_eval_every,
             dino_loss=loss,
+            # The ZERO-OPTIMIZER-STEP control, beside `config.json` in the SAME run
+            # directory -- `run_dir`, not `results_dir`, because that is where
+            # `train_dino` writes `config.json` and the reader needs the seed from
+            # it to interpret the control. It cannot go into `training_log.csv`:
+            # `CSVLogger` appends a row per `on_epoch_end` only (D-004).
+            control_json_path=Path(run_dir) / "random_init_control.json",
+            random_init_repeats=config.random_init_repeats,
         )
         # DECISION plan-2026-08-01T105809-dc0c402e/D-029
         # INSERT before `CSVLogger`, never `append`. `CSVLogger` freezes its
@@ -811,6 +832,17 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--knn-temperature", type=float,
                         default=DEFAULT_KNN_TEMPERATURE,
                         help="Temperature of the exp(sim / T) neighbour weighting")
+    parser.add_argument("--random-init-repeats", type=int, default=2,
+                        help=(
+                            "Repeats of the ZERO-OPTIMIZER-STEP k-NN control "
+                            "written to <run_dir>/random_init_control.json before "
+                            "fit() performs a single update. 0 disables it. This "
+                            "is the baseline a dino_knn_top1_* delta must be read "
+                            "against: an UNTRAINED ViT already scores ~0.28 on "
+                            "imagenette here, so the 0.10 chance line is mostly "
+                            "architecture. The epoch-0 row of training_log.csv is "
+                            "NOT this number -- it is post-one-epoch."
+                        ))
 
     # Debug
     parser.add_argument("--max-steps", type=int, default=None,
@@ -905,6 +937,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         knn_bank_batches=args.knn_bank_batches,
         knn_query_batches=args.knn_query_batches,
         knn_temperature=args.knn_temperature,
+        random_init_repeats=args.random_init_repeats,
         max_steps=args.max_steps,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,

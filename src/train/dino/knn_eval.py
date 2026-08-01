@@ -108,6 +108,29 @@ Reading rules that follow from the measurement:
   so "3x chance" is mostly architecture, not training.
 
 -------------------------------------------------------------------------------
+The ZERO-OPTIMIZER-STEP control this callback now produces for itself
+-------------------------------------------------------------------------------
+Every number in the section above was quoted for YEARS against controls produced by an
+out-of-band scratch script that was never committed, and ``on_epoch_end(epoch=0)`` fires
+AFTER a full epoch of training -- so no shipped code path ever produced a random-init
+baseline. :meth:`KNNEvalCallback.on_train_begin` closes that: given a
+``control_json_path``, it runs the SAME extraction/scoring path ``random_init_repeats``
+times BEFORE ``fit()`` performs a single update, and writes per-repeat values plus
+min/max/mean/range for every :attr:`~KNNEvalCallback.log_keys` entry to that JSON.
+
+It is DEFAULT-ON at ``random_init_repeats=2`` in the trainer (``--random-init-repeats 0``
+disables it) because the measured failure mode of this codebase is quoting a k-NN delta
+with no control at all, and two feature extractions cost seconds against runs measured in
+tens of minutes.
+
+**The JSON's ``repeats_are_independent`` field is MEASURED, not assumed.** The trainer
+``.take(n).cache()``s both probe datasets on purpose (the same samples every epoch), so
+re-iterating them across repeats replays the cache and the repeats are BIT-IDENTICAL --
+a spread of exactly 0.0 that says the instrument is deterministic at a fixed seed, NOT
+that the probe is noise-free across seeds. The field records which case a run was in, by
+fingerprinting the extracted bank rather than by trusting this paragraph.
+
+-------------------------------------------------------------------------------
 Two things about this callback that are load-bearing, not cosmetic
 -------------------------------------------------------------------------------
 1. **It must sit BEFORE `keras.callbacks.CSVLogger` in the callback list, and it must
@@ -129,9 +152,14 @@ Run the guards::
         tests/test_train/test_dino/test_knn_eval.py -q
 """
 
+import json
+import hashlib
 import keras
 import numpy as np
-from typing import Any, Dict, Iterable, Optional, Sequence, Set, Tuple
+from pathlib import Path
+from typing import (
+    Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union,
+)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -430,6 +458,14 @@ class KNNEvalCallback(keras.callbacks.Callback):
             ``dino_teacher_entropy_is_centered`` is ``0.0`` -- a plain
             ``softmax(logits)`` is NOT substituted under the documented name (D-039).
         num_classes: Class count for the k-NN vote; ``None`` infers it from the labels.
+        control_json_path: Where :meth:`on_train_begin` writes the ZERO-OPTIMIZER-STEP
+            random-init control. ``None`` (the default) SKIPS the control entirely --
+            there is nowhere to write it, and a probe whose result is discarded is
+            pure cost. The trainer passes ``<run_dir>/random_init_control.json``.
+        random_init_repeats: How many times :meth:`on_train_begin` repeats the probe.
+            ``0`` disables it even when ``control_json_path`` is given. Each repeat
+            RE-EXTRACTS; whether that actually redraws is measured, not assumed (see
+            the module docstring and ``repeats_are_independent`` in the JSON).
 
     Raises:
         ValueError: For a non-positive ``every_n_epochs`` / batch count / temperature,
@@ -464,6 +500,8 @@ class KNNEvalCallback(keras.callbacks.Callback):
             every_n_epochs: int = 1,
             dino_loss: Optional[Any] = None,
             num_classes: Optional[int] = None,
+            control_json_path: Optional[Union[str, Path]] = None,
+            random_init_repeats: int = 2,
     ) -> None:
         super().__init__()
 
@@ -480,6 +518,11 @@ class KNNEvalCallback(keras.callbacks.Callback):
         if every_n_epochs <= 0:
             raise ValueError(
                 f"every_n_epochs must be positive, got {every_n_epochs}")
+        if random_init_repeats < 0:
+            raise ValueError(
+                f"random_init_repeats must be >= 0 (0 disables the zero-step "
+                f"control), got {random_init_repeats}"
+            )
 
         self.bank_dataset = bank_dataset
         self.query_dataset = query_dataset
@@ -490,6 +533,9 @@ class KNNEvalCallback(keras.callbacks.Callback):
         self.every_n_epochs = int(every_n_epochs)
         self.dino_loss = dino_loss
         self.num_classes = num_classes
+        self.control_json_path = (
+            None if control_json_path is None else Path(control_json_path))
+        self.random_init_repeats = int(random_init_repeats)
 
         self._feature_model: Optional[keras.Model] = None
         self._warned: Set[str] = set()
@@ -710,7 +756,163 @@ class KNNEvalCallback(keras.callbacks.Callback):
         self._warned.add(message)
         logger.warning(message)
 
-    # -- the Keras hook ----------------------------------------------------
+    # -- one evaluation, shared by both hooks -------------------------------
+
+    def _evaluate_once(self) -> Tuple[Dict[str, float], str]:
+        """Run the whole probe once and return its numbers plus a bank fingerprint.
+
+        Interface contract:
+            Parameters: none (reads ``self.model`` and the two datasets).
+            Returns:
+                ``(metrics, bank_fingerprint)``. ``metrics`` carries a value for
+                EVERY key in :attr:`log_keys`, in that order. ``bank_fingerprint``
+                is a sha1 over the extracted bank features and labels -- two
+                extractions that drew the same samples through the same frozen
+                network share it.
+            Failure mode:
+                ``ValueError`` from :meth:`_build_feature_model` (not a
+                `DINOTrainingModel`, or a student with no head), from
+                :meth:`_extract` (a dataset that yielded nothing), or from
+                :func:`knn_top1_accuracy` (the overlap guard).
+
+        This exists so :meth:`on_epoch_end` and :meth:`on_train_begin` score the
+        SAME quantity by construction rather than by two bodies kept in lockstep.
+        It is a factoring of the one body that already existed, not a new layer:
+        both callers are concrete and shipped.
+
+        The fingerprint is returned rather than logged because the ONLY consumer
+        that needs it is the zero-step control's ``repeats_are_independent`` field,
+        which must MEASURE whether repeats redrew instead of asserting it in prose.
+        """
+        bank_features, bank_labels, _ = self._extract(
+            self.bank_dataset, self.bank_batches)
+        query_features, query_labels, teacher_logits = self._extract(
+            self.query_dataset, self.query_batches)
+
+        metrics: Dict[str, float] = {}
+        for k in self.ks:
+            metrics[f"dino_knn_top1_k{k}"] = knn_top1_accuracy(
+                bank_features,
+                bank_labels,
+                query_features,
+                query_labels,
+                k=k,
+                temperature=self.temperature,
+                num_classes=self.num_classes,
+            )
+
+        probabilities, is_centered = self._teacher_probabilities(teacher_logits)
+        diagnostics = collapse_metrics(query_features, probabilities)
+        metrics["dino_feat_mean_cos"] = diagnostics["mean_pairwise_cosine"]
+        metrics["dino_teacher_entropy"] = diagnostics["teacher_entropy"]
+        metrics["dino_teacher_entropy_norm"] = (
+            diagnostics["teacher_entropy_normalized"])
+        metrics["dino_teacher_entropy_is_centered"] = is_centered
+        metrics["dino_collapse_flag"] = diagnostics["collapse_flag"]
+
+        digest = hashlib.sha1()
+        digest.update(np.ascontiguousarray(bank_features, dtype=np.float64).tobytes())
+        digest.update(np.ascontiguousarray(bank_labels, dtype=np.int64).tobytes())
+        return metrics, digest.hexdigest()
+
+    # -- the Keras hooks ---------------------------------------------------
+
+    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Write the ZERO-OPTIMIZER-STEP random-init control, before any update.
+
+        Interface contract:
+            Parameters: ``logs`` -- Keras's dict, DELIBERATELY unused (see below).
+            Returns: ``None``. The result goes to :attr:`control_json_path`.
+            Failure mode: whatever :meth:`_evaluate_once` raises -- in particular a
+                model that is not a `DINOTrainingModel`. This callback NEVER
+                self-disables; a control that quietly stops being produced is how
+                the missing-baseline failure happened in the first place.
+
+        Skipped entirely when ``control_json_path`` is ``None`` or
+        ``random_init_repeats`` is ``0`` -- no extraction, no file, no cost.
+
+        DECISION plan-2026-08-01T195746-12a1f2db/D-004
+        The numbers go to a JSON file and NOT into ``logs``. Do NOT "simplify" this
+        by writing the control into ``logs`` and expecting it in
+        ``training_log.csv``: `CSVLogger` appends a row per ``on_epoch_end`` ONLY,
+        so an ``on_train_begin`` key reaches no row -- and worse, mutating ``logs``
+        here risks disturbing the epoch-0 fieldname freeze that I-4 / D-029 depend
+        on. A sibling file next to ``config.json`` also keeps the control's
+        provenance (it is not an epoch) visible to a reader who has only the run
+        directory. See decisions.md D-004.
+        """
+        if self.control_json_path is None or self.random_init_repeats <= 0:
+            return
+
+        values: Dict[str, List[float]] = {key: [] for key in self.log_keys}
+        fingerprints: List[str] = []
+        for repeat in range(self.random_init_repeats):
+            metrics, fingerprint = self._evaluate_once()
+            fingerprints.append(fingerprint)
+            for key in self.log_keys:
+                values[key].append(float(metrics[key]))
+            summary = " ".join(f"{key}={metrics[key]:.4f}" for key in self.log_keys)
+            logger.info(
+                f"zero-step control repeat {repeat + 1}/{self.random_init_repeats}: "
+                f"{summary}"
+            )
+
+        # DECISION plan-2026-08-01T195746-12a1f2db/D-005
+        # Independence is MEASURED from the bank fingerprints, never assumed. The
+        # trainer `.take(n).cache()`s both probe datasets on purpose, so repeats
+        # replay the cache and come back bit-identical -- a range of exactly 0.0.
+        # Do NOT "fix" that by dropping the `.cache()` (it is what keeps the probe
+        # comparable ACROSS epochs, D-029's sibling property) and do NOT report the
+        # 0.0 range as evidence that the probe is noise-free: it says the
+        # instrument is deterministic at a fixed seed, which is a strictly weaker
+        # claim. See decisions.md D-005.
+        independent = len(set(fingerprints)) == len(fingerprints)
+
+        payload: Dict[str, Any] = {
+            "note": (
+                "ZERO-OPTIMIZER-STEP control: every number here was measured in "
+                "KNNEvalCallback.on_train_begin, BEFORE fit() performed a single "
+                "update, on the randomly-initialized network. It is the baseline "
+                "any dino_knn_top1_* delta from training_log.csv must be read "
+                "against -- NOT the 0.10 chance line, and NOT the epoch-0 CSV row "
+                "(which is post-one-epoch)."
+            ),
+            "random_init_repeats": self.random_init_repeats,
+            "repeats_are_independent": independent,
+            "repeats_independence_evidence": (
+                f"{len(set(fingerprints))} distinct bank fingerprint(s) across "
+                f"{len(fingerprints)} repeat(s); identical fingerprints mean the "
+                f"repeats re-scored the SAME samples (the trainer caches both probe "
+                f"datasets), so the reported range is 0.0 by construction rather "
+                f"than a measurement of probe noise."
+            ),
+            "bank_fingerprints": fingerprints,
+            "ks": list(self.ks),
+            "knn_bank_batches": self.bank_batches,
+            "knn_query_batches": self.query_batches,
+            "knn_temperature": self.temperature,
+            # The callback is not given the run's seed; it is recorded in
+            # `config.json` beside this file rather than duplicated (and risking
+            # disagreement) here.
+            "seed": None,
+            "seed_source": "config.json in this same run directory",
+            "metrics": {
+                key: {
+                    "values": values[key],
+                    "min": float(min(values[key])),
+                    "max": float(max(values[key])),
+                    "mean": float(sum(values[key]) / len(values[key])),
+                    "range": float(max(values[key]) - min(values[key])),
+                }
+                for key in self.log_keys
+            },
+        }
+
+        self.control_json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.control_json_path, "w") as handle:
+            json.dump(payload, handle, indent=2)
+        logger.info(
+            f"zero-step random-init control written to {self.control_json_path}")
 
     def on_epoch_end(
             self,
@@ -741,32 +943,12 @@ class KNNEvalCallback(keras.callbacks.Callback):
         if epoch != 0 and epoch % self.every_n_epochs != 0:
             return
 
-        bank_features, bank_labels, _ = self._extract(
-            self.bank_dataset, self.bank_batches)
-        query_features, query_labels, teacher_logits = self._extract(
-            self.query_dataset, self.query_batches)
-
-        for k in self.ks:
-            logs[f"dino_knn_top1_k{k}"] = knn_top1_accuracy(
-                bank_features,
-                bank_labels,
-                query_features,
-                query_labels,
-                k=k,
-                temperature=self.temperature,
-                num_classes=self.num_classes,
-            )
-
-        probabilities, is_centered = self._teacher_probabilities(teacher_logits)
-        diagnostics = collapse_metrics(query_features, probabilities)
-        logs["dino_feat_mean_cos"] = diagnostics["mean_pairwise_cosine"]
-        logs["dino_teacher_entropy"] = diagnostics["teacher_entropy"]
-        logs["dino_teacher_entropy_norm"] = diagnostics["teacher_entropy_normalized"]
-        logs["dino_teacher_entropy_is_centered"] = is_centered
-        logs["dino_collapse_flag"] = diagnostics["collapse_flag"]
+        metrics, _fingerprint = self._evaluate_once()
+        for key in self.log_keys:
+            logs[key] = metrics[key]
 
         summary = " ".join(f"{key}={logs[key]:.4f}" for key in self.log_keys)
-        if diagnostics["collapse_flag"] > 0.0:
+        if metrics["dino_collapse_flag"] > 0.0:
             logger.warning(
                 f"COLLAPSE DIAGNOSTIC FIRED at epoch {epoch}: {summary}. A decreasing "
                 f"loss does NOT rule this out -- the collapsed solution is a real "

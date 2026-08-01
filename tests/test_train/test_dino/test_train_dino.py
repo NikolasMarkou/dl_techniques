@@ -100,6 +100,7 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     "knn_bank_batches": ("--knn-bank-batches", 5),                # default: 16
     "knn_query_batches": ("--knn-query-batches", 2),              # default: 8
     "knn_temperature": ("--knn-temperature", 0.05),               # default: 0.07
+    "random_init_repeats": ("--random-init-repeats", 3),          # default: 2
     "max_steps": ("--max-steps", 9),                              # default: None
     "experiment_name": ("--experiment-name", "dino_cli_wiring_probe"),   # default: None
     "seed": ("--seed", 123),                                      # default: 42
