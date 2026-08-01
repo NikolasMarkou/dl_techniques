@@ -82,11 +82,17 @@ def _crop_only_map_fn(seed, **overrides):
     return make_multi_crop_map_fn(CROP_SIZE, **kwargs)
 
 
-def _run(map_fn, images):
-    """Map `map_fn` over `images` through a real tf.data pipeline."""
+def _run(map_fn, images, num_parallel_calls=None):
+    """Map `map_fn` over `images` through a real tf.data pipeline.
+
+    `num_parallel_calls=None` is a SERIAL `.map()`. That is the ONLY
+    configuration in which the `seed` argument reproduces anything -- see
+    `TestRandomness`. Pass `tf.data.AUTOTUNE` to exercise the configuration the
+    shipped trainer actually uses (`build_raw_image_dataset` passes AUTOTUNE).
+    """
     ds = tf.data.Dataset.from_tensor_slices(
         (images, np.arange(len(images), dtype="int32"))
-    ).map(map_fn)
+    ).map(map_fn, num_parallel_calls=num_parallel_calls)
     return np.stack([v.numpy() for v, _ in ds])
 
 
@@ -320,15 +326,27 @@ class TestLocalCropSizeIsRefused:
 
 
 class TestRandomness:
-    """A map fn that ignores its seed is a real failure mode."""
+    """A map fn that ignores its seed is a real failure mode.
 
-    def test_a_fixed_seed_is_reproducible(self):
+    **Read the scope, not just the names.** `seed` seeds ONE shared
+    `tf.random.Generator`, i.e. a STREAM, not each element. Every guarantee
+    below therefore holds for a SERIAL `.map()` only. The shipped trainer maps
+    with `num_parallel_calls=tf.data.AUTOTUNE`, where several elements read that
+    one generator concurrently and the element-to-draw assignment varies run to
+    run -- MEASURED at HEAD, seed 777, 8 images: serial identical=True, parallel
+    identical=False maxdiff 1.5312, serial-vs-parallel maxdiff 1.5908. Until
+    this iteration those three facts were invisible here, because every
+    determinism test used the serial map and none of them said so.
+    """
+
+    def test_a_fixed_seed_is_reproducible_under_a_serial_map(self):
         images = _source_images(4, seed=5)
         first = _run(_crop_only_map_fn(seed=4242), images)
         second = _run(_crop_only_map_fn(seed=4242), images)
         np.testing.assert_array_equal(first, second)
 
     def test_a_fixed_seed_is_reproducible_with_every_augmentation_on(self):
+        """Same scope as above: SERIAL map."""
         images = _source_images(4, seed=5)
         first = _run(
             make_multi_crop_map_fn(
@@ -337,6 +355,73 @@ class TestRandomness:
             make_multi_crop_map_fn(
                 CROP_SIZE, n_local_crops=N_LOCAL, seed=777), images)
         np.testing.assert_array_equal(first, second)
+
+    def test_the_seed_seeds_a_STREAM_not_each_element(self):
+        """The MECHANISM that scopes the guarantee, asserted deterministically.
+
+        Two successive calls of the SAME map fn on the SAME image must differ:
+        the generator advances per call, so the draw an element receives depends
+        on how many draws happened before it. That is exactly why a parallel map
+        -- which reorders those draws across elements -- is not reproducible.
+
+        This is asserted here rather than by comparing two AUTOTUNE runs,
+        because "two parallel runs came out different" depends on the thread
+        scheduler and could pass or fail for reasons unrelated to the code. The
+        stream property does not: it is a property of `tf.random.Generator`.
+        """
+        map_fn = _crop_only_map_fn(seed=4242)
+        image = _source_images(1, seed=5)[0]
+        first, _ = map_fn(image)
+        second, _ = map_fn(image)
+        assert float(np.abs(first.numpy() - second.numpy()).max()) > 1e-3, (
+            "two successive calls of one seeded map fn on the SAME image "
+            "returned identical views -- the seed would then be per-element "
+            "and the parallel-map caveat below would be unnecessary"
+        )
+        # ... and a FRESH map fn at the same seed reproduces the FIRST call,
+        # which is what makes the serial guarantee above real.
+        again, _ = _crop_only_map_fn(seed=4242)(image)
+        np.testing.assert_array_equal(first.numpy(), again.numpy())
+
+    def test_the_pipeline_is_well_formed_at_the_trainer_s_real_parallelism(self):
+        """Exercise `num_parallel_calls=AUTOTUNE` -- the SHIPPED configuration.
+
+        A guard that only holds in a configuration nothing runs is worse than
+        none, so the shipped setting is executed here. What it can assert is the
+        element contract (shape, dtype, finiteness), NOT reproducibility: see
+        the class docstring for the measured non-determinism.
+        """
+        images = _source_images(8, seed=5)
+        views = _run(
+            make_multi_crop_map_fn(
+                CROP_SIZE, n_local_crops=N_LOCAL, seed=777),
+            images,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        assert views.shape == (8, N_VIEWS, CROP_SIZE, CROP_SIZE, CHANNELS)
+        assert views.dtype == np.float32
+        assert np.isfinite(views).all()
+
+    def test_the_seed_docstring_scopes_its_own_guarantee(self):
+        """The caveat is load-bearing prose, so it is pinned like code.
+
+        `train_dino.py` presents `--seed` beside `set_seeds(config.seed)` as run
+        reproducibility. It is not, for this transform. If the qualification
+        ever gets "cleaned up" out of the docstring, this fails.
+        """
+        doc = make_multi_crop_map_fn.__doc__ or ""
+        module_doc = (
+            __import__(
+                "dl_techniques.datasets.vision.multi_crop",
+                fromlist=["multi_crop"],
+            ).__doc__ or ""
+        )
+        assert "SERIAL" in doc, (
+            "make_multi_crop_map_fn's docstring no longer scopes `seed` to a "
+            "serial map, but the guarantee is still serial-only"
+        )
+        assert "num_parallel_calls" in module_doc
+        assert "AUTOTUNE" in module_doc
 
     def test_different_seeds_differ(self):
         images = _source_images(4, seed=5)

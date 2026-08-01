@@ -93,7 +93,10 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.models.dino.common import reject_input_shape
+from dl_techniques.models.dino.common import (
+    reject_input_shape,
+    sync_teacher_to_student,
+)
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -1021,6 +1024,19 @@ def create_dino_teacher_student_pair(
     """
     Create teacher-student pair for DINO self-supervised learning.
 
+    **The returned teacher is a WEIGHT-FOR-WEIGHT COPY of the returned student.**
+    This factory synchronizes them before returning (`common.sync_teacher_to_student`),
+    because DINO's teacher is defined as an exponential moving average of the
+    STUDENT'S OWN trajectory starting from the student's own initialization — the
+    reference implementation runs `teacher.load_state_dict(student.state_dict())`
+    before the first step. The two are still DISTINCT objects with DISTINCT
+    variables; only their VALUES agree at construction, and `update_teacher_ema`
+    moves them apart from there. See plan decision D-034.
+
+    `DINOTrainingModel.__init__` performs the same synchronization for pairs that
+    did not come from this factory, so calling both is harmless (the second copy
+    is a no-op).
+
     Follows the same converged parameter scheme as ``create_dino_v1``:
     ``image_size`` (int or tuple), ``patch_size`` with the ``None``-defers-to-variant
     rule, and no ``input_shape``.
@@ -1039,7 +1055,8 @@ def create_dino_teacher_student_pair(
         TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
 
     Returns:
-        Tuple of (teacher_model, student_model).
+        Tuple of (teacher_model, student_model). The teacher's weight VALUES are
+        identical to the student's; the objects and variables are distinct.
 
     Note:
         The temperature parameters are provided for API compatibility but are
@@ -1054,8 +1071,8 @@ def create_dino_teacher_student_pair(
             dino_out_dim=65536
         )
 
-        # The teacher model weights are typically updated via EMA
-        # from the student model during training
+        # The teacher starts EQUAL to the student and is thereafter updated by
+        # EMA from the student during training.
         ```
     """
     reject_input_shape(kwargs, "create_dino_teacher_student_pair")
@@ -1087,7 +1104,15 @@ def create_dino_teacher_student_pair(
         **kwargs
     )
 
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-034
+    # The teacher STARTS as the student. Do not remove this and do not make it
+    # optional -- without it the "EMA teacher" is an EMA between two unrelated
+    # random networks for the first several hundred steps. The full measurement
+    # and the reasoning live at `common.sync_teacher_to_student`.
+    sync_teacher_to_student(teacher, student)
+
     logger.info(f"Created DINO teacher-student pair with variant '{variant}'")
     logger.info(f"Teacher temp: {teacher_temp}, Student temp: {student_temp}")
+    logger.info("Teacher initialized from the student (D-034)")
 
     return teacher, student

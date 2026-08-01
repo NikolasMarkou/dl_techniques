@@ -38,6 +38,12 @@ Why a single tensor rather than the obvious `{"student_logits": ...,
 
 Teacher updates
 ---------------
+The teacher STARTS as a weight-for-weight copy of the student — `__init__`
+synchronizes it (D-034), matching the reference implementation's
+`teacher.load_state_dict(student.state_dict())` before step 0. Without that the
+"EMA teacher" is an EMA between two unrelated random networks for the first
+several hundred steps.
+
 The teacher is NOT trained by backpropagation. It is an EMA of the student,
 advanced once per training batch by
 `dl_techniques.models.depth_anything.teacher_ema.TeacherEMACallback`, which calls
@@ -75,7 +81,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.losses.dino_loss import pack_student_teacher
-from dl_techniques.models.dino.common import reject_input_shape
+from dl_techniques.models.dino.common import (
+    reject_input_shape,
+    sync_teacher_to_student,
+)
 from dl_techniques.models.dino.dino_v1 import (
     ModelVariant,
     create_dino_teacher_student_pair,
@@ -112,6 +121,11 @@ class DINOTrainingModel(keras.Model):
         teacher: A structurally identical `keras.Model`. Must be a DISTINCT
             object with DISTINCT weight variables — a shared pair would make
             the EMA a silent no-op, which is checked at construction.
+            **Its weight VALUES are overwritten with the student's at
+            construction** (D-034): DINO's teacher is an EMA of the student's
+            own trajectory from the student's own initialization, so a
+            teacher that starts from an unrelated random draw is not an EMA
+            teacher. Pass whatever you like here — it will be synchronized.
         n_local_views: Number of local crops per sample, `>= 0`. Total views
             per sample is `N_GLOBAL_VIEWS + n_local_views`.
         **kwargs: Forwarded to `keras.Model`.
@@ -175,6 +189,28 @@ class DINOTrainingModel(keras.Model):
         # trainable would produce bit-identical outputs and a quietly wrong
         # training run (a recorded repo gotcha).
         self.teacher.trainable = False
+
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-034
+        # The teacher STARTS as a weight-for-weight copy of the student. Do not
+        # remove this, and do not hide it behind a constructor flag.
+        #   * The measurement, the reference-implementation citation and the
+        #     "30.66% of an unrelated network survives epoch 1" arithmetic live
+        #     at `common.sync_teacher_to_student`.
+        #   * It runs on EVERY construction, `from_config` included, and that is
+        #     SAFE rather than destructive: MEASURED, `keras.models.load_model`
+        #     restores the saved weights into the reconstructed object AFTER
+        #     `from_config` returns, and the restore is authoritative -- a
+        #     deliberately-perturbed teacher saved and reloaded came back
+        #     bit-identical (max|delta| 0.000e+00) while still differing from
+        #     its student by 2.397e+00. `test_reload_keeps_a_trained_teacher`
+        #     pins that, because the alternative -- a `from_config`-only
+        #     exemption -- would be a second code path with no test able to see
+        #     it fail.
+        #   * Anything that legitimately needs a DIVERGENT pair (an EMA test
+        #     needs a gap to close) must create the divergence EXPLICITLY after
+        #     construction. Relying on construction leaving them apart is what
+        #     made the original defect invisible to this package's test suite.
+        sync_teacher_to_student(self.teacher, self.student)
 
         self.n_local_views = int(n_local_views)
         self.n_views = N_GLOBAL_VIEWS + self.n_local_views

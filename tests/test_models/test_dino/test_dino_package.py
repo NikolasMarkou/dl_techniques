@@ -62,6 +62,12 @@ DELIBERATELY_NOT_EXPORTED = {
     # `common.reject_input_shape` is the shared internals of the three factories,
     # not part of the DINO model API. Callers never invoke it directly.
     "reject_input_shape",
+    # `common.sync_teacher_to_student` (D-034) is likewise internal: it is called
+    # BY `create_dino_teacher_student_pair` and `DINOTrainingModel.__init__`, so
+    # every supported way of building a DINO pair already gets it. Exporting it
+    # would advertise a construction-time-only operation that DESTROYS a trained
+    # teacher if a caller runs it later.
+    "sync_teacher_to_student",
 }
 
 

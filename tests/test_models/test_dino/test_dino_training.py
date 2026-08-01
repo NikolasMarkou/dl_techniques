@@ -87,6 +87,16 @@ def _seed_nonzero(model, seed):
 
 
 def _pair(seed_student=11, seed_teacher=22):
+    """Two backbones seeded FAR APART, before `DINOTrainingModel` sees them.
+
+    The gap here is deliberately NOT the source of any test's teacher/student
+    divergence — `DINOTrainingModel.__init__` synchronizes the teacher to the
+    student (D-034), so a model built from this pair comes out with the two
+    EQUAL. The far-apart seeding survives only so that
+    `test_construction_copies_the_student_into_the_teacher`'s non-vacuity
+    control has something real to measure: it proves the pair WAS different
+    before the copy.
+    """
     student = _backbone("dino_student")
     teacher = _backbone("dino_teacher")
     _seed_nonzero(student, seed_student)
@@ -99,6 +109,31 @@ def _model(**kwargs):
     return DINOTrainingModel(
         student=student, teacher=teacher, n_local_views=N_LOCAL, **kwargs
     )
+
+
+def _diverge_teacher(model, seed=33):
+    """Push the teacher OFF the student, explicitly, after construction.
+
+    Since D-034 the teacher starts EQUAL to the student, which is what DINO
+    requires. Three kinds of test still need a gap: the EMA arithmetic (an
+    `t <- d*t + (1-d)*s` update moves nothing when `t == s`), the EMA
+    integration test (it asserts the teacher-student distance SHRINKS, which
+    needs a non-zero distance to shrink), and the packed-pairing test (with
+    `t == s` it could no longer tell a teacher forward pass from a student
+    one). Those tests create the divergence HERE, visibly, instead of relying
+    on construction leaving the pair apart — relying on that is precisely what
+    made the missing-copy defect invisible to this suite.
+
+    Returns the resulting teacher/student distance, asserted non-zero.
+    """
+    _seed_nonzero(model.teacher, seed)
+    distance = _distance(model.teacher, model.student)
+    assert distance > 0.0, (
+        "the deliberate divergence did not take: teacher and student are still "
+        "identical, so any 'the teacher moved toward the student' assertion "
+        "below would be vacuous"
+    )
+    return distance
 
 
 def _batch(batch_size=3, seed=0):
@@ -150,6 +185,12 @@ class TestForwardContract:
         above and fails here.
         """
         model = _model()
+        # Explicit divergence: since D-034 the teacher is built EQUAL to the
+        # student, and an equal pair would make this test unable to tell a
+        # teacher forward pass from a student one (the "teacher half" of every
+        # row would match the student's output on the same view). See
+        # `_diverge_teacher`.
+        _diverge_teacher(model)
         x = _batch(2, seed=5)
         out = np.asarray(model(x)).reshape(2, N_PAIRS, 2 * OUT_DIM)
 
@@ -311,6 +352,7 @@ class TestUpdateTeacherEMA:
 
     def test_moves_every_weight_to_the_exact_ema_value(self):
         model = _model()
+        _diverge_teacher(model)  # D-034: the pair is built EQUAL; see helper.
         decay = 0.5
         before = _weights(model.teacher)
         student = _weights(model.student)
@@ -329,7 +371,7 @@ class TestUpdateTeacherEMA:
 
     def test_moves_the_teacher_toward_the_student(self):
         model = _model()
-        before = _distance(model.teacher, model.student)
+        before = _diverge_teacher(model)  # D-034: built EQUAL; see helper.
         model.update_teacher_ema(0.5)
         after = _distance(model.teacher, model.student)
         assert before > 0.0
@@ -351,6 +393,9 @@ class TestTeacherEMACallbackIntegration:
 
     def test_callback_moves_the_teacher_toward_the_student(self):
         model = _model()
+        # D-034: the pair is built EQUAL, so the gap this test closes has to be
+        # created here, deliberately. See `_diverge_teacher`.
+        _diverge_teacher(model)
         x = _batch(4)
         y = np.zeros((4, 1), "float32")
 
@@ -418,10 +463,138 @@ class TestTeacherEMACallbackIntegration:
 # ---------------------------------------------------------------------
 
 
+class TestTeacherStartsFromTheStudent:
+    """D-034. DINO's teacher is an EMA of the STUDENT'S OWN trajectory.
+
+    Before this was fixed, `create_dino_teacher_student_pair` returned two
+    independently random `DINOv1`s and nothing copied one into the other.
+    MEASURED at the defect: 55 of 157 weight tensors differed and the two
+    networks' outputs on the same input differed by max|delta| 0.3002, so the
+    first several hundred steps distilled the student against an unrelated
+    network (at `ema_decay_start=0.996`, `0.996**295 = 30.66%` of that
+    unrelated teacher survives epoch 1).
+
+    The suite was structurally blind to it because the fixtures seeded the pair
+    FAR APART and every existing check was about distinct OBJECTS, never about
+    equal VALUES.
+    """
+
+    def test_construction_copies_the_student_into_the_teacher(self):
+        """Teacher == student at construction, with a NON-VACUITY control.
+
+        The control matters: a test that only asserted equality would pass on a
+        pair that happened to be identical already (e.g. two zero-initialized
+        models), proving nothing about the copy. So the pair is measured BEFORE
+        construction and required to differ.
+        """
+        student, teacher = _pair()
+
+        before = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(teacher.weights, student.weights)
+        )
+        differing_before = sum(
+            1 for t, s in zip(teacher.weights, student.weights)
+            if float(np.abs(np.asarray(t) - np.asarray(s)).max()) > 0.0
+        )
+        assert before > 0.1, (
+            f"non-vacuity control failed: the pair handed to DINOTrainingModel "
+            f"already agreed to {before:.3e}, so 'teacher == student after "
+            f"construction' would be true whether or not the copy ran"
+        )
+        assert differing_before > 0
+
+        model = DINOTrainingModel(
+            student=student, teacher=teacher, n_local_views=N_LOCAL)
+
+        after = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(model.teacher.weights, model.student.weights)
+        )
+        assert after == 0.0, (
+            f"the teacher was NOT initialized from the student: {after:.6e} "
+            f"max|delta| remains across {len(model.teacher.weights)} weight "
+            f"tensors (it was {before:.6e} across {differing_before} tensors "
+            f"before construction). DINO's teacher must be an EMA of the "
+            f"student's own trajectory from the student's own initialization."
+        )
+
+    def test_the_two_networks_agree_on_the_forward_pass_at_construction(self):
+        """The value-level consequence, measured where it is observable."""
+        model = _model()
+        x = _batch(2, seed=9)[:, 0]
+        student_out = np.asarray(model.student(x, training=False))
+        teacher_out = np.asarray(model.teacher(x, training=False))
+        # Non-vacuity: the outputs must not be trivially constant.
+        assert float(np.abs(student_out).max()) > 1e-3
+        np.testing.assert_allclose(
+            teacher_out, student_out, rtol=0, atol=0,
+            err_msg="teacher and student disagree on the same input at step 0",
+        )
+
+    def test_the_pair_factory_itself_synchronizes(self):
+        """`create_dino_teacher_student_pair` is a public exported factory.
+
+        It must return a synchronized pair on its own, not only when its output
+        is handed to `DINOTrainingModel`.
+        """
+        from dl_techniques.models.dino.dino_v1 import (
+            create_dino_teacher_student_pair,
+        )
+
+        teacher, student = create_dino_teacher_student_pair(
+            variant="tiny", image_size=32, patch_size=16, dino_out_dim=64)
+        worst = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(teacher.weights, student.weights)
+        )
+        assert worst == 0.0, (
+            f"create_dino_teacher_student_pair returned an UNSYNCHRONIZED "
+            f"pair (max|delta| {worst:.6e})"
+        )
+        # ... while still being two distinct variable sets.
+        assert not ({id(w) for w in teacher.weights}
+                    & {id(w) for w in student.weights})
+
+    def test_dino_backbones_are_built_at_construction(self):
+        """WHERE the copy can live, decided by measurement rather than guess.
+
+        A student->teacher copy placed before the weights exist copies nothing
+        and no-ops silently — the same defect wearing a fix's clothes. MEASURED:
+        `DINOv1.__init__` builds eagerly, so a freshly constructed backbone
+        already carries its full weight list and `__init__` is a valid home for
+        the copy. If this ever stops being true, the copy must move to `build()`
+        and this test is the signal.
+        """
+        fresh = _backbone("freshly_constructed")
+        assert fresh.built is True
+        assert len(fresh.weights) > 0
+
+    def test_the_sync_helper_refuses_an_unbuilt_model(self):
+        """A copy that silently no-ops is the defect wearing a fix's clothes."""
+        from dl_techniques.models.dino.common import sync_teacher_to_student
+
+        unbuilt = keras.Sequential([keras.layers.Dense(4)])
+        built = keras.Sequential([keras.layers.Dense(4)])
+        built(np.zeros((1, 3), "float32"))
+        assert not unbuilt.weights, "the fixture is not actually unbuilt"
+        with pytest.raises(ValueError, match="BUILT models"):
+            sync_teacher_to_student(unbuilt, built)
+
+
+# ---------------------------------------------------------------------
+
+
 class TestStudentTeacherIndependence:
     """A shared pair would make the whole EMA mechanism a silent no-op."""
 
     def test_weights_are_independent_objects(self):
+        """Distinct VARIABLES. Their VALUES are equal at construction (D-034).
+
+        The two properties are orthogonal and both matter: equal values are
+        what DINO requires, distinct variables are what makes the EMA an EMA
+        rather than an alias.
+        """
         model = _model()
         student_ids = {id(w) for w in model.student.weights}
         assert not any(id(w) in student_ids for w in model.teacher.weights)
@@ -506,6 +679,9 @@ class TestSerialization:
 
     def test_reloaded_model_still_updates_its_teacher(self, tmp_path):
         model = _model()
+        # D-034: a freshly built pair is EQUAL, and an EMA over an equal pair
+        # moves nothing, so the divergence is created explicitly.
+        _diverge_teacher(model)
         model(_batch(2))
         path = tmp_path / "dino_training.keras"
         model.save(path)
@@ -517,6 +693,43 @@ class TestSerialization:
         np.testing.assert_allclose(
             _distance(restored.teacher, restored.student),
             0.5 * before, rtol=1e-4)
+
+    def test_reload_keeps_a_trained_teacher(self, tmp_path):
+        """The D-034 copy must NOT re-fire destructively on reload.
+
+        `from_config` calls `cls(**config)`, so the student->teacher copy DOES
+        run again when a saved model is loaded. That is safe only because
+        `keras.models.load_model` restores the saved weights into the
+        reconstructed object AFTERWARDS, and the restore is authoritative. If
+        that ordering ever changed, a resumed pretraining run would silently
+        throw away its trained teacher and restart the EMA from the student --
+        no error, no warning, a plausible loss curve. This test is the only
+        thing that would see it.
+        """
+        model = _model()
+        # Stand in for a trained teacher: a value the student cannot produce.
+        _diverge_teacher(model, seed=77)
+        saved_teacher = _weights(model.teacher)
+        saved_distance = _distance(model.teacher, model.student)
+        assert saved_distance > 0.0
+
+        model(_batch(2))
+        path = tmp_path / "dino_training.keras"
+        model.save(path)
+        restored = keras.models.load_model(path)
+
+        worst = max(
+            float(np.abs(np.asarray(a) - b).max())
+            for a, b in zip(restored.teacher.weights, saved_teacher)
+        )
+        assert worst == 0.0, (
+            f"the reloaded teacher differs from the SAVED teacher by "
+            f"{worst:.6e} -- the construction-time student->teacher copy "
+            f"survived the weight restore and destroyed a trained teacher"
+        )
+        np.testing.assert_allclose(
+            _distance(restored.teacher, restored.student),
+            saved_distance, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------

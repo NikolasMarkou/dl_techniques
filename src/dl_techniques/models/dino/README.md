@@ -35,7 +35,7 @@ two together are what make an otherwise-degenerate objective learn something.
 | `src/dl_techniques/models/dino/dino_v2.py` | `DINOv2Block`, `DINOv2VisionTransformer` (the backbone), `DINOv2` (backbone + classifier), `create_dino_v2`. |
 | `src/dl_techniques/models/dino/dino_v3.py` | `DINOv3`, `create_dino_v3`. |
 | `src/dl_techniques/models/dino/dino_training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
-| `src/dl_techniques/models/dino/common.py` | `reject_input_shape` — the one piece of the converged factory scheme that is identical in all three files. Not part of the public API. |
+| `src/dl_techniques/models/dino/common.py` | `reject_input_shape` (the one piece of the converged factory scheme identical in all three files) and `sync_teacher_to_student` (the construction-time student→teacher weight copy DINO requires). Neither is part of the public API. |
 | `src/dl_techniques/models/dino/README.md` | This file. |
 
 Related, outside this package:
@@ -261,7 +261,11 @@ ssl_model = create_dino_v1(
     dino_out_dim=4096,
 )
 
-# A teacher/student pair with identical architecture and independent weights.
+# A teacher/student pair: identical architecture, DISTINCT weight variables, and
+# — as DINO requires — identical weight VALUES at construction. The factory copies
+# the student into the teacher (D-034); `update_teacher_ema` moves them apart from
+# there. A teacher starting from its own unrelated random draw is not an EMA of the
+# student and corrupts the first 1-3 epochs.
 teacher, student = create_dino_teacher_student_pair(
     "small", image_size=32, patch_size=16, dino_out_dim=4096
 )
@@ -539,6 +543,30 @@ silent omission again.
    properly means touching a shared layer used across the repository.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
+9. **A reproducible augmentation stream under a PARALLEL `tf.data` map.**
+   `make_multi_crop_map_fn`'s `seed` seeds ONE shared `tf.random.Generator`, i.e. a
+   stream, not each element. MEASURED at seed 777 over 8 images: a serial `.map(fn)`
+   is bit-reproducible, while `.map(fn, num_parallel_calls=AUTOTUNE)` — the shipped
+   trainer's configuration — is not (two runs differ, maxdiff 1.5312). Making it real
+   needs `tf.random.stateless_*` keyed on a per-element counter, and the counter has to
+   come from `ds.enumerate()` placed AFTER `repeat()`, i.e. a change to
+   `src/train/energy_transformer/common.py`'s `build_raw_image_dataset` pipeline, which
+   every `src/train/` consumer shares. Until then `--seed` reproduces weight
+   initialization and shuffling but NOT the augmentation stream, and an A/B that assumes
+   identical data across two runs is unsound. The caveat is stated in the map fn's own
+   `seed:` docstring and pinned by `tests/test_datasets/test_multi_crop.py`.
+10. **Cropping local views from the ORIGINAL record rather than from a thumbnail.**
+    `build_raw_image_dataset` resizes each record to `image_size` BEFORE the multi-crop
+    `element_map_fn` runs, so with `image_size == global_crop_size` a "local crop of the
+    source image" is a crop of an already-downsampled square. MEASURED at the smoke scale
+    (`global_crop_size=96`, `local_scale=(0.05, 0.4)`, 2000 draws): local crop sides are
+    19-69 px (mean 44) and are upsampled to 96 — 2.33x mean, 4.50x worst case — while 8 of
+    the 10 (teacher, student) loss pairs carry a local student view. `train_dino.py`'s
+    `--source-image-size` is the bounded remedy (decode larger, crop, resize DOWN); its
+    default is deliberately left behaviour-preserving, so moving it is a measurement
+    someone still has to run. Cropping before the resize *and* before normalization would
+    restructure the shared pipeline and change the augmentation's value domain (D-025),
+    which is why it is a backlog item and not a patch.
 
 > **Training pipeline.** `src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the
 > trainable model, `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data

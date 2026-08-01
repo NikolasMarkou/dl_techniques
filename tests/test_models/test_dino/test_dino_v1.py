@@ -651,15 +651,34 @@ class TestCreateDINOTeacherStudentPair:
         assert t_out.shape == (2, 64), t_out.shape
         assert s_out.shape == (2, 64), s_out.shape
 
-    def test_the_two_models_are_independently_initialized(self):
-        """They must be two separate weight sets, not one model returned twice.
+    def test_the_two_models_have_separate_variables_but_equal_values(self):
+        """Two separate weight SETS, carrying identical VALUES (D-034).
 
-        A pair that shared weights would pass every shape assertion and would
-        make an EMA teacher update a no-op — a silent failure, and exactly the
-        thing this factory exists to avoid.
+        The two halves are orthogonal and both matter. Separate variables are
+        what makes the EMA an EMA rather than an alias: a pair that shared
+        weights would pass every shape assertion and make an EMA update a
+        no-op. Equal values are what makes it DINO: the teacher is an EMA of
+        the student's own trajectory starting from the student's own
+        initialization, so a teacher drawn independently at random is not an
+        EMA teacher at all. Before D-034 this factory returned an
+        independently-drawn teacher (MEASURED: 55 of 157 tensors differed,
+        outputs differed by 0.3002) and no test looked at values.
         """
         teacher, student = self._pair()
         assert len(teacher.weights) == len(student.weights)
+
+        worst = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(teacher.weights, student.weights)
+        )
+        # Non-vacuity: at least one tensor must be non-trivial, or "all equal"
+        # would be satisfied by a pair of all-zero models.
+        assert max(float(np.abs(np.asarray(s)).max())
+                   for s in student.weights) > 0.1
+        assert worst == 0.0, (
+            f"the teacher was NOT initialized from the student: max|delta| "
+            f"{worst:.6e}"
+        )
         assert not any(tw is sw for tw in teacher.weights for sw in student.weights), (
             "teacher and student SHARE weight objects — an EMA update would be a "
             "no-op and the two towers are not independent"

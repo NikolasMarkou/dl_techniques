@@ -47,6 +47,36 @@ global ones, in both compute and activation memory. ``local_crop_size !=
 global_crop_size`` therefore raises ``NotImplementedError`` naming
 positional-embedding interpolation, rather than silently mis-shaping a batch.
 
+"AREA of the source image" means the SOURCE THIS FUNCTION RECEIVES
+------------------------------------------------------------------
+This transform runs as ``build_raw_image_dataset``'s ``element_map_fn``, and
+that pipeline resizes every record to ``(image_size, image_size)`` in its
+``_decode`` step BEFORE the map fn runs (order: ``_decode`` -> ``shuffle`` ->
+``_normalize`` -> ``element_map_fn`` -> ``batch``). The trainer passes
+``image_size = global_crop_size``. So the "source image" cropped here is already
+a ``global_crop_size``-square, aspect-distorted thumbnail — NOT the original
+record — and a local crop is an UPSAMPLE of a small piece of it.
+
+MEASURED at the smoke scale (``global_crop_size=96``, ``local_scale=(0.05,
+0.4)``, ``aspect_ratio_range=(3/4, 4/3)``, 2000 draws)::
+
+    global views: crop side 53-96 px  (mean 79)  -> upsampled 1.23x mean
+    local  views: crop side 19-69 px  (mean 44)  -> upsampled 2.33x mean,
+                                                    4.50x worst case
+
+At ``patch_size=16`` a patch of the most extreme local view therefore covers
+about 3.5 distinct source pixels, and since 8 of the 10 (teacher, student) loss
+pairs at ``n_local_crops=4`` carry a local student view, most of the objective
+at that scale is computed on heavily interpolated content. **This is a candidate
+explanation for a weak representation result, alongside the usual scale
+arguments (``out_dim``, epochs, dataset size).**
+
+The remedy that does NOT require restructuring the shared pipeline is to decode
+the records at a HIGHER resolution than the crop size, so the crop is taken from
+a larger image and then resized DOWN. ``train_dino.py``'s ``source_image_size``
+config field does exactly that (its default preserves the behaviour measured
+above; see that field's documentation for why the default was not moved).
+
 Augmentations: what is implemented, and what is NOT
 ---------------------------------------------------
 The paper's recipe is RandomResizedCrop, horizontal flip, colour jitter
@@ -83,6 +113,38 @@ NOT implemented, deliberately, and named rather than quietly dropped:
 
 This is a weaker augmentation than the paper's. It is written down here so that
 nobody reads the module name and infers the full recipe.
+
+``seed`` reproduces a SERIAL map only (MEASURED)
+------------------------------------------------
+``seed`` seeds ONE module-level ``tf.random.Generator`` shared by every element,
+i.e. it seeds a STREAM, not each element independently. Under
+``ds.map(fn, num_parallel_calls=...)`` — which is what the shipped trainer uses
+(``build_raw_image_dataset`` passes ``tf.data.AUTOTUNE``) — several elements read
+that one generator concurrently, so which element gets which slice of the stream
+varies run to run.
+
+MEASURED at HEAD, same seed (777), same 8 source images, ``global_crop_size=96``,
+``n_local_crops=4``::
+
+    serial   .map(fn)                    identical = True    maxdiff 0.0000
+    parallel .map(fn, AUTOTUNE) x2       identical = False   maxdiff 1.5312
+    serial vs parallel                   identical = False   maxdiff 1.5908
+
+**So two runs of ``train_dino.py --seed 42`` see DIFFERENT augmentation streams.**
+The seed still reproduces weight initialization, shuffling order and every other
+``set_seeds``-governed source; it does not reproduce this transform's randomness
+in the trainer's configuration. Any A/B that assumes bit-identical data between
+two runs is unsound.
+
+Making this a real guarantee needs stateless per-element randomness
+(``tf.random.stateless_uniform`` keyed on a per-element counter), and the counter
+has to come from the pipeline: ``ds.enumerate()`` placed AFTER ``repeat()``, so
+that the same source image draws a different augmentation each epoch. That is a
+change to ``build_raw_image_dataset``'s pipeline shape, which is shared by every
+``src/train/`` consumer — recorded as backlog item 3 in
+``src/dl_techniques/models/dino/README.md`` rather than done here.
+``tests/test_datasets/test_multi_crop.py`` pins BOTH halves: the serial guarantee
+that is real, and the stream-not-per-element mechanism that scopes it.
 
 Raw TensorFlow ops are used deliberately: this is a ``tf.data`` transform, not
 a Keras layer, so ``keras.ops`` purity does not apply (the same rule and the
@@ -329,8 +391,15 @@ def make_multi_crop_map_fn(
             solarization is not.
         local_blur_prob: Gaussian-blur probability for every local view.
         blur_sigma_range: ``(min, max)`` Gaussian sigma, in pixels.
-        seed: Optional seed for a deterministic ``tf.random.Generator``. Leave
-            ``None`` for a non-deterministic stream in real training.
+        seed: Optional seed for the module-level ``tf.random.Generator``.
+            **Reproduces a SERIAL ``.map(fn)`` ONLY.** It seeds one shared
+            STREAM, not each element, so under
+            ``.map(fn, num_parallel_calls=...)`` — the shipped trainer's
+            configuration — the element-to-draw assignment varies run to run
+            and the outputs are NOT reproducible (MEASURED: serial
+            identical=True, parallel identical=False, maxdiff 1.5312). See the
+            module docstring's "``seed`` reproduces a SERIAL map only" section.
+            Leave ``None`` for an explicitly non-deterministic stream.
 
     Returns:
         A ``tf.data``-mappable callable ``(image, label) -> (views, label)``.
@@ -432,6 +501,19 @@ def make_multi_crop_map_fn(
     # sampled sigma.
     blur_radius = max(1, int(round(2.0 * blur_sigma_range[1])))
 
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-035
+    # This ONE shared stateful generator is DOCUMENTED-not-fixed, deliberately.
+    # Do NOT "fix" the parallel-map non-determinism by (i) hashing the image
+    # content into a stateless key -- that makes every epoch replay the SAME
+    # augmentation for the same image, which is worse than a non-reproducible
+    # stream for SSL; or (ii) calling `rng.reset_from_seed(seed)` per element --
+    # every element then gets the IDENTICAL augmentation, which is not
+    # augmentation at all (that arm was executed as a RED proof and it fires).
+    # A correct stateless form needs a per-element counter from
+    # `ds.enumerate()` placed AFTER `repeat()`, i.e. a change to
+    # `build_raw_image_dataset`'s pipeline shape, which every `src/train/`
+    # consumer shares. Measurement and scope are in the module docstring's
+    # "``seed`` reproduces a SERIAL map only" section.
     rng = (
         tf.random.Generator.from_seed(seed)
         if seed is not None

@@ -160,6 +160,27 @@ class TrainingConfig:
     # interpolation. That check is NOT duplicated here -- one definition, one message.
     local_crop_size: Optional[int] = None
     n_local_crops: int = 4
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-036
+    # Resolution at which `build_raw_image_dataset` DECODES each record, i.e. the
+    # resolution the multi-crop transform crops FROM. `None` means
+    # `global_crop_size`, which is what the smoke run measured in step 12.
+    #
+    # Why this exists: `build_raw_image_dataset._decode` resizes every record
+    # BEFORE `element_map_fn` runs, so with `None` a "local crop of the source
+    # image" is a crop of a `global_crop_size` thumbnail. MEASURED at the smoke
+    # scale (global_crop_size=96, local_scale=(0.05, 0.4), 2000 draws): local
+    # crop sides are 19-69 px (mean 44) and get upsampled to 96 -- 2.33x mean,
+    # 4.50x worst case -- and 8 of the 10 loss pairs carry a local student view.
+    # Setting this to, say, 224 makes the local crops come out of a 224-square
+    # source and be resized DOWN instead.
+    #
+    # Why the DEFAULT is still `None` (behaviour-preserving) rather than a
+    # larger number: the only end-to-end evidence this trainer has was collected
+    # at `None`, and the step-14 confirmation run exists to test ONE hypothesis
+    # (the teacher/student initialization, D-034). Changing the data pipeline in
+    # the same run would make the result unattributable. Moving this default is a
+    # measurement, not a cleanup.
+    source_image_size: Optional[int] = None
 
     # Model
     variant: str = "small"
@@ -233,6 +254,15 @@ class TrainingConfig:
         if self.n_local_crops < 0:
             raise ValueError(
                 f"n_local_crops must be >= 0, got {self.n_local_crops}")
+        if self.source_image_size is not None:
+            if self.source_image_size < self.global_crop_size:
+                raise ValueError(
+                    f"source_image_size ({self.source_image_size}) must be >= "
+                    f"global_crop_size ({self.global_crop_size}); decoding the "
+                    f"records SMALLER than the crop size would upsample every "
+                    f"view even further, which is the opposite of what this "
+                    f"field is for."
+                )
         if self.patch_size is not None and self.patch_size <= 0:
             raise ValueError(
                 f"patch_size must be positive when set, got {self.patch_size}")
@@ -325,9 +355,16 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
     # augment=False on purpose: build_raw_image_dataset's own flip / pad-crop runs BEFORE
     # normalization and would stack a second, non-DINO augmentation under the multi-crop
     # transform. The DINO recipe's augmentation lives entirely in map_fn.
+    # The DECODE resolution, i.e. what the multi-crop transform crops FROM.
+    # `build_raw_image_dataset` resizes every record to this size before
+    # `element_map_fn` runs; `map_fn` then emits views at `global_crop_size`
+    # regardless. See `TrainingConfig.source_image_size` for the measurement
+    # that motivates the knob and for why its default is behaviour-preserving.
+    source_size = config.source_image_size or config.global_crop_size
+
     train_ds, num_train, _ = build_raw_image_dataset(
         config.dataset,
-        config.global_crop_size,
+        source_size,
         config.batch_size,
         is_training=True,
         augment=False,
@@ -675,6 +712,14 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "raises NotImplementedError naming positional-embedding "
                              "interpolation (local views crop a smaller AREA and resize up)")
     parser.add_argument("--n-local-crops", type=int, default=4)
+    parser.add_argument("--source-image-size", type=int, default=None,
+                        help="Resolution at which records are DECODED, i.e. what the "
+                             "multi-crop transform crops from. None = --global-crop-size, "
+                             "which means local crops are taken from an already-"
+                             "downsampled thumbnail (MEASURED at global-crop-size=96: "
+                             "local crop sides 19-69 px, upsampled 2.33x mean / 4.50x "
+                             "worst case). Set it larger (e.g. 224) to crop from a bigger "
+                             "source and resize DOWN. Must be >= --global-crop-size")
 
     # Model
     parser.add_argument("--variant", type=str, default="small", choices=list(VARIANTS))
@@ -750,7 +795,15 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--experiment-name", type=str, default=None)
 
     # Runtime
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seeds weight initialization, dataset shuffling and the "
+                             "multi-crop generator. It does NOT make a run bit-"
+                             "reproducible: the multi-crop transform's seed reproduces a "
+                             "SERIAL .map() only, and this pipeline uses "
+                             "num_parallel_calls=AUTOTUNE (MEASURED: parallel runs at the "
+                             "same seed differ, maxdiff 1.5312). See "
+                             "dl_techniques/datasets/vision/multi_crop.py's module "
+                             "docstring")
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
 
     return parser.parse_args(argv)
@@ -782,6 +835,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         dataset=args.dataset.lower(),
         global_crop_size=args.global_crop_size,
         local_crop_size=args.local_crop_size,
+        source_image_size=args.source_image_size,
         n_local_crops=args.n_local_crops,
         variant=args.variant,
         patch_size=args.patch_size,

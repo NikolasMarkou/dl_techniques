@@ -72,6 +72,10 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     "global_crop_size": ("--global-crop-size", 96),               # default: 224
     "local_crop_size": ("--local-crop-size", 96),                 # default: None
     "n_local_crops": ("--n-local-crops", 6),                      # default: 4
+    # >= the global_crop_size probe (96) -- __post_init__ refuses a smaller
+    # decode resolution, since decoding below the crop size would upsample every
+    # view even further, which is the opposite of what the field is for.
+    "source_image_size": ("--source-image-size", 128),            # default: None
     "variant": ("--variant", "tiny"),                             # default: small
     "patch_size": ("--patch-size", 8),                            # default: None
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
@@ -287,6 +291,38 @@ class TestConfigValidation:
             local_crop_size=16, n_local_crops=1, batch_size=2, dataset="cifar10")
         with pytest.raises(NotImplementedError, match="positional-embedding interpolation"):
             trainer.build_dataset(config)
+
+    @pytest.mark.parametrize("source_image_size,expected", [(None, 32), (64, 64)])
+    def test_source_image_size_reaches_the_decode_resolution(
+            self, monkeypatch, source_image_size, expected) -> None:
+        """A config field that never reaches its use site is a silent no-op.
+
+        `source_image_size` sets the resolution at which `build_raw_image_dataset`
+        DECODES each record, i.e. the resolution the multi-crop transform crops
+        FROM. Wiring it CLI -> config is checked by `TestCLIWiring`; this checks
+        config -> the actual call, which is the half that would otherwise leave
+        the flag inert. The `None` arm is the non-vacuity control: it pins that
+        the default really does resolve to `global_crop_size`, so the `64` arm is
+        measuring a change rather than a constant.
+        """
+        seen: Dict[str, Any] = {}
+
+        def spy(dataset, image_size, batch_size, **kwargs):
+            seen["image_size"] = image_size
+            raise RuntimeError("stop: the decode resolution has been captured")
+
+        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        config = trainer.TrainingConfig(
+            variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
+            n_local_crops=1, batch_size=2, dataset="cifar10",
+            source_image_size=source_image_size)
+        with pytest.raises(RuntimeError, match="decode resolution"):
+            trainer.build_dataset(config)
+        assert seen["image_size"] == expected, (
+            f"build_raw_image_dataset was asked to decode at "
+            f"{seen['image_size']}, not {expected} -- source_image_size="
+            f"{source_image_size} did not reach the pipeline"
+        )
 
 
 # ---------------------------------------------------------------------------
