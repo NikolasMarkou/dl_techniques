@@ -150,6 +150,23 @@ class SequencePooling(keras.layers.Layer):
         │  Output [B, output_dim]          │
         └──────────────────────────────────┘
 
+    **Positional strategies and the keep-mask:**
+
+    ``last`` returns the LAST KEPT position and ``middle`` the middle of the
+    KEPT positions (with ``n`` kept positions, the ``n // 2``-th of them,
+    0-based) — both derived from the mask, never from the padded sequence
+    length. At ``mask=None`` or an all-keep mask they reduce exactly to
+    ``inputs[:, -1, :]`` and ``inputs[:, seq_len // 2, :]``.
+
+    ``cls`` and ``first`` return index 0 BY INTENT, mask or no mask: the caller
+    asked for the token at index 0, so a mask covering position 0 does not
+    redirect them.
+
+    A FULLY-MASKED row degenerates to index 0 for ``last`` and ``middle``,
+    i.e. the returned token is itself masked. This is a deliberate, documented
+    degeneration consistent with the rest of the package (no strategy here
+    rescues a fully-masked row and none raises); it is not a rescue path.
+
     Args:
         strategy: Pooling strategy name or list of strategy names.
         exclude_positions: Positions to exclude from pooling.
@@ -350,6 +367,83 @@ class SequencePooling(keras.layers.Layer):
 
         return top_k_embeds, validity
 
+    def _positional_index(
+        self,
+        mask: keras.KerasTensor,
+        seq_len: keras.KerasTensor,
+        *,
+        mode: str
+    ) -> keras.KerasTensor:
+        """Resolve the per-row index selected by a MASK-AWARE positional mode.
+
+        Shared by the ``middle`` and ``last`` branches, which must agree on what
+        "a position exists" means or the two modes drift apart under the same
+        mask.
+
+        :param mask: Keep-mask ``(batch, seq_len)``, 1/True = keep. Must NOT be
+            ``None`` — the caller keeps a separate no-mask fast path so the
+            ``mask=None`` numerics stay bit-identical to the pre-F-25 code.
+        :param seq_len: Sequence length. A scalar tensor is fine; this path is
+            graph-safe and jit-safe under a symbolic ``seq_len``.
+        :param mode: ``'middle'`` (the middle of the KEPT positions) or
+            ``'last'`` (the last KEPT position).
+        :return: ``(batch,)`` ``int32`` index, safe to feed to
+            ``ops.take_along_axis``. A fully-masked row yields index 0 — a
+            DOCUMENTED DEGENERATION (the returned token is itself masked), not a
+            rescue.
+        :raises ValueError: If ``mode`` is neither ``'middle'`` nor ``'last'``.
+        """
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-001: both modes resolve to
+        # `where(keep-predicate, position, -1)` -> `max` -> `maximum(..., 0)`.
+        # That shared shape is WHY one helper serves both; it is not a forced
+        # unification of two unlike things.
+        #
+        # `middle` = the middle of the KEPT positions, NOT the geometric
+        # midpoint of the padded sequence. The old `ops.shape(inputs)[1] // 2`
+        # derived the index from the PADDED length inside a layer whose
+        # contract is mask-awareness: under ORDINARY contiguous-prefix padding
+        # it returned a PAD token in 19 of 42 measured (S, L) cells (exactly
+        # when `L <= S // 2`). Do NOT "restore" a padded-length midpoint.
+        #
+        # `last` = the LAST KEPT index, NOT `sum(mask) - 1`. Those coincide for
+        # a contiguous-prefix mask and for nothing else; with an interior gap
+        # (e.g. keep = 110011) `sum(mask) - 1` is 3, which is MASKED, while the
+        # last kept index is 5. Do NOT "simplify" back to a count.
+        #
+        # Do NOT use `ops.argmax` over a one-hot hit vector for `middle`: it
+        # works, but it pins behaviour on argmax returning the FIRST maximum,
+        # an unstated framework guarantee, and it does not share a shape with
+        # `last`. Do NOT use `ops.tril`/`ops.triu` to build the prefix sums —
+        # they are graph-mode traps on this stack.
+        #
+        # The `-1` sentinel is an INDEX, not a logit: it never reaches a
+        # softmax and is compared only by integer `max`, so the fp16 concerns
+        # that force `-1e4` elsewhere in this package do not apply here.
+        # See decisions.md D-001.
+        if mode not in ('middle', 'last'):
+            raise ValueError(
+                f"_positional_index: mode must be 'middle' or 'last', "
+                f"got {mode!r}."
+            )
+
+        keep = ops.cast(mask, 'bool')
+        keep_int = ops.cast(keep, 'int32')
+        # `(batch, seq_len)` position grid, broadcast from `(1, seq_len)`.
+        positions = ops.zeros_like(keep_int) + ops.expand_dims(
+            ops.arange(seq_len, dtype='int32'), 0
+        )
+
+        if mode == 'middle':
+            cum = ops.cumsum(keep_int, axis=1)
+            target = ops.expand_dims(cum[:, -1] // 2 + 1, -1)
+            candidates = ops.where(
+                ops.logical_and(keep, cum <= target), positions, -1
+            )
+        else:
+            candidates = ops.where(keep, positions, -1)
+
+        return ops.maximum(ops.max(candidates, axis=1), 0)
+
     def _apply_single_strategy(
         self,
         strategy: str,
@@ -379,23 +473,20 @@ class SequencePooling(keras.layers.Layer):
         if strategy in ['cls', 'first']:
             return inputs[:, 0, :]
 
-        elif strategy == 'last':
-            if mask is not None:
-                seq_lens = ops.sum(ops.cast(mask, 'int32'), axis=1) - 1
-                seq_lens = ops.maximum(seq_lens, 0)
-                batch_indices = ops.arange(batch_size)
-                indices = ops.stack([batch_indices, seq_lens], axis=1)
-                return ops.take_along_axis(
-                    inputs,
-                    ops.expand_dims(ops.expand_dims(seq_lens, -1), -1),
-                    axis=1
-                )[:, 0, :]
-            else:
-                return inputs[:, -1, :]
+        elif strategy in ['last', 'middle']:
+            if mask is None:
+                # No-mask FAST PATH, kept separate so the `mask=None` numerics
+                # stay bit-identical to the pre-F-25 code (I1_UNMASKED_GOLDEN).
+                if strategy == 'last':
+                    return inputs[:, -1, :]
+                return inputs[:, seq_len // 2, :]
 
-        elif strategy == 'middle':
-            mid_pos = seq_len // 2
-            return inputs[:, mid_pos, :]
+            selected = self._positional_index(mask, seq_len, mode=strategy)
+            return ops.take_along_axis(
+                inputs,
+                ops.expand_dims(ops.expand_dims(selected, -1), -1),
+                axis=1
+            )[:, 0, :]
 
         # Statistical strategies
         elif strategy == 'mean':

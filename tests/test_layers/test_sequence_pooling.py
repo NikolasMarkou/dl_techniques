@@ -1011,6 +1011,17 @@ class TestIntegrationScenarios:
 #
 # ---------------------------------------------------------------------
 
+# F-25's `middle`/`last` are deliberately NOT added to this list, and that was
+# MEASURED, not assumed. Every suite parametrized by it is built on
+# `ISO_MASKED_POS = 5` / `ISO_LIVE_POS = 0`, and a positional mode selects
+# exactly ONE token: at `seq_len = 6` with position 5 masked, `middle` lands on
+# index 2 and `last` on index 4, so perturbing the live control at position 0
+# moves the output by exactly 0.000000e+00. Adding the two modes here produces
+# 20 failures, ALL of them the suites' own vacuous-probe guards firing (plus
+# `test_fully_masked_row_is_finite_and_documented`'s `-1e4` sentinel branch,
+# which is a `top_k_max` fact) — manufactured noise, not coverage. F-25's
+# guards live in `TestPositionalModesIsolateMaskedPositions` below, on cells
+# chosen to discriminate for these modes.
 ISO_LEAKY_STRATEGIES = ['weighted', 'top_k_mean', 'top_k_max']
 
 ISO_ALL_STRATEGIES = [
@@ -1436,6 +1447,323 @@ class TestMaskedPositionIsolation:
             x, mask=keras.ops.ones((ISO_B, ISO_S)), training=False
         ))
         np.testing.assert_allclose(ones_mask, no_mask, rtol=1e-6, atol=1e-6)
+
+
+# ---------------------------------------------------------------------
+# F-25 — the POSITIONAL modes (`cls` / `first` / `last` / `middle`)
+#
+# `middle` derived its index from the PADDED length (`ops.shape(inputs)[1] // 2`)
+# and never consulted the mask at all; `last` consulted it only through
+# `sum(mask) - 1`, which is the last index of a contiguous PREFIX and nothing
+# else. `cls`/`first` return index 0 BY INTENT and are pinned, not "fixed".
+#
+# Cell selection here is adversarial on purpose — the enumeration below was
+# re-executed at this HEAD over all 64 masks at `seq_len = 6`:
+#
+#   `middle`, prefix keep `0..L-1`: the current index 3 is MASKED at L=1,2,3
+#     (a real leak) and KEPT-BUT-WRONG at L=4,5 (kept-middle is 2). L=5 is
+#     therefore a TWO-TIER TRAP: an isolation-only assertion is GREEN against
+#     broken code there. That is why `test_middle_returns_the_kept_middle_token`
+#     exists ALONGSIDE the isolation test and includes L=5.
+#   `last`: every contiguous-prefix mask is degenerate (`sum-1` IS the last kept
+#     index), so a prefix probe proves nothing. 57 of 64 masks discriminate
+#     `cur != fix`, but only 32 make the CURRENT index masked, i.e. only those
+#     are isolation cells. `keep = 101101` (this plan's findings) is NOT one of
+#     them — measured at HEAD: `sum-1 = 3` and position 3 is KEPT, so it is a
+#     wrong-token cell, not a leak cell. It is used for the CORRECTNESS test;
+#     `keep = 110011` (`sum-1 = 3`, MASKED; last kept = 5) is used for isolation.
+#
+# `ISO_MASKED_POS = 5` / `ISO_LIVE_POS = 0` are deliberately NOT reused: position
+# 5 is invisible to `middle`, and to `last` under any prefix mask.
+#
+# The live control here perturbs EVERY position rather than one kept position:
+# a positional mode selects exactly ONE token, and pre-fix vs post-fix that
+# token is a different index, so no single-position control can be live in both
+# directions. Perturbing the whole sequence is live either way, which keeps the
+# control a genuine anti-vacuity check instead of a precondition that fires
+# before the assertion under test.
+#
+# This suite is NOT device-pinned: it compares two outputs produced on the SAME
+# device (following `TestExcludePositionsIsAlsoIsolated`'s stated reasoning).
+# ---------------------------------------------------------------------
+
+F25_S = 6
+F25_MIDDLE_LEAK_PREFIX_LENGTHS = [2, 3]     # index 3 masked -> a real leak
+F25_MIDDLE_ALL_PREFIX_LENGTHS = [2, 3, 5]   # 5 is the kept-but-wrong-token trap
+F25_LAST_LEAK_MASKED = [2, 3]               # keep = 110011; `sum-1 = 3` is MASKED
+F25_LAST_WRONG_TOKEN_MASKED = [1, 4]        # keep = 101101; `sum-1 = 3` is KEPT
+
+
+def _f25_kept_middle(keep: np.ndarray) -> int:
+    """Oracle for the shipped semantics: the middle of the KEPT positions.
+
+    Mirrors `SequencePooling._positional_index(mode='middle')`: with `n` kept
+    positions the target rank is `n // 2 + 1`, i.e. the 0-based `n // 2`-th kept
+    index. A fully-masked row degenerates to index 0 (documented, D-008).
+    """
+    kept = [i for i, v in enumerate(keep) if v]
+    return kept[len(kept) // 2] if kept else 0
+
+
+def _f25_last_kept(keep: np.ndarray) -> int:
+    """Oracle for `last`: the last kept index; 0 when nothing is kept."""
+    kept = [i for i, v in enumerate(keep) if v]
+    return kept[-1] if kept else 0
+
+
+class TestPositionalModesIsolateMaskedPositions:
+    """F-25: `middle` and `last` must not return a masked token.
+
+    `cls`/`first` are NOT isolation-tested — they leak off-prefix by INTENT
+    (the caller asked for index 0), so an isolation assertion for them would go
+    RED against correct code. Their contract is pinned as intent instead.
+    """
+
+    @pytest.mark.parametrize("prefix_len", F25_MIDDLE_LEAK_PREFIX_LENGTHS)
+    def test_middle_isolates_a_masked_position(self, prefix_len: int) -> None:
+        """A prefix mask of length L <= S//2 makes index `S//2` masked."""
+        layer = _iso_layer('middle', seq_len=F25_S)
+        x = _iso_inputs(seed=31, seq_len=F25_S)
+        masked = list(range(prefix_len, F25_S))
+        keep = _iso_mask([masked] * ISO_B, seq_len=F25_S)
+        mask = keras.ops.convert_to_tensor(keep)
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+
+        # Live control: perturbing the WHOLE sequence must move the output,
+        # both before and after the fix (see the note above this class).
+        all_positions = list(range(F25_S))
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, all_positions)),
+            mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe at prefix_len={prefix_len}: perturbing every "
+            f"position moved the output by only {live_delta:.6e}."
+        )
+
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, masked)),
+            mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy='middle', prefix_len={prefix_len} (masked positions "
+                f"{masked}): a MASKED position leaked into the pooled output by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    @pytest.mark.parametrize("prefix_len", F25_MIDDLE_ALL_PREFIX_LENGTHS)
+    def test_middle_returns_the_kept_middle_token(self, prefix_len: int) -> None:
+        """Isolation and CORRECTNESS are different properties for `middle`.
+
+        At `prefix_len = 5` the current index 3 is KEPT, so the isolation test
+        above cannot see the defect — yet the kept-middle is 2. This assertion
+        is what closes that gap.
+        """
+        layer = _iso_layer('middle', seq_len=F25_S)
+        x = _iso_inputs(seed=37, seq_len=F25_S)
+        masked = list(range(prefix_len, F25_S))
+        keep = _iso_mask([masked] * ISO_B, seq_len=F25_S)
+        expected_idx = _f25_kept_middle(keep[0])
+        assert expected_idx != F25_S // 2, (
+            f"Degenerate cell: prefix_len={prefix_len} has kept-middle "
+            f"{expected_idx}, which equals the padded midpoint {F25_S // 2}, so "
+            f"this assertion would pass against the unfixed code."
+        )
+
+        out = _np(layer(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        np.testing.assert_allclose(
+            out, x[:, expected_idx, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy='middle', prefix_len={prefix_len}: expected the "
+                f"kept-middle token at index {expected_idx}; the padded-midpoint "
+                f"token at index {F25_S // 2} differs from it by "
+                f"{float(np.max(np.abs(x[:, F25_S // 2, :] - x[:, expected_idx, :]))):.6e}."
+            ),
+        )
+
+    def test_last_isolates_a_masked_position_under_an_interior_mask(self) -> None:
+        """`keep = 110011`: `sum(mask) - 1 = 3` is MASKED; the last kept index is 5.
+
+        Every contiguous-prefix mask is degenerate here, which is exactly why
+        this cell is interior.
+        """
+        layer = _iso_layer('last', seq_len=F25_S)
+        x = _iso_inputs(seed=41, seq_len=F25_S)
+        masked = F25_LAST_LEAK_MASKED
+        keep = _iso_mask([masked] * ISO_B, seq_len=F25_S)
+        assert keep[0][int(keep[0].sum()) - 1] == 0.0, (
+            "Degenerate cell: `sum(mask) - 1` is a KEPT position here, so the "
+            "unfixed `last` returns a real token and cannot leak."
+        )
+        mask = keras.ops.convert_to_tensor(keep)
+
+        base = _np(layer(keras.ops.convert_to_tensor(x), mask=mask, training=False))
+
+        live = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, list(range(F25_S)))),
+            mask=mask, training=False,
+        ))
+        live_delta = float(np.max(np.abs(live - base)))
+        assert live_delta > 1e-2, (
+            f"Vacuous probe: perturbing every position moved the output by only "
+            f"{live_delta:.6e}."
+        )
+
+        leaked = _np(layer(
+            keras.ops.convert_to_tensor(_iso_perturb(x, masked)),
+            mask=mask, training=False,
+        ))
+        np.testing.assert_allclose(
+            leaked, base, rtol=0, atol=0,
+            err_msg=(
+                f"strategy='last', masked positions {masked}: a MASKED position "
+                f"leaked into the pooled output by "
+                f"{float(np.max(np.abs(leaked - base))):.6e}; required 0.0."
+            ),
+        )
+
+    def test_last_returns_the_last_kept_index(self) -> None:
+        """`keep = 101101`: `sum(mask) - 1 = 3` is KEPT but is NOT the last kept index.
+
+        This is the `last` analogue of `middle`'s two-tier trap — the unfixed
+        code returns a real, unmasked, WRONG token, so isolation alone is blind.
+        """
+        layer = _iso_layer('last', seq_len=F25_S)
+        x = _iso_inputs(seed=43, seq_len=F25_S)
+        keep = _iso_mask([F25_LAST_WRONG_TOKEN_MASKED] * ISO_B, seq_len=F25_S)
+        stale_idx = int(keep[0].sum()) - 1
+        expected_idx = _f25_last_kept(keep[0])
+        assert keep[0][stale_idx] == 1.0 and stale_idx != expected_idx, (
+            "Degenerate cell: `sum(mask) - 1` must be a KEPT position that is "
+            "NOT the last kept index for this test to discriminate."
+        )
+
+        out = _np(layer(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        np.testing.assert_allclose(
+            out, x[:, expected_idx, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy='last', masked positions "
+                f"{F25_LAST_WRONG_TOKEN_MASKED}: expected the last KEPT index "
+                f"{expected_idx}; the `sum(mask)-1` index {stale_idx} differs by "
+                f"{float(np.max(np.abs(x[:, stale_idx, :] - x[:, expected_idx, :]))):.6e}."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ['cls', 'first'])
+    def test_cls_and_first_return_index_zero_regardless_of_mask(
+        self, strategy: str
+    ) -> None:
+        """INTENT pin, not an isolation test.
+
+        `cls`/`first` mean "the token at index 0". Masking position 0 does not
+        make that a defect — the caller asked for index 0 — so this asserts the
+        contract rather than isolation. It goes RED if anyone makes the index
+        mask-aware, which is its dead-component probe.
+        """
+        layer = _iso_layer(strategy, seq_len=F25_S)
+        x = _iso_inputs(seed=47, seq_len=F25_S)
+        # Position 0 masked in row 0, an interior mask in row 1.
+        keep = _iso_mask([[0], [0, 2, 4]], seq_len=F25_S)
+
+        out = _np(layer(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        np.testing.assert_allclose(
+            out, x[:, 0, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}: must return index 0 regardless of the "
+                f"mask, but the output differs from `x[:, 0, :]` by "
+                f"{float(np.max(np.abs(out - x[:, 0, :]))):.6e}. The nearest "
+                f"mask-aware answer (first KEPT index) is index 1 for row 0."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ['cls', 'first', 'last', 'middle'])
+    @pytest.mark.parametrize("seq_len", [3, 6, 7])
+    def test_mask_none_is_unchanged_and_matches_an_all_ones_mask(
+        self, strategy: str, seq_len: int
+    ) -> None:
+        """I-A's per-mode companion: the fix must be `mask=None`-NEUTRAL.
+
+        `middle` at an all-keep mask must still land on `seq_len // 2` exactly
+        (kept-middle == padded midpoint when nothing is masked), and `last` on
+        `seq_len - 1`.
+        """
+        layer = _iso_layer(strategy, seq_len=seq_len)
+        x = keras.ops.convert_to_tensor(_iso_inputs(seed=53, seq_len=seq_len))
+        x_np = _np(x)
+        expected_idx = {
+            'cls': 0, 'first': 0, 'last': seq_len - 1, 'middle': seq_len // 2,
+        }[strategy]
+
+        no_mask = _np(layer(x, mask=None, training=False))
+        np.testing.assert_allclose(
+            no_mask, x_np[:, expected_idx, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}, seq_len={seq_len}: the `mask=None` "
+                f"answer moved off index {expected_idx}."
+            ),
+        )
+
+        ones = _np(layer(
+            x, mask=keras.ops.ones((ISO_B, seq_len)), training=False
+        ))
+        np.testing.assert_allclose(
+            ones, no_mask, rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}, seq_len={seq_len}: an all-ones mask "
+                f"disagrees with `mask=None` by "
+                f"{float(np.max(np.abs(ones - no_mask))):.6e}."
+            ),
+        )
+
+    @pytest.mark.parametrize("strategy", ['last', 'middle'])
+    def test_fully_masked_row_degenerates_to_index_zero(self, strategy: str) -> None:
+        """A fully-masked row does NOT rescue and does NOT raise — it returns index 0.
+
+        Both mask-aware index expressions clamp an empty candidate set to 0 via
+        `ops.maximum(ops.max(cand, axis=1), 0)`, so the returned token is itself
+        masked. That is DOCUMENTED DEGENERATION, matching the in-package
+        no-rescue precedent (D-008 of the F-24 plan) and matching `last`'s
+        pre-existing `ops.maximum(seq_lens, 0)` clamp — not a rescue.
+        """
+        layer = _iso_layer(strategy, seq_len=F25_S)
+        x = _iso_inputs(seed=59, seq_len=F25_S)
+        # Row 0 keeps a prefix of 2; row 1 is fully masked.
+        keep = _iso_mask([[2, 3, 4, 5], list(range(F25_S))], seq_len=F25_S)
+
+        out = _np(layer(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        assert np.all(np.isfinite(out)), (
+            f"strategy={strategy!r}: a fully-masked row produced non-finite "
+            f"output {out[1]}."
+        )
+        np.testing.assert_allclose(
+            out[1], x[1, 0, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={strategy!r}: a fully-masked row must degenerate to "
+                f"index 0; it differs by "
+                f"{float(np.max(np.abs(out[1] - x[1, 0, :]))):.6e}."
+            ),
+        )
 
 
 class TestUnmaskedNumericsAreFrozen:
