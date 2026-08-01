@@ -23,18 +23,20 @@ make docs       # generate documentation
 
 ## Repository Structure
 
+> **Start here for orientation**: `REPO_MAP.md` at the repo root — a path-verified map of where code lives, how the registry/factory dispatch works, which trainer trains which model, and a ledger of claims the repo's own docs get wrong.
+
 ```
 ├── src/
 │   ├── dl_techniques/   # Core library — all layers, models, losses, metrics, etc.
 │   ├── applications/    # Deployable ready-made applications built on dl_techniques
-│   ├── train/           # Production-grade training scripts for models in dl_techniques/models/
-│   └── experiments/     # Exploratory / experimental code (not production)
+│   └── train/           # Production-grade training scripts for models in dl_techniques/models/
 ├── results/             # Training results and outputs (repo-root)
 ├── tests/               # Mirrors src/dl_techniques/ structure
 ├── research/            # Research notes and references
-├── docs/                # Generated documentation
-└── imgs/, ww-img/       # Images and assets
+└── imgs/                # Images and assets
 ```
+
+There is no committed documentation directory. `make docs` runs `generate_docs.py`, which generates one on demand; nothing exists at that path until you run it, and the output is not committed.
 
 ### src/dl_techniques/ (core library)
 
@@ -46,11 +48,7 @@ Ready-made applications that package models from `dl_techniques` for deployment.
 
 ### src/train/
 
-Production-grade training pipelines. Each subdirectory corresponds to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`).
-
-### src/experiments/
-
-Experimental and exploratory code. Not production quality — used for prototyping ideas, testing hypotheses, and quick iterations.
+Production-grade training pipelines — one directory per runnable pipeline. Most correspond to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`), but two do not: `src/train/logic/` is a boolean-circuit / rule-learning research harness and `src/train/rms_variants_train/` is a normalization-layer ablation sweep, neither of which has a matching model package. Several trainer directories are also renamed relative to the model package they train — `src/dl_techniques/models/bias_free_denoisers/` is trained by `src/train/bfunet/`, `src/dl_techniques/models/byte_latent_transformer/` by `src/train/blt/`, and `src/dl_techniques/models/hierarchical_reasoning_model/` by `src/train/hrm/` — so the absence of a same-named directory does not mean the model is untrained.
 
 ### tests/
 
