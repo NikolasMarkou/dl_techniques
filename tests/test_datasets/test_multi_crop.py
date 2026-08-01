@@ -33,6 +33,7 @@ import tensorflow as tf
 from dl_techniques.datasets.vision.multi_crop import (
     N_GLOBAL_VIEWS,
     make_multi_crop_map_fn,
+    make_stateless_multi_crop_map_fn,
 )
 
 # The source is only modestly larger than the crop ON PURPOSE. TF's bilinear
@@ -92,6 +93,36 @@ def _run(map_fn, images, num_parallel_calls=None):
     """
     ds = tf.data.Dataset.from_tensor_slices(
         (images, np.arange(len(images), dtype="int32"))
+    ).map(map_fn, num_parallel_calls=num_parallel_calls)
+    return np.stack([v.numpy() for v, _ in ds])
+
+
+def _stateless_crop_only_map_fn(seed, **overrides):
+    """`_crop_only_map_fn`'s stateless twin: same config, different RNG."""
+    kwargs = dict(
+        n_local_crops=N_LOCAL,
+        flip_prob=0.0,
+        color_jitter_prob=0.0,
+        grayscale_prob=0.0,
+        global_blur_probs=(0.0, 0.0),
+        local_blur_prob=0.0,
+    )
+    kwargs.update(overrides)
+    return make_stateless_multi_crop_map_fn(CROP_SIZE, seed=seed, **kwargs)
+
+
+def _run_indexed(map_fn, images, indices=None, num_parallel_calls=None):
+    """Map an INDEXED map fn over `images`, keyed by `indices`.
+
+    The index is supplied explicitly rather than by `.enumerate()` so that the
+    cross-epoch test can hand the SAME image two DIFFERENT indices, which is
+    what a second epoch does (`build_raw_image_dataset` enumerates AFTER
+    `repeat()`).
+    """
+    if indices is None:
+        indices = np.arange(len(images), dtype="int64")
+    ds = tf.data.Dataset.from_tensor_slices(
+        (np.asarray(indices, dtype="int64"), images)
     ).map(map_fn, num_parallel_calls=num_parallel_calls)
     return np.stack([v.numpy() for v, _ in ds])
 
@@ -298,14 +329,24 @@ class TestGlobalsCoverMoreAreaThanLocals:
 class TestLocalCropSizeIsRefused:
     """D-002's named limitation must be loud, not silent."""
 
-    def test_a_different_local_crop_size_raises_naming_interpolation(self):
+    @pytest.mark.parametrize("factory", [
+        lambda **kw: make_multi_crop_map_fn(CROP_SIZE, **kw),
+        lambda **kw: make_stateless_multi_crop_map_fn(CROP_SIZE, seed=1, **kw),
+    ], ids=["stateful", "stateless"])
+    def test_a_different_local_crop_size_raises_naming_interpolation(
+            self, factory):
         # Asserted on the MESSAGE, not the type: the actionable content is the
         # word "interpolation" plus the reason.
+        #
+        # BOTH factories are exercised (plan I-7): the stateless path shares
+        # this validation only because it delegates to the same private
+        # implementation, and "shares it by construction" is exactly the kind of
+        # claim that stops being true after one refactor.
         with pytest.raises(
             Exception,
             match=r"positional-embedding interpolation",
         ):
-            make_multi_crop_map_fn(CROP_SIZE, local_crop_size=CROP_SIZE // 2)
+            factory(local_crop_size=CROP_SIZE // 2)
 
     def test_the_message_names_the_backlog_document(self):
         with pytest.raises(
@@ -437,6 +478,120 @@ class TestRandomness:
             "two unseeded pipelines produced bit-identical crops; the map fn "
             "is not actually random."
         )
+
+
+class TestStatelessRandomness:
+    """`make_stateless_multi_crop_map_fn` — the guarantee `seed` never gave.
+
+    Three properties, and all three are needed. Reproducibility ALONE is
+    satisfied by a map fn that returns the same augmentation for an image
+    forever, which is the frozen-per-image failure `D-035` already RED-proved
+    wrong; cross-index variation ALONE is satisfied by the stateful stream this
+    replaces; and both together are satisfied by a key derivation that drives
+    the crop, the flip and the blur off ONE correlated draw. Hence the third.
+    """
+
+    def test_two_same_seed_pipelines_agree_under_AUTOTUNE(self):
+        """The SHIPPED parallelism, where the stateful path is NOT reproducible.
+
+        `TestRandomness` pins the measurement this closes: at seed 777 two
+        AUTOTUNE runs of the stateful map fn differ with maxdiff 1.5312. A
+        serial `.map()` version of this test would pass at HEAD and prove
+        nothing.
+        """
+        images = _source_images(16, seed=21)
+        first = _run_indexed(
+            _stateless_crop_only_map_fn(seed=4242), images,
+            num_parallel_calls=tf.data.AUTOTUNE)
+        second = _run_indexed(
+            _stateless_crop_only_map_fn(seed=4242), images,
+            num_parallel_calls=tf.data.AUTOTUNE)
+        np.testing.assert_array_equal(first, second)
+
+        # Non-vacuity: a map fn that ignored its seed entirely would also pass
+        # the equality above.
+        other = _run_indexed(
+            _stateless_crop_only_map_fn(seed=4243), images,
+            num_parallel_calls=tf.data.AUTOTUNE)
+        assert float(np.abs(first - other).max()) > 1e-3, (
+            "two DIFFERENT seeds produced bit-identical crops; the seed does "
+            "not reach the stateless key"
+        )
+
+    def test_the_same_image_is_augmented_differently_at_a_different_index(self):
+        """Cross-epoch variation: epoch 2's copy of image k has a NEW index.
+
+        `build_raw_image_dataset` enumerates AFTER `repeat()` precisely so that
+        this holds. If the key ignored the index, every epoch would replay one
+        frozen augmentation per image and the determinism test above would
+        still be green.
+        """
+        image = _source_images(1, seed=22)
+        map_fn = _stateless_crop_only_map_fn(seed=99)
+
+        # Same image, three indices -- i.e. the same source record as seen on
+        # three successive epochs of an enumerated, repeated pipeline.
+        views = _run_indexed(
+            map_fn, np.repeat(image, 3, axis=0), indices=[0, 7, 4242])
+
+        deltas = [
+            float(np.abs(views[0] - views[1]).max()),
+            float(np.abs(views[0] - views[2]).max()),
+            float(np.abs(views[1] - views[2]).max()),
+        ]
+        assert min(deltas) > 1e-3, (
+            f"the SAME source image got the same augmentation at three "
+            f"different element indices (max-abs deltas {deltas}); the "
+            f"augmentation is FROZEN per image, which is worse for SSL than a "
+            f"non-reproducible stream (D-035)."
+        )
+
+        # ... and the SAME index reproduces, which is what makes the variation
+        # above attributable to the index rather than to residual state.
+        again = _run_indexed(map_fn, image, indices=[0])
+        np.testing.assert_array_equal(views[0], again[0])
+
+    def test_every_draw_in_one_element_uses_a_DIFFERENT_key(self, monkeypatch):
+        """Guard (d): the crop, the flip and the blur must not share a key.
+
+        Asserted on the keys themselves rather than on a statistical
+        correlation of the pixels: one shared key per element makes every
+        augmentation decision the SAME uniform sample (the crop would sit on
+        the image diagonal, and the flip would fire exactly when the crop area
+        was small), and no reproducibility or variation test can see that.
+        """
+        seen_keys = []
+        real_stateless_uniform = tf.random.stateless_uniform
+
+        def spy(shape, seed, **kwargs):
+            seen_keys.append(tuple(int(v) for v in np.asarray(seed)))
+            return real_stateless_uniform(shape, seed=seed, **kwargs)
+
+        monkeypatch.setattr(tf.random, "stateless_uniform", spy)
+
+        # Every probability is 0.0 or resolved at trace time, so the draw count
+        # is exactly the crop's: 4 draws (area, aspect, offset_x, offset_y) per
+        # view, over N_GLOBAL_VIEWS + 1 views.
+        map_fn = _stateless_crop_only_map_fn(seed=7, n_local_crops=1)
+        map_fn(tf.constant(3, tf.int64), _source_images(1, seed=23)[0])
+
+        expected = 4 * (N_GLOBAL_VIEWS + 1)
+        assert len(seen_keys) == expected, (
+            f"expected {expected} crop draws in one element, saw "
+            f"{len(seen_keys)}; the draw accounting below is not measuring "
+            f"what it claims"
+        )
+        assert len(set(seen_keys)) == len(seen_keys), (
+            f"only {len(set(seen_keys))} distinct keys across "
+            f"{len(seen_keys)} draws in ONE element: {seen_keys}. Draws "
+            f"sharing a key return the SAME sample, so the crop offset, the "
+            f"aspect ratio and every probability draw would be perfectly "
+            f"correlated."
+        )
+        # The element index is the SECOND key component and is the only part
+        # that may repeat -- pin that it is really the index, so a key that
+        # varied only in its counter (and so ignored the element) is RED.
+        assert {key[1] for key in seen_keys} == {3}
 
 
 class TestPhotometricAugmentationsAreLive:

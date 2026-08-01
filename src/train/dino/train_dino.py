@@ -109,7 +109,10 @@ from train.energy_transformer.common import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.dino_loss import DINOLoss
-from dl_techniques.datasets.vision.multi_crop import make_multi_crop_map_fn
+from dl_techniques.datasets.vision.multi_crop import (
+    make_multi_crop_map_fn,
+    make_stateless_multi_crop_map_fn,
+)
 from dl_techniques.models.dino.dino_training import (
     N_GLOBAL_VIEWS,
     create_dino_training_model,
@@ -198,6 +201,20 @@ class TrainingConfig:
     # the same run would make the result unattributable. Moving this default is a
     # measurement, not a cleanup.
     source_image_size: Optional[int] = None
+
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-009
+    # Route the multi-crop augmentation through `tf.random.stateless_uniform`,
+    # keyed on a per-element counter from `.enumerate()` after `.repeat()`,
+    # instead of through one shared `tf.random.Generator` stream. Only then does
+    # `--seed` reproduce the AUGMENTATION stream under the shipped
+    # `num_parallel_calls=AUTOTUNE` (MEASURED at HEAD: two same-seed parallel
+    # maps differ, maxdiff 1.5312).
+    #
+    # DEFAULT-OFF, unlike D-004's control: this changes what every training
+    # batch CONTAINS, so turning it on mid-programme would make a run
+    # incomparable to `results/dino_smoke_step12/` and to every arm measured
+    # before it. Moving this default is a measurement, not a cleanup.
+    stateless_augmentation: bool = False
 
     # Model
     variant: str = "small"
@@ -376,12 +393,22 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
 
     NO validation pipeline is built. See the module docstring's Rule.
     """
-    map_fn = make_multi_crop_map_fn(
-        global_crop_size=config.global_crop_size,
+    crop_kwargs = dict(
         local_crop_size=config.local_crop_size,
         n_local_crops=config.n_local_crops,
-        seed=config.seed,
     )
+    if config.stateless_augmentation:
+        map_fn = make_stateless_multi_crop_map_fn(
+            global_crop_size=config.global_crop_size,
+            seed=config.seed,
+            **crop_kwargs,
+        )
+    else:
+        map_fn = make_multi_crop_map_fn(
+            global_crop_size=config.global_crop_size,
+            seed=config.seed,
+            **crop_kwargs,
+        )
 
     # augment=False on purpose: build_raw_image_dataset's own flip / pad-crop runs BEFORE
     # normalization and would stack a second, non-DINO augmentation under the multi-crop
@@ -393,14 +420,23 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
     # that motivates the knob and for why its default is behaviour-preserving.
     source_size = config.source_image_size or config.global_crop_size
 
+    # The stateless map fn takes `(index, image, label)`, so it goes in the
+    # INDEXED slot -- `build_raw_image_dataset` refuses both slots at once, and
+    # the default path below stays byte-for-byte the call it was before.
+    map_fn_kwarg = (
+        {"indexed_element_map_fn": map_fn}
+        if config.stateless_augmentation
+        else {"element_map_fn": map_fn}
+    )
+
     train_ds, num_train, _ = build_raw_image_dataset(
         config.dataset,
         source_size,
         config.batch_size,
         is_training=True,
         augment=False,
-        element_map_fn=map_fn,
         seed=config.seed,
+        **map_fn_kwarg,
     )
 
     steps_per_epoch = max(1, num_train // config.batch_size)
@@ -778,6 +814,16 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "local crop sides 19-69 px, upsampled 2.33x mean / 4.50x "
                              "worst case). Set it larger (e.g. 224) to crop from a bigger "
                              "source and resize DOWN. Must be >= --global-crop-size")
+    parser.add_argument("--stateless-augmentation", action="store_true",
+                        help="Draw the multi-crop augmentation from "
+                             "tf.random.stateless_uniform keyed on a per-element "
+                             "counter instead of one shared tf.random.Generator "
+                             "stream. This is what makes --seed reproduce the "
+                             "AUGMENTATION stream under the shipped AUTOTUNE map "
+                             "(MEASURED at HEAD: two same-seed parallel maps "
+                             "differ, maxdiff 1.5312). Default OFF because it "
+                             "changes what every batch contains, so a run with it "
+                             "on is not comparable to the runs measured without it")
 
     # Model
     parser.add_argument("--variant", type=str, default="small", choices=list(VARIANTS))
@@ -912,6 +958,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         global_crop_size=args.global_crop_size,
         local_crop_size=args.local_crop_size,
         source_image_size=args.source_image_size,
+        stateless_augmentation=args.stateless_augmentation,
         n_local_crops=args.n_local_crops,
         variant=args.variant,
         patch_size=args.patch_size,

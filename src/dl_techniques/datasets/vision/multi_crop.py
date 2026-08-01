@@ -137,16 +137,31 @@ The seed still reproduces weight initialization, shuffling order and every other
 in the trainer's configuration. Any A/B that assumes bit-identical data between
 two runs is unsound.
 
-Making this a real guarantee needs stateless per-element randomness
-(``tf.random.stateless_uniform`` keyed on a per-element counter), and the counter
-has to come from the pipeline: ``ds.enumerate()`` placed AFTER ``repeat()``, so
-that the same source image draws a different augmentation each epoch. That is a
-change to ``build_raw_image_dataset``'s pipeline shape, which is shared by every
-``src/train/`` consumer — recorded as the backlog item "A reproducible
-augmentation stream under a PARALLEL ``tf.data`` map" in
-``src/dl_techniques/models/dino/README.md`` § 7 rather than done here.
-``tests/test_datasets/test_multi_crop.py`` pins BOTH halves: the serial guarantee
-that is real, and the stream-not-per-element mechanism that scopes it.
+``make_stateless_multi_crop_map_fn`` — the reproducible alternative
+--------------------------------------------------------------------
+The paragraph above describes ``make_multi_crop_map_fn``. The module also
+exports ``make_stateless_multi_crop_map_fn``, whose randomness comes from
+``tf.random.stateless_uniform`` keyed on ``(seed, per-draw counter, element
+index)`` instead of from one shared stream. It IS reproducible under
+``num_parallel_calls=tf.data.AUTOTUNE``, because no element's draw depends on
+how many other elements were served first.
+
+Its price is a different calling convention: it returns
+``fn(index, image, *rest)``, so it can only be mapped over an ENUMERATED
+dataset. The index has to come from ``ds.enumerate()`` placed AFTER
+``ds.repeat()`` — that ordering is what makes the same source image draw a
+DIFFERENT augmentation on each epoch, which is the whole point (freezing the
+augmentation per image is worse for SSL than a non-reproducible stream). That
+enumeration is supplied by ``build_raw_image_dataset``'s
+``indexed_element_map_fn`` parameter in
+``src/train/energy_transformer/common.py``; ``train_dino.py`` opts in with
+``--stateless-augmentation``.
+
+``tests/test_datasets/test_multi_crop.py`` pins every half: the stateful
+serial guarantee that is real, the stream-not-per-element mechanism that scopes
+it, the stateless AUTOTUNE guarantee, and the cross-epoch variation without
+which the stateless path would be a frozen-augmentation bug that a determinism
+test alone would happily pass.
 
 Raw TensorFlow ops are used deliberately: this is a ``tf.data`` transform, not
 a Keras layer, so ``keras.ops`` purity does not apply (the same rule and the
@@ -173,6 +188,22 @@ from dl_techniques.utils.logger import logger
 # import, so that this tf.data module stays free of the Keras model package.
 N_GLOBAL_VIEWS = 2
 
+# The RNG seam. `draw(shape, minval, maxval)` returns a float32 uniform sample.
+# Every random draw in this module goes through it, which is what lets the SAME
+# augmentation code run on a stateful `tf.random.Generator` stream and on a
+# stateless per-element key. See `make_multi_crop_map_fn` /
+# `make_stateless_multi_crop_map_fn`, the two concrete call sites.
+DrawFn = Callable[[Any, float, float], tf.Tensor]
+
+# `draw_factory(index) -> DrawFn`, called ONCE per element. `index` is the
+# element's counter tensor for the stateless path and `None` for the stateful
+# one (which needs no key, since its state lives in the shared generator).
+DrawFactory = Callable[[Optional[tf.Tensor]], DrawFn]
+
+# Odd multiplier used to spread the per-draw counter across the stateless key
+# space. Any odd constant works; this is the 32-bit golden-ratio constant.
+_KEY_COUNTER_STRIDE = 0x9E3779B1
+
 
 # ---------------------------------------------------------------------
 # augmentation primitives (module-private -- see the "earned abstraction" note
@@ -196,7 +227,7 @@ def _random_resized_crop(
     out_size: int,
     scale: Tuple[float, float],
     ratio: Tuple[float, float],
-    rng: tf.random.Generator,
+    draw: DrawFn,
 ) -> tf.Tensor:
     """Crop a random area/aspect region and resize it to ``out_size``.
 
@@ -206,8 +237,8 @@ def _random_resized_crop(
             out_size: Side length of the returned square view.
             scale: ``(min, max)`` fraction of the source AREA to crop.
             ratio: ``(min, max)`` aspect ratio (width / height) of the crop.
-            rng: The map fn's ``tf.random.Generator``; all randomness here
-                comes from it, so a seeded pipeline is reproducible.
+            draw: The element's :data:`DrawFn`; all randomness here comes from
+                it, so whichever RNG the caller supplied governs this crop.
         Returns:
             ``(out_size, out_size, C)`` float32.
         Failure mode:
@@ -228,9 +259,8 @@ def _random_resized_crop(
     width = tf.cast(shape[1], tf.float32)
     area = height * width
 
-    target_area = area * rng.uniform([], scale[0], scale[1], dtype=tf.float32)
-    log_ratio = rng.uniform(
-        [], math.log(ratio[0]), math.log(ratio[1]), dtype=tf.float32)
+    target_area = area * draw([], scale[0], scale[1])
+    log_ratio = draw([], math.log(ratio[0]), math.log(ratio[1]))
     aspect = tf.exp(log_ratio)
 
     crop_w = tf.sqrt(target_area * aspect)
@@ -238,8 +268,8 @@ def _random_resized_crop(
     crop_w = tf.clip_by_value(tf.round(crop_w), 1.0, width)
     crop_h = tf.clip_by_value(tf.round(crop_h), 1.0, height)
 
-    offset_w = rng.uniform([], 0.0, 1.0, dtype=tf.float32) * (width - crop_w)
-    offset_h = rng.uniform([], 0.0, 1.0, dtype=tf.float32) * (height - crop_h)
+    offset_w = draw([], 0.0, 1.0) * (width - crop_w)
+    offset_h = draw([], 0.0, 1.0) * (height - crop_h)
 
     crop = tf.image.crop_to_bounding_box(
         image,
@@ -303,7 +333,7 @@ def _gaussian_blur(
 
 def _maybe(
     condition_prob: float,
-    rng: tf.random.Generator,
+    draw: DrawFn,
     transform: Callable[[], tf.Tensor],
     identity: tf.Tensor,
 ) -> tf.Tensor:
@@ -316,7 +346,7 @@ def _maybe(
                 disabled augmentation costs nothing and cannot perturb the
                 random stream — which is what makes the seeded-determinism and
                 the crop-only tests comparable across configurations.
-            rng: The map fn's generator.
+            draw: The element's :data:`DrawFn`.
             transform: Zero-argument callable returning the transformed tensor.
             identity: The tensor to return when the draw fails.
         Returns:
@@ -328,16 +358,18 @@ def _maybe(
         return identity
     if condition_prob >= 1.0:
         return transform()
-    draw = rng.uniform([], 0.0, 1.0, dtype=tf.float32)
-    return tf.cond(draw < condition_prob, transform, lambda: identity)
+    sample = draw([], 0.0, 1.0)
+    return tf.cond(sample < condition_prob, transform, lambda: identity)
 
 
 # ---------------------------------------------------------------------
 
 
-def make_multi_crop_map_fn(
+def _make_multi_crop_element_fn(
     global_crop_size: int,
     *,
+    draw_factory: DrawFactory,
+    rng_description: str,
     local_crop_size: Optional[int] = None,
     n_local_crops: int = 4,
     global_scale: Tuple[float, float] = (0.4, 1.0),
@@ -351,79 +383,32 @@ def make_multi_crop_map_fn(
     global_blur_probs: Tuple[float, float] = (1.0, 0.1),
     local_blur_prob: float = 0.5,
     blur_sigma_range: Tuple[float, float] = (0.1, 2.0),
-    seed: Optional[int] = None,
 ) -> Callable[..., Tuple[tf.Tensor, Any]]:
-    """Build the ``tf.data`` map function for DINO multi-crop pretraining.
+    """The multi-crop transform, parameterized by its RNG.
 
-    The returned function maps one ``(image, label)`` pair to
-    ``(views, label)``, where ``views`` has shape
-    ``(2 + n_local_crops, global_crop_size, global_crop_size, C)`` and views 0
-    and 1 are the global crops. See the module docstring for the full contract,
-    for the D-002 same-resolution rule, and for the list of paper augmentations
-    that are deliberately NOT implemented here.
+    Interface contract:
+        Parameters:
+            global_crop_size: As in :func:`make_multi_crop_map_fn`, which is the
+                canonical reference for EVERY geometry/photometry parameter
+                below — they are documented once, there, not twice.
+            draw_factory: Called once per element with that element's index
+                (``None`` on the stateful path) and returning the
+                :data:`DrawFn` every augmentation in this element will use.
+            rng_description: Human-readable RNG mode, for the construction log
+                line only.
+        Returns:
+            ``element_fn(index, image, *rest) -> (views, label)``. ``index`` is
+            forwarded verbatim to ``draw_factory``; the two PUBLIC factories
+            wrap this in the calling convention their consumers expect.
+        Failure mode:
+            ``NotImplementedError`` / ``ValueError`` at CONSTRUCTION time, as
+            documented on :func:`make_multi_crop_map_fn`. Validation lives here
+            so both public factories get it — a stateless pipeline that skipped
+            the ``local_crop_size`` guard would mis-shape a batch silently.
 
-    All configuration is validated EAGERLY, at construction time — a bad scale
-    range must fail when the pipeline is built, not silently produce degenerate
-    crops a thousand steps into training.
-
-    Args:
-        global_crop_size: Side length of EVERY returned view, global and local
-            alike (D-002).
-        local_crop_size: Must be ``None`` or equal to ``global_crop_size``. Any
-            other value raises ``NotImplementedError`` — see Raises.
-        n_local_crops: Number of local views per sample, ``>= 0``. Total views
-            is ``N_GLOBAL_VIEWS + n_local_crops``.
-        global_scale: ``(min, max)`` fraction of the source area for the two
-            global crops. Paper: ``(0.4, 1.0)``.
-        local_scale: ``(min, max)`` fraction of the source area for the local
-            crops. Paper: ``(0.05, 0.4)``. Must not exceed ``global_scale``'s
-            maximum — the point of multi-crop is that locals see LESS.
-        aspect_ratio_range: ``(min, max)`` width/height ratio of the crop box.
-        flip_prob: Probability of a horizontal flip, per view.
-        color_jitter_prob: Probability of applying brightness+contrast jitter,
-            per view.
-        brightness: Half-width of the uniform additive brightness offset, in
-            the input's (normalized) value units.
-        contrast: Half-width of the uniform contrast factor around ``1.0``;
-            the view is scaled about its own per-channel mean.
-        grayscale_prob: Probability of collapsing the channels to their mean.
-        global_blur_probs: ``(p_view0, p_view1)`` Gaussian-blur probabilities
-            for the two global views. Asymmetric on purpose (paper: 1.0 and
-            0.1); this is the only global-view asymmetry implemented, since
-            solarization is not.
-        local_blur_prob: Gaussian-blur probability for every local view.
-        blur_sigma_range: ``(min, max)`` Gaussian sigma, in pixels.
-        seed: Optional seed for the module-level ``tf.random.Generator``.
-            **Reproduces a SERIAL ``.map(fn)`` ONLY.** It seeds one shared
-            STREAM, not each element, so under
-            ``.map(fn, num_parallel_calls=...)`` — the shipped trainer's
-            configuration — the element-to-draw assignment varies run to run
-            and the outputs are NOT reproducible (MEASURED: serial
-            identical=True, parallel identical=False, maxdiff 1.5312). See the
-            module docstring's "``seed`` reproduces a SERIAL map only" section.
-            Leave ``None`` for an explicitly non-deterministic stream.
-
-    Returns:
-        A ``tf.data``-mappable callable ``(image, label) -> (views, label)``.
-        It also accepts a bare ``image``, in which case the returned label is
-        an ``int32`` zero scalar.
-
-    Raises:
-        NotImplementedError: If ``local_crop_size`` is given and differs from
-            ``global_crop_size``. Rendering local views at a smaller pixel
-            resolution changes the patch-grid length and therefore requires
-            positional-embedding interpolation, which this repository does not
-            implement (D-002; the backlog item "Positional-embedding
-            interpolation for smaller local crops" in
-            ``src/dl_techniques/models/dino/README.md`` § 7).
-        ValueError: If ``global_crop_size`` is not positive; if
-            ``n_local_crops`` is negative; if either scale range is not an
-            increasing pair inside ``(0, 1]``; if ``local_scale``'s maximum
-            exceeds ``global_scale``'s maximum; if ``aspect_ratio_range`` is
-            not an increasing pair of positive numbers; if any probability is
-            outside ``[0, 1]``; if ``brightness``/``contrast`` are negative; or
-            if ``blur_sigma_range`` is not an increasing pair of positive
-            numbers.
+    This exists because there are TWO concrete RNG call sites (a stateful
+    ``tf.random.Generator`` stream and a stateless per-element key), not as
+    speculative generality. Do not add a third without a recorded decision.
     """
     if global_crop_size <= 0:
         raise ValueError(
@@ -505,30 +490,11 @@ def make_multi_crop_map_fn(
     # sampled sigma.
     blur_radius = max(1, int(round(2.0 * blur_sigma_range[1])))
 
-    # DECISION plan-2026-08-01T105809-dc0c402e/D-035
-    # This ONE shared stateful generator is DOCUMENTED-not-fixed, deliberately.
-    # Do NOT "fix" the parallel-map non-determinism by (i) hashing the image
-    # content into a stateless key -- that makes every epoch replay the SAME
-    # augmentation for the same image, which is worse than a non-reproducible
-    # stream for SSL; or (ii) calling `rng.reset_from_seed(seed)` per element --
-    # every element then gets the IDENTICAL augmentation, which is not
-    # augmentation at all (that arm was executed as a RED proof and it fires).
-    # A correct stateless form needs a per-element counter from
-    # `ds.enumerate()` placed AFTER `repeat()`, i.e. a change to
-    # `build_raw_image_dataset`'s pipeline shape, which every `src/train/`
-    # consumer shares. Measurement and scope are in the module docstring's
-    # "``seed`` reproduces a SERIAL map only" section.
-    rng = (
-        tf.random.Generator.from_seed(seed)
-        if seed is not None
-        else tf.random.Generator.from_non_deterministic_state()
-    )
-
     logger.info(
         f"multi-crop map fn: {n_views} views ({N_GLOBAL_VIEWS} global + "
         f"{n_local_crops} local) at {global_crop_size}x{global_crop_size}, "
         f"global_scale={global_scale}, local_scale={local_scale}, "
-        f"blur_radius={blur_radius}, seed={seed}"
+        f"blur_radius={blur_radius}, rng={rng_description}"
     )
 
     def _blur_prob(view_index: int) -> float:
@@ -536,7 +502,8 @@ def make_multi_crop_map_fn(
             return float(global_blur_probs[view_index])
         return float(local_blur_prob)
 
-    def _augment_view(image: tf.Tensor, view_index: int) -> tf.Tensor:
+    def _augment_view(
+            image: tf.Tensor, view_index: int, draw: DrawFn) -> tf.Tensor:
         """Crop + photometrically augment ONE view. `view_index` is static."""
         is_global = view_index < N_GLOBAL_VIEWS
         view = _random_resized_crop(
@@ -544,25 +511,25 @@ def make_multi_crop_map_fn(
             out_size=global_crop_size,
             scale=global_scale if is_global else local_scale,
             ratio=aspect_ratio_range,
-            rng=rng,
+            draw=draw,
         )
 
         view = _maybe(
-            flip_prob, rng,
+            flip_prob, draw,
             lambda: tf.image.flip_left_right(view),
             view,
         )
 
         def _jitter() -> tf.Tensor:
-            offset = rng.uniform([], -brightness, brightness, tf.float32)
-            factor = rng.uniform([], 1.0 - contrast, 1.0 + contrast, tf.float32)
+            offset = draw([], -brightness, brightness)
+            factor = draw([], 1.0 - contrast, 1.0 + contrast)
             mean = tf.reduce_mean(view, axis=(0, 1), keepdims=True)
             return (view - mean) * factor + mean + offset
 
-        view = _maybe(color_jitter_prob, rng, _jitter, view)
+        view = _maybe(color_jitter_prob, draw, _jitter, view)
 
         view = _maybe(
-            grayscale_prob, rng,
+            grayscale_prob, draw,
             lambda: tf.tile(
                 tf.reduce_mean(view, axis=-1, keepdims=True),
                 (1, 1, tf.shape(view)[-1]),
@@ -571,21 +538,28 @@ def make_multi_crop_map_fn(
         )
 
         def _blur() -> tf.Tensor:
-            sigma = rng.uniform(
-                [], blur_sigma_range[0], blur_sigma_range[1], tf.float32)
+            sigma = draw([], blur_sigma_range[0], blur_sigma_range[1])
             return _gaussian_blur(view, sigma, blur_radius)
 
-        view = _maybe(_blur_prob(view_index), rng, _blur, view)
+        view = _maybe(_blur_prob(view_index), draw, _blur, view)
         return view
 
-    def map_fn(image: tf.Tensor, *rest: Any) -> Tuple[tf.Tensor, Any]:
+    def element_fn(
+            index: Optional[tf.Tensor],
+            image: tf.Tensor,
+            *rest: Any,
+    ) -> Tuple[tf.Tensor, Any]:
         """Map one raw image to the DINO multi-crop training element."""
+        draw = draw_factory(index)
         image = tf.cast(image, tf.float32)
         channels = image.shape[-1]
 
         # Python loop over a STATIC view count -- nothing here reads a tensor
         # value, so the whole body traces into a straight-line graph.
-        views = [_augment_view(image, index) for index in range(n_views)]
+        views = [
+            _augment_view(image, view_index, draw)
+            for view_index in range(n_views)
+        ]
         stacked = tf.stack(views, axis=0)
 
         # Static shape: tf.data needs it for a well-defined batch spec, and
@@ -595,6 +569,252 @@ def make_multi_crop_map_fn(
 
         label = rest[0] if rest else tf.zeros((), dtype=tf.int32)
         return stacked, label
+
+    return element_fn
+
+
+# ---------------------------------------------------------------------
+# the two PUBLIC factories -- the two concrete `draw` call sites
+# ---------------------------------------------------------------------
+
+
+def make_multi_crop_map_fn(
+    global_crop_size: int,
+    *,
+    local_crop_size: Optional[int] = None,
+    n_local_crops: int = 4,
+    global_scale: Tuple[float, float] = (0.4, 1.0),
+    local_scale: Tuple[float, float] = (0.05, 0.4),
+    aspect_ratio_range: Tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+    flip_prob: float = 0.5,
+    color_jitter_prob: float = 0.8,
+    brightness: float = 0.4,
+    contrast: float = 0.4,
+    grayscale_prob: float = 0.2,
+    global_blur_probs: Tuple[float, float] = (1.0, 0.1),
+    local_blur_prob: float = 0.5,
+    blur_sigma_range: Tuple[float, float] = (0.1, 2.0),
+    seed: Optional[int] = None,
+) -> Callable[..., Tuple[tf.Tensor, Any]]:
+    """Build the ``tf.data`` map function for DINO multi-crop pretraining.
+
+    The returned function maps one ``(image, label)`` pair to
+    ``(views, label)``, where ``views`` has shape
+    ``(2 + n_local_crops, global_crop_size, global_crop_size, C)`` and views 0
+    and 1 are the global crops. See the module docstring for the full contract,
+    for the D-002 same-resolution rule, and for the list of paper augmentations
+    that are deliberately NOT implemented here.
+
+    All configuration is validated EAGERLY, at construction time — a bad scale
+    range must fail when the pipeline is built, not silently produce degenerate
+    crops a thousand steps into training.
+
+    This is the CANONICAL reference for every geometry/photometry parameter;
+    :func:`make_stateless_multi_crop_map_fn` forwards them verbatim and does not
+    re-document them.
+
+    Args:
+        global_crop_size: Side length of EVERY returned view, global and local
+            alike (D-002).
+        local_crop_size: Must be ``None`` or equal to ``global_crop_size``. Any
+            other value raises ``NotImplementedError`` — see Raises.
+        n_local_crops: Number of local views per sample, ``>= 0``. Total views
+            is ``N_GLOBAL_VIEWS + n_local_crops``.
+        global_scale: ``(min, max)`` fraction of the source area for the two
+            global crops. Paper: ``(0.4, 1.0)``.
+        local_scale: ``(min, max)`` fraction of the source area for the local
+            crops. Paper: ``(0.05, 0.4)``. Must not exceed ``global_scale``'s
+            maximum — the point of multi-crop is that locals see LESS.
+        aspect_ratio_range: ``(min, max)`` width/height ratio of the crop box.
+        flip_prob: Probability of a horizontal flip, per view.
+        color_jitter_prob: Probability of applying brightness+contrast jitter,
+            per view.
+        brightness: Half-width of the uniform additive brightness offset, in
+            the input's (normalized) value units.
+        contrast: Half-width of the uniform contrast factor around ``1.0``;
+            the view is scaled about its own per-channel mean.
+        grayscale_prob: Probability of collapsing the channels to their mean.
+        global_blur_probs: ``(p_view0, p_view1)`` Gaussian-blur probabilities
+            for the two global views. Asymmetric on purpose (paper: 1.0 and
+            0.1); this is the only global-view asymmetry implemented, since
+            solarization is not.
+        local_blur_prob: Gaussian-blur probability for every local view.
+        blur_sigma_range: ``(min, max)`` Gaussian sigma, in pixels.
+        seed: Optional seed for the module-level ``tf.random.Generator``.
+            **Reproduces a SERIAL ``.map(fn)`` ONLY.** It seeds one shared
+            STREAM, not each element, so under
+            ``.map(fn, num_parallel_calls=...)`` — the shipped trainer's
+            configuration — the element-to-draw assignment varies run to run
+            and the outputs are NOT reproducible (MEASURED: serial
+            identical=True, parallel identical=False, maxdiff 1.5312). See the
+            module docstring's "``seed`` reproduces a SERIAL map only" section,
+            and :func:`make_stateless_multi_crop_map_fn` for the variant that
+            IS reproducible under a parallel map.
+            Leave ``None`` for an explicitly non-deterministic stream.
+
+    Returns:
+        A ``tf.data``-mappable callable ``(image, label) -> (views, label)``.
+        It also accepts a bare ``image``, in which case the returned label is
+        an ``int32`` zero scalar.
+
+    Raises:
+        NotImplementedError: If ``local_crop_size`` is given and differs from
+            ``global_crop_size``. Rendering local views at a smaller pixel
+            resolution changes the patch-grid length and therefore requires
+            positional-embedding interpolation, which this repository does not
+            implement (D-002; the backlog item "Positional-embedding
+            interpolation for smaller local crops" in
+            ``src/dl_techniques/models/dino/README.md`` § 7).
+        ValueError: If ``global_crop_size`` is not positive; if
+            ``n_local_crops`` is negative; if either scale range is not an
+            increasing pair inside ``(0, 1]``; if ``local_scale``'s maximum
+            exceeds ``global_scale``'s maximum; if ``aspect_ratio_range`` is
+            not an increasing pair of positive numbers; if any probability is
+            outside ``[0, 1]``; if ``brightness``/``contrast`` are negative; or
+            if ``blur_sigma_range`` is not an increasing pair of positive
+            numbers.
+    """
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-035
+    # This ONE shared stateful generator is DOCUMENTED-not-fixed on THIS
+    # factory, deliberately. Do NOT "fix" its parallel-map non-determinism by
+    # (i) hashing the image content into a stateless key -- that makes every
+    # epoch replay the SAME augmentation for the same image, which is worse
+    # than a non-reproducible stream for SSL; or (ii) calling
+    # `rng.reset_from_seed(seed)` per element -- every element then gets the
+    # IDENTICAL augmentation, which is not augmentation at all (that arm was
+    # executed as a RED proof and it fires). The correct stateless form needs a
+    # per-element counter and now EXISTS as a SEPARATE factory,
+    # `make_stateless_multi_crop_map_fn`; it is not retrofitted onto this one,
+    # because its calling convention differs (it takes an index).
+    rng = (
+        tf.random.Generator.from_seed(seed)
+        if seed is not None
+        else tf.random.Generator.from_non_deterministic_state()
+    )
+
+    def stateful_draw_factory(index: Optional[tf.Tensor]) -> DrawFn:
+        del index  # the stream's state IS the key; no per-element key exists
+
+        def draw(shape: Any, minval: float, maxval: float) -> tf.Tensor:
+            return rng.uniform(shape, minval, maxval, dtype=tf.float32)
+
+        return draw
+
+    element_fn = _make_multi_crop_element_fn(
+        global_crop_size,
+        draw_factory=stateful_draw_factory,
+        rng_description=f"stateful tf.random.Generator (seed={seed})",
+        local_crop_size=local_crop_size,
+        n_local_crops=n_local_crops,
+        global_scale=global_scale,
+        local_scale=local_scale,
+        aspect_ratio_range=aspect_ratio_range,
+        flip_prob=flip_prob,
+        color_jitter_prob=color_jitter_prob,
+        brightness=brightness,
+        contrast=contrast,
+        grayscale_prob=grayscale_prob,
+        global_blur_probs=global_blur_probs,
+        local_blur_prob=local_blur_prob,
+        blur_sigma_range=blur_sigma_range,
+    )
+
+    def map_fn(image: tf.Tensor, *rest: Any) -> Tuple[tf.Tensor, Any]:
+        """Map one raw image to the DINO multi-crop training element."""
+        return element_fn(None, image, *rest)
+
+    return map_fn
+
+
+def make_stateless_multi_crop_map_fn(
+    global_crop_size: int,
+    *,
+    seed: int,
+    **kwargs: Any,
+) -> Callable[..., Tuple[tf.Tensor, Any]]:
+    """Multi-crop with STATELESS randomness — reproducible under a parallel map.
+
+    Identical augmentation to :func:`make_multi_crop_map_fn`; the only
+    differences are where the randomness comes from and, consequently, the
+    calling convention.
+
+    Args:
+        global_crop_size: As in :func:`make_multi_crop_map_fn`.
+        seed: Run seed. REQUIRED — an unseeded stateless stream is a
+            contradiction (the whole point is that ``(seed, counter, index)``
+            determines the draw), so there is no ``None`` default to fall into
+            silently.
+        **kwargs: Forwarded verbatim to :func:`make_multi_crop_map_fn`'s
+            geometry/photometry parameters (``n_local_crops``,
+            ``local_crop_size``, ``global_scale``, ``flip_prob``, ...), which
+            document them. A misspelled name raises ``TypeError`` at
+            construction. ``seed`` is NOT among them — it means something
+            different here and is taken above.
+
+    Returns:
+        A ``tf.data``-mappable callable ``(index, image, label) ->
+        (views, label)``. **Note the leading index**: this must be mapped over
+        an ENUMERATED dataset, which is what
+        ``build_raw_image_dataset(..., indexed_element_map_fn=...)`` builds. It
+        also accepts ``(index, image)``.
+
+    Raises:
+        Same construction-time ``NotImplementedError`` / ``ValueError`` as
+        :func:`make_multi_crop_map_fn` — the validation is shared, so the
+        ``local_crop_size`` guard holds on this path too.
+    """
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-006
+    # The key is `(seed-mixed per-draw counter, element index)` and EVERY draw
+    # inside one element gets a DIFFERENT counter, hence a different key.
+    # Reusing one key for the whole element would make the crop offset, the flip
+    # decision, the jitter and the blur all the SAME uniform sample -- perfectly
+    # correlated augmentation decisions that every "is it deterministic?" test
+    # would still pass. The counter is a PYTHON-level trace-time integer, reset
+    # per element trace, so it is static in the graph; only the index is a
+    # tensor. Do NOT hoist `counter` out of `draw_factory`: it would then keep
+    # incrementing across retraces and the same element would key differently
+    # in two processes. See decisions.md D-006.
+    def stateless_draw_factory(index: Optional[tf.Tensor]) -> DrawFn:
+        if index is None:
+            raise ValueError(
+                "make_stateless_multi_crop_map_fn's map fn was called without "
+                "an element index. It must be mapped over an ENUMERATED "
+                "dataset -- see build_raw_image_dataset's "
+                "`indexed_element_map_fn` parameter."
+            )
+        key_index = tf.cast(index, tf.int64)
+        counter = [0]
+
+        def draw(shape: Any, minval: float, maxval: float) -> tf.Tensor:
+            key_counter = (
+                int(seed) + counter[0] * _KEY_COUNTER_STRIDE) % (2 ** 31)
+            counter[0] += 1
+            return tf.random.stateless_uniform(
+                shape,
+                seed=tf.stack(
+                    [tf.constant(key_counter, tf.int64), key_index]),
+                minval=minval,
+                maxval=maxval,
+                dtype=tf.float32,
+            )
+
+        return draw
+
+    element_fn = _make_multi_crop_element_fn(
+        global_crop_size,
+        draw_factory=stateless_draw_factory,
+        rng_description=(
+            f"stateless tf.random.stateless_uniform "
+            f"(seed={seed}, keyed on (counter, element index))"
+        ),
+        **kwargs,
+    )
+
+    def map_fn(
+            index: tf.Tensor, image: tf.Tensor, *rest: Any
+    ) -> Tuple[tf.Tensor, Any]:
+        """Map one ENUMERATED raw image to the DINO multi-crop element."""
+        return element_fn(index, image, *rest)
 
     return map_fn
 

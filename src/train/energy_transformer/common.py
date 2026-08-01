@@ -93,6 +93,7 @@ def build_raw_image_dataset(
         is_training: bool,
         augment: bool = True,
         element_map_fn: Optional[ElementMapFn] = None,
+        indexed_element_map_fn: Optional[ElementMapFn] = None,
         shuffle_buffer: int = 4096,
         seed: Optional[int] = None,
         shuffle_files_seed: Optional[int] = None,
@@ -115,6 +116,23 @@ def build_raw_image_dataset(
             (``.cache()``, no shuffle, no repeat, no augment).
         augment: Enable train-time augmentation. Ignored when ``is_training`` is False.
         element_map_fn: Optional per-sample transform applied to ``(image, label)``.
+        indexed_element_map_fn: Optional per-sample transform that ALSO receives a
+            per-element counter: it is called as ``fn(index, image, label)``. When
+            it is given, the training pipeline becomes
+            ``.repeat() -> .enumerate() -> .map(...) -> .batch(...)``, so the SAME
+            source image carries a DIFFERENT ``index`` on each epoch. That counter
+            is what a stateless-RNG augmentation keys on, which is the only way to
+            make the augmentation stream reproducible under
+            ``num_parallel_calls=AUTOTUNE`` (see
+            ``dl_techniques.datasets.vision.multi_crop
+            .make_stateless_multi_crop_map_fn``). ``None`` preserves today's
+            behaviour EXACTLY: no enumeration, no extra map, and the
+            ``.repeat().batch()`` tail unchanged. Do NOT "simplify" the branch
+            away, and do NOT fold this into ``element_map_fn`` behind a boolean:
+            this function has 7 call sites across 3 trainers whose
+            ``element_map_fn``s cannot accept an index (decisions.md D-003).
+            Mutually exclusive with ``element_map_fn``; requires ``is_training``
+            (see Raises).
         shuffle_buffer: Shuffle buffer for the training pipeline.
         seed: Seed for the element ``.shuffle()`` and for augmentation. It does NOT
             reach the TFDS FILE order -- see ``shuffle_files_seed``.
@@ -139,8 +157,38 @@ def build_raw_image_dataset(
 
     Raises:
         ValueError: If ``dataset`` is not supported or ``image_size``/``batch_size`` are
-            non-positive.
+            non-positive; if BOTH ``element_map_fn`` and ``indexed_element_map_fn`` are
+            supplied; or if ``indexed_element_map_fn`` is supplied with
+            ``is_training=False``.
     """
+    # DECISION plan-2026-08-01T195746-12a1f2db/D-007
+    # Both refusals are LOUD rather than a silent best-effort, and they fire
+    # BEFORE any tfds/keras dataset work so the message is the first thing the
+    # caller sees. `is_training=False` is refused because the eval branch has no
+    # `.repeat()`: `.enumerate()` there would count a SINGLE pass, so every
+    # element would key identically on every epoch -- the frozen-augmentation
+    # failure that D-035 already RED-proved wrong, reintroduced silently through
+    # a different door. See decisions.md D-007.
+    if indexed_element_map_fn is not None:
+        if element_map_fn is not None:
+            raise ValueError(
+                "element_map_fn and indexed_element_map_fn are mutually "
+                "exclusive: they are two different calling conventions for the "
+                "same map slot (`fn(image, label)` vs `fn(index, image, "
+                "label)`), and applying both would feed the second one the "
+                "first one's output. Pass exactly one."
+            )
+        if not is_training:
+            raise ValueError(
+                "indexed_element_map_fn requires is_training=True: the "
+                "evaluation pipeline has no `.repeat()`, so the per-element "
+                "counter would enumerate a SINGLE pass and hand every element "
+                "the same index on every epoch. A stateless augmentation keyed "
+                "on that counter would then be frozen per image, which is worse "
+                "than a non-reproducible stream. Use element_map_fn for the "
+                "evaluation pipeline."
+            )
+
     dataset = dataset.lower()
     if dataset not in DATASET_NUM_CLASSES:
         raise ValueError(
@@ -235,7 +283,33 @@ def build_raw_image_dataset(
     if element_map_fn is not None:
         ds = ds.map(element_map_fn, num_parallel_calls=num_parallel_calls)
 
-    if is_training:
+    if indexed_element_map_fn is not None:
+        # DECISION plan-2026-08-01T195746-12a1f2db/D-008
+        # `.enumerate()` goes AFTER `.repeat()`, never before. Before it, the
+        # counter would restart at 0 every epoch and the same source image would
+        # draw the SAME augmentation forever -- exactly the frozen-per-image
+        # failure D-035 RED-proved wrong. After it, the counter runs 0,1,2,...
+        # across the infinite repeat, so epoch 2's copy of image k keys
+        # differently from epoch 1's. A determinism test alone cannot see this
+        # difference; the cross-epoch-variation guard in
+        # tests/test_train/test_energy_transformer/test_build_raw_image_dataset.py
+        # is what pins it.
+        #
+        # MEASURED, not assumed: `.enumerate()` emits `(index, element)` and
+        # `tf.data` passes a TUPLE element as ONE nested argument, so the map
+        # lambda receives 2 args -- `(index, (image, label))` -- not 3. A
+        # `lambda i, *elem: fn(i, *elem)` would hand the map fn a tuple where it
+        # expects an image. `_call_indexed` unpacks that nesting.
+        # See decisions.md D-008.
+        def _call_indexed(index: tf.Tensor, *element: Any) -> Any:
+            if len(element) == 1 and isinstance(element[0], tuple):
+                return indexed_element_map_fn(index, *element[0])
+            return indexed_element_map_fn(index, *element)
+
+        ds = ds.repeat().enumerate()
+        ds = ds.map(_call_indexed, num_parallel_calls=num_parallel_calls)
+        ds = ds.batch(batch_size, drop_remainder=True)
+    elif is_training:
         ds = ds.repeat().batch(batch_size, drop_remainder=True)
     else:
         ds = ds.batch(batch_size)

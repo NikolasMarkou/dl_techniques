@@ -76,6 +76,7 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     # decode resolution, since decoding below the crop size would upsample every
     # view even further, which is the opposite of what the field is for.
     "source_image_size": ("--source-image-size", 128),            # default: None
+    "stateless_augmentation": ("--stateless-augmentation", True),  # default: False
     "variant": ("--variant", "tiny"),                             # default: small
     "patch_size": ("--patch-size", 8),                            # default: None
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
@@ -323,6 +324,45 @@ class TestConfigValidation:
             f"build_raw_image_dataset was asked to decode at "
             f"{seen['image_size']}, not {expected} -- source_image_size="
             f"{source_image_size} did not reach the pipeline"
+        )
+
+    @pytest.mark.parametrize("stateless,expected_slot,absent_slot", [
+        (False, "element_map_fn", "indexed_element_map_fn"),   # non-vacuity
+        (True, "indexed_element_map_fn", "element_map_fn"),
+    ])
+    def test_stateless_augmentation_picks_the_indexed_map_slot(
+            self, monkeypatch, stateless, expected_slot, absent_slot) -> None:
+        """The half `TestCLIWiring` cannot see: config -> the actual call.
+
+        The two slots are two different CALLING CONVENTIONS (`fn(image, label)`
+        vs `fn(index, image, label)`), and `build_raw_image_dataset` refuses
+        both at once, so putting the stateless map fn in the wrong slot is not
+        a subtle degradation -- it is a `TypeError` a thousand steps in, or, if
+        the arity happened to match, a silently unindexed augmentation. The
+        `False` arm is the non-vacuity control: it pins that the DEFAULT still
+        uses the plain slot, so the `True` arm measures a change.
+        """
+        seen: Dict[str, Any] = {}
+
+        def spy(dataset, image_size, batch_size, **kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop: the map-fn slot has been captured")
+
+        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        config = trainer.TrainingConfig(
+            variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
+            n_local_crops=1, batch_size=2, dataset="cifar10",
+            stateless_augmentation=stateless)
+        with pytest.raises(RuntimeError, match="map-fn slot"):
+            trainer.build_dataset(config)
+
+        assert callable(seen.get(expected_slot)), (
+            f"stateless_augmentation={stateless} did not put the multi-crop "
+            f"map fn in `{expected_slot}` (got keys {sorted(seen)})"
+        )
+        assert absent_slot not in seen, (
+            f"both map-fn slots were passed; build_raw_image_dataset refuses "
+            f"that combination, so this run would die at pipeline construction"
         )
 
     def test_the_knn_memory_bank_seeds_the_TFDS_FILE_order(
