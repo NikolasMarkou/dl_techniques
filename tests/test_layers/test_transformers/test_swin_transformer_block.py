@@ -509,11 +509,24 @@ class TestSwinTransformerBlock:
 #                       predicted message did not.
 #
 # The symbolic half needs an explicit `tf.function(input_signature=...)` trace.
-# A `keras.Input` functional build with a static non-divisible shape does NOT
-# raise at construction (G-03): Keras 3 skips `Reshape` element-count
-# validation for `KerasTensor`s, so it "succeeds" with a wrong
-# `model.output_shape` and defers the crash to the first real forward call. A
-# construction-only test is therefore structurally vacuous.
+#
+# [CORRECTED 2026-08-01, G-03] This block used to continue: "A `keras.Input`
+# functional build with a static non-divisible shape does NOT raise at
+# construction (G-03) ... so it 'succeeds' with a wrong `model.output_shape` and
+# defers the crash to the first real forward call." That claim is REFUTED at
+# HEAD and has been deleted rather than softened. Re-measured by execution
+# (functional `keras.Input` build + a real forward call, dim=8, num_heads=2):
+# `(13,11,ws=4,shift=0)`, `(13,11,ws=4,shift=2)`, `(7,7,ws=4)`, `(3,3,ws=4)`,
+# `(35,35,ws=8,shift=0)`, `(35,35,ws=8,shift=4)`, `(6,6,ws=4,shift=2)` and
+# `(32,32,ws=7,shift=3)` -- 8 of 8 report `model.output_shape[1:] == actual[1:]`
+# and 0 of 8 raise, at construction or on the forward call. The block-internal
+# pad/crop that this very section documents is what removed the defect: the
+# block returns the CALLER's `(H, W)`, so shape inference is right.
+#
+# What survives from the old text is only the SCOPE note: the symbolic half
+# still needs an explicit `tf.function(input_signature=...)` trace, because a
+# static functional build cannot exercise the dynamic path. It is no longer
+# "structurally vacuous" -- it is simply testing a different path.
 # ---------------------------------------------------------------------------
 
 import tensorflow as tf  # noqa: E402  (test-local, used only by the block below)

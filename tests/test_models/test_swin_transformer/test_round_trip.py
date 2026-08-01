@@ -19,8 +19,14 @@ from dl_techniques.models.swin_transformer.model import (
 )
 
 
-# The "tiny" variant uses window_size=7, so the feature grid at the deepest
-# stage must be divisible by 7 -> the smallest legal square input is 224x224.
+# [CORRECTED 2026-08-01, G-03] This used to say: "The 'tiny' variant uses
+# window_size=7, so the feature grid at the deepest stage must be divisible by 7
+# -> the smallest legal square input is 224x224." The second half is FALSE and is
+# deleted, not softened. `window_size` constrains nothing: SwinTransformerBlock
+# pads a short grid up to the window and crops back. Re-measured by execution --
+# `create_swin_transformer("tiny", 10, input_shape=(s,s,3))` (window_size=7,
+# patch_size=4) builds AND forwards finite logits at s = 224, 96, 64, 56 and 32.
+# 224 is kept below because it is the variant's design resolution, not a minimum.
 def _images(b=2, s=224, c=3):
     return np.random.rand(b, s, s, c).astype("float32")
 

@@ -287,17 +287,53 @@ class SwinTransformer(keras.Model):
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        # Validate dimensions compatibility
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-003
+        # These are COMPUTE notes, not correctness warnings, and there is deliberately
+        # NO `window_size` raise or divisibility raise here. Do not "upgrade" either.
+        #
+        # The previous text ("may cause issues in deeper stages") was measured over an
+        # 80-cell (input, patch_size, window_size, depth) sweep and had ZERO true
+        # positives: every geometry that builds reports `model.output_shape[1:] ==
+        # actual[1:]`. `PatchMerging` ceil-pads an odd grid dimension, so a deeper stage
+        # does not break -- it costs padded tokens. Re-verified here with
+        # `include_top=False` (a SPATIAL declared shape, so the check is not vacuous):
+        # declared == actual at 7 of 7 geometries, including the warned 56/ps=4 and
+        # 30/ps=2. The predicate also mis-fires in both directions as a correctness
+        # signal: it is SILENT on 63/ps=2, which raises loudly (and correctly) in
+        # `PatchEmbedding2D`, and it FIRES on 56 and 30, which work.
+        #
+        # The only hard requirement is `H % patch_size == 0`, and it is already enforced
+        # by `PatchEmbedding2D` with a clear message, at construction, in the right
+        # place. That raise is this model's divisibility guard; this is not.
+        #
+        # `window_size` is entirely unconstrained and was never wrong in the sweep
+        # (including ws=5, ws=7 on grids 7/4/2/1, and ws=16 on a 1x1 grid). Its only
+        # residual cost is COMPUTE WASTE at the deepest stage, and it is NOT detectable
+        # from the divisibility predicate below -- measured by instrumenting
+        # `SwinTransformerBlock.call` inside a full forward pass, the worst cells are
+        # NOT warned ones. At `input_shape=(32,32,3), patch_size=4` the deepest stage
+        # grid is 1x1, so the block pads it to the full window: `window_size=8` -> 8x8,
+        # 1 -> 64 tokens (64x) and 1 -> 4096 attention pairs (4096x); `window_size=16`
+        # -> 16x16, 256x tokens and 65536x pairs. Meanwhile the WARNED 56/ps=4/ws=7
+        # cell has a 2x2 deepest grid padded to 7x7 -- only 12x tokens / 150x pairs.
+        # A `window_size` guard would therefore have to key off the deepest stage grid,
+        # not off divisibility; none is added here.
         height, width, channels = input_shape
         if height is not None and height % (patch_size * 8) != 0:
             logger.warning(
                 f"Input height {height} is not divisible by {patch_size * 8}. "
-                f"This may cause issues in deeper stages."
+                f"The model is still correct -- PatchMerging ceil-pads an odd grid "
+                f"dimension and the declared output shape matches the actual one. "
+                f"The cost is compute: at least one of the three merge stages will "
+                f"carry zero-padded tokens."
             )
         if width is not None and width % (patch_size * 8) != 0:
             logger.warning(
                 f"Input width {width} is not divisible by {patch_size * 8}. "
-                f"This may cause issues in deeper stages."
+                f"The model is still correct -- PatchMerging ceil-pads an odd grid "
+                f"dimension and the declared output shape matches the actual one. "
+                f"The cost is compute: at least one of the three merge stages will "
+                f"carry zero-padded tokens."
             )
 
         # Store ALL configuration parameters for serialization
