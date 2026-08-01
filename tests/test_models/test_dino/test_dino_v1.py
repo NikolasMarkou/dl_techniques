@@ -16,13 +16,30 @@ shape is derived from ``image_size``. The patch grid is ``image_size // patch_si
 so ``image_size=32, patch_size=16`` yields a 2x2 patch grid. ``num_classes=10`` +
 default ``include_top=True`` returns logits ``(B, 10)``.
 
-The DINOHead / DINOv1 ``.keras`` round-trips (previously known-broken) are now
-FIXED and covered separately in ``test_model_v1.py``.
-
 Beyond the smoke test, this module pins the four defects repaired in
 plan-2026-08-01T105809-dc0c402e step 3 (D-010, D-011, D-012 plus the
 ``image_size % patch_size`` guard). Each of those guards was RED-proven by
 reverting the corresponding fix in place; see the plan's ``verification.md``.
+
+MERGE RECORD (step 7). ``tests/test_models/test_dino/test_model_v1.py`` was the
+naming outlier in this directory (every sibling is ``test_dino_v{1,2,3}.py``).
+Its cases were NOT duplicates of this file's — they were complementary — so all
+FOUR of them moved here verbatim-by-name, converging on v2's pattern of smoke +
+round-trip inline in one file per version. Nothing was renamed and nothing was
+dropped; the name-for-name correspondence is::
+
+    test_model_v1.py                          -> test_dino_v1.py
+    TestDINOHead::test_forward_shape          -> TestDINOHead::test_forward_shape
+    TestDINOHead::test_keras_round_trip       -> TestDINOHead::test_keras_round_trip
+    TestDINOv1::test_forward_logits           -> TestDINOv1::test_forward_logits
+    TestDINOv1::test_keras_round_trip         -> TestDINOv1::test_keras_round_trip
+
+Both round-trips were STRENGTHENED in the move: they now seed non-zero weights,
+assert non-vacuity of the pre-save output, and were RED-proven by perturbing one
+reloaded weight (a model that restores ZERO weights satisfies a shape-only
+round-trip test — recorded repo lesson). ``test_model_v1.py`` is deleted; a
+count of tests going UP is not evidence that nothing was lost, so the mapping
+above is the evidence.
 """
 
 import os
@@ -327,3 +344,360 @@ def test_giant_variant_shares_the_family_dimensions():
     v3 = DINOv3.MODEL_VARIANTS["giant"]
     for key in shared:
         assert v1[key] == v2[key] == v3[key], f"giant disagrees on {key}"
+
+
+# =====================================================================
+# MERGED FROM tests/test_models/test_dino/test_model_v1.py (step 7)
+# =====================================================================
+#
+# The original file's header claimed these round-trips "were previously broken
+# (DINOHead sublayers built lazily; DINOv1 patch_size/image_size deserialized as
+# lists breaking `//`)". Both are FIXED; the claim is kept here as history, not
+# as a live caveat, and neither round-trip is xfailed.
+
+
+class TestDINOHead:
+
+    def test_forward_shape(self):
+        from dl_techniques.models.dino.dino_v1 import DINOHead
+
+        head = DINOHead(in_dim=64, out_dim=128, nlayers=3,
+                        hidden_dim=256, bottleneck_dim=64)
+        x = np.random.default_rng(0).random((4, 64)).astype("float32")
+        y = head(x, training=False)
+        assert tuple(y.shape) == (4, 128)
+
+    def test_keras_round_trip(self, tmp_path):
+        """Asserts VALUES, not shapes.
+
+        RED-proven by perturbing ONE reloaded weight after load: a model that
+        restores ZERO weights satisfies a shape-only round-trip test, so the
+        numeric assertion below is the whole guard. The non-vacuity floor
+        matters too — a head whose output were ~0 everywhere would satisfy
+        `assert_allclose` against any other ~0 output.
+        """
+        from dl_techniques.models.dino.dino_v1 import DINOHead
+
+        head = DINOHead(in_dim=64, out_dim=128, nlayers=3,
+                        hidden_dim=256, bottleneck_dim=64)
+        model = keras.Sequential([keras.Input((64,)), head])
+        _seed_trainable(model, 1234)
+        x = np.random.default_rng(1).random((4, 64)).astype("float32")
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+        assert np.abs(before).max() > 1e-3, (
+            f"non-vacuity: the pre-save output is ~0 (absmax "
+            f"{np.abs(before).max():.3e}), so this round-trip would pass against "
+            "a model that restored nothing"
+        )
+
+        path = os.path.join(str(tmp_path), "dino_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(loaded(x, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4,
+                                   err_msg="DINOHead differs after round-trip")
+
+
+class TestDINOv1:
+
+    def _model(self):
+        from dl_techniques.models.dino.dino_v1 import create_dino_v1
+
+        return create_dino_v1("small", image_size=32, patch_size=16,
+                              num_classes=10)
+
+    def test_forward_logits(self):
+        model = self._model()
+        x = np.random.default_rng(2).random((2, 32, 32, 3)).astype("float32")
+        out = model(x, training=False)
+        assert tuple(out.shape) == (2, 10)
+
+    def test_keras_round_trip(self, tmp_path):
+        """Asserts VALUES, not shapes — see TestDINOHead::test_keras_round_trip."""
+        model = self._model()
+        _seed_trainable(model, 4321)
+        x = np.random.default_rng(3).random((2, 32, 32, 3)).astype("float32")
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+        assert np.abs(before).max() > 1e-3, (
+            f"non-vacuity: pre-save output absmax {np.abs(before).max():.3e}"
+        )
+
+        path = os.path.join(str(tmp_path), "dino_v1.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(loaded(x, training=False))
+        # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
+        np.testing.assert_allclose(before, after, atol=1e-4,
+                                   err_msg="DINOv1 differs after .keras round-trip")
+
+
+def _seed_trainable(model, seed):
+    """Assign seeded NON-ZERO values to every TRAINABLE weight.
+
+    Deliberately not `model.weights`: non-trainable weights include
+    normalization moving statistics and (on the v3 rope path) rotation tables,
+    which must not be overwritten with noise. A default init leaves biases at
+    zero, which makes several probes here structurally blind.
+    """
+    rng = np.random.default_rng(seed)
+    for w in model.trainable_weights:
+        w.assign(rng.normal(0.0, 0.3, size=w.shape).astype(w.dtype))
+
+
+# =====================================================================
+# step 7 — dtype-policy coverage (the DINO suite had NEVER had any)
+# =====================================================================
+#
+# `keras.mixed_precision.set_global_policy` is process-global; the restore-safe
+# `dtype_policy` fixture lives in this directory's own conftest.py (the
+# `tests/test_layers/` one is NOT reachable from here — MEASURED, see that
+# file's docstring).
+#
+# EVERY test below asserts the ACTIVE policy inside its own body. Requesting the
+# fixture is not evidence: if the policy silently failed to apply, the body would
+# run under float32 and pass.
+
+
+def _assert_policy_is_active(expected):
+    active = keras.mixed_precision.dtype_policy().name
+    assert active == expected, (
+        f"the dtype_policy fixture requested {expected!r} but the ACTIVE global "
+        f"policy is {active!r} — this test is running in the wrong regime and "
+        "every assertion below is vacuous"
+    )
+    return keras.mixed_precision.dtype_policy()
+
+
+class TestDINOHeadMixedPrecision:
+
+    def test_forward_survives_every_dtype_policy(self, dtype_policy):
+        from dl_techniques.models.dino.dino_v1 import DINOHead
+
+        policy = _assert_policy_is_active(dtype_policy)
+
+        head = DINOHead(in_dim=64, out_dim=32, nlayers=3, hidden_dim=128,
+                        bottleneck_dim=64)
+        head.build((None, 64))
+        assert head.compute_dtype == policy.compute_dtype
+        x = np.random.default_rng(21).random((4, 64)).astype("float32")
+        y = head(x, training=False)
+
+        assert keras.backend.standardize_dtype(y.dtype) == policy.compute_dtype
+        arr = np.asarray(keras.ops.convert_to_numpy(y), dtype="float64")
+        assert np.all(np.isfinite(arr)), f"non-finite head output under {dtype_policy}"
+        assert np.abs(arr).max() > 0.0, (
+            f"the head output is identically zero under {dtype_policy} — this is "
+            "the D-020 silent-collapse signature, not a passing forward test"
+        )
+
+
+class TestDINOv1MixedPrecision:
+
+    def test_forward_survives_every_dtype_policy(self, dtype_policy):
+        from dl_techniques.models.dino.dino_v1 import DINOv1
+
+        policy = _assert_policy_is_active(dtype_policy)
+
+        model = DINOv1(embed_dim=32, depth=2, num_heads=4, patch_size=16,
+                       image_size=32, num_classes=5)
+        x = np.random.default_rng(22).random((2, 32, 32, 3)).astype("float32")
+        out = model(x, training=False)
+
+        assert keras.backend.standardize_dtype(out.dtype) == policy.compute_dtype
+        arr = np.asarray(keras.ops.convert_to_numpy(out), dtype="float64")
+        assert arr.shape == (2, 5)
+        assert np.all(np.isfinite(arr)), f"non-finite DINOv1 logits under {dtype_policy}"
+        # Input-sensitivity: a collapsed / dead forward would be constant.
+        other = np.random.default_rng(23).random((2, 32, 32, 3)).astype("float32")
+        arr2 = np.asarray(keras.ops.convert_to_numpy(model(other, training=False)),
+                          dtype="float64")
+        assert np.abs(arr - arr2).max() > 1e-4, (
+            f"DINOv1's output does not depend on its input under {dtype_policy}"
+        )
+
+
+# ---------------------------------------------------------------------
+# D-020 — DINOHead's L2 normalization must not overflow fp16
+# ---------------------------------------------------------------------
+#
+# THIS TEST MUST NOT BE SHRUNK. The defect is invisible at toy sizes: with
+# bottleneck_dim=64 and default-initialized weights, `sum(x**2)` stays far
+# under fp16's 65504 and the buggy and fixed versions agree to 1e-3. It only
+# fires at the ORDINARY DINO head scale, which is why the dimensions below are
+# the paper's (hidden_dim=2048, bottleneck_dim=256) and why the weights are
+# seeded to a realistic post-training magnitude rather than left at init.
+# MEASURED with the fix reverted: fp16 output absmax 0.0, 100% of entries
+# exactly zero, against float32 absmax 0.2536 on bit-identical weights.
+
+
+def _head_at_dino_scale(seed):
+    from dl_techniques.models.dino.dino_v1 import DINOHead
+
+    head = DINOHead(in_dim=384, out_dim=512, nlayers=3, hidden_dim=2048,
+                    bottleneck_dim=256, norm_last_layer=False)
+    head.build((None, 384))
+    rng = np.random.default_rng(seed)
+    for w in head.trainable_weights:
+        w.assign(rng.normal(0.0, 0.5, size=w.shape).astype("float32"))
+    return head
+
+
+class TestDINOHeadFp16NormalizationOverflow:
+
+    def test_fp16_head_output_is_not_silently_zero_at_dino_scale(self, dtype_policy):
+        if dtype_policy != "mixed_float16":
+            pytest.skip("this guard is specific to mixed_float16")
+        _assert_policy_is_active("mixed_float16")
+
+        head = _head_at_dino_scale(31)
+        x = np.random.default_rng(32).normal(size=(8, 384)).astype("float32")
+        y = np.asarray(keras.ops.convert_to_numpy(head(x, training=False)),
+                       dtype="float64")
+
+        # Establish that this configuration REALLY does overflow fp16 if the
+        # reduction runs in compute_dtype — otherwise the assertion below is
+        # a guard against nothing.
+        pre = x
+        for layer in head.mlp_layers:
+            pre = layer(pre)
+        sumsq = np.square(
+            np.asarray(keras.ops.convert_to_numpy(pre), dtype="float64")
+        ).sum(-1).max()
+        assert sumsq > 65504.0, (
+            f"non-vacuity FAILED: pre-normalization sum(x**2) is only {sumsq:.4g}, "
+            "which fits in fp16, so this test cannot see the overflow it exists "
+            "to catch. Increase bottleneck_dim / the seeded weight scale."
+        )
+
+        assert np.all(np.isfinite(y))
+        assert np.count_nonzero(y) > 0, (
+            "the DINOHead output is EXACTLY ZERO everywhere under mixed_float16 "
+            f"(pre-normalization sum(x**2) = {sumsq:.4g} > 65504). The L2 "
+            "normalization overflowed fp16 and x/inf collapsed to 0 — a silently "
+            "dead projection head with no NaN, no Inf and no error. See D-020."
+        )
+        assert np.abs(y).max() > 1e-3, np.abs(y).max()
+
+    def test_fp16_head_matches_float32_at_dino_scale(self):
+        """The stronger form: same weights, fp16 vs float32, values compared."""
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy("float32")
+            _assert_policy_is_active("float32")
+            x = np.random.default_rng(33).normal(size=(8, 384)).astype("float32")
+            y32 = np.asarray(
+                keras.ops.convert_to_numpy(_head_at_dino_scale(31)(x, training=False)),
+                dtype="float64",
+            )
+
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            _assert_policy_is_active("mixed_float16")
+            y16 = np.asarray(
+                keras.ops.convert_to_numpy(_head_at_dino_scale(31)(x, training=False)),
+                dtype="float64",
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+            assert keras.mixed_precision.global_policy().name == previous
+
+        assert np.abs(y32).max() > 1e-2, np.abs(y32).max()
+        # fp16 accumulates real error over a 2048-wide MLP; the assertion is
+        # about AGREEMENT IN SCALE, not bit-equality. The defect this catches
+        # drives the fp16 arm to exactly 0.0, i.e. a ratio of 0.
+        ratio = float(np.abs(y16).max() / np.abs(y32).max())
+        assert 0.5 < ratio < 2.0, (
+            f"fp16 head output magnitude is {ratio:.4g}x the float32 one "
+            f"(fp16 absmax {np.abs(y16).max():.4g}, float32 absmax "
+            f"{np.abs(y32).max():.4g}). A ratio near 0 is the D-020 overflow."
+        )
+        np.testing.assert_allclose(y16, y32, atol=0.15 * np.abs(y32).max())
+
+
+# ---------------------------------------------------------------------
+# step 7 coverage audit — names in `__all__` with ZERO test coverage
+# ---------------------------------------------------------------------
+#
+# The audit greps the test BODIES (not the filenames) for every name in
+# `dl_techniques.models.dino.__all__`. Two names had zero body hits anywhere
+# under `tests/`: `create_dino_teacher_student_pair` (an exported public factory,
+# named in the README, never constructed by any test) and `ModelVariant`. Both
+# are closed here; the remaining audit result is reported in the step's status.
+
+
+class TestCreateDINOTeacherStudentPair:
+    """`create_dino_teacher_student_pair` had ZERO test references before step 7."""
+
+    def _pair(self, **kwargs):
+        from dl_techniques.models.dino.dino_v1 import (
+            create_dino_teacher_student_pair,
+        )
+
+        defaults = dict(variant="tiny", image_size=32, patch_size=16,
+                        dino_out_dim=64)
+        defaults.update(kwargs)
+        return create_dino_teacher_student_pair(**defaults)
+
+    def test_returns_two_distinct_projection_head_models(self):
+        teacher, student = self._pair()
+        assert teacher is not student
+        assert teacher.name == "dino_teacher"
+        assert student.name == "dino_student"
+        # `include_projection_head=True` + `num_classes=0` -> the DINOHead output
+        # width, NOT a class count. A pair that quietly returned backbones would
+        # give embed_dim here instead.
+        x = np.random.default_rng(41).random((2, 32, 32, 3)).astype("float32")
+        t_out = np.asarray(keras.ops.convert_to_numpy(teacher(x, training=False)))
+        s_out = np.asarray(keras.ops.convert_to_numpy(student(x, training=False)))
+        assert t_out.shape == (2, 64), t_out.shape
+        assert s_out.shape == (2, 64), s_out.shape
+
+    def test_the_two_models_are_independently_initialized(self):
+        """They must be two separate weight sets, not one model returned twice.
+
+        A pair that shared weights would pass every shape assertion and would
+        make an EMA teacher update a no-op — a silent failure, and exactly the
+        thing this factory exists to avoid.
+        """
+        teacher, student = self._pair()
+        assert len(teacher.weights) == len(student.weights)
+        assert not any(tw is sw for tw in teacher.weights for sw in student.weights), (
+            "teacher and student SHARE weight objects — an EMA update would be a "
+            "no-op and the two towers are not independent"
+        )
+        # Independence is also observable: perturbing the student must not move
+        # the teacher's output.
+        x = np.random.default_rng(42).random((2, 32, 32, 3)).astype("float32")
+        before = np.asarray(keras.ops.convert_to_numpy(teacher(x, training=False)))
+        for w in student.trainable_weights:
+            w.assign(np.asarray(w) + 0.25)
+        after = np.asarray(keras.ops.convert_to_numpy(teacher(x, training=False)))
+        np.testing.assert_allclose(before, after, atol=1e-6)
+
+    def test_input_shape_is_refused(self):
+        from dl_techniques.models.dino.dino_v1 import (
+            create_dino_teacher_student_pair,
+        )
+
+        with pytest.raises(TypeError, match="image_size"):
+            create_dino_teacher_student_pair(
+                variant="tiny", image_size=32, patch_size=16, dino_out_dim=64,
+                input_shape=(32, 32, 3),
+            )
+
+
+def test_model_variant_literal_lists_exactly_the_shipped_variants():
+    """`ModelVariant` is exported but was never referenced by any test.
+
+    It is a `Literal` type alias, so nothing enforces it at runtime — which is
+    precisely why it can drift away from the tables it annotates without any
+    test noticing.
+    """
+    import typing
+
+    from dl_techniques.models.dino import ModelVariant
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+
+    assert set(typing.get_args(ModelVariant)) == set(DINOv1.MODEL_VARIANTS)
+    assert set(typing.get_args(ModelVariant)) == {
+        "tiny", "small", "base", "large", "giant"
+    }

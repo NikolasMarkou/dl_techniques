@@ -350,3 +350,74 @@ class TestDINOv3ImageSizeNormalization:
                 depth=1,
                 num_heads=_HEADS,
             )
+
+
+# =====================================================================
+# step 7 (plan-2026-08-01T105809-dc0c402e) — dtype-policy coverage
+# =====================================================================
+#
+# The restore-safe parametrized `dtype_policy` fixture lives in this
+# directory's own conftest.py; `tests/test_layers/conftest.py`'s copy is NOT
+# reachable from `tests/test_models/` (MEASURED). BOTH positional-embedding
+# modes are covered: under `rope` the rotation tables are non-trainable
+# `add_weight` variables, and a dtype regime that mis-types them would be
+# invisible to a learned-path-only test.
+
+
+class TestDINOv3DtypePolicy:
+
+    @pytest.mark.parametrize("pos_type", ["learned", "rope"])
+    def test_forward_under_every_dtype_policy(self, dtype_policy, pos_type):
+        active = keras.mixed_precision.dtype_policy().name
+        assert active == dtype_policy, (
+            f"the dtype_policy fixture requested {dtype_policy!r} but the ACTIVE "
+            f"global policy is {active!r} — this test is running in the wrong "
+            "regime and every assertion below is vacuous"
+        )
+        policy = keras.mixed_precision.dtype_policy()
+
+        model = _tiny_v3(positional_embedding_type=pos_type)
+        x = np.random.default_rng(31).random((2, _IMG, _IMG, 3)).astype("float32")
+        out = model(x, training=False)
+
+        assert keras.backend.standardize_dtype(out.dtype) == policy.compute_dtype
+        arr = np.asarray(keras.ops.convert_to_numpy(out), dtype="float64")
+        assert arr.shape == (2, _DIM)
+        assert np.all(np.isfinite(arr)), (
+            f"non-finite DINOv3/{pos_type} output under {dtype_policy}"
+        )
+
+        # Input-sensitivity: a dead or collapsed forward is constant, and a
+        # constant output passes every shape and finiteness assertion above.
+        other = np.random.default_rng(32).random((2, _IMG, _IMG, 3)).astype("float32")
+        arr2 = np.asarray(keras.ops.convert_to_numpy(model(other, training=False)),
+                          dtype="float64")
+        assert np.abs(arr - arr2).max() > 1e-4, (
+            f"DINOv3/{pos_type}'s output does not depend on its input under "
+            f"{dtype_policy}"
+        )
+
+    def test_rope_rotation_tables_stay_a_real_rotation_under_mixed_float16(
+        self, dtype_policy
+    ):
+        """The rope-specific dtype risk, isolated.
+
+        `RotaryPositionEmbedding` caches cos/sin as NON-trainable weights. Under
+        `mixed_float16` a table stored in fp16 (or zeroed) would leave the
+        forward pass finite and shape-correct while destroying the rotation —
+        exactly the inert-RoPE failure `TestDINOv3RoPE` exists to catch, but in
+        a regime that test never runs in.
+        """
+        if dtype_policy != "mixed_float16":
+            pytest.skip("this guard is specific to mixed_float16")
+        assert keras.mixed_precision.dtype_policy().name == "mixed_float16"
+
+        model = _tiny_v3(positional_embedding_type="rope")
+        rope = model.encoder_layers[0].attention.rope
+        cos = np.asarray(keras.ops.convert_to_numpy(rope.cos_cached), dtype="float64")
+        sin = np.asarray(keras.ops.convert_to_numpy(rope.sin_cached), dtype="float64")
+        assert np.all(np.isfinite(cos)) and np.all(np.isfinite(sin))
+        assert np.abs(cos).max() > 0.5, np.abs(cos).max()
+        # cos^2 + sin^2 == 1 is what makes it a ROTATION rather than an
+        # arbitrary elementwise scaling.
+        np.testing.assert_allclose(cos ** 2 + sin ** 2, 1.0, atol=1e-3)

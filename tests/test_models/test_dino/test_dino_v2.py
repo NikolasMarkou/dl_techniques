@@ -221,3 +221,53 @@ def test_register_tokens_forward():
     assert tuple(np.asarray(out_a).shape) == (2, 10)
     # Position-free registers do not degrade the forward into a constant.
     assert np.any(np.abs(np.asarray(out_a) - np.asarray(out_b)) > 1e-6)
+
+
+# =====================================================================
+# step 7 (plan-2026-08-01T105809-dc0c402e) — dtype-policy coverage
+# =====================================================================
+#
+# The restore-safe parametrized `dtype_policy` fixture lives in this
+# directory's own conftest.py. `tests/test_layers/conftest.py`'s copy is NOT
+# reachable from `tests/test_models/` (MEASURED — pytest resolves conftest by
+# directory ancestry, and these are sibling trees).
+#
+# The test asserts the ACTIVE policy INSIDE its body. Requesting the fixture is
+# not evidence: a policy that silently failed to apply would leave the body
+# running under float32, green.
+
+import keras  # noqa: E402
+
+
+def test_dtype_policy_forward(dtype_policy):
+    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+
+    active = keras.mixed_precision.dtype_policy().name
+    assert active == dtype_policy, (
+        f"the dtype_policy fixture requested {dtype_policy!r} but the ACTIVE "
+        f"global policy is {active!r} — this test is running in the wrong "
+        "regime and every assertion below is vacuous"
+    )
+    policy = keras.mixed_precision.dtype_policy()
+
+    model = create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=10)
+    images = np.random.rand(2, 28, 28, 3).astype("float32")
+    masks = np.zeros((2, 4), dtype=bool)
+
+    out = model([images, masks], training=False)
+    assert keras.backend.standardize_dtype(out.dtype) == policy.compute_dtype
+    arr = np.asarray(keras.ops.convert_to_numpy(out), dtype="float64")
+    assert arr.shape == (2, 10)
+    assert np.all(np.isfinite(arr)), f"non-finite v2 logits under {dtype_policy}"
+
+    # The masked path is v2's version-specific forward branch; run it in the
+    # same regime rather than only the all-False no-op path.
+    out_masked = model([images, np.ones((2, 4), dtype=bool)], training=False)
+    arr_masked = np.asarray(keras.ops.convert_to_numpy(out_masked), dtype="float64")
+    assert np.all(np.isfinite(arr_masked)), (
+        f"non-finite v2 logits on the MASKED path under {dtype_policy}"
+    )
+    assert np.abs(arr - arr_masked).max() > 1e-4, (
+        f"the mask token has no effect under {dtype_policy} — the masked branch "
+        "is dead in this dtype regime"
+    )

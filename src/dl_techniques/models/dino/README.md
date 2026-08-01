@@ -441,10 +441,10 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_loss
 
 | File | Covers |
 |---|---|
-| `tests/test_models/test_dino/test_dino_v1.py` | v1 smoke + forward, `qkv_bias` reaching the attention layer, `norm_last_layer`'s kernel-norm invariant, the `get_last_selfattention` raise, the `image_size % patch_size` guard, cross-version variant-table parity. |
-| `tests/test_models/test_dino/test_model_v1.py` | `DINOHead` and `DINOv1` `.keras` round-trips with numeric assertions. |
-| `tests/test_models/test_dino/test_dino_v2.py` | v2 smoke, the masked forward path, per-position mixed masks, register tokens, `.keras` round-trip. |
-| `tests/test_models/test_dino/test_dino_v3.py` | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), the `get_last_selfattention` raises, `image_size` int-or-tuple. |
+| `tests/test_models/test_dino/test_dino_v1.py` | v1 smoke + forward, `qkv_bias` reaching the attention layer, `norm_last_layer`'s kernel-norm invariant, the `get_last_selfattention` raise, the `image_size % patch_size` guard, cross-version variant-table parity, `DINOHead` and `DINOv1` `.keras` round-trips with numeric assertions, and the D-020 fp16 normalization-overflow guard. |
+| `tests/test_models/test_dino/test_dino_v2.py` | v2 smoke, the masked forward path, per-position mixed masks, register tokens, `.keras` round-trip, dtype-policy forward. |
+| `tests/test_models/test_dino/test_dino_v3.py` | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), `.keras` round-trips at BOTH `positional_embedding_type` values, the `get_last_selfattention` raises, `image_size` int-or-tuple, dtype-policy forward on both positional modes. |
+| `tests/test_models/test_dino/conftest.py` | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
 | `tests/test_models/test_dino/test_dino_package.py` | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
 | `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, and the all-masked / none-masked `iBOTPatchLoss` edges. |
 

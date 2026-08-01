@@ -385,8 +385,26 @@ class DINOHead(keras.layers.Layer):
             else:
                 x = layer(x)
 
-        # L2 normalize before final projection (as in DINO paper)
+        # L2 normalize before final projection (as in DINO paper).
+        #
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-020
+        # The normalization runs in `variable_dtype`, NOT in `compute_dtype`. Do
+        # NOT "simplify" this back to a bare
+        # `keras.utils.normalize(x, axis=-1, order=2)`: under `mixed_float16`
+        # that reduces `sum(x**2)` over `bottleneck_dim` in fp16, and the sum
+        # overflows 65504 long before any individual value does. Overflow gives
+        # `x / inf == 0`, so the head returns EXACTLY ZERO for every sample --
+        # no NaN, no Inf, no error, a silently dead projection head.
+        # MEASURED at the ordinary DINO head scale (in_dim=384, hidden=2048,
+        # bottleneck=256, weights ~N(0, 0.5)): pre-normalize `sum(x**2)` reaches
+        # 1.649e+09, fp16 output absmax 0.0 (100% of entries exactly zero) vs
+        # float32 absmax 0.2536 on bit-identical weights.
+        # `variable_dtype` is float32 under `mixed_float16` and equals
+        # `compute_dtype` under float32/float64, so this is a no-op outside
+        # mixed precision (float32 outputs are unchanged).
+        x = keras.ops.cast(x, self.variable_dtype)
         x = keras.utils.normalize(x, axis=-1, order=2)
+        x = keras.ops.cast(x, self.compute_dtype)
 
         # Final projection
         x = self.last_layer(x)
