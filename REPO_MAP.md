@@ -2,19 +2,19 @@
 
 **What this file is.** A router and a verified skeleton. It tells you *where code of a
 given kind lives*, *how the pieces are wired together*, and *which of the repo's many
-in-tree docs answers your question*. Every filesystem path printed here resolved when
-this file was written; every number printed here lives in exactly one table together
-with the shell command that re-derives it.
+in-tree docs answers your question*. Every filesystem path printed here resolved when this
+file was written, with one declared exception: the stale-doc ledger in Part C names paths
+precisely *because* they do not resolve, and each carries an explicit `allow-dead-path`
+directive above that table. Every number lives in exactly one table, beside the command
+that re-derives it.
 
 **What this file deliberately is NOT.** It is not a replacement for the 20 in-tree
 `CLAUDE.md` files — those are the authority on their own subtree, and this map points at
 them rather than restating them. It is not an API reference: it will not tell you what any
 individual layer, loss or model does, only which document will. Restating subtree content
 here is exactly how the repo's older maps drifted into describing code that no longer
-exists, so the omission is the design, not an oversight.
-
-Parts B (the navigation spine) and C (conventions, tests, doc routing, and the stale-doc
-ledger) follow below.
+exists, so the omission is the design, not an oversight. Parts B (the navigation spine)
+and C (conventions, tests, doc routing, the stale-doc ledger) follow below.
 
 ---
 
@@ -62,7 +62,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 283 | **The largest package.** 20 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 270 | **The second largest.** 73 self-contained model packages in roughly eight architecture families. Most expose a `create_*` factory; a minority do not. |
+| **`src/dl_techniques/models/`** | 270 | **The second largest.** 73 self-contained model packages, one per architecture. Fewer than a third export a `create_*` factory from their package init — do not assume one exists; see Part C. |
 | `src/dl_techniques/losses/` | 39 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 35 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -143,9 +143,14 @@ Grepping for `_REGISTRY` will not find all of the surface, though. Three variant
   `src/dl_techniques/layers/heads/vlm/factory.py`. Task heads are selected by *domain
   first*, then by key.
 
-And one deliberate absence: `src/dl_techniques/layers/transformers/` has **no** factory
-and no registry. Transformer blocks are direct-imported by class, by design. Do not
-"fix" this by adding a registry.
+And one deliberate absence: `src/dl_techniques/layers/transformers/` has **no factory
+module and no registry** — transformer blocks are direct-imported by class, by design.
+It is not factory-free, though:
+`src/dl_techniques/layers/transformers/vision_encoder.py` and
+`src/dl_techniques/layers/transformers/text_encoder.py` each define a family of
+`create_*_encoder` helpers, all re-exported from the package init. Those are preset
+constructors for two composite encoders, not a keyed dispatcher, and they are the only
+`create_*` in the package. Do not "fix" the absence by adding a registry.
 
 ## The model / trainer / test triangle
 
@@ -182,8 +187,11 @@ top level.
 `tests/test_models/test_lewm.py`. Any directory-to-directory comparison will report it as
 untested; it is not.
 
-The remaining models with no trainer genuinely have none — they are exercised only by
-tests. That is normal here and not a defect to fix.
+Once those four are accounted for, 27 model packages have neither a same-named directory
+under `src/train/` nor any `models.<name>` import anywhere under it (command in the
+Numbers table). That measures reachability from `src/train/` and nothing else — this map
+did **not** check whether those 27 are covered by tests, so do not read "no trainer" as
+"tested instead". Having no trainer is normal here, not a defect to fix.
 
 ## Entry points
 
@@ -282,27 +290,22 @@ thing you will meet and should not be surprised by.
   fixtures too: both `tests/conftest.py` and `tests/test_layers/conftest.py`
   document themselves in reST. Read the root `CLAUDE.md`'s "Google-style
   docstrings" line as a preference for new code, not a description of the tree.
-- **The factory convention is not universal.** 16 of the 73 model packages
-  expose no top-level `create_*` at all; you construct their classes directly.
-  Check before assuming a factory exists.
+- **The factory convention is not universal, and the two ways of measuring it
+  disagree sharply.** 16 of the 73 model packages define no `create_*` function
+  *anywhere* in the package. But defining one and exporting one are different
+  things: only 23 of the 73 name a `create_*` in their own `<pkg>/__init__.py`
+  (concretely `src/dl_techniques/models/vit/__init__.py`), and that is the
+  figure a caller actually experiences; the rest bury the factory in a submodule
+  you must know to import. Read the package init before assuming importability.
 
 **Before writing a new layer or model, read
 `research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
 it as mandatory and at 3105 lines it is among the longest documents in the repo.
-Its load-bearing rules, so you know what you are agreeing to:
-
-- **Create/build separation** — `__init__` may only create sub-layers and store
-  config; it must never call `add_weight` or look at `input_shape`. `build()`
-  creates weights, explicitly builds each sub-layer, and ends with
-  `super().build(input_shape)`.
-- **`compute_output_shape()` is required on every custom layer**, and must work
-  from stored config on an unbuilt layer — not from weight shapes.
-- **Create all sub-layers in `__init__`; gate USAGE in `call()`, not CREATION.**
-  Conditionally creating a sub-layer makes the weight set depend on flags, which
-  breaks weight loading and transfer.
-- **Config is data, not code** — constructor arguments must be plain
-  serializable values, because `get_config()` has to survive a `.keras`
-  round-trip.
+Four of its rules are load-bearing and will reject your layer if broken:
+create/build separation, a mandatory `compute_output_shape()`, creating every
+sub-layer unconditionally (gate usage in `call()`, never creation), and config
+being plain serializable data. Read them there — restating them here is how a
+map goes stale.
 
 ## Tests
 
@@ -370,7 +373,8 @@ the map's job is to route you to the right one, not to paraphrase it.
 | How are model packages meant to be structured? | `src/dl_techniques/models/CLAUDE.md` |
 | How do I add or run a trainer? | `src/train/CLAUDE.md`, then that trainer's own `README.md` |
 | How do the Streamlit apps split GUI from core? | `src/applications/CLAUDE.md` |
-| Which loss / metric / optimizer / callback should I use? | the `CLAUDE.md` in `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/`, `src/dl_techniques/callbacks/` |
+| Which loss / metric / optimizer should I use? | the `CLAUDE.md` in `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` |
+| Which callback should I use — or where is it? | **Part B, "Where the callbacks actually are", first**; only then `src/dl_techniques/callbacks/CLAUDE.md`, which documents that one package and not the callbacks outside it |
 | How do I analyze a trained model? | `src/dl_techniques/analyzer/CLAUDE.md` |
 | What helpers already exist (masking, export, tensors)? | `src/dl_techniques/utils/CLAUDE.md` — check here before writing a helper |
 | What datasets can I load? | `src/dl_techniques/datasets/CLAUDE.md` |
@@ -399,24 +403,31 @@ table are named precisely *because* they do not resolve.
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
-| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: 16 of the 73 model packages have no top-level `create_*`. Command in the Numbers table |
+| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: only 23 of the 73 model packages export a `create_*` from their package init, and 16 define none anywhere. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
 
-Two of the sources above — `plans/SYSTEM.md` and the plan directories it
-summarizes — are gitignored and will not be in your clone. The root `CLAUDE.md`
-is tracked, and the claims this ledger attributes to it were corrected in
-`a3685599`, the commit that immediately follows the one adding this file.
+Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
+are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
+claims this ledger attributes to it were corrected in `a3685599`, just after this file.
 
-A closing note on dependencies, since the routing table defers to it: `pyproject.toml`
-and `requirements.txt` are two sources of truth that disagree — most visibly on the
-numpy pin. Install from `pyproject.toml`; treat `requirements.txt` as advisory.
+A closing note on dependencies, since the routing table defers to it. `pyproject.toml`
+and `requirements.txt` never *contradict* each other on a shared pin — wherever both name
+a package, `requirements.txt` is strictly narrower and fully contained (numpy `>=1.22,<3.0`
+against `~=2.0.2`), i.e. redundancy, not conflict. The divergence is coverage:
+`requirements.txt` asks for `tensorflow[and-cuda]` where `pyproject.toml` asks for plain
+`tensorflow`, and adds `tensorflow-datasets`, `tiktoken` and `datasets`, which
+`pyproject.toml` omits although `src/dl_techniques/datasets/vision/imagenet.py`,
+`src/dl_techniques/datasets/nlp.py` and `src/dl_techniques/utils/tokenizer.py` import
+them. `pyproject.toml` is authoritative for the library API; a bare `pip install -e .`
+will not run the dataset loaders or the tokenizer, nor put you on a GPU wheel.
 
 ---
 
 ## Numbers, and how to re-derive them
 
-This is the only place in this document where a number is *stated*. Anything numeric in
-the prose above is a Value from this table. Run these from the repo root.
+Every *digit* in the prose above is a Value from this table, mechanically enforced. That
+enforcement cannot see a quantity spelled out in words ("fewer than a third"), so those
+are kept rare and each is decidable from a Value here. Run these from the repo root.
 
 | Quantity | Value | Command |
 |---|---|---|
@@ -481,7 +492,9 @@ the prose above is a Value from this table. Run these from the repo root.
 | Library modules using a Google-style `Args:` block | 260 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 79 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Model packages with no top-level `create_*` | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
+| Model packages with no `create_` function ANYWHERE in the package | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
+| Model packages naming a `create_` in their own package init (what a caller sees) | 23 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 27 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |
