@@ -78,7 +78,11 @@ class SCUNet(keras.Model):
         head_dim: Dimension of each attention head. Defaults to 32.
         window_size: Size of attention window. Defaults to 8.
         stochastic_depth_rate: Maximum stochastic depth rate. Defaults to 0.0.
-        input_resolution: Expected input resolution for optimization. Defaults to 256.
+        input_resolution: Expected input resolution, forwarded to every
+            ``SwinConvBlock`` (halved per stage). **Advisory only** — since
+            plan ``plan-2026-07-31T210633-b63a35aa`` step 9 it changes no
+            attention geometry, and the model accepts any static ``(H, W)``
+            regardless of it. Defaults to 256.
         **kwargs: Additional keyword arguments for Model base class.
     """
 

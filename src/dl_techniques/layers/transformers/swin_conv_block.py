@@ -86,8 +86,14 @@ class SwinConvBlock(keras.layers.Layer):
     :type drop_path_rate: float
     :param block_type: ``'W'`` for regular or ``'SW'`` for shifted windows.
     :type block_type: str
-    :param input_resolution: Optional spatial resolution hint; if
-        ``<= window_size``, forces regular windows.
+    :param input_resolution: Optional spatial resolution hint. **Advisory
+        only** — it is stored and serialized but changes nothing. It used to
+        force regular windows when ``<= window_size``; that was removed because
+        the hint is never cross-checked against the real feature map, so a hint
+        smaller than the tensor silently dropped SW-MSA. Whether the shift
+        applies is decided per call by
+        :meth:`SwinTransformerBlock._resolve_shift_size` from the actual
+        ``(H, W)``. See the ``D-004`` block in ``__init__``.
     :type input_resolution: Optional[int]
     :param mlp_ratio: MLP expansion ratio. Default: 4.0.
     :type mlp_ratio: float
@@ -174,14 +180,47 @@ class SwinConvBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # If input resolution is too small, use regular window attention
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
+        # `input_resolution` is ADVISORY. It is stored, serialized and logged,
+        # and it decides NOTHING about the attention geometry.
+        #
+        # WHAT WAS HERE, and why it is gone: this block used to downgrade
+        # `block_type` "SW" -> "W" whenever `input_resolution <= window_size`.
+        # Two measurements retired it (CPU, HEAD `c5d8ad7e`):
+        #   * REDUNDANT in the honest case. Weight-matched against a plain
+        #     `block_type="W"` block at `(res, ws)` in `(4,8) (8,8) (3,4)
+        #     (4,4)`: `maxdiff 0.000000e+00` at 4 of 4. The base block's
+        #     `SwinTransformerBlock._resolve_shift_size(x)` already drops the
+        #     shift on the SAME rule -- evaluated on the REAL tensor.
+        #   * WRONG when the hint LIES. `input_resolution` is never
+        #     cross-checked against `x.shape`. At `input_resolution=4,
+        #     window_size=8` on a real 16x16 map (2 windows wide) the shift was
+        #     dropped anyway: `maxdiff 6.526413e-01` against the honest block.
+        #     Shipped consequence: `SCUNet._create_stage_blocks` forwards the
+        #     hint blind, halved per stage, so `SCUNet(input_resolution=64,
+        #     window_size=8)` fed 128x128 lost SW-MSA at its bottleneck --
+        #     `maxdiff 1.562450e+00` on the model output.
+        #
+        # WHAT NOT TO DO:
+        #   * Do NOT re-add the downgrade, here or anywhere else. A
+        #     construction-time geometry hint cannot decide a runtime geometry
+        #     question; only `x.shape` can.
+        #   * Do NOT "fix" it by cross-checking `input_resolution` against
+        #     `x.shape` in `call()` and raising. That RELOCATES a guard into a
+        #     forward path for a value that is already unnecessary -- the
+        #     runtime rule is total without it.
+        #   * Do NOT delete `input_resolution` from the signature or from
+        #     `get_config()`. `SCUNet` passes it at 7 sites and it is a live
+        #     serialized key; removing it breaks round-trip on saved models.
+        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
         self.effective_block_type = self.block_type
         if self.input_resolution is not None and self.input_resolution <= self.window_size:
-            original_block_type = self.block_type
-            self.effective_block_type = "W"
-            logger.info(
-                f"Input resolution {self.input_resolution} <= window_size {self.window_size}, "
-                f"switching from '{original_block_type}' to regular window attention 'W'"
+            logger.debug(
+                f"input_resolution {self.input_resolution} <= window_size "
+                f"{self.window_size}; this hint is ADVISORY and does not change "
+                f"block_type '{self.block_type}'. Whether the shift applies is "
+                f"decided per call from the real feature map by "
+                f"SwinTransformerBlock._resolve_shift_size."
             )
 
         # CREATE all sub-layers in __init__ (they are unbuilt)

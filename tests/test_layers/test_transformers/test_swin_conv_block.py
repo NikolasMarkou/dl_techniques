@@ -1,15 +1,27 @@
 """
-Test suite for SwinMLP layer.
+Test suite for ``SwinConvBlock`` -- plus a legacy ``SwinMLP`` suite.
 
-This file should be placed in tests/test_layers/test_swin_mlp.py
+.. note::
+
+   Until the H-15 work below, this module contained **only** the ``SwinMLP``
+   suite (a near-copy of ``tests/test_layers/test_ffn/test_swin_mlp.py``), so
+   its filename asserted a coverage of ``SwinConvBlock`` that did not exist:
+   ``grep -n 'effective_block_type\\|input_resolution'`` over this file returned
+   **zero** hits, and ``grep -rl SwinConvBlock tests/`` reached only the two
+   SCUNet model modules. The ``TestSwinConvBlockInputResolutionIsAdvisory``
+   class at the bottom is the first direct coverage of ``SwinConvBlock`` in
+   ``tests/``. The ``SwinMLP`` classes are left where they are; moving them is
+   out of scope.
 """
 import pytest
 import numpy as np
 import keras
 import tempfile
 import os
+from keras import ops
 
 from dl_techniques.layers.ffn.swin_mlp import SwinMLP
+from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 
 class TestSwinMLP:
@@ -426,3 +438,171 @@ class TestSwinMLPEdgeCases:
         # Check that all weights are 2D (kernels, not 1D biases)
         for weight in layer.weights:
             assert len(weight.shape) == 2
+
+# ---------------------------------------------------------------------------
+# H-15 / G-04(b1): ``SwinConvBlock.input_resolution`` is an ADVISORY hint
+# ---------------------------------------------------------------------------
+#
+# ``SwinConvBlock.__init__`` used to downgrade ``block_type`` ``"SW" -> "W"``
+# whenever ``input_resolution <= window_size``. Two measured facts retired it:
+#
+#   * it is bit-identically REDUNDANT in the honest case (the hint matches the
+#     real extent) -- ``SwinTransformerBlock._resolve_shift_size`` already
+#     applies the same rule, on the REAL tensor; and
+#   * it is ACTIVELY WRONG when the hint lies, because ``input_resolution`` is
+#     never cross-checked against ``x.shape``.
+#
+# The measured figures live beside the assertions that pin them.
+
+_CD, _TD, _HD = 16, 16, 8
+
+#: ``(input_resolution, window_size)`` cells where the hint TELLS THE TRUTH:
+#: the block is fed a map of exactly ``input_resolution`` square. This is
+#: invariant **I-D** -- removing the downgrade must not move numerics here.
+#:
+#: PROBE-9 (dead-component: force ``_resolve_shift_size``'s single-window rule
+#: never to fire, so a real roll + region mask reaches the honest geometry)
+#: takes **3 of these 4** cells RED on the ``maxdiff`` assertion. ``(4, 8)``
+#: stays GREEN and is therefore NOT discriminating: ``H=4`` pads up to ``ws=8``,
+#: giving ``pad_h == 4 == shift``, the enumerated ``pad == shift`` degenerate
+#: family. It is kept because the plan names it as an I-D cell, not because it
+#: can see a shift.
+_HONEST_GEOMETRIES = ((4, 8), (8, 8), (3, 4), (4, 4))
+
+
+def _conv_block(ws, block_type, input_resolution):
+    return SwinConvBlock(
+        conv_dim=_CD, trans_dim=_TD, head_dim=_HD, window_size=ws,
+        block_type=block_type, input_resolution=input_resolution,
+        drop_path_rate=0.0,
+    )
+
+
+def _weight_matched_maxdiff(block_a, block_b, x):
+    """Run two blocks on identical WEIGHTS and identical input.
+
+    The weight copy is not optional: two independently constructed blocks draw
+    different initializers, so an un-matched A/B measures the initializer, not
+    the geometry. The match is ASSERTED, not assumed.
+    """
+    tx = ops.convert_to_tensor(x)
+    block_a(tx)
+    block_b(tx)
+    block_b.set_weights(block_a.get_weights())
+    wa = [np.asarray(w) for w in block_a.get_weights()]
+    wb = [np.asarray(w) for w in block_b.get_weights()]
+    assert len(wa) == len(wb) and len(wa) > 0
+    for u, v in zip(wa, wb):
+        assert np.array_equal(u, v), "weight match failed; the A/B is invalid"
+    ya = np.asarray(block_a(tx))
+    yb = np.asarray(block_b(tx))
+    return float(np.max(np.abs(ya - yb)))
+
+
+class TestSwinConvBlockInputResolutionIsAdvisory:
+    """``input_resolution`` is accepted, stored and serialized -- and inert."""
+
+    @pytest.mark.parametrize("res,ws", _HONEST_GEOMETRIES)
+    def test_honest_hint_is_bit_identical_to_a_plain_window_block(self, res, ws):
+        """**I-D**: at an HONEST hint the shifted block matches a regular one.
+
+        The comparison is against an explicitly constructed ``block_type="W"``
+        block -- i.e. against exactly what the removed downgrade used to
+        produce -- so the cell keeps discriminating after the removal. A
+        ``SW``-vs-``SW`` comparison would degenerate into an identity check.
+
+        Measured at HEAD ``c5d8ad7e``: ``maxdiff 0.000000e+00`` at 4/4 cells.
+        """
+        rng = np.random.default_rng(1234)
+        x = rng.normal(size=(2, res, res, _CD + _TD)).astype("float32")
+
+        shifted = _conv_block(ws, "SW", res)
+        regular = _conv_block(ws, "W", None)
+
+        # Precondition, and the H-15 contract: the hint no longer suppresses
+        # the shift at construction. Without this the bit-identity below is
+        # trivially true and proves nothing.
+        assert shifted.effective_block_type == "SW"
+        assert shifted.trans_block.shift_size == ws // 2
+
+        assert _weight_matched_maxdiff(shifted, regular, x) == 0.0
+
+    def test_lying_hint_no_longer_drops_the_shift(self):
+        """A hint that DISAGREES with the real map must not suppress SW-MSA.
+
+        ``input_resolution=4`` with ``window_size=8`` on a real ``16x16`` map
+        (2 windows wide) is the counterexample: the runtime rule
+        ``min(H, W) <= window_size`` is FALSE here, so the shift belongs.
+
+        Measured at HEAD ``c5d8ad7e``, before the removal: the hinted block
+        differed from the honest one by ``6.526413e-01`` -- the shift was
+        dropped anyway, because ``input_resolution`` is never cross-checked
+        against ``x.shape``.
+        """
+        rng = np.random.default_rng(1234)
+        x = rng.normal(size=(2, 16, 16, _CD + _TD)).astype("float32")
+
+        hinted = _conv_block(8, "SW", 4)
+        honest = _conv_block(8, "SW", None)
+
+        assert hinted.trans_block.shift_size == honest.trans_block.shift_size == 4
+        assert _weight_matched_maxdiff(hinted, honest, x) == 0.0
+
+    def test_undersized_hint_no_longer_loses_sw_msa_inside_scunet(self):
+        """The shipped path: ``SCUNet`` forwards the hint blind.
+
+        ``SCUNet._create_stage_blocks`` halves ``input_resolution`` per stage
+        with no reference to the tensor, so a model built at one resolution and
+        fed a larger image used to lose SW-MSA at every stage whose HINT fell
+        to ``<= window_size``.
+
+        Measured at HEAD ``c5d8ad7e``: ``SCUNet(input_resolution=64,
+        window_size=8)`` fed ``128x128`` differed from the same weights under
+        an honest hint by ``1.562450e+00``, from the BOTTLENECK stage alone
+        (hint ``64//8 = 8 <= 8``; real grid ``16``, i.e. 2 windows).
+
+        NOT the briefed geometry: the plan predicted the DEFAULT
+        ``input_resolution=256`` loses SW-MSA "at every stage". That is
+        **false** -- measured, at ``ws=8`` the default's deepest hint is
+        ``256//8 = 32 > 8``, so 0 of 7 declared-``SW`` blocks were downgraded.
+        The downgrade needed ``input_resolution <= 64`` at ``ws=8``.
+        """
+        from dl_techniques.models.scunet.model import SCUNet
+
+        cfg = dict(in_nc=3, config=[2] * 7, dim=16, head_dim=8, window_size=8,
+                   stochastic_depth_rate=0.0)
+        rng = np.random.default_rng(3)
+        x = ops.convert_to_tensor(
+            (rng.normal(size=(1, 128, 128, 3)) * 0.5).astype("float32"))
+
+        undersized = SCUNet(input_resolution=64, **cfg)
+        honest = SCUNet(input_resolution=512, **cfg)
+        undersized(x)
+        honest(x)
+        honest.set_weights(undersized.get_weights())
+
+        effs = [b.effective_block_type
+                for b in undersized._flatten_layers()
+                if isinstance(b, SwinConvBlock) and b.block_type == "SW"]
+        assert effs == ["SW"] * 7, f"a declared SW stage was downgraded: {effs}"
+
+        ya = np.asarray(undersized(x))
+        yb = np.asarray(honest(x))
+        assert float(np.max(np.abs(ya - yb))) == 0.0
+
+    def test_input_resolution_is_still_an_accepted_config_key(self):
+        """The key stays in the public surface: ``SCUNet`` passes it and
+        ``get_config()`` must round-trip it. Only its BEHAVIOUR was removed."""
+        block = _conv_block(8, "SW", 4)
+        config = block.get_config()
+        assert config["input_resolution"] == 4
+
+        restored = SwinConvBlock.from_config(config)
+        assert restored.input_resolution == 4
+        assert restored.block_type == "SW"
+        assert restored.effective_block_type == "SW"
+        assert restored.trans_block.shift_size == 4
+
+        # Still validated as a value, even though it is advisory.
+        with pytest.raises(ValueError, match="input_resolution must be positive"):
+            _conv_block(8, "SW", 0)

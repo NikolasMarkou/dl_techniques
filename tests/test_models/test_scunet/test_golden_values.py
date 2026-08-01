@@ -52,18 +52,30 @@ differs by the amount above and is guarded by nothing.
 What this guard does NOT cover
 ------------------------------
 
-The D-006 single-window rule (``H == window_size`` -> ``shift_size = 0``) is
-**structurally unreachable from SCUNet** and no tolerance here can change that.
-``swin_conv_block.py:177-185`` downgrades ``block_type`` ``"SW" -> "W"``
-whenever ``input_resolution <= window_size``, so the block never carries a shift
-for the rule to suppress. Measured over all 14 ``SwinConvBlock``s of this
-config: at ``input_resolution=256`` the smallest stage is 32 (no ``H <= ws``
-stage exists at all), and at ``input_resolution=64`` the 8x8 bottleneck is
-downgraded before construction. Instrumenting ``_resolve_shift_size`` across a
-full forward pass returns "resolved shift differs from configured shift" for
-**zero** of the 28 blocks. That rule's shipped consumer is
-``models/swin_transformer`` alone, and its guard lives in
-``tests/test_models/test_swin_transformer/test_golden_values.py``.
+These references pin the OUTPUT, so they are silent about which mechanism
+produced it. In particular they cannot distinguish "the shift was never
+configured" from "the shift was configured and then resolved away at runtime" —
+and this config has now been through both.
+
+.. note::
+
+   **This paragraph was rewritten at plan ``plan-2026-07-31T210633-b63a35aa``
+   step 9 (H-15), because the code it described is gone.** It used to say the
+   D-006 single-window rule (``H == window_size`` -> ``shift_size = 0``) was
+   *structurally unreachable from SCUNet*, on the grounds that
+   ``SwinConvBlock.__init__`` downgraded ``block_type`` ``"SW" -> "W"``
+   whenever ``input_resolution <= window_size`` so no shift ever existed for
+   the rule to suppress. That downgrade was removed (it lied whenever the hint
+   disagreed with the real feature map). Re-measured against the shipped code
+   at this exact config: instrumenting ``_resolve_shift_size`` across a full
+   forward pass now returns "resolved shift differs from configured shift" for
+   **2 of the 28** blocks reached — the ``8x8`` bottleneck pair, which carries
+   ``shift_size=4`` and resolves to ``0``. The rule is therefore REACHABLE from
+   SCUNet, and this module's references are among its guards.
+
+   The references below did **not** move: the resolved shift is still ``0`` at
+   those two blocks, which is exactly invariant **I-D** (removing the downgrade
+   is bit-identical at every honest geometry) holding at the model level.
 """
 
 import keras
