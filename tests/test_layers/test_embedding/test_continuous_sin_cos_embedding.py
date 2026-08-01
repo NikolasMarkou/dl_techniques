@@ -37,6 +37,11 @@ _G10_COORD_HI = 64.0
 # Max abs error vs a float64 numpy reference, MEASURED at the [0, 64) regime above on
 # CPU with dim=64, ndim=3: float32 8.34e-07, float64 4.36e-07, mixed_float16 1.28e-02,
 # mixed_bfloat16 9.81e-02. Each entry carries ~1.5-2.5x headroom over its measurement.
+# The fp16/bf16 rows are a property OF THIS COORD REGIME and are emphatically NOT a
+# claim that this layer "works" at those policies -- at coords in [0, 2000) the same
+# configuration is wrong by 0.47 / 1.99 on a [-1, 1]-ranged output. That limitation is
+# pinned executably by `test_fp16_large_position_error_bound_is_pinned` below and
+# documented in the layer's own class docstring.
 # A SINGLE policy-wide tolerance is rejected on purpose: the span is 5 orders of
 # magnitude, so a bound loose enough for bfloat16 is vacuous at float32.
 # (float64 does not reach ~1e-16 because `omega` is still computed at float32 —
@@ -46,6 +51,18 @@ _G10_TOL = {
     "float64": 1.0e-06,
     "mixed_float16": 3.0e-02,
     "mixed_bfloat16": 1.5e-01,
+}
+
+# H-10: the LARGE-POSITION (coords in [0, 2000)) error band, MEASURED against the
+# shipped code on CPU at dim=64, ndim=3: mixed_float16 0.4745, mixed_bfloat16 1.9859
+# (8-seed sweep 0.446-0.483 and 1.964-1.997). The bands below sit either side of those
+# measurements. NOTE these are ~2.8x and ~3.1x WORSE than the figures an EXPLORE
+# prototype produced (0.17 / 0.63): the prototype did not narrow `coords` at the
+# autocast boundary, so it measured only the `omega` narrowing. A plan's predicted
+# figure is not a measurement of the shipped path.
+_G10_LARGE_POS_BOUND = {
+    "mixed_float16": (0.30, 0.60),
+    "mixed_bfloat16": (1.50, 2.00),
 }
 
 # I-B: float32 output must stay BIT-IDENTICAL to HEAD. Captured on CPU at HEAD 5b1a966e
@@ -243,6 +260,51 @@ class TestContinuousSinCosEmbed:
         assert keras.backend.standardize_dtype(eager.dtype) == layer.compute_dtype
         assert keras.backend.standardize_dtype(traced.dtype) == layer.compute_dtype
         np.testing.assert_array_equal(eager_np, traced_np)
+
+    @pytest.mark.parametrize(
+        "dtype_policy", ["mixed_float16", "mixed_bfloat16"], indirect=True)
+    def test_fp16_large_position_error_bound_is_pinned(self, dtype_policy):
+        """H-10: the reduced-precision LARGE-POSITION limitation, made executable.
+
+        REGIME (a bound without its corpus is meaningless): coords drawn uniformly
+        from [0, 2000), `dim=64, ndim=3, max_wavelength=10000`, CPU, compared against
+        the float64 oracle built from the ORIGINAL float32 coordinates.
+
+        The bound is TWO-SIDED on purpose. The LOWER edge is the non-vacuous half: it
+        asserts the limitation is REAL and would go red if anyone ever claimed (or
+        made) this layer accurate at fp16/bf16 for large positions -- including via
+        the partial `autocast=False` mitigation, which measures 0.16 / 0.56 here and
+        trips the lower edge. The UPPER edge pins the magnitude, and goes red for a
+        dead `call()` (a zeros return measures ~1.0 at both policies).
+
+        This is NOT a claim that fp16 works. It is the opposite: the documented
+        failure is now something the suite executes rather than something a docstring
+        merely asserts. The cause is the AUTOCAST BOUNDARY, before `call()` runs.
+        """
+        lo, hi = _G10_LARGE_POS_BOUND[dtype_policy]
+        with tf.device("/CPU:0"):
+            layer = ContinuousSinCosEmbed(dim=64, ndim=3)
+            coords = _g10_coords((2, 5, 3), 2000.0)
+            # FLOAT32 coords ON PURPOSE, not pre-cast to compute_dtype. This is the
+            # test's whole point: the caller hands over full float32 precision and
+            # Keras narrows it at the AUTOCAST BOUNDARY anyway. Pre-casting here would
+            # make the lower edge unfalsifiable -- the error would be pinned by the
+            # test's own input, so a layer that had somehow avoided the narrowing
+            # would still pass. (Measured: it does not help; float32-in gives exactly
+            # the same 0.4745 as fp16-in.)
+            x = keras.ops.convert_to_tensor(coords)
+            out = layer(x)
+            actual = np.asarray(
+                keras.ops.convert_to_numpy(tf.cast(out, tf.float64)), dtype=np.float64)
+
+        reference = _g10_reference_f64(coords.astype(np.float64), dim=64, ndim=3)
+        err = float(np.max(np.abs(actual - reference)))
+        assert lo < err <= hi, (
+            f"policy {dtype_policy}, coords in [0, 2000): max abs error {err:.6f} "
+            f"left the pinned band ({lo}, {hi}]. Below the band means the documented "
+            f"limitation no longer holds as written (update the class docstring "
+            f"note); above it means something else broke."
+        )
 
     # ---- serialization (continued) ----------------------------------
 

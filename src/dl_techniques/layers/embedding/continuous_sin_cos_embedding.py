@@ -139,6 +139,45 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
     :raises ValueError: If ``dim`` is too small for the given ``ndim``.
     :raises ValueError: If input parameters are invalid.
     :raises ValueError: If input shape is invalid.
+
+    .. note::
+       **Accuracy limitation at reduced-precision policies, and at float64.**
+       The layer RUNS at ``float32``, ``mixed_float16``, ``float64`` and
+       ``mixed_bfloat16``, but running is not the same as being correct.
+
+       *Large positions under fp16/bf16.* Measured on CPU against a float64 oracle
+       with ``dim=64, ndim=3, max_wavelength=10000`` and coordinates drawn from
+       ``[0, 2000)`` -- the output, a ``[-1, 1]``-ranged quantity, is wrong by up to
+       **0.47** at ``mixed_float16`` and up to **1.99** at ``mixed_bfloat16``
+       (8-seed sweep: 0.45-0.48 and 1.96-2.00). At bfloat16 that is nearly the full
+       output range, i.e. the embedding carries essentially no usable position
+       information there. This is NOT fixable inside ``call()``: Keras narrows
+       ``coords`` at the AUTOCAST BOUNDARY, before ``call()`` runs (measured: a
+       coordinate of ``1934.448`` arrives as ``1934.0``), and the ``omega`` weight
+       READ is autocast to the compute dtype for the same reason. The widened working
+       dtype in ``call()`` therefore starts from operands that have already lost the
+       precision. The error is driven by the MAGNITUDE of the coordinates, not by
+       the layer: the same configuration over ``[0, 64)`` is roughly 40x more
+       accurate at both policies (those per-policy figures live with the tolerance
+       table of the test that uses them, not restated here).
+
+       *Remedies, as measured -- do not assume, they do not all work.* Passing
+       ``coords`` as float32 does NOT help (identical 0.47 at fp16: Keras narrows
+       the input at the layer boundary regardless of what the caller hands it).
+       Constructing the layer with ``autocast=False`` and float32 coordinates helps
+       but does not fix it -- 0.47 -> 0.16 (fp16) and 1.99 -> 0.56 (bf16) at the
+       regime above -- because the ``omega`` read is still narrowed. A real fp16
+       long-sequence consumer should keep this layer OUT of the reduced-precision
+       region (run it under a float32 policy and cast the result), which is
+       UNTESTED here.
+
+       *float64 frequency ceiling.* ``build()`` computes the frequency table at
+       float32 at every policy, so a ``float64``-policy caller gets float32-accurate
+       frequencies: max relative deviation from the float64 frequencies is
+       ``2.79e-07`` (at ``dim=64, ndim=3, max_wavelength=10000``; ``3.02e-07`` at
+       ``max_wavelength=1e5``). Widening it was measured and DELIBERATELY REJECTED:
+       it moves the float32 output at 10 of 10 configurations swept, and float32
+       bit-identity is a hard invariant for this layer.
     """
 
     def __init__(
@@ -255,9 +294,13 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         #
         # Do NOT "simplify" this to `ops.cast(coords, self.compute_dtype)` either:
         # that NARROWS the sinusoid math to fp16/bf16 and measured ~2.4x worse against
-        # a float64 reference at large positions (0.41 vs 0.17 at fp16). The
-        # conditional below IS the never-narrow rule, stated rather than inherited
-        # from `variable_dtype`.
+        # a float64 reference at large positions. (Those two prototype figures used to
+        # be quoted here; they were re-derived against the SHIPPED path in step 7 and
+        # did NOT reproduce -- the prototype never narrowed `coords` at the autocast
+        # boundary. The measured shipped numbers now have exactly one home, the class
+        # docstring's `.. note::`, and are pinned by
+        # `test_fp16_large_position_error_bound_is_pinned`.) The conditional below IS
+        # the never-narrow rule, stated rather than inherited from `variable_dtype`.
         #
         # The final `ops.cast(..., self.compute_dtype)` at the return is load-bearing:
         # without it this returns float32 under mixed_float16, a silently wrong output
