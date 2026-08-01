@@ -92,6 +92,10 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     "weight_decay": ("--weight-decay", 0.01),                     # default: 0.04
     "gradient_clipping": ("--gradient-clipping", 0.5),            # default: 3.0
     "early_stopping_patience": ("--early-stopping-patience", 4),  # default: 30
+    "knn_eval_every": ("--knn-eval-every", 3),                    # default: 1
+    "knn_bank_batches": ("--knn-bank-batches", 5),                # default: 16
+    "knn_query_batches": ("--knn-query-batches", 2),              # default: 8
+    "knn_temperature": ("--knn-temperature", 0.05),               # default: 0.07
     "max_steps": ("--max-steps", 9),                              # default: None
     "experiment_name": ("--experiment-name", "dino_cli_wiring_probe"),   # default: None
     "seed": ("--seed", 123),                                      # default: 42

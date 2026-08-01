@@ -552,10 +552,17 @@ silent omission again.
 > `--smoke` pins a MEASURED shape-validation scale (`tiny`, 96px globals, 4 local crops,
 > `batch_size=32`, `dino_out_dim=4096`, a handful of steps; peak 1518.6 MiB of 10001 MiB
 > on an RTX 4070). That is **not** a paper reproduction. The trainer passes **no**
-> `validation_data` — see § 5 Rule 1, which is the reason, not a preference. Still
-> missing: the k-NN evaluation callback and its collapse diagnostic; **no path is named
-> here for that**, because a README naming a path that does not resolve is exactly the rot
-> this file's path checker exists to prevent.
+> `validation_data` — see § 5 Rule 1, which is the reason, not a preference.
+>
+> **Validation is `src/train/dino/knn_eval.py`.** `KNNEvalCallback` extracts FROZEN
+> student-backbone CLS features (the tensor feeding `DINOHead`, width `embed_dim` — not
+> the projection-head output), runs a temperature-weighted cosine k-NN at k = 10 and 20
+> against a TRAIN-split memory bank, and logs top-1 plus the two collapse numbers:
+> `dino_feat_mean_cos` (mean pairwise feature cosine) and `dino_teacher_entropy_norm`
+> (entropy of the mean teacher softmax, as a fraction of `log(out_dim)`). **A decreasing
+> loss does not rule out collapse** — the collapsed solution is a genuine minimum of the
+> cross-view objective — so read those columns in `results/<run>/training_log.csv`
+> before calling a run good. That module's docstring carries the STOP thresholds.
 
 ---
 
@@ -576,6 +583,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_loss
 | `tests/test_models/test_dino/test_dino_training.py` | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
 | `tests/test_datasets/test_multi_crop.py` | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
 | `tests/test_train/test_dino/test_train_dino.py` | The trainer (`src/train/dino/train_dino.py`): a STRUCTURAL CLI-to-config wiring guard (reflection over `dataclasses.fields` and the parser's dests, fail-closed in both directions, so an unwired flag is RED by default), `TrainingConfig.__post_init__` rejections asserted on their messages, model/loss/callback construction, a spy on the real `train_dino()` path asserting `fit()` receives **no** `validation_data`, and a real two-epoch `fit()` asserting the teacher-temperature `LambdaCallback` MOVES the loss's `teacher_temp` Variable. |
+| `tests/test_train/test_dino/test_knn_eval.py` | The k-NN probe and the collapse diagnostic (`src/train/dino/knn_eval.py`): perfectly separable synthetic features scoring 1.0 against identical features falling to chance (with a non-vacuity control proving a constant predictor cannot satisfy both), a contrast proving the `exp(sim/T)` weighting is really used rather than a majority vote, the bank/query OVERLAP guard — which fires on self-retrieval but deliberately does NOT fire on collapse — a RED-proven collapse detector fed a deliberately collapsed matrix, the entropy half isolated with spread features and a one-hot teacher, the entropy taken of the MEAN distribution rather than the mean of per-sample entropies, a backbone-vs-projection-head width assertion, and REAL two-epoch `fit()` runs proving the columns reach `CSVLogger`'s CSV — including the executed negative control that placing the callback AFTER `CSVLogger` loses every column. |
 | `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
 
 ---

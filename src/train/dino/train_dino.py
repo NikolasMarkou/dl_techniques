@@ -34,7 +34,7 @@ Consequences, both deliberate:
 * ``model.fit(...)`` below takes no ``validation_data`` and no ``validation_steps``.
 * There is therefore no ``val_loss``, so the callbacks monitor the TRAINING ``loss``.
   Real validation for SSL pretraining is a k-NN probe on frozen features, which does not
-  invoke the loss at all (that callback is a separate module; see "Seams" below).
+  invoke the loss at all -- `train.dino.knn_eval`; see "Validation" below.
 
 -------------------------------------------------------------------------------
 Scale
@@ -46,10 +46,20 @@ a handful of steps. On GPU 1 (RTX 4070) one full train step at that scale peaks 
 reproduction** -- DINO uses ``dino_out_dim=65536``, 224px globals and hundreds of epochs.
 The defaults (no ``--smoke``) are the paper-shaped ones and are correspondingly expensive.
 
-Seams deliberately left open
-    A k-NN evaluation callback (frozen-feature top-1 + a collapse diagnostic) belongs in
-    ``callbacks`` next to ``TeacherEMACallback``. It is not imported here yet; nothing in
-    this module forward-references a module that does not exist.
+-------------------------------------------------------------------------------
+Validation, and the reason a decreasing loss is not enough
+-------------------------------------------------------------------------------
+`train.dino.knn_eval.KNNEvalCallback` is this run's ONLY validation signal: frozen
+student-backbone features, a weighted k-NN top-1 against imagenette's labels, and the
+two collapse numbers (mean pairwise feature cosine; entropy of the mean teacher
+softmax). It is INSERTED BEFORE ``CSVLogger`` -- appending it after would silently drop
+every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
+
+**A decreasing loss does NOT rule out collapse.** Read
+``results/<run>/training_log.csv``'s ``dino_collapse_flag`` / ``dino_feat_mean_cos`` /
+``dino_teacher_entropy_norm`` / ``dino_knn_top1_k20`` columns before calling a run good;
+`knn_eval`'s module docstring carries the STOP thresholds (chance is 0.10 on
+imagenette's 10 classes).
 
 Usage::
 
@@ -94,6 +104,10 @@ from dl_techniques.models.depth_anything.teacher_ema import (
     TeacherEMACallback,
     cosine_ema_schedule,
     linear_ema_schedule,
+)
+from train.dino.knn_eval import (
+    DEFAULT_KNN_TEMPERATURE,
+    KNNEvalCallback,
 )
 
 # ---------------------------------------------------------------------
@@ -177,6 +191,15 @@ class TrainingConfig:
     # Monitoring. NOTE: there is no `val_loss` -- see the module docstring's Rule.
     early_stopping_patience: int = 30
 
+    # k-NN probe on frozen features -- the ONLY validation signal this run has, plus
+    # the collapse diagnostic (`train.dino.knn_eval`). `knn_eval_every=0` disables it,
+    # which also disables Pre-Mortem 3's detection: a decreasing loss then proves
+    # nothing about the representation.
+    knn_eval_every: int = 1  # epochs between evaluations; 0 = off
+    knn_bank_batches: int = 16  # memory-bank batches drawn from the TRAIN split
+    knn_query_batches: int = 8  # query batches drawn from the VALIDATION split
+    knn_temperature: float = DEFAULT_KNN_TEMPERATURE
+
     # Debug
     max_steps: Optional[int] = None  # cap steps_per_epoch (smoke runs); None = full epoch
 
@@ -249,6 +272,19 @@ class TrainingConfig:
         if self.max_steps is not None and self.max_steps <= 0:
             raise ValueError(
                 f"max_steps must be positive when set, got {self.max_steps}")
+        if self.knn_eval_every < 0:
+            raise ValueError(
+                f"knn_eval_every must be >= 0 (0 disables the k-NN probe), got "
+                f"{self.knn_eval_every}"
+            )
+        if self.knn_bank_batches <= 0 or self.knn_query_batches <= 0:
+            raise ValueError(
+                f"knn_bank_batches and knn_query_batches must be positive, got "
+                f"{self.knn_bank_batches} and {self.knn_query_batches}"
+            )
+        if self.knn_temperature <= 0:
+            raise ValueError(
+                f"knn_temperature must be positive, got {self.knn_temperature}")
 
     @property
     def n_views(self) -> int:
@@ -303,6 +339,52 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
     if config.max_steps is not None:
         steps_per_epoch = min(steps_per_epoch, config.max_steps)
     return train_ds, steps_per_epoch
+
+
+def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
+    """Build the k-NN probe's memory bank and query set: SINGLE crops, with labels.
+
+    Interface contract:
+        Parameters:
+            config: The trainer config.
+        Returns:
+            ``(bank_ds, query_ds)`` -- both batched ``(image, label)`` pipelines at
+            the global crop resolution. NO multi-crop ``element_map_fn``: the probe
+            evaluates the representation of a plain image, not of an augmented view.
+        Failure mode:
+            ``ValueError`` for an unsupported dataset (from
+            ``build_raw_image_dataset``).
+
+    **The bank comes from the TRAIN split and the queries from the VALIDATION split**,
+    so the two are disjoint BY CONSTRUCTION -- which is the property that makes the
+    reported accuracy mean anything (a query that finds itself in the bank at cosine
+    1.0 scores a free hit). That disjointness is additionally checked numerically
+    inside `knn_top1_accuracy`; the two guards are deliberate belt-and-braces because
+    the failure is silent and looks like a good result.
+
+    Both pipelines are ``.take(n).cache()``d so the SAME samples are used every epoch;
+    an eval set that reshuffles each epoch turns run-to-run noise into apparent
+    training progress.
+    """
+    bank_ds, _, _ = build_raw_image_dataset(
+        config.dataset,
+        config.global_crop_size,
+        config.batch_size,
+        is_training=True,   # -> the TRAIN split
+        augment=False,      # a frozen-feature probe must not see augmentation
+        seed=config.seed,
+    )
+    query_ds, _, _ = build_raw_image_dataset(
+        config.dataset,
+        config.global_crop_size,
+        config.batch_size,
+        is_training=False,  # -> the VALIDATION split
+        seed=config.seed,
+    )
+    return (
+        bank_ds.take(config.knn_bank_batches).cache(),
+        query_ds.take(config.knn_query_batches).cache(),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -404,8 +486,36 @@ def create_callbacks(
 
     callbacks.append(create_teacher_temp_callback(config, loss))
 
-    # SEAM: the k-NN evaluation callback (frozen-feature top-1 + the collapse diagnostic)
-    # is appended here once it exists. Nothing above forward-references it.
+    if config.knn_eval_every > 0:
+        bank_ds, query_ds = build_knn_datasets(config)
+        knn_callback = KNNEvalCallback(
+            bank_ds,
+            query_ds,
+            bank_batches=config.knn_bank_batches,
+            query_batches=config.knn_query_batches,
+            temperature=config.knn_temperature,
+            every_n_epochs=config.knn_eval_every,
+            dino_loss=loss,
+        )
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-029
+        # INSERT before `CSVLogger`, never `append`. `CSVLogger` freezes its
+        # fieldnames from `sorted(logs.keys())` on the FIRST epoch it sees and then
+        # writes the row -- so a callback that runs after it writes into an
+        # already-serialized dict. MEASURED on keras 3.8.0, all three epochs:
+        # appending after CSVLogger gave the header ['epoch', 'loss', 'val_loss'] and
+        # the k-NN columns NEVER appeared. Same header when the key was first written
+        # on epoch 1 instead of epoch 0 (which is why KNNEvalCallback writes every key
+        # on every epoch, `nan` on skipped ones). Both failures are silent: the run
+        # completes, the CSV looks well-formed, and the only validation signal this
+        # trainer has is gone. Pinned by
+        # tests/test_train/test_dino/test_knn_eval.py::TestCallbackOrdering.
+        csv_index = next(
+            (index for index, callback in enumerate(callbacks)
+             if isinstance(callback, keras.callbacks.CSVLogger)),
+            len(callbacks),
+        )
+        callbacks.insert(csv_index, knn_callback)
+
     return callbacks, results_dir
 
 
@@ -603,6 +713,23 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--early-stopping-patience", type=int, default=30,
                         help="Patience on the TRAINING loss (there is no val_loss)")
 
+    # k-NN probe + collapse diagnostic
+    parser.add_argument("--knn-eval-every", type=int, default=1,
+                        help=(
+                            "Epochs between frozen-feature k-NN evaluations. 0 turns "
+                            "the probe OFF, which also turns off the collapse "
+                            "diagnostic -- a decreasing loss then proves nothing about "
+                            "the representation."
+                        ))
+    parser.add_argument("--knn-bank-batches", type=int, default=16,
+                        help="Memory-bank batches, drawn from the TRAIN split")
+    parser.add_argument("--knn-query-batches", type=int, default=8,
+                        help="Query batches, drawn from the VALIDATION split (disjoint "
+                             "from the bank by construction)")
+    parser.add_argument("--knn-temperature", type=float,
+                        default=DEFAULT_KNN_TEMPERATURE,
+                        help="Temperature of the exp(sim / T) neighbour weighting")
+
     # Debug
     parser.add_argument("--max-steps", type=int, default=None,
                         help="Cap steps_per_epoch. Smoke runs only.")
@@ -676,6 +803,10 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         weight_decay=args.weight_decay,
         gradient_clipping=args.gradient_clipping,
         early_stopping_patience=args.early_stopping_patience,
+        knn_eval_every=args.knn_eval_every,
+        knn_bank_batches=args.knn_bank_batches,
+        knn_query_batches=args.knn_query_batches,
+        knn_temperature=args.knn_temperature,
         max_steps=args.max_steps,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
