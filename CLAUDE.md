@@ -40,7 +40,7 @@ There is no committed documentation directory. `make docs` runs `generate_docs.p
 
 ### src/dl_techniques/ (core library)
 
-The main codebase. Contains all custom layers, models, losses, metrics, optimizers, analyzers, visualization, datasets, and utilities. Has its own `CLAUDE.md` with detailed documentation, and each subpackage has one as well.
+The main codebase. The package names are exactly: `src/dl_techniques/layers/`, `src/dl_techniques/models/`, `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` (not "optimizers"), `src/dl_techniques/analyzer/` (not "analyzers"), `src/dl_techniques/visualization/`, `src/dl_techniques/datasets/`, `src/dl_techniques/utils/`, `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/`, `src/dl_techniques/regularizers/`. Has its own `CLAUDE.md` with detailed documentation, and each subpackage has one as well.
 
 ### src/applications/
 

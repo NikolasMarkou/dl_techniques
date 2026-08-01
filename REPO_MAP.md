@@ -273,11 +273,15 @@ thing you will meet and should not be surprised by.
   being the stated backend-agnostic surface. The standing repo preference is to
   *migrate* such a site rather than document it as an accepted exception, unless
   it is genuinely unmigratable (FFT, SVD).
-- **`src/dl_techniques/layers/attention/` writes Sphinx/reST docstrings, not
-  Google style.** 33 of that package's 34 modules use `:param:`/`:return:`. This
-  is a deliberate, localized carve-out, not a repo-wide split — but it has leaked
-  out of `src/` into the shared test fixtures: both `tests/conftest.py` and
-  `tests/test_layers/conftest.py` document themselves in the same style.
+- **Docstring style is split repo-wide; both styles are in wide use.** 260
+  library modules carry a Google-style `Args:` block, and 311 modules *outside*
+  `src/dl_techniques/layers/attention/` carry Sphinx/reST `:param:`. reST is
+  therefore not a carve-out and is localized nowhere. The only thing true of
+  `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
+  *within itself* — 33 of its 34 modules. The split reaches the shared test
+  fixtures too: both `tests/conftest.py` and `tests/test_layers/conftest.py`
+  document themselves in reST. Read the root `CLAUDE.md`'s "Google-style
+  docstrings" line as a preference for new code, not a description of the tree.
 - **The factory convention is not universal.** 16 of the 73 model packages
   expose no top-level `create_*` at all; you construct their classes directly.
   Check before assuming a factory exists.
@@ -304,14 +308,12 @@ Its load-bearing rules, so you know what you are agreeing to:
 
 `tests/` mirrors `src/dl_techniques/`: package `x` is tested by `tests/test_<x>/`,
 for example `tests/test_layers/`.
-Four named places break that rule, and each has cost someone a search:
+Three named places break that rule, and each has cost someone a search:
 
 - **`src/dl_techniques/visualization/` has no test directory at all.** It has a
-  `CLAUDE.md`; it has no tests. Documented but unexercised.
-- **`src/dl_techniques/layers/sequence_pooling/` has no test directory** either,
-  despite shipping both
-  `src/dl_techniques/layers/sequence_pooling/README.md` and
-  `src/dl_techniques/layers/sequence_pooling/GUIDE.md`.
+  `CLAUDE.md`; it has no tests, and no test module anywhere imports it. The trap
+  is that `tests/test_utils/test_visualization.py` exists and is a zero-byte
+  file, so a name-based search finds something and learns nothing.
 - **`tests/test_analysis/` is a vestigial empty directory** — it holds nothing but an
   empty init module and 0 test files, and its name shadows the real, populated
   `tests/test_analyzer/` (2 files). Searching for "analysis tests" lands you in
@@ -320,6 +322,13 @@ Four named places break that rule, and each has cost someone a search:
   gets a `tests/test_models/test_<name>/` directory — e.g.
   `tests/test_models/test_ccnets/`. Any directory-to-directory comparison
   reports `lewm` as untested. It is not.
+
+And one place that only *looks* broken: `src/dl_techniques/layers/sequence_pooling/`
+has no test *directory*, but it is tested — by the loose
+`tests/test_layers/test_sequence_pooling.py`. A loose module is the dominant
+layout there, 79 of them against 20 subdirectories, so under `tests/test_layers/`
+a missing directory means nothing at all. Under `tests/test_models/`, where the
+directory is the norm, it usually does — which is why `lewm` is worth naming.
 
 **The four fixtures a test author needs**, all restore-safe by construction:
 
@@ -334,9 +343,12 @@ Four named places break that rule, and each has cost someone a search:
 pytest to the module you touched plus whatever imports it. Two things about that
 are worth knowing before you commit:
 
-- `.pre-commit-config.yaml` configures a single local hook that runs
-  `python -m pytest` with `always_run: true` — i.e. as written it attempts the
-  entire suite on every commit. If you have hooks installed, expect that.
+- **Configured is not installed.** `.pre-commit-config.yaml` *declares* one
+  local hook running `python -m pytest` with `always_run: true`. What is
+  *installed* under `.git/hooks/` on this machine is only `pre-push`; no
+  `pre-commit` hook file exists. So the suite fires on push, not on commit —
+  which is why the standing default is `git push --no-verify`. Hook
+  installation is per-clone and untracked: run `ls .git/hooks/` to see yours.
 - **There is no CI.** No `.github/` directory exists. Nothing runs these tests
   except you.
 
@@ -385,7 +397,7 @@ table are named precisely *because* they do not resolve.
 | `src/experiments/undivided_attention/`, its test suite and its research note exist | `plans/SYSTEM.md`, in a long, confident, entirely fictional section | **Never committed in any commit reachable from any ref.** `git log --all --oneline -- '*undivided*'` returns nothing; `find src tests -name '*undivided*'` returns nothing. The owning plan ran weeks *after* `src/experiments/` was deleted, wrote into a directory the repo no longer had, and its description was then promoted into the atlas as fact. *Caveat: `plans/` is gitignored, so a cloner cannot see this file — which is exactly why the fabrication survived* |
 | `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
-| The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md` | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
+| The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: 16 of the 73 model packages have no top-level `create_*`. Command in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
@@ -465,6 +477,10 @@ the prose above is a Value from this table. Run these from the repo root.
 | Files importing raw `tensorflow` | 68 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 34 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 33 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 311 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block | 260 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| wc -l` |
+| Loose `test_*.py` directly under `tests/test_layers/` | 79 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
+| Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model packages with no top-level `create_*` | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
 | Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
