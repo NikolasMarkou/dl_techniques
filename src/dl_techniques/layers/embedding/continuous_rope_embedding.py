@@ -228,8 +228,36 @@ class ContinuousRoPE(keras.layers.Layer):
         # materialization that breaks `@tf.function` / graph tracing. Removed for
         # graph compatibility (DECISION plan_2026-06-15_9dbb87c1/D-001).
 
-        # Ensure float32 precision
-        coords = ops.cast(coords, "float32")
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-007
+        # Compute the phases in a NEVER-NARROWING working dtype, and cast the
+        # frequency table to that same dtype.
+        #
+        # Do NOT write `ops.cast(coords, "float32")` here. A hard dtype literal is
+        # measured against `self.omega`, which Keras AUTOCASTS to the active compute
+        # dtype on read -- so the multiply below had mismatched operands and raised
+        # `InvalidArgumentError ... cannot compute Mul as input #1 was expected to be
+        # a float tensor but is a half/double/bfloat16 tensor [Op:Mul]` under
+        # mixed_float16, float64 AND mixed_bfloat16, i.e. this whole layer was dead at
+        # 3 of the 4 standard policies.
+        #
+        # Do NOT "simplify" this to `ops.cast(coords, self.compute_dtype)` either:
+        # that NARROWS the phase math to fp16/bf16. The conditional below IS the
+        # never-narrow rule, stated rather than inherited from `variable_dtype`.
+        #
+        # The final `ops.cast(..., self.compute_dtype)` at the return is load-bearing:
+        # without it this returns float32 under mixed_float16, a silently wrong output
+        # dtype that the consuming attention layer's rotation would have to absorb.
+        #
+        # This is the FOURTH inline copy of this rule in `src/` and the second in this
+        # package -- the sibling `continuous_sin_cos_embedding.py` carries the same
+        # block under D-002. Promotion to one shared helper was considered and ruled
+        # against (decisions.md D-006/D-007); a FIFTH site should promote instead of
+        # copying this again.
+        #
+        # NOTE this cannot recover fp16/bf16 accuracy at large positions: Keras has
+        # already narrowed `coords` at the autocast boundary BEFORE `call()` runs.
+        work_dtype = "float64" if self.compute_dtype == "float64" else "float32"
+        coords = ops.cast(coords, work_dtype)
 
         # Expand coordinates for frequency multiplication
         # coords: (..., ndim) -> coords_expanded: (..., ndim, 1)
@@ -237,7 +265,7 @@ class ContinuousRoPE(keras.layers.Layer):
 
         # omega: (freq_dim,) -> omega_expanded: (1, ..., 1, freq_dim)
         omega_shape = [1] * (len(coords.shape) - 1) + [self.omega.shape[0]]
-        omega_expanded = ops.reshape(self.omega, omega_shape)
+        omega_expanded = ops.reshape(ops.cast(self.omega, work_dtype), omega_shape)
 
         # Compute phase angles: (..., ndim, freq_dim)
         phases = coords_expanded * omega_expanded
@@ -256,7 +284,8 @@ class ContinuousRoPE(keras.layers.Layer):
             )
             phases = ops.concatenate([phases, padding_zeros], axis=-1)
 
-        return phases
+        # Back to the caller's compute dtype (see D-007 above -- not optional).
+        return ops.cast(phases, self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
