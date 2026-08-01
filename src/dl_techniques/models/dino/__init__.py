@@ -10,6 +10,9 @@ base class"):
   pretraining uses) and ``create_dino_teacher_student_pair``.
 - ``dino_v2`` — Oquab et al. 2023. Adds register tokens, LayerScale, iBOT-style
   patch masking on the forward path, and a SwiGLU FFN on ``giant``.
+- ``dino_training`` — ``DINOTrainingModel``: student + frozen EMA teacher over a
+  multi-crop batch, trainable under stock ``model.fit()``. This is the object the
+  SSL pretraining pipeline compiles with ``DINOLoss``.
 - ``dino_v3`` — Siméoni et al. 2025, partially. Adds real 1-D RoPE via a
   ``group_query`` attention. Gram anchoring and Sinkhorn-Knopp centering are NOT
   implemented — the README says so explicitly and per-row.
@@ -49,6 +52,11 @@ from .dino_v3 import (
     DINOv3,
     create_dino_v3,
 )
+from .dino_training import (
+    N_GLOBAL_VIEWS,
+    DINOTrainingModel,
+    create_dino_training_model,
+)
 
 __all__ = [
     "ModelVariant",
@@ -62,4 +70,7 @@ __all__ = [
     "create_dino_v2",
     "create_dino_v3",
     "create_dino_teacher_student_pair",
+    "DINOTrainingModel",
+    "create_dino_training_model",
+    "N_GLOBAL_VIEWS",
 ]

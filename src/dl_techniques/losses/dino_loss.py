@@ -60,8 +60,51 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
+
+# ---------------------------------------------------------------------
+
+
+def pack_student_teacher(
+        student_logits: keras.KerasTensor,
+        teacher_logits: keras.KerasTensor,
+) -> keras.KerasTensor:
+    """
+    Pack aligned student and teacher logits into ONE tensor for stock `fit()`.
+
+    Interface contract:
+        Parameters:
+            student_logits: `(..., out_dim)`.
+            teacher_logits: `(..., out_dim)`, the SAME shape as
+                `student_logits` -- already broadcast into row-for-row
+                correspondence by the caller. Row `i` of the result is the
+                (student view, teacher view) pair the loss will score.
+        Returns:
+            `(..., 2 * out_dim)` -- student first, teacher second. This layout
+            is the single source of truth for the packed convention; the
+            matching unpack lives in `_resolve_student_teacher` in this module,
+            and NOWHERE else.
+        Failure mode:
+            No validation is performed here (it must stay trace-safe). A width
+            mismatch surfaces in the loss, which checks the last dimension
+            against `2 * out_dim` and raises a `ValueError` naming both widths.
+
+    Why this exists (D-009, MEASURED on keras 3.8.0): a model whose `call()`
+    returns a dict/tuple cannot be scored by ONE `compile(loss=...)` object --
+    `CompileLoss.build` broadcasts the loss across every leaf of a nested
+    `y_pred` and then raises `KeyError: The path: ('student_logits',) ...`. A
+    single tensor is the only shape that works, so the two networks' outputs
+    are concatenated on the last axis and split again inside the loss.
+
+    Example:
+        ```python
+        packed = pack_student_teacher(student_logits, teacher_logits)
+        # -> feed as the model's single output; DINOLoss(out_dim=D) unpacks it.
+        ```
+    """
+    return ops.concatenate([student_logits, teacher_logits], axis=-1)
 
 # ---------------------------------------------------------------------
 
@@ -70,22 +113,40 @@ def _resolve_student_teacher(
         loss_name: str,
         y_true: Optional[keras.KerasTensor],
         y_pred: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+        out_dim: int,
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """
-    Resolve `(teacher_logits, student_logits)` from either calling convention.
+    Resolve `(teacher_logits, student_logits)` from any calling convention.
 
-    Shared by `DINOLoss` and `iBOTPatchLoss`, which accept the same two
-    conventions: a structured dict `y_pred` (the only one usable under stock
-    `compile(loss=...)`, since the teacher's logits are produced by the model
-    rather than by the dataset), or a direct `(y_true=teacher, y_pred=student)`
-    tensor pair for tests and manual use.
+    Shared by `DINOLoss` and `iBOTPatchLoss`, which accept the same three
+    conventions:
+
+    1. **Packed single tensor** -- `y_pred` has a last dimension of exactly
+       `2 * out_dim`: student first, teacher second (see
+       `pack_student_teacher`). `y_true` is IGNORED. **This is the only
+       convention usable under stock `compile(loss=...)` / `fit()`** when the
+       teacher's logits are produced by the model rather than by the dataset.
+    2. **Structured dict `y_pred`** -- carries `"student_logits"` and
+       `"teacher_logits"`; `y_true` is IGNORED. Direct invocation only -- a
+       model returning this dict is refused by Keras (D-009; see `DINOLoss`'s
+       "Input shapes").
+    3. **Direct two-tensor call** -- `y_true` is the teacher's logits and
+       `y_pred` the student's, each of last dimension `out_dim`.
+
+    Conventions 1 and 3 are told apart by the last dimension alone, which is
+    unambiguous because `2 * out_dim != out_dim` for every legal `out_dim`
+    (`out_dim > 0` is enforced by both constructors). A statically-unknown last
+    dimension falls through to convention 3.
 
     Args:
         loss_name: Name of the calling loss, used in error messages only.
-        y_true: Teacher logits, or ignored when `y_pred` is a dict.
-        y_pred: Student logits, or a dict carrying `"student_logits"` and
-            `"teacher_logits"` (plus, for `iBOTPatchLoss`, an optional
-            `"mask"`, which this helper does not read).
+        y_true: Teacher logits, or ignored under conventions 1 and 2.
+        y_pred: Packed logits, student logits, or a dict carrying
+            `"student_logits"` and `"teacher_logits"` (plus, for
+            `iBOTPatchLoss`, an optional `"mask"`, which this helper does not
+            read).
+        out_dim: The calling loss's `out_dim`, i.e. the width of ONE network's
+            logits. Used to split the packed form and to validate widths.
 
     Returns:
         Tuple of `(teacher_logits, student_logits)`.
@@ -104,14 +165,124 @@ def _resolve_student_teacher(
                 f"key(s) {sorted(missing)}; got keys {sorted(y_pred)}"
             )
         return y_pred['teacher_logits'], y_pred['student_logits']
+
+    last_dim = None
+    shape = getattr(y_pred, 'shape', None)
+    if shape is not None and len(shape) > 0:
+        last_dim = shape[-1]
+
+    if last_dim == 2 * out_dim:
+        # Packed convention -- student first, teacher second.
+        return y_pred[..., out_dim:], y_pred[..., :out_dim]
+
     if y_true is None:
         raise ValueError(
             f"{loss_name} called with a plain-tensor y_pred requires y_true to "
             f"be the teacher's logits, but y_true is None. Either pass the "
-            f"teacher logits as y_true, or pass a dict y_pred with keys "
-            f"'student_logits' and 'teacher_logits'."
+            f"teacher logits as y_true, pass a PACKED y_pred whose last "
+            f"dimension is 2 * out_dim = {2 * out_dim} (see "
+            f"pack_student_teacher), or pass a dict y_pred with keys "
+            f"'student_logits' and 'teacher_logits'. Got a y_pred with last "
+            f"dimension {last_dim}."
         )
     return y_true, y_pred
+
+# ---------------------------------------------------------------------
+# Schedulable teacher temperature.
+#
+# DECISION plan-2026-08-01T105809-dc0c402e/D-022
+# `teacher_temp` is a non-trainable `keras.Variable`, NOT a Python float, and
+# the public attribute is a read-only property. Do NOT "simplify" it back to
+# `self.teacher_temp = teacher_temp`: a Python float is CONSTANT-FOLDED into
+# the traced training graph, so DINO's teacher-temperature warmup -- which the
+# reference implementation ramps during training -- becomes a SILENT no-op.
+# MEASURED under a real 2-epoch `fit()` with the centering EMA frozen
+# (`center_momentum=0.999999`) so the temperature is the only thing that could
+# move the loss: setting `loss.teacher_temp = 4.0` (a 100x change) between
+# epochs moved the reported loss 9.953619 -> 9.953612, i.e. 7e-7 relative --
+# nothing. With this Variable, `set_teacher_temp(4.0)` moved it
+# 16.215630 -> 12.618570. The setter raises instead of assigning, so the
+# silent path is now a loud one.
+#
+# These three module-level objects are installed on BOTH `DINOLoss` and
+# `iBOTPatchLoss` (one definition, two bindings) rather than copy-pasted, and
+# deliberately not a mixin -- a `keras.losses.Loss` subclass with an extra base
+# class complicates `from_config` for no gain here.
+# ---------------------------------------------------------------------
+
+
+def _create_teacher_temp_variable(value: float) -> keras.Variable:
+    """
+    Create the non-trainable scalar `keras.Variable` backing `teacher_temp`.
+
+    It is **float64**, not float32, and deliberately so: the value round-trips
+    through `get_config()` as a Python float, and a float32 store silently
+    changes it (MEASURED: `teacher_temp=0.05` came back as
+    `0.05000000074505806`, failing an exact-equality config round-trip
+    assertion that had been green since step 2). It is cast to the logits'
+    dtype at the single point of use, so the storage dtype costs nothing on
+    the forward path.
+
+    The initializer is a raw `np.float64` scalar and NOT
+    `keras.initializers.Constant(value)`: MEASURED, `Constant` materializes at
+    float32 first and then upcasts, so it reproduces the very rounding this
+    float64 store exists to avoid (`Constant(0.05)` in a float64 Variable
+    reads back as 0.05000000074505806).
+    """
+    return keras.Variable(
+        initializer=np.float64(value),
+        dtype='float64',
+        trainable=False,
+        name='teacher_temp',
+    )
+
+
+def _get_teacher_temp(self) -> float:
+    """Current teacher temperature as a plain Python float."""
+    return float(ops.convert_to_numpy(self._teacher_temp))
+
+
+def _refuse_teacher_temp_assignment(self, value: Any) -> None:
+    raise AttributeError(
+        f"{type(self).__name__}.teacher_temp is read-only; use "
+        f"set_teacher_temp({value!r}) instead. A plain attribute assignment "
+        f"would be silently ignored inside a compiled training step, because "
+        f"the temperature is read from a keras.Variable that the traced graph "
+        f"already holds (MEASURED: a 100x plain-attribute change moved the "
+        f"training loss by 7e-7)."
+    )
+
+
+_TEACHER_TEMP_PROPERTY = property(
+    _get_teacher_temp,
+    _refuse_teacher_temp_assignment,
+    doc="Teacher sharpening temperature (read-only; see set_teacher_temp).",
+)
+
+
+def _set_teacher_temp(self, value: float) -> None:
+    """
+    Set the teacher temperature so a running training step sees the new value.
+
+    Interface contract:
+        Parameters:
+            value: The new temperature. Must be > 0.
+        Returns:
+            ``None``. The change takes effect on the next batch, inside an
+            already-traced `fit()` graph.
+        Failure mode:
+            ``ValueError`` when ``value <= 0`` -- the same bound the
+            constructor enforces.
+
+    This is the seam a teacher-temperature warmup schedule drives. Reuse
+    `dl_techniques.models.depth_anything.teacher_ema.linear_ema_schedule` (or
+    `cosine_ema_schedule`) with a `keras.callbacks.LambdaCallback` rather than
+    adding another schedule-callback class -- see
+    `src/dl_techniques/models/dino/README.md` § "Training".
+    """
+    if value <= 0:
+        raise ValueError(f"teacher_temp must be positive, got {value}")
+    self._teacher_temp.assign(float(value))
 
 # ---------------------------------------------------------------------
 
@@ -146,20 +317,37 @@ class DINOLoss(keras.losses.Loss):
     Args:
         out_dim: Dimensionality of the model's output embeddings/logits.
         student_temp: Temperature for sharpening student's output distribution.
-            Lower values create sharper distributions. Defaults to 0.1.
-        teacher_temp: Temperature for sharpening teacher's output distribution.
-            Should be lower than student_temp. Defaults to 0.04.
+            Lower values create sharper distributions. Defaults to 0.1. This
+            one is a plain float -- DINO does not schedule it.
+        teacher_temp: INITIAL temperature for sharpening teacher's output
+            distribution. Should be lower than student_temp. Defaults to 0.04.
+            Stored as a `keras.Variable` so a warmup schedule can move it;
+            read it back via the `teacher_temp` property and change it via
+            `set_teacher_temp()`.
         center_momentum: Momentum coefficient for EMA center updates.
             Higher values create more stable centers. Defaults to 0.9.
 
     Input shapes:
-        Two calling conventions are supported.
+        Three calling conventions are supported.
 
+        0. **Packed single tensor -- the ONE that works under stock `fit()`
+           when the teacher's logits come from the model.** `y_pred` has last
+           dimension `2 * out_dim`: `[student_logits, teacher_logits]`
+           concatenated on the last axis (build it with
+           `pack_student_teacher`), and `y_true` is IGNORED. Every leading
+           dimension is treated as a batch dimension, so the model must have
+           already flattened its (view, pair) structure into rows -- see
+           `DINOTrainingModel` in
+           `src/dl_techniques/models/dino/dino_training.py`, which emits
+           `(batch * n_pairs, 2 * out_dim)`. **A rank > 2 packed `y_pred` is
+           NOT supported**: the centering EMA reduces only `axis=0`, so a
+           `(batch, n_pairs, 2 * out_dim)` input makes the batch centre
+           `(1, n_pairs, out_dim)` and the `center.assign()` fails.
         1. **Direct two-tensor call** -- `y_true` is the teacher's logits
            `(batch_size, out_dim)` and `y_pred` the student's
-           `(batch_size, out_dim)`. This is the convention that works as a
-           `compile(loss=...)` argument against a model with a single tensor
-           output.
+           `(batch_size, out_dim)`. Usable under `compile(loss=...)` only when
+           the DATASET supplies the teacher's logits as the label, which DINO
+           cannot do (the teacher is part of the model).
         2. **Structured `y_pred`** -- `y_pred` is a dict carrying both
            networks' outputs and `y_true` is IGNORED (as in
            `CLIPContrastiveLoss` and `KoLeoLoss`)::
@@ -190,13 +378,23 @@ class DINOLoss(keras.losses.Loss):
     Attributes:
         center: Non-trainable momentum-updated `keras.Variable` of shape
             `(1, out_dim)`, dtype float32, created eagerly in `__init__`.
+        teacher_temp: **Read-only property** returning the current teacher
+            temperature as a Python float. It is backed by a non-trainable
+            scalar `keras.Variable`, so a warmup schedule can move it during
+            training; assign through `set_teacher_temp(value)`. A plain
+            `loss.teacher_temp = x` raises `AttributeError` on purpose --
+            MEASURED, a Python-float temperature is constant-folded into the
+            traced training step, so such an assignment is a SILENT no-op
+            (a 100x change moved the training loss by 7e-7). See D-022.
 
     Example:
         ```python
         # Initialize for vision_heads transformer with 65k dimensional output
         dino_loss = DINOLoss(out_dim=65536, student_temp=0.1, teacher_temp=0.04)
 
-        # Under stock fit(), via a model returning a structured y_pred:
+        # Under stock fit(), via a model whose call() returns the PACKED
+        # single tensor (a dict y_pred does NOT work here -- see "Input
+        # shapes" convention 0 and D-009):
         model.compile(optimizer=..., loss=dino_loss)
         model.fit(train_ds, epochs=100)          # NOTE: no validation_data
 
@@ -240,6 +438,12 @@ class DINOLoss(keras.losses.Loss):
         strategy.
     """
 
+    # Installed from the module-level definitions above (D-022): a read-only
+    # property over a keras.Variable, plus the setter that actually works
+    # inside a compiled step.
+    teacher_temp = _TEACHER_TEMP_PROPERTY
+    set_teacher_temp = _set_teacher_temp
+
     def __init__(
             self,
             out_dim: int,
@@ -279,8 +483,10 @@ class DINOLoss(keras.losses.Loss):
         # Store configuration
         self.out_dim = out_dim
         self.student_temp = student_temp
-        self.teacher_temp = teacher_temp
         self.center_momentum = center_momentum
+
+        # Schedulable teacher temperature -- see D-022 above the property.
+        self._teacher_temp = _create_teacher_temp_variable(teacher_temp)
 
         # Create momentum-updated center as non-trainable weight
         self.center = keras.Variable(
@@ -301,10 +507,12 @@ class DINOLoss(keras.losses.Loss):
 
         Args:
             y_true: Teacher's output logits with shape (batch_size, out_dim)
-                when `y_pred` is a plain tensor; IGNORED when `y_pred` is a
-                structured dict (see the class docstring's "Input shapes").
-            y_pred: Either the student's logits (batch_size, out_dim), or a
-                dict with keys `"student_logits"` and `"teacher_logits"`.
+                when `y_pred` is a plain student-width tensor; IGNORED when
+                `y_pred` is PACKED or a structured dict (see the class
+                docstring's "Input shapes").
+            y_pred: The PACKED tensor `(batch_size, 2 * out_dim)`, or the
+                student's logits `(batch_size, out_dim)`, or a dict with keys
+                `"student_logits"` and `"teacher_logits"`.
 
         Returns:
             Scalar tensor representing the computed DINO loss.
@@ -315,7 +523,7 @@ class DINOLoss(keras.losses.Loss):
             this call's update, matching the reference DINO ordering.
         """
         teacher_logits, student_logits = _resolve_student_teacher(
-            'DINOLoss', y_true, y_pred)
+            'DINOLoss', y_true, y_pred, self.out_dim)
 
         # DECISION plan-2026-08-01T105809-dc0c402e/D-006
         # The centering EMA lives HERE, inside call(), maintained by .assign()
@@ -331,10 +539,13 @@ class DINOLoss(keras.losses.Loss):
         # pre-update value regardless of how the graph orders the stateful op.
         center = ops.convert_to_tensor(self.center)
 
-        # Process teacher output: center and sharpen
+        # Process teacher output: center and sharpen.
+        # Read the temperature from the VARIABLE (`self._teacher_temp`), never
+        # through the `self.teacher_temp` property -- the property returns a
+        # Python float, which a traced step constant-folds (D-022).
         teacher_probs = ops.softmax(
             (teacher_logits - ops.cast(center, teacher_logits.dtype))
-            / self.teacher_temp,
+            / ops.cast(self._teacher_temp, teacher_logits.dtype),
             axis=-1,
         )
 
@@ -439,15 +650,23 @@ class iBOTPatchLoss(keras.losses.Loss):
     Args:
         out_dim: Dimensionality of patch token embeddings/logits.
         student_temp: Temperature for student distribution sharpening.
-        teacher_temp: Temperature for teacher distribution sharpening.
+        teacher_temp: INITIAL temperature for teacher distribution sharpening.
+            Backed by a `keras.Variable`; see `DINOLoss` and
+            `set_teacher_temp()`.
         center_momentum: EMA momentum for center updates.
 
     Input shapes:
-        Two calling conventions are supported, mirroring `DINOLoss` -- and the
-        same MEASURED constraint applies: the structured form is for direct
-        invocation, not for a model whose `call()` returns that dict (see
-        `DINOLoss`'s "Input shapes" for the exact Keras behaviour and error).
+        The same three calling conventions as `DINOLoss`, and the same
+        MEASURED constraint: the structured form is for direct invocation, not
+        for a model whose `call()` returns that dict (see `DINOLoss`'s "Input
+        shapes" for the exact Keras behaviour and error).
 
+        0. **Packed single tensor** -- last dimension `2 * out_dim`,
+           `[student, teacher]`, `y_true` IGNORED. This is the stock-`fit()`
+           convention, but note it carries NO mask, so every patch
+           participates; a masked iBOT objective under stock `fit()` needs the
+           mask packed into the same tensor by a future caller, which is not
+           built here (no consumer yet -- `DINOTrainingModel` is DINO-only).
         1. **Structured `y_pred` (required to use a mask at all)** -- `y_true`
            is IGNORED and `y_pred` is a dict::
 
@@ -500,6 +719,11 @@ class iBOTPatchLoss(keras.losses.Loss):
         strategy).
     """
 
+    # Installed from the module-level definitions above (D-022) -- identical
+    # contract to DINOLoss's.
+    teacher_temp = _TEACHER_TEMP_PROPERTY
+    set_teacher_temp = _set_teacher_temp
+
     def __init__(
             self,
             out_dim: int,
@@ -538,8 +762,10 @@ class iBOTPatchLoss(keras.losses.Loss):
         # Store configuration
         self.out_dim = out_dim
         self.student_temp = student_temp
-        self.teacher_temp = teacher_temp
         self.center_momentum = center_momentum
+
+        # Schedulable teacher temperature -- see D-022 above the property.
+        self._teacher_temp = _create_teacher_temp_variable(teacher_temp)
 
         # Create center for patch tokens (shape for broadcasting over patches)
         self.center = keras.Variable(
@@ -566,8 +792,10 @@ class iBOTPatchLoss(keras.losses.Loss):
         `sample_weight` turns that silent-wrong path into a loud one.
 
         Args:
-            y_true: Teacher patch logits, or ignored when `y_pred` is a dict.
-            y_pred: Student patch logits, or the structured dict.
+            y_true: Teacher patch logits, or ignored when `y_pred` is packed
+                or a dict.
+            y_pred: The PACKED tensor (last dim `2 * out_dim`), the student's
+                patch logits, or the structured dict.
             sample_weight: Must be None.
 
         Returns:
@@ -606,15 +834,18 @@ class iBOTPatchLoss(keras.losses.Loss):
             patches. Exactly `0.0` when no patch participates.
         """
         teacher_logits, student_logits = _resolve_student_teacher(
-            'iBOTPatchLoss', y_true, y_pred)
+            'iBOTPatchLoss', y_true, y_pred, self.out_dim)
         mask = y_pred.get('mask') if isinstance(y_pred, dict) else None
 
         center = ops.convert_to_tensor(self.center)
 
-        # Process teacher output: center and sharpen
+        # Process teacher output: center and sharpen.
+        # Read the temperature from the VARIABLE (`self._teacher_temp`), never
+        # through the `self.teacher_temp` property -- the property returns a
+        # Python float, which a traced step constant-folds (D-022).
         teacher_probs = ops.softmax(
             (teacher_logits - ops.cast(center, teacher_logits.dtype))
-            / self.teacher_temp,
+            / ops.cast(self._teacher_temp, teacher_logits.dtype),
             axis=-1,
         )
 
@@ -807,8 +1038,38 @@ class KoLeoLoss(keras.losses.Loss):
         Returns:
             Scalar regularization loss encouraging uniform distribution.
         """
-        # L2 normalize embeddings to unit sphere
-        features = ops.normalize(y_pred, axis=-1)
+        # L2 normalize embeddings to unit sphere.
+        #
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-023
+        # The normalization runs at float32 whenever the input is a 16-bit
+        # float. Do NOT "simplify" this back to a bare
+        # `ops.normalize(y_pred, axis=-1)`: that reduces `sum(x**2)` over the
+        # embedding width in the INPUT dtype, and at fp16 the sum overflows
+        # 65504 long before any individual activation does. Overflow gives
+        # `x / inf == 0`, so every embedding becomes the zero vector, every
+        # pairwise cosine similarity becomes 0, and the loss collapses to the
+        # CONSTANT `-log(sqrt(2) + eps) = -0.34657` with an EXACTLY ZERO
+        # gradient -- a silently dead anti-collapse regularizer, precisely
+        # when collapse is what it exists to detect.
+        # MEASURED at width 256, activation scale 300 (`sum(x**2)` = 2.25e7),
+        # `KoLeoLoss(dtype='float16')`: a SPREAD batch and a fully COLLAPSED
+        # batch both return -0.346436, where float32 returns -0.279918 and
+        # +15.257816 respectively; fp16 gradient absmax 0.0 vs float32
+        # 3.42e-06.
+        # Reachability, also MEASURED: this does NOT fire under a global
+        # `mixed_float16` policy through `Loss.__call__`, because
+        # `keras.losses.Loss` casts `y_pred` to `self.dtype`, which stays
+        # float32 (`floatx()`) under that policy. It DOES fire via
+        # `KoLeoLoss(dtype='float16')`, `KoLeoLoss(dtype='mixed_float16')`,
+        # and any direct `loss.call(...)` on fp16 activations -- e.g. from
+        # inside a model's own `call()`. float64 is left alone (never
+        # downcast); this is the same defect class as D-020 in `DINOHead`.
+        features = ops.convert_to_tensor(y_pred)
+        input_dtype = keras.backend.standardize_dtype(features.dtype)
+        safe_dtype = (
+            'float32' if input_dtype in ('float16', 'bfloat16') else input_dtype
+        )
+        features = ops.normalize(ops.cast(features, safe_dtype), axis=-1)
         batch_size = ops.shape(features)[0]
 
         # Compute pairwise cosine similarity matrix
@@ -832,7 +1093,9 @@ class KoLeoLoss(keras.losses.Loss):
         # Compute loss: maximize log distance = minimize -log(distance)
         loss = -ops.log(distances + self.epsilon)
 
-        return ops.mean(loss)
+        # Return in the caller's dtype: only the INTERMEDIATE normalization was
+        # promoted (D-023 above), so the method's dtype contract is unchanged.
+        return ops.cast(ops.mean(loss), input_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""

@@ -18,7 +18,7 @@ two together are what make an otherwise-degenerate objective learn something.
 2. [Honest capability table (v1 / v2 / v3)](#2-honest-capability-table-v1--v2--v3)
 3. [Factory signatures](#3-factory-signatures)
 4. [Runnable examples](#4-runnable-examples)
-5. [The loss family, and two rules that are not optional](#5-the-loss-family-and-two-rules-that-are-not-optional)
+5. [The loss family, the training model, and the rules that are not optional](#5-the-loss-family-the-training-model-and-the-rules-that-are-not-optional)
 6. [Why there is no shared base class](#6-why-there-is-no-shared-base-class)
 7. [Named backlog — what is deliberately NOT implemented](#7-named-backlog--what-is-deliberately-not-implemented)
 8. [Tests](#8-tests)
@@ -34,6 +34,7 @@ two together are what make an otherwise-degenerate objective learn something.
 | `src/dl_techniques/models/dino/dino_v1.py` | `DINOHead` (the projection head all three versions use for SSL), `DINOv1`, `create_dino_v1`, `create_dino_teacher_student_pair`. |
 | `src/dl_techniques/models/dino/dino_v2.py` | `DINOv2Block`, `DINOv2VisionTransformer` (the backbone), `DINOv2` (backbone + classifier), `create_dino_v2`. |
 | `src/dl_techniques/models/dino/dino_v3.py` | `DINOv3`, `create_dino_v3`. |
+| `src/dl_techniques/models/dino/dino_training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
 | `src/dl_techniques/models/dino/common.py` | `reject_input_shape` — the one piece of the converged factory scheme that is identical in all three files. Not part of the public API. |
 | `src/dl_techniques/models/dino/README.md` | This file. |
 
@@ -315,7 +316,7 @@ ssl_model = keras.Model(inputs=backbone.input, outputs=head(backbone.output))
 
 ---
 
-## 5. The loss family, and two rules that are not optional
+## 5. The loss family, the training model, and the rules that are not optional
 
 `src/dl_techniques/losses/dino_loss.py` provides three losses, all re-exported from
 `dl_techniques.losses`:
@@ -359,7 +360,7 @@ that grows with `out_dim`: about 84 KB at `out_dim=4096`, 165 KB at `8192`, and 
 at DINO's paper-scale `65536`. A `get_config()` round-trip test that compares only
 hyperparameters is vacuous here — assert the center's value.
 
-### Rule 3 — the structured-dict `y_pred` is **direct-invocation only**
+### Rule 3 — the structured-dict `y_pred` is **direct-invocation only**; stock `fit()` uses the **packed single tensor**
 
 `DINOLoss` and `iBOTPatchLoss` accept a `Dict[str, Tensor]` `y_pred` (carrying student
 logits, teacher logits, and — for iBOT — the patch mask). **This does not work under stock
@@ -372,10 +373,90 @@ The dict form is a documented API for calling the loss **directly**
 (`loss(y_true, y_pred_dict)`), which is how the tests exercise it. A model that must be
 compiled with one of these losses has to return a **single tensor**.
 
+The single-tensor form is the **packed** convention: `y_pred` has last dimension
+`2 * out_dim`, holding `concatenate([student_logits, teacher_logits], axis=-1)`. Build it
+with `pack_student_teacher` from `src/dl_techniques/losses/dino_loss.py` — that function
+is the single source of truth for the layout, and `_resolve_student_teacher` in the same
+module is the only place that unpacks it. `y_true` is ignored, so feed a dummy label.
+
+Two constraints on the packed form, both measured:
+
+- **It must be rank 2.** The centering EMA reduces over `axis=0` only, so a
+  `(batch, n_pairs, 2 * out_dim)` `y_pred` produces a `(1, n_pairs, out_dim)` batch centre
+  and `center.assign()` dies mid-`fit()` with
+  `NotImplementedError: numpy() is only available when eager execution is enabled` — a
+  shape error wearing a backend error's clothes. Flatten the pair axis into the batch axis.
+- **`sample_weight` cannot carry the second tensor.** `fit()` sources `sample_weight` from
+  the **dataset** tuple, and the teacher's logits are produced by the model from the same
+  batch, so there is no point at which they could be handed over. `iBOTPatchLoss`
+  additionally refuses a non-`None` `sample_weight` outright (see below).
+
 Relatedly, `iBOTPatchLoss.__call__` **refuses** a non-`None` `sample_weight` with a
 `TypeError` naming `y_pred['mask']`, because the pre-fix docstring told callers to write
 `loss(teacher, student, mask)` — a call that would otherwise silently apply the mask as a
 scalar weighting.
+
+### Rule 4 — `teacher_temp` is a Variable behind a **read-only** property
+
+DINO warms the teacher's temperature up during training. A Python-float temperature cannot
+do that: it is constant-folded into the traced training step. Measured, with the centering
+EMA frozen so the temperature is the only thing that could move the loss — setting
+`loss.teacher_temp = 4.0` (a 100x change) between two epochs moved the reported loss
+`9.953619 -> 9.953612`, i.e. by 7e-07. Nothing.
+
+So `teacher_temp` is a non-trainable `keras.Variable`, exposed as a read-only `float`
+property. Change it with `loss.set_teacher_temp(value)`; a plain
+`loss.teacher_temp = value` raises `AttributeError` naming the setter, which turns the
+silent no-op into a loud failure. `get_config()` carries the **current** value, so a
+warmup survives a checkpoint.
+
+Drive it with the schedule **functions** already in
+`src/dl_techniques/models/depth_anything/teacher_ema.py`
+(`linear_ema_schedule` / `cosine_ema_schedule`) plus a `keras.callbacks.LambdaCallback` —
+**not** with a new schedule-callback class. `src/dl_techniques/callbacks/temperature_annealing.py`
+does **not** fit: measured, `TemperatureAnnealingCallback._iter_target_layers` walks
+`self.model.layers` and requires each target to expose a `temperature` **Variable** plus a
+`softplus_temperature` flag (the `dl_techniques.layers.logic.*` contract). A `keras.losses.Loss`
+is not a layer of the model, so the callback finds `[]` targets on a compiled DINO model
+and anneals nothing.
+
+### 5.5 — `DINOTrainingModel`
+
+`src/dl_techniques/models/dino/dino_training.py` packages the two networks:
+
+- Input: one fixed-shape tensor `(batch, n_views, height, width, channels)`, where views
+  `0` and `1` are the **global** crops and every view is at the **same** pixel resolution
+  (the local-crop limitation of § 7, item 1).
+- The student runs on all views; the teacher runs on the global views only, under
+  `keras.ops.stop_gradient`, with `trainable=False`.
+- Output: the packed tensor of Rule 3, at `(batch * n_pairs, 2 * out_dim)` — one row per
+  (teacher global view, student view) pair, same-view pairs excluded.
+- It exposes `update_teacher_ema(decay)`, which is the **exact name**
+  `TeacherEMACallback` looks up. If that method is absent the callback logs one warning
+  and self-disables: the run completes, the loss curve looks plausible, and the teacher is
+  never trained. There is no other symptom, which is why the tests assert the teacher
+  weights moved *and* moved toward the student.
+
+```python
+import numpy as np
+from dl_techniques.models.dino import create_dino_training_model
+from dl_techniques.losses.dino_loss import DINOLoss
+from dl_techniques.models.depth_anything.teacher_ema import (
+    TeacherEMACallback, cosine_ema_schedule,
+)
+
+model = create_dino_training_model(
+    "tiny", image_size=32, patch_size=16, n_local_views=2, dino_out_dim=64,
+)
+model.compile(optimizer="adamw", loss=DINOLoss(out_dim=64))
+
+views = np.random.rand(2, 4, 32, 32, 3).astype("float32")   # 2 global + 2 local
+dummy_labels = np.zeros((2, 1), dtype="float32")            # ignored by the loss
+model.fit(                       # NOTE: no validation_data (Rule 1)
+    views, dummy_labels, epochs=1, batch_size=2, verbose=0,
+    callbacks=[TeacherEMACallback(cosine_ema_schedule(0.99, 0.9999, 100))],
+)
+```
 
 ---
 
@@ -425,10 +506,12 @@ silent omission again.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
 
-> **Training pipeline — PENDING.** No DINO training pipeline exists in this repository
-> yet. Nothing in this package assumes one does. When a trainer lands, this section will
-> name its path; deliberately, no path is named here now, because a README naming a path
-> that does not resolve is exactly the rot this file's path checker exists to prevent.
+> **Training pipeline — PARTIAL.** `src/dl_techniques/models/dino/dino_training.py`
+> (§ 5.5) is the trainable model, and it runs under stock `fit()` today. The two pieces
+> still missing are the multi-crop dataset element map and the runnable trainer script
+> with its k-NN evaluation callback. Deliberately, **no path is named here for those**,
+> because a README naming a path that does not resolve is exactly the rot this file's
+> path checker exists to prevent.
 
 ---
 
@@ -446,7 +529,8 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_loss
 | `tests/test_models/test_dino/test_dino_v3.py` | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), `.keras` round-trips at BOTH `positional_embedding_type` values, the `get_last_selfattention` raises, `image_size` int-or-tuple, dtype-policy forward on both positional modes. |
 | `tests/test_models/test_dino/conftest.py` | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
 | `tests/test_models/test_dino/test_dino_package.py` | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
-| `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, and the all-masked / none-masked `iBOTPatchLoss` edges. |
+| `tests/test_models/test_dino/test_dino_training.py` | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
+| `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
 
 ---
 

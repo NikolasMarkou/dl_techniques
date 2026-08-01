@@ -268,9 +268,11 @@ class TestForward:
     def test_dino_dict_and_tensor_conventions_agree(self, cls_logits):
         """The structured-dict and two-tensor conventions give the same loss.
 
-        The dict convention is the only one usable under stock `fit()` (the
-        teacher's logits come from the MODEL, never from the dataset's
-        `y_true`), so the two paths must not diverge.
+        Neither of these is the stock-`fit()` convention -- that is the PACKED
+        single tensor (see `TestPackedConvention`; D-009 measured that a dict
+        `y_pred` is refused by `CompileLoss.build`). All three must agree, so
+        that a test written against one convention is evidence about the
+        others.
         """
         teacher, student = cls_logits
         tensor_value = float(ops.convert_to_numpy(DINOLoss(out_dim=6)(teacher, student)))
@@ -737,3 +739,276 @@ class TestKoLeoRegression:
         grad = tape.gradient(value, embeddings).numpy()
         assert np.all(np.isfinite(grad))
         assert np.abs(grad).max() > 0.0
+
+
+# =============================================================================
+# The PACKED single-tensor convention (D-009 / plan step 8)
+# =============================================================================
+
+
+class TestPackedConvention:
+    """`y_pred` of last dimension `2 * out_dim`: student first, teacher second.
+
+    This is the ONLY convention that works under stock `compile(loss=...)` /
+    `fit()` when the teacher's logits come from the model rather than from the
+    dataset. The dict form is refused by `CompileLoss.build` (D-009) and the
+    two-tensor form would require the DATASET to supply the teacher's logits.
+    """
+
+    def test_packed_agrees_with_the_two_tensor_call(self, cls_logits):
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        teacher, student = cls_logits
+        packed = ops.convert_to_numpy(pack_student_teacher(student, teacher))
+        assert packed.shape == (teacher.shape[0], 2 * teacher.shape[1])
+
+        direct = float(ops.convert_to_numpy(
+            DINOLoss(out_dim=6)(teacher, student)))
+        from_packed = float(ops.convert_to_numpy(
+            DINOLoss(out_dim=6)(IGNORED_Y_TRUE, packed)))
+        np.testing.assert_allclose(from_packed, direct, rtol=1e-6, atol=1e-6)
+
+        # Non-vacuity: the two halves must not be interchangeable, or the
+        # agreement above would hold for a swapped layout too.
+        swapped = np.concatenate([teacher, student], axis=-1)
+        swapped_value = float(ops.convert_to_numpy(
+            DINOLoss(out_dim=6)(IGNORED_Y_TRUE, swapped)))
+        assert abs(swapped_value - direct) > 1e-3, (
+            "swapping the student and teacher halves changed nothing, so this "
+            "test cannot see the layout at all"
+        )
+
+    def test_packed_ignores_y_true(self, cls_logits):
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        teacher, student = cls_logits
+        packed = pack_student_teacher(student, teacher)
+        loss = DINOLoss(out_dim=6)
+        a = float(ops.convert_to_numpy(loss(IGNORED_Y_TRUE, packed)))
+        loss_b = DINOLoss(out_dim=6)
+        b = float(ops.convert_to_numpy(
+            loss_b(np.full((4, 6), 99.0, "float32"), packed)))
+        np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-6)
+
+    def test_a_wrong_width_plain_tensor_raises_naming_both_widths(self):
+        loss = DINOLoss(out_dim=6)
+        wrong = np.zeros((4, 7), "float32")
+        with pytest.raises(ValueError, match=r"2 \* out_dim = 12"):
+            loss.call(None, wrong)
+
+    def test_packed_trains_under_stock_fit(self):
+        """A model emitting the packed tensor trains, and the center moves."""
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        out_dim = 5
+
+        class _PackedModel(keras.Model):
+            def __init__(self):
+                super().__init__(name="packed_model")
+                self.student = keras.layers.Dense(out_dim)
+                self.teacher = keras.layers.Dense(out_dim)
+                self.teacher.trainable = False
+
+            def call(self, inputs, training=None):
+                student = self.student(inputs)
+                teacher = ops.stop_gradient(self.teacher(inputs))
+                return pack_student_teacher(student, teacher)
+
+        rng = np.random.default_rng(4242)
+        x = rng.normal(size=(8, 3)).astype("float32")
+        y = np.zeros((8, 1), "float32")
+
+        model = _PackedModel()
+        loss = DINOLoss(out_dim=out_dim)
+        model.compile(optimizer=keras.optimizers.SGD(0.0), loss=loss)
+
+        before = ops.convert_to_numpy(loss.center).copy()
+        # shuffle=False: the hand-computed EMA below assumes the two
+        # batches arrive in index order.
+        history = model.fit(x, y, epochs=1, batch_size=4, verbose=0,
+                            shuffle=False)
+
+        assert np.isfinite(history.history["loss"][0])
+        after = ops.convert_to_numpy(loss.center)
+        assert not np.array_equal(before, after), (
+            "the center did not move: the packed y_pred never reached the "
+            "centering EMA"
+        )
+        # The center must equal the EMA of the TEACHER half specifically.
+        packed = ops.convert_to_numpy(model(x))
+        teacher_half = packed[:, out_dim:]
+        expected = np.zeros((1, out_dim), np.float64)
+        for start in (0, 4):
+            batch_center = teacher_half[start:start + 4].astype(
+                np.float64).mean(axis=0, keepdims=True)
+            expected = 0.9 * expected + 0.1 * batch_center
+        np.testing.assert_allclose(after, expected, rtol=1e-4, atol=1e-6)
+
+    def test_ibot_also_accepts_the_packed_form(self, patch_logits):
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        teacher, student, _ = patch_logits
+        packed = pack_student_teacher(student, teacher)
+        direct = float(ops.convert_to_numpy(
+            iBOTPatchLoss(out_dim=4)(teacher, student)))
+        from_packed = float(ops.convert_to_numpy(
+            iBOTPatchLoss(out_dim=4)(IGNORED_Y_TRUE, packed)))
+        np.testing.assert_allclose(from_packed, direct, rtol=1e-6, atol=1e-6)
+
+
+# =============================================================================
+# A SCHEDULABLE teacher temperature (D-022 / plan step 8)
+# =============================================================================
+
+
+class TestSchedulableTeacherTemperature:
+    """`teacher_temp` is a `keras.Variable` behind a read-only property.
+
+    A Python-float temperature is constant-folded into the traced training
+    step, so a warmup schedule that assigns it is a SILENT no-op. The tests
+    here pin (a) that the property reads back exactly, (b) that a plain
+    assignment RAISES rather than silently doing nothing, and (c) that
+    `set_teacher_temp` really reaches a compiled `fit()`.
+    """
+
+    @pytest.mark.parametrize("cls", [DINOLoss, iBOTPatchLoss])
+    def test_property_reads_back_the_exact_constructor_value(self, cls):
+        loss = cls(out_dim=4, teacher_temp=0.07)
+        assert isinstance(loss.teacher_temp, float)
+        assert loss.teacher_temp == 0.07
+        assert isinstance(loss._teacher_temp, keras.Variable)
+        assert loss._teacher_temp.trainable is False
+
+    @pytest.mark.parametrize("cls", [DINOLoss, iBOTPatchLoss])
+    def test_plain_assignment_is_refused(self, cls):
+        loss = cls(out_dim=4)
+        with pytest.raises(AttributeError, match="set_teacher_temp"):
+            loss.teacher_temp = 0.5
+
+    @pytest.mark.parametrize("cls", [DINOLoss, iBOTPatchLoss])
+    def test_set_teacher_temp_validates(self, cls):
+        loss = cls(out_dim=4)
+        with pytest.raises(ValueError, match="teacher_temp must be positive"):
+            loss.set_teacher_temp(0.0)
+
+    def test_set_teacher_temp_reaches_a_compiled_fit(self):
+        """The whole point: a schedule must change a RUNNING training step.
+
+        The centering EMA is frozen (`center_momentum` ~ 1.0) so the ONLY
+        thing that can move the reported loss between the two epochs is the
+        temperature.
+        """
+        out_dim = 6
+        rng = np.random.default_rng(99)
+        x = rng.normal(size=(8, 4)).astype("float32")
+        teacher = (rng.normal(size=(8, out_dim)) * 3.0).astype("float32")
+
+        loss = DINOLoss(out_dim=out_dim, center_momentum=0.999999)
+        model = keras.Sequential([keras.layers.Dense(out_dim)])
+        model.compile(optimizer=keras.optimizers.SGD(0.0), loss=loss)
+
+        first = model.fit(x, teacher, epochs=1, batch_size=8,
+                          verbose=0).history["loss"][0]
+        loss.set_teacher_temp(4.0)
+        second = model.fit(x, teacher, epochs=1, batch_size=8,
+                           verbose=0).history["loss"][0]
+
+        assert abs(second - first) > 0.5, (
+            f"a 100x teacher_temp change moved the training loss by "
+            f"{abs(second - first):.3e}; the temperature is being "
+            f"constant-folded into the traced step (D-022)"
+        )
+        assert loss.teacher_temp == 4.0
+
+    def test_config_round_trip_carries_the_current_temperature(self):
+        loss = DINOLoss(out_dim=4, teacher_temp=0.04)
+        loss.set_teacher_temp(0.07)
+        restored = DINOLoss.from_config(loss.get_config())
+        assert restored.teacher_temp == 0.07
+
+
+# =============================================================================
+# KoLeo's fp16 normalization overflow (D-023, the D-020 defect class)
+# =============================================================================
+
+
+class TestKoLeoFp16NormalizationOverflow:
+    """`ops.normalize` in a 16-bit dtype makes KoLeo a DEAD regularizer.
+
+    Not a toy-size test on purpose: at small widths / magnitudes the fp16 path
+    is correct to ~1e-4 and every assertion here would be vacuous. The
+    configuration is pinned at a width and magnitude where `sum(x**2)` really
+    does exceed fp16's 65504, asserted at RUNTIME below.
+    """
+
+    WIDTH = 256
+    SCALE = 300.0
+
+    def _embeddings(self, seed=0):
+        rng = np.random.RandomState(seed)
+        return (rng.normal(size=(16, self.WIDTH)) * self.SCALE).astype("float32")
+
+    def test_the_fixture_really_overflows_fp16(self):
+        """Runtime non-vacuity floor for every test in this class."""
+        embeddings = self._embeddings()
+        sumsq = float(np.sum(embeddings[0].astype(np.float64) ** 2))
+        assert sumsq > 65504.0, (
+            f"sum(x**2) = {sumsq:.3e} does not exceed fp16's 65504, so these "
+            f"tests would pass with the fix reverted"
+        )
+
+    def test_fp16_matches_float32(self):
+        embeddings = self._embeddings()
+        reference = float(ops.convert_to_numpy(
+            KoLeoLoss()(IGNORED_Y_TRUE, embeddings)))
+        fp16 = float(ops.convert_to_numpy(
+            KoLeoLoss(dtype="float16")(IGNORED_Y_TRUE, embeddings)))
+        np.testing.assert_allclose(fp16, reference, rtol=2e-2, atol=2e-3)
+
+    def test_fp16_still_distinguishes_collapse_from_spread(self):
+        """The defect's real damage: a CONSTANT loss with a zero gradient.
+
+        With the normalization overflowing, every embedding becomes the zero
+        vector, every pairwise cosine similarity becomes 0, and the loss
+        collapses to `-log(sqrt(2) + eps) = -0.34657` for ANY input -- so the
+        anti-collapse regularizer stops seeing collapse.
+        """
+        rng = np.random.RandomState(1)
+        spread = self._embeddings()
+        collapsed = np.tile(
+            rng.normal(size=(1, self.WIDTH)) * self.SCALE, (16, 1)
+        ).astype("float32") + rng.normal(size=(16, self.WIDTH)).astype("float32")
+
+        loss = KoLeoLoss(dtype="float16")
+        spread_value = float(ops.convert_to_numpy(
+            loss(IGNORED_Y_TRUE, spread)))
+        collapsed_value = float(ops.convert_to_numpy(
+            loss(IGNORED_Y_TRUE, collapsed)))
+
+        assert collapsed_value > spread_value + 1.0, (
+            f"under fp16 the KoLeo loss cannot tell a collapsed batch "
+            f"({collapsed_value:.6f}) from a spread one ({spread_value:.6f}). "
+            f"A value pinned at -0.34657 for both is the D-023 overflow."
+        )
+
+    def test_fp16_gradient_is_not_dead(self):
+        import tensorflow as tf
+
+        embeddings = tf.Variable(self._embeddings())
+        loss = KoLeoLoss(dtype="float16")
+        with tf.GradientTape() as tape:
+            value = loss(IGNORED_Y_TRUE, embeddings)
+        grad = tape.gradient(value, embeddings).numpy()
+        assert np.all(np.isfinite(grad))
+        assert np.abs(grad).max() > 0.0, (
+            "the fp16 KoLeo gradient is EXACTLY zero -- the regularizer "
+            "contributes nothing to training (D-023)"
+        )
+
+    def test_float64_is_not_downcast(self):
+        """The promotion must not pin float64 callers to float32."""
+        embeddings = self._embeddings().astype("float64")
+        value = KoLeoLoss(dtype="float64")(
+            IGNORED_Y_TRUE.astype("float64"), embeddings)
+        assert keras.backend.standardize_dtype(value.dtype) == "float64"
+        assert np.isfinite(float(ops.convert_to_numpy(value)))
