@@ -61,7 +61,57 @@ References:
 
 import keras
 from keras import ops
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple, Union
+
+# ---------------------------------------------------------------------
+
+
+def _resolve_student_teacher(
+        loss_name: str,
+        y_true: Optional[keras.KerasTensor],
+        y_pred: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    """
+    Resolve `(teacher_logits, student_logits)` from either calling convention.
+
+    Shared by `DINOLoss` and `iBOTPatchLoss`, which accept the same two
+    conventions: a structured dict `y_pred` (the only one usable under stock
+    `compile(loss=...)`, since the teacher's logits are produced by the model
+    rather than by the dataset), or a direct `(y_true=teacher, y_pred=student)`
+    tensor pair for tests and manual use.
+
+    Args:
+        loss_name: Name of the calling loss, used in error messages only.
+        y_true: Teacher logits, or ignored when `y_pred` is a dict.
+        y_pred: Student logits, or a dict carrying `"student_logits"` and
+            `"teacher_logits"` (plus, for `iBOTPatchLoss`, an optional
+            `"mask"`, which this helper does not read).
+
+    Returns:
+        Tuple of `(teacher_logits, student_logits)`.
+
+    Raises:
+        KeyError: If `y_pred` is a dict missing `"student_logits"` or
+            `"teacher_logits"`.
+        ValueError: If `y_pred` is a plain tensor and `y_true` is None, so no
+            teacher logits are available from either argument.
+    """
+    if isinstance(y_pred, dict):
+        missing = {'student_logits', 'teacher_logits'} - set(y_pred)
+        if missing:
+            raise KeyError(
+                f"{loss_name} received a dict y_pred missing required "
+                f"key(s) {sorted(missing)}; got keys {sorted(y_pred)}"
+            )
+        return y_pred['teacher_logits'], y_pred['student_logits']
+    if y_true is None:
+        raise ValueError(
+            f"{loss_name} called with a plain-tensor y_pred requires y_true to "
+            f"be the teacher's logits, but y_true is None. Either pass the "
+            f"teacher logits as y_true, or pass a dict y_pred with keys "
+            f"'student_logits' and 'teacher_logits'."
+        )
+    return y_true, y_pred
 
 # ---------------------------------------------------------------------
 
@@ -103,34 +153,91 @@ class DINOLoss(keras.losses.Loss):
             Higher values create more stable centers. Defaults to 0.9.
 
     Input shapes:
-        y_true: Teacher's output logits with shape `(batch_size, out_dim)`.
-        y_pred: Student's output logits with shape `(batch_size, out_dim)`.
+        Two calling conventions are supported.
+
+        1. **Direct two-tensor call** -- `y_true` is the teacher's logits
+           `(batch_size, out_dim)` and `y_pred` the student's
+           `(batch_size, out_dim)`. This is the convention that works as a
+           `compile(loss=...)` argument against a model with a single tensor
+           output.
+        2. **Structured `y_pred`** -- `y_pred` is a dict carrying both
+           networks' outputs and `y_true` is IGNORED (as in
+           `CLIPContrastiveLoss` and `KoLeoLoss`)::
+
+               y_pred = {
+                   "student_logits": (batch_size, out_dim),
+                   "teacher_logits": (batch_size, out_dim),
+               }
+
+           **This convention is for direct invocation, NOT for a model whose
+           `call()` returns that dict.** MEASURED on keras 3.8.0: when the
+           model's output is nested, `CompileLoss.build` broadcasts a single
+           `Loss` object across every leaf
+           (`loss = tree.map_structure(lambda x: loss, y_pred)`), so each copy
+           receives one leaf instead of the whole structure and the build then
+           fails with `KeyError: The path: ('student_logits',) in the 'loss'
+           argument, can't be found in either the model's output (y_pred) or in
+           the labels (y_true)`. A model that wants one loss to see several
+           tensors must return them as a SINGLE tensor.
+
+        Note that `y_true` may not be `None` when going through `__call__`:
+        Keras converts it to a tensor before dispatching to `call()`. Pass a
+        dummy tensor (the repo's `get_dummy_labels` shape) when it is ignored.
 
     Output shape:
         Scalar loss tensor.
 
     Attributes:
-        center: Non-trainable momentum-updated center vector for teacher logits.
+        center: Non-trainable momentum-updated `keras.Variable` of shape
+            `(1, out_dim)`, dtype float32, created eagerly in `__init__`.
 
     Example:
         ```python
         # Initialize for vision_heads transformer with 65k dimensional output
         dino_loss = DINOLoss(out_dim=65536, student_temp=0.1, teacher_temp=0.04)
 
-        # Compute loss in training loop
-        teacher_cls = teacher_model(global_crops)  # Shape: (batch, 65536)
-        student_cls = student_model(all_crops)     # Shape: (batch, 65536)
+        # Under stock fit(), via a model returning a structured y_pred:
+        model.compile(optimizer=..., loss=dino_loss)
+        model.fit(train_ds, epochs=100)          # NOTE: no validation_data
 
+        # Or called directly (teacher first, student second):
         loss = dino_loss(teacher_cls, student_cls)
-
-        # CRITICAL: Update center after loss computation
-        dino_loss.update_center(teacher_cls)
         ```
 
     Note:
-        The `update_center()` method must be called once per training step,
-        typically in the model's `train_step()` method, to maintain the
-        momentum-updated center that prevents feature collapse.
+        **The centering EMA is applied inside `call()`** -- there is no public
+        `update_center()` method and none is needed. The repo forbids a custom
+        Keras `train_step`, so the center is maintained the same way a
+        BatchNormalization moving average is: a non-trainable variable
+        `.assign()`-ed from inside the forward path. MEASURED under keras 3.8.0
+        / tensorflow 2.18.0: the center reaches the hand-computed EMA value to
+        1.6e-08, bit-identically across `jit_compile` auto/False/True.
+
+    Note:
+        **SSL pretraining with this loss MUST run without `validation_data`.**
+        This is a hard requirement, not hygiene. The centering EMA fires on
+        EVERY invocation of `call()`, and Keras runs the compiled loss on
+        validation batches too. MEASURED: `validation_batch_size` defaults to
+        `batch_size`, so a validation set covering the same number of samples
+        as one training epoch DOUBLES the number of centering updates per
+        epoch. In the step-1 probe this pushed the center 81% past its correct
+        training-only value -- silently, with a finite loss and a clean exit.
+        The corruption scales with the validation batch COUNT. Use a separate
+        evaluation callback (e.g. k-NN on frozen features) instead.
+
+    Note:
+        **The center's value does NOT survive a `.keras` model checkpoint.**
+        Keras does not checkpoint loss-owned variables. It is therefore
+        serialized explicitly through `get_config()` / `from_config()` (see
+        those methods). The cost is a config blob proportional to `out_dim`
+        (MEASURED as JSON: ~83 KB at `out_dim=4096`, ~1.3 MiB at 65536).
+
+    Note:
+        **Single-device only.** No cross-replica reduction of the batch centre
+        is performed. keras 3.8.0's `Distribution` API exposes neither
+        `num_replicas_in_sync` nor `reduce` (MEASURED), so a data-parallel run
+        would maintain a per-replica center. Untested under any distribution
+        strategy.
     """
 
     def __init__(
@@ -176,88 +283,126 @@ class DINOLoss(keras.losses.Loss):
         self.center_momentum = center_momentum
 
         # Create momentum-updated center as non-trainable weight
-        self.center = self.add_weight(
-            name='center',
+        self.center = keras.Variable(
+            initializer=keras.initializers.Zeros(),
             shape=(1, out_dim),
-            initializer='zeros',
+            dtype='float32',
             trainable=False,
-            dtype=self.dtype
+            name='center',
         )
 
     def call(
             self,
-            y_true: keras.KerasTensor,
-            y_pred: keras.KerasTensor
+            y_true: Optional[keras.KerasTensor],
+            y_pred: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
     ) -> keras.KerasTensor:
         """
-        Compute DINO loss between teacher and student outputs.
+        Compute the DINO loss and advance the centering EMA.
 
         Args:
-            y_true: Teacher's output logits with shape (batch_size, out_dim).
-            y_pred: Student's output logits with shape (batch_size, out_dim).
+            y_true: Teacher's output logits with shape (batch_size, out_dim)
+                when `y_pred` is a plain tensor; IGNORED when `y_pred` is a
+                structured dict (see the class docstring's "Input shapes").
+            y_pred: Either the student's logits (batch_size, out_dim), or a
+                dict with keys `"student_logits"` and `"teacher_logits"`.
 
         Returns:
             Scalar tensor representing the computed DINO loss.
 
         Note:
-            This method computes the loss but does NOT update the center.
-            Call `update_center()` separately after loss computation.
+            This method ALSO advances the centering EMA -- see the class
+            docstring. The returned loss uses the center as it stood BEFORE
+            this call's update, matching the reference DINO ordering.
         """
+        teacher_logits, student_logits = _resolve_student_teacher(
+            'DINOLoss', y_true, y_pred)
+
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-006
+        # The centering EMA lives HERE, inside call(), maintained by .assign()
+        # on a non-trainable keras.Variable -- the BatchNormalization
+        # moving-average pattern. Do NOT move it back out into a public
+        # update_center() called from a train_step(): this repo forbids a
+        # custom Keras train_step, so such a method has no caller and the
+        # center would silently stay at zero for an entire pretraining run
+        # (a finite, decreasing loss and a collapsed representation). The
+        # branch was chosen on a measurement, not a prediction -- see D-006.
+        #
+        # Read the center BEFORE assigning so the loss provably uses the
+        # pre-update value regardless of how the graph orders the stateful op.
+        center = ops.convert_to_tensor(self.center)
+
         # Process teacher output: center and sharpen
-        teacher_logits = y_true - self.center
-        teacher_probs = ops.softmax(teacher_logits / self.teacher_temp, axis=-1)
+        teacher_probs = ops.softmax(
+            (teacher_logits - ops.cast(center, teacher_logits.dtype))
+            / self.teacher_temp,
+            axis=-1,
+        )
 
         # Process student output: sharpen to log probabilities
-        student_log_probs = ops.log_softmax(y_pred / self.student_temp, axis=-1)
+        student_log_probs = ops.log_softmax(
+            student_logits / self.student_temp, axis=-1)
 
         # Compute cross-entropy loss: -sum(p_teacher * log_p_student)
         loss = -ops.sum(teacher_probs * student_log_probs, axis=-1)
 
-        return ops.mean(loss)
-
-    def update_center(self, teacher_logits: keras.KerasTensor) -> None:
-        """
-        Update center vector using exponential moving average of teacher logits.
-
-        This method must be called once per training step to maintain the
-        momentum-updated center that prevents feature collapse. Typically
-        called from the model's `train_step()` method.
-
-        Args:
-            teacher_logits: Raw output logits from teacher network with shape
-                           (batch_size, out_dim).
-
-        Note:
-            In distributed training, the batch center is automatically
-            averaged across all replicas before the EMA update.
-        """
-        # Compute mean of current batch
+        # EMA update: center <- a * center + (1-a) * mean(teacher_logits)
         batch_center = ops.mean(teacher_logits, axis=0, keepdims=True)
-
-        # Handle distributed training
-        dist = keras.distribution.distribution()
-        if dist is not None and dist.num_replicas_in_sync > 1:
-            # Average across all replicas
-            batch_center = dist.reduce(
-                'mean', batch_center, axis=None
-            )
-
-        # EMA update: center ← α * center + (1-α) * batch_center
         self.center.assign(
-            self.center * self.center_momentum +
-            batch_center * (1.0 - self.center_momentum)
+            center * self.center_momentum
+            + ops.cast(batch_center, center.dtype) * (1.0 - self.center_momentum)
         )
 
+        return ops.mean(loss)
+
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization, INCLUDING the center's value.
+
+        Returns:
+            Config dict carrying every constructor argument plus a `center`
+            entry holding the centering vector as a nested list.
+        """
         config = super().get_config()
         config.update({
             'out_dim': self.out_dim,
             'student_temp': self.student_temp,
             'teacher_temp': self.teacher_temp,
             'center_momentum': self.center_momentum,
+            # DECISION plan-2026-08-01T105809-dc0c402e/D-007
+            # The center's VALUE is carried in the config on purpose. Keras
+            # does NOT checkpoint loss-owned variables (MEASURED: a .keras
+            # round-trip returns the right Loss subclass with a live .center
+            # that reads back as zeros), so without this the centering
+            # statistic silently resets on every resume. Do NOT "slim down"
+            # get_config() by dropping this key -- that reintroduces a silent
+            # state loss no test that checks only hyperparameters can see.
+            'center': ops.convert_to_numpy(self.center).tolist(),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'DINOLoss':
+        """
+        Reconstruct the loss, restoring the center's value when present.
+
+        Args:
+            config: A config dict as produced by `get_config()`. A missing
+                `center` key is tolerated (the center starts at zeros).
+
+        Returns:
+            The reconstructed `DINOLoss`.
+        """
+        config = dict(config)
+        center = config.pop('center', None)
+        instance = cls(**config)
+        if center is not None:
+            instance.center.assign(
+                ops.reshape(
+                    ops.convert_to_tensor(center, dtype='float32'),
+                    instance.center.shape,
+                )
+            )
+        return instance
 
 # ---------------------------------------------------------------------
 
@@ -298,31 +443,61 @@ class iBOTPatchLoss(keras.losses.Loss):
         center_momentum: EMA momentum for center updates.
 
     Input shapes:
-        y_true: Teacher patch logits with shape `(batch_size, num_patches, out_dim)`.
-        y_pred: Student patch logits with shape `(batch_size, num_patches, out_dim)`.
-        mask: Boolean mask with shape `(batch_size, num_patches)`. True for masked.
+        Two calling conventions are supported, mirroring `DINOLoss` -- and the
+        same MEASURED constraint applies: the structured form is for direct
+        invocation, not for a model whose `call()` returns that dict (see
+        `DINOLoss`'s "Input shapes" for the exact Keras behaviour and error).
+
+        1. **Structured `y_pred` (required to use a mask at all)** -- `y_true`
+           is IGNORED and `y_pred` is a dict::
+
+               y_pred = {
+                   "student_logits": (batch_size, num_patches, out_dim),
+                   "teacher_logits": (batch_size, num_patches, out_dim),
+                   "mask":           (batch_size, num_patches),  # optional, bool
+               }
+
+           An omitted `"mask"` means every patch participates.
+        2. **Direct two-tensor call** -- `y_true` is the teacher's patch logits
+           and `y_pred` the student's; every patch participates.
+
+        The mask CANNOT be passed as a third positional argument. Keras 3's
+        `Loss.__call__` signature is `(y_true, y_pred, sample_weight=None)` and
+        it dispatches to a TWO-argument `self.call`, so a third positional
+        argument is silently swallowed as `sample_weight` and never reaches
+        the masking logic. `__call__` is overridden here to raise on a
+        non-None `sample_weight` rather than let that happen quietly.
 
     Output shape:
         Scalar loss tensor.
 
     Attributes:
-        center: Non-trainable center vector for patch token normalization.
+        center: Non-trainable `keras.Variable` of shape `(1, 1, out_dim)`,
+            dtype float32, created eagerly in `__init__`.
 
     Example:
         ```python
         # Initialize for vision_heads transformer patches
         ibot_loss = iBOTPatchLoss(out_dim=65536, student_temp=0.1)
 
-        # Compute loss with masking
-        teacher_patches = teacher_model.patch_tokens(global_crops)  # (B, 196, 65536)
-        student_patches = student_model.patch_tokens(masked_crops)  # (B, 196, 65536)
-        mask = create_random_mask(batch_size=B, num_patches=196)    # (B, 196)
-
-        loss = ibot_loss(teacher_patches, student_patches, mask)
-
-        # Update center with all teacher patches
-        ibot_loss.update_center(teacher_patches)
+        loss = ibot_loss(
+            None,
+            {
+                "teacher_logits": teacher_patches,  # (B, 196, 65536)
+                "student_logits": student_patches,  # (B, 196, 65536)
+                "mask": mask,                       # (B, 196), bool
+            },
+        )
         ```
+
+    Note:
+        Every note on `DINOLoss` applies verbatim to this class as well: the
+        centering EMA is applied inside `call()` with no public
+        `update_center()`; **pretraining must run without `validation_data`**;
+        the center's value is carried through `get_config()` because Keras does
+        not checkpoint loss-owned variables; and no cross-replica reduction is
+        performed (single-device only, untested under any distribution
+        strategy).
     """
 
     def __init__(
@@ -367,87 +542,163 @@ class iBOTPatchLoss(keras.losses.Loss):
         self.center_momentum = center_momentum
 
         # Create center for patch tokens (shape for broadcasting over patches)
-        self.center = self.add_weight(
-            name='center',
+        self.center = keras.Variable(
+            initializer=keras.initializers.Zeros(),
             shape=(1, 1, out_dim),
-            initializer='zeros',
+            dtype='float32',
             trainable=False,
-            dtype=self.dtype
+            name='center',
         )
+
+    def __call__(
+            self,
+            y_true: Any,
+            y_pred: Any,
+            sample_weight: Any = None
+    ) -> keras.KerasTensor:
+        """
+        Invoke the loss, refusing a `sample_weight` outright.
+
+        The pre-fix API asked callers to write `loss(teacher, student, mask)`.
+        Under Keras 3 that third argument lands in `sample_weight` and is
+        applied as a weighting of the already-reduced scalar loss -- the mask
+        never reaches the masking logic, and nothing complains. Refusing
+        `sample_weight` turns that silent-wrong path into a loud one.
+
+        Args:
+            y_true: Teacher patch logits, or ignored when `y_pred` is a dict.
+            y_pred: Student patch logits, or the structured dict.
+            sample_weight: Must be None.
+
+        Returns:
+            The scalar loss.
+
+        Raises:
+            TypeError: If `sample_weight` is not None.
+        """
+        if sample_weight is not None:
+            raise TypeError(
+                "iBOTPatchLoss does not accept a sample_weight. If you meant "
+                "to supply the patch mask, pass it inside the structured "
+                "y_pred dict as y_pred['mask'] -- a third positional argument "
+                "is swallowed by Keras as sample_weight and never reaches the "
+                "masking logic."
+            )
+        return super().__call__(y_true, y_pred)
 
     def call(
             self,
-            y_true: keras.KerasTensor,
-            y_pred: keras.KerasTensor,
-            mask: keras.KerasTensor
+            y_true: Optional[keras.KerasTensor],
+            y_pred: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
     ) -> keras.KerasTensor:
         """
-        Compute iBOT loss on masked patches only.
+        Compute the iBOT loss over the masked patches and advance the EMA.
 
         Args:
-            y_true: Teacher patch logits (B, num_patches, out_dim).
-            y_pred: Student patch logits (B, num_patches, out_dim).
-            mask: Boolean mask (B, num_patches). True for masked patches.
+            y_true: Teacher patch logits `(B, num_patches, out_dim)` when
+                `y_pred` is a plain tensor; IGNORED when `y_pred` is a dict.
+            y_pred: Student patch logits, or a dict with `"student_logits"`,
+                `"teacher_logits"` and an optional boolean `"mask"` of shape
+                `(B, num_patches)` (True = the patch participates).
 
         Returns:
-            Scalar loss tensor normalized by number of masked patches.
+            Scalar loss tensor, the mask-weighted mean over participating
+            patches. Exactly `0.0` when no patch participates.
         """
-        # Select only masked patch tokens
-        student_masked_logits = ops.boolean_mask(y_pred, mask)
-        teacher_masked_logits = ops.boolean_mask(y_true, mask)
+        teacher_logits, student_logits = _resolve_student_teacher(
+            'iBOTPatchLoss', y_true, y_pred)
+        mask = y_pred.get('mask') if isinstance(y_pred, dict) else None
 
-        # If no patches are masked, return zero loss
-        num_masked = ops.shape(student_masked_logits)[0]
-        if num_masked == 0:
-            return ops.convert_to_tensor(0.0, dtype=self.dtype)
+        center = ops.convert_to_tensor(self.center)
 
         # Process teacher output: center and sharpen
-        teacher_logits = teacher_masked_logits - ops.squeeze(self.center, axis=[0, 1])
-        teacher_probs = ops.softmax(teacher_logits / self.teacher_temp, axis=-1)
-
-        # Process student output: sharpen to log probabilities
-        student_log_probs = ops.log_softmax(student_masked_logits / self.student_temp, axis=-1)
-
-        # Compute cross-entropy loss
-        loss = -ops.sum(teacher_probs * student_log_probs, axis=-1)
-
-        # Return mean loss over masked patches
-        return ops.mean(loss)
-
-    def update_center(self, teacher_patch_logits: keras.KerasTensor) -> None:
-        """
-        Update center using all teacher patch tokens.
-
-        Args:
-            teacher_patch_logits: All patch logits from teacher with shape
-                                 (batch_size, num_patches, out_dim).
-        """
-        # Compute mean over batch and patch dimensions
-        batch_center = ops.mean(teacher_patch_logits, axis=[0, 1], keepdims=True)
-
-        # Handle distributed training
-        dist = keras.distribution.distribution()
-        if dist is not None and dist.num_replicas_in_sync > 1:
-            batch_center = dist.reduce(
-                'mean', batch_center, axis=None
-            )
-
-        # EMA update
-        self.center.assign(
-            self.center * self.center_momentum +
-            batch_center * (1.0 - self.center_momentum)
+        teacher_probs = ops.softmax(
+            (teacher_logits - ops.cast(center, teacher_logits.dtype))
+            / self.teacher_temp,
+            axis=-1,
         )
 
+        # Process student output: sharpen to log probabilities
+        student_log_probs = ops.log_softmax(
+            student_logits / self.student_temp, axis=-1)
+
+        # Per-patch cross-entropy, shape (B, num_patches)
+        per_patch_loss = -ops.sum(teacher_probs * student_log_probs, axis=-1)
+
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-008
+        # Mask-weighted mean, with NO branch. Do NOT restore the previous
+        # `ops.boolean_mask(...)` + `if ops.shape(...)[0] == 0:` form: MEASURED
+        # on keras 3.8.0, `keras.ops.boolean_mask` DOES NOT EXIST
+        # (AttributeError in eager AND under tf.function), so the whole body
+        # was unreachable and the zero-masked branch behind it was never even
+        # evaluated. A gather-based rewrite would reintroduce the original
+        # defect: a data-dependent shape that a Python `if` cannot read at
+        # trace time. This form is correct at zero participating patches by
+        # construction -- 0 / eps == 0.0 -- with no dynamic shape anywhere.
+        # (`mask is None` is a Python branch on a STATIC value -- the presence
+        # of a dict key -- not on a tensor, so it is trace-time safe.)
+        if mask is None:
+            loss = ops.mean(per_patch_loss)
+        else:
+            mask_weights = ops.cast(mask, per_patch_loss.dtype)
+            num_participating = ops.sum(mask_weights)
+            loss = ops.sum(per_patch_loss * mask_weights) / ops.maximum(
+                num_participating, ops.cast(1e-8, per_patch_loss.dtype))
+
+        # EMA update over ALL teacher patches (masked and unmasked alike),
+        # matching the reference iBOT centering statistic.
+        batch_center = ops.mean(teacher_logits, axis=[0, 1], keepdims=True)
+        self.center.assign(
+            center * self.center_momentum
+            + ops.cast(batch_center, center.dtype) * (1.0 - self.center_momentum)
+        )
+
+        return loss
+
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization, INCLUDING the center's value.
+
+        Returns:
+            Config dict carrying every constructor argument plus a `center`
+            entry holding the centering vector as a nested list.
+        """
         config = super().get_config()
         config.update({
             'out_dim': self.out_dim,
             'student_temp': self.student_temp,
             'teacher_temp': self.teacher_temp,
             'center_momentum': self.center_momentum,
+            # DECISION plan-2026-08-01T105809-dc0c402e/D-007
+            # See DINOLoss.get_config -- the center's value is carried here
+            # because Keras does not checkpoint loss-owned variables.
+            'center': ops.convert_to_numpy(self.center).tolist(),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'iBOTPatchLoss':
+        """
+        Reconstruct the loss, restoring the center's value when present.
+
+        Args:
+            config: A config dict as produced by `get_config()`. A missing
+                `center` key is tolerated (the center starts at zeros).
+
+        Returns:
+            The reconstructed `iBOTPatchLoss`.
+        """
+        config = dict(config)
+        center = config.pop('center', None)
+        instance = cls(**config)
+        if center is not None:
+            instance.center.assign(
+                ops.reshape(
+                    ops.convert_to_tensor(center, dtype='float32'),
+                    instance.center.shape,
+                )
+            )
+        return instance
 
 # ---------------------------------------------------------------------
 

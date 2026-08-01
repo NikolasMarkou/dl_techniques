@@ -89,28 +89,34 @@ model.compile(optimizer='adam', loss=CLIPContrastiveLoss(temperature=0.07))
 ```
 
 ### DINO Loss
-`DINOLoss` requires a manual call to `update_center()` in the training loop.
+`DINOLoss` (and `iBOTPatchLoss`) maintain their centering EMA **inside
+`call()`**, on a non-trainable `keras.Variable`. There is no `update_center()`
+method and no custom `train_step` is needed — the model returns a structured
+`y_pred` dict and the loss unpacks it, exactly like `CLIPContrastiveLoss`.
 
 ```python
 from dl_techniques.losses import DINOLoss
 
 dino_loss = DINOLoss(out_dim=65536)
 
-class DINOModel(keras.Model):
-    def train_step(self, data):
-        # ... forward passes for student and teacher ...
-        with tf.GradientTape() as tape:
-            teacher_output = self.teacher(global_crops, training=False)
-            student_output = self.student(all_crops, training=True)
-            loss = dino_loss(teacher_output, student_output)
-        
-        # ... backward pass ...
-        
-        # CRITICAL: Update the loss's internal center
-        dino_loss.update_center(teacher_output)
-        
-        return {"loss": loss}
+# The model returns both networks' logits; y_true is ignored.
+# outputs = {"student_logits": ..., "teacher_logits": ...}
+model.compile(optimizer='adam', loss=dino_loss)
+model.fit(train_ds, epochs=100)      # NOTE: no validation_data — see below
 ```
+
+**Two rules these losses impose** (both MEASURED, both silent if violated):
+
+1. **Do not pass `validation_data`.** The centering EMA fires on every
+   invocation of `call()`, including validation batches, and
+   `validation_batch_size` defaults to `batch_size` — so a validation pass
+   inflates the number of centering updates per epoch and corrupts the
+   statistic proportionally to the validation batch count. Use an evaluation
+   callback (k-NN on frozen features) instead.
+2. **The center's value is carried in `get_config()`.** Keras does not
+   checkpoint loss-owned variables, so without this the centering statistic
+   silently resets to zeros on every resume. The cost is a config blob
+   proportional to `out_dim` (~1.3 MiB of JSON at `out_dim=65536`).
 
 ### Segmentation Losses
 Recommended path: construct `SegmentationWrapperLoss` directly. The legacy
