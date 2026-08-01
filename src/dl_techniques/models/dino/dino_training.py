@@ -20,8 +20,9 @@ Multi-crop input contract (the whole contract, stated once)
   and `tf.data`'s fixed-shape batching serve every view with no
   positional-embedding interpolation. The cost is that local views are as
   expensive as global ones — the paper's compute saving on locals is given up.
-* `src/dl_techniques/datasets/vision/multi_crop.py` produces exactly this element
-  shape (built in the next step of the same plan).
+* `src/dl_techniques/datasets/vision/multi_crop.py`'s `make_multi_crop_map_fn`
+  produces exactly this element shape (its augmentation is deliberately weaker
+  than the paper's; that module's docstring lists what it does NOT do).
 
 Output contract
 ---------------
