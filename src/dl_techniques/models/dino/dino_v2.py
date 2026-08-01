@@ -45,7 +45,6 @@ Where:
 
 import keras
 import numpy as np
-import tensorflow as tf
 from keras import layers, initializers
 from typing import Optional, Union, Dict, Any, Tuple, Literal
 
@@ -90,6 +89,16 @@ class DINOv2Block(keras.layers.Layer):
     **Intent**: Implement the core transformer block used in DINOv2 with modern
     enhancements like learnable scaling and stochastic depth for improved training
     stability and regularization.
+
+    **Note on the shared `drop_path` instance**: the two ``DropPath`` boxes above are
+    ONE `StochasticDepth` object called twice, not two objects. This is deliberate and
+    MEASURED-equivalent to two instances -- `StochasticDepth.call` draws a fresh
+    `keras.random.uniform` mask on every invocation and holds no seed state or
+    variables, so the attention-branch and FFN-branch masks are independent. Measured
+    on keras 3.8.0: 40 successive calls on one instance produced 0 identical pairs out
+    of 780, keep-fraction 0.505 at `drop_path_rate=0.5`. Do NOT "fix" this by creating
+    a second instance -- it would add a second serialized sub-layer for no behavioural
+    difference. See decisions.md D-014.
 
     Args:
         dim: Embedding dimension. Must be positive and divisible by num_heads.
@@ -147,7 +156,7 @@ class DINOv2Block(keras.layers.Layer):
             qkv_bias: bool = True,
             proj_bias: bool = True,
             ffn_bias: bool = True,
-            stochastic_depth_rate: float = 0.0,  # Renamed from drop_path_rate
+            stochastic_depth_rate: float = 0.0,
             init_values: Optional[float] = None,
             attention_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
@@ -175,7 +184,7 @@ class DINOv2Block(keras.layers.Layer):
         self.qkv_bias = qkv_bias
         self.proj_bias = proj_bias
         self.ffn_bias = ffn_bias
-        self.stochastic_depth_rate = stochastic_depth_rate  # Renamed
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.init_values = init_values
         self.attention_dropout = attention_dropout
         self.ffn_dropout = ffn_dropout
@@ -248,12 +257,18 @@ class DINOv2Block(keras.layers.Layer):
             self.ls2 = None
 
         # Stochastic depth (optional)
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-014: ONE StochasticDepth instance is
+        # shared by the attention branch and the FFN branch in call(). MEASURED equivalent
+        # to two instances (fresh keras.random.uniform per call, no seed state, no
+        # variables): 0/780 identical mask pairs over 40 calls. Do NOT split this into
+        # drop_path1/drop_path2 -- it changes the serialized sub-layer set for no
+        # behavioural gain. See decisions.md D-014 and the class docstring.
         if self.stochastic_depth_rate > 0.0:
             self.drop_path = StochasticDepth(self.stochastic_depth_rate, name="drop_path")
         else:
             self.drop_path = None
 
-    def build(self, input_shape: tf.TensorShape) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the transformer block with all sub-components.
 
@@ -285,9 +300,9 @@ class DINOv2Block(keras.layers.Layer):
 
     def call(
             self,
-            inputs: tf.Tensor,
+            inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> tf.Tensor:
+    ) -> keras.KerasTensor:
         """Forward pass of the transformer block."""
         # Pre-norm attention block
         x = self.norm1(inputs, training=training)
@@ -315,7 +330,10 @@ class DINOv2Block(keras.layers.Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         return input_shape
 
@@ -332,7 +350,7 @@ class DINOv2Block(keras.layers.Layer):
             "qkv_bias": self.qkv_bias,
             "proj_bias": self.proj_bias,
             "ffn_bias": self.ffn_bias,
-            "stochastic_depth_rate": self.stochastic_depth_rate,  # Updated
+            "stochastic_depth_rate": self.stochastic_depth_rate,
             "init_values": self.init_values,
             "attention_dropout": self.attention_dropout,
             "ffn_dropout": self.ffn_dropout,
@@ -464,7 +482,7 @@ class DINOv2VisionTransformer(keras.Model):
 
     def __init__(
             self,
-            image_size: Union[int, Tuple[int, int]] = 224,  # Renamed from img_size
+            image_size: Union[int, Tuple[int, int]] = 224,
             patch_size: Union[int, Tuple[int, int]] = 14,
             in_chans: int = 3,
             embed_dim: int = 768,
@@ -474,7 +492,7 @@ class DINOv2VisionTransformer(keras.Model):
             qkv_bias: bool = True,
             proj_bias: bool = True,
             ffn_bias: bool = True,
-            stochastic_depth_rate: float = 0.0,  # Renamed from drop_path_rate
+            stochastic_depth_rate: float = 0.0,
             drop_path_uniform: bool = False,
             init_values: Optional[float] = None,
             attention_type: str = 'multi_head',
@@ -510,7 +528,7 @@ class DINOv2VisionTransformer(keras.Model):
         self.qkv_bias = qkv_bias
         self.proj_bias = proj_bias
         self.ffn_bias = ffn_bias
-        self.stochastic_depth_rate = stochastic_depth_rate  # Renamed
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.drop_path_uniform = drop_path_uniform
         self.init_values = init_values
         self.attention_type = attention_type
@@ -578,7 +596,7 @@ class DINOv2VisionTransformer(keras.Model):
         # nothing in the graph reads `is_training`, so it was dead weight carried only to
         # be coerced by a fragile DINOv2.call override (#13). Do NOT re-add an `is_training`
         # Input here or to the wrapper; there is no branch that needs it. See decisions.md D-009.
-        masks_input = keras.Input(shape=(self.num_patches,), dtype=tf.bool, name="input_masks")
+        masks_input = keras.Input(shape=(self.num_patches,), dtype="bool", name="input_masks")
 
         # Build the model
         outputs = self._build_model(inputs, masks_input)
@@ -743,7 +761,7 @@ class DINOv2VisionTransformer(keras.Model):
                 qkv_bias=self.qkv_bias,
                 proj_bias=self.proj_bias,
                 ffn_bias=self.ffn_bias,
-                stochastic_depth_rate=dpr[i],  # Updated
+                stochastic_depth_rate=dpr[i],
                 init_values=self.init_values,
                 name=f"block_{i}"
             )
@@ -827,11 +845,11 @@ class DINOv2VisionTransformer(keras.Model):
     def from_variant(
             cls,
             variant: Literal['tiny', 'small', 'base', 'large', 'giant'],
-            image_size: Union[int, Tuple[int, int]] = 224,  # Updated
+            image_size: Union[int, Tuple[int, int]] = 224,
             patch_size: Union[int, Tuple[int, int]] = 14,
             num_register_tokens: int = 0,
             init_values: Optional[float] = 1e-5,
-            stochastic_depth_rate: float = 0.0,  # Updated
+            stochastic_depth_rate: float = 0.0,
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs
     ) -> "DINOv2VisionTransformer":
@@ -864,11 +882,11 @@ class DINOv2VisionTransformer(keras.Model):
         logger.info(f"Configuration: {config}")
 
         return cls(
-            image_size=image_size,  # Updated
+            image_size=image_size,
             patch_size=patch_size,
             num_register_tokens=num_register_tokens,
             init_values=init_values,
-            stochastic_depth_rate=stochastic_depth_rate,  # Updated
+            stochastic_depth_rate=stochastic_depth_rate,
             input_shape=input_shape,
             **config
         )
@@ -876,7 +894,7 @@ class DINOv2VisionTransformer(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
         return {
-            'image_size': self.image_size,  # Updated
+            'image_size': self.image_size,
             'patch_size': self.patch_size,
             'in_chans': self.in_chans,
             'embed_dim': self.embed_dim,
@@ -886,7 +904,7 @@ class DINOv2VisionTransformer(keras.Model):
             'qkv_bias': self.qkv_bias,
             'proj_bias': self.proj_bias,
             'ffn_bias': self.ffn_bias,
-            'stochastic_depth_rate': self.stochastic_depth_rate,  # Updated
+            'stochastic_depth_rate': self.stochastic_depth_rate,
             'drop_path_uniform': self.drop_path_uniform,
             'init_values': self.init_values,
             'attention_type': self.attention_type,
@@ -912,7 +930,7 @@ class DINOv2VisionTransformer(keras.Model):
         logger.info(f"  - MLP ratio: {self.mlp_ratio}")
         logger.info(f"  - Num patches: {self.num_patches}")
         logger.info(f"  - Register tokens: {self.num_register_tokens}")
-        logger.info(f"  - Stochastic depth rate: {self.stochastic_depth_rate}")  # Updated
+        logger.info(f"  - Stochastic depth rate: {self.stochastic_depth_rate}")
         logger.info(f"  - Init values: {self.init_values}")
 
 # ---------------------------------------------------------------------
@@ -984,7 +1002,7 @@ class DINOv2(keras.Model):
 
     def __init__(
             self,
-            image_size: Union[int, Tuple[int, int]] = 224,  # Updated
+            image_size: Union[int, Tuple[int, int]] = 224,
             patch_size: Union[int, Tuple[int, int]] = 14,
             num_classes: int = 1000,
             include_top: bool = True,
@@ -1025,7 +1043,7 @@ class DINOv2(keras.Model):
         inputs = keras.Input(shape=input_shape, name="dinov2_input_images")
 
         # For inference, we typically don't need masks, so provide default
-        masks = keras.Input(shape=(None,), dtype=tf.bool, name="dinov2_input_masks")
+        masks = keras.Input(shape=(None,), dtype="bool", name="dinov2_input_masks")
 
         # Build the model
         outputs = self._build_model(inputs, masks)
@@ -1057,7 +1075,7 @@ class DINOv2(keras.Model):
         """
         # Create backbone
         self.backbone = DINOv2VisionTransformer(
-            image_size=self.image_size,  # Updated
+            image_size=self.image_size,
             patch_size=self.patch_size,
             name='dinov2_backbone',
             **self.backbone_kwargs
@@ -1089,7 +1107,7 @@ class DINOv2(keras.Model):
     def from_variant(
             cls,
             variant: Literal['tiny', 'small', 'base', 'large', 'giant'],
-            image_size: Union[int, Tuple[int, int]] = 224,  # Updated
+            image_size: Union[int, Tuple[int, int]] = 224,
             patch_size: Union[int, Tuple[int, int]] = 14,
             num_classes: int = 1000,
             include_top: bool = True,
@@ -1123,7 +1141,7 @@ class DINOv2(keras.Model):
         logger.info(f"Creating DINOv2-{variant.upper()} complete model")
 
         return cls(
-            image_size=image_size,  # Updated
+            image_size=image_size,
             patch_size=patch_size,
             num_classes=num_classes,
             include_top=include_top,
@@ -1134,7 +1152,7 @@ class DINOv2(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
         return {
-            'image_size': self.image_size,  # Updated
+            'image_size': self.image_size,
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
             'include_top': self.include_top,
@@ -1156,13 +1174,13 @@ class DINOv2(keras.Model):
 
 # ---------------------------------------------------------------------
 
-def create_dino_v2(  # Renamed from create_dinov2_model
+def create_dino_v2(
         variant: Literal['tiny', 'small', 'base', 'large', 'giant'] = 'base',
-        image_size: Union[int, Tuple[int, int]] = 224,  # Updated
+        image_size: Union[int, Tuple[int, int]] = 224,
         patch_size: Union[int, Tuple[int, int]] = 14,
         num_register_tokens: int = 0,
         init_values: Optional[float] = 1e-5,
-        stochastic_depth_rate: float = 0.0,  # Updated
+        stochastic_depth_rate: float = 0.0,
         ffn_type: str = 'mlp',
         num_classes: int = 1000,
         include_top: bool = True,
@@ -1235,19 +1253,19 @@ def create_dino_v2(  # Renamed from create_dinov2_model
     logger.info(f"Creating DINOv2-{variant.upper()} model with:")
     logger.info(f"  - FFN type: {ffn_type}")
     logger.info(f"  - Register tokens: {num_register_tokens}")
-    logger.info(f"  - Stochastic depth rate: {stochastic_depth_rate}")  # Updated
+    logger.info(f"  - Stochastic depth rate: {stochastic_depth_rate}")
     logger.info(f"  - Init values: {init_values}")
 
     return DINOv2.from_variant(
         variant,
-        image_size=image_size,  # Updated
+        image_size=image_size,
         patch_size=patch_size,
         num_classes=num_classes,
         include_top=include_top,
         input_shape=input_shape,
         num_register_tokens=num_register_tokens,
         init_values=init_values,
-        stochastic_depth_rate=stochastic_depth_rate,  # Updated
+        stochastic_depth_rate=stochastic_depth_rate,
         ffn_type=ffn_type,
         **kwargs
     )
