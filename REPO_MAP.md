@@ -483,12 +483,23 @@ The cheap sweep: extract every `| Quantity | Value | \`command\` |` row whose Va
 all digits, run the command, and diff. That is ~15 lines of script and it is the only
 thing that makes "mechanically enforced" true rather than aspirational.
 
+**Two rows were REMOVED on 2026-08-01 rather than corrected: total Python LINE counts
+under `src/` and `tests/`.** They were measured wrong at the commit that shipped them
+(`417760` vs an actual `417836`; `241983` vs `242082`) — the sweep had run before that
+same commit's later `.py` edits landed. The correction was not a re-derivation, because
+the row class is unmaintainable by construction: a whole-tree line count is invalidated
+by *any* edit to *any* `.py` file, including the commit that fixes it, and it has two
+different true values at once (working tree vs committed tree) with nothing in the table
+to say which is meant. A number that is stale the moment it is written cannot be
+"mechanically enforced", and nothing else in this map depends on it. If you want a line
+count, run `find src -name '*.py' -exec cat {} + | wc -l` yourself and treat the answer as
+valid for that instant only. The FILE-count rows below are kept: they move only when a
+file is added or deleted, which is a reviewable event rather than a side effect of typing.
+
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1008 | `find src -name '*.py' \| wc -l` |
 | Python files under `tests/` | 698 | `find tests -name '*.py' \| wc -l` |
-| Python lines under `src/` | 417760 | `find src -name '*.py' -exec cat {} + \| wc -l` |
-| Python lines under `tests/` | 241983 | `find tests -name '*.py' -exec cat {} + \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 20 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 283 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |

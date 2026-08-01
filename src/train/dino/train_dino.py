@@ -42,7 +42,21 @@ Scale
 ``--smoke`` pins the MEASURED shape-validation scale: ``variant=tiny``,
 ``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``, ``dino_out_dim=4096``,
 a handful of steps. On GPU 1 (RTX 4070) one full train step at that scale peaks at
-**1518.6 MiB of 10001 MiB**. That is a SHAPE-VALIDATION scale, **NOT a paper
+**1518.6 MiB of 10001 MiB**.
+
+**How that number was obtained, because it is NOT reproducible by watching
+``nvidia-smi`` during a run of this script.** It comes from a dedicated single-config
+probe (D-026): one real ``train_on_batch`` -- forward, backward and the AdamW update --
+on a real multi-crop batch, with ``tf.config.experimental.reset_memory_stats`` called
+immediately before and ``get_memory_info('GPU:0')['peak']`` immediately after, ONE config
+per PROCESS (the peak is a high-water mark that does not reset between configs). Polling
+this trainer instead reads ~10 400 MiB, because ``train.common.setup_gpu``'s
+``set_memory_growth`` fails ("Physical devices cannot be modified after being
+initialized" -- TF is already initialized by an earlier import) and TF then pre-allocates
+~85% of the visible device. That polled figure is TF's ARENA, not the model's working
+set, and it neither confirms nor refutes the 1518.6 MiB above.
+
+That is a SHAPE-VALIDATION scale, **NOT a paper
 reproduction** -- DINO uses ``dino_out_dim=65536``, 224px globals and hundreds of epochs.
 The defaults (no ``--smoke``) are the paper-shaped ones and are correspondingly expensive.
 
@@ -117,7 +131,10 @@ from train.dino.knn_eval import (
 VARIANTS: Tuple[str, ...] = ("tiny", "small", "base", "large", "giant")
 
 # The MEASURED shape-validation scale (D-026): one full train step peaks at 1518.6 MiB of
-# the 10001 MiB free on GPU 1, i.e. ~15%. The three pre-committed memory reductions
+# the 10001 MiB free on GPU 1, i.e. ~15% -- measured by a dedicated one-config-per-process
+# `reset_memory_stats` / `get_memory_info(...)['peak']` probe around a single
+# `train_on_batch`, NOT by polling a run of this script (see the module docstring: polling
+# reads TF's ~85% pre-allocated arena instead). The three pre-committed memory reductions
 # (n_local_crops 4->2, crop 96->64, batch 32->16) were measured and are NOT needed --
 # do not apply them "to be safe", they cost coverage for nothing.
 SMOKE_OVERRIDES: Dict[str, Any] = {
@@ -803,7 +820,14 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                             "Pin the MEASURED shape-validation scale: variant=tiny, "
                             "global-crop-size=96, n-local-crops=4, batch-size=32, "
                             "dino-out-dim=4096, 2 epochs x 5 steps. Peaks at 1518.6 MiB of "
-                            "10001 MiB on an RTX 4070. This validates SHAPES and wiring; it "
+                            "10001 MiB on an RTX 4070 -- per-step working set from a "
+                            "dedicated get_memory_info('peak') probe (D-026), NOT what "
+                            # `%%` is NOT a typo: argparse runs every help string
+                            # through `help % params`, so a literal percent sign
+                            # must be doubled or `--help` dies with
+                            # `ValueError: unsupported format character`.
+                            "nvidia-smi shows during a run (TF pre-allocates ~85%%; see "
+                            "the module docstring). This validates SHAPES and wiring; it "
                             "is NOT a paper reproduction (the paper uses out_dim=65536, "
                             "224px globals and hundreds of epochs). Explicit flags still "
                             "win over the preset."

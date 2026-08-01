@@ -69,6 +69,33 @@ def reject_input_shape(kwargs: Dict[str, Any], factory_name: str) -> None:
 # ---------------------------------------------------------------------
 
 
+def _path_suffix(weight: Any) -> str:
+    """Return a weight's path with its owning model's root name removed.
+
+    Interface contract:
+        Parameters:
+            weight: A `keras.Variable` (anything exposing `.path`).
+        Returns:
+            The path after the first `/`, or the whole path when there is no
+            `/`. Read only, no side effects.
+        Failure mode:
+            `AttributeError` if `weight` has no `.path` -- not defended
+            against, because the only callers iterate `model.weights`.
+
+    Why the root is stripped rather than compared: two models built by the
+    same factory in the same process get DIFFERENT root names (`sequential`
+    and `sequential_1`), so a full-path comparison would reject every
+    legitimate pair. MEASURED on the in-tree factory pair
+    (`create_dino_teacher_student_pair("tiny", ...)`): 157/157 weights, 0
+    suffix mismatches -- the paths are in fact identical there, and the strip
+    only matters for a hand-built pair.
+    """
+    return weight.path.split("/", 1)[-1]
+
+
+# ---------------------------------------------------------------------
+
+
 # DECISION plan-2026-08-01T105809-dc0c402e/D-034
 # Copy the STUDENT into the TEACHER, never the other way round, and do it
 # UNCONDITIONALLY at pair construction. Do NOT "improve" this into an opt-in
@@ -105,22 +132,47 @@ def sync_teacher_to_student(teacher: Any, student: Any) -> None:
             ``None``. On return every teacher weight equals its student
             counterpart exactly.
         Failure mode:
-            ``ValueError`` when the copy could not be performed or did not
-            take effect — an empty weight list (an unbuilt model, where the
-            copy would silently no-op), a weight-count mismatch (the ``zip``
-            would silently copy a prefix), or a surviving difference after the
-            assignment.
+            ``ValueError`` when the copy could not be performed, would be
+            performed against the wrong counterpart, or did not take effect —
+            an empty weight list (an unbuilt model, where the copy would
+            silently no-op), a weight-count mismatch (the ``zip`` would
+            silently copy a prefix), a per-weight path-suffix or shape
+            disagreement (the ``zip`` would copy into the wrong slot), or a
+            surviving difference after the assignment.
 
-    **The verification loop is not belt-and-braces.** The failure this function
-    exists to fix is a silent one, and the most likely way a "fix" for it
-    reproduces the defect is by running against a model whose weights do not
-    exist yet — `zip()` over two empty lists completes happily and copies
-    nothing. So the post-condition is asserted, not assumed.
+    **The guards are not belt-and-braces.** The failure this function exists to
+    fix is a silent one, and the two ways a "fix" for it reproduces the defect
+    are (1) running against a model whose weights do not exist yet — `zip()`
+    over two empty lists completes happily and copies nothing — and (2) running
+    against a correctly-sized but MIS-ORDERED pair, where every tensor is
+    copied into a same-shaped neighbour's slot.
 
-    This is a CONSTRUCTION-time operation only. It must never run on a model
-    that has been trained or reloaded: it would overwrite a trained teacher
-    with the student, destroying the EMA. See `DINOTrainingModel.__init__` for
-    how the `.keras` reload path is kept safe.
+    The per-weight check is in the COPY loop, deliberately, not in the trailing
+    equality sweep. That sweep re-uses the same positional `zip` the copy used,
+    so it can only ever confirm the pairing it was given: a mis-paired copy
+    makes the teacher equal to the student *under that pairing* and the sweep
+    reports success. It is retained as a did-the-assignment-land check, which
+    is all it can honestly be. REPRODUCED before this guard existed, on two
+    `keras.Sequential([Dense(4), Dense(4)])` models whose layers were named in
+    opposite order: the teacher's `b` received the student's `a` values and the
+    function returned without raising.
+
+    This is a CONSTRUCTION-time operation only, and it is unconditional —
+    `DINOTrainingModel.__init__` calls it on EVERY construction, so any
+    teacher values held by the object passed in are discarded. Safe and unsafe
+    uses, measured:
+
+    * **SAFE — `keras.models.load_model` on a saved `DINOTrainingModel`.** The
+      restore happens AFTER `from_config` returns and is authoritative; a
+      deliberately-perturbed teacher survived a round-trip bit-identically
+      (drift 0.0, teacher-student gap preserved). Pinned by
+      `test_reload_keeps_a_trained_teacher`.
+    * **UNSAFE — resuming by rebuilding the two backbones separately** (two
+      `create_dino_v1(...)` calls, `load_weights` into each, then wrapping them
+      in `DINOTrainingModel`). The sync overwrites the restored teacher with
+      the restored student and the EMA history is gone. Nothing can detect
+      this: a trained teacher is structurally indistinguishable from a fresh
+      one. Resume from the `.keras` file instead.
     """
     if not teacher.weights or not student.weights:
         raise ValueError(
@@ -138,7 +190,23 @@ def sync_teacher_to_student(teacher: Any, student: Any) -> None:
             f"only the shorter prefix."
         )
 
-    for teacher_weight, student_weight in zip(teacher.weights, student.weights):
+    for index, (teacher_weight, student_weight) in enumerate(
+            zip(teacher.weights, student.weights)):
+        if (_path_suffix(teacher_weight) != _path_suffix(student_weight)
+                or teacher_weight.shape != student_weight.shape):
+            raise ValueError(
+                f"sync_teacher_to_student refuses to copy weight {index}: the "
+                f"teacher's '{teacher_weight.path}' {teacher_weight.shape} is "
+                f"not the counterpart of the student's "
+                f"'{student_weight.path}' {student_weight.shape}. The two "
+                f"weight lists are paired POSITIONALLY, so a pair whose "
+                f"layers were created in a different order copies each "
+                f"tensor into the wrong slot -- and because the two networks "
+                f"are full of same-shaped tensors (every LayerNorm gamma and "
+                f"beta at a given width is interchangeable by shape alone), "
+                f"the result is a teacher assembled from the right values in "
+                f"the wrong places. Build both networks with the same factory."
+            )
         teacher_weight.assign(
             np.asarray(student_weight).astype(
                 np.asarray(teacher_weight).dtype))

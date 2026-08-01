@@ -581,6 +581,69 @@ class TestTeacherStartsFromTheStudent:
         with pytest.raises(ValueError, match="BUILT models"):
             sync_teacher_to_student(unbuilt, built)
 
+    def test_the_sync_helper_refuses_a_MIS_ORDERED_pair(self):
+        """The guard the trailing equality sweep structurally cannot provide.
+
+        That sweep re-uses the same positional `zip` the copy used, so it
+        confirms whatever pairing it was handed. REPRODUCED before this guard
+        existed, on exactly this fixture: the teacher's `b` received the
+        student's `a` values (1.0) and vice versa, and the function returned
+        WITHOUT raising while reporting max|delta| == 0.0.
+
+        Shapes alone cannot catch it — every tensor here is (4, 4) or (4,),
+        which is why `_validate_student_teacher_pair`'s existing shape loop
+        does not see it either. A real ViT is worse: every LayerNorm gamma and
+        beta at a given width is shape-interchangeable.
+
+        The fixture must have IDENTICAL shapes and count in both models, or
+        this test passes for the wrong reason.
+        """
+        from dl_techniques.models.dino.common import sync_teacher_to_student
+
+        def _pair(first: str, second: str) -> keras.Sequential:
+            model = keras.Sequential([keras.layers.Dense(4, name=first),
+                                      keras.layers.Dense(4, name=second)])
+            model.build((None, 4))
+            return model
+
+        student = _pair("a", "b")
+        teacher = _pair("b", "a")
+        # Non-vacuity: the guard must be the thing that fires, not a count or
+        # shape mismatch that would have fired anyway.
+        assert len(teacher.weights) == len(student.weights)
+        assert all(t.shape == s.shape
+                   for t, s in zip(teacher.weights, student.weights))
+
+        for weight in student.weights:
+            weight.assign(np.full(
+                weight.shape, 1.0 if "/a/" in weight.path else 2.0))
+        for weight in teacher.weights:
+            weight.assign(np.full(weight.shape, -9.0))
+
+        with pytest.raises(ValueError, match="is not the counterpart of"):
+            sync_teacher_to_student(teacher, student)
+
+        # It must refuse BEFORE mutating anything, not half-way through.
+        assert all(float(np.asarray(w).flat[0]) == -9.0
+                   for w in teacher.weights)
+
+    def test_the_sync_helper_accepts_the_real_factory_pair(self):
+        """Non-vacuity control for the guard above: it must not fire in-tree.
+
+        A name-comparison guard that rejects legitimate pairs is worse than no
+        guard. The two backbones get DIFFERENT root names in one process, so
+        the comparison is on the path SUFFIX. MEASURED: 157/157 weights, 0
+        suffix mismatches.
+        """
+        from dl_techniques.models.dino.common import sync_teacher_to_student
+        from dl_techniques.models.dino.dino_v1 import (
+            create_dino_teacher_student_pair,
+        )
+
+        teacher, student = create_dino_teacher_student_pair(
+            variant="tiny", image_size=32, patch_size=16, dino_out_dim=64)
+        sync_teacher_to_student(teacher, student)  # must not raise
+
 
 # ---------------------------------------------------------------------
 

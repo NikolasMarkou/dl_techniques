@@ -125,7 +125,16 @@ class DINOTrainingModel(keras.Model):
             construction** (D-034): DINO's teacher is an EMA of the student's
             own trajectory from the student's own initialization, so a
             teacher that starts from an unrelated random draw is not an EMA
-            teacher. Pass whatever you like here — it will be synchronized.
+            teacher. Any values this object carries are therefore DISCARDED,
+            which makes exactly one workflow unsafe: **do not resume training
+            by rebuilding the two backbones separately** (`create_dino_v1(...)`
+            + `load_weights` for each) and wrapping them here — the restored
+            teacher is overwritten by the restored student and the EMA history
+            is lost silently, because a trained teacher is structurally
+            indistinguishable from a fresh one. Resume by reloading the saved
+            `DINOTrainingModel` with `keras.models.load_model`, which IS safe
+            (measured; see `test_reload_keeps_a_trained_teacher`). For a fresh
+            run, pass whatever you like — it will be synchronized.
         n_local_views: Number of local crops per sample, `>= 0`. Total views
             per sample is `N_GLOBAL_VIEWS + n_local_views`.
         **kwargs: Forwarded to `keras.Model`.

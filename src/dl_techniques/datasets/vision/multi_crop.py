@@ -40,7 +40,8 @@ Why: one backbone, one positional-embedding table, and ``tf.data``'s
 fixed-shape batching then serve every view. A genuinely smaller local
 resolution changes the patch-grid length, which requires interpolating the
 positional-embedding table — deliberately not implemented (it is named as
-backlog item 1 in ``src/dl_techniques/models/dino/README.md``).
+the backlog item "Positional-embedding interpolation for smaller local
+crops" in ``src/dl_techniques/models/dino/README.md`` § 7).
 
 **The cost is real and is not hidden**: local crops are exactly as expensive as
 global ones, in both compute and activation memory. ``local_crop_size !=
@@ -141,8 +142,9 @@ Making this a real guarantee needs stateless per-element randomness
 has to come from the pipeline: ``ds.enumerate()`` placed AFTER ``repeat()``, so
 that the same source image draws a different augmentation each epoch. That is a
 change to ``build_raw_image_dataset``'s pipeline shape, which is shared by every
-``src/train/`` consumer — recorded as backlog item 3 in
-``src/dl_techniques/models/dino/README.md`` rather than done here.
+``src/train/`` consumer — recorded as the backlog item "A reproducible
+augmentation stream under a PARALLEL ``tf.data`` map" in
+``src/dl_techniques/models/dino/README.md`` § 7 rather than done here.
 ``tests/test_datasets/test_multi_crop.py`` pins BOTH halves: the serial guarantee
 that is real, and the stream-not-per-element mechanism that scopes it.
 
@@ -411,8 +413,9 @@ def make_multi_crop_map_fn(
             ``global_crop_size``. Rendering local views at a smaller pixel
             resolution changes the patch-grid length and therefore requires
             positional-embedding interpolation, which this repository does not
-            implement (D-002; backlog item 1 in
-            ``src/dl_techniques/models/dino/README.md``).
+            implement (D-002; the backlog item "Positional-embedding
+            interpolation for smaller local crops" in
+            ``src/dl_techniques/models/dino/README.md`` § 7).
         ValueError: If ``global_crop_size`` is not positive; if
             ``n_local_crops`` is negative; if either scale range is not an
             increasing pair inside ``(0, 1]``; if ``local_scale``'s maximum
@@ -433,8 +436,9 @@ def make_multi_crop_map_fn(
             f"a smaller pixel resolution changes the patch-grid length, which "
             f"requires positional-embedding interpolation in the backbone. "
             f"That interpolation is NOT implemented (plan decision D-002; "
-            f"named as backlog item 1 in "
-            f"src/dl_techniques/models/dino/README.md). Local views are "
+            f"named as the backlog item 'Positional-embedding "
+            f"interpolation for smaller local crops' in "
+            f"src/dl_techniques/models/dino/README.md § 7). Local views are "
             f"rendered at the SAME resolution as global views by cropping a "
             f"smaller AREA (see local_scale) and resizing up, so pass "
             f"local_crop_size=None or local_crop_size=global_crop_size."

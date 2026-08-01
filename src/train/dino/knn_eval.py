@@ -91,9 +91,15 @@ draws before). That fixes reproducibility; it does NOT shrink the band.
 
 Reading rules that follow from the measurement:
 
-* Two runs at the SAME ``--seed`` now share a bank, so a difference between them is a
-  difference in the model. Two runs at DIFFERENT seeds do not, and a ~0.02 gap between
-  them is expected from the bank alone.
+* Two runs at the SAME ``--seed`` now share a bank, i.e. the same MEASURING INSTRUMENT.
+  They do NOT share the data they were trained on: `train_dino.build_dataset` (the
+  TRAINING pipeline) passes only ``seed=``, never ``shuffle_files_seed=``, so its TFDS
+  file interleave is still unseeded, and per D-035 the augmentation stream is
+  non-reproducible under ``num_parallel_calls=AUTOTUNE`` regardless. So a difference
+  between two same-seed runs is a difference in the model AS TRAINED ON A DIFFERENT
+  DATA STREAM -- it is no longer confounded by the bank, which is strictly less
+  confounding, not none. Two runs at DIFFERENT seeds share neither, and a ~0.02 gap
+  between them is expected from the bank alone.
 * Every `dino_knn_top1_*` produced BEFORE this seeding -- including the runs in
   ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
   band, whatever the seed.
