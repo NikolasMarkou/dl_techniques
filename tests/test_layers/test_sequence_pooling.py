@@ -1766,6 +1766,221 @@ class TestPositionalModesIsolateMaskedPositions:
         )
 
 
+# ---------------------------------------------------------------------
+# H-02: `exclude_positions` must be LIVE for the four positional modes.
+#
+# At HEAD the gate in `_apply_single_strategy`
+#   `if strategy not in ['cls','first','last','middle','none','flatten']:`
+# skipped `_apply_mask_and_exclusions` entirely for the positional modes, so
+# `exclude_positions` was a measured `0.000e+00` no-op for all four. D-005 (ruled
+# by the user) settles the semantics: `exclude_positions` is an EXPLICIT caller
+# instruction, not inferred padding, so it is HONOURED by all four modes and
+# `cls`/`first` with position 0 excluded return the first NON-EXCLUDED position.
+# `cls`/`first` still IGNORE the keep-MASK (pinned by
+# `test_cls_and_first_return_index_zero_regardless_of_mask`) — the two inputs
+# are not interchangeable and only one of them outranks the positional default.
+#
+# Cell selection is per mode, derived from the oracle below and asserted
+# non-degenerate in each test — a single shared cell does NOT discriminate for
+# all four. Measured at `seq_len = 6`, `mask=None`:
+#   `cls`/`first`  exclude=[0]  0 -> 1
+#   `last`         exclude=[5]  5 -> 4
+#   `middle`       exclude=[4]  3 -> 2   (exclude=[0] and exclude=[1] both leave
+#                                         the kept-middle at 3 — NOT cells)
+# The two interaction cells are chosen so that mask-only, exclusion-only and
+# both-together give THREE DISTINCT indices, which is the only shape that can
+# fail a fix honouring just one of the two keep terms:
+#   `middle`  mask off {3} + exclude=[0]  -> 2 / 3 / 4
+#   `last`    mask off {4} + exclude=[5]  -> 5 / 4 / 3
+# ---------------------------------------------------------------------
+
+H02_S = F25_S      # 6; same geometry as the F-25 suite
+H02_ALL_MODES = ['cls', 'first', 'last', 'middle']
+
+# mode -> (exclude_positions, expected index WITH the exclusion)
+H02_MOVEMENT_CELLS = {
+    'cls': ([0], 1),
+    'first': ([0], 1),
+    'last': ([5], 4),
+    'middle': ([4], 2),
+}
+
+# mode -> (masked positions, exclude_positions, idx_mask_only, idx_excl_only, idx_both)
+H02_INTERACTION_CELLS = {
+    'middle': ([3], [0], 2, 3, 4),
+    'last': ([4], [5], 5, 4, 3),
+}
+
+
+def _h02_expected_index(mode: str, keep: np.ndarray, exclude: List[int]) -> int:
+    """Oracle for the SHIPPED combined-keep semantics.
+
+    `cls`/`first` ignore ``keep`` entirely (D-005 keeps the mask/exclusion
+    asymmetry); `middle`/`last` combine both into one keep predicate. An empty
+    combined keep set degenerates to index 0 for every mode — documented
+    degeneration (D-008 no-rescue precedent), not a rescue.
+    """
+    if mode in ('cls', 'first'):
+        live = [i for i in range(len(keep)) if i not in exclude]
+        return live[0] if live else 0
+    live = [i for i, v in enumerate(keep) if v and i not in exclude]
+    if not live:
+        return 0
+    return live[-1] if mode == 'last' else live[len(live) // 2]
+
+
+class TestExcludePositionsIsLiveForPositionalModes:
+    """H-02 / C-4: `exclude_positions` must move the index each mode selects.
+
+    Every test asserts the RESULTING INDEX, not merely that something moved:
+    step 1 established that isolation and correctness are different properties
+    here, and a movement-only assertion is the weaker of the two.
+    """
+
+    @pytest.mark.parametrize("mode", H02_ALL_MODES)
+    def test_exclude_positions_moves_the_selected_index(self, mode: str) -> None:
+        exclude, expected_idx = H02_MOVEMENT_CELLS[mode]
+        keep_all = np.ones(H02_S, dtype='float32')
+        base_idx = _h02_expected_index(mode, keep_all, [])
+        assert expected_idx == _h02_expected_index(mode, keep_all, exclude)
+        assert expected_idx != base_idx, (
+            f"Degenerate cell for {mode!r}: exclude_positions={exclude} leaves "
+            f"the selected index at {base_idx}, so this assertion would pass "
+            f"against the unfixed (inert) code."
+        )
+
+        x = _iso_inputs(seed=61, seq_len=H02_S)
+        xt = keras.ops.convert_to_tensor(x)
+        base = _np(_iso_layer(mode, seq_len=H02_S)(xt, mask=None, training=False))
+        excluded = _np(_iso_layer(
+            mode, seq_len=H02_S, exclude_positions=exclude
+        )(xt, mask=None, training=False))
+
+        moved = float(np.max(np.abs(excluded - base)))
+        assert moved > 0.0, (
+            f"strategy={mode!r}, exclude_positions={exclude}: the exclusion is "
+            f"INERT — it moved the pooled output by exactly {moved:.6e}. It must "
+            f"move the selected index from {base_idx} to {expected_idx}."
+        )
+        np.testing.assert_allclose(
+            excluded, x[:, expected_idx, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={mode!r}, exclude_positions={exclude}: expected the "
+                f"token at index {expected_idx}; the un-excluded answer is index "
+                f"{base_idx}."
+            ),
+        )
+
+    @pytest.mark.parametrize("mode", ['middle', 'last'])
+    def test_exclusion_and_mask_compose_into_one_keep_predicate(
+        self, mode: str
+    ) -> None:
+        """The interaction cell: a caller mask AND `exclude_positions`, one call.
+
+        This is the case the single-keep-predicate design exists for. The cell
+        is chosen so the three answers (mask only / exclusion only / both) are
+        DISTINCT, so a fix honouring only one keep term lands on a measurably
+        wrong index rather than accidentally on the right one.
+        """
+        masked, exclude, idx_mask, idx_excl, idx_both = H02_INTERACTION_CELLS[mode]
+        keep = _iso_mask([masked] * ISO_B, seq_len=H02_S)
+        keep_all = np.ones(H02_S, dtype='float32')
+        assert (
+            _h02_expected_index(mode, keep[0], []) == idx_mask
+            and _h02_expected_index(mode, keep_all, exclude) == idx_excl
+            and _h02_expected_index(mode, keep[0], exclude) == idx_both
+            and len({idx_mask, idx_excl, idx_both}) == 3
+        ), (
+            f"Degenerate interaction cell for {mode!r}: the mask-only, "
+            f"exclusion-only and combined answers must be three distinct "
+            f"indices."
+        )
+
+        x = _iso_inputs(seed=67, seq_len=H02_S)
+        out = _np(_iso_layer(
+            mode, seq_len=H02_S, exclude_positions=exclude
+        )(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        np.testing.assert_allclose(
+            out, x[:, idx_both, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={mode!r}, masked {masked} AND exclude_positions="
+                f"{exclude}: expected index {idx_both} (both keep terms); "
+                f"honouring only the mask gives {idx_mask}, only the exclusion "
+                f"gives {idx_excl}."
+            ),
+        )
+
+    @pytest.mark.parametrize("mode", H02_ALL_MODES)
+    def test_excluding_every_position_degenerates_to_index_zero(
+        self, mode: str
+    ) -> None:
+        """Documented degeneration: an EMPTY keep set returns index 0.
+
+        Index 0 is itself excluded here. That is deliberate and matches the
+        in-package no-rescue precedent (D-008) and the fully-masked-row
+        behaviour step 1 shipped — the layer does not raise and does not invent
+        a position.
+        """
+        exclude = list(range(H02_S))
+        x = _iso_inputs(seed=71, seq_len=H02_S)
+        out = _np(_iso_layer(
+            mode, seq_len=H02_S, exclude_positions=exclude
+        )(keras.ops.convert_to_tensor(x), mask=None, training=False))
+
+        assert np.all(np.isfinite(out)), (
+            f"strategy={mode!r}: excluding every position produced non-finite "
+            f"output {out}."
+        )
+        np.testing.assert_allclose(
+            out, x[:, 0, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={mode!r}: excluding every position must degenerate "
+                f"to index 0 (documented), it differs by "
+                f"{float(np.max(np.abs(out - x[:, 0, :]))):.6e}."
+            ),
+        )
+
+    @pytest.mark.parametrize("mode", ['middle', 'last'])
+    def test_excluding_every_kept_position_degenerates_to_index_zero(
+        self, mode: str
+    ) -> None:
+        """The other empty-keep route: the mask and the exclusions are disjoint.
+
+        Positions 2..5 are masked and 0..1 are excluded, so the COMBINED keep
+        set is empty even though neither term is empty on its own.
+        """
+        masked = [2, 3, 4, 5]
+        exclude = [0, 1]
+        keep = _iso_mask([masked] * ISO_B, seq_len=H02_S)
+        assert _h02_expected_index(mode, keep[0], []) != 0, (
+            "Degenerate cell: the mask alone must NOT already select index 0, "
+            "or this test cannot distinguish the empty-keep degeneration."
+        )
+
+        x = _iso_inputs(seed=73, seq_len=H02_S)
+        out = _np(_iso_layer(
+            mode, seq_len=H02_S, exclude_positions=exclude
+        )(
+            keras.ops.convert_to_tensor(x),
+            mask=keras.ops.convert_to_tensor(keep),
+            training=False,
+        ))
+        assert np.all(np.isfinite(out))
+        np.testing.assert_allclose(
+            out, x[:, 0, :], rtol=0, atol=0,
+            err_msg=(
+                f"strategy={mode!r}: mask and exclusions are disjoint, so the "
+                f"combined keep set is empty and the answer must degenerate to "
+                f"index 0; it differs by "
+                f"{float(np.max(np.abs(out - x[:, 0, :]))):.6e}."
+            ),
+        )
+
+
 class TestUnmaskedNumericsAreFrozen:
     """I1 / SC-2: no F-24 fix may move the `mask=None` output of ANY strategy.
 

@@ -169,7 +169,15 @@ class SequencePooling(keras.layers.Layer):
 
     Args:
         strategy: Pooling strategy name or list of strategy names.
-        exclude_positions: Positions to exclude from pooling.
+        exclude_positions: Positions to exclude from pooling. Honoured by EVERY
+            strategy except ``none``/``flatten`` (which return the sequence, so
+            there is no index to move and no reduction to exclude from). Unlike
+            a keep-mask this is an EXPLICIT caller instruction, so it outranks a
+            positional mode's default: ``cls``/``first`` with position 0
+            excluded return the first NON-excluded position (they still ignore
+            the keep-mask). If the exclusions leave no position kept, every
+            positional mode degenerates to index 0 — the same documented,
+            no-rescue degeneration as a fully-masked row.
         aggregation_method: How to combine multiple strategy outputs.
         attention_hidden_dim: Hidden dimension for attention pooling.
         attention_num_heads: Number of heads for multi-head attention.
@@ -274,26 +282,36 @@ class SequencePooling(keras.layers.Layer):
         inputs: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None
     ) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
-        """Apply mask and position exclusions.
+        """Fold ``exclude_positions`` into the keep-mask.
 
-        Args:
-            inputs: Input tensor.
-            mask: Optional boolean mask.
+        This is the SINGLE place where the caller's keep-mask and the caller's
+        ``exclude_positions`` are combined into ONE keep predicate. It does not
+        touch ``inputs`` at all (the returned tensor is the input unchanged);
+        the name is historical.
 
-        Returns:
-            Tuple of (masked inputs, updated mask).
+        :param inputs: Input sequence ``(batch, seq_len, hidden_dim)``, returned
+            unchanged.
+        :param mask: Optional keep-mask ``(batch, seq_len)``, 1/True = keep.
+        :return: ``(inputs, combined_mask)``. ``combined_mask`` is ``None``
+            exactly when ``mask`` is ``None`` AND ``exclude_positions`` is
+            empty — the condition every caller's no-mask fast path keys on.
         """
         if self.exclude_positions:
             seq_len = ops.shape(inputs)[1]
             if mask is None:
                 mask = ops.ones((ops.shape(inputs)[0], seq_len))
 
-            # Create exclusion mask
+            # DECISION plan-2026-07-31T210633-b63a35aa/D-005: no `pos < seq_len`
+            # Python guard. `indices != pos` is already a no-op for an
+            # out-of-range `pos`, so the guard was redundant AND was a graph
+            # trap: under a symbolic `seq_len` it is an `if` on a traced tensor,
+            # which AutoGraph rewrites into a `tf.cond` (or raises). Positional
+            # modes now reach this method, and they are required to be
+            # symbolic-length-safe. Do NOT reinstate the guard.
+            indices = ops.arange(seq_len)
             for pos in self.exclude_positions:
-                if pos < seq_len:
-                    indices = ops.arange(seq_len)
-                    exclusion = ops.cast(indices != pos, mask.dtype)
-                    mask = mask * exclusion
+                exclusion = ops.cast(indices != pos, mask.dtype)
+                mask = mask * exclusion
 
         return inputs, mask
 
@@ -376,22 +394,29 @@ class SequencePooling(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Resolve the per-row index selected by a MASK-AWARE positional mode.
 
-        Shared by the ``middle`` and ``last`` branches, which must agree on what
-        "a position exists" means or the two modes drift apart under the same
-        mask.
+        Shared by the ``cls``/``first``, ``middle`` and ``last`` branches, which
+        must agree on what "a position exists" means or the modes drift apart
+        under the same keep predicate.
 
-        :param mask: Keep-mask ``(batch, seq_len)``, 1/True = keep. Must NOT be
-            ``None`` — the caller keeps a separate no-mask fast path so the
-            ``mask=None`` numerics stay bit-identical to the pre-F-25 code.
+        :param mask: COMBINED keep-mask ``(batch, seq_len)``, 1/True = keep —
+            the caller's mask and ``exclude_positions`` already folded together
+            by :meth:`_apply_mask_and_exclusions`. Must NOT be ``None``: each
+            caller keeps a separate no-keep-predicate fast path so the
+            ``mask=None``-and-no-exclusions numerics stay bit-identical to the
+            pre-F-25 code.
         :param seq_len: Sequence length. A scalar tensor is fine; this path is
             graph-safe and jit-safe under a symbolic ``seq_len``.
-        :param mode: ``'middle'`` (the middle of the KEPT positions) or
-            ``'last'`` (the last KEPT position).
+        :param mode: ``'first'`` (the first kept position), ``'middle'`` (the
+            middle of the KEPT positions) or ``'last'`` (the last KEPT
+            position).
         :return: ``(batch,)`` ``int32`` index, safe to feed to
-            ``ops.take_along_axis``. A fully-masked row yields index 0 — a
-            DOCUMENTED DEGENERATION (the returned token is itself masked), not a
-            rescue.
-        :raises ValueError: If ``mode`` is neither ``'middle'`` nor ``'last'``.
+            ``ops.take_along_axis``. An EMPTY keep set yields index 0 — a
+            DOCUMENTED DEGENERATION (the returned token is itself suppressed),
+            not a rescue. This covers both routes into an empty set: a fully
+            masked row, and an ``exclude_positions`` that removes every
+            remaining kept position.
+        :raises ValueError: If ``mode`` is not one of ``'first'``, ``'middle'``
+            or ``'last'``.
         """
         # DECISION plan-2026-07-31T210633-b63a35aa/D-001: both modes resolve to
         # `where(keep-predicate, position, -1)` -> `max` -> `maximum(..., 0)`.
@@ -420,9 +445,17 @@ class SequencePooling(keras.layers.Layer):
         # softmax and is compared only by integer `max`, so the fp16 concerns
         # that force `-1e4` elsewhere in this package do not apply here.
         # See decisions.md D-001.
-        if mode not in ('middle', 'last'):
+        #
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-005: `first` was added here
+        # rather than beside `inputs[:, 0, :]` so that ALL FOUR positional modes
+        # resolve their index through ONE keep predicate. It is the MIRROR of
+        # `last` (`where` -> `min` over a `seq_len` sentinel instead of `max`
+        # over `-1`); the empty-set fallback needs an explicit `where` because
+        # a `minimum(..., seq_len - 1)` clamp would return the LAST position
+        # instead of the documented index 0. See decisions.md D-005.
+        if mode not in ('first', 'middle', 'last'):
             raise ValueError(
-                f"_positional_index: mode must be 'middle' or 'last', "
+                f"_positional_index: mode must be 'first', 'middle' or 'last', "
                 f"got {mode!r}."
             )
 
@@ -432,6 +465,14 @@ class SequencePooling(keras.layers.Layer):
         positions = ops.zeros_like(keep_int) + ops.expand_dims(
             ops.arange(seq_len, dtype='int32'), 0
         )
+
+        if mode == 'first':
+            sentinel = ops.cast(seq_len, 'int32')
+            candidates = ops.where(keep, positions, sentinel)
+            index = ops.min(candidates, axis=1)
+            return ops.where(
+                ops.equal(index, sentinel), ops.zeros_like(index), index
+            )
 
         if mode == 'middle':
             cum = ops.cumsum(keep_int, axis=1)
@@ -465,18 +506,46 @@ class SequencePooling(keras.layers.Layer):
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
 
-        # Apply mask and exclusions for statistical pooling
-        if strategy not in ['cls', 'first', 'last', 'middle', 'none', 'flatten']:
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-005: `exclude_positions` is
+        # HONOURED by the four positional modes. The old gate listed all four
+        # alongside `none`/`flatten` and skipped `_apply_mask_and_exclusions`
+        # entirely, which made `exclude_positions` a measured `0.000e+00` NO-OP
+        # for `cls`/`first`/`last`/`middle` — a silently inert public config key.
+        #
+        # `none`/`flatten` remain excluded: they return the sequence itself, so
+        # there is no index to move and no reduction to exclude a position from.
+        #
+        # `cls`/`first` fold in the exclusions but NOT the caller's mask
+        # (`_apply_mask_and_exclusions(inputs, None)`). The two inputs are not
+        # interchangeable: a keep-MASK is inferred padding and does not outrank
+        # "give me index 0", while `exclude_positions` is an EXPLICIT caller
+        # instruction and does. `test_cls_and_first_return_index_zero_regardless
+        # _of_mask` pins the mask half; do NOT pass `mask` here.
+        #
+        # Do NOT implement this by ZEROING `inputs`: that would change
+        # `none`/`flatten`, and would make `cls` return a zero VECTOR instead of
+        # a different INDEX. The exclusions must reach `_positional_index` as an
+        # additional keep TERM. See decisions.md D-005.
+        if strategy in ['cls', 'first']:
+            _, keep = self._apply_mask_and_exclusions(inputs, None)
+            if keep is None:
+                # No exclusions: bit-identical to the pre-H-02 code.
+                return inputs[:, 0, :]
+            selected = self._positional_index(keep, seq_len, mode='first')
+            return ops.take_along_axis(
+                inputs,
+                ops.expand_dims(ops.expand_dims(selected, -1), -1),
+                axis=1
+            )[:, 0, :]
+
+        if strategy not in ['none', 'flatten']:
             inputs, mask = self._apply_mask_and_exclusions(inputs, mask)
 
-        # Positional strategies
-        if strategy in ['cls', 'first']:
-            return inputs[:, 0, :]
-
-        elif strategy in ['last', 'middle']:
+        if strategy in ['last', 'middle']:
             if mask is None:
-                # No-mask FAST PATH, kept separate so the `mask=None` numerics
-                # stay bit-identical to the pre-F-25 code (I1_UNMASKED_GOLDEN).
+                # No keep-predicate FAST PATH (no mask AND no exclusions), kept
+                # separate so those numerics stay bit-identical to the pre-F-25
+                # code (I1_UNMASKED_GOLDEN).
                 if strategy == 'last':
                     return inputs[:, -1, :]
                 return inputs[:, seq_len // 2, :]
