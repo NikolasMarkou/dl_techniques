@@ -334,6 +334,121 @@ class TestCollapseDetector:
 
 
 # ---------------------------------------------------------------------------
+# 2b. the teacher distribution the entropy is DEFINED on (D-039)
+# ---------------------------------------------------------------------------
+
+
+def _centered_softmax_oracle(
+        logits: np.ndarray,
+        center: np.ndarray,
+        temperature: float,
+) -> np.ndarray:
+    """Independent numpy oracle for ``softmax((logits - center) / temp)``."""
+    scaled = (logits.astype(np.float64) - center.reshape(1, -1)) / temperature
+    scaled = scaled - scaled.max(axis=1, keepdims=True)
+    exponentiated = np.exp(scaled)
+    return exponentiated / exponentiated.sum(axis=1, keepdims=True)
+
+
+class TestTeacherProbabilitiesAreTheDocumentedQuantity:
+    """`dino_teacher_entropy` is DEFINED on the loss's centered+sharpened softmax.
+
+    Before D-039 a center whose width disagreed with the teacher head was skipped
+    with no else-branch, so the column carried an UNCENTERED softmax under the same
+    name. MEASURED at HEAD on 64 rows of width 8 against ``DINOLoss(out_dim=16)``:
+    the fallback's rows were BIT-IDENTICAL to a plain softmax, per-row probabilities
+    differed from the centered ones by up to 1.0, and the normalized entropy read
+    0.966176 instead of 0.844065 -- 0.122 FURTHER from the STOP threshold, i.e. a
+    false NEGATIVE.
+    """
+
+    WIDTH = 8
+
+    def _logits(self, seed: int = 7) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        return (rng.normal(size=(64, self.WIDTH)) * 3.0).astype("float32")
+
+    def _callback(self, loss: Any) -> KNNEvalCallback:
+        return KNNEvalCallback([], [], bank_batches=1, query_batches=1,
+                               dino_loss=loss)
+
+    def test_a_matched_center_gives_the_centered_sharpened_softmax(self) -> None:
+        logits = self._logits()
+        loss = DINOLoss(out_dim=self.WIDTH, teacher_temp=0.04)
+        rng = np.random.default_rng(99)
+        center = (rng.normal(size=(1, self.WIDTH)) * 2.0).astype("float32")
+        loss.center.assign(center)
+
+        probabilities, is_centered = self._callback(loss)._teacher_probabilities(
+            logits)
+
+        assert is_centered == 1.0
+        expected = _centered_softmax_oracle(logits, center, 0.04)
+        np.testing.assert_allclose(probabilities, expected, rtol=0.0, atol=1e-12)
+
+        # NON-VACUITY: the UNCENTERED softmax must be a visibly different answer,
+        # or this test would pass whether or not the center were subtracted.
+        uncentered = _centered_softmax_oracle(
+            logits, np.zeros(self.WIDTH), 0.04)
+        assert np.max(np.abs(expected - uncentered)) > 0.1, (
+            "the fixture's center is too weak to separate centered from "
+            "uncentered; this test cannot see the substitution it exists for")
+
+    def test_a_mismatched_center_yields_nan_not_an_uncentered_softmax(
+            self, caplog: Any) -> None:
+        logits = self._logits()
+        loss = DINOLoss(out_dim=self.WIDTH * 2, teacher_temp=0.04)
+
+        with caplog.at_level("WARNING", logger="dl"):
+            probabilities, is_centered = self._callback(
+                loss)._teacher_probabilities(logits)
+
+        assert probabilities is None, (
+            "a mis-shaped center must NOT fall through to an uncentered softmax")
+        assert is_centered == 0.0
+        assert any("out_dim disagrees" in record.message
+                   for record in caplog.records), (
+            f"the degradation must be LOUD; captured {[r.message for r in caplog.records]}")
+
+        # And it must reach the CSV as nan, not as a number.
+        metrics = collapse_metrics(
+            _separable(n_per_class=16, seed=21, jitter=0.4)[0], probabilities)
+        assert np.isnan(metrics["teacher_entropy"])
+        assert np.isnan(metrics["teacher_entropy_normalized"])
+
+    def test_no_dino_loss_yields_nan_not_a_plain_softmax(
+            self, caplog: Any) -> None:
+        callback = KNNEvalCallback([], [], bank_batches=1, query_batches=1)
+        with caplog.at_level("WARNING", logger="dl"):
+            probabilities, is_centered = callback._teacher_probabilities(
+                self._logits())
+        assert probabilities is None
+        assert is_centered == 0.0
+        assert any("without dino_loss" in record.message
+                   for record in caplog.records)
+
+    def test_no_teacher_logits_is_nan_not_zero(self) -> None:
+        """No logits at all is a THIRD state, and must not read as 'degraded'."""
+        loss = DINOLoss(out_dim=self.WIDTH)
+        probabilities, is_centered = self._callback(loss)._teacher_probabilities(
+            None)
+        assert probabilities is None
+        assert np.isnan(is_centered)
+
+    def test_the_warning_is_emitted_once_not_once_per_epoch(
+            self, caplog: Any) -> None:
+        logits = self._logits()
+        callback = self._callback(DINOLoss(out_dim=self.WIDTH * 2))
+        with caplog.at_level("WARNING", logger="dl"):
+            for _ in range(5):
+                callback._teacher_probabilities(logits)
+        hits = [r for r in caplog.records if "out_dim disagrees" in r.message]
+        assert len(hits) == 1, (
+            f"expected exactly one warning across 5 evaluations, got {len(hits)}; "
+            f"a per-epoch repeat would bury the COLLAPSE DIAGNOSTIC FIRED line")
+
+
+# ---------------------------------------------------------------------------
 # a real, tiny DINO model + datasets for the callback tests
 # ---------------------------------------------------------------------------
 
@@ -518,6 +633,45 @@ class TestLogsReachTheCSV:
             "epoch 0 must always be evaluated")
         assert second["dino_feat_mean_cos"] in ("nan", "NA"), (
             f"a skipped epoch must be marked, got {second['dino_feat_mean_cos']!r}")
+
+    def test_a_degraded_entropy_is_distinguishable_from_a_skipped_one_in_the_csv(
+            self, dino_model: keras.Model, tmp_path: Any) -> None:
+        """D-039: the CSV alone must separate SKIPPED (nan) from DEGRADED (0.0).
+
+        Both write ``nan`` into the entropy columns, so ``nan`` alone cannot tell
+        them apart -- which is why ``dino_teacher_entropy_is_centered`` exists.
+        """
+        mismatched = DINOLoss(out_dim=OUT_DIM * 2)
+        knn = KNNEvalCallback(
+            _labelled_dataset(31), _labelled_dataset(32),
+            bank_batches=2, query_batches=2, every_n_epochs=5,
+            dino_loss=mismatched)
+        rows = _run_two_epochs_with_csv(
+            dino_model,
+            tmp_path,
+            [knn, keras.callbacks.CSVLogger(str(tmp_path / "log.csv"))],
+        )
+
+        header = rows[0]
+        assert "dino_teacher_entropy_is_centered" in header, header
+        evaluated = dict(zip(header, rows[1]))
+        skipped = dict(zip(header, rows[2]))
+
+        # Epoch 0 WAS evaluated, but the center is unusable -> 0.0, entropy nan.
+        assert float(evaluated["dino_teacher_entropy_is_centered"]) == 0.0, (
+            f"an evaluated epoch with an unusable center must be marked 0.0, got "
+            f"{evaluated['dino_teacher_entropy_is_centered']!r}")
+        assert evaluated["dino_teacher_entropy"] in ("nan", "NA"), (
+            f"the entropy must be nan, not an uncentered softmax reported under "
+            f"the centered name, got {evaluated['dino_teacher_entropy']!r}")
+        assert np.isfinite(float(evaluated["dino_feat_mean_cos"])), (
+            "the OTHER half of the diagnostic must still be computed")
+
+        # Epoch 1 was SKIPPED -> nan, which is a different value from 0.0.
+        assert skipped["dino_teacher_entropy_is_centered"] in ("nan", "NA"), (
+            f"a skipped epoch must read nan, not 0.0, or the CSV cannot separate "
+            f"'not evaluated' from 'evaluated but degraded'; got "
+            f"{skipped['dino_teacher_entropy_is_centered']!r}")
 
     def test_logs_none_raises_rather_than_discarding_the_metrics(self) -> None:
         knn = KNNEvalCallback(

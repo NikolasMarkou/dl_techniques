@@ -402,6 +402,21 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
     Both pipelines are ``.take(n).cache()``d so the SAME samples are used every epoch;
     an eval set that reshuffles each epoch turns run-to-run noise into apparent
     training progress.
+
+    **The bank is seeded down to the TFDS FILE order (D-040), and that is load-bearing.**
+    ``.take(knn_bank_batches)`` off the train stream selects a SMALL sample -- 2048 images
+    at the smoke settings, out of 9469 -- and `build_raw_image_dataset` opens the train
+    split with ``shuffle_files=True``. Without ``shuffle_files_seed`` the file interleave
+    is non-deterministic ACROSS PROCESSES even at a fixed ``--seed``, so two runs score
+    against two different memory banks. MEASURED before this was seeded: four bank draws
+    at ``seed=42`` (two per process, two processes) gave four different label sequences,
+    and four zero-optimizer-step k-NN controls at the smoke config spread
+    ``dino_knn_top1_k20`` over **0.2754 / 0.2900 / 0.2910 / 0.2949 (range 0.0195)** and
+    ``k10`` over **0.2773 / 0.2686 / 0.2793 / 0.2607 (range 0.0186)** -- a band LARGER
+    than the +0.0127 effect a step-14 A/B was trying to read out of it. The QUERY set is
+    unaffected (the validation split is opened with ``shuffle_files=False``), which is why
+    ``dino_feat_mean_cos`` was bit-identical across those same repeats while the k-NN
+    moved. See `knn_eval`'s module docstring for how to read the number.
     """
     bank_ds, _, _ = build_raw_image_dataset(
         config.dataset,
@@ -410,6 +425,11 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
         is_training=True,   # -> the TRAIN split
         augment=False,      # a frozen-feature probe must not see augmentation
         seed=config.seed,
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-040
+        # Do NOT drop this and rely on `seed=` alone: `seed` reaches the element
+        # `.shuffle()` and the augmentation, NOT the TFDS file interleave, so the
+        # `.take()` below would select a different 2048 images every process.
+        shuffle_files_seed=config.seed,
     )
     query_ds, _, _ = build_raw_image_dataset(
         config.dataset,

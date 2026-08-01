@@ -95,6 +95,7 @@ def build_raw_image_dataset(
         element_map_fn: Optional[ElementMapFn] = None,
         shuffle_buffer: int = 4096,
         seed: Optional[int] = None,
+        shuffle_files_seed: Optional[int] = None,
         num_parallel_calls: int = tf.data.AUTOTUNE,
         prefetch_buffer: int = tf.data.AUTOTUNE,
 ) -> Tuple[tf.data.Dataset, int, int]:
@@ -115,7 +116,20 @@ def build_raw_image_dataset(
         augment: Enable train-time augmentation. Ignored when ``is_training`` is False.
         element_map_fn: Optional per-sample transform applied to ``(image, label)``.
         shuffle_buffer: Shuffle buffer for the training pipeline.
-        seed: Seed for shuffling and augmentation.
+        seed: Seed for the element ``.shuffle()`` and for augmentation. It does NOT
+            reach the TFDS FILE order -- see ``shuffle_files_seed``.
+        shuffle_files_seed: Optional seed for the TFDS **file interleave** order
+            (imagenette only; ``tfds.ReadConfig(shuffle_seed=...)``). ``None``
+            preserves today's behaviour EXACTLY: ``builder.as_dataset(...,
+            shuffle_files=is_training)`` with no read config, whose file order is
+            non-deterministic across processes. Pass a seed when a consumer draws a
+            SMALL fixed sample off the head of the train stream (``.take(n)``) and
+            reports a number from it, because the sample -- and therefore the number
+            -- otherwise changes run to run at the same ``seed``. MEASURED at
+            ``image_size=96, batch_size=32``, 8 batches, ``seed=42``: four calls (two
+            per process, two processes) gave four DIFFERENT label sequences, with the
+            per-class count of one class ranging 16-25 out of 256 samples. See
+            decisions.md D-040.
         num_parallel_calls: ``tf.data`` parallelism.
         prefetch_buffer: ``tf.data`` prefetch depth.
 
@@ -151,7 +165,22 @@ def build_raw_image_dataset(
         # failure instead of a silent multi-GB fetch.
         builder = tfds.builder(IMAGENETTE_TFDS_NAME)
         num_examples = int(builder.info.splits[split].num_examples)
-        ds = builder.as_dataset(split=split, shuffle_files=is_training)
+
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-040
+        # `shuffle_files_seed=None` must keep passing NO read_config, not
+        # `ReadConfig(shuffle_seed=None)`. This function is shared by every
+        # `src/train/` consumer, so the default has to be byte-for-byte today's
+        # behaviour; an always-on ReadConfig would change the file order for every
+        # existing trainer at once. Do NOT "simplify" the branch away.
+        # See decisions.md D-040.
+        read_config = None
+        if shuffle_files_seed is not None:
+            read_config = tfds.ReadConfig(shuffle_seed=int(shuffle_files_seed))
+        if read_config is None:
+            ds = builder.as_dataset(split=split, shuffle_files=is_training)
+        else:
+            ds = builder.as_dataset(
+                split=split, shuffle_files=is_training, read_config=read_config)
 
         def _decode(element: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
             # Imagenette records are VARIABLE-SIZE (e.g. 320x396x3). The resize is MANDATORY:

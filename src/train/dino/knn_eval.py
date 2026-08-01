@@ -42,6 +42,65 @@ The first two are computed on every evaluation and summarized into
 ``dino_collapse_flag`` (1.0 = at least one threshold tripped, 0.0 = none), which is also
 logged at WARNING level so it appears in the run log, not only in the CSV.
 
+**How to read a `nan` entropy (D-039).** ``dino_teacher_entropy`` is DEFINED as the
+entropy of ``softmax((teacher_logits - center) / teacher_temp)`` -- the loss's own
+distribution -- and this module will emit ``nan`` rather than substitute a different
+quantity under that name. ``dino_teacher_entropy_is_centered`` says which case a row is:
+
+===============================  ==============================================
+``..._is_centered``              meaning
+===============================  ==============================================
+``1.0``                          the entropy columns ARE the documented quantity
+``0.0``                          they could NOT be computed and are ``nan``:
+                                 either no ``dino_loss`` was passed, or the
+                                 loss's ``center`` width disagrees with the
+                                 teacher head's. A WARNING names which, once.
+``nan``                          this epoch was not a k-NN evaluation epoch
+===============================  ==============================================
+
+The column exists because ``nan`` ALONE cannot tell a skipped epoch from a degraded one,
+and a reader of ``training_log.csv`` has only the CSV. MEASURED at HEAD before this
+change, on 64 teacher rows of width 8 against a loss of ``out_dim=16``: the old silent
+fallback produced an entropy of ``0.966176`` where the centered quantity is ``0.844065``
+-- 0.122 FURTHER from the STOP threshold, i.e. the substitution failed toward a false
+NEGATIVE, under an unchanged column name.
+
+-------------------------------------------------------------------------------
+How big a `dino_knn_top1_*` difference is real (D-040 -- read before quoting one)
+-------------------------------------------------------------------------------
+**A k-NN top-1 delta below ~0.02 is inside this probe's own noise band and is not
+evidence of anything.** The number is a small-sample estimate: at the smoke settings the
+memory bank is 2048 images ``.take()``n off a 9469-image train split, and the bank's
+composition moves the score.
+
+MEASURED, four ZERO-optimizer-step controls at the same seed and config -- i.e. four
+readings of the SAME untrained network::
+
+    dino_knn_top1_k20   0.2754  0.2900  0.2910  0.2949     range 0.0195
+    dino_knn_top1_k10   0.2773  0.2686  0.2793  0.2607     range 0.0186
+    dino_feat_mean_cos  0.2348  0.2348  0.2348  0.2348     range 0.0000  (bit-identical)
+
+The cosine is bit-identical because the QUERY set comes from the unshuffled validation
+split; only the BANK moved. Root cause: `train.energy_transformer.common
+.build_raw_image_dataset` opened the train split with ``shuffle_files=True`` and no
+``tfds.ReadConfig``, so the file interleave was non-deterministic across processes even
+at a fixed ``--seed``. `train_dino.build_knn_datasets` now passes
+``shuffle_files_seed=config.seed``, which makes the bank REPRODUCIBLE at a fixed seed
+(MEASURED: four draws across two processes are byte-identical, against four distinct
+draws before). That fixes reproducibility; it does NOT shrink the band.
+
+Reading rules that follow from the measurement:
+
+* Two runs at the SAME ``--seed`` now share a bank, so a difference between them is a
+  difference in the model. Two runs at DIFFERENT seeds do not, and a ~0.02 gap between
+  them is expected from the bank alone.
+* Every `dino_knn_top1_*` produced BEFORE this seeding -- including the runs in
+  ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
+  band, whatever the seed.
+* Quote the number against a zero-step random-init control at the same seed, never
+  against the 0.10 chance line: an UNTRAINED ViT already scores ~0.28 on imagenette here,
+  so "3x chance" is mostly architecture, not training.
+
 -------------------------------------------------------------------------------
 Two things about this callback that are load-bearing, not cosmetic
 -------------------------------------------------------------------------------
@@ -66,7 +125,7 @@ Run the guards::
 
 import keras
 import numpy as np
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Set, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -356,11 +415,14 @@ class KNNEvalCallback(keras.callbacks.Callback):
         temperature: Neighbour-weighting temperature.
         every_n_epochs: Evaluation period. Epoch 0 is always evaluated (the CSV
             fieldnames are frozen there).
-        dino_loss: The compiled `DINOLoss`, optional. When given, the teacher softmax
-            is CENTERED and SHARPENED exactly as the loss does it (``softmax((logits -
-            center) / teacher_temp)``), which is the distribution whose entropy the
-            diagnostic is about. Without it, a plain ``softmax(logits)`` is used and
-            the entropy reads high for a reason that has nothing to do with training.
+        dino_loss: The compiled `DINOLoss`, optional but STRONGLY recommended. When
+            given AND its ``center`` width matches the teacher head, the teacher
+            softmax is CENTERED and SHARPENED exactly as the loss does it
+            (``softmax((logits - center) / teacher_temp)``), which is the
+            distribution whose entropy the diagnostic is about. When it is absent or
+            its width disagrees, the entropy columns are ``nan`` and
+            ``dino_teacher_entropy_is_centered`` is ``0.0`` -- a plain
+            ``softmax(logits)`` is NOT substituted under the documented name (D-039).
         num_classes: Class count for the k-NN vote; ``None`` infers it from the labels.
 
     Raises:
@@ -424,6 +486,7 @@ class KNNEvalCallback(keras.callbacks.Callback):
         self.num_classes = num_classes
 
         self._feature_model: Optional[keras.Model] = None
+        self._warned: Set[str] = set()
 
     # -- keys -------------------------------------------------------------
 
@@ -440,6 +503,14 @@ class KNNEvalCallback(keras.callbacks.Callback):
                 "dino_feat_mean_cos",
                 "dino_teacher_entropy",
                 "dino_teacher_entropy_norm",
+                # PROVENANCE marker for the two entropy columns above (D-039).
+                # 1.0 = they ARE softmax((logits - center) / teacher_temp), the
+                # quantity the module docstring defines. 0.0 = they could not be
+                # computed (no dino_loss, or a center whose width disagrees with
+                # the head) and are nan. nan = this epoch was not evaluated. It
+                # exists because nan alone cannot tell a SKIPPED epoch from a
+                # DEGRADED one, and a reader of training_log.csv has only the CSV.
+                "dino_teacher_entropy_is_centered",
                 "dino_collapse_flag",
             ]
         )
@@ -540,38 +611,98 @@ class KNNEvalCallback(keras.callbacks.Callback):
     def _teacher_probabilities(
             self,
             teacher_logits: Optional[np.ndarray],
-    ) -> Optional[np.ndarray]:
+    ) -> Tuple[Optional[np.ndarray], float]:
         """Center and sharpen the teacher logits the way `DINOLoss` does.
 
         Interface contract:
             Parameters:
                 teacher_logits: ``(n, out_dim)`` raw teacher outputs, or ``None``.
             Returns:
-                ``(n, out_dim)`` softmax rows, or ``None`` when there were no logits.
-            Failure mode: none -- a missing/mis-shaped center is ignored rather than
-                raising, because a diagnostic must never take a run down.
+                ``(probabilities, is_centered)``. ``probabilities`` is ``(n,
+                out_dim)`` softmax rows, or ``None`` when the documented quantity
+                could not be computed. ``is_centered`` is the value written to
+                ``dino_teacher_entropy_is_centered``: ``1.0`` when the rows ARE
+                ``softmax((logits - center) / teacher_temp)``, ``0.0`` when a
+                ``dino_loss`` was given but its center could not be used, and
+                ``nan`` when there were no teacher logits at all.
+            Failure mode: never raises. A center whose width disagrees with the
+                logits yields ``(None, 0.0)`` plus a WARNING -- the entropy is NOT
+                computed from raw logits and silently reported as the centered one.
+
+        DECISION plan-2026-08-01T105809-dc0c402e/D-039
+        Do NOT restore the old ``if center.shape[0] == logits.shape[1]: logits =
+        logits - center`` with no else-branch. That fell through to an UNCENTERED
+        softmax and wrote it into ``dino_teacher_entropy`` under the same column
+        name, with nothing marking the switch. MEASURED at HEAD on 64 rows of
+        width 8 against a loss of ``out_dim=16``: the fallback's output is
+        BIT-IDENTICAL to a fully uncentered softmax, the per-row probabilities
+        differ from the centered ones by up to 1.0, and the normalized entropy
+        reads 0.966176 instead of 0.844065 -- i.e. the substitution moves the
+        Pre-Mortem 3 diagnostic 0.122 AWAY from its STOP threshold, so the failure
+        direction is a FALSE NEGATIVE. Emitting ``nan`` plus a distinct column is
+        the point: a diagnostic that must never take a run down must also never
+        report a different quantity under the documented one. See decisions.md
+        D-039.
 
         Without ``dino_loss`` this is a plain ``softmax(logits)``, whose entropy says
-        nothing about the distribution the student is actually trained against.
+        nothing about the distribution the student is actually trained against; that
+        case is reported as ``is_centered = 0.0`` too.
         """
         if teacher_logits is None:
-            return None
+            return None, float("nan")
 
         logits = np.asarray(teacher_logits, dtype=np.float64)
-        temperature = 1.0
-        if self.dino_loss is not None:
-            center = np.asarray(
-                keras.ops.convert_to_numpy(self.dino_loss.center),
-                dtype=np.float64,
-            ).reshape(-1)
-            if center.shape[0] == logits.shape[1]:
-                logits = logits - center[None, :]
-            temperature = float(self.dino_loss.teacher_temp)
 
-        logits = logits / max(temperature, 1e-12)
+        if self.dino_loss is None:
+            self._warn_once(
+                "KNNEvalCallback was constructed without dino_loss, so the "
+                "teacher distribution cannot be centered or sharpened the way "
+                "DINOLoss does it. dino_teacher_entropy is reported as nan and "
+                "dino_teacher_entropy_is_centered as 0.0 rather than reporting a "
+                "plain softmax(logits) under the documented name."
+            )
+            return None, 0.0
+
+        center = np.asarray(
+            keras.ops.convert_to_numpy(self.dino_loss.center),
+            dtype=np.float64,
+        ).reshape(-1)
+        if center.shape[0] != logits.shape[1]:
+            self._warn_once(
+                f"KNNEvalCallback: the DINOLoss center is {center.shape[0]} wide "
+                f"but the teacher head emits {logits.shape[1]} -- the loss's "
+                f"out_dim disagrees with the model. The centered+sharpened teacher "
+                f"distribution CANNOT be reconstructed, so dino_teacher_entropy "
+                f"and dino_teacher_entropy_norm are reported as nan and "
+                f"dino_teacher_entropy_is_centered as 0.0. They are NOT an "
+                f"uncentered softmax reported under the centered name."
+            )
+            return None, 0.0
+
+        logits = logits - center[None, :]
+        temperature = max(float(self.dino_loss.teacher_temp), 1e-12)
+        logits = logits / temperature
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exponentiated = np.exp(logits)
-        return exponentiated / np.sum(exponentiated, axis=1, keepdims=True)
+        probabilities = exponentiated / np.sum(exponentiated, axis=1, keepdims=True)
+        return probabilities, 1.0
+
+    def _warn_once(self, message: str) -> None:
+        """Log ``message`` at WARNING the first time it is seen.
+
+        Interface contract:
+            Parameters: ``message`` -- the full warning text, used as its own key.
+            Returns: ``None``.
+            Failure mode: none.
+
+        Once-per-message, not once-per-epoch: the condition is a static
+        configuration mismatch, so repeating it every evaluation would bury the
+        `COLLAPSE DIAGNOSTIC FIRED` line this module exists to surface.
+        """
+        if message in self._warned:
+            return
+        self._warned.add(message)
+        logger.warning(message)
 
     # -- the Keras hook ----------------------------------------------------
 
@@ -620,11 +751,12 @@ class KNNEvalCallback(keras.callbacks.Callback):
                 num_classes=self.num_classes,
             )
 
-        diagnostics = collapse_metrics(
-            query_features, self._teacher_probabilities(teacher_logits))
+        probabilities, is_centered = self._teacher_probabilities(teacher_logits)
+        diagnostics = collapse_metrics(query_features, probabilities)
         logs["dino_feat_mean_cos"] = diagnostics["mean_pairwise_cosine"]
         logs["dino_teacher_entropy"] = diagnostics["teacher_entropy"]
         logs["dino_teacher_entropy_norm"] = diagnostics["teacher_entropy_normalized"]
+        logs["dino_teacher_entropy_is_centered"] = is_centered
         logs["dino_collapse_flag"] = diagnostics["collapse_flag"]
 
         summary = " ".join(f"{key}={logs[key]:.4f}" for key in self.log_keys)

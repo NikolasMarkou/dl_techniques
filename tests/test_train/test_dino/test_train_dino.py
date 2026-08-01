@@ -324,6 +324,105 @@ class TestConfigValidation:
             f"{source_image_size} did not reach the pipeline"
         )
 
+    def test_the_knn_memory_bank_seeds_the_TFDS_FILE_order(
+            self, monkeypatch) -> None:
+        """D-040: the bank must be seeded down to the file interleave, not just `seed`.
+
+        `.take(knn_bank_batches)` selects 2048 of 9469 train images at the smoke
+        settings, and `build_raw_image_dataset` opens the train split with
+        `shuffle_files=True`. `seed=` reaches only the element `.shuffle()` and the
+        augmentation. MEASURED before this was wired: four bank draws at `seed=42`
+        (two per process, two processes) gave four DIFFERENT label sequences, and
+        four zero-step k-NN controls spread `dino_knn_top1_k20` over a range of
+        0.0195 -- larger than the +0.0127 effect a step-14 A/B was reading.
+
+        The QUERY arm is the non-vacuity control: the validation split is opened
+        with `shuffle_files=False`, so seeding its file order would be meaningless
+        and this test would pass whether or not the BANK were seeded if it only
+        checked "some call got a seed".
+        """
+        calls: list = []
+
+        def spy(dataset, image_size, batch_size, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise RuntimeError("stop: both k-NN pipelines have been captured")
+            return (object(), 0, 0)
+
+        monkeypatch.setattr(trainer, "build_raw_image_dataset", spy)
+        config = trainer.TrainingConfig(
+            variant="tiny", global_crop_size=32, patch_size=16, dino_out_dim=16,
+            n_local_crops=1, batch_size=2, dataset="cifar10", seed=1234)
+        with pytest.raises(RuntimeError, match="both k-NN pipelines"):
+            trainer.build_knn_datasets(config)
+
+        bank_kwargs, query_kwargs = calls[0], calls[1]
+        assert bank_kwargs["is_training"] is True, "call 0 must be the BANK"
+        assert query_kwargs["is_training"] is False, "call 1 must be the QUERY set"
+        assert bank_kwargs.get("shuffle_files_seed") == 1234, (
+            f"the k-NN memory bank was built WITHOUT a seeded TFDS file order "
+            f"(got shuffle_files_seed={bank_kwargs.get('shuffle_files_seed')!r}); "
+            f"every dino_knn_top1_* it produces then carries a ~0.02 run-to-run "
+            f"band from an unseeded file interleave"
+        )
+
+    @pytest.mark.parametrize("shuffle_files_seed,expect_read_config", [
+        (None, False),   # non-vacuity control: the DEFAULT must not change
+        (42, True),
+    ])
+    def test_shuffle_files_seed_is_strictly_additive(
+            self, monkeypatch, shuffle_files_seed, expect_read_config) -> None:
+        """D-040: `shuffle_files_seed=None` must pass NO read_config at all.
+
+        `build_raw_image_dataset` is shared by every `src/train/` consumer, so the
+        new parameter is only safe if its default is byte-for-byte today's call.
+        `ReadConfig(shuffle_seed=None)` is NOT the same thing as no ReadConfig, and
+        the difference is invisible in a single-consumer test -- hence the `None`
+        arm, which is the control this pair exists for.
+
+        This guard lives beside the DINO trainer rather than in a new test module
+        because `shuffle_files_seed` exists for `build_knn_datasets` above and the
+        parameter is exercised nowhere else; the shared function's own regression
+        gate is `tests/test_train/test_energy_transformer/`.
+        """
+        import tensorflow_datasets as tfds
+
+        from train.energy_transformer import common as et_common
+
+        seen: Dict[str, Any] = {}
+
+        class _FakeSplit:
+            num_examples = 8
+
+        class _FakeInfo:
+            splits = {"train": _FakeSplit(), "validation": _FakeSplit()}
+
+        class _FakeBuilder:
+            info = _FakeInfo()
+
+            def as_dataset(self, **kwargs):
+                seen.update(kwargs)
+                raise RuntimeError("stop: as_dataset kwargs captured")
+
+        monkeypatch.setattr(tfds, "builder", lambda *a, **k: _FakeBuilder())
+
+        with pytest.raises(RuntimeError, match="as_dataset kwargs captured"):
+            et_common.build_raw_image_dataset(
+                "imagenette", 32, 2, is_training=True, augment=False, seed=7,
+                shuffle_files_seed=shuffle_files_seed)
+
+        assert seen["shuffle_files"] is True
+        if expect_read_config:
+            assert "read_config" in seen, (
+                f"shuffle_files_seed={shuffle_files_seed} did not reach "
+                f"as_dataset; the file order stays unseeded. Got {sorted(seen)}")
+            assert seen["read_config"].shuffle_seed == 42
+        else:
+            assert "read_config" not in seen, (
+                f"the DEFAULT passed read_config={seen.get('read_config')!r}; "
+                f"shuffle_files_seed=None must change NOTHING for the other "
+                f"src/train/ consumers of this shared function")
+
 
 # ---------------------------------------------------------------------------
 # 3. Construction-level fixtures: a tiny model + a synthetic multi-crop pipeline

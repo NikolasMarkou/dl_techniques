@@ -796,6 +796,83 @@ class TestPackedConvention:
         with pytest.raises(ValueError, match=r"2 \* out_dim = 12"):
             loss.call(None, wrong)
 
+    # -- The width check `pack_student_teacher`'s contract promises (D-038).
+    #
+    # Before it existed, BOTH cases below reached the arithmetic. MEASURED on a
+    # correctly packed (6, 16) tensor plus a (6, 1) label:
+    #   out_dim=9  -> InvalidArgumentError: required broadcastable shapes
+    #                 [Op:Mul], naming neither width.
+    #   out_dim=16 -> NO ERROR AT ALL, value 16.5552, computed from the LABEL
+    #                 as the teacher's logits.
+    # The second is why the check cannot be a y_pred-only check.
+
+    @pytest.mark.parametrize("bad_out_dim", [9, 16])
+    def test_a_packed_tensor_whose_width_misses_2x_out_dim_raises(
+            self, bad_out_dim):
+        """A width miss is a named `ValueError`, not a backend broadcast error.
+
+        `out_dim=9` misses on `y_pred` (16 is neither 9 nor 18); `out_dim=16`
+        misses on `y_true` (the label is 1 wide, not 16) and is the case that
+        previously returned a number silently.
+        """
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        rng = np.random.default_rng(0)
+        student = rng.normal(size=(6, 8)).astype("float32")
+        teacher = rng.normal(size=(6, 8)).astype("float32")
+        packed = ops.convert_to_numpy(pack_student_teacher(student, teacher))
+        label = np.zeros((6, 1), "float32")
+
+        with pytest.raises(ValueError) as excinfo:
+            DINOLoss(out_dim=bad_out_dim)(label, packed)
+
+        message = str(excinfo.value)
+        # The docstring's promise is specifically that BOTH widths are named.
+        assert f"out_dim = {bad_out_dim}" in message, message
+        assert f"2 * out_dim = {2 * bad_out_dim}" in message, message
+        assert "16" in message or "1" in message, message
+
+        # NON-VACUITY CONTROL: the same packed tensor at the CORRECT out_dim
+        # must still score, or this test would pass on a loss that refuses
+        # everything.
+        value = float(ops.convert_to_numpy(DINOLoss(out_dim=8)(label, packed)))
+        assert np.isfinite(value)
+
+    def test_the_ibot_width_check_fires_on_a_rank_3_packed_tensor(self):
+        """The same check reaches `iBOTPatchLoss`'s rank-3 packed form."""
+        from dl_techniques.losses.dino_loss import pack_student_teacher
+
+        rng = np.random.default_rng(1)
+        student = rng.normal(size=(2, 5, 8)).astype("float32")
+        teacher = rng.normal(size=(2, 5, 8)).astype("float32")
+        packed = ops.convert_to_numpy(pack_student_teacher(student, teacher))
+        label = np.zeros((2, 5, 1), "float32")
+
+        with pytest.raises(ValueError, match=r"2 \* out_dim = 18"):
+            iBOTPatchLoss(out_dim=9)(label, packed)
+
+    def test_a_student_only_tensor_of_packed_width_is_NOT_caught(self):
+        """CHARACTERIZATION of the residual ambiguity -- a known boundary.
+
+        The conventions are told apart by width alone, so a tensor that is
+        `2 * out_dim` wide for the WRONG reason is read as packed and scored.
+        This test pins the measured behaviour so that a future reader meets the
+        limit here rather than discovering it in a training run. It is NOT an
+        endorsement: closing it needs a signal other than width, which is not
+        available at trace time.
+        """
+        rng = np.random.default_rng(2)
+        student_only = rng.normal(size=(6, 8)).astype("float32")
+        label = np.zeros((6, 1), "float32")
+
+        # 8 == 2 * 4, so this is accepted and scored as if it were packed.
+        value = float(ops.convert_to_numpy(
+            DINOLoss(out_dim=4)(label, student_only)))
+        assert np.isfinite(value), (
+            "if this now RAISES, the width check gained a signal beyond width "
+            "and this characterization test should be replaced by a raise test"
+        )
+
     def test_packed_trains_under_stock_fit(self):
         """A model emitting the packed tensor trains, and the center moves."""
         from dl_techniques.losses.dino_loss import pack_student_teacher

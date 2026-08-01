@@ -88,8 +88,14 @@ def pack_student_teacher(
             and NOWHERE else.
         Failure mode:
             No validation is performed here (it must stay trace-safe). A width
-            mismatch surfaces in the loss, which checks the last dimension
-            against `2 * out_dim` and raises a `ValueError` naming both widths.
+            mismatch surfaces in the loss: `_resolve_student_teacher` checks the
+            packed last dimension against `2 * out_dim` and, when it does not
+            match, raises a `ValueError` naming the observed width, `out_dim`
+            and `2 * out_dim`. **The one width it cannot see is a tensor that
+            is `2 * out_dim` wide by accident** (e.g. a student-only tensor fed
+            to a loss whose `out_dim` is half the real one) -- that is read as
+            packed and scored, because the conventions are told apart by width
+            alone. See `_resolve_student_teacher`'s "Residual ambiguity".
 
     Why this exists (D-009, MEASURED on keras 3.8.0): a model whose `call()`
     returns a dict/tuple cannot be scored by ONE `compile(loss=...)` object --
@@ -138,6 +144,28 @@ def _resolve_student_teacher(
     (`out_dim > 0` is enforced by both constructors). A statically-unknown last
     dimension falls through to convention 3.
 
+    Width validation (the contract `pack_student_teacher` advertises): a
+    statically-known last dimension that is neither `out_dim` nor `2 * out_dim`
+    raises a `ValueError` naming the observed width, `out_dim` and
+    `2 * out_dim`. Under convention 3 the SAME check is applied to `y_true`,
+    because under `fit()` `y_true` is the passed-through label, never the
+    teacher's logits -- so a packed `y_pred` whose width misses `2 * out_dim`
+    would otherwise fall through to convention 3 and be scored against the
+    label. **MEASURED before this check existed** (`DINOLoss` on a correctly
+    packed `(6, 16)` tensor plus a `(6, 1)` label): at `out_dim=9` the fall-
+    through produced `InvalidArgumentError: required broadcastable shapes
+    [Op:Mul]`, naming neither width; at `out_dim=16` it produced **no error at
+    all**, returning `16.5552` computed from the LABEL as the teacher's logits.
+    The silent case is the one this check exists for.
+
+    Residual ambiguity (known, and NOT closable by a width check): a tensor
+    that is `2 * out_dim` wide for the wrong reason is read as packed. MEASURED:
+    a student-only `(6, 8)` tensor fed to `DINOLoss(out_dim=4)` is split into
+    two halves of one network's logits and scored, returning `7.3828`. Width is
+    the only signal available at trace time, so this is documented rather than
+    detected; it is pinned by a characterization test in
+    `tests/test_losses/test_dino_loss.py`.
+
     Args:
         loss_name: Name of the calling loss, used in error messages only.
         y_true: Teacher logits, or ignored under conventions 1 and 2.
@@ -155,7 +183,9 @@ def _resolve_student_teacher(
         KeyError: If `y_pred` is a dict missing `"student_logits"` or
             `"teacher_logits"`.
         ValueError: If `y_pred` is a plain tensor and `y_true` is None, so no
-            teacher logits are available from either argument.
+            teacher logits are available from either argument; or if a
+            statically-known last dimension of `y_pred` or of `y_true` is
+            neither `out_dim` nor `2 * out_dim`.
     """
     if isinstance(y_pred, dict):
         missing = {'student_logits', 'teacher_logits'} - set(y_pred)
@@ -166,10 +196,15 @@ def _resolve_student_teacher(
             )
         return y_pred['teacher_logits'], y_pred['student_logits']
 
-    last_dim = None
-    shape = getattr(y_pred, 'shape', None)
-    if shape is not None and len(shape) > 0:
-        last_dim = shape[-1]
+    def _static_last_dim(t: Any) -> Optional[int]:
+        """Last dimension of `t` if it is statically known, else None."""
+        shape = getattr(t, 'shape', None)
+        if shape is None or len(shape) == 0:
+            return None
+        value = shape[-1]
+        return value if isinstance(value, int) else None
+
+    last_dim = _static_last_dim(y_pred)
 
     if last_dim == 2 * out_dim:
         # Packed convention -- student first, teacher second.
@@ -185,6 +220,33 @@ def _resolve_student_teacher(
             f"'student_logits' and 'teacher_logits'. Got a y_pred with last "
             f"dimension {last_dim}."
         )
+
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-038
+    # The width check `pack_student_teacher`'s contract promises. Do NOT delete
+    # this and go back to falling through to convention 3: under `fit()`
+    # `y_true` is the passed-through LABEL, so a packed tensor that misses
+    # `2 * out_dim` is scored against the label instead of against the teacher.
+    # MEASURED before the check existed, on a correct `(6, 16)` packed tensor
+    # plus a `(6, 1)` label: `out_dim=9` -> `InvalidArgumentError: required
+    # broadcastable shapes [Op:Mul]` naming neither width; `out_dim=16` -> NO
+    # ERROR AT ALL, value 16.5552 computed from the label. Do NOT weaken this
+    # to a `y_pred`-only check either -- `out_dim=16` passes that one.
+    # See decisions.md D-038.
+    true_last_dim = _static_last_dim(y_true)
+    for name, observed in (('y_pred', last_dim), ('y_true', true_last_dim)):
+        if observed is None or observed == out_dim:
+            continue
+        raise ValueError(
+            f"{loss_name} received a {name} whose last dimension is "
+            f"{observed}, which is neither out_dim = {out_dim} (the two-tensor "
+            f"convention, y_true = teacher logits and y_pred = student logits) "
+            f"nor 2 * out_dim = {2 * out_dim} (the PACKED convention, see "
+            f"pack_student_teacher). Under fit() y_true is the label, so a "
+            f"packed y_pred that misses 2 * out_dim = {2 * out_dim} would "
+            f"otherwise be scored against the label. Check that this loss's "
+            f"out_dim = {out_dim} matches the model head's width."
+        )
+
     return y_true, y_pred
 
 # ---------------------------------------------------------------------

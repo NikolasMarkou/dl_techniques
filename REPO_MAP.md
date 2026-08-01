@@ -57,17 +57,17 @@ legitimately writes a trainer path as `train/vit/` rather than `src/train/vit/`.
 
 ## src/dl_techniques/ — the 13 subpackages
 
-Weighting matters more than completeness here: layers and models together are 553 of the
+Weighting matters more than completeness here: layers and models together are 555 of the
 library's Python files, i.e. 55% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 283 | **The largest package.** 20 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 270 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. Fewer than a third bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
+| **`src/dl_techniques/models/`** | 272 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. Fewer than a third bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
 | `src/dl_techniques/losses/` | 39 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
-| `src/dl_techniques/datasets/` | 35 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
+| `src/dl_techniques/datasets/` | 36 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
 | `src/dl_techniques/analyzer/` | 24 | Post-hoc model analysis — `src/dl_techniques/analyzer/model_analyzer.py` is the entry point; calibration and spectral metrics, plus its own visualizers. |
 | `src/dl_techniques/metrics/` | 15 | Keras metrics (PSNR, SSIM, perplexity, depth, forecasting, Brier). |
 | `src/dl_techniques/optimization/` | 14 | Custom optimizers (Muon, VSGD, SGLD, …), LR schedules, deep-supervision weighting. |
@@ -86,7 +86,7 @@ Every one of the 13 has its own `CLAUDE.md` — start there, not here.
 | Directory | Present here | Ships in a clone | Consequence |
 |---|---|---|---|
 | `src/`, `tests/`, `research/`, `imgs/`, `scripts/` | yes | yes | The whole repo a newcomer gets. |
-| `results/` | yes — 56 run dirs, 6.2 G | **no** (gitignored) | Zero checkpoints in a clone. |
+| `results/` | yes — 59 run dirs, 7.3 G | **no** (gitignored) | Zero checkpoints in a clone. |
 | `plans/` | yes | **no** (gitignored) | Planner state is machine-local. |
 | `data/` | yes — 2.6 G | **no** (untracked) | Local datasets only. |
 
@@ -164,8 +164,11 @@ transformer block's constructor arguments. For the options behind `attention_typ
 ## The model / trainer / test triangle
 
 Three trees are meant to line up by directory name: 73 model packages under
-`src/dl_techniques/models/`, 45 trainer directories under `src/train/`, and 79 test
-directories under `tests/test_models/`. Comparing those name lists directly is the
+`src/dl_techniques/models/`, 46 trainer directories under `src/train/`, and 79 test
+directories under `tests/test_models/`. **46 counts `src/train/` entries EXCLUDING
+`src/train/common/`, which is a shared library, not a trainer** — the Numbers table
+carries both derivations (47 including it, 46 excluding it), because the two rows were
+once read as contradicting each other. Comparing those name lists directly is the
 obvious move and it produces a badly wrong picture. Four things break the correspondence:
 
 **1. Trainers renamed away from their model package.** A model with no same-named trainer
@@ -196,10 +199,10 @@ top level.
 `tests/test_models/test_lewm.py`. Any directory-to-directory comparison will report it as
 untested; it is not.
 
-Once those four are accounted for, 27 model packages have neither a same-named directory
+Once those four are accounted for, 26 model packages have neither a same-named directory
 under `src/train/` nor any `models.<name>` import anywhere under it (command in the
 Numbers table). That measures reachability from `src/train/` and nothing else — this map
-did **not** check whether those 27 are covered by tests, so do not read "no trainer" as
+did **not** check whether those 26 are covered by tests, so do not read "no trainer" as
 "tested instead". Having no trainer is normal here, not a defect to fix.
 
 ## Entry points
@@ -246,7 +249,7 @@ and the apps additionally need a checkpoint that no clone contains.
 ## Where the callbacks actually are
 
 `src/dl_techniques/callbacks/` cannot answer "where are the callbacks", and a map that
-sent you there alone would be lying by omission. Of the 56 files under `src/` that
+sent you there alone would be lying by omission. Of the 58 files under `src/` that
 name `keras.callbacks.Callback`, only 11 live in that package. The answer has three
 parts:
 
@@ -255,7 +258,7 @@ parts:
 2. **`src/train/common/`** — a *second*, trainer-side callback library that sits outside
    the core library entirely, shared across trainers
    (`src/train/common/callbacks.py`, `src/train/common/step_checkpoint.py`,
-   `src/train/common/step_plots.py`, and siblings). 38 of the 56 files are under
+   `src/train/common/step_plots.py`, and siblings). 40 of the 58 files are under
    `src/train/`, and this package is where the shared ones concentrate.
 3. **Beside the thing they serve** — a callback tightly coupled to one model or one
    optimizer lives with it, not in `src/dl_techniques/callbacks/`. Examples:
@@ -278,9 +281,9 @@ Every command is in the Numbers table at the foot of this file.
 
 | Convention | Files following it (of the library's `.py`) |
 |---|---|
-| `@keras.saving.register_keras_serializable()` on custom classes | 461 |
-| A `get_config()` for round-trip serialization | 464 |
-| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 354 |
+| `@keras.saving.register_keras_serializable()` on custom classes | 462 |
+| A `get_config()` for round-trip serialization | 465 |
+| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 356 |
 
 Three honest exceptions. None of them is a defect to go fix on sight; each is a
 thing you will meet and should not be surprised by.
@@ -293,7 +296,7 @@ thing you will meet and should not be surprised by.
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
   `src/dl_techniques/layers/attention/` — 311 modules carry Sphinx/reST
-  `:param:` and 260 carry a Google-style `Args:` block, and the two sets are not
+  `:param:` and 262 carry a Google-style `Args:` block, and the two sets are not
   disjoint: 13 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
@@ -436,7 +439,7 @@ table are named precisely *because* they do not resolve.
 | `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
-| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
+| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 58 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 40 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: only 22 of the 73 model packages bind a `create_*` in their package init, and 16 define none anywhere. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
 | **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — a sample of two already rot | `src/dl_techniques/models/CLAUDE.md` lists a package `src/dl_techniques/models/jepa/`; `src/dl_techniques/CLAUDE.md` cites `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar | Neither resolves. The real names are `src/dl_techniques/models/video_jepa/` and the *directory* `tests/test_models/test_mobilenet/`. `ls -d src/dl_techniques/models/*jepa*`; `ls -d tests/test_models/*mobilenet*`. This map verified only that its routing targets **exist** — it did not check what they say, and this row is the found-by-sampling floor, not a count |
@@ -464,19 +467,35 @@ Every *digit* in the prose above is a Value from this table, mechanically enforc
 enforcement cannot see a quantity spelled out in words ("fewer than a third"), so those
 are kept rare and each is decidable from a Value here. Run these from the repo root.
 
+**Re-derive the WHOLE table, not the rows you think you changed.** The enforcement is
+only as good as the last full sweep, and it has failed twice in the same direction:
+
+- A change that adds one directory or one file moves rows in sections you did not open.
+  One `src/train/` addition on 2026-08-01 moved **19 of the 68 numeric rows** — the
+  trainer count, the callback counts, the serializable / `get_config` / logger counts,
+  the docstring-style counts, the file and line totals, and the coverage row.
+- **Fixing the prose without fixing the table silently breaks the invariant this section
+  claims.** On 2026-08-01 the "22 of the 73 bind a `create_*`" prose was corrected to 23
+  while the table row behind it stayed at 22, so the map contradicted itself for one
+  commit. A prose digit and its Value must move in the SAME edit.
+
+The cheap sweep: extract every `| Quantity | Value | \`command\` |` row whose Value is
+all digits, run the command, and diff. That is ~15 lines of script and it is the only
+thing that makes "mechanically enforced" true rather than aspirational.
+
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1002 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 692 | `find tests -name '*.py' \| wc -l` |
-| Python lines under `src/` | 413693 | `find src -name '*.py' -exec cat {} + \| wc -l` |
-| Python lines under `tests/` | 236612 | `find tests -name '*.py' -exec cat {} + \| wc -l` |
+| Python files under `src/` | 1008 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 698 | `find tests -name '*.py' \| wc -l` |
+| Python lines under `src/` | 417760 | `find src -name '*.py' -exec cat {} + \| wc -l` |
+| Python lines under `tests/` | 241983 | `find tests -name '*.py' -exec cat {} + \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 20 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 283 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/models/` | 270 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/models/` | 272 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 39 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 39 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/datasets/` | 35 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/datasets/` | 36 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/analyzer/` | 24 | `find src/dl_techniques/analyzer -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/metrics/` | 15 | `find src/dl_techniques/metrics -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/optimization/` | 14 | `find src/dl_techniques/optimization -name '*.py' \| wc -l` |
@@ -485,16 +504,16 @@ are kept rare and each is decidable from a Value here. Run these from the repo r
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 553 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in layers + models | 555 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
 | layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 20 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 74 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model packages under `src/dl_techniques/models/` | 73 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Entries under `src/train/` | 46 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Entries under `src/train/` | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 2 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Run dirs under `results/` (local) | 56 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Size of `results/` (local) | 6.2G | `LC_ALL=C du -sh results \| cut -f1` |
+| Run dirs under `results/` (local) | 59 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
+| Size of `results/` (local) | 7.3G | `LC_ALL=C du -sh results \| cut -f1` |
 | Size of `data/` (local) | 2.6G | `LC_ALL=C du -sh data \| cut -f1` |
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
 | Notes in `research/` | 120 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
@@ -511,28 +530,28 @@ are kept rare and each is decidable from a Value here. Run these from the repo r
 | Keys in `MIXTURE_REGISTRY` | 3 | `awk 'index($0,"MIXTURE_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/mixtures/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
-| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 45 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
+| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 46 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
 | Test dirs under `tests/test_models/` | 79 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Files under `src/` naming `keras.callbacks.Callback` | 56 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
+| Files under `src/` naming `keras.callbacks.Callback` | 58 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 11 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
-| …of those, under `src/train/` | 38 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
-| Files using `@keras.saving.register_keras_serializable` | 461 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
-| Files defining `get_config` | 464 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
-| Files using the central logger | 354 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| …of those, under `src/train/` | 40 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
+| Files using `@keras.saving.register_keras_serializable` | 462 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files defining `get_config` | 465 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 356 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
 | Files importing raw `tensorflow` | 68 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 34 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 33 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 311 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 260 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 262 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 13 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 79 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model packages with no `create_` function ANYWHERE in the package | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
-| Model packages BINDING a `create_` in their own package init (what a caller sees) | 22 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
-| …the same thing counted by a bare mention-grep, which overcounts by one | 23 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
-| Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 27 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
+| Model packages BINDING a `create_` in their own package init (what a caller sees) | 23 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| …the same thing counted by a bare mention-grep, which overcounts by one | 24 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |
