@@ -10,7 +10,9 @@ that re-derives it.
 
 **What this file deliberately is NOT.** It is not a replacement for the 20 in-tree
 `CLAUDE.md` files — those are the authority on their own subtree, and this map points at
-them rather than restating them. It is not an API reference: it will not tell you what any
+them rather than restating them. Every routing target below was checked to *exist*; none
+was audited for its own accuracy, and a sample found two that are already stale (last row
+of the ledger). It is not an API reference: it will not tell you what any
 individual layer, loss or model does, only which document will. Restating subtree content
 here is exactly how the repo's older maps drifted into describing code that no longer
 exists, so the omission is the design, not an oversight. Parts B (the navigation spine)
@@ -62,7 +64,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 283 | **The largest package.** 20 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 270 | **The second largest.** 73 self-contained model packages, one per architecture. Fewer than a third export a `create_*` factory from their package init — do not assume one exists; see Part C. |
+| **`src/dl_techniques/models/`** | 270 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. Fewer than a third bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
 | `src/dl_techniques/losses/` | 39 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 35 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -150,7 +152,14 @@ It is not factory-free, though:
 `src/dl_techniques/layers/transformers/text_encoder.py` each define a family of
 `create_*_encoder` helpers, all re-exported from the package init. Those are preset
 constructors for two composite encoders, not a keyed dispatcher, and they are the only
-`create_*` in the package. Do not "fix" the absence by adding a registry.
+`create_*` the package *defines*. Do not "fix" the absence by adding a registry.
+
+The absence is about what it **publishes**. Internally the blocks are registry-*driven*:
+9 modules here import a sibling dispatcher (`create_attention_layer`,
+`create_ffn_layer`, `create_normalization_layer`, the `*_from_config` variants) and
+select by string key, so `ATTENTION_REGISTRY`/`FFN_REGISTRY` keys are the vocabulary of a
+transformer block's constructor arguments. For the options behind `attention_type` or
+`ffn_type`, read those sibling registries — not this package.
 
 ## The model / trainer / test triangle
 
@@ -281,9 +290,11 @@ thing you will meet and should not be surprised by.
   being the stated backend-agnostic surface. The standing repo preference is to
   *migrate* such a site rather than document it as an accepted exception, unless
   it is genuinely unmigratable (FFT, SVD).
-- **Docstring style is split repo-wide; both styles are in wide use.** 260
-  library modules carry a Google-style `Args:` block, and 311 modules *outside*
-  `src/dl_techniques/layers/attention/` carry Sphinx/reST `:param:`. reST is
+- **Docstring style is split repo-wide; both styles are in wide use.** Counted
+  on the same scope — the library *outside*
+  `src/dl_techniques/layers/attention/` — 311 modules carry Sphinx/reST
+  `:param:` and 260 carry a Google-style `Args:` block, and the two sets are not
+  disjoint: 13 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
   *within itself* — 33 of its 34 modules. The split reaches the shared test
@@ -293,19 +304,40 @@ thing you will meet and should not be surprised by.
 - **The factory convention is not universal, and the two ways of measuring it
   disagree sharply.** 16 of the 73 model packages define no `create_*` function
   *anywhere* in the package. But defining one and exporting one are different
-  things: only 23 of the 73 name a `create_*` in their own `<pkg>/__init__.py`
-  (concretely `src/dl_techniques/models/vit/__init__.py`), and that is the
+  things: only 22 of the 73 actually *bind* a `create_*` in their own
+  `<pkg>/__init__.py` — an import, a def or an assignment, not a mention
+  (concretely `src/dl_techniques/models/vit/__init__.py`) — and that is the
   figure a caller actually experiences; the rest bury the factory in a submodule
   you must know to import. Read the package init before assuming importability.
+  A plain `grep create_` gives 23: it also counts
+  `src/dl_techniques/models/convnext_patch_vae/__init__.py`, a pure docstring
+  that only cross-references its factories.
 
 **Before writing a new layer or model, read
 `research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
 it as mandatory and at 3105 lines it is among the longest documents in the repo.
-Four of its rules are load-bearing and will reject your layer if broken:
-create/build separation, a mandatory `compute_output_shape()`, creating every
-sub-layer unconditionally (gate usage in `call()`, never creation), and config
-being plain serializable data. Read them there — restating them here is how a
-map goes stale.
+Four of its rules are load-bearing. **Nothing enforces them.** None fails at
+layer-definition time: you find out at `.keras` save/load, at shape inference,
+or on a weight transfer — and there is no CI to tell you (see Tests, below).
+So they are worth knowing before you write, not after:
+
+- **Create/build separation** (§ 1.1 *The Golden Rule: Create vs. Build*) —
+  `__init__` only creates sub-layers and stores config; it must never call
+  `add_weight` or inspect `input_shape`. `build()` creates weights, explicitly
+  builds each sub-layer, and ends with `super().build(input_shape)`.
+- **`compute_output_shape()` on every custom layer** (§ 3.4 *Implementing
+  compute_output_shape*) — and it must work from stored config on an *unbuilt*
+  layer, never from weight shapes.
+- **Create all sub-layers unconditionally; gate USAGE in `call()`, never
+  creation** (§ 1.2 *Separation of Layer Creation vs. Layer Usage*) —
+  conditional creation makes the weight set depend on flags, which breaks
+  loading and transfer.
+- **Config is data, not code** (§ 1.3 *Configuration as Data*) — constructor
+  arguments must be plain serializable values, because `get_config()` has to
+  survive a round-trip (the guide's § 8.2 gives the test).
+
+Jump by those section headings, not by line number — the guide is edited and line
+anchors rot. Everything else stays there: restating it here is how a map goes stale.
 
 ## Tests
 
@@ -394,6 +426,8 @@ table are named precisely *because* they do not resolve.
 <!-- allow-dead-path: docs/ - ledger subject: generated on demand by `make docs`, never committed -->
 <!-- allow-dead-path: ww-img/ - ledger subject: named by the root CLAUDE.md, absent from disk -->
 <!-- allow-dead-path: .github/ - asserted absent on purpose: this repo has no CI -->
+<!-- allow-dead-path: src/dl_techniques/models/jepa/ - ledger subject: named by models/CLAUDE.md, never existed under that name -->
+<!-- allow-dead-path: tests/test_models/test_mobilenet_v1.py - ledger subject: cited as the mirroring exemplar; the real path is a directory -->
 
 | The claim | Where it is made | Reality, and the proof |
 |---|---|---|
@@ -403,8 +437,9 @@ table are named precisely *because* they do not resolve.
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` name `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
-| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: only 23 of the 73 model packages export a `create_*` from their package init, and 16 define none anywhere. Both commands are in the Numbers table |
+| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: only 22 of the 73 model packages bind a `create_*` in their package init, and 16 define none anywhere. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
+| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — a sample of two already rot | `src/dl_techniques/models/CLAUDE.md` lists a package `src/dl_techniques/models/jepa/`; `src/dl_techniques/CLAUDE.md` cites `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar | Neither resolves. The real names are `src/dl_techniques/models/video_jepa/` and the *directory* `tests/test_models/test_mobilenet/`. `ls -d src/dl_techniques/models/*jepa*`; `ls -d tests/test_models/*mobilenet*`. This map verified only that its routing targets **exist** — it did not check what they say, and this row is the found-by-sampling floor, not a count |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
 are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
@@ -489,11 +524,14 @@ are kept rare and each is decidable from a Value here. Run these from the repo r
 | `.py` in `src/dl_techniques/layers/attention/` | 34 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 33 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 311 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block | 260 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| wc -l` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 260 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules carrying BOTH styles (the two sets overlap) | 13 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
+| Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 79 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model packages with no `create_` function ANYWHERE in the package | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
-| Model packages naming a `create_` in their own package init (what a caller sees) | 23 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| Model packages BINDING a `create_` in their own package init (what a caller sees) | 22 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| …the same thing counted by a bare mention-grep, which overcounts by one | 23 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 27 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |

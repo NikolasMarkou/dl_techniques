@@ -52,7 +52,7 @@ Production-grade training pipelines — one directory per runnable pipeline. Mos
 
 ### tests/
 
-Pytest test suite mirroring the `src/dl_techniques/` structure. See `src/dl_techniques/CLAUDE.md` for testing conventions.
+Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a vestigial shadow directory, a loose test module) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/CLAUDE.md` for testing conventions.
 
 ## Dependencies
 
