@@ -95,7 +95,8 @@ class DINOv2Block(keras.layers.Layer):
         dim: Embedding dimension. Must be positive and divisible by num_heads.
         num_heads: Number of attention heads. Must be positive.
         mlp_ratio: Ratio of MLP hidden dimension to embedding dimension. Must be positive.
-        attention_type: Type of attention mechanism ('multi_head_attention', etc.).
+        attention_type: Type of attention mechanism ('multi_head', etc.). Must be
+            a key of ATTENTION_REGISTRY; 'multi_head_attention' is NOT one.
         ffn_type: Type of FFN ('mlp', 'swiglu', etc.).
         normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
         qkv_bias: Whether to use bias in QKV projection.

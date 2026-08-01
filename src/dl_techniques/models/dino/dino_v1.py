@@ -11,7 +11,7 @@ Key Features:
 ------------
 - Vision Transformer backbone with configurable architecture
 - DINO projection head for self-supervised learning
-- Support for different model variants (tiny, small, base, large)
+- Support for different model variants (tiny, small, base, large, giant)
 - Configurable attention mechanisms through factory system
 - Proper Keras 3 serialization and deserialization
 - Reuses existing transformer and embedding layers
@@ -30,6 +30,15 @@ Model Variants:
 - DINO-Small: 12 layers, 384 dim, 6 heads, 1536 FFN dim
 - DINO-Base: 12 layers, 768 dim, 12 heads, 3072 FFN dim
 - DINO-Large: 24 layers, 1024 dim, 16 heads, 4096 FFN dim
+- DINO-Giant: 40 layers, 1536 dim, 24 heads, 6144 FFN dim
+
+`giant` is NOT a variant of the DINOv1 paper (Caron et al. 2021 stops at
+ViT-B/8); it exists here so the ``MODEL_VARIANTS`` key sets of ``DINOv1``,
+``DINOv2VisionTransformer`` and ``DINOv3`` match. Its dimensions are the
+shared ViT-g/14 numbers. It deliberately carries NO version-specific extras:
+``dino_v2.py``'s giant additionally sets ``ffn_type='swiglu'`` and
+``dino_v3.py``'s additionally sets ``patch_size=(14, 14)`` and
+``stochastic_depth_rate=0.4`` — those are v2/v3 mechanisms, not v1's.
 
 Usage:
 ------
@@ -80,7 +89,7 @@ from dl_techniques.utils.logger import logger
 # Type definitions
 # ---------------------------------------------------------------------
 
-ModelVariant = Literal["tiny", "small", "base", "large"]
+ModelVariant = Literal["tiny", "small", "base", "large", "giant"]
 
 
 # ---------------------------------------------------------------------
@@ -98,7 +107,9 @@ class DINOHead(keras.layers.Layer):
         in_dim: Integer, input dimension (backbone output dimension).
         out_dim: Integer, output dimension for contrastive learning.
         use_bn: Boolean, whether to use batch normalization in intermediate layers.
-        norm_last_layer: Boolean, whether to normalize the last layer weights.
+        norm_last_layer: Boolean, whether to constrain the final projection's
+            weights to unit L2 norm per output unit. See the "Last-layer weight
+            normalization" note below for exactly what is and is not implemented.
         nlayers: Integer, number of layers in the projection head (minimum 1).
         hidden_dim: Integer, hidden dimension in intermediate layers.
         bottleneck_dim: Integer, dimension before the final projection layer.
@@ -113,6 +124,22 @@ class DINOHead(keras.layers.Layer):
 
     Output shape:
         2D tensor with shape: `(batch_size, out_dim)`
+
+    Last-layer weight normalization (``norm_last_layer``):
+        The reference DINO implementation wraps the final projection in PyTorch's
+        weight-norm reparameterization ``w = g * v / ||v||`` and, when
+        ``norm_last_layer=True``, pins ``g = 1`` and freezes it — so every output
+        prototype has unit L2 norm throughout training.
+
+        Here that INVARIANT is reproduced with a
+        ``keras.constraints.UnitNorm(axis=0)`` on the final ``Dense`` kernel plus
+        a one-off normalization at ``build()`` time, NOT with a ``(g, v)``
+        reparameterization. The invariant (``||kernel[:, j]||_2 == 1`` for every
+        output unit ``j``) is identical; the optimization path is not — the
+        constraint PROJECTS after each optimizer step where the reference
+        reparameterizes before it. ``norm_last_layer=False`` leaves the kernel
+        unconstrained, matching the reference's trainable-``g`` branch only in
+        that the norms are then free.
 
     Example:
         ```python
@@ -273,10 +300,24 @@ class DINOHead(keras.layers.Layer):
             self.mlp_layers.append(final_mlp_layer)
 
         # Final projection layer (bottleneck_dim -> out_dim)
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-011
+        # `norm_last_layer` is honoured by a UnitNorm(axis=0) CONSTRAINT on the
+        # Dense kernel, not by a (g, v) weight-norm reparameterization. Do NOT
+        # "upgrade" this to PolarWeightNorm or a hand-rolled g/v split: both add
+        # forward-path arithmetic on a kernel that is (256 x 65536) at paper
+        # scale, and a post-build `radius.trainable = False` does NOT survive a
+        # .keras reload (build() recreates the variable trainable). Also do NOT
+        # drop the build-time normalize below: a Keras constraint is applied by
+        # the OPTIMIZER, so without it a freshly built or never-trained head
+        # violates the invariant this flag promises (MEASURED: column norms
+        # 0.089-0.136 before the first step, 1.0 +/- 2.4e-07 after).
         self.last_layer = keras.layers.Dense(
             units=self.out_dim,
             use_bias=False,  # DINO typically doesn't use bias in the last layer
             kernel_initializer=self.kernel_initializer,
+            kernel_constraint=(
+                keras.constraints.UnitNorm(axis=0) if self.norm_last_layer else None
+            ),
             name="last_layer"
         )
 
@@ -291,6 +332,15 @@ class DINOHead(keras.layers.Layer):
             if hasattr(layer, "compute_output_shape"):
                 current_shape = layer.compute_output_shape(current_shape)
         self.last_layer.build(current_shape)
+
+        # Apply the constraint once at build time so the unit-norm invariant
+        # holds for a never-trained head too (see D-011 above). On a .keras
+        # reload this runs BEFORE the saved weights are restored, and those
+        # weights already satisfy the constraint, so it does not perturb them.
+        if self.norm_last_layer:
+            self.last_layer.kernel.assign(
+                self.last_layer.kernel_constraint(self.last_layer.kernel)
+            )
 
         super().build(input_shape)
 
@@ -369,11 +419,12 @@ class DINOv1(keras.Model):
         num_classes: Integer, number of output classes for classification.
             Set to 0 for feature extraction only.
         mlp_ratio: Float, ratio of MLP hidden dimension to embedding dimension.
-        qkv_bias: Boolean, whether to use bias in QKV projection.
+        qkv_bias: Boolean, whether to use bias in the attention QKV/output
+            projections. Forwarded to the attention factory as `use_bias`.
         dropout_rate: Float, dropout rate.
         attention_dropout_rate: Float, attention dropout rate.
         stochastic_depth_rate: Float, stochastic depth rate.
-        norm_layer: String, normalization layer type.
+        normalization_type: String, normalization layer type.
         attention_type: String, type of attention mechanism to use.
         ffn_type: String, type of feed-forward network to use.
         include_top: Boolean, whether to include classification head.
@@ -445,6 +496,14 @@ class DINOv1(keras.Model):
             "depth": 24,
             "num_heads": 16,
             "mlp_ratio": 4.0,
+        },
+        # Present for key-set parity with dino_v2/dino_v3 only — see the module
+        # docstring. Not a DINOv1-paper variant.
+        "giant": {
+            "embed_dim": 1536,
+            "depth": 40,
+            "num_heads": 24,
+            "mlp_ratio": 4.0,
         }
     }
 
@@ -454,19 +513,19 @@ class DINOv1(keras.Model):
             depth: int = 12,
             num_heads: int = 12,
             patch_size: Union[int, Tuple[int, int]] = 16,
-            image_size: Union[int, Tuple[int, int]] = 224,  # Renamed from img_size
+            image_size: Union[int, Tuple[int, int]] = 224,
             in_channels: int = 3,
             num_classes: int = 1000,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
-            dropout_rate: float = 0.0,  # Renamed from drop_rate
-            attention_dropout_rate: float = 0.0,  # Renamed from attn_drop_rate
-            stochastic_depth_rate: float = 0.0,  # Renamed from drop_path_rate
-            norm_layer: str = "layer_norm",
+            dropout_rate: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            stochastic_depth_rate: float = 0.0,
+            normalization_type: str = "layer_norm",
             attention_type: str = "multi_head",
             ffn_type: str = "mlp",
-            include_top: bool = True,  # New argument for standard classifier
-            include_projection_head: bool = False,  # Renamed from include_head
+            include_top: bool = True,
+            include_projection_head: bool = False,
             dino_out_dim: int = 65536,
             dino_hidden_dim: int = 2048,
             dino_bottleneck_dim: int = 256,
@@ -485,7 +544,7 @@ class DINOv1(keras.Model):
         if embed_dim % num_heads != 0:
             raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
 
-        # Store configuration with renamed parameters
+        # Store configuration
         self.embed_dim = embed_dim
         self.depth = depth
         self.num_heads = num_heads
@@ -503,19 +562,28 @@ class DINOv1(keras.Model):
         self.num_classes = num_classes
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
-        self.dropout_rate = dropout_rate  # Renamed
-        self.attention_dropout_rate = attention_dropout_rate  # Renamed
-        self.stochastic_depth_rate = stochastic_depth_rate  # Renamed
-        self.norm_layer = norm_layer
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.stochastic_depth_rate = stochastic_depth_rate
+        self.normalization_type = normalization_type
         self.attention_type = attention_type
         self.ffn_type = ffn_type
-        self.include_top = include_top  # New
-        self.include_projection_head = include_projection_head  # Renamed
+        self.include_top = include_top
+        self.include_projection_head = include_projection_head
         self.dino_out_dim = dino_out_dim
         self.dino_hidden_dim = dino_hidden_dim
         self.dino_bottleneck_dim = dino_bottleneck_dim
         self.dino_nlayers = dino_nlayers
         self.use_cls_token = use_cls_token
+
+        # Validate patch size alignment. Without this the floor-division below
+        # silently truncates patches; v2/v3 both raise here (same message).
+        if (self.image_size[0] % self.patch_size[0] != 0
+                or self.image_size[1] % self.patch_size[1] != 0):
+            raise ValueError(
+                f"image_size {self.image_size} must be divisible by "
+                f"patch_size {self.patch_size}"
+            )
 
         # Calculate derived parameters
         self.num_patches = (self.image_size[0] // self.patch_size[0]) * (self.image_size[1] // self.patch_size[1])
@@ -564,28 +632,40 @@ class DINOv1(keras.Model):
         self.pos_embed = PositionalEmbedding(
             max_seq_len=max_seq_len,
             dim=self.embed_dim,
-            dropout_rate=self.dropout_rate,  # Updated
+            dropout_rate=self.dropout_rate,
             name="pos_embed"
         )
         x = self.pos_embed(x)
 
         # Transformer blocks
         self.transformer_blocks = []
-        dpr = [float(x) for x in keras.ops.linspace(0., self.stochastic_depth_rate, self.depth)]  # Updated
+        dpr = [float(x) for x in keras.ops.linspace(0., self.stochastic_depth_rate, self.depth)]
 
         for i in range(self.depth):
+            # DECISION plan-2026-08-01T105809-dc0c402e/D-010
+            # Forward qkv_bias UNCONDITIONALLY and spell it `use_bias` — the
+            # name the attention registry actually accepts. Do NOT reinstate
+            # either half of the old form
+            # (`{"qkv_bias": ...} if attention_type == "multi_head_attention"`):
+            # the gate string was never a registry key (the key is
+            # `multi_head`), and `create_attention_layer` SILENTLY DROPS an
+            # unrecognized kwarg rather than raising (MEASURED: passing
+            # qkv_bias=True yields a layer with use_bias=False and zero bias
+            # weights) — so both halves were independently dead. Sibling
+            # factories disagree on this (`create_ffn_layer` RAISES); never
+            # infer this behaviour, execute it.
             block = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
                 attention_type=self.attention_type,
-                attention_args={"qkv_bias": self.qkv_bias} if self.attention_type == "multi_head_attention" else {},
-                normalization_type=self.norm_layer,
+                attention_args={"use_bias": self.qkv_bias},
+                normalization_type=self.normalization_type,
                 normalization_position="pre",  # Pre-normalization as in DINO
                 ffn_type=self.ffn_type,
-                dropout_rate=self.dropout_rate,  # Updated
-                attention_dropout_rate=self.attention_dropout_rate,  # Updated
-                use_stochastic_depth=self.stochastic_depth_rate > 0.0,  # Updated
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
+                use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=dpr[i],
                 name=f"transformer_block_{i}"
             )
@@ -594,7 +674,7 @@ class DINOv1(keras.Model):
 
         # Final layer normalization
         self.norm = create_normalization_layer(
-            self.norm_layer,
+            self.normalization_type,
             name="norm"
         )
         x = self.norm(x)
@@ -608,7 +688,7 @@ class DINOv1(keras.Model):
             # Global average pooling over patch tokens
             features = keras.ops.mean(x, axis=1)  # Shape: (batch_size, embed_dim)
 
-        # Output head - refactored logic
+        # Output head
         if self.include_projection_head:
             # DINO projection head for self-supervised learning
             self.head = DINOHead(
@@ -619,8 +699,8 @@ class DINOv1(keras.Model):
                 nlayers=self.dino_nlayers,
                 use_bn=False,
                 norm_last_layer=True,
-                dropout_rate=self.dropout_rate,  # Updated
-                name="dino_projection_head"  # Updated name
+                dropout_rate=self.dropout_rate,
+                name="dino_projection_head"
             )
             outputs = self.head(features)
         elif self.include_top and self.num_classes > 0:
@@ -628,7 +708,7 @@ class DINOv1(keras.Model):
             self.head = keras.layers.Dense(
                 units=self.num_classes,
                 kernel_initializer="truncated_normal",
-                name="classifier"  # Updated name
+                name="classifier"
             )
             outputs = self.head(features)
         else:
@@ -643,47 +723,43 @@ class DINOv1(keras.Model):
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Get attention weights from the last transformer layer.
+        Get attention probabilities from the last transformer layer.
 
-        This method is useful for visualizing attention patterns,
-        similar to the original DINO implementation.
+        NOT IMPLEMENTED — see `Raises`. This method exists so that the DINO
+        attention-map visualization API of the reference implementation fails
+        loudly rather than silently returning something useless.
 
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels).
 
-        Returns:
-            Attention tensor from the last layer.
+        Raises:
+            NotImplementedError: Always. See the message for the missing
+                capability.
         """
-        x = inputs
-
-        # Process through patch embedding and positional encoding
-        x = self.patch_embed(x)
-
-        if self.use_cls_token:
-            x = self.cls_token_layer(x)
-
-        x = self.pos_embed(x)
-
-        # Process through all but the last transformer block
-        for i in range(self.depth - 1):
-            x = self.transformer_blocks[i](x)
-
-        # Get attention from the last block
-        # Note: This requires the transformer block to support returning attention
-        # For now, we'll return a placeholder - this would need to be implemented
-        # in the TransformerLayer class to return attention weights when requested
-
-        logger.warning("get_last_selfattention not fully implemented - "
-                       "TransformerLayer needs attention return capability")
-
-        # Process through last layer normally for now
-        x = self.transformer_blocks[-1](x)
-
-        # Return dummy attention tensor for compatibility
-        batch_size = keras.ops.shape(x)[0]
-        seq_len = keras.ops.shape(x)[1]
-        attention_shape = (batch_size, self.num_heads, seq_len, seq_len)
-        return keras.ops.zeros(attention_shape)
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-012
+        # RAISE. Do NOT restore the previous body (log a warning, then
+        # `return keras.ops.zeros((batch, heads, seq, seq))`): it made an
+        # attention-map visualization silently render an all-black map, and a
+        # caller could not tell "uniform attention" from "no implementation".
+        # Implementing it truthfully is blocked at the layer level, MEASURED on
+        # keras 3.8.0 by signature inspection: neither `TransformerLayer.call`
+        # (inputs, attention_mask, layer_idx, training), nor
+        # `MultiHeadAttention.call` (inputs, attention_mask, training), nor the
+        # `MultiHeadCrossAttention.call` it delegates to (query_input, kv_input,
+        # attention_mask, training) accepts a `return_attention_scores` flag or
+        # caches the probabilities on an attribute. Other registry types DO
+        # (`performer`, `rpc`, `hopfield`) — so the fix is to add that flag to
+        # `multi_head`/`TransformerLayer`, in layers/, not to fake it here.
+        raise NotImplementedError(
+            "get_last_selfattention() is not implemented for DINOv1. The "
+            "'multi_head' attention path does not expose its attention "
+            "probabilities: TransformerLayer.call, MultiHeadAttention.call and "
+            "MultiHeadCrossAttention.call all lack a return_attention_scores "
+            "argument and cache no attention tensor. Implementing DINO-style "
+            "attention-map visualization requires adding that capability to "
+            "dl_techniques.layers.attention.multi_head_attention and "
+            "dl_techniques.layers.transformers.transformer first."
+        )
 
     @classmethod
     def from_variant(
@@ -698,7 +774,7 @@ class DINOv1(keras.Model):
         Create a DINO model from a predefined variant.
 
         Args:
-            variant: String, one of "tiny", "small", "base", "large".
+            variant: String, one of "tiny", "small", "base", "large", "giant".
             num_classes: Integer, number of output classes.
             patch_size: Integer or tuple, size of image patches.
             input_shape: Tuple, input shape. If None, uses (224, 224, 3).
@@ -753,19 +829,19 @@ class DINOv1(keras.Model):
             "depth": self.depth,
             "num_heads": self.num_heads,
             "patch_size": self.patch_size,
-            "image_size": self.image_size,  # Updated
+            "image_size": self.image_size,
             "in_channels": self.in_channels,
             "num_classes": self.num_classes,
             "mlp_ratio": self.mlp_ratio,
             "qkv_bias": self.qkv_bias,
-            "dropout_rate": self.dropout_rate,  # Updated
-            "attention_dropout_rate": self.attention_dropout_rate,  # Updated
-            "stochastic_depth_rate": self.stochastic_depth_rate,  # Updated
-            "norm_layer": self.norm_layer,
+            "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
+            "normalization_type": self.normalization_type,
             "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
-            "include_top": self.include_top,  # New
-            "include_projection_head": self.include_projection_head,  # Updated
+            "include_top": self.include_top,
+            "include_projection_head": self.include_projection_head,
             "dino_out_dim": self.dino_out_dim,
             "dino_hidden_dim": self.dino_hidden_dim,
             "dino_bottleneck_dim": self.dino_bottleneck_dim,
@@ -790,12 +866,12 @@ class DINOv1(keras.Model):
         logger.info(f"  - Number of layers: {self.depth}")
         logger.info(f"  - Number of heads: {self.num_heads}")
         logger.info(f"  - Patch size: {self.patch_size}")
-        logger.info(f"  - Image size: {self.image_size}")  # Updated
+        logger.info(f"  - Image size: {self.image_size}")
         logger.info(f"  - Number of patches: {self.num_patches}")
         logger.info(f"  - MLP ratio: {self.mlp_ratio}")
         logger.info(f"  - Use CLS token: {self.use_cls_token}")
-        logger.info(f"  - Include top: {self.include_top}")  # New
-        logger.info(f"  - Include DINO head: {self.include_projection_head}")  # Updated
+        logger.info(f"  - Include top: {self.include_top}")
+        logger.info(f"  - Include DINO head: {self.include_projection_head}")
         if self.include_projection_head:
             logger.info(f"  - DINO output dim: {self.dino_out_dim}")
         if self.num_classes > 0:
@@ -806,13 +882,13 @@ class DINOv1(keras.Model):
 # Convenience functions
 # ---------------------------------------------------------------------
 
-def create_dino_v1(  # Renamed from create_dino_model
+def create_dino_v1(
         variant: ModelVariant = "small",
         num_classes: int = 0,
         patch_size: Union[int, Tuple[int, int]] = 16,
         input_shape: Optional[Tuple[int, ...]] = None,
-        include_top: bool = True,  # New argument
-        include_projection_head: bool = False,  # Renamed from include_head
+        include_top: bool = True,
+        include_projection_head: bool = False,
         dino_out_dim: int = 65536,
         **kwargs
 ) -> DINOv1:
@@ -820,7 +896,7 @@ def create_dino_v1(  # Renamed from create_dino_model
     Convenience function to create DINO Vision Transformer models.
 
     Args:
-        variant: String, model variant ("tiny", "small", "base", "large").
+        variant: String, model variant ("tiny", "small", "base", "large", "giant").
         num_classes: Integer, number of output classes. Set to 0 for feature extraction.
         patch_size: Integer or tuple, size of image patches.
         input_shape: Tuple, input shape. If None, uses (224, 224, 3).
@@ -857,8 +933,8 @@ def create_dino_v1(  # Renamed from create_dino_model
         num_classes=num_classes,
         patch_size=patch_size,
         input_shape=input_shape,
-        include_top=include_top,  # New
-        include_projection_head=include_projection_head,  # Updated
+        include_top=include_top,
+        include_projection_head=include_projection_head,
         dino_out_dim=dino_out_dim,
         **kwargs
     )
@@ -914,7 +990,7 @@ def create_dino_teacher_student_pair(
         num_classes=0,
         patch_size=patch_size,
         input_shape=input_shape,
-        include_projection_head=True,  # Updated
+        include_projection_head=True,
         dino_out_dim=dino_out_dim,
         name="dino_teacher",
         **kwargs
@@ -926,7 +1002,7 @@ def create_dino_teacher_student_pair(
         num_classes=0,
         patch_size=patch_size,
         input_shape=input_shape,
-        include_projection_head=True,  # Updated
+        include_projection_head=True,
         dino_out_dim=dino_out_dim,
         name="dino_student",
         **kwargs
