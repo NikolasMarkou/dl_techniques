@@ -6,12 +6,15 @@ plan_2026-06-15_39a31d4a (D-001): the CLS token is now owned by the
 `ClassTokenPrepend` sub-layer. This test is therefore a REAL forward+finiteness
 assertion, no longer an xfail.
 
-dino has no ``__init__`` exports, so import the factory directly from the
-submodule. `create_dino_v1(variant, num_classes, patch_size, input_shape, ...)`
-verified from source. The patch grid is derived from ``image_size // patch_size``
-at build time, so a small ``input_shape`` is legal: with ``patch_size=16`` a
-32x32 image yields a 2x2 patch grid. ``num_classes=10`` + default
-``include_top=True`` returns logits ``(B, 10)``.
+Since plan-2026-08-01T105809-dc0c402e step 6 the package DOES export its public
+surface, so ``from dl_techniques.models.dino import create_dino_v1`` works; these
+tests keep importing from the submodule so a package-level export regression is
+not the thing that makes them fail. The converged signature is
+``create_dino_v1(variant, *, image_size, patch_size, num_classes, include_top, ...)``
+— ``input_shape`` was REMOVED from the factory (it raises ``TypeError``); the input
+shape is derived from ``image_size``. The patch grid is ``image_size // patch_size``,
+so ``image_size=32, patch_size=16`` yields a 2x2 patch grid. ``num_classes=10`` +
+default ``include_top=True`` returns logits ``(B, 10)``.
 
 The DINOHead / DINOv1 ``.keras`` round-trips (previously known-broken) are now
 FIXED and covered separately in ``test_model_v1.py``.
@@ -41,9 +44,9 @@ def test_smoke_build_and_forward():
 
     model = create_dino_v1(
         "small",
-        num_classes=10,
+        image_size=32,
         patch_size=16,
-        input_shape=(32, 32, 3),
+        num_classes=10,
     )
 
     images = np.random.rand(2, 32, 32, 3).astype("float32")

@@ -42,8 +42,8 @@ class TestDINOHead:
 class TestDINOv1:
 
     def _model(self):
-        return create_dino_v1("small", num_classes=10, patch_size=16,
-                              input_shape=(32, 32, 3))
+        return create_dino_v1("small", image_size=32, patch_size=16,
+                              num_classes=10)
 
     def test_forward_logits(self):
         model = self._model()

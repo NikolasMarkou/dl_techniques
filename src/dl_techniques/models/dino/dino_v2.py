@@ -61,6 +61,16 @@ from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.models.dino.common import reject_input_shape
+
+# ---------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------
+
+# DINOv2's patch size when the caller does not specify one. `MODEL_VARIANTS`
+# here carries no per-variant `patch_size`, so `create_dino_v2(patch_size=None)`
+# resolves to this for EVERY variant. Oquab et al. 2023 use ViT-L/14 and ViT-g/14.
+_DEFAULT_PATCH_SIZE = 14
 
 
 # ---------------------------------------------------------------------
@@ -1176,54 +1186,76 @@ class DINOv2(keras.Model):
 
 def create_dino_v2(
         variant: Literal['tiny', 'small', 'base', 'large', 'giant'] = 'base',
+        *,
         image_size: Union[int, Tuple[int, int]] = 224,
-        patch_size: Union[int, Tuple[int, int]] = 14,
-        num_register_tokens: int = 0,
-        init_values: Optional[float] = 1e-5,
-        stochastic_depth_rate: float = 0.0,
-        ffn_type: str = 'mlp',
+        patch_size: Optional[Union[int, Tuple[int, int]]] = None,
         num_classes: int = 1000,
         include_top: bool = True,
-        input_shape: Optional[Tuple[int, ...]] = None,
+        num_register_tokens: Optional[int] = None,
+        init_values: Optional[float] = 1e-5,
+        stochastic_depth_rate: float = 0.0,
+        ffn_type: Optional[str] = None,
         pretrained: bool = False,
         **kwargs
 ) -> DINOv2:
     """
     Factory function to create DINOv2 model variants with sensible defaults.
 
+    Signature note (converged surface): ``create_dino_v1``, ``create_dino_v2`` and
+    ``create_dino_v3`` share ``(variant, *, image_size, patch_size, num_classes,
+    include_top, **kwargs)``. The redundant ``input_shape`` spelling was removed —
+    the input shape is always derived as ``(*image_size, in_chans)``. Passing
+    ``input_shape=`` raises ``TypeError`` rather than silently disagreeing with
+    ``image_size``.
+
+    **Variant-defers precedence rule** (shared by all three factories): a parameter
+    passed as ``None`` defers to the variant's own ``MODEL_VARIANTS`` entry (or, if
+    the entry says nothing, to this version's default). An EXPLICIT non-``None``
+    value ALWAYS wins over the variant's. Three parameters use it here:
+
+    - ``patch_size``: ``DINOv2VisionTransformer.MODEL_VARIANTS`` defines no
+      per-variant patch size, so ``None`` resolves to 14 for every variant.
+    - ``ffn_type``: the ``giant`` entry sets ``'swiglu'``; every other variant
+      resolves to ``'mlp'``. Passing ``ffn_type='mlp'`` explicitly on ``giant``
+      now genuinely gives you MLP — before this rule, ``'mlp'`` was the default
+      AND the promotion trigger, so an explicit ``'mlp'`` on ``giant`` was
+      silently upgraded to SwiGLU and the caller could not opt out.
+    - ``num_register_tokens``: ``None`` gives 4 on ``large``/``giant`` and 0
+      elsewhere; an explicit ``0`` on ``giant`` now genuinely means zero.
+
     **Recommended Configurations**:
-    - **tiny/small/base/large**: Use 'mlp' FFN, 0 or 4 register tokens
-    - **giant**: Use 'swiglu' FFN, 4 register tokens, higher stochastic_depth_rate
+    - **tiny/small/base/large**: 'mlp' FFN, 0 or 4 register tokens
+    - **giant**: 'swiglu' FFN, 4 register tokens, higher stochastic_depth_rate
 
     Args:
         variant: Size variant ('tiny', 'small', 'base', 'large', 'giant').
-        image_size: Input image size.
-        patch_size: Patch size for patch embedding.
-        num_register_tokens: Number of register tokens (0 or 4 typically).
-        init_values: LearnableMultiplier initialization value.
-        stochastic_depth_rate: Maximum stochastic depth rate.
-        ffn_type: Type of FFN ('mlp' for small models, 'swiglu' for giant).
+        image_size: Integer or ``(height, width)``, input image size.
+        patch_size: Patch size for patch embedding. ``None`` defers to the variant
+            (v2 has no per-variant patch size, so ``None`` -> 14).
         num_classes: Number of output classes.
         include_top: Whether to include classification head.
-        input_shape: Input shape.
+        num_register_tokens: Number of register tokens. ``None`` defers to the
+            variant (4 for 'large'/'giant', 0 otherwise).
+        init_values: LearnableMultiplier initialization value.
+        stochastic_depth_rate: Maximum stochastic depth rate.
+        ffn_type: Type of FFN. ``None`` defers to the variant ('swiglu' for
+            'giant', 'mlp' otherwise).
         pretrained: Whether to load pretrained weights (not implemented).
         **kwargs: Additional arguments for the model.
 
     Returns:
         DINOv2 instance.
 
+    Raises:
+        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
+
     Example:
         ```python
         # Standard DINOv2-Base for ImageNet
         model = create_dino_v2('base', num_classes=1000)
 
-        # DINOv2-Giant with SwiGLU and register tokens
-        model = create_dino_v2(
-            'giant',
-            ffn_type='swiglu',
-            num_register_tokens=4,
-            stochastic_depth_rate=0.3
-        )
+        # DINOv2-Giant — SwiGLU and 4 register tokens come from the variant
+        model = create_dino_v2('giant', stochastic_depth_rate=0.3)
 
         # Pre-training model (no classification head)
         model = create_dino_v2('base', include_top=False)
@@ -1233,22 +1265,30 @@ def create_dino_v2(
             'small',
             num_classes=10,
             image_size=32,
-            input_shape=(32, 32, 3)
+            patch_size=16,
         )
         ```
     """
+    reject_input_shape(kwargs, "create_dino_v2")
+
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")
 
-    # Use SwiGLU for giant model by default if not specified
-    if variant == 'giant' and ffn_type == 'mlp':
-        ffn_type = 'swiglu'
-        logger.info("Using SwiGLU FFN for giant variant")
+    if patch_size is None:
+        patch_size = _DEFAULT_PATCH_SIZE
 
-    # Set reasonable register tokens for larger models
-    if variant in ['large', 'giant'] and num_register_tokens == 0:
-        num_register_tokens = 4
-        logger.info(f"Setting {num_register_tokens} register tokens for {variant} variant")
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `None` means "defer to the
+    # variant", an explicit value always wins. Do NOT go back to
+    # `ffn_type: str = 'mlp'` plus `if variant == 'giant' and ffn_type == 'mlp':
+    # ffn_type = 'swiglu'` — that form cannot distinguish "the caller said mlp"
+    # from "the caller said nothing", so an explicit `ffn_type='mlp'` on `giant`
+    # was silently overridden with no way to opt out. Same for
+    # `num_register_tokens == 0` as the promotion trigger. See decisions.md D-017.
+    variant_config = DINOv2VisionTransformer.MODEL_VARIANTS.get(variant, {})
+    if ffn_type is None:
+        ffn_type = variant_config.get('ffn_type', 'mlp')
+    if num_register_tokens is None:
+        num_register_tokens = 4 if variant in ('large', 'giant') else 0
 
     logger.info(f"Creating DINOv2-{variant.upper()} model with:")
     logger.info(f"  - FFN type: {ffn_type}")
@@ -1262,7 +1302,6 @@ def create_dino_v2(
         patch_size=patch_size,
         num_classes=num_classes,
         include_top=include_top,
-        input_shape=input_shape,
         num_register_tokens=num_register_tokens,
         init_values=init_values,
         stochastic_depth_rate=stochastic_depth_rate,

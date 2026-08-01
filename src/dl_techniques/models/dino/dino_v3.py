@@ -90,6 +90,7 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.dino.common import reject_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -594,35 +595,84 @@ class DINOv3(keras.Model):
 
 def create_dino_v3(
     variant: str = "base",
+    *,
     image_size: Union[int, Tuple[int, int]] = (224, 224),
+    patch_size: Optional[Union[int, Tuple[int, int]]] = None,
     num_classes: int = 1000,
     include_top: bool = True,
+    positional_embedding_type: Literal['learned', 'rope'] = 'learned',
+    rope_theta: float = 10000.0,
+    rope_percentage: float = 1.0,
     pretrained: bool = False,
     **kwargs: Any
 ) -> DINOv3:
     """
     A factory function to create DINOv3 models.
 
+    Signature note (converged surface): ``create_dino_v1``, ``create_dino_v2`` and
+    ``create_dino_v3`` share ``(variant, *, image_size, patch_size, num_classes,
+    include_top, **kwargs)``. ``patch_size`` used to be reachable only through
+    ``**kwargs`` here; it is now a named parameter on all three. There is no
+    ``input_shape`` spelling on any of them — the input shape is derived from
+    ``image_size``.
+
+    **Variant-defers precedence rule** (shared by all three factories):
+    ``patch_size=None`` defers to the variant's own ``MODEL_VARIANTS`` entry; an
+    EXPLICIT non-``None`` value ALWAYS wins over it. This matters here and only
+    here: ``DINOv3.MODEL_VARIANTS['giant']`` carries ``patch_size=(14, 14)`` while
+    every other variant carries ``(16, 16)``, so ``create_dino_v3('giant')`` gives
+    a /14 model and ``create_dino_v3('giant', patch_size=16)`` gives a /16 one.
+    ``giant`` likewise carries ``stochastic_depth_rate=0.4``, overridable the same
+    way by passing it through ``**kwargs``.
+
     Args:
         variant: Model variant ("tiny", "small", "base", "large", "giant").
         image_size: Input image size; an int, or (height, width).
+        patch_size: Patch size; an int, or (height, width). ``None`` defers to the
+            variant ((14, 14) for 'giant', (16, 16) otherwise).
         num_classes: Number of output classes.
         include_top: Whether to include the final classification layer.
+        positional_embedding_type: ``'learned'`` (absolute table) or ``'rope'``
+            (1-D rotary, applied inside a ``group_query`` attention). A checkpoint
+            is NOT portable between the two — they run different attention classes.
+        rope_theta: RoPE base frequency. Ignored unless
+            ``positional_embedding_type='rope'``.
+        rope_percentage: Fraction of each head's dimensions that are rotated.
+            Ignored unless ``positional_embedding_type='rope'``. ``0.0`` is legal
+            but leaves the model with NO positional information at all.
         pretrained: If True, logs a warning and is otherwise ignored — NO pretrained
             DINOv3 weights are shipped with this repository.
         **kwargs: Additional arguments for the model constructor, e.g.
-            ``patch_size``, ``positional_embedding_type='rope'``, ``rope_theta``.
+            ``stochastic_depth_rate``, ``normalization_type``.
 
     Returns:
         A DINOv3 model instance.
+
+    Raises:
+        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
     """
+    reject_input_shape(kwargs, "create_dino_v3")
+
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented for DINOv3.")
+
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `patch_size=None` defers to
+    # the variant. Do NOT give this parameter a concrete default (e.g. `= 16`):
+    # `DINOv3.from_variant` does `config = MODEL_VARIANTS[variant].copy();
+    # config.update(kwargs)`, so a non-None value ALWAYS overrides the variant's —
+    # and a concrete default would silently turn `create_dino_v3('giant')` from
+    # the /14 model its variant entry specifies into a /16 one. `None` is the only
+    # value that means "the caller said nothing". See decisions.md D-017.
+    if patch_size is not None:
+        kwargs['patch_size'] = patch_size
 
     return DINOv3.from_variant(
         variant=variant,
         image_size=image_size,
         num_classes=num_classes,
         include_top=include_top,
+        positional_embedding_type=positional_embedding_type,
+        rope_theta=rope_theta,
+        rope_percentage=rope_percentage,
         **kwargs
     )

@@ -43,32 +43,42 @@ shared ViT-g/14 numbers. It deliberately carries NO version-specific extras:
 Usage:
 ------
 ```python
+from dl_techniques.models.dino import DINOv1, create_dino_v1
+
 # Create DINO model for ImageNet (224x224)
-model = DINOv1.from_variant(
+model = create_dino_v1(
     "small",
+    image_size=224,
     num_classes=0,  # 0 for feature extraction
-    input_shape=(224, 224, 3)
+    include_top=False,
 )
 
 # Create DINO model with projection head
-model = DINOv1.from_variant(
+model = create_dino_v1(
     "base",
+    image_size=224,
     num_classes=0,
+    include_top=False,
     include_projection_head=True,
     dino_out_dim=65536,
-    input_shape=(224, 224, 3)
 )
 
-# Create custom DINO model
+# Create custom DINO model (the constructor, not the factory: it takes the
+# architecture directly instead of a variant name)
 model = DINOv1(
     embed_dim=768,
     depth=12,
     num_heads=12,
     patch_size=16,
+    image_size=224,
     num_classes=1000,
-    input_shape=(224, 224, 3)
 )
 ```
+
+The three factories share one parameter scheme —
+``create_dino_v{1,2,3}(variant, *, image_size, patch_size, num_classes, include_top, ...)``.
+``input_shape`` is NOT a factory argument (it raises ``TypeError``); the input shape is
+derived from ``image_size``. See ``src/dl_techniques/models/dino/README.md``.
 """
 
 import keras
@@ -83,6 +93,7 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.dino.common import reject_input_shape
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -90,6 +101,12 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 ModelVariant = Literal["tiny", "small", "base", "large", "giant"]
+
+# DINOv1's patch size when the caller does not specify one. `MODEL_VARIANTS`
+# here carries no per-variant `patch_size` (unlike `dino_v3.py`'s, whose `giant`
+# entry sets 14), so `create_dino_v1(patch_size=None)` resolves to this for
+# EVERY variant. Caron et al. 2021 use ViT-S/16 and ViT-B/16.
+_DEFAULT_PATCH_SIZE = 16
 
 
 # ---------------------------------------------------------------------
@@ -454,7 +471,7 @@ class DINOv1(keras.Model):
             patch_size=16,
             num_classes=0,
             include_top=False,
-            input_shape=(224, 224, 3)
+            image_size=224
         )
 
         # Self-supervised learning model with DINO head
@@ -466,7 +483,7 @@ class DINOv1(keras.Model):
             num_classes=0,
             include_projection_head=True,
             dino_out_dim=65536,
-            input_shape=(224, 224, 3)
+            image_size=224
         )
         ```
     """
@@ -777,7 +794,11 @@ class DINOv1(keras.Model):
             variant: String, one of "tiny", "small", "base", "large", "giant".
             num_classes: Integer, number of output classes.
             patch_size: Integer or tuple, size of image patches.
-            input_shape: Tuple, input shape. If None, uses (224, 224, 3).
+            input_shape: Tuple, an explicit input shape. Prefer `image_size`
+                (passed through **kwargs); if this is None the constructor
+                derives `(*image_size, in_channels)`. The two spellings can
+                DISAGREE, which is why the `create_dino_v1` factory refuses
+                this one outright.
             **kwargs: Additional arguments passed to the constructor.
 
         Returns:
@@ -884,9 +905,10 @@ class DINOv1(keras.Model):
 
 def create_dino_v1(
         variant: ModelVariant = "small",
+        *,
+        image_size: Union[int, Tuple[int, int]] = 224,
+        patch_size: Optional[Union[int, Tuple[int, int]]] = None,
         num_classes: int = 0,
-        patch_size: Union[int, Tuple[int, int]] = 16,
-        input_shape: Optional[Tuple[int, ...]] = None,
         include_top: bool = True,
         include_projection_head: bool = False,
         dino_out_dim: int = 65536,
@@ -895,11 +917,25 @@ def create_dino_v1(
     """
     Convenience function to create DINO Vision Transformer models.
 
+    Signature note (converged surface): ``create_dino_v1``, ``create_dino_v2`` and
+    ``create_dino_v3`` share ``(variant, *, image_size, patch_size, num_classes,
+    include_top, **kwargs)``. The redundant ``input_shape`` spelling was removed —
+    the input shape is always derived as ``(*image_size, in_channels)``. Passing
+    ``input_shape=`` raises ``TypeError`` rather than silently disagreeing with
+    ``image_size`` (a mismatch used to build a model with the wrong patch count).
+
+    ``patch_size`` precedence rule (shared by all three factories):
+    ``None`` means "use the variant's own ``patch_size`` if its ``MODEL_VARIANTS``
+    entry defines one, otherwise this version's default". An explicitly passed
+    ``patch_size`` ALWAYS wins over the variant's. ``DINOv1.MODEL_VARIANTS`` defines
+    no per-variant ``patch_size``, so ``None`` resolves to 16 for every v1 variant.
+
     Args:
         variant: String, model variant ("tiny", "small", "base", "large", "giant").
+        image_size: Integer or ``(height, width)``, input image size.
+        patch_size: Integer or tuple, size of image patches. ``None`` defers to the
+            variant (v1 has no per-variant patch size, so ``None`` -> 16).
         num_classes: Integer, number of output classes. Set to 0 for feature extraction.
-        patch_size: Integer or tuple, size of image patches.
-        input_shape: Tuple, input shape. If None, uses (224, 224, 3).
         include_top: Boolean, whether to include classification head.
         include_projection_head: Boolean, whether to include DINO projection head.
         dino_out_dim: Integer, output dimension for DINO head.
@@ -908,31 +944,36 @@ def create_dino_v1(
     Returns:
         DINOv1 model instance.
 
+    Raises:
+        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
+
     Example:
         ```python
         # Create DINO-Small for self-supervised learning
         model = create_dino_v1(
             variant="small",
             include_projection_head=True,
-            dino_out_dim=65536
+            dino_out_dim=65536,
         )
 
         # Create DINO-Base for fine-tuning
         model = create_dino_v1(
             variant="base",
+            image_size=224,
             num_classes=1000,
-            input_shape=(224, 224, 3)
         )
         ```
     """
-    if input_shape is None:
-        input_shape = (224, 224, 3)
+    reject_input_shape(kwargs, "create_dino_v1")
+
+    if patch_size is None:
+        patch_size = _DEFAULT_PATCH_SIZE
 
     return DINOv1.from_variant(
         variant=variant,
+        image_size=image_size,
         num_classes=num_classes,
         patch_size=patch_size,
-        input_shape=input_shape,
         include_top=include_top,
         include_projection_head=include_projection_head,
         dino_out_dim=dino_out_dim,
@@ -942,24 +983,33 @@ def create_dino_v1(
 
 def create_dino_teacher_student_pair(
         variant: ModelVariant = "small",
+        *,
         teacher_temp: float = 0.04,
         student_temp: float = 0.1,
-        patch_size: Union[int, Tuple[int, int]] = 16,
-        input_shape: Optional[Tuple[int, ...]] = None,
+        image_size: Union[int, Tuple[int, int]] = 224,
+        patch_size: Optional[Union[int, Tuple[int, int]]] = None,
         dino_out_dim: int = 65536,
         **kwargs
 ) -> Tuple[DINOv1, DINOv1]:
     """
     Create teacher-student pair for DINO self-supervised learning.
 
+    Follows the same converged parameter scheme as ``create_dino_v1``:
+    ``image_size`` (int or tuple), ``patch_size`` with the ``None``-defers-to-variant
+    rule, and no ``input_shape``.
+
     Args:
         variant: String, model variant for both teacher and student.
         teacher_temp: Float, temperature for teacher model (not used in model creation).
         student_temp: Float, temperature for student model (not used in model creation).
-        patch_size: Integer or tuple, size of image patches.
-        input_shape: Tuple, input shape. If None, uses (224, 224, 3).
+        image_size: Integer or ``(height, width)``, input image size.
+        patch_size: Integer or tuple, size of image patches. ``None`` -> 16 (v1 has no
+            per-variant patch size).
         dino_out_dim: Integer, output dimension for DINO heads.
         **kwargs: Additional arguments passed to both model constructors.
+
+    Raises:
+        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
 
     Returns:
         Tuple of (teacher_model, student_model).
@@ -981,15 +1031,17 @@ def create_dino_teacher_student_pair(
         # from the student model during training
         ```
     """
-    if input_shape is None:
-        input_shape = (224, 224, 3)
+    reject_input_shape(kwargs, "create_dino_teacher_student_pair")
+
+    if patch_size is None:
+        patch_size = _DEFAULT_PATCH_SIZE
 
     # Create teacher model
     teacher = DINOv1.from_variant(
         variant=variant,
         num_classes=0,
+        image_size=image_size,
         patch_size=patch_size,
-        input_shape=input_shape,
         include_projection_head=True,
         dino_out_dim=dino_out_dim,
         name="dino_teacher",
@@ -1000,8 +1052,8 @@ def create_dino_teacher_student_pair(
     student = DINOv1.from_variant(
         variant=variant,
         num_classes=0,
+        image_size=image_size,
         patch_size=patch_size,
-        input_shape=input_shape,
         include_projection_head=True,
         dino_out_dim=dino_out_dim,
         name="dino_student",
