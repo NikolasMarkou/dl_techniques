@@ -304,12 +304,12 @@ thing you will meet and should not be surprised by.
 - **The factory convention is not universal, and the two ways of measuring it
   disagree sharply.** 16 of the 73 model packages define no `create_*` function
   *anywhere* in the package. But defining one and exporting one are different
-  things: only 22 of the 73 actually *bind* a `create_*` in their own
+  things: only 23 of the 73 actually *bind* a `create_*` in their own
   `<pkg>/__init__.py` — an import, a def or an assignment, not a mention
   (concretely `src/dl_techniques/models/vit/__init__.py`) — and that is the
   figure a caller actually experiences; the rest bury the factory in a submodule
   you must know to import. Read the package init before assuming importability.
-  A plain `grep create_` gives 23: it also counts
+  A plain `grep create_` gives 24: it also counts
   `src/dl_techniques/models/convnext_patch_vae/__init__.py`, a pure docstring
   that only cross-references its factories.
 

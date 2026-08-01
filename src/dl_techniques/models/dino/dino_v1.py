@@ -846,19 +846,28 @@ class DINOv1(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.MODEL_VARIANTS[variant]
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-033
+        # An explicit architecture override in **kwargs WINS over the variant
+        # table; it does not collide with it. Do NOT go back to spelling the
+        # four table keys out as `embed_dim=config["embed_dim"], ...` next to a
+        # bare `**kwargs` -- that form raised
+        #   TypeError: DINOv1() got multiple values for keyword argument
+        #   'embed_dim'
+        # for `from_variant("tiny", embed_dim=32)` and for every caller that
+        # reaches it, including `create_dino_teacher_student_pair`. `DINOv2`
+        # and `DINOv3` already used the merge form, so this is a convergence
+        # on the majority spelling, not a new convention. See decisions.md
+        # D-033 (and D-017, the same explicit-value-must-be-honoured rule).
+        config = cls.MODEL_VARIANTS[variant].copy()
+        config.update(kwargs)
 
         logger.info(f"Creating DINO-{variant.upper()} model")
 
         return cls(
-            embed_dim=config["embed_dim"],
-            depth=config["depth"],
-            num_heads=config["num_heads"],
-            mlp_ratio=config["mlp_ratio"],
             num_classes=num_classes,
             patch_size=patch_size,
             input_shape=input_shape,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:

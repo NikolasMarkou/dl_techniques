@@ -701,3 +701,76 @@ def test_model_variant_literal_lists_exactly_the_shipped_variants():
     assert set(typing.get_args(ModelVariant)) == {
         "tiny", "small", "base", "large", "giant"
     }
+
+
+# ---------------------------------------------------------------------
+# D-033 — an explicit architecture override must WIN over the variant table,
+# not collide with it. `DINOv1.from_variant` used to spell the four table keys
+# out beside a bare `**kwargs`, so `from_variant("tiny", embed_dim=32)` raised
+# `TypeError: DINOv1() got multiple values for keyword argument 'embed_dim'`.
+# MEASURED at close-out: `DINOv2.from_variant` and `DINOv3.from_variant`
+# already merged (`config.update(kwargs)`), so ONLY v1 was affected — and
+# `create_dino_teacher_student_pair` forwards `**kwargs` straight into it,
+# which is where the defect was actually hit (twice, at steps 8 and 9).
+# ---------------------------------------------------------------------
+
+_OVERRIDE = dict(embed_dim=32, depth=1, num_heads=2)
+
+
+def test_from_variant_honours_an_explicit_architecture_override():
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+
+    model = DINOv1.from_variant(
+        "tiny", image_size=32, patch_size=16, **_OVERRIDE
+    )
+    # Non-vacuity: the override must actually DIFFER from the variant table,
+    # or an equality assertion passes with the override silently discarded.
+    table = DINOv1.MODEL_VARIANTS["tiny"]
+    assert table["embed_dim"] != _OVERRIDE["embed_dim"], (
+        "the tiny variant's embed_dim now equals the override; this test can "
+        "no longer tell an honoured override from a discarded one"
+    )
+    assert model.embed_dim == 32
+    assert model.depth == 1
+    assert model.num_heads == 2
+
+
+def test_from_variant_without_an_override_still_uses_the_variant_table():
+    """Control: the merge must not have broken the default path."""
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+
+    model = DINOv1.from_variant("tiny", image_size=32, patch_size=16)
+    table = DINOv1.MODEL_VARIANTS["tiny"]
+    assert model.embed_dim == table["embed_dim"]
+    assert model.depth == table["depth"]
+    assert model.num_heads == table["num_heads"]
+    assert model.mlp_ratio == table["mlp_ratio"]
+
+
+def test_teacher_student_pair_honours_an_architecture_override():
+    """The call site the defect was actually hit from (steps 8 and 9)."""
+    from dl_techniques.models.dino.dino_v1 import (
+        create_dino_teacher_student_pair,
+    )
+
+    teacher, student = create_dino_teacher_student_pair(
+        "tiny", image_size=32, patch_size=16, dino_out_dim=32, **_OVERRIDE
+    )
+    for m in (teacher, student):
+        assert m.embed_dim == 32
+        assert m.depth == 1
+        assert m.num_heads == 2
+
+
+def test_all_three_from_variant_agree_on_override_precedence():
+    """Convergence guard: v1 was the outlier; keep all three merged."""
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.dino.dino_v2 import DINOv2
+    from dl_techniques.models.dino.dino_v3 import DINOv3
+
+    v1 = DINOv1.from_variant("tiny", image_size=32, patch_size=16, **_OVERRIDE)
+    v2 = DINOv2.from_variant("tiny", image_size=32, patch_size=16, **_OVERRIDE)
+    v3 = DINOv3.from_variant("tiny", image_size=32, patch_size=16, **_OVERRIDE)
+    assert v1.embed_dim == 32
+    assert v2.backbone.embed_dim == 32
+    assert v3.embed_dim == 32

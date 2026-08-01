@@ -97,7 +97,18 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 
 ## Conventions
 
-- `__init__.py` is empty — import from model subdirectories directly
+- `src/dl_techniques/models/__init__.py` (the parent) is empty — always import
+  from the model subpackage, never from `dl_techniques.models` itself.
+- Per-model `<pkg>/__init__.py` is **mixed, and the empty case is no longer a
+  safe default assumption**. Measured at 2026-08-01: 23 of the 73 model packages
+  bind a `create_*` factory in their own `__init__.py` (an import, a `def` or an
+  assignment — a plain `grep create_` gives 24 because
+  `convnext_patch_vae/__init__.py` only cross-references its factories in a
+  docstring). Exemplars of a curated init with `__all__`:
+  `energy_transformer/`, `dino/`, `vit/`. The remaining ~50 are empty or
+  near-empty and do require importing from the submodule directly. **Read the
+  package init before assuming either shape.** (`REPO_MAP.md` § "The factory
+  convention is not universal" carries the same derivation.)
 - Each model subdirectory typically contains:
   - Model definition module(s)
   - Block/layer definitions specific to that architecture

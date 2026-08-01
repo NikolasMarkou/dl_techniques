@@ -20,7 +20,14 @@ Data loading, generation, and preprocessing utilities for various domains.
 - `arc/` — ARC (Abstraction and Reasoning Corpus) dataset support:
   - `arc_converters.py`, `arc_keras.py`, `arc_utilities.py`
 - `vision/` — Computer vision dataset loaders:
-  - `coco.py` — COCO dataset, `imagenet.py` — ImageNet, `common.py` — shared utilities
+  - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
+    variant, `imagenet.py` — ImageNet, `common.py` — shared utilities
+  - `masked_patches.py` — `make_masked_patch_map_fn`, the per-sample
+    `element_map_fn` for masked-image-modelling objectives
+  - `multi_crop.py` — `make_multi_crop_map_fn`, the DINO multi-crop
+    (2 global + N local views) `element_map_fn`; local views are rendered at the
+    global pixel resolution, so `local_crop_size != global_crop_size` raises
+    `NotImplementedError` (positional-embedding interpolation is not implemented)
 - `time_series/` — Time series dataset framework:
   - `base.py` — Base dataset class, `config.py` — dataset configuration
   - `generator.py` — Data generators, `pipeline.py` — preprocessing pipelines

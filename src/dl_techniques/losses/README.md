@@ -91,16 +91,34 @@ model.compile(optimizer='adam', loss=CLIPContrastiveLoss(temperature=0.07))
 ### DINO Loss
 `DINOLoss` (and `iBOTPatchLoss`) maintain their centering EMA **inside
 `call()`**, on a non-trainable `keras.Variable`. There is no `update_center()`
-method and no custom `train_step` is needed — the model returns a structured
-`y_pred` dict and the loss unpacks it, exactly like `CLIPContrastiveLoss`.
+method and no custom `train_step` is needed.
+
+**Do NOT follow `CLIPContrastiveLoss`'s structured-dict `y_pred` here.** These
+losses do accept a `Dict[str, Tensor]` `y_pred`, but that form is **direct
+invocation only** — it does not work under stock `compile(loss=...)` / `fit()`
+on Keras 3.8. Measured: `CompileLoss.build` broadcasts one `Loss` object across
+every leaf of a nested `y_pred` and then raises
+`KeyError: "The path: ('student_logits',) in the 'loss' argument, can't be found
+in either the model's output ('y_pred') or in the labels ('y_true')."`
+(`CLIPContrastiveLoss` is not a counterexample: it has only ever run under
+`src/train/clip/train_clip.py`'s hand-rolled loop, never under stock `fit()`.)
+
+Under stock `fit()` the model must return a **single rank-2 tensor** in the
+**packed** layout — last dimension `2 * out_dim`, holding
+`concatenate([student_logits, teacher_logits], axis=-1)`. Build it with
+`pack_student_teacher` from `src/dl_techniques/losses/dino_loss.py`, which is
+the single source of truth for that layout. `y_true` is ignored.
+`src/dl_techniques/models/dino/dino_training.py::DINOTrainingModel` already
+returns this shape; see `src/dl_techniques/models/dino/README.md` § "Rule 3"
+for the full derivation and the two measured constraints on the packed form.
 
 ```python
 from dl_techniques.losses import DINOLoss
 
 dino_loss = DINOLoss(out_dim=65536)
 
-# The model returns both networks' logits; y_true is ignored.
-# outputs = {"student_logits": ..., "teacher_logits": ...}
+# The model returns ONE tensor of width 2 * out_dim; y_true is ignored.
+# outputs = pack_student_teacher(student_logits, teacher_logits)
 model.compile(optimizer='adam', loss=dino_loss)
 model.fit(train_ds, epochs=100)      # NOTE: no validation_data — see below
 ```
