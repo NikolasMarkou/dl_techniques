@@ -540,12 +540,22 @@ silent omission again.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
 
-> **Training pipeline — PARTIAL.** `src/dl_techniques/models/dino/dino_training.py`
-> (§ 5.5) is the trainable model and `src/dl_techniques/datasets/vision/multi_crop.py`
-> (§ 5.6) is its data side; both run under stock `fit()` today. The piece still missing
-> is the runnable trainer script with its k-NN evaluation callback. Deliberately, **no
-> path is named here for that**, because a README naming a path that does not resolve is
-> exactly the rot this file's path checker exists to prevent.
+> **Training pipeline.** `src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the
+> trainable model, `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data
+> side, and `src/train/dino/train_dino.py` is the runnable trainer that joins them under
+> stock `fit()`:
+>
+> ```
+> MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
+> ```
+>
+> `--smoke` pins a MEASURED shape-validation scale (`tiny`, 96px globals, 4 local crops,
+> `batch_size=32`, `dino_out_dim=4096`, a handful of steps; peak 1518.6 MiB of 10001 MiB
+> on an RTX 4070). That is **not** a paper reproduction. The trainer passes **no**
+> `validation_data` — see § 5 Rule 1, which is the reason, not a preference. Still
+> missing: the k-NN evaluation callback and its collapse diagnostic; **no path is named
+> here for that**, because a README naming a path that does not resolve is exactly the rot
+> this file's path checker exists to prevent.
 
 ---
 
@@ -565,6 +575,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_loss
 | `tests/test_models/test_dino/test_dino_package.py` | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
 | `tests/test_models/test_dino/test_dino_training.py` | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
 | `tests/test_datasets/test_multi_crop.py` | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
+| `tests/test_train/test_dino/test_train_dino.py` | The trainer (`src/train/dino/train_dino.py`): a STRUCTURAL CLI-to-config wiring guard (reflection over `dataclasses.fields` and the parser's dests, fail-closed in both directions, so an unwired flag is RED by default), `TrainingConfig.__post_init__` rejections asserted on their messages, model/loss/callback construction, a spy on the real `train_dino()` path asserting `fit()` receives **no** `validation_data`, and a real two-epoch `fit()` asserting the teacher-temperature `LambdaCallback` MOVES the loss's `teacher_temp` Variable. |
 | `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
 
 ---
