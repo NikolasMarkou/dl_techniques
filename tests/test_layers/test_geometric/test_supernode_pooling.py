@@ -1,4 +1,5 @@
 import pytest
+import itertools
 import numpy as np
 import tensorflow as tf
 import keras
@@ -6,6 +7,74 @@ import os
 import tempfile
 
 from dl_techniques.layers.geometric.supernode_pooling import SupernodePooling
+
+# ---------------------------------------------------------------------
+# dtype-policy corpus (G-10 / H-08)
+# ---------------------------------------------------------------------
+
+# The four policies this layer must survive. `tests/test_layers/conftest.py::dtype_policy`
+# is the house fixture (the restore-safe global-policy set/teardown lives there, once);
+# its own params cover three of them, so `mixed_bfloat16` is supplied by INDIRECT
+# parametrization instead of a second copy of the set/restore dance in this module.
+_G10_POLICIES = ("float32", "mixed_float16", "float64", "mixed_bfloat16")
+
+# A 3x3x3 unit grid, NOT random points. The neighbour predicate is a DISCRETE
+# comparison (`sq_distance <= radius**2`), so a corpus whose distances sit near the
+# radius makes the whole test a coin flip at reduced precision: with 60 random points
+# the closest squared distance to the boundary was 1.7e-04, which bfloat16 rounding
+# alone can flip. On this grid the squared distances are exactly {0,1,2,3,4,...} and
+# the margin to `radius**2 = 1.44` is 0.44 — far outside bfloat16 resolution — so a
+# tolerance failure means the ARITHMETIC moved, not that the neighbour set changed.
+_SP_POSITIONS = np.array(
+    list(itertools.product([0.0, 1.0, 2.0], repeat=3)), dtype="float32")
+_SP_INDICES = np.array([0, 4, 13, 22, 26], dtype="int32")
+_SP_RADIUS = 1.2  # neighbour counts per supernode: 4, 6, 7, 6, 4
+_SP_HIDDEN = 16
+
+# Max abs deviation of the policy-P output from the SAME-WEIGHTS float32 output,
+# MEASURED on CPU with the corpus above (float32 0.0 / float64 2.4e-07 /
+# mixed_float16 6.5e-04 / mixed_bfloat16 1.14e-02), each with ~1.5-3x headroom.
+# The reference output's max magnitude is ~1.24, so a `call()` returning zeros, or an
+# `_aggregate_messages` that dropped its divisor (values would scale by the 4..7
+# neighbour count), is RED by two orders of magnitude against every row here.
+_SP_TOL = {
+    "float32": 1.0e-06,
+    "float64": 1.0e-06,
+    "mixed_float16": 2.0e-03,
+    "mixed_bfloat16": 3.0e-02,
+}
+
+
+def _sp_inputs(compute_dtype="float32"):
+    return {
+        "positions": keras.ops.cast(
+            keras.ops.convert_to_tensor(_SP_POSITIONS), compute_dtype),
+        "supernode_indices": keras.ops.convert_to_tensor(_SP_INDICES),
+    }
+
+
+def _sp_float32_reference():
+    """Weights + output of a float32 SupernodePooling, per mode.
+
+    Computed at IMPORT time, i.e. during pytest collection, before any test body has
+    touched the global dtype policy. Sub-layers capture the global policy in their own
+    ``__init__``, so a ``dtype='float32'`` kwarg on the parent would NOT pin them — the
+    reference has to be taken while the ambient policy really is float32.
+    """
+    assert keras.mixed_precision.global_policy().name == "float32", (
+        "the float32 reference must be captured under the float32 policy"
+    )
+    ref = {}
+    for mode in ("abspos", "relpos"):
+        with tf.device("/CPU:0"):
+            layer = SupernodePooling(
+                hidden_dim=_SP_HIDDEN, ndim=3, radius=_SP_RADIUS, mode=mode)
+            out = keras.ops.convert_to_numpy(layer(_sp_inputs()))
+        ref[mode] = (layer.get_weights(), out.astype(np.float64))
+    return ref
+
+
+_SP_REFERENCE = _sp_float32_reference()
 
 
 # ===========================================================================
@@ -275,6 +344,41 @@ class TestSupernodePooling:
         """abspos mode should not create rel_pos_embed layer."""
         layer = SupernodePooling(hidden_dim=hidden_dim, ndim=ndim, radius=1.0, mode="abspos")
         assert layer.rel_pos_embed is None
+
+    # ---- dtype policies (G-10 / H-08) --------------------------------
+
+    @pytest.mark.parametrize("mode", ["abspos", "relpos"])
+    @pytest.mark.parametrize("dtype_policy", _G10_POLICIES, indirect=True)
+    def test_forward_matches_float32_reference_under_all_policies(self, dtype_policy, mode):
+        """Same weights, every policy: the layer must RUN and agree with float32.
+
+        This is the SECOND half of G-10. Widening `ContinuousSinCosEmbed` alone is not
+        enough — `_aggregate_messages` normalises by a neighbour count it hard-casts to
+        "float32" while the numerator is at the compute dtype, so at three of the four
+        policies this layer still died, with a DIFFERENT exception from the embedding's
+        (`TypeError: 'x' and 'y' must have the same dtype`).
+        """
+        ref_weights, ref_out = _SP_REFERENCE[mode]
+        with tf.device("/CPU:0"):
+            layer = SupernodePooling(
+                hidden_dim=_SP_HIDDEN, ndim=3, radius=_SP_RADIUS, mode=mode)
+            x = _sp_inputs(layer.compute_dtype)
+            _ = layer(x)                     # build, so the weights exist
+            layer.set_weights(ref_weights)   # identical parameters at every policy
+            out = layer(x)
+            # bfloat16 has no plain-numpy view; compare the VALUES at float32.
+            out_np = keras.ops.convert_to_numpy(
+                tf.cast(out, tf.float32)).astype(np.float64)
+
+        assert keras.backend.standardize_dtype(out.dtype) == layer.compute_dtype, (
+            f"policy {dtype_policy}, mode {mode}: expected {layer.compute_dtype}, "
+            f"got {keras.backend.standardize_dtype(out.dtype)}"
+        )
+        assert out_np.shape == ref_out.shape
+        np.testing.assert_allclose(
+            out_np, ref_out, atol=_SP_TOL[dtype_policy], rtol=0,
+            err_msg=f"policy {dtype_policy}, mode {mode}, 3x3x3 unit grid, radius 1.2",
+        )
 
 
 if __name__ == "__main__":

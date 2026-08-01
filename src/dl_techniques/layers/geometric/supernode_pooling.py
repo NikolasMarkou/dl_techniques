@@ -397,9 +397,21 @@ class SupernodePooling(keras.layers.Layer):
         # Sum messages for each supernode
         aggregated = ops.sum(messages, axis=0)  # (num_supernodes, hidden_dim)
 
-        # Normalize by number of neighbors to get mean
-        neighbor_counts = ops.sum(ops.cast(neighbor_mask, "float32"), axis=0, keepdims=True)  # (1, num_supernodes)
-        neighbor_counts = ops.maximum(neighbor_counts, 1.0)  # Avoid division by zero
+        # Normalize by number of neighbors to get mean.
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-002
+        # The divisor is built at the NUMERATOR's dtype, copying this file's own
+        # sibling idiom `ops.cast(neighbor_mask, messages.dtype)` in
+        # `_compute_messages`. Do NOT restore the hard `"float32"` literal (nor the
+        # bare `1.0` Python float, which `ops.maximum` also resolves to float32): the
+        # numerator is at the compute dtype, so the divide raised
+        # `TypeError: 'x' and 'y' must have the same dtype, got tf.float16 != tf.float32`
+        # under mixed_float16, float64 and mixed_bfloat16. This is the SECOND of the
+        # two hard dtype literals on the sincos path; fixing only
+        # `ContinuousSinCosEmbed` left this layer dead at 3 of the 4 policies.
+        neighbor_counts = ops.sum(
+            ops.cast(neighbor_mask, aggregated.dtype), axis=0, keepdims=True)  # (1, num_supernodes)
+        neighbor_counts = ops.maximum(
+            neighbor_counts, ops.cast(1.0, aggregated.dtype))  # Avoid division by zero
 
         aggregated = aggregated / ops.transpose(neighbor_counts)  # (num_supernodes, hidden_dim)
 
