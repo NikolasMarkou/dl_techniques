@@ -97,6 +97,160 @@ trainer default is a reference to a local artifact that was never distributed. N
 Concretely: `results/20260717_convunext_denoiser/final_model.keras` exists on this
 machine and is absent from every clone.
 
+---
+
+# Part B — the navigation spine
+
+The four things below are what this repo's in-tree docs do not answer, because each
+answer spans several packages at once. This is the one part of the map that goes deep.
+
+## The registry / factory surface
+
+**The house pattern, stated once:** where the library has many interchangeable
+implementations of one idea, it puts them behind a single `create_*` dispatcher backed
+by a module-level registry dict, and you select an implementation with a **string key**
+rather than an import. So the question "which attention variants exist?" is answered by
+reading one dict, not by listing a directory. New interchangeable variants extend an
+existing registry; they do not get a new dispatch style.
+
+There are 9 dicts named `*_REGISTRY`:
+
+| Registry | File | Keys | Dispatcher |
+|---|---|---|---|
+| `ATTENTION_REGISTRY` | `src/dl_techniques/layers/attention/factory.py` | 31 | `create_attention_layer` |
+| `ACTIVATION_REGISTRY` | `src/dl_techniques/layers/activations/factory.py` | 22 | `create_activation_layer` |
+| `FFN_REGISTRY` | `src/dl_techniques/layers/ffn/factory.py` | 21 | `create_ffn_layer` |
+| `ANYLOSS_REGISTRY` | `src/dl_techniques/losses/any_loss.py` | 16 | dispatched by the `AnyLoss` class |
+| `EMBEDDING_REGISTRY` | `src/dl_techniques/layers/embedding/factory.py` | 13 | `create_embedding_layer` |
+| `LOGIC_REGISTRY` | `src/dl_techniques/layers/logic/factory.py` | 4 | `create_logic_layer` |
+| `SAMPLING_REGISTRY` | `src/dl_techniques/layers/sampling.py` | 3 | `create_sampling_layer` |
+| `MIXTURE_REGISTRY` | `src/dl_techniques/layers/mixtures/factory.py` | 3 | `create_mixture_layer` |
+| `SEQUENCE_POOLING_REGISTRY` | `src/dl_techniques/layers/sequence_pooling/factory.py` | 3 | `create_sequence_pooling_layer` |
+
+Grepping for `_REGISTRY` will not find all of the surface, though. Three variants:
+
+- **A registry under a different name.** `src/dl_techniques/layers/norms/factory.py`
+  drives `create_normalization_layer` from a private `_TYPE_TO_CLASS` dict with 18 keys,
+  alongside per-type parameter tables and a `create_normalization_from_config` entry.
+  It is the most elaborate factory in the library and the one to copy when a layer family
+  has per-type-optional constructor arguments.
+- **Dispatchers with no dict at all.** `src/dl_techniques/layers/memory/factory.py`
+  exposes two named constructors, `create_mann` and `create_som_2d`, and nothing else.
+- **A three-tier dispatcher.** `src/dl_techniques/layers/heads/factory.py` defines a thin
+  `create_head(domain, ...)` shim that forwards to one per-domain factory each:
+  `src/dl_techniques/layers/heads/nlp/factory.py`,
+  `src/dl_techniques/layers/heads/vision/factory.py`, and
+  `src/dl_techniques/layers/heads/vlm/factory.py`. Task heads are selected by *domain
+  first*, then by key.
+
+And one deliberate absence: `src/dl_techniques/layers/transformers/` has **no** factory
+and no registry. Transformer blocks are direct-imported by class, by design. Do not
+"fix" this by adding a registry.
+
+## The model / trainer / test triangle
+
+Three trees are meant to line up by directory name: 73 model packages under
+`src/dl_techniques/models/`, 45 trainer directories under `src/train/`, and 79 test
+directories under `tests/test_models/`. Comparing those name lists directly is the
+obvious move and it produces a badly wrong picture. Four things break the correspondence:
+
+**1. Trainers renamed away from their model package.** A model with no same-named trainer
+is usually still trained — under another name:
+
+| Model package | Actual trainer |
+|---|---|
+| `src/dl_techniques/models/bias_free_denoisers/` | `src/train/bfunet/` — four `train_*.py` scripts, e.g. `src/train/bfunet/train_convunext_denoiser.py` |
+| `src/dl_techniques/models/byte_latent_transformer/` | `src/train/blt/train_blt.py` |
+| `src/dl_techniques/models/hierarchical_reasoning_model/` | `src/train/hrm/train_hrm.py` |
+
+**2. Two entries under `src/train/` are not model trainers.** `src/train/logic/` is a
+boolean-circuit and rule-learning research harness (numbered experiment scripts plus its
+own `src/train/logic/PAPER.md`), and `src/train/rms_variants_train/` is a
+normalization-layer ablation sweep (`src/train/rms_variants_train/sweep.py`,
+`src/train/rms_variants_train/RESULTS.md`). Both are experiment code parked under
+`src/train/`. Read `src/train/` as "runnable pipelines", not "one directory per model".
+
+**3. `src/dl_techniques/models/time_series/` nests two levels deep.** Seven test
+directories look orphaned — `tests/test_models/test_nbeats/`,
+`tests/test_models/test_deepar/`, `tests/test_models/test_xlstm/`,
+`tests/test_models/test_prism/`, `tests/test_models/test_tirex/`,
+`tests/test_models/test_mdn/`, `tests/test_models/test_adaptive_ema/` — only because
+their models live inside `src/dl_techniques/models/time_series/` rather than at the
+top level.
+
+**4. One model's tests are a file, not a directory.** `lewm` is tested by the loose
+`tests/test_models/test_lewm.py`. Any directory-to-directory comparison will report it as
+untested; it is not.
+
+The remaining models with no trainer genuinely have none — they are exercised only by
+tests. That is normal here and not a defect to fix.
+
+## Entry points
+
+**Training.** Every trainer is a module, run with `-m`, never as a file path:
+
+```
+MPLBACKEND=Agg .venv/bin/python -m train.<model>.<script> [args]
+```
+
+Concretely, `MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser --help`.
+`MPLBACKEND=Agg` is mandatory — matplotlib's interactive backend crashes headless.
+
+**Why it resolves from any working directory.** The editable install drops a `.pth` file
+into the virtualenv's `site-packages` whose sole content is the absolute path of this
+repo's `src/`. That puts `src/` on `sys.path` for *every* invocation of `.venv/bin/python`,
+which is why `train.*`, `dl_techniques.*` and `applications.*` are all importable
+top-level names regardless of where you stand. The `pythonpath = ["src"]` setting in
+`pyproject.toml` is a separate, redundant mechanism that only affects pytest — do not
+mistake it for the reason `-m train....` works.
+
+**Output.** Trainers write to `results/<run_name>/` at the **repo root**, never to a
+results directory nested under `src/`. A run directory carries its config, its CSV
+training log, and the checkpoints; `src/train/common/compare_runs.py` reads exactly that
+layout. Concretely, `results/20260717_convunext_denoiser/config.json` and
+`results/20260717_convunext_denoiser/training_log.csv` on this machine. Remember Part A:
+`results/` is gitignored, so a run directory exists only where it was produced.
+
+**Applications.** Two Streamlit apps, each following the GUI-free-core plus thin entry
+split documented in `src/applications/CLAUDE.md`:
+`src/applications/bias_free_denoiser/streamlit_app.py` (denoiser-as-prior inverse-problem
+solver; also has a headless `src/applications/bias_free_denoiser/main.py`) and
+`src/applications/anomaly_detection/streamlit_app.py`. Launch:
+
+```
+CUDA_VISIBLE_DEVICES=1 .venv/bin/streamlit run src/applications/<app>/streamlit_app.py \
+  --server.address 127.0.0.1 --server.port 8501
+```
+
+Streamlit is an **optional extra** (`[project.optional-dependencies].apps` in
+`pyproject.toml`), not a core dependency. A plain install of the library will not have it,
+and the apps additionally need a checkpoint that no clone contains.
+
+## Where the callbacks actually are
+
+`src/dl_techniques/callbacks/` cannot answer "where are the callbacks", and a map that
+sent you there alone would be lying by omission. Of the 56 files under `src/` that
+subclass `keras.callbacks.Callback`, only 11 live in that package. The answer has three
+parts:
+
+1. **`src/dl_techniques/callbacks/`** — the reusable, model-agnostic ones (curricula and
+   annealing schedules, visualization callbacks, the analyzer hook).
+2. **`src/train/common/`** — a *second*, trainer-side callback library that sits outside
+   the core library entirely, shared across trainers
+   (`src/train/common/callbacks.py`, `src/train/common/step_checkpoint.py`,
+   `src/train/common/step_plots.py`, and siblings). 38 of the 56 files are under
+   `src/train/`, and this package is where the shared ones concentrate.
+3. **Beside the thing they serve** — a callback tightly coupled to one model or one
+   optimizer lives with it, not in `src/dl_techniques/callbacks/`. Examples:
+   `src/dl_techniques/models/depth_anything/teacher_ema.py`,
+   `src/dl_techniques/models/memory_bank/phase_scheduler.py`, and
+   `src/dl_techniques/optimization/ww_pgd_optimizer.py`.
+
+The reliable way to find one is a grep, not a directory listing:
+`grep -rln "keras.callbacks.Callback" src --include=*.py`.
+
+---
+
 ## Numbers, and how to re-derive them
 
 This is the only place in this document where a number is *stated*. Anything numeric in
@@ -108,7 +262,6 @@ the prose above is a Value from this table. Run these from the repo root.
 | Python files under `tests/` | 692 | `find tests -name '*.py' \| wc -l` |
 | Python lines under `src/` | 413693 | `find src -name '*.py' -exec cat {} + \| wc -l` |
 | Python lines under `tests/` | 236612 | `find tests -name '*.py' -exec cat {} + \| wc -l` |
-| Commits at HEAD | 4216 | `git log --oneline \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 20 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 283 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -139,3 +292,20 @@ the prose above is a Value from this table. Run these from the repo root.
 | Notes in `research/` | 120 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Lines in `README.md` | 485 | `wc -l < README.md` |
+| Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
+| Keys in `ATTENTION_REGISTRY` | 31 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `FFN_REGISTRY` | 21 | `awk 'index($0,"FFN_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/ffn/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `ANYLOSS_REGISTRY` | 16 | `awk 'index($0,"ANYLOSS_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/losses/any_loss.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `EMBEDDING_REGISTRY` | 13 | `awk 'index($0,"EMBEDDING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/embedding/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `LOGIC_REGISTRY` | 4 | `awk 'index($0,"LOGIC_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/logic/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `SAMPLING_REGISTRY` | 3 | `awk 'index($0,"SAMPLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sampling.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `MIXTURE_REGISTRY` | 3 | `awk 'index($0,"MIXTURE_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/mixtures/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 45 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
+| Test dirs under `tests/test_models/` | 79 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Files under `src/` subclassing `keras.callbacks.Callback` | 56 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
+| …of those, inside `src/dl_techniques/callbacks/` | 11 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
+| …of those, under `src/train/` | 38 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
