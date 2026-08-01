@@ -251,6 +251,156 @@ The reliable way to find one is a grep, not a directory listing:
 
 ---
 
+# Part C — conventions, tests, doc routing, and the stale-doc ledger
+
+## Conventions, as measured rather than as asserted
+
+The root `CLAUDE.md` states the house conventions. Below is the same list
+*re-derived from the code*, so you can see how strongly each one actually holds.
+Every command is in the Numbers table at the foot of this file.
+
+| Convention | Files following it (of the library's `.py`) |
+|---|---|
+| `@keras.saving.register_keras_serializable()` on custom classes | 461 |
+| A `get_config()` for round-trip serialization | 464 |
+| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 354 |
+
+Three honest exceptions. None of them is a defect to go fix on sight; each is a
+thing you will meet and should not be surprised by.
+
+- **Raw TensorFlow has not been fully migrated.** 68 files under
+  `src/dl_techniques/` still import `tensorflow` directly despite `keras.ops`
+  being the stated backend-agnostic surface. The standing repo preference is to
+  *migrate* such a site rather than document it as an accepted exception, unless
+  it is genuinely unmigratable (FFT, SVD).
+- **`src/dl_techniques/layers/attention/` writes Sphinx/reST docstrings, not
+  Google style.** 33 of that package's 34 modules use `:param:`/`:return:`. This
+  is a deliberate, localized carve-out, not a repo-wide split — but it has leaked
+  out of `src/` into the shared test fixtures: both `tests/conftest.py` and
+  `tests/test_layers/conftest.py` document themselves in the same style.
+- **The factory convention is not universal.** 16 of the 73 model packages
+  expose no top-level `create_*` at all; you construct their classes directly.
+  Check before assuming a factory exists.
+
+**Before writing a new layer or model, read
+`research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
+it as mandatory and it is the longest single document in the repo (3105 lines).
+Its load-bearing rules, so you know what you are agreeing to:
+
+- **Create/build separation** — `__init__` may only create sub-layers and store
+  config; it must never call `add_weight` or look at `input_shape`. `build()`
+  creates weights, explicitly builds each sub-layer, and ends with
+  `super().build(input_shape)`.
+- **`compute_output_shape()` is required on every custom layer**, and must work
+  from stored config on an unbuilt layer — not from weight shapes.
+- **Create all sub-layers in `__init__`; gate USAGE in `call()`, not CREATION.**
+  Conditionally creating a sub-layer makes the weight set depend on flags, which
+  breaks weight loading and transfer.
+- **Config is data, not code** — constructor arguments must be plain
+  serializable values, because `get_config()` has to survive a `.keras`
+  round-trip.
+
+## Tests
+
+`tests/` mirrors `src/dl_techniques/`: package `x` is tested by `tests/test_<x>/`,
+for example `tests/test_layers/`.
+Four named places break that rule, and each has cost someone a search:
+
+- **`src/dl_techniques/visualization/` has no test directory at all.** It has a
+  `CLAUDE.md`; it has no tests. Documented but unexercised.
+- **`src/dl_techniques/layers/sequence_pooling/` has no test directory** either,
+  despite shipping both
+  `src/dl_techniques/layers/sequence_pooling/README.md` and
+  `src/dl_techniques/layers/sequence_pooling/GUIDE.md`.
+- **`tests/test_analysis/` is a vestigial empty directory** — it holds nothing but an
+  empty init module and 0 test files, and its name shadows the real, populated
+  `tests/test_analyzer/` (2 files). Searching for "analysis tests" lands you in
+  the wrong one.
+- **`tests/test_models/test_lewm.py` is a loose file**, where every other model
+  gets a `tests/test_models/test_<name>/` directory — e.g.
+  `tests/test_models/test_ccnets/`. Any directory-to-directory comparison
+  reports `lewm` as untested. It is not.
+
+**The four fixtures a test author needs**, all restore-safe by construction:
+
+| Fixture | Defined in | What it is for |
+|---|---|---|
+| `golden_reference_device` | `tests/conftest.py` | The single source of truth for the device a stored golden value is built AND compared on. Cross-device float32 comparison diverges far past the tolerance a golden guard needs, which makes the guard blind rather than merely noisy. |
+| `dtype_policy` | `tests/test_layers/conftest.py` | Parametrizes one test over float32 / mixed_float16 / float64 by flipping Keras's *process-global* policy and restoring it. `mixed_float16` is a mandatory regression dtype here, not a nicety. |
+| `tf32_disabled` | `tests/test_layers/conftest.py` | Module-scoped TF32 off for precision-sensitive float32 assertions. Opt in with `pytestmark = pytest.mark.usefixtures("tf32_disabled")`. |
+| `_tf32_leak_canary` | `tests/test_layers/conftest.py` | Autouse. Fails the first test after *any* TF32 leak, because a leak makes every later measurement in the session order-dependent. No opt-in needed. |
+
+**Never run the full suite as a routine check — it takes about 1.5 hours.** Scope
+pytest to the module you touched plus whatever imports it. Two things about that
+are worth knowing before you commit:
+
+- `.pre-commit-config.yaml` configures a single local hook that runs
+  `python -m pytest` with `always_run: true` — i.e. as written it attempts the
+  entire suite on every commit. If you have hooks installed, expect that.
+- **There is no CI.** No `.github/` directory exists. Nothing runs these tests
+  except you.
+
+## Which doc answers which question
+
+This is the part that keeps this file a router. The repo already carries 20
+`CLAUDE.md` files and well over a hundred in-tree README and GUIDE files;
+the map's job is to route you to the right one, not to paraphrase it.
+
+| Your question | Read |
+|---|---|
+| How do I write a new layer or model? | `research/2026_keras_custom_models_instructions.md` (mandatory) |
+| What are the library-wide conventions? | `src/dl_techniques/CLAUDE.md` |
+| What attention variants exist, and which do I pick? | `src/dl_techniques/layers/attention/README.md`, then `src/dl_techniques/layers/attention/GUIDE.md` |
+| What activations / sequence-pooling options exist? | `src/dl_techniques/layers/activations/GUIDE.md`, `src/dl_techniques/layers/sequence_pooling/GUIDE.md` |
+| How is a layer subpackage organized? | `src/dl_techniques/layers/CLAUDE.md`, plus that subpackage's own `README.md` |
+| What task heads exist, and how is `create_head` dispatched? | `src/dl_techniques/layers/heads/CLAUDE.md` |
+| What does model `<name>` do? | `src/dl_techniques/models/<name>/README.md`, e.g. `src/dl_techniques/models/bias_free_denoisers/README.md` |
+| How are model packages meant to be structured? | `src/dl_techniques/models/CLAUDE.md` |
+| How do I add or run a trainer? | `src/train/CLAUDE.md`, then that trainer's own `README.md` |
+| How do the Streamlit apps split GUI from core? | `src/applications/CLAUDE.md` |
+| Which loss / metric / optimizer / callback should I use? | the `CLAUDE.md` in `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/`, `src/dl_techniques/callbacks/` |
+| How do I analyze a trained model? | `src/dl_techniques/analyzer/CLAUDE.md` |
+| What helpers already exist (masking, export, tensors)? | `src/dl_techniques/utils/CLAUDE.md` — check here before writing a helper |
+| What datasets can I load? | `src/dl_techniques/datasets/CLAUDE.md` |
+| What is the project about, at a glance? | `README.md` (marketing-style; its self-reported counts are not derived) |
+| Which dependency pin is authoritative? | `pyproject.toml` — but see the ledger below |
+
+## The stale-doc ledger
+
+**This is the most valuable section of this file.** The repo has already shipped
+documentation describing a directory deleted six weeks earlier *and* a package
+that was never committed at all. Every row below was re-verified at the moment
+this file was written, with the command or commit that proves it. Paths in this
+table are named precisely *because* they do not resolve.
+
+<!-- allow-dead-path: src/experiments/ - ledger subject: deleted in 4673fc88; naming it is the point of the row -->
+<!-- allow-dead-path: src/experiments/undivided_attention/ - ledger subject: never committed in any reachable commit -->
+<!-- allow-dead-path: docs/ - ledger subject: generated on demand by `make docs`, never committed -->
+<!-- allow-dead-path: ww-img/ - ledger subject: named by the root CLAUDE.md, absent from disk -->
+<!-- allow-dead-path: .github/ - asserted absent on purpose: this repo has no CI -->
+
+| The claim | Where it is made | Reality, and the proof |
+|---|---|---|
+| `src/experiments/` is a repo component | root `CLAUDE.md` (structure tree *and* a prose section), `plans/SYSTEM.md` § Components | Deleted in `4673fc88` on 2026-06-16. `git log -1 --format='%h %ad %s' --date=short 4673fc88`; `test -e src/experiments/` fails; `ls -d src/*/` lists only `src/applications/`, `src/dl_techniques/`, `src/train/` |
+| `src/experiments/undivided_attention/`, its test suite and its research note exist | `plans/SYSTEM.md`, in a long, confident, entirely fictional section | **Never committed in any commit reachable from any ref.** `git log --all --oneline -- '*undivided*'` returns nothing; `find src tests -name '*undivided*'` returns nothing. The owning plan ran weeks *after* `src/experiments/` was deleted, wrote into a directory the repo no longer had, and its description was then promoted into the atlas as fact. *Caveat: `plans/` is gitignored, so a cloner cannot see this file — which is exactly why the fabrication survived* |
+| `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
+| `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
+| The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md` | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
+| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 56 files under `src/` define a `keras.callbacks.Callback`; only 11 are in `src/dl_techniques/callbacks/` and 38 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
+| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: 16 of the 73 model packages have no top-level `create_*`. Command in the Numbers table |
+| `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
+
+Two of the sources above — `plans/SYSTEM.md` and the plan directories it
+summarizes — are gitignored and will not be in your clone. The root `CLAUDE.md`
+is tracked, and the claims this ledger attributes to it are corrected in the same
+change that added this file.
+
+A closing note on dependencies, since the routing table defers to it: `pyproject.toml`
+and `requirements.txt` are two sources of truth that disagree — most visibly on the
+numpy pin. Install from `pyproject.toml`; treat `requirements.txt` as advisory.
+
+---
+
 ## Numbers, and how to re-derive them
 
 This is the only place in this document where a number is *stated*. Anything numeric in
@@ -309,3 +459,13 @@ the prose above is a Value from this table. Run these from the repo root.
 | Files under `src/` subclassing `keras.callbacks.Callback` | 56 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 11 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
 | …of those, under `src/train/` | 38 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
+| Files using `@keras.saving.register_keras_serializable` | 461 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files defining `get_config` | 464 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 354 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| Files importing raw `tensorflow` | 68 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
+| `.py` in `src/dl_techniques/layers/attention/` | 34 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
+| …of those using Sphinx `:param` docstrings | 33 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
+| Model packages with no top-level `create_*` | 16 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
+| Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
+| Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
+| Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |
