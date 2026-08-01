@@ -18,6 +18,32 @@ The self-disable trap this file exists to catch:
 `getattr(self.model, "update_teacher_ema", None)` and, when that is `None`,
 logs ONE warning and sets `self._disabled = True`. The run then completes
 normally with a teacher that was never updated.
+
+-------------------------------------------------------------------------------
+Coverage boundary: what `sync_teacher_to_student` IS and IS NOT proven under
+-------------------------------------------------------------------------------
+The three `sync_teacher_to_student` tests below run at all three
+`DTYPE_POLICIES` (`conftest.py`: float32 / mixed_float16 / float64). That
+parametrization is not decoration: under `mixed_float16` a model's
+`variable_dtype` stays float32 while its `compute_dtype` is float16, and the
+copy loop casts through `np.asarray(teacher_weight).dtype` — so "it works at
+float32" says nothing about the other two. MEASURED at all three on the real
+factory pair (157 weights): variable dtypes float32 / float32 / float64,
+post-sync max|delta| exactly 0.0 in every case. The helper is CLEAN, not
+assumed clean.
+
+**`tf.distribute` is an explicit NON-GOAL, named rather than silently dropped.**
+`sync_teacher_to_student` assigns variables eagerly, outside any
+`strategy.scope()`, and under a `MirroredStrategy` a per-replica variable's
+`.assign` has replica-context semantics this helper never considers. It is not
+tested here and it is not claimed to work here, for three reasons: this is a
+single-GPU environment (GPU 0 RTX 4090 / GPU 1 RTX 4070, jobs strictly serial),
+`src/train/dino/train_dino.py` exposes no `--strategy` flag and builds no
+strategy scope, so the distributed path has no in-tree caller; and a guard
+written against a strategy that cannot be exercised on this hardware would be a
+test that passes for the wrong reason. An untestable-here CLAIM is worse than a
+named GAP. If a distributed DINO trainer is ever added, this is the first thing
+that needs a real guard.
 """
 
 import inspect
@@ -570,9 +596,11 @@ class TestTeacherStartsFromTheStudent:
         assert fresh.built is True
         assert len(fresh.weights) > 0
 
-    def test_the_sync_helper_refuses_an_unbuilt_model(self):
+    def test_the_sync_helper_refuses_an_unbuilt_model(self, dtype_policy):
         """A copy that silently no-ops is the defect wearing a fix's clothes."""
         from dl_techniques.models.dino.common import sync_teacher_to_student
+
+        assert keras.mixed_precision.dtype_policy().name == dtype_policy
 
         unbuilt = keras.Sequential([keras.layers.Dense(4)])
         built = keras.Sequential([keras.layers.Dense(4)])
@@ -581,7 +609,7 @@ class TestTeacherStartsFromTheStudent:
         with pytest.raises(ValueError, match="BUILT models"):
             sync_teacher_to_student(unbuilt, built)
 
-    def test_the_sync_helper_refuses_a_MIS_ORDERED_pair(self):
+    def test_the_sync_helper_refuses_a_MIS_ORDERED_pair(self, dtype_policy):
         """The guard the trailing equality sweep structurally cannot provide.
 
         That sweep re-uses the same positional `zip` the copy used, so it
@@ -599,6 +627,8 @@ class TestTeacherStartsFromTheStudent:
         this test passes for the wrong reason.
         """
         from dl_techniques.models.dino.common import sync_teacher_to_student
+
+        assert keras.mixed_precision.dtype_policy().name == dtype_policy
 
         def _pair(first: str, second: str) -> keras.Sequential:
             model = keras.Sequential([keras.layers.Dense(4, name=first),
@@ -627,22 +657,85 @@ class TestTeacherStartsFromTheStudent:
         assert all(float(np.asarray(w).flat[0]) == -9.0
                    for w in teacher.weights)
 
-    def test_the_sync_helper_accepts_the_real_factory_pair(self):
+    def test_the_sync_helper_accepts_the_real_factory_pair(self, dtype_policy):
         """Non-vacuity control for the guard above: it must not fire in-tree.
 
         A name-comparison guard that rejects legitimate pairs is worse than no
         guard. The two backbones get DIFFERENT root names in one process, so
         the comparison is on the path SUFFIX. MEASURED: 157/157 weights, 0
         suffix mismatches.
+
+        Two things make this a real check rather than a smoke test:
+
+        1. **The teacher is CLOBBERED first.** `create_dino_teacher_student_pair`
+           already synchronizes (D-034), so a post-`sync` equality assertion on
+           its untouched output is satisfied before `sync_teacher_to_student` is
+           ever called and would pass with the helper's body deleted. Every
+           teacher weight is overwritten with a sentinel, and that sentinel is
+           asserted to have LANDED, so the equality below can only come from the
+           copy under test.
+        2. **The assertion is on VALUES, not shapes or counts.** A shape-level
+           post-condition is satisfiable by a pair copied into each other's slots
+           — precisely the mis-ordering the test above exists for.
+
+        The dtype-policy parametrization is load bearing: under `mixed_float16`
+        a model's `variable_dtype` is float32 while its `compute_dtype` is
+        float16, and the copy loop casts through
+        `np.asarray(teacher_weight).dtype`, so float32 coverage says nothing
+        about the other two. MEASURED here: variable dtypes float32 /
+        float32 / float64 and post-sync max|delta| exactly 0.0 at all three.
         """
         from dl_techniques.models.dino.common import sync_teacher_to_student
         from dl_techniques.models.dino.dino_v1 import (
             create_dino_teacher_student_pair,
         )
 
+        assert keras.mixed_precision.dtype_policy().name == dtype_policy
+
         teacher, student = create_dino_teacher_student_pair(
             variant="tiny", image_size=32, patch_size=16, dino_out_dim=64)
+
+        # Non-vacuity 1: the student must carry information to copy. An
+        # all-zeros student would make the equality below hold for a dead
+        # helper, since the sentinel would be the only thing being compared.
+        student_scale = max(
+            float(np.abs(np.asarray(w)).max()) for w in student.weights)
+        assert student_scale > 1e-3, (
+            f"the student is effectively all-zeros (max|w| {student_scale:.3e}); "
+            f"a value-equality assertion against it proves nothing")
+
+        # Non-vacuity 2: destroy the factory's own sync, and prove the
+        # destruction landed, so the copy under test is the only thing that can
+        # restore equality.
+        for weight in teacher.weights:
+            weight.assign(np.full(weight.shape, -9.0, np.asarray(weight).dtype))
+        pre = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(teacher.weights, student.weights))
+        assert pre > 1.0, (
+            f"the teacher clobber did not take (max|delta| {pre:.6e}), so this "
+            f"test would pass against a `sync_teacher_to_student` that does "
+            f"nothing at all")
+
         sync_teacher_to_student(teacher, student)  # must not raise
+
+        worst = max(
+            float(np.abs(np.asarray(t) - np.asarray(s)).max())
+            for t, s in zip(teacher.weights, student.weights))
+        assert worst == 0.0, (
+            f"under dtype policy '{dtype_policy}' the teacher still differs "
+            f"from the student by max|delta| {worst:.6e} after the copy; the "
+            f"teacher would then be an EMA of a network it never matched")
+        # ... and per-weight, so a single agreeing tensor cannot carry the max.
+        for index, (t, s) in enumerate(zip(teacher.weights, student.weights)):
+            np.testing.assert_array_equal(
+                np.asarray(t), np.asarray(s),
+                err_msg=(f"weight {index} ('{t.path}') did not receive the "
+                         f"student's VALUES under policy '{dtype_policy}'"))
+        # ... while remaining two distinct variable sets (an alias would make
+        # the equality above free and the EMA a no-op).
+        assert not ({id(w) for w in teacher.weights}
+                    & {id(w) for w in student.weights})
 
 
 # ---------------------------------------------------------------------
