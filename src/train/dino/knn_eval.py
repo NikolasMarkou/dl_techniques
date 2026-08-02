@@ -69,15 +69,23 @@ How big a `dino_knn_top1_*` difference is real (read before quoting one)
 -------------------------------------------------------------------------------
 **A k-NN top-1 delta below ~0.02 is inside this probe's own band and is evidence of
 nothing.** The number is a small-sample estimate and the memory bank's composition moves
-it: at the smoke settings the bank is 2048 images ``.take()``n off a 9469-image train
-split.
+it. The bank is ``knn_bank_batches * batch_size`` images ``.take()``n off a 9469-image
+train split -- **512 at the ``--smoke`` defaults** (16 x 32) and **2048 at the 64/32
+probe settings** every figure quoted in this section was measured at.
 
 The band comes from four ZERO-optimizer-step controls -- four readings of the SAME
-untrained network, at one seed, smoke scale, imagenette, bank 64 / query 32.
+untrained network, at **``--seed 42``**, smoke scale, imagenette, bank 64 / query 32.
 ``dino_knn_top1_k20`` spanned 0.2754-0.2949 (range 0.0195) and ``dino_knn_top1_k10``
 spanned 0.2607-0.2793 (range 0.0186) across those four, while ``dino_feat_mean_cos`` was
 bit-identical at 0.2348 in all four, because the QUERY set comes from the unshuffled
 validation split and only the BANK moved. Provenance: the record § 6 (ii), § 5 confound 8.
+
+**That band is a SEED-42 band and a run at another seed can sit outside it.** The record
+§ 1's zero-step control at ``--seed 1337`` is **0.2969** -- above the top of the span
+above -- at the same scale and estimator. Nothing is inconsistent there: the band was
+never claimed to cover other seeds. But a reader comparing a 1337-seeded control against
+0.2754-0.2949 would wrongly conclude the instrument had moved, which is why the next rule
+is stated in terms of a run's OWN control rather than in terms of this band.
 
 Reading rules that follow from that measurement:
 

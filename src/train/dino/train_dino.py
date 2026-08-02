@@ -47,7 +47,14 @@ Scale: what ``--smoke`` pins, and the two traps that ride along with it
 ``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``,
 ``dino_out_dim=4096``, ``epochs=2``, ``max_steps=5``, ``ema_warmup_epochs=0.0`` and
 three more warmup pins; :data:`SMOKE_OVERRIDES` below is the authoritative list.
-Explicit flags still win over the preset. This validates SHAPES and wiring; it is
+Explicit flags win over the preset **only when the value you pass DIFFERS from the
+parser default**: :func:`config_from_args` fills a field whenever the parsed value
+equals ``parse_arguments([])``'s, so it cannot tell an explicit default from an
+omission. MEASURED: ``--smoke --ema-warmup-epochs 1.0`` resolves to
+``warmup_steps=0`` (1.0 IS the default, so the preset's ``0.0`` wins), while
+``--ema-warmup-epochs 1.5`` gives 442 and ``--ema-warmup-steps 295`` gives 295.
+**To pin a value the preset also pins, pass a NON-default value or a different
+flag.** This validates SHAPES and wiring; it is
 **NOT a paper reproduction** (the paper uses ``dino_out_dim=65536``, 224px globals and
 hundreds of epochs). The defaults are the paper-shaped ones and cost accordingly.
 
@@ -142,13 +149,31 @@ Usage::
 
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
 
+    # PAPER SCALE -- these ARE the no-flag defaults, spelled out. DOES NOT FIT ON
+    # GPU 1: MEASURED, this config at `--batch-size 32` requested a single 10.13 GB
+    # allocation against the 10001 MiB usable on the RTX 4070 and was aborted by the
+    # BFC allocator (research/2026_dino_ssl_measurements.md § 5 confound 5, § 7).
+    # It has never been run here, and NOTHING in the README's § 6.1 table was
+    # measured at it. Reduce `--batch-size` or use a larger device.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100
 
-    # a CONTROLLED arm: real step budget, comparable estimator, pinned seed.
+    # the IMPROVED ARM of the 60-epoch measurement, reproduced (README § 6.1).
     # Both stream flags are ON by default, so they are NOT passed here.
+    # `--ema-warmup-steps 295` IS required and is NOT redundant with the shipped
+    # `ema_warmup_epochs=1.0`: `--smoke` pins `ema_warmup_epochs=0.0`, and an
+    # explicit `--ema-warmup-epochs 1.0` cannot override it (see the preset note
+    # above). VERIFIED through parse_arguments -> config_from_args ->
+    # resolve_ema_warmup_steps: this line gives warmup_steps=295 (295 steps/epoch),
+    # teacher_temp_final=0.04. Dropping it gives 0 -- the BASELINE arm's freeze.
+    # `295` is `num_train // batch_size` for imagenette at batch 32 only.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
+        --ema-warmup-steps 295 \\
+        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
+
+    # the BASELINE arm of the same measurement, for the A/B
+    ... --smoke --max-steps 100000 --epochs 60 --seed 42 --teacher-temp-final 0.07 \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
 
     # the OLD stream, to compare against a run recorded before the flags flipped
@@ -1328,8 +1353,15 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
     )
 
     if args.smoke:
-        # An EXPLICIT flag still wins over the preset -- the preset only fills fields the
-        # caller left at the parser default, so `--smoke --batch-size 8` really uses 8.
+        # An EXPLICIT flag wins over the preset ONLY IF its value DIFFERS from the parser
+        # default -- the equality test below cannot tell an explicit value that happens to
+        # equal the default from an omission. So `--smoke --batch-size 8` really uses 8,
+        # but `--smoke --ema-warmup-epochs 1.0` (1.0 IS the parser default) is silently
+        # overridden to 0.0. MEASURED: that invocation resolves to warmup_steps=0, while
+        # `--ema-warmup-epochs 1.5` -> 442 and `--ema-warmup-steps 295` -> 295 survive.
+        # Do NOT "fix" this by tracking sentinels here: the module docstring and README
+        # § 6.2 state the limitation instead, because a sentinel default would break the
+        # parser/dataclass default agreement that `--smoke` itself relies on.
         defaults = parse_arguments([])
         for field_name, smoke_value in SMOKE_OVERRIDES.items():
             arg_name = _ARG_FOR_FIELD.get(field_name, field_name)

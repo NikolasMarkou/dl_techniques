@@ -149,13 +149,15 @@ MEASURED at HEAD, same seed (777), same 8 source images, ``global_crop_size=96``
     parallel .map(fn, AUTOTUNE) x2       identical = False   maxdiff 1.5312
     serial vs parallel                   identical = False   maxdiff 1.5908
 
-**So two runs of ``train_dino.py --seed 42`` see DIFFERENT augmentation streams**
-(unless they pass ``--stateless-augmentation``, which routes them through the
-alternative below).
-The seed still reproduces weight initialization, shuffling order and every other
-``set_seeds``-governed source; it does not reproduce this transform's randomness
-in the trainer's configuration. Any A/B that assumes bit-identical data between
-two runs is unsound.
+**So two runs of ``train_dino.py --seed 42`` see DIFFERENT augmentation streams
+whenever this stateful path is the one in use.** It is no longer the trainer's
+default path: ``train_dino.py`` ships ``--stateless-augmentation`` **ON**, which
+routes it through the alternative below, and only ``--no-stateless-augmentation``
+selects the stateful function this section describes. On that ``--no-`` path the
+seed still reproduces weight initialization, shuffling order and every other
+``set_seeds``-governed source; it does not reproduce this transform's randomness.
+Any A/B that assumes bit-identical data between two ``--no-stateless-augmentation``
+runs is unsound.
 
 ``make_stateless_multi_crop_map_fn`` — the reproducible alternative
 --------------------------------------------------------------------
@@ -174,8 +176,10 @@ DIFFERENT augmentation on each epoch, which is the whole point (freezing the
 augmentation per image is worse for SSL than a non-reproducible stream). That
 enumeration is supplied by ``build_raw_image_dataset``'s
 ``indexed_element_map_fn`` parameter in
-``src/train/energy_transformer/common.py``; ``train_dino.py`` opts in with
-``--stateless-augmentation``.
+``src/train/energy_transformer/common.py``. **``train_dino.py`` takes this path by
+DEFAULT** -- ``--stateless-augmentation`` ships ON, so the indexed slot is the
+default branch of ``build_dataset``; ``--no-stateless-augmentation`` is the
+off-switch back to ``make_multi_crop_map_fn``.
 
 **MEASURED end-to-end, and it is NOT sufficient on its own.** Two separate
 PROCESSES building the real ``train_dino.build_dataset``, sha1 of the first 3

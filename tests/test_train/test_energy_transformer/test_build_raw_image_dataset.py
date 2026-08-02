@@ -97,7 +97,18 @@ that pairing gets a test below.
    misroute the unpacking silently rather than raise.
 3. `shuffle_files_seed` together with `indexed_element_map_fn` — closed by
    `test_a_file_order_seed_composes_with_an_indexed_map_fn`, within the limits
-   that test's own docstring states.
+   that test's own docstring states. **State those limits plainly, because
+   "F-15c closed" reads stronger than what was measured: F-15c is closed for
+   REFUSAL-FREEDOM (the two kwargs compose without raising) and for
+   COUNTER-MONOTONICITY (the per-element index still advances) ONLY.** That test
+   runs on `cifar10`, whose in-memory branch (`common.py`'s `else`) accepts
+   `shuffle_files_seed` and never reads it; the seed is live only on the
+   `imagenette` branch, which is where it reaches
+   `tfds.ReadConfig(shuffle_seed=...)` and where site 5 actually runs in
+   production. **Nothing in this repository exercises seeded FILE ORDER together
+   with an indexed map fn on the branch where the seed is live.** Closing that
+   would need an imagenette-marked (TFDS-dependent) test, which this module
+   deliberately does not have.
 """
 
 from typing import Any, List, Tuple

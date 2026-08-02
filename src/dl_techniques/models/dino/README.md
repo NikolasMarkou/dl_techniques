@@ -548,11 +548,31 @@ INCONCLUSIVE otherwise) was fixed before the runs launched.
 
 **Read the arm labels carefully.** The "shipped default" arm above is
 `ema_warmup_steps=0, teacher_temp_final=0.07` — what this repository shipped **when the
-measurement was taken**. Those two defaults have since been changed
+measurement was taken**. Those two TREATMENT keys have since been changed
 (`plan-2026-08-02T132301-93deeae2`): the trainer now ships `ema_warmup_epochs=1.0` (which
-resolves to the same 295 steps at imagenette/batch 32) and `teacher_temp_final=0.04`, i.e.
-**a run launched today with no flags is the IMPROVED arm.** To reproduce the old arm,
-pass `--ema-warmup-epochs 0 --teacher-temp-final 0.07`.
+resolves to the same 295 steps at imagenette/batch 32) and `teacher_temp_final=0.04`.
+
+**A no-flag run carries the improved arm's two treatment values, and nothing else about
+it.** It does *not* carry the improved arm's SCALE, which is the only scale any number in
+this table was measured at. Read from `parse_arguments([])`: a no-flag run is `--variant
+small --global-crop-size 224 --dino-out-dim 65536 --epochs 100 --knn-bank-batches 16
+--knn-query-batches 8` with no `--max-steps`, whereas every row above ran at `tiny` / 96 px
+/ `dino_out_dim=4096` / 60 epochs / bank 64 / query 32 / `--max-steps 100000`. So
+**`python -m train.dino.train_dino` with no flags reproduces nothing in this table** — a
+different backbone, a different resolution, a 16x smaller head, a different k-NN estimator
+and a different horizon.
+
+**And that no-flag configuration has never been run at all.** `small` / 224 px /
+`out_dim=65536` at `batch_size=32` requested a single **10.13 GB** allocation against the
+**10001 MiB usable on GPU 1 (RTX 4070, 12 GB)** and was aborted by the BFC allocator
+(`research/2026_dino_ssl_measurements.md` § 5 confound 5 and § 7). The invocation that
+produced the table is the `--smoke`-scaled Usage block in `src/train/dino/train_dino.py`,
+not the bare command.
+
+To restore the OLD treatment keys at whatever scale you are running, pass
+`--ema-warmup-epochs 0 --teacher-temp-final 0.07` (verified: that resolves to
+`warmup_steps=0`, `teacher_temp_final=0.07`). That gives you the baseline arm's two
+values — not the baseline arm.
 
 Two caveats that do not shrink with re-reading. (i) The improved arm changes **two** config
 keys at once and the 60-epoch result cannot apportion credit between them; the two were
@@ -585,7 +605,7 @@ next to a measured one inherits none of its credibility.
 | `--stateless-augmentation` / `--no-stateless-augmentation` | Draws the multi-crop augmentation from `tf.random.stateless_uniform` keyed on a per-element counter instead of one shared `tf.random.Generator` stream. | **ON** | MEASURED — sha1 of the first 3 batches, 2 processes, CPU-only probe, real `build_dataset` | This flag ALONE still gives non-identical batches across processes; **both** reproducibility flags together are bit-identical on all 3 batches. The probe never ran a GPU kernel, so it says nothing about cuDNN nondeterminism. `--no-` restores the old shared-`Generator` behaviour and with it comparability to any run in `results/` measured before this default moved. This path has only ever been exercised end-to-end in one plan's matrices. |
 | `--seed-training-stream` / `--no-seed-training-stream` | Seeds the TRAINING stream's TFDS file interleave with `--seed`. | **ON** | MEASURED — same 2-process CPU-only sha1 probe | Also not sufficient alone (the augmentation RNG is the residual source). `--seed` on its own does **not** make two runs comparable. `--no-` restores the unpinned file order. |
 | `--source-image-size` | Resolution at which records are DECODED, i.e. what the multi-crop transform crops from. `None` means `--global-crop-size`, so local crops come from an already-downsampled thumbnail. | `None` | MEASURED-NO-DIFFERENCE — 8 epochs, 2 seeds, smoke scale, controlled stream | **+0.0024** on the pre-registered endpoint and +0.0028 on the exploratory one, both an order of magnitude inside the ±0.02 no-difference band. Geometry (N=2000 draws): at a 96 px source, 100% of local views are upsampled, mean 2.35x, worst 4.50x; at 224 px, mean 1.006, worst 1.92x, and 39% are still upsamples. So 224 px **mitigates** the defect and does not eliminate it — the null result is not evidence that crop resolution is irrelevant. |
-| `--smoke` | Preset pinning the shape-validation scale: `tiny`, 96 px globals, 4 local crops, batch 32, `dino_out_dim=4096`, 2 epochs, `max_steps=5`, `ema_warmup_epochs=0.0`. Explicit flags still win over the preset. | off | UNMEASURED as an arm — it is a scale, not a treatment | Validates SHAPES and wiring; it is **not** a paper reproduction. It carries two traps that silently change what you measure — see § 6.3. Note it pins `ema_warmup_epochs=0.0` on purpose, so `--smoke` keeps its historical no-freeze semantics rather than silently gaining the new default's teacher freeze. |
+| `--smoke` | Preset pinning the shape-validation scale: `tiny`, 96 px globals, 4 local crops, batch 32, `dino_out_dim=4096`, 2 epochs, `max_steps=5`, `ema_warmup_epochs=0.0`. An explicit flag wins over the preset **only if the value differs from the parser default** — `config_from_args` fills any field whose parsed value equals `parse_arguments([])`'s, so it cannot tell an explicit default from an omission. MEASURED: `--smoke --ema-warmup-epochs 1.0` resolves to `warmup_steps=0` (1.0 *is* the default), while `1.5` gives 442 and `--ema-warmup-steps 295` gives 295. | off | UNMEASURED as an arm — it is a scale, not a treatment | Validates SHAPES and wiring; it is **not** a paper reproduction. It carries two traps that silently change what you measure — see § 6.3. Note it pins `ema_warmup_epochs=0.0` on purpose, so `--smoke` keeps its historical no-freeze semantics rather than silently gaining the new default's teacher freeze. |
 | `--knn-bank-batches` / `--knn-query-batches` | Size of the k-NN memory bank (TRAIN split) and query set (VALIDATION split), in batches. | `16` / `8` | Not a treatment — it is the **estimator** | Every k-NN figure quoted in § 6.1 and in `research/2026_dino_ssl_measurements.md` was measured at **64 / 32** (2048 bank images). At the default 16 / 8 (512 images) a top-1 is a *different estimator*, not a noisier reading of the same one. Pass `--knn-bank-batches 64 --knn-query-batches 32` for anything you intend to compare. |
 | `--max-steps` | Caps `steps_per_epoch`. | `None` (full epoch); `--smoke` pins **5** | UNMEASURED | Not a treatment, but a silent scale change: see § 6.3 trap 1. |
 | `--random-init-repeats` | Repeats of the ZERO-OPTIMIZER-STEP k-NN control written to `<run_dir>/random_init_control.json` before `fit()` performs a single update. | `2` | MEASURED-NO-DIFFERENCE **by construction** | The bank is `.cache()`d, so repeats replay the identical bank and the within-run range is exactly 0.0. Each run records `repeats_are_independent: false`. **This is not a noise estimate.** The only genuine noise data are the across-seed spread and one 0.0020 cross-process datum. |

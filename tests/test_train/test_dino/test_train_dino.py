@@ -532,10 +532,13 @@ class TestConfigValidation:
             self, monkeypatch, seed_training_stream, expected) -> None:
         """D-011: the half `TestCLIWiring` cannot see -- config -> the actual call.
 
-        `build_knn_datasets` seeds the k-NN bank's TFDS file interleave (D-040) but
-        `build_dataset` does not seed the TRAINING stream's BY DEFAULT, so two
-        same-seed runs share the measuring instrument and NOT the data they are
-        trained on. This flag closes that source -- and only that source: MEASURED
+        `build_knn_datasets` seeds the k-NN bank's TFDS file interleave (D-040)
+        UNCONDITIONALLY; `build_dataset` seeds the TRAINING stream's only when this
+        flag is on. It now ships ON, so the `False` arm below is the
+        `--no-seed-training-stream` path -- the one where two same-seed runs share
+        the measuring instrument and NOT the data they are trained on. (That
+        sentence described the DEFAULT before this flag flipped; do not reinstate
+        the old form.) This flag closes that source -- and only that source: MEASURED
         across two processes, this flag ALONE still yields different batches (the
         augmentation RNG is the residual), so a reproducible run needs it TOGETHER
         with `--stateless-augmentation`. Neither is redundant.
@@ -579,8 +582,10 @@ class TestConfigValidation:
             self, monkeypatch) -> None:
         """D-040: the bank must be seeded down to the file interleave, not just `seed`.
 
-        `.take(knn_bank_batches)` selects 2048 of 9469 train images at the smoke
-        settings, and `build_raw_image_dataset` opens the train split with
+        `.take(knn_bank_batches)` selects a SMALL sample of the 9469 train images
+        -- `knn_bank_batches * batch_size`, i.e. 512 at the `--smoke` defaults
+        (16 x 32) and 2048 at the 64/32 probe settings every measured figure was
+        taken at -- and `build_raw_image_dataset` opens the train split with
         `shuffle_files=True`. `seed=` reaches only the element `.shuffle()` and the
         augmentation. MEASURED before this was wired: four bank draws at `seed=42`
         (two per process, two processes) gave four DIFFERENT label sequences, and
@@ -763,6 +768,27 @@ class TestConstruction:
         )
         assert "CSVLogger" in kinds and "ModelCheckpoint" in kinds
         assert any(isinstance(cb, TeacherEMACallback) for cb in callbacks)
+
+        # The PLUMBING, not the arithmetic. `test_shipped_defaults_reproduce_the_measured
+        # _warmup` calls `resolve_ema_warmup_steps` directly and would stay green if
+        # `create_callbacks` were reverted to `warmup_steps=config.ema_warmup_steps` --
+        # every shipped run would then silently lose its teacher freeze with no test
+        # failing. Assert the RESOLVED value actually arrives at the callback.
+        ema_cb = next(cb for cb in callbacks if isinstance(cb, TeacherEMACallback))
+        expected_warmup = trainer.resolve_ema_warmup_steps(config, steps_per_epoch=2)
+        assert expected_warmup == 2 and config.ema_warmup_steps == 0, (
+            f"precondition: this config must make the resolved value DIFFER from the raw "
+            f"field, or the assertion below cannot tell them apart (resolved "
+            f"{expected_warmup}, config.ema_warmup_steps {config.ema_warmup_steps})"
+        )
+        assert ema_cb.warmup_steps == expected_warmup, (
+            f"TeacherEMACallback got warmup_steps={ema_cb.warmup_steps!r}, but "
+            f"resolve_ema_warmup_steps(config, steps_per_epoch=2)={expected_warmup!r}. "
+            f"create_callbacks is passing the RAW config field "
+            f"(config.ema_warmup_steps={config.ema_warmup_steps!r}) instead of the "
+            f"resolved one -- the epoch-denominated default never reaches the teacher "
+            f"and every run silently trains with no EMA freeze."
+        )
 
         # There is no val_loss in this run; every monitor must be a training metric.
         for cb in callbacks:
