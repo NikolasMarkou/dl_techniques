@@ -19,10 +19,15 @@ two together are what make an otherwise-degenerate objective learn something.
 3. [Factory signatures](#3-factory-signatures)
 4. [Runnable examples](#4-runnable-examples)
 5. [The loss family, the training model, and the rules that are not optional](#5-the-loss-family-the-training-model-and-the-rules-that-are-not-optional)
-6. [Why there is no shared base class](#6-why-there-is-no-shared-base-class)
-7. [Named backlog — what is deliberately NOT implemented](#7-named-backlog--what-is-deliberately-not-implemented)
-8. [Tests](#8-tests)
-9. [References](#9-references)
+6. [Running a training job: the trainer, its flags, and what was measured](#6-running-a-training-job-the-trainer-its-flags-and-what-was-measured)
+7. [Why there is no shared base class](#7-why-there-is-no-shared-base-class)
+8. [Named backlog — what is deliberately NOT implemented](#8-named-backlog--what-is-deliberately-not-implemented)
+9. [Tests](#9-tests)
+10. [References](#10-references)
+
+The measurements behind every number in § 6 — the configurations, all nine confounds, the
+defects found in the measuring instruments, and the questions still open — live in
+`research/2026_dino_ssl_measurements.md`. This README cites it rather than carrying it.
 
 ---
 
@@ -45,8 +50,8 @@ Related, outside this package:
 | `src/dl_techniques/losses/dino_loss.py` | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss`. Re-exported from `dl_techniques.losses`. See § 5. |
 | `src/dl_techniques/datasets/vision/multi_crop.py` | `make_multi_crop_map_fn` — the `tf.data` transform producing the multi-crop element `DINOTrainingModel` consumes. See § 5.6. |
 | `src/dl_techniques/models/depth_anything/teacher_ema.py` | `TeacherEMACallback` plus `cosine_ema_schedule` / `linear_ema_schedule`. Model-agnostic: it drives the teacher EMA of any model exposing `update_teacher_ema(decay)`. |
-| `src/dl_techniques/models/depth_anything/model.py` | Uses a **placeholder** encoder described in prose as "a placeholder for DINOv2". It does **not** import from this package. Wiring it to a real `DINOv2` is a named backlog item (§ 7). |
-| `tests/test_models/test_dino/` | This package's tests. See § 8. |
+| `src/dl_techniques/models/depth_anything/model.py` | Uses a **placeholder** encoder described in prose as "a placeholder for DINOv2". It does **not** import from this package. Wiring it to a real `DINOv2` is a named backlog item (§ 8). |
+| `tests/test_models/test_dino/` | This package's tests. See § 9. |
 
 **Variant tables are per-class.** `DINOv1.MODEL_VARIANTS`,
 `DINOv2VisionTransformer.MODEL_VARIANTS` and `DINOv3.MODEL_VARIANTS` are three separate
@@ -336,20 +341,22 @@ from dl_techniques.losses import DINOLoss, iBOTPatchLoss, KoLeoLoss
 | `iBOTPatchLoss` | The same objective at patch level, over the masked patches only. Also owns a centering state. |
 | `KoLeoLoss` | A Kozachenko-Leonenko entropic regularizer that pushes embeddings apart on the unit sphere. An anti-collapse term, not a distillation term. |
 
+These four rules are **API contracts**, not advice: each names a Keras or TensorFlow
+behaviour that fails silently if you ignore it. The measurements that established them are
+in `research/2026_dino_ssl_measurements.md` and in the two trainer module docstrings; only
+the contract and its mechanism are repeated here.
+
 ### Rule 1 — SSL pretraining must run **without** `validation_data`
 
 `DINOLoss` maintains its centering statistic by `.assign()`ing a `keras.Variable` inside
-`call()`. That works correctly under stock `fit()` (measured: it reaches the
-hand-computed EMA value to `1.6e-08`, bit-identically under `jit_compile` auto / `False` /
-`True`) — but `call()` runs on **every** batch, including validation batches. Every
-validation batch therefore performs a full, unwanted centering update.
-
-This is not a rounding error. Measured: a 4-sample validation set at `batch_size=2`
-doubled an epoch's update count from 2 to 4 and pushed the center **81% past** its correct
-value — silently, with a finite loss and a clean exit.
+`call()`, and `call()` runs on **every** batch, including validation batches. Every
+validation batch therefore performs a full, unwanted centering update. Measured: a
+4-sample validation set at `batch_size=2` doubled an epoch's update count from 2 to 4 and
+pushed the center **81% past** its correct value — with a finite loss and a clean exit.
 
 So: **do not pass `validation_data` to a DINO pretraining `fit()`.** Validation belongs in
-a separate callback (a k-NN probe on frozen features), which does not invoke the loss.
+a separate callback (a k-NN probe on frozen features), which does not invoke the loss —
+see § 6.
 
 ### Rule 2 — the center's **value** is serialized through `get_config()`
 
@@ -403,11 +410,10 @@ scalar weighting.
 
 ### Rule 4 — `teacher_temp` is a Variable behind a **read-only** property
 
-DINO warms the teacher's temperature up during training. A Python-float temperature cannot
-do that: it is constant-folded into the traced training step. Measured, with the centering
-EMA frozen so the temperature is the only thing that could move the loss — setting
-`loss.teacher_temp = 4.0` (a 100x change) between two epochs moved the reported loss
-`9.953619 -> 9.953612`, i.e. by 7e-07. Nothing.
+DINO warms the teacher's temperature up during training, and a Python-float temperature
+cannot do that: it is constant-folded into the traced training step. Measured, with the
+centering EMA frozen so temperature was the only thing that could move the loss, setting
+`loss.teacher_temp = 4.0` between two epochs moved the reported loss by 7e-07. Nothing.
 
 So `teacher_temp` is a non-trainable `keras.Variable`, exposed as a read-only `float`
 property. Change it with `loss.set_teacher_temp(value)`; a plain
@@ -431,7 +437,7 @@ and anneals nothing.
 
 - Input: one fixed-shape tensor `(batch, n_views, height, width, channels)`, where views
   `0` and `1` are the **global** crops and every view is at the **same** pixel resolution
-  (the local-crop limitation of § 7, item 1).
+  (the local-crop limitation of § 8, item 1).
 - The student runs on all views; the teacher runs on the global views only, under
   `keras.ops.stop_gradient`, with `trainable=False`.
 - Output: the packed tensor of Rule 3, at `(batch * n_pairs, 2 * out_dim)` — one row per
@@ -481,12 +487,12 @@ map_fn = make_multi_crop_map_fn(global_crop_size=96, n_local_crops=4, seed=42)
 Two things about it are worth reading before use:
 
 - **Local views are rendered at the GLOBAL resolution** — a smaller *area* is cropped and
-  resized up (§ 7, item 1). `local_crop_size != global_crop_size` raises
+  resized up (§ 8, item 1). `local_crop_size != global_crop_size` raises
   `NotImplementedError` naming positional-embedding interpolation, rather than silently
   mis-shaping the batch. The cost is that local views are exactly as expensive as global
-  ones. Measured on GPU 1 (RTX 4070, 12 GB) at the smoke scale — `tiny`, 96 px, 4 local
-  crops, batch 32, `dino_out_dim=4096` — one forward+backward peaks at **1.5 GiB**, so
-  the trade-off is affordable at this scale.
+  ones — affordable at the smoke scale, where one forward+backward peaks at about 1.5 GiB
+  on GPU 1 (RTX 4070, 12 GB); see the cost model in
+  `research/2026_dino_ssl_measurements.md`.
 - **Its augmentation is weaker than the paper's, and says so.** RandomResizedCrop,
   horizontal flip, brightness/contrast jitter, random grayscale and Gaussian blur are
   implemented; **saturation/hue jitter and solarization are not**, because this transform
@@ -496,22 +502,128 @@ Two things about it are worth reading before use:
 
 ---
 
-## 6. Why there is no shared base class
+## 6. Running a training job: the trainer, its flags, and what was measured
+
+This package is the **library**. The runnable trainer is `src/train/dino/train_dino.py`;
+its validation probe is `src/train/dino/knn_eval.py`. Read those two module docstrings
+before launching anything — they carry the operating instructions. The evidence behind
+every number in this section is in `research/2026_dino_ssl_measurements.md`.
+
+```
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
+```
+
+`src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the trainable model,
+`src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data side, and the
+trainer joins them under stock `fit()` with **no** `validation_data` — § 5 Rule 1 is the
+reason, not a preference.
+
+**Validation is `src/train/dino/knn_eval.py`.** `KNNEvalCallback` extracts FROZEN
+student-backbone CLS features (the tensor feeding `DINOHead`, width `embed_dim` — not the
+projection-head output), runs a temperature-weighted cosine k-NN at k = 10 and 20 against
+a TRAIN-split memory bank, and logs top-1 plus two collapse numbers: `dino_feat_mean_cos`
+(mean pairwise feature cosine) and `dino_teacher_entropy_norm` (entropy of the mean
+teacher softmax, as a fraction of `log(out_dim)`). **A decreasing loss does not rule out
+collapse** — the collapsed solution is a genuine minimum of the cross-view objective — so
+read those columns in `results/<run>/training_log.csv` before calling a run good. That
+module's docstring carries the STOP thresholds and what to do when one fires.
+
+### 6.1 The headline result, and what today's default gives you
+
+Two configurations were run to **60 epochs at 2 seeds (42 and 1337)**, at the **smoke
+scale** (`tiny` backbone, 96 px views, `dino_out_dim=4096`, 4 local crops, batch 32) on
+imagenette, on a **bit-identical (fully controlled) training stream**, on GPU 1
+(RTX 4070). Each arm is read against **its own** zero-optimizer-step random-init control,
+written by `KNNEvalCallback.on_train_begin` before `fit()` takes a single step. The
+endpoint is `dino_knn_top1_k20`, mean of the last 3 evaluated epochs, and the verdict rule
+(IMPROVED at `delta >= 0.04` for both seeds; NOT IMPROVED at `<= 0.02` for both;
+INCONCLUSIVE otherwise) was fixed before the runs launched.
+
+| arm | seed | own control | endpoint | delta | verdict |
+|---|---|---|---|---|---|
+| improved | 42 | 0.2900 | 0.4326 | **+0.1426** | **IMPROVED** (both seeds) |
+| improved | 1337 | 0.2969 | 0.4661 | **+0.1693** | |
+| shipped default *at the time of measurement* | 42 | 0.2900 | 0.3363 | +0.0462 | **INCONCLUSIVE** |
+| shipped default *at the time of measurement* | 1337 | 0.2969 | 0.3285 | +0.0316 | (one seed clears 0.04, one does not) |
+
+**Read the arm labels carefully.** The "shipped default" arm above is
+`ema_warmup_steps=0, teacher_temp_final=0.07` — what this repository shipped **when the
+measurement was taken**. Those two defaults have since been changed
+(`plan-2026-08-02T132301-93deeae2`): the trainer now ships `ema_warmup_epochs=1.0` (which
+resolves to the same 295 steps at imagenette/batch 32) and `teacher_temp_final=0.04`, i.e.
+**a run launched today with no flags is the IMPROVED arm.** To reproduce the old arm,
+pass `--ema-warmup-epochs 0 --teacher-temp-final 0.07`.
+
+Two caveats that do not shrink with re-reading. (i) The improved arm changes **two** config
+keys at once and the 60-epoch result cannot apportion credit between them; the two were
+separated only at 8 epochs (§ 8, item 9). (ii) `improved - baseline` at matched seeds
+(+0.0964 at s42, +0.1377 at s1337) is **not** a pre-registered endpoint and carries no
+verdict.
+
+**The early k-NN dip is reduced, not abolished, and the reduction is seed-dependent.** At
+the 60-epoch improved arm, the epoch-0 reading relative to that run's own control is
+**+0.0020 at seed 42** (above its control — no dip at that seed) and **-0.0273 at seed
+1337** (below its control — a real dip remains at that seed). The corresponding baseline
+readings are -0.0605 (s42) and -0.0625 (s1337). Do not restate this as a single claim
+quantified over both seeds; that form was written once and was false at seed 1337.
+
+### 6.2 Per-flag reference
+
+Defaults below are the SHIPPED values, read from `TrainingConfig` and `parse_arguments` in
+`src/train/dino/train_dino.py`. "Measured?" is deliberately three-valued: **MEASURED**
+names the endpoint the effect was seen on, **MEASURED-NO-DIFFERENCE** means it was run and
+moved nothing, and **UNMEASURED** means no arm has ever isolated it. An unmeasured flag
+next to a measured one inherits none of its credibility.
+
+| flag | what it does | default | measured? | the number, and its caveat |
+|---|---|---|---|---|
+| `--ema-warmup-epochs` | Freezes the teacher-weight EMA for the first N epochs (teacher stays at its student-synced init). The default-bearing knob. | `1.0` | MEASURED — epoch-0 `dino_knn_top1_k20` vs own control, 8 epochs, 2 seeds, smoke scale, controlled stream | **+0.0498** vs the old no-freeze default (per-seed +0.0625 / +0.0371), on a matrix whose own null was exactly 0.000. Measured as `--ema-warmup-steps 295`, which is one epoch at imagenette/batch 32. It is a **SUPERSET**: it also re-bases the cosine EMA ramp N steps later, and freeze-vs-re-basing has never been separated. The epoch-0 endpoint is also structurally kind to it (it cannot distinguish "fixed the dip" from "learned less"). |
+| `--ema-warmup-steps` | Absolute-step override of the same freeze; any value `> 0` wins over `--ema-warmup-epochs`. | `0` (defer to epochs) | MEASURED — this is the flag the 8-epoch and 60-epoch runs actually passed | `295` is `num_train // batch_size` at imagenette/batch 32 **only**; it is roughly two epochs at batch 64 and arbitrary elsewhere. Use it to reproduce a pre-existing run, not as a recipe constant. |
+| `--teacher-temp` | Teacher temperature at epoch 0 (start of the warmup). | `0.04` | UNMEASURED as a knob | It was `0.04` in **both** arms of the 60-epoch runs and in every arm of the 8-epoch matrices, so no measurement recorded here varies it. |
+| `--teacher-temp-final` | Teacher temperature after the warmup. | `0.04` (EQUAL to `--teacher-temp`, i.e. no warmup) | MEASURED-NO-DIFFERENCE at the pre-registered endpoint; AMBIGUOUS on the exploratory one | Exactly **0.0000** at both seeds on the pre-registered epoch-0 endpoint (8 epochs, controlled stream) — it is structurally inert there. Its exploratory last-3-epochs effect **shrank from +0.0518 to +0.0387** once the stream was controlled. Only the PAIR with the EMA freeze has a 60-epoch IMPROVED verdict; **no temp-only arm was ever run at 60 epochs**. Pass `0.07` for the paper recipe. |
+| `--teacher-temp-warmup-epochs` | Epoch horizon of the linear `teacher_temp -> teacher_temp_final` ramp. | `30` | UNMEASURED, and **INERT at the shipped defaults** | Both endpoints are `0.04`, so `linear_ema_schedule` returns a constant and the horizon multiplies a zero delta. It becomes live only when `--teacher-temp-final` differs from `--teacher-temp`. |
+| `--stateless-augmentation` / `--no-stateless-augmentation` | Draws the multi-crop augmentation from `tf.random.stateless_uniform` keyed on a per-element counter instead of one shared `tf.random.Generator` stream. | **ON** | MEASURED — sha1 of the first 3 batches, 2 processes, CPU-only probe, real `build_dataset` | This flag ALONE still gives non-identical batches across processes; **both** reproducibility flags together are bit-identical on all 3 batches. The probe never ran a GPU kernel, so it says nothing about cuDNN nondeterminism. `--no-` restores the old shared-`Generator` behaviour and with it comparability to any run in `results/` measured before this default moved. This path has only ever been exercised end-to-end in one plan's matrices. |
+| `--seed-training-stream` / `--no-seed-training-stream` | Seeds the TRAINING stream's TFDS file interleave with `--seed`. | **ON** | MEASURED — same 2-process CPU-only sha1 probe | Also not sufficient alone (the augmentation RNG is the residual source). `--seed` on its own does **not** make two runs comparable. `--no-` restores the unpinned file order. |
+| `--source-image-size` | Resolution at which records are DECODED, i.e. what the multi-crop transform crops from. `None` means `--global-crop-size`, so local crops come from an already-downsampled thumbnail. | `None` | MEASURED-NO-DIFFERENCE — 8 epochs, 2 seeds, smoke scale, controlled stream | **+0.0024** on the pre-registered endpoint and +0.0028 on the exploratory one, both an order of magnitude inside the ±0.02 no-difference band. Geometry (N=2000 draws): at a 96 px source, 100% of local views are upsampled, mean 2.35x, worst 4.50x; at 224 px, mean 1.006, worst 1.92x, and 39% are still upsamples. So 224 px **mitigates** the defect and does not eliminate it — the null result is not evidence that crop resolution is irrelevant. |
+| `--smoke` | Preset pinning the shape-validation scale: `tiny`, 96 px globals, 4 local crops, batch 32, `dino_out_dim=4096`, 2 epochs, `max_steps=5`, `ema_warmup_epochs=0.0`. Explicit flags still win over the preset. | off | UNMEASURED as an arm — it is a scale, not a treatment | Validates SHAPES and wiring; it is **not** a paper reproduction. It carries two traps that silently change what you measure — see § 6.3. Note it pins `ema_warmup_epochs=0.0` on purpose, so `--smoke` keeps its historical no-freeze semantics rather than silently gaining the new default's teacher freeze. |
+| `--knn-bank-batches` / `--knn-query-batches` | Size of the k-NN memory bank (TRAIN split) and query set (VALIDATION split), in batches. | `16` / `8` | Not a treatment — it is the **estimator** | Every k-NN figure quoted in § 6.1 and in `research/2026_dino_ssl_measurements.md` was measured at **64 / 32** (2048 bank images). At the default 16 / 8 (512 images) a top-1 is a *different estimator*, not a noisier reading of the same one. Pass `--knn-bank-batches 64 --knn-query-batches 32` for anything you intend to compare. |
+| `--max-steps` | Caps `steps_per_epoch`. | `None` (full epoch); `--smoke` pins **5** | UNMEASURED | Not a treatment, but a silent scale change: see § 6.3 trap 1. |
+| `--random-init-repeats` | Repeats of the ZERO-OPTIMIZER-STEP k-NN control written to `<run_dir>/random_init_control.json` before `fit()` performs a single update. | `2` | MEASURED-NO-DIFFERENCE **by construction** | The bank is `.cache()`d, so repeats replay the identical bank and the within-run range is exactly 0.0. Each run records `repeats_are_independent: false`. **This is not a noise estimate.** The only genuine noise data are the across-seed spread and one 0.0020 cross-process datum. |
+| `--center-momentum` | Momentum of the `DINOLoss` centering EMA. | `0.9` | MEASURED — **CLEARED** as a cause of the early k-NN dip, 8 epochs, 2 seeds, unseeded stream | Effect **-0.0063** at `--center-momentum 0.0` in the dip matrix, i.e. removing the centering lag entirely made the dip marginally worse. That matrix ran on an unseeded stream whose own null was 0.0400 wide. |
+
+### 6.3 Two measurement traps in the shipped defaults
+
+Neither is a bug; both silently produce a number that is not the number you think you are
+reading.
+
+1. **`--smoke` sets `max_steps=5`.** An unqualified `--smoke` "epoch" is 5 of its 295
+   steps, so a `--smoke --epochs 40` run trains for 200 steps, not ~11 800. Any run meant
+   to *train* rather than validate shapes must pass `--max-steps 100000` (or an explicit
+   budget) alongside `--smoke`. This is not new: a prior 40-epoch smoke artifact's
+   `config.json` already recorded `max_steps=100000` — that run needed the same workaround
+   and nobody wrote it down.
+2. **`--smoke` leaves `--knn-bank-batches 16 --knn-query-batches 8`** (512 bank images),
+   while the k-NN numbers in § 6.1, in `research/2026_dino_ssl_measurements.md` and in the
+   zero-step control band in `src/train/dino/knn_eval.py`'s docstring were all measured at
+   **64 / 32** (2048 images). See the estimator caveat in
+   § 6.2.
+
+---
+
+## 7. Why there is no shared base class
 
 `dino_v1.py`, `dino_v2.py` and `dino_v3.py` each build their own patch-embedding /
 transformer-block wiring, and each carries its own `MODEL_VARIANTS`, `from_variant`,
-`get_config` and `summary`. The obvious "normalize" reading is to unify them onto a shared
-ViT trunk. That is a **deliberate non-goal**, and the reason is testability, not taste: a
-trunk unification is a large behaviour-preserving refactor over three files whose test
-suite is not dense enough to prove it behaviour-preserving. The risk budget is better
-spent on the parts that were actually broken.
+`get_config` and `summary`. Unifying them onto a shared ViT trunk is a **deliberate
+non-goal**, for testability rather than taste: it is a large behaviour-preserving refactor
+over three files whose test suite is not dense enough to prove it behaviour-preserving.
 
 What *is* normalized: factory signatures, parameter names, validation guards, variant key
 sets, the `__init__.py` surface, this README, and the test layout.
 
 ---
 
-## 7. Named backlog — what is deliberately NOT implemented
+## 8. Named backlog — what is deliberately NOT implemented
 
 These are gaps by decision, not by oversight. Each is named here so it cannot become a
 silent omission again.
@@ -543,139 +655,53 @@ silent omission again.
    properly means touching a shared layer used across the repository.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
-9. **~~A reproducible augmentation stream under a PARALLEL `tf.data` map.~~ CLOSED —
-   shipped, opt-in, and it turned out to be a PRECONDITION, not a nicety.**
-   The defect was real: `make_multi_crop_map_fn`'s `seed` seeds ONE shared
-   `tf.random.Generator`, i.e. a stream, not each element, so under
-   `.map(fn, num_parallel_calls=AUTOTUNE)` — the shipped trainer's configuration —
-   two same-seed runs differ (MEASURED at seed 777 over 8 images, maxdiff 1.5312; a
-   serial `.map(fn)` is bit-reproducible). The fix now ships:
-   `make_stateless_multi_crop_map_fn` draws from `tf.random.stateless_uniform` keyed on
-   `(seed, per-draw counter, element index)`, the counter comes from `ds.enumerate()`
-   placed AFTER `repeat()` via `build_raw_image_dataset`'s `indexed_element_map_fn`
-   parameter, and `train_dino.py` opts in with **`--stateless-augmentation`**
-   (default OFF, because it changes what every batch CONTAINS and so makes a run
-   incomparable to every run measured without it).
-
-   **The measured consequence, which is stronger than the original item.** Two
-   processes, the real `train_dino.build_dataset`, sha1 of the first 3 batches:
-
-   | flags | batches across two processes |
-   |---|---|
-   | `--seed-training-stream` alone | **differ** (batch-0 mean 0.0999388 vs 0.0002119) |
-   | `--stateless-augmentation` alone | **differ** |
-   | **both together** | **bit-identical**, all 3 batches |
-
-   So `--seed` alone does NOT make two DINO runs comparable, and neither flag is
-   redundant: `--seed-training-stream` reaches the TFDS **file interleave**,
-   `--stateless-augmentation` reaches the **augmentation RNG**, and a controlled A/B
-   needs both. The bit-identity of the both-flags cell also rules out cuDNN
-   nondeterminism, `tf.data` `options.deterministic` and the element `.shuffle()` as
-   contributors. Pinned by `tests/test_datasets/test_multi_crop.py` and
-   `tests/test_train/test_energy_transformer/test_build_raw_image_dataset.py`.
-10. **Cropping local views from the ORIGINAL record rather than from a thumbnail —
-    the bounded remedy has now been RUN; the restructuring is still backlog.**
+9. **Attributing the improved 60-epoch configuration to one of its two changes.** The
+   IMPROVED verdict in § 6.1 belongs to the PAIR (`ema_warmup_epochs 0 -> 1.0`,
+   `teacher_temp_final 0.07 -> 0.04`). The two mechanisms were separated only at 8 epochs
+   and never at 60, so no credit can be apportioned. Separately, `--ema-warmup-epochs` is
+   itself a superset — it freezes the teacher EMA *and* re-bases the cosine EMA ramp — and
+   those two have never been separated by any measurement here. What would settle it, and
+   why the freeze-without-re-basing option is deliberately not shipped, is written up in
+   `research/2026_dino_ssl_measurements.md` (Open questions).
+10. **Cropping local views from the ORIGINAL record rather than from a thumbnail.**
     `build_raw_image_dataset` resizes each record to `image_size` BEFORE the multi-crop
     `element_map_fn` runs, so with `image_size == global_crop_size` a "local crop of the
-    source image" is a crop of an already-downsampled square. MEASURED at the smoke scale
-    (`global_crop_size=96`, `local_scale=(0.05, 0.4)`, 2000 draws): local crop sides are
-    19-69 px (mean 44) and are upsampled to 96 — 2.33x mean, 4.50x worst case — while 8 of
-    the 10 (teacher, student) loss pairs carry a local student view. `train_dino.py`'s
-    `--source-image-size` is the bounded remedy (decode larger, crop, resize DOWN).
-
-    **It was run. Result: NO MEASURABLE DIFFERENCE.** `--source-image-size 224` vs the
-    `None` default, 2 seeds, each arm read against its OWN zero-step random-init control,
-    on a fully controlled stream (`--seed-training-stream --stateless-augmentation`):
-    effect **+0.0024** on the pre-registered endpoint (first evaluated epoch) and
-    **+0.0028** on the mean of the last 3 evaluated epochs — both an order of magnitude
-    inside the ±0.02 no-difference band.
-
-    **And the geometry, re-measured through the shipped `_random_resized_crop`
-    (N=2000 draws per source size).** At a 96 px source: local crop sides 21.4–61.0 px
-    (mean 44.1) → mean upsample **2.35x**, worst **4.50x**, **100%** of local views are
-    upsamples — this REPRODUCES the inherited 2.33x / 4.50x figures above, so those are
-    sound. At 224 px: sides 50.1–141.9 px (mean 102.9) → mean **1.006**, worst 1.92x, and
-    **39% of local views are still upsamples**. The earlier prediction that the mean
-    would fall *below* 1.0 is **FALSIFIED AS STATED** — it lands marginally above it.
-
-    **Read the null result precisely.** 224 px **mitigates** the thumbnail defect (2.3x
-    less mean interpolation, worst case 4.50x → 1.92x); it does **not** eliminate it.
-    So the no-difference verdict is NOT evidence that local-crop resolution is
-    irrelevant — it is evidence that a 2.3x reduction in interpolation buys no
-    measurable k-NN delta *at this scale*. Driving the mean genuinely below 1.0 needs a
-    larger source still, which is a different and more expensive run.
-
-    Still backlog: cropping before the resize *and* before normalization, which would
-    restructure the shared pipeline and change the augmentation's value domain (D-025).
-    That is why it remains an item and not a patch.
-
-> **Two measurement traps in the shipped defaults. Neither is a bug; both silently
-> produce a number that is not the number you think you are reading.**
->
-> 1. **`--smoke` sets `max_steps=5`.** An unqualified `--smoke` "epoch" is 5 of its 295
->    steps, so a `--smoke --epochs 40` run trains for 200 steps, not ~11 800. Any run
->    meant to *train* rather than validate shapes must pass `--max-steps 100000` (or an
->    explicit budget) alongside `--smoke`. This is not new: the `config.json` of the
->    prior 40-epoch smoke artifact (`dino_smoke_step12`, under the gitignored run
->    directory) already records `max_steps=100000`, i.e. that run needed the same
->    workaround and nobody wrote it down.
-> 2. **`--smoke` also leaves `--knn-bank-batches 16 --knn-query-batches 8`** (512 bank
->    images), while every historical k-NN number quoted for this trainer — including the
->    0.2754–0.2949 zero-step control band in `knn_eval.py`'s docstring — was measured at
->    **64 / 32** (2048 images). A k-NN top-1 over a 4x smaller bank is a **different
->    estimator**, not a noisier reading of the same one, and it is not comparable to that
->    band. Pass `--knn-bank-batches 64 --knn-query-batches 32` on anything you intend to
->    compare against a historical figure.
-
-> **Training pipeline.** `src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the
-> trainable model, `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data
-> side, and `src/train/dino/train_dino.py` is the runnable trainer that joins them under
-> stock `fit()`:
->
-> ```
-> MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
-> ```
->
-> `--smoke` pins a MEASURED shape-validation scale (`tiny`, 96px globals, 4 local crops,
-> `batch_size=32`, `dino_out_dim=4096`, `max_steps=5` — see trap 1 above; peak 1518.6 MiB
-> of 10001 MiB on an RTX 4070). That is **not** a paper reproduction. The trainer passes **no**
-> `validation_data` — see § 5 Rule 1, which is the reason, not a preference.
->
-> **Validation is `src/train/dino/knn_eval.py`.** `KNNEvalCallback` extracts FROZEN
-> student-backbone CLS features (the tensor feeding `DINOHead`, width `embed_dim` — not
-> the projection-head output), runs a temperature-weighted cosine k-NN at k = 10 and 20
-> against a TRAIN-split memory bank, and logs top-1 plus the two collapse numbers:
-> `dino_feat_mean_cos` (mean pairwise feature cosine) and `dino_teacher_entropy_norm`
-> (entropy of the mean teacher softmax, as a fraction of `log(out_dim)`). **A decreasing
-> loss does not rule out collapse** — the collapsed solution is a genuine minimum of the
-> cross-view objective — so read those columns in `results/<run>/training_log.csv`
-> before calling a run good. That module's docstring carries the STOP thresholds.
+    source image" is a crop of an already-downsampled square. The bounded remedy
+    (`--source-image-size`, decode larger and resize DOWN) has been RUN and measured NO
+    DIFFERENCE — see § 6.2 and `research/2026_dino_ssl_measurements.md`. Still open is the
+    deeper restructuring: cropping before the resize *and* before normalization, which
+    would change the shared pipeline and the augmentation's value domain. That is why it
+    remains an item and not a patch.
 
 ---
 
-## 8. Tests
+## 9. Tests
 
 ```
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_dino/ -q
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_losses/test_dino_loss.py -q
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_train/test_dino/ -q
 ```
 
-| File | Covers |
-|---|---|
-| `tests/test_models/test_dino/test_dino_v1.py` | v1 smoke + forward, `qkv_bias` reaching the attention layer, `norm_last_layer`'s kernel-norm invariant, the `get_last_selfattention` raise, the `image_size % patch_size` guard, cross-version variant-table parity, `DINOHead` and `DINOv1` `.keras` round-trips with numeric assertions, and the D-020 fp16 normalization-overflow guard. |
-| `tests/test_models/test_dino/test_dino_v2.py` | v2 smoke, the masked forward path, per-position mixed masks, register tokens, `.keras` round-trip, dtype-policy forward. |
-| `tests/test_models/test_dino/test_dino_v3.py` | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), `.keras` round-trips at BOTH `positional_embedding_type` values, the `get_last_selfattention` raises, `image_size` int-or-tuple, dtype-policy forward on both positional modes. |
-| `tests/test_models/test_dino/conftest.py` | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
-| `tests/test_models/test_dino/test_dino_package.py` | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
-| `tests/test_models/test_dino/test_dino_training.py` | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
-| `tests/test_datasets/test_multi_crop.py` | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
-| `tests/test_train/test_dino/test_train_dino.py` | The trainer (`src/train/dino/train_dino.py`): a STRUCTURAL CLI-to-config wiring guard (reflection over `dataclasses.fields` and the parser's dests, fail-closed in both directions, so an unwired flag is RED by default), `TrainingConfig.__post_init__` rejections asserted on their messages, model/loss/callback construction, a spy on the real `train_dino()` path asserting `fit()` receives **no** `validation_data`, and a real two-epoch `fit()` asserting the teacher-temperature `LambdaCallback` MOVES the loss's `teacher_temp` Variable. |
-| `tests/test_train/test_dino/test_knn_eval.py` | The k-NN probe and the collapse diagnostic (`src/train/dino/knn_eval.py`): perfectly separable synthetic features scoring 1.0 against identical features falling to chance (with a non-vacuity control proving a constant predictor cannot satisfy both), a contrast proving the `exp(sim/T)` weighting is really used rather than a majority vote, the bank/query OVERLAP guard — which fires on self-retrieval but deliberately does NOT fire on collapse — a RED-proven collapse detector fed a deliberately collapsed matrix, the entropy half isolated with spread features and a one-hot teacher, the entropy taken of the MEAN distribution rather than the mean of per-sample entropies, a backbone-vs-projection-head width assertion, and REAL two-epoch `fit()` runs proving the columns reach `CSVLogger`'s CSV — including the executed negative control that placing the callback AFTER `CSVLogger` loses every column. |
-| `tests/test_losses/test_dino_loss.py` | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
+Collected counts below were re-derived with `pytest --collect-only -q` at the commit that
+last edited this file; they are a shape check, not a promise.
+
+| File | Collected | Covers |
+|---|---|---|
+| `tests/test_models/test_dino/test_dino_v1.py` | 36 | v1 smoke + forward, `qkv_bias` reaching the attention layer, `norm_last_layer`'s kernel-norm invariant, the `get_last_selfattention` raise, the `image_size % patch_size` guard, cross-version variant-table parity, `DINOHead` and `DINOv1` `.keras` round-trips with numeric assertions, and the D-020 fp16 normalization-overflow guard. |
+| `tests/test_models/test_dino/test_dino_v2.py` | 8 | v2 smoke, the masked forward path, per-position mixed masks, register tokens, `.keras` round-trip, dtype-policy forward. |
+| `tests/test_models/test_dino/test_dino_v3.py` | 24 | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), `.keras` round-trips at BOTH `positional_embedding_type` values, the `get_last_selfattention` raises, `image_size` int-or-tuple, dtype-policy forward on both positional modes. |
+| `tests/test_models/test_dino/conftest.py` | — | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
+| `tests/test_models/test_dino/test_dino_package.py` | 20 | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
+| `tests/test_models/test_dino/test_dino_training.py` | 40 | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
+| `tests/test_datasets/test_multi_crop.py` | 44 | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
+| `tests/test_train/test_dino/test_train_dino.py` | 57 | The trainer (`src/train/dino/train_dino.py`): a STRUCTURAL CLI-to-config wiring guard (reflection over `dataclasses.fields` and the parser's dests, fail-closed in both directions, so an unwired flag is RED by default), `TrainingConfig.__post_init__` rejections asserted on their messages, model/loss/callback construction, a spy on the real `train_dino()` path asserting `fit()` receives **no** `validation_data`, and a real two-epoch `fit()` asserting the teacher-temperature `LambdaCallback` MOVES the loss's `teacher_temp` Variable. |
+| `tests/test_train/test_dino/test_knn_eval.py` | 47 | The k-NN probe and the collapse diagnostic (`src/train/dino/knn_eval.py`): perfectly separable synthetic features scoring 1.0 against identical features falling to chance (with a non-vacuity control proving a constant predictor cannot satisfy both), a contrast proving the `exp(sim/T)` weighting is really used rather than a majority vote, the bank/query OVERLAP guard — which fires on self-retrieval but deliberately does NOT fire on collapse — a RED-proven collapse detector fed a deliberately collapsed matrix, the entropy half isolated with spread features and a one-hot teacher, the entropy taken of the MEAN distribution rather than the mean of per-sample entropies, a backbone-vs-projection-head width assertion, and REAL two-epoch `fit()` runs proving the columns reach `CSVLogger`'s CSV — including the executed negative control that placing the callback AFTER `CSVLogger` loses every column. |
+| `tests/test_losses/test_dino_loss.py` | 66 | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |
 
 ---
 
-## 9. References
+## 10. References
 
 - Caron et al., *Emerging Properties in Self-Supervised Vision Transformers* (DINO),
   ICCV 2021. arXiv:2104.14294
