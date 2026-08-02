@@ -585,8 +585,10 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
     training progress.
 
     **The bank is seeded down to the TFDS FILE order (D-040), and that is load-bearing.**
-    ``.take(knn_bank_batches)`` off the train stream selects a SMALL sample -- 2048 images
-    at the smoke settings, out of 9469 -- and `build_raw_image_dataset` opens the train
+    ``.take(knn_bank_batches)`` off the train stream selects a SMALL sample --
+    ``knn_bank_batches * batch_size`` images out of 9469, i.e. **512 at the SMOKE
+    defaults** (16 x 32) and 2048 at the 64/32 probe settings every measurement in
+    `plan-2026-08-01T195746-12a1f2db` used -- and `build_raw_image_dataset` opens the train
     split with ``shuffle_files=True``. Without ``shuffle_files_seed`` the file interleave
     is non-deterministic ACROSS PROCESSES even at a fixed ``--seed``, so two runs score
     against two different memory banks. MEASURED before this was seeded: four bank draws
@@ -609,7 +611,7 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
         # DECISION plan-2026-08-01T105809-dc0c402e/D-040
         # Do NOT drop this and rely on `seed=` alone: `seed` reaches the element
         # `.shuffle()` and the augmentation, NOT the TFDS file interleave, so the
-        # `.take()` below would select a different 2048 images every process.
+        # `.take()` below would select a different bank every process.
         shuffle_files_seed=config.seed,
     )
     query_ds, _, _ = build_raw_image_dataset(
@@ -982,7 +984,18 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     # Teacher EMA
     parser.add_argument("--ema-decay-start", type=float, default=0.996)
     parser.add_argument("--ema-decay-end", type=float, default=0.9999)
-    parser.add_argument("--ema-warmup-steps", type=int, default=0)
+    parser.add_argument(
+        "--ema-warmup-steps", type=int, default=0,
+        help="Freeze the teacher-weight EMA for the first N optimizer steps "
+             "(teacher stays at its student-synced init). MEASURED "
+             "(plan-2026-08-01T195746-12a1f2db): this is the mechanism behind "
+             "the early k-NN dip -- at N=295 (one smoke epoch) the epoch-0 "
+             "k-NN rises +0.0498 vs the default on a stream whose null is "
+             "exactly 0.000, removing the dip at seed 42 and halving it at "
+             "seed 1337. NOTE it is a SUPERSET: it also shifts the cosine EMA "
+             "ramp N steps later, because the post-warmup index restarts at 0 "
+             "while total_steps is unchanged. Those two effects have never "
+             "been separated. 0 = shipped default, no freeze.")
 
     # Training
     parser.add_argument("--batch-size", type=int, default=32)
