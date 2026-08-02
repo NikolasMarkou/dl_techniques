@@ -565,9 +565,21 @@ and a different horizon.
 **And that no-flag configuration has never been run at all.** `small` / 224 px /
 `out_dim=65536` at `batch_size=32` requested a single **10.13 GB** allocation against the
 **10001 MiB usable on GPU 1 (RTX 4070, 12 GB)** and was aborted by the BFC allocator
-(`research/2026_dino_ssl_measurements.md` § 5 confound 5 and § 7). The invocation that
-produced the table is the `--smoke`-scaled Usage block in `src/train/dino/train_dino.py`,
-not the bare command.
+(`research/2026_dino_ssl_measurements.md` § 5 confound 5 and § 7). The invocations that
+produced the table are the two `--smoke`-scaled arm lines in the `Usage::` block of
+`src/train/dino/train_dino.py`, not the bare command.
+
+Those two lines are checked, not asserted: each was resolved through the real
+`parse_arguments -> config_from_args -> resolve_ema_warmup_steps` and diffed field-by-field
+(38 keys) against `results/dino_plan12a1f2db/long_improved_s42/config.json` and
+`long_baseline_s42/config.json`. Every measurement-bearing field matches. Three do not, none
+of them measurement-bearing: `output_dir` and `experiment_name` (deliberately left at their
+defaults so a re-run cannot overwrite the recorded artifacts) and `ema_warmup_epochs` (a
+field that did not exist when those runs were made, and inert on the improved line because
+`--ema-warmup-steps 295` wins). Note in particular that both lines must carry
+`--knn-eval-every 4`: the endpoint is the mean of the last 3 *evaluated* epochs, so the
+cadence chooses which epochs it averages (48/52/56 at `4` — mean 0.4326, the number in the
+table above — versus 57/58/59 at the parser default `1`).
 
 To restore the OLD treatment keys at whatever scale you are running, pass
 `--ema-warmup-epochs 0 --teacher-temp-final 0.07` (verified: that resolves to

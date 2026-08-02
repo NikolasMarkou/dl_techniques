@@ -341,7 +341,9 @@ directory does not ship.
 9. **The control's within-run range is exactly 0.0 and is NOT a noise estimate.** The k-NN bank is
    `.cache()`d, so the `--random-init-repeats` repeats replay the identical bank. This is recorded
    in each run's `random_init_control.json` as `repeats_are_independent: false`. The genuine noise
-   band lives across seeds and across processes only.
+   band lives across seeds and across processes only, and is **not bounded by** the 0.2754-0.2949
+   span in [section 6 (iv)](#6-defects-found-in-the-measuring-instruments-themselves) — that span
+   is a within-`--seed 42` spread, and the `--seed 1337` control (0.2969) is already outside it.
 
 One free cross-process noise datum, for calibration: two identical-config, identical-`--seed 42`
 calibration runs in two separate processes differed by **0.0020** in their epoch-0
@@ -386,8 +388,12 @@ the SAME untrained network. `dino_feat_mean_cos` was bit-identical at 0.2348 acr
 because the QUERY set comes from the unshuffled validation split — only the bank moved.
 `train_dino.build_knn_datasets` now passes `shuffle_files_seed=config.seed`; MEASURED after the
 fix, four draws across two processes are byte-identical. That makes the instrument reproducible at
-a fixed seed. **It does NOT shrink the 0.2754-0.2949 band**, which lives across seeds and is the
-band any k-NN delta must be quoted against.
+a fixed seed. **It does NOT shrink the 0.2754-0.2949 band.** Note what that band is and is not: all
+four draws were at `--seed 42`, so 0.0195 is a WITHIN-seed spread. The genuine across-seed /
+across-process band is WIDER and is **not bounded by** this span — the `--seed 1337` zero-step
+control in [section 1](#1-the-headline-improved-config-vs-shipped-default) is 0.2969, already above
+its top. Quote every k-NN delta against the run's OWN zero-step control, never against a bare
+number and never against this span.
 
 **Honourable mention 1 — the control's repeats are not independent.** The k-NN memory bank is
 `.cache()`d, so `--random-init-repeats N` replays the same bank N times and the within-run repeat

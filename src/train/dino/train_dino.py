@@ -158,23 +158,50 @@ Usage::
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100
 
-    # the IMPROVED ARM of the 60-epoch measurement, reproduced (README § 6.1).
+    # the IMPROVED ARM of the 60-epoch measurement (README § 6.1).
     # Both stream flags are ON by default, so they are NOT passed here.
     # `--ema-warmup-steps 295` IS required and is NOT redundant with the shipped
     # `ema_warmup_epochs=1.0`: `--smoke` pins `ema_warmup_epochs=0.0`, and an
     # explicit `--ema-warmup-epochs 1.0` cannot override it (see the preset note
-    # above). VERIFIED through parse_arguments -> config_from_args ->
-    # resolve_ema_warmup_steps: this line gives warmup_steps=295 (295 steps/epoch),
-    # teacher_temp_final=0.04. Dropping it gives 0 -- the BASELINE arm's freeze.
-    # `295` is `num_train // batch_size` for imagenette at batch 32 only.
+    # above). `295` is `num_train // batch_size` for imagenette at batch 32 only.
+    #
+    # `--knn-eval-every 4` and `--early-stopping-patience 70` are NOT decoration and
+    # are NOT optional. The published endpoint is the mean of the last 3 EVALUATED
+    # epochs, so the eval CADENCE defines which epochs it averages. READ OFF
+    # `long_improved_s42/training_log.csv`: at the measured `4` the evaluated epochs
+    # are 0,4,...,56 and the last three are 48/52/56, whose k20 mean is 0.4326171875
+    # -- exactly the 0.4326 published in README § 6.1. At the parser default `1` the
+    # last three would be 57/58/59: a DIFFERENT endpoint, which cannot reproduce
+    # +0.1426. Patience `70` (default 30) exists so a 60-epoch horizon is actually
+    # run to its end.
+    #
+    # VERIFIED by resolving this line through the real
+    # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffing
+    # the resulting config FIELD-BY-FIELD against
+    # `results/dino_plan12a1f2db/long_improved_s42/config.json` (38 keys). Result:
+    # warmup_steps=295, teacher_temp_final=0.04, and every measurement-bearing field
+    # equal. Exactly three fields do not match, none of them measurement-bearing:
+    #   * `output_dir` / `experiment_name` -- deliberately left at their defaults
+    #     here, because passing the recorded `results/dino_plan12a1f2db` +
+    #     `long_improved_s42` would OVERWRITE the surviving artifacts. Add them only
+    #     if you intend to replace that run.
+    #   * `ema_warmup_epochs` -- absent from the recorded config.json entirely: the
+    #     field did not exist when those runs were made. It is inert here anyway
+    #     (`ema_warmup_steps=295 > 0` wins in resolve_ema_warmup_steps).
+    # Same diff run against `long_improved_s1337/config.json` with `--seed 1337`:
+    # identical outcome.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
         --ema-warmup-steps 295 \\
-        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
+        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
+        --knn-eval-every 4 --early-stopping-patience 70
 
-    # the BASELINE arm of the same measurement, for the A/B
+    # the BASELINE arm of the same measurement, for the A/B. Same field-by-field
+    # diff against `long_baseline_s42/config.json`, same three non-matching fields,
+    # and resolve_ema_warmup_steps gives 0 -- the baseline arm's no-freeze.
     ... --smoke --max-steps 100000 --epochs 60 --seed 42 --teacher-temp-final 0.07 \\
-        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
+        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
+        --knn-eval-every 4 --early-stopping-patience 70
 
     # the OLD stream, to compare against a run recorded before the flags flipped
     ... --no-seed-training-stream --no-stateless-augmentation
@@ -1262,8 +1289,12 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                             "nvidia-smi shows during a run (TF pre-allocates ~85%%; see "
                             "the module docstring). This validates SHAPES and wiring; it "
                             "is NOT a paper reproduction (the paper uses out_dim=65536, "
-                            "224px globals and hundreds of epochs). Explicit flags still "
-                            "win over the preset."
+                            "224px globals and hundreds of epochs). An explicit flag wins "
+                            "over the preset ONLY when the value you pass DIFFERS from the "
+                            "parser default: config_from_args cannot tell an explicit "
+                            "default from an omission, so --smoke --ema-warmup-epochs 1.0 "
+                            "(1.0 IS the default) is still overridden to 0.0, while 1.5 "
+                            "survives. See the module docstring."
                         ))
 
     # Output

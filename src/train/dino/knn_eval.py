@@ -78,14 +78,22 @@ untrained network, at **``--seed 42``**, smoke scale, imagenette, bank 64 / quer
 ``dino_knn_top1_k20`` spanned 0.2754-0.2949 (range 0.0195) and ``dino_knn_top1_k10``
 spanned 0.2607-0.2793 (range 0.0186) across those four, while ``dino_feat_mean_cos`` was
 bit-identical at 0.2348 in all four, because the QUERY set comes from the unshuffled
-validation split and only the BANK moved. Provenance: the record § 6 (ii), § 5 confound 8.
+validation split and only the BANK moved. Provenance: the record § 6 **(iv)** carries
+those four draws verbatim; § 6 (ii) and § 5 confound 8 support the PREVIOUS paragraph's
+512-vs-2048 estimator point, not this one.
 
-**That band is a SEED-42 band and a run at another seed can sit outside it.** The record
-§ 1's zero-step control at ``--seed 1337`` is **0.2969** -- above the top of the span
-above -- at the same scale and estimator. Nothing is inconsistent there: the band was
-never claimed to cover other seeds. But a reader comparing a 1337-seeded control against
-0.2754-0.2949 would wrongly conclude the instrument had moved, which is why the next rule
-is stated in terms of a run's OWN control rather than in terms of this band.
+**That band is a SEED-42 band -- a WITHIN-seed spread -- and it does NOT bound the
+genuine one.** All four draws were at ``--seed 42``; they differ only because the bank's
+TFDS file interleave was unseeded at the time (§ 6 (iv)). The record § 1's zero-step
+control at ``--seed 1337`` is **0.2969**, above the top of the span above, at the same
+scale and estimator -- measured, in
+``results/dino_plan12a1f2db/long_improved_s1337/random_init_control.json``. Nothing is
+inconsistent there: the band was never claimed to cover other seeds. The genuine
+across-seed / across-process band is therefore WIDER than 0.2754-0.2949 and is not
+measurable from inside one seed; treat 0.0195 as a LOWER bound on it. A reader comparing
+a 1337-seeded control against 0.2754-0.2949 would wrongly conclude the instrument had
+moved, which is why the next rule is stated in terms of a run's OWN control rather than
+in terms of this band.
 
 Reading rules that follow from that measurement:
 
@@ -151,8 +159,11 @@ bank produced the identical bank fingerprint and a ``dino_knn_top1_k20`` range o
 
 **Do not read that 0.0 as a noise estimate.** It says the instrument is deterministic at
 a fixed seed, NOT that the probe is noise-free. The genuine band lives ACROSS SEEDS and
-ACROSS PROCESSES and is not measurable from inside one run; the 0.2754-0.2949 span above
-is what it looks like. The field records which case a run was in by FINGERPRINTING the
+ACROSS PROCESSES and is not measurable from inside one run -- and it is NOT bounded by
+the 0.2754-0.2949 span above, which is a WITHIN-``--seed 42`` spread (the s1337 control,
+0.2969, already sits outside it). So: never quote a bare k-NN delta, and do not use that
+span as the yardstick either -- use the run's own control, per the RULE just above. The
+field records which case a run was in by FINGERPRINTING the
 extracted bank rather than by trusting this paragraph, so a within-run range of 0.0
 alongside ``repeats_are_independent: false`` is the expected, correct output -- and a
 spread reported WITHOUT that flag would be a FAKE spread (the record, § 5 confound 9).
