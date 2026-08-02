@@ -6,15 +6,20 @@ so a validation set silently multiplies the per-epoch centering updates. The rea
 validation signal is this module: a k-NN probe on FROZEN student features, which never
 invokes the loss, plus the two numbers that say whether the representation collapsed.
 
+This docstring is the OPERATING MANUAL for reading that probe: the STOP thresholds, what
+to do when one fires, and how big a difference has to be before it means anything. It
+does NOT carry the evidence -- the measurement record behind every number below is
+``research/2026_dino_ssl_measurements.md`` (cited as "the record"), and the per-flag
+reference is ``src/dl_techniques/models/dino/README.md`` § 6.2.
+
 -------------------------------------------------------------------------------
-Why the collapse diagnostic exists (Pre-Mortem 3 -- read this before reading a run)
+Collapse: A DECREASING LOSS DOES NOT RULE IT OUT (read this before reading a run)
 -------------------------------------------------------------------------------
-**A DECREASING LOSS DOES NOT RULE OUT COLLAPSE.** The collapsed solution -- every view
-of every image mapping to the same output distribution -- is a genuine minimum of DINO's
-cross-view cross-entropy whenever centering/sharpening is not doing its job. A run can
-therefore produce a textbook loss curve, a clean exit and a completely dead
-representation. "The loss went down" is a near-vacuous assertion on its own; these three
-numbers are what make it mean something:
+The collapsed solution -- every view of every image mapping to the same output
+distribution -- is a genuine minimum of DINO's cross-view cross-entropy whenever
+centering/sharpening is not doing its job. A run can therefore produce a textbook loss
+curve, a clean exit and a completely dead representation. "The loss went down" is a
+near-vacuous assertion on its own; these three numbers are what make it mean something:
 
 ======================================  ==============================  ===============
 number                                  collapse drives it              logged as
@@ -42,125 +47,107 @@ The first two are computed on every evaluation and summarized into
 ``dino_collapse_flag`` (1.0 = at least one threshold tripped, 0.0 = none), which is also
 logged at WARNING level so it appears in the run log, not only in the CSV.
 
-**How to read a `nan` entropy (D-039).** ``dino_teacher_entropy`` is DEFINED as the
-entropy of ``softmax((teacher_logits - center) / teacher_temp)`` -- the loss's own
-distribution -- and this module will emit ``nan`` rather than substitute a different
-quantity under that name. ``dino_teacher_entropy_is_centered`` says which case a row is:
+**Reading the entropy columns, and why one can be `nan`.** ``dino_teacher_entropy`` is
+DEFINED as the entropy of ``softmax((teacher_logits - center) / teacher_temp)`` -- the
+loss's own distribution -- and this module emits ``nan`` rather than substitute a
+different quantity under that name. ``dino_teacher_entropy_is_centered`` says which case
+a row of ``training_log.csv`` is: ``1.0`` = the entropy columns ARE the documented
+quantity; ``0.0`` = they could NOT be computed and are ``nan`` (either no ``dino_loss``
+was passed, or the loss's ``center`` width disagrees with the teacher head's -- a WARNING
+names which, once); ``nan`` = this epoch was not a k-NN evaluation epoch. The column
+exists because ``nan`` ALONE cannot tell a skipped epoch from a degraded one, and a
+reader of the CSV has only the CSV.
 
-===============================  ==============================================
-``..._is_centered``              meaning
-===============================  ==============================================
-``1.0``                          the entropy columns ARE the documented quantity
-``0.0``                          they could NOT be computed and are ``nan``:
-                                 either no ``dino_loss`` was passed, or the
-                                 loss's ``center`` width disagrees with the
-                                 teacher head's. A WARNING names which, once.
-``nan``                          this epoch was not a k-NN evaluation epoch
-===============================  ==============================================
-
-The column exists because ``nan`` ALONE cannot tell a skipped epoch from a degraded one,
-and a reader of ``training_log.csv`` has only the CSV. MEASURED at HEAD before this
-change, on 64 teacher rows of width 8 against a loss of ``out_dim=16``: the old silent
-fallback produced an entropy of ``0.966176`` where the centered quantity is ``0.844065``
--- 0.122 FURTHER from the STOP threshold, i.e. the substitution failed toward a false
-NEGATIVE, under an unchanged column name.
+**THE RULE: a wrong number under the documented name is worse than no number.** That is
+not a preference. MEASURED on 64 teacher rows of width 8 against a loss of
+``out_dim=16``: the uncentered fallback this replaced reported ``0.966176`` where the
+centered quantity is ``0.844065`` -- 0.122 FURTHER from the entropy STOP threshold under
+an unchanged column name, i.e. the substitution failed toward a false NEGATIVE.
 
 -------------------------------------------------------------------------------
-How big a `dino_knn_top1_*` difference is real (D-040 -- read before quoting one)
+How big a `dino_knn_top1_*` difference is real (read before quoting one)
 -------------------------------------------------------------------------------
-**A k-NN top-1 delta below ~0.02 is inside this probe's own noise band and is not
-evidence of anything.** The number is a small-sample estimate: at the smoke settings the
-memory bank is 2048 images ``.take()``n off a 9469-image train split, and the bank's
-composition moves the score.
+**A k-NN top-1 delta below ~0.02 is inside this probe's own band and is evidence of
+nothing.** The number is a small-sample estimate and the memory bank's composition moves
+it: at the smoke settings the bank is 2048 images ``.take()``n off a 9469-image train
+split.
 
-MEASURED, four ZERO-optimizer-step controls at the same seed and config -- i.e. four
-readings of the SAME untrained network::
+The band comes from four ZERO-optimizer-step controls -- four readings of the SAME
+untrained network, at one seed, smoke scale, imagenette, bank 64 / query 32.
+``dino_knn_top1_k20`` spanned 0.2754-0.2949 (range 0.0195) and ``dino_knn_top1_k10``
+spanned 0.2607-0.2793 (range 0.0186) across those four, while ``dino_feat_mean_cos`` was
+bit-identical at 0.2348 in all four, because the QUERY set comes from the unshuffled
+validation split and only the BANK moved. Provenance: the record § 6 (ii), § 5 confound 8.
 
-    dino_knn_top1_k20   0.2754  0.2900  0.2910  0.2949     range 0.0195
-    dino_knn_top1_k10   0.2773  0.2686  0.2793  0.2607     range 0.0186
-    dino_feat_mean_cos  0.2348  0.2348  0.2348  0.2348     range 0.0000  (bit-identical)
+Reading rules that follow from that measurement:
 
-The cosine is bit-identical because the QUERY set comes from the unshuffled validation
-split; only the BANK moved. Root cause: `train.energy_transformer.common
-.build_raw_image_dataset` opened the train split with ``shuffle_files=True`` and no
-``tfds.ReadConfig``, so the file interleave was non-deterministic across processes even
-at a fixed ``--seed``. `train_dino.build_knn_datasets` now passes
-``shuffle_files_seed=config.seed``, which makes the bank REPRODUCIBLE at a fixed seed
-(MEASURED: four draws across two processes are byte-identical, against four distinct
-draws before). That fixes reproducibility; it does NOT shrink the band.
-
-Reading rules that follow from the measurement:
-
-* Two runs at the SAME ``--seed`` now share a bank, i.e. the same MEASURING INSTRUMENT.
-  **By default they still do NOT share the data they were trained on**, and that is
-  now FIXABLE rather than merely a caveat. Two unseeded sources had to be closed, and
-  MEASURED across two PROCESSES (real `train_dino.build_dataset`, sha1 of the first 3
-  batches) NEITHER is sufficient alone::
-
-      --seed-training-stream   alone   49bf308a vs 4fbd3a6e   DIFFER
-      --stateless-augmentation alone   e70e2ad2 vs 5f968198   DIFFER
-      BOTH                             2ce84c18 vs 2ce84c18   BIT-IDENTICAL
-
-  ``--seed-training-stream`` seeds `train_dino.build_dataset`'s TFDS file interleave;
-  ``--stateless-augmentation`` replaces the shared ``tf.random.Generator`` stream with
-  ``tf.random.stateless_uniform`` keyed per element, which is what survives
-  ``num_parallel_calls=AUTOTUNE`` (D-035). **Without BOTH, a difference between two
-  same-seed runs is a difference in the model AS TRAINED ON A DIFFERENT DATA STREAM**
-  -- no longer confounded by the bank, which is strictly less confounding, not none.
-  With both, the two runs are the same experiment and a difference is attributable.
-  Two runs at DIFFERENT seeds share neither, and a ~0.02 gap between them is expected
-  from the bank alone.
-* Every `dino_knn_top1_*` produced BEFORE this seeding -- including the runs in
-  ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
-  band, whatever the seed.
-* Quote the number against a zero-step random-init control at the same seed, never
-  against the 0.10 chance line: an UNTRAINED ViT already scores ~0.28 on imagenette here,
-  so "3x chance" is mostly architecture, not training.
-* **The band above is a band for ONE estimator: bank 64 / query 32 (2048 images).**
+* **Quote the number against a zero-step random-init control at the same seed, never
+  against the 0.10 chance line.** At bank 64 / query 32 on imagenette at the smoke scale
+  an UNTRAINED ViT already scores ~0.28, so "3x chance" is mostly architecture, not
+  training.
+* **That band is a band for ONE estimator: bank 64 / query 32 (2048 images).**
   ``train_dino.py --smoke`` leaves ``knn_bank_batches=16`` / ``knn_query_batches=8``
   (512 images). A k-NN top-1 over a 4x smaller bank is a DIFFERENT ESTIMATOR, not a
-  noisier reading of the same one, and it is NOT comparable to the 0.2754-0.2949
-  control band above. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` on any run
-  whose number you intend to read against a historical figure.
+  noisier reading of the same one, and it is NOT comparable to the 0.2754-0.2949 control
+  band. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` on any run whose number you
+  intend to read against a historical figure.
+* **The BANK is seeded unconditionally.** `train_dino.build_knn_datasets` always passes
+  ``shuffle_files_seed=config.seed``, down to the TFDS file interleave, so two runs at
+  the same ``--seed`` share the same MEASURING INSTRUMENT. That buys reproducibility of
+  the instrument; it does NOT shrink the band above, which was itself measured at a
+  fixed seed.
+* **The TRAINING stream is seeded by default too, by TWO flags, and dropping either one
+  is enough to lose it.** ``--seed-training-stream`` (the TFDS file interleave) and
+  ``--stateless-augmentation`` (per-element ``stateless_uniform`` keying, which is what
+  survives the shipped ``num_parallel_calls=AUTOTUNE``) both ship ON, so two no-flag runs
+  at the same ``--seed`` are the same experiment and a difference between them is
+  attributable. MEASURED across two processes on the real `train_dino.build_dataset`
+  (sha1 of the first 3 batches, CPU-only): either flag alone still gave DIFFERING
+  batches, both together gave BIT-IDENTICAL ones -- table in the record § 4. So passing
+  ``--no-seed-training-stream`` OR ``--no-stateless-augmentation`` alone makes a
+  difference between two same-seed runs a difference in the DATA THEY TRAINED ON.
+  Two runs at DIFFERENT seeds share neither stream nor bank, and a ~0.02 gap between
+  them is expected from the bank alone.
+* Every `dino_knn_top1_*` produced BEFORE the bank was seeded -- including the runs in
+  ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
+  band, whatever the seed.
 
 -------------------------------------------------------------------------------
-The ZERO-OPTIMIZER-STEP control this callback now produces for itself
+The ZERO-OPTIMIZER-STEP control this callback produces for itself
 -------------------------------------------------------------------------------
-Every number in the section above was quoted for YEARS against controls produced by an
-out-of-band scratch script that was never committed, and ``on_epoch_end(epoch=0)`` fires
-AFTER a full epoch of training -- so no shipped code path ever produced a random-init
-baseline. :meth:`KNNEvalCallback.on_train_begin` closes that: given a
+``on_epoch_end(epoch=0)`` fires AFTER a full epoch of training, so the epoch-0 CSV row is
+POST-one-epoch and is NOT a random-init baseline -- a confusion this repo has already
+made. :meth:`KNNEvalCallback.on_train_begin` produces the baseline: given a
 ``control_json_path``, it runs the SAME extraction/scoring path ``random_init_repeats``
 times BEFORE ``fit()`` performs a single update, and writes per-repeat values plus
-min/max/mean/range for every :attr:`~KNNEvalCallback.log_keys` entry to that JSON.
+min/max/mean/range for every :attr:`~KNNEvalCallback.log_keys` entry to that JSON. The
+trainer points it at **``<run_dir>/random_init_control.json``**, a sibling of
+``config.json``, and it is DEFAULT-ON at ``random_init_repeats=2``
+(``--random-init-repeats 0`` disables it).
 
-The trainer points that at **``<run_dir>/random_init_control.json``**, a sibling of
-``config.json``. It is a SEPARATE ARTIFACT, not a CSV row, and deliberately so (D-004):
-`keras.callbacks.CSVLogger` appends a row per ``on_epoch_end`` ONLY, so a key written at
+**THE RULE: read every k-NN number beside its own run's control. Never a bare delta.**
+The measured failure mode of this codebase is quoting a k-NN delta with no control at
+all, and two feature extractions cost seconds against runs measured in tens of minutes.
+
+It is a SEPARATE ARTIFACT rather than a CSV column deliberately: `keras.callbacks
+.CSVLogger` appends a row per ``on_epoch_end`` ONLY, so a key written at
 ``on_train_begin`` would reach no row at all, and mutating ``logs`` before epoch 0 is the
-one place that can disturb the fieldname freeze every DINO diagnostic column depends on.
-The separate file also keeps the provenance visible: the control is not an epoch, and the
-epoch-0 CSV row is POST-one-epoch -- a confusion this repo has already made.
+one place that can disturb the fieldname freeze described in the next section.
 
-It is DEFAULT-ON at ``random_init_repeats=2`` in the trainer (``--random-init-repeats 0``
-disables it) because the measured failure mode of this codebase is quoting a k-NN delta
-with no control at all, and two feature extractions cost seconds against runs measured in
-tens of minutes.
-
-**HONEST CAVEAT, and it is the reason the JSON carries a
-``repeats_are_independent`` field at all: the repeats are NOT independent.** The trainer
-``.take(n).cache()``s both probe datasets on purpose (the same samples every epoch), so
-re-iterating them across repeats replays the cache and the repeats are BIT-IDENTICAL.
-MEASURED: two repeats over a cached bank produced the identical fingerprint and a k20
-range of exactly **0.0**.
+**The repeats are NOT independent, which is why the JSON carries a
+``repeats_are_independent`` field at all.** The trainer ``.take(n).cache()``s both probe
+datasets on purpose (the same samples every epoch), so re-iterating them across repeats
+replays the cache and the repeats are BIT-IDENTICAL. MEASURED: two repeats over a cached
+bank produced the identical bank fingerprint and a ``dino_knn_top1_k20`` range of exactly
+**0.0**.
 
 **Do not read that 0.0 as a noise estimate.** It says the instrument is deterministic at
-a fixed seed -- which is what ``shuffle_files_seed`` bought (D-040) -- NOT that the probe
-is noise-free. The genuine band lives ACROSS SEEDS and is not measurable from inside one
-run; the 0.2754-0.2949 band above is what it looks like. The field records which case a
-run was in by FINGERPRINTING the extracted bank, rather than by trusting this paragraph;
-so a within-run range of 0.0 alongside ``repeats_are_independent: false`` is the expected,
-correct output, and a spread reported without that flag would be a FAKE spread.
+a fixed seed, NOT that the probe is noise-free. The genuine band lives ACROSS SEEDS and
+ACROSS PROCESSES and is not measurable from inside one run; the 0.2754-0.2949 span above
+is what it looks like. The field records which case a run was in by FINGERPRINTING the
+extracted bank rather than by trusting this paragraph, so a within-run range of 0.0
+alongside ``repeats_are_independent: false`` is the expected, correct output -- and a
+spread reported WITHOUT that flag would be a FAKE spread (the record, § 5 confound 9).
 
 -------------------------------------------------------------------------------
 Two things about this callback that are load-bearing, not cosmetic
@@ -169,16 +156,16 @@ Two things about this callback that are load-bearing, not cosmetic
    write its keys on EPOCH 0.** MEASURED on keras 3.8.0: `CSVLogger` freezes its
    fieldnames from ``sorted(logs.keys())`` on the first epoch it sees. A key first added
    on epoch 1 NEVER appears in the CSV (measured header ``['epoch', 'loss', 'val_loss']``
-   for all three epochs), and a callback placed AFTER `CSVLogger` writes into a `logs`
-   dict that has already been serialized -- also measured, also silently absent. Hence
-   :meth:`KNNEvalCallback.on_epoch_end` writes EVERY key on EVERY epoch, filling skipped
-   epochs with ``nan`` rather than omitting them.
+   for all three epochs of that probe), and a callback placed AFTER `CSVLogger` writes
+   into a `logs` dict that has already been serialized -- also measured, also silently
+   absent. Hence :meth:`KNNEvalCallback.on_epoch_end` writes EVERY key on EVERY epoch,
+   filling skipped epochs with ``nan`` rather than omitting them.
 2. **Features come from the STUDENT BACKBONE, not the projection head.** DINO's protocol
    evaluates the backbone representation; the head is a training-time device thrown away
    at transfer. The tensor is `student.head.input` -- the post-final-norm CLS token, width
    ``embed_dim`` -- NOT `student.output`, width ``dino_out_dim``.
 
-Run the guards::
+Run the guards (47 tests at the time of writing)::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest \\
         tests/test_train/test_dino/test_knn_eval.py -q
