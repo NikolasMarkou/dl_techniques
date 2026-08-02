@@ -88,7 +88,8 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     "center_momentum": ("--center-momentum", 0.95),               # default: 0.9
     "ema_decay_start": ("--ema-decay-start", 0.99),               # default: 0.996
     "ema_decay_end": ("--ema-decay-end", 0.999),                  # default: 0.9999
-    "ema_warmup_steps": ("--ema-warmup-steps", 11),               # default: 0
+    "ema_warmup_steps": ("--ema-warmup-steps", 11),               # default: 0 (override)
+    "ema_warmup_epochs": ("--ema-warmup-epochs", 3.0),            # default: 1.0
     "batch_size": ("--batch-size", 8),                            # default: 32
     "epochs": ("--epochs", 3),                                    # default: 100
     "learning_rate": ("--learning-rate", 1e-5),                   # default: 5e-4
@@ -247,6 +248,44 @@ class TestSmokePreset:
         )
         assert config.variant == "tiny"  # untouched fields still get the preset
 
+    def test_smoke_still_means_no_teacher_ema_freeze(self) -> None:
+        """`--smoke` must resolve to ZERO warmup, as it always has.
+
+        `SMOKE_OVERRIDES` pins BOTH `ema_warmup_steps: 0` and
+        `ema_warmup_epochs: 0.0`. The first alone is no longer sufficient: 0 steps now
+        means "defer to epochs", and the shipped `ema_warmup_epochs` default is 1.0, so
+        dropping the second pin makes every smoke run silently gain a freeze it has
+        never had. Built through the REAL parse -> config path, because that wiring is
+        where this trainer's documented silent-no-op defects live.
+        """
+        config = trainer.config_from_args(trainer.parse_arguments(["--smoke"]))
+        # The BEHAVIOURAL assertion comes first on purpose: reading SMOKE_OVERRIDES
+        # first would make the test die at a KeyError precondition when the pin is
+        # dropped, and a precondition failure proves nothing about the resolution.
+        assert trainer.resolve_ema_warmup_steps(config, steps_per_epoch=295) == 0
+        assert trainer.SMOKE_OVERRIDES.get("ema_warmup_epochs") == 0.0
+
+
+class TestEMAWarmupResolution:
+    """The precedence rule between the epoch default and the absolute-step override."""
+
+    def test_shipped_defaults_reproduce_the_measured_warmup(self) -> None:
+        """THE decisive gate: the new defaults == the measured invocation's warmup.
+
+        The configuration measured as IMPROVED used `--ema-warmup-steps 295`, and 295 is
+        `num_train // batch_size` for imagenette at `batch_size=32`. This assertion
+        stands in for a ~5 h GPU re-measurement: it proves the epoch-denominated default
+        resolves, at the measured scale, to the EXACT `warmup_steps` the measured run
+        passed to `TeacherEMACallback`. `steps_per_epoch=295` is passed IN -- this tests
+        the resolution arithmetic, not the dataset cardinality.
+        """
+        assert trainer.resolve_ema_warmup_steps(
+            trainer.TrainingConfig(), steps_per_epoch=295) == 295
+
+    def test_an_explicit_step_count_wins(self) -> None:
+        assert trainer.resolve_ema_warmup_steps(
+            trainer.TrainingConfig(ema_warmup_steps=11), steps_per_epoch=295) == 11
+
 
 # ---------------------------------------------------------------------------
 # 2. Config validation
@@ -271,6 +310,9 @@ class TestConfigValidation:
         ({"ema_decay_start": 1.5}, r"ema_decay_start must be in \[0, 1\]"),
         ({"ema_decay_end": -0.1}, r"ema_decay_end must be in \[0, 1\]"),
         ({"ema_warmup_steps": -1}, "ema_warmup_steps must be >= 0"),
+        ({"ema_warmup_epochs": -1.0}, "ema_warmup_epochs must be finite and >= 0"),
+        ({"ema_warmup_epochs": float("nan")},
+         "ema_warmup_epochs must be finite and >= 0"),
         ({"batch_size": 0}, "batch_size must be positive"),
         ({"epochs": 0}, "epochs must be positive"),
         ({"warmup_epochs": -1}, "warmup_epochs must be >= 0"),

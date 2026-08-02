@@ -150,6 +150,7 @@ Usage::
 
 import gc
 import json
+import math
 import time
 import keras
 import argparse
@@ -217,6 +218,14 @@ SMOKE_OVERRIDES: Dict[str, Any] = {
     "warmup_epochs": 0,
     "teacher_temp_warmup_epochs": 1,
     "ema_warmup_steps": 0,
+    # DECISION plan-2026-08-02T132301-93deeae2/D-001
+    # This entry is LOAD-BEARING, not redundant with the `ema_warmup_steps: 0` above.
+    # Under `resolve_ema_warmup_steps` a zero `ema_warmup_steps` means "defer to
+    # `ema_warmup_epochs`", and the shipped `ema_warmup_epochs` default is 1.0. Without
+    # this pin a `--smoke` run would SILENTLY GAIN a teacher freeze it has never had --
+    # changing what every smoke measurement measures, with nothing failing. Do NOT
+    # "simplify" it away as a duplicate of the line above; see decisions.md D-001.
+    "ema_warmup_epochs": 0.0,
 }
 
 
@@ -337,7 +346,22 @@ class TrainingConfig:
     # Teacher EMA
     ema_decay_start: float = 0.996
     ema_decay_end: float = 0.9999
+    # DECISION plan-2026-08-02T132301-93deeae2/D-001
+    # The teacher-EMA warmup has TWO homes and ONE resolution rule
+    # (:func:`resolve_ema_warmup_steps`): `ema_warmup_steps` is an ABSOLUTE-step
+    # override that WINS whenever it is > 0; `ema_warmup_epochs` is the
+    # DEFAULT-BEARING knob and is used whenever `ema_warmup_steps == 0`.
+    #
+    # Why the default is denominated in EPOCHS. The configuration this repo actually
+    # measured used `--ema-warmup-steps 295`, and 295 is not a recipe constant: it is
+    # `num_train // batch_size` for the imagenette train split at `batch_size=32`, i.e.
+    # exactly ONE EPOCH AT THAT SCALE ONLY. At `batch_size=64` the same literal is ~2
+    # epochs, and on another dataset it is arbitrary. Shipping `ema_warmup_epochs=1.0`
+    # reproduces the measured behaviour at the measured scale AND transfers.
+    # Evidence, caveats and the un-separated SUPERSET question:
+    # `research/2026_dino_ssl_measurements.md`.
     ema_warmup_steps: int = 0
+    ema_warmup_epochs: float = 1.0
 
     # Training
     batch_size: int = 32
@@ -441,6 +465,15 @@ class TrainingConfig:
         if self.ema_warmup_steps < 0:
             raise ValueError(
                 f"ema_warmup_steps must be >= 0, got {self.ema_warmup_steps}")
+        # Refused here, in the house convention, rather than clamped in
+        # `resolve_ema_warmup_steps`: a silently-clamped negative warmup would train
+        # with a teacher schedule nobody asked for. NaN/inf are rejected too -- both
+        # survive a `< 0` test and `int(round(nan * steps))` raises far from the cause.
+        if not math.isfinite(self.ema_warmup_epochs) or self.ema_warmup_epochs < 0:
+            raise ValueError(
+                f"ema_warmup_epochs must be finite and >= 0, got "
+                f"{self.ema_warmup_epochs}"
+            )
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {self.batch_size}")
         if self.epochs <= 0:
@@ -675,6 +708,41 @@ def create_teacher_temp_callback(
     return keras.callbacks.LambdaCallback(on_epoch_begin=_set)
 
 
+# DECISION plan-2026-08-02T132301-93deeae2/D-002
+# This function has exactly ONE production call site (`create_callbacks`, below) and is
+# therefore an UN-EARNED abstraction on its face. Do NOT inline it back "for simplicity":
+# inlining puts the resolution behind a `DINOLoss` plus the k-NN bank/query datasets, so
+# the only gate that stands in for a ~5 h GPU re-measurement -- that the shipped defaults
+# resolve to the SAME warmup the measured `--ema-warmup-steps 295` invocation produced --
+# would need data and a GPU to run. See decisions.md D-002.
+def resolve_ema_warmup_steps(config: TrainingConfig, steps_per_epoch: int) -> int:
+    """Resolve the teacher-EMA warmup to absolute optimizer steps.
+
+    Precedence: ``config.ema_warmup_steps`` WINS whenever it is ``> 0``; otherwise the
+    value is ``round(config.ema_warmup_epochs * steps_per_epoch)``.
+
+    The EPOCH form is the default-bearing one because the measured value (295) is
+    ``num_train // batch_size`` at one dataset and one batch size -- one epoch at that
+    scale, and an arbitrary number at any other. The STEP form is retained as the exact,
+    scale-free override every prior run recorded in ``results/*/config.json`` used.
+
+    Interface contract:
+        Parameters:
+            config: The trainer config. Both fields are validated by ``__post_init__``
+                (``ema_warmup_steps >= 0``; ``ema_warmup_epochs`` finite and ``>= 0``),
+                so this function does no re-validation and cannot silently clamp.
+            steps_per_epoch: Optimizer steps in one epoch, as computed by
+                :func:`build_dataset` (already ``max_steps``-capped).
+        Returns:
+            Absolute step count, ``>= 0``. ``0`` means no freeze.
+        Failure mode:
+            None. A hand-built config bypassing ``__post_init__`` is out of contract.
+    """
+    if config.ema_warmup_steps > 0:
+        return config.ema_warmup_steps
+    return int(round(config.ema_warmup_epochs * steps_per_epoch))
+
+
 def create_callbacks(
         config: TrainingConfig,
         loss: DINOLoss,
@@ -720,7 +788,7 @@ def create_callbacks(
             decay_end=config.ema_decay_end,
             total_steps=max(1, steps_per_epoch * config.epochs),
         ),
-        warmup_steps=config.ema_warmup_steps,
+        warmup_steps=resolve_ema_warmup_steps(config, steps_per_epoch),
         log_every=max(1, steps_per_epoch),
     ))
 
@@ -985,17 +1053,29 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--ema-decay-start", type=float, default=0.996)
     parser.add_argument("--ema-decay-end", type=float, default=0.9999)
     parser.add_argument(
+        "--ema-warmup-epochs", type=float, default=1.0,
+        help="Freeze the teacher-weight EMA for the first N EPOCHS (teacher stays "
+             "at its student-synced init). This is the DEFAULT-BEARING knob; "
+             "default 1.0 = freeze the teacher for the first epoch. MEASURED "
+             "(plan-2026-08-01T195746-12a1f2db) at N=295 absolute steps, which is "
+             "one epoch at imagenette/batch-32: the epoch-0 k-NN rises +0.0498 vs "
+             "the old no-freeze default on a controlled stream whose null is "
+             "exactly 0.000, removing the dip at seed 42 and halving it at seed "
+             "1337. NOTE it is a SUPERSET: it also shifts the cosine EMA ramp that "
+             "many steps later, because the post-warmup index restarts at 0 while "
+             "total_steps is unchanged -- freeze and re-basing have NEVER been "
+             "separated (see the Open Questions in "
+             "research/2026_dino_ssl_measurements.md). It is denominated in epochs "
+             "because 295 is num_train // batch_size at ONE scale, not a portable "
+             "constant. 0 = no freeze. --ema-warmup-steps N overrides this in "
+             "absolute steps.")
+    parser.add_argument(
         "--ema-warmup-steps", type=int, default=0,
-        help="Freeze the teacher-weight EMA for the first N optimizer steps "
-             "(teacher stays at its student-synced init). MEASURED "
-             "(plan-2026-08-01T195746-12a1f2db): this is the mechanism behind "
-             "the early k-NN dip -- at N=295 (one smoke epoch) the epoch-0 "
-             "k-NN rises +0.0498 vs the default on a stream whose null is "
-             "exactly 0.000, removing the dip at seed 42 and halving it at "
-             "seed 1337. NOTE it is a SUPERSET: it also shifts the cosine EMA "
-             "ramp N steps later, because the post-warmup index restarts at 0 "
-             "while total_steps is unchanged. Those two effects have never "
-             "been separated. 0 = shipped default, no freeze.")
+        help="ABSOLUTE-step override for the teacher-EMA warmup described under "
+             "--ema-warmup-epochs. Any value > 0 WINS over --ema-warmup-epochs; 0 "
+             "(the default) defers to it. Use this to reproduce a run recorded "
+             "before the epoch-denominated default existed, e.g. the measured "
+             "--ema-warmup-steps 295.")
 
     # Training
     parser.add_argument("--batch-size", type=int, default=32)
@@ -1126,6 +1206,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         ema_decay_start=args.ema_decay_start,
         ema_decay_end=args.ema_decay_end,
         ema_warmup_steps=args.ema_warmup_steps,
+        ema_warmup_epochs=args.ema_warmup_epochs,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
