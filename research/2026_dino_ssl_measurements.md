@@ -174,8 +174,10 @@ Endpoint = `dino_knn_top1_k20` at the first evaluated epoch minus that run's own
 | C no center lag | -0.0664 | **-0.0063** | **CLEARED** |
 | D EMA warmup | -0.0156 | **+0.0445** | **IMPLICATED** |
 
-The dip reproduces: on this matrix the baseline arm sits about 0.060 below its own random-init
-control at both seeds.
+The dip reproduces: on this matrix the baseline arm's dip is **-0.0601** below its own random-init
+control. That figure is a MEAN OVER THE TWO SEEDS (the `mean dip` column); this table records no
+per-seed dips, so it does not support the same statement quantified over both seeds. An earlier
+draft of this line said "at both seeds" and was scoped back here.
 
 **But this matrix measured its own null, and the null is 0.0400 wide against a 0.04 threshold.**
 Arm B is provably inert at the epoch-0 endpoint: `create_teacher_temp_callback` assigns via
@@ -189,8 +191,10 @@ matrix below exists.
 Also recorded from the dip matrix, on an **exploratory** (not pre-registered) endpoint — mean of
 the last 3 evaluated epochs minus own control: A `-0.0379`, B `+0.0138`, C `-0.0272`, D `+0.0173`;
 i.e. effects vs A of B **+0.0518**, D **+0.0552**, C `+0.0107`. On that endpoint B and D are the
-only arms rising above their own random-init control, at both seeds. This is exploratory: it was
-not pre-registered and it is read at an endpoint where arm B is live rather than inert.
+only arms whose SEED-MEAN rises above its own random-init control; those four numbers are means
+over the two seeds, so this is not a per-seed claim and must not be restated as one. This is also
+exploratory: it was not pre-registered and it is read at an endpoint where arm B is live rather
+than inert.
 
 ### Confirm matrix: 4 arms x 2 seeds, 8 epochs, FULLY CONTROLLED stream
 
@@ -373,6 +377,18 @@ steps. Any run intended to be comparable must pass `--max-steps 100000` explicit
 pre-existing `results/dino_smoke_step12/config.json` already recorded `max_steps=100000` — an
 earlier run needed the same workaround and nobody wrote it down.
 
+**(iv) The k-NN memory bank was not the same bank twice.**
+`train.energy_transformer.common.build_raw_image_dataset` opened the train split with
+`shuffle_files=True` and no `tfds.ReadConfig`, so the file interleave was non-deterministic across
+processes even at a fixed `--seed`. Four draws of the "same" bank were therefore four distinct
+banks, and the zero-step control read 0.2754 / 0.2900 / 0.2910 / 0.2949 (`k20`, range 0.0195) on
+the SAME untrained network. `dino_feat_mean_cos` was bit-identical at 0.2348 across all four,
+because the QUERY set comes from the unshuffled validation split — only the bank moved.
+`train_dino.build_knn_datasets` now passes `shuffle_files_seed=config.seed`; MEASURED after the
+fix, four draws across two processes are byte-identical. That makes the instrument reproducible at
+a fixed seed. **It does NOT shrink the 0.2754-0.2949 band**, which lives across seeds and is the
+band any k-NN delta must be quoted against.
+
 **Honourable mention 1 — the control's repeats are not independent.** The k-NN memory bank is
 `.cache()`d, so `--random-init-repeats N` replays the same bank N times and the within-run repeat
 range is exactly 0.0 **by construction**. This was RED-proven by hardcoding
@@ -408,6 +424,17 @@ inherited estimate that did exactly that was both ~7-10% high and wrongly decomp
 
 The 1534 MiB peak corroborates an independently-obtained 1518.6 MiB figure in the trainer docstring
 to within 1%.
+
+**How the peak was obtained (D-026), and why polling would answer a different question.**
+`tf.config.experimental.reset_memory_stats('GPU:0')` before, then
+`tf.config.experimental.get_memory_info('GPU:0')['peak']` after, around a SINGLE `train_on_batch`.
+One config per PROCESS: the peak is a non-resetting high-water mark, so a second config measured in
+the same process reports the maximum over both. Polling `nvidia-smi` while `train_dino.py` runs
+does NOT measure this — in that trainer's import order TF is initialized before
+`train.common.setup_gpu`, so `set_memory_growth` fails and TF pre-allocates ~85% of the device
+(~10 400 MiB polled). That number is TF's ARENA, not the working set. The three pre-committed
+memory reductions (`n_local_crops` 4 -> 2, crop 96 -> 64, `batch_size` 32 -> 16) are measured to be
+unnecessary at this scale; applying them "to be safe" costs coverage for nothing.
 
 **Paper scale does not fit.** `small` / 224 px / `out_dim=65536` at `batch_size=32` requested a
 single 10.13 GB allocation against 10001 MiB usable and was aborted by the allocator. "Does not

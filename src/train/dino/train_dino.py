@@ -123,9 +123,11 @@ bit-identical ones. Table in ``research/2026_dino_ssl_measurements.md`` § 4.
 
 The two flags reach two different unseeded sources -- the file interleave and the
 augmentation RNG -- so an A/B run without both is comparing models trained on
-different data. The bit-identity of the both-flags cell also rules out cuDNN
-nondeterminism, ``tf.data`` ``options.deterministic`` and the element
-``.shuffle()`` as contributors.
+different data. For the pipeline that probe measured, the bit-identity of the
+both-flags cell also rules out ``tf.data`` ``options.deterministic`` and the
+element ``.shuffle()`` as residual contributors. It says NOTHING about cuDNN
+kernel nondeterminism: the probe was CPU-only, built no model and ran no GPU
+kernel.
 
 **Both stream flags ship ON**, so a no-flag run is already reproducible against
 another no-flag run at the same ``--seed``; nothing needs to be remembered. The

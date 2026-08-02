@@ -187,9 +187,11 @@ batches::
 
 This transform is only ONE of the two unseeded sources; the other is the TFDS
 file interleave, which ``--seed-training-stream`` closes. A reproducible DINO
-run needs both flags, and the bit-identity of the both-flags cell also rules out
-cuDNN nondeterminism, ``tf.data`` ``options.deterministic`` and the element
-``.shuffle()`` as contributors.
+run needs both flags. For the pipeline this probe measured, the bit-identity of
+the both-flags cell also rules out ``tf.data`` ``options.deterministic`` and the
+element ``.shuffle()`` as residual contributors; it says NOTHING about cuDNN
+kernel nondeterminism, because the probe was CPU-only, built no model and ran no
+GPU kernel.
 
 ``tests/test_datasets/test_multi_crop.py`` pins every half: the stateful
 serial guarantee that is real, the stream-not-per-element mechanism that scopes
