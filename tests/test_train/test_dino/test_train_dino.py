@@ -76,8 +76,12 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     # decode resolution, since decoding below the crop size would upsample every
     # view even further, which is the opposite of what the field is for.
     "source_image_size": ("--source-image-size", 128),            # default: None
-    "stateless_augmentation": ("--stateless-augmentation", True),  # default: False
-    "seed_training_stream": ("--seed-training-stream", True),      # default: False
+    # BooleanOptionalAction flags: the probe is False, so `_build_argv` emits the
+    # `--no-` token. Both defaults moved False -> True in plan-2026-08-02-93deeae2,
+    # which made the previous `True` probes VACUOUS -- and this table's own
+    # `test_probe_values_are_non_default` is what caught it.
+    "stateless_augmentation": ("--stateless-augmentation", False),  # default: True
+    "seed_training_stream": ("--seed-training-stream", False),      # default: True
     "variant": ("--variant", "tiny"),                             # default: small
     "patch_size": ("--patch-size", 8),                            # default: None
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
@@ -132,7 +136,11 @@ def _build_argv(spec: Dict[str, Tuple[str, Any]]) -> list:
     argv: list = []
     for _dest, (flag, value) in spec.items():
         if isinstance(value, bool):
-            argv.append(flag)
+            # A bool flag is `argparse.BooleanOptionalAction`, which owns BOTH
+            # `--x` and `--no-x` under ONE dest. Emitting the bare flag for a
+            # False probe would drive the value TRUE and silently assert the
+            # default -- the vacuity class this module exists to catch.
+            argv.append(flag if value else flag.replace("--", "--no-", 1))
         else:
             argv += [flag, str(value)]
     return argv
@@ -192,6 +200,35 @@ class TestCLIWiring:
             f"would pass even with the wiring line DELETED. Pick different values."
         )
 
+    def test_parser_defaults_agree_with_dataclass_defaults(self) -> None:
+        """A diverged pair is a SILENT no-op, and MEASURED to be invisible here.
+
+        During plan-2026-08-02-93deeae2 step 3 the `--teacher-temp-final` parser
+        default and the dataclass default were deliberately diverged (0.04 vs
+        0.07) as a RED-proof, and this whole module stayed GREEN. Nothing read
+        the dataclass default on the CLI path, so the divergence only surfaces
+        as a wrong number in a run nobody flagged -- and `SMOKE_OVERRIDES` only
+        fills a field the caller left at the PARSER default, so a diverged pair
+        also silently changes what `--smoke` applies to.
+        """
+        defaults = vars(trainer.parse_arguments([]))
+        fields = _config_fields()
+        diverged = []
+        for dest in FLAG_SPEC:
+            field = fields[_field_for(dest)]
+            if field.default is dataclasses.MISSING:
+                continue
+            if defaults[dest] != field.default:
+                diverged.append(
+                    f"{dest}: parser default {defaults[dest]!r} != "
+                    f"TrainingConfig.{_field_for(dest)} default {field.default!r}"
+                )
+        assert not diverged, (
+            "parser/dataclass default(s) disagree:\n  " + "\n  ".join(diverged)
+            + "\nEach is a SILENT divergence: the run's value depends on which "
+            "construction path it took, and SMOKE_OVERRIDES stops applying."
+        )
+
     def test_every_cli_value_reaches_the_config(self, tmp_path) -> None:
         """THE guard: parse a fully non-default argv, demand every field carry its value."""
         spec = _spec(tmp_path)
@@ -224,6 +261,39 @@ class TestCLIWiring:
         assert config.variant == "small"
         assert config.global_crop_size == 224
         assert config.experiment_name  # __post_init__ generates one
+
+
+class TestReproducibilityFlagDefaults:
+    """The shipped default is a REPRODUCIBLE run (plan-2026-08-02-93deeae2, D-004).
+
+    Both flags are `argparse.BooleanOptionalAction`. They are required TOGETHER
+    for bit-identical batches across processes (MEASURED, 2-process CPU-only sha1
+    over the first 3 batches of the real `build_dataset` -- either alone DIFFERS;
+    see research/2026_dino_ssl_measurements.md). That framing makes it easy to
+    wire them as one switch by accident, so the off-switches are asserted
+    INDEPENDENTLY below.
+    """
+
+    def test_both_default_on_in_the_dataclass_and_through_the_cli(self) -> None:
+        assert trainer.TrainingConfig().stateless_augmentation is True
+        assert trainer.TrainingConfig().seed_training_stream is True
+        config = trainer.config_from_args(trainer.parse_arguments([]))
+        assert config.stateless_augmentation is True
+        assert config.seed_training_stream is True
+
+    @pytest.mark.parametrize("off_flag,off_dest,other_dest", [
+        ("--no-stateless-augmentation", "stateless_augmentation", "seed_training_stream"),
+        ("--no-seed-training-stream", "seed_training_stream", "stateless_augmentation"),
+    ])
+    def test_each_off_switch_moves_only_its_own_flag(
+        self, off_flag: str, off_dest: str, other_dest: str
+    ) -> None:
+        config = trainer.config_from_args(trainer.parse_arguments([off_flag]))
+        assert getattr(config, off_dest) is False, f"{off_flag} did not turn {off_dest} off"
+        assert getattr(config, other_dest) is True, (
+            f"{off_flag} ALSO turned {other_dest} off -- the two flags are wired "
+            f"as one switch, which their 'both required together' framing invites"
+        )
 
 
 class TestSmokePreset:

@@ -105,14 +105,16 @@ flag                          what it buys
                               the 0.10 chance line. ``0`` disables it.
 ``--seed-training-stream``    Seeds the TRAINING stream's TFDS **file interleave**
                               with ``--seed`` (the k-NN bank's was already seeded,
-                              D-040). Default OFF.
+                              D-040). Default ON; ``--no-seed-training-stream``
+                              restores the unpinned file order.
 ``--stateless-augmentation``  Draws the multi-crop augmentation from
                               ``tf.random.stateless_uniform`` keyed on a
                               per-element counter instead of one shared
                               ``tf.random.Generator`` stream, which is the only
                               thing that makes the **augmentation** reproducible
                               under the shipped ``num_parallel_calls=AUTOTUNE``.
-                              Default OFF.
+                              Default ON; ``--no-stateless-augmentation``
+                              restores the shared-Generator behaviour.
 ============================  =================================================
 
 **THE RULE: ``--seed`` alone does NOT make two runs the same experiment. BOTH
@@ -131,9 +133,12 @@ different data. The bit-identity of the both-flags cell also rules out cuDNN
 nondeterminism, ``tf.data`` ``options.deterministic`` and the element
 ``.shuffle()`` as contributors.
 
-**Both default OFF, deliberately.** Each changes what every training batch
-CONTAINS, so switching one on mid-programme makes a run incomparable to every run
-measured without it. Moving either default is a MEASUREMENT, not a cleanup.
+**Both default ON as of plan-2026-08-02-93deeae2**, so a run with no flags is
+reproducible. They shipped OFF before that, for comparability; that comparability
+is now BROKEN ONCE, deliberately, and ``--no-seed-training-stream
+--no-stateless-augmentation`` restores it. Each flag changes what every training
+batch CONTAINS, so any run in ``results/`` predating this flip is not comparable
+to a default run today. See ``research/2026_dino_ssl_measurements.md``.
 
 Usage::
 
@@ -143,6 +148,7 @@ Usage::
 
     # a CONTROLLED arm: reproducible stream, comparable estimator, real step budget
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
+        # (both stream flags are ON by default now; spelled out here for the record)
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
         --seed-training-stream --stateless-augmentation \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
@@ -303,11 +309,26 @@ class TrainingConfig:
     # `num_parallel_calls=AUTOTUNE` (MEASURED at HEAD: two same-seed parallel
     # maps differ, maxdiff 1.5312).
     #
-    # DEFAULT-OFF, unlike D-004's control: this changes what every training
-    # batch CONTAINS, so turning it on mid-programme would make a run
-    # incomparable to `results/dino_smoke_step12/` and to every arm measured
-    # before it. Moving this default is a measurement, not a cleanup.
-    stateless_augmentation: bool = False
+    # DECISION plan-2026-08-02T132301-93deeae2/D-004
+    # DEFAULT-ON as of this plan (it shipped OFF under D-009 above, whose
+    # "default OFF for comparability" rationale is SUPERSEDED, not merely
+    # relaxed). A run with no flags is now REPRODUCIBLE out of the box.
+    # `--no-stateless-augmentation` restores the old behaviour, and with it
+    # comparability to `results/dino_smoke_step12/` and to every arm measured
+    # before this plan.
+    #
+    # This flag is NOT sufficient alone, and neither is `seed_training_stream`
+    # below: BOTH are required TOGETHER for bit-identical batches across
+    # processes. MEASURED (2-process CPU-only sha1 over the first 3 batches of
+    # the real `build_dataset`): either flag alone still DIFFERS; both together
+    # are bit-identical. Do not "simplify" by shipping one of them.
+    #
+    # The honest counter-argument, stated here because `plans/` is gitignored:
+    # `--stateless-augmentation` has only ever been exercised end-to-end in ONE
+    # plan's confirm/long matrices. The default path now depends on a code path
+    # with that much and no more exposure.
+    # Numbers, configs and all 9 confounds: research/2026_dino_ssl_measurements.md
+    stateless_augmentation: bool = True
 
     # DECISION plan-2026-08-01T195746-12a1f2db/D-011
     # Seed the TRAINING stream's TFDS file interleave, the way `build_knn_datasets`
@@ -317,19 +338,27 @@ class TrainingConfig:
     # same-seed runs interleave the TFDS shards differently and see a different
     # example ORDER from step 0.
     #
-    # Do NOT "simplify" this to always-on to match `build_knn_datasets`. The bank is
-    # a frozen probe -- reseeding it changes only which images the score is read
-    # against, and it was already unseeded-and-wrong. The TRAINING stream is
-    # different: pinning the file order changes what every batch contains from step 0
-    # onward, so a run with this on is not comparable to `results/dino_smoke_step12/`
-    # or to any arm measured before it. Default OFF for the same reason
-    # `stateless_augmentation` is: moving this default is a measurement, not a cleanup.
+    # DECISION plan-2026-08-02T132301-93deeae2/D-004
+    # DEFAULT-ON as of this plan (it shipped OFF under D-011 above; that "default
+    # OFF for comparability" rationale is SUPERSEDED). `--no-seed-training-stream`
+    # restores the old unpinned file interleave and with it comparability to
+    # `results/dino_smoke_step12/` and to every arm measured before this plan.
     #
-    # Do NOT pass `shuffle_files_seed=None` on the default path either. `build_dataset`
-    # omits the kwarg entirely so the default call is byte-for-byte the call it was
-    # before; the guard in tests/test_train/test_dino/test_train_dino.py asserts
-    # ABSENCE, not `None`.
-    seed_training_stream: bool = False
+    # Still NOT sufficient alone -- see `stateless_augmentation` above: BOTH flags
+    # are required TOGETHER for bit-identical batches across processes (MEASURED,
+    # 2-process CPU-only sha1 over the first 3 batches of the real `build_dataset`;
+    # either alone DIFFERS). research/2026_dino_ssl_measurements.md has the table.
+    #
+    # This is still NOT the same decision as `build_knn_datasets`' always-on seed.
+    # The bank is a frozen probe -- reseeding it changes only which images the score
+    # is read against. The TRAINING stream pins what every batch contains from step 0,
+    # which is why the off-switch exists and why the flip is recorded as a deliberate
+    # break rather than a cleanup.
+    #
+    # Do NOT pass `shuffle_files_seed=None` on the `--no-` path. `build_dataset` omits
+    # the kwarg ENTIRELY there (absence != None at the `ReadConfig` layer); the guard in
+    # tests/test_train/test_dino/test_train_dino.py asserts ABSENCE, not `None`.
+    seed_training_stream: bool = True
 
     # Model
     variant: str = "small"
@@ -589,8 +618,11 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
     source_size = config.source_image_size or config.global_crop_size
 
     # The stateless map fn takes `(index, image, label)`, so it goes in the
-    # INDEXED slot -- `build_raw_image_dataset` refuses both slots at once, and
-    # the default path below stays byte-for-byte the call it was before.
+    # INDEXED slot -- `build_raw_image_dataset` refuses both slots at once.
+    # DECISION plan-2026-08-02T132301-93deeae2/D-004
+    # As of this plan the INDEXED slot is the DEFAULT branch (the `element_map_fn`
+    # branch is now the `--no-stateless-augmentation` path). The dict-spread is
+    # unchanged and still correct; only which branch is the default has moved.
     map_fn_kwarg = (
         {"indexed_element_map_fn": map_fn}
         if config.stateless_augmentation
@@ -598,8 +630,15 @@ def build_dataset(config: TrainingConfig) -> Tuple[Any, int]:
     )
 
     # DECISION plan-2026-08-01T195746-12a1f2db/D-011
-    # Built as a dict so the DEFAULT call passes NO `shuffle_files_seed` at all,
+    # Built as a dict so that the no-seed call passes NO `shuffle_files_seed` at all,
     # rather than `shuffle_files_seed=None`. See `TrainingConfig.seed_training_stream`.
+    # DECISION plan-2026-08-02T132301-93deeae2/D-004
+    # D-011's wording above said "the DEFAULT call"; that is no longer the default
+    # call. After this plan the DEFAULT branch PASSES `shuffle_files_seed=config.seed`,
+    # and the empty-dict branch is the `--no-seed-training-stream` path. The spread
+    # still exists for exactly the original reason, which the flip did not change:
+    # absence of the kwarg is NOT the same as `shuffle_files_seed=None` at the
+    # `ReadConfig` layer, so the off-switch must omit it rather than pass `None`.
     stream_seed_kwarg = (
         {"shuffle_files_seed": config.seed} if config.seed_training_stream else {}
     )
@@ -1032,35 +1071,42 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "end-to-end (224 vs None, 2 seeds, controlled stream): NO "
                              "DIFFERENCE in k-NN top-1 (+0.0024). Must be >= "
                              "--global-crop-size")
-    parser.add_argument("--stateless-augmentation", action="store_true",
+    parser.add_argument("--stateless-augmentation",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="Draw the multi-crop augmentation from "
                              "tf.random.stateless_uniform keyed on a per-element "
                              "counter instead of one shared tf.random.Generator "
                              "stream. This is what makes --seed reproduce the "
                              "AUGMENTATION stream under the shipped AUTOTUNE map "
                              "(MEASURED at HEAD: two same-seed parallel maps "
-                             "differ, maxdiff 1.5312). REQUIRED TOGETHER WITH "
-                             "--seed-training-stream for a reproducible run: "
-                             "MEASURED across two processes, this flag ALONE still "
-                             "gives different batches; both together are bit-"
-                             "identical. Default OFF because it "
-                             "changes what every batch contains, so a run with it "
-                             "on is not comparable to the runs measured without it")
-    parser.add_argument("--seed-training-stream", action="store_true",
+                             "differ, maxdiff 1.5312). DEFAULT ON, so a run with "
+                             "no flags is reproducible. REQUIRED TOGETHER WITH "
+                             "--seed-training-stream: MEASURED across two "
+                             "processes, this flag ALONE still gives different "
+                             "batches; both together are bit-identical. "
+                             "--no-stateless-augmentation restores the old shared-"
+                             "Generator behaviour and with it comparability to any "
+                             "run in results/ measured before this default moved. "
+                             "Caveat: this path has only ever been exercised end-"
+                             "to-end in one plan's confirm/long matrices. See "
+                             "research/2026_dino_ssl_measurements.md")
+    parser.add_argument("--seed-training-stream",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="Seed the TRAINING stream's TFDS file interleave with "
                              "--seed, the way the k-NN memory bank already is "
                              "(D-040). Without it --seed fixes the measuring "
                              "instrument but not the data: `seed` reaches the "
                              "element shuffle and the augmentation, NOT the file "
                              "order, so two same-seed runs see a different example "
-                             "order from step 0. NOT SUFFICIENT ALONE: MEASURED "
-                             "across two processes, this flag by itself still gives "
-                             "different batches (the augmentation RNG is the "
-                             "residual source) -- pass --stateless-augmentation too. "
-                             "Default OFF because pinning the "
-                             "file order changes what every batch contains, so a "
-                             "run with it on is not comparable to the runs measured "
-                             "without it")
+                             "order from step 0. DEFAULT ON. NOT SUFFICIENT ALONE: "
+                             "MEASURED across two processes, this flag by itself "
+                             "still gives different batches (the augmentation RNG "
+                             "is the residual source) -- it needs "
+                             "--stateless-augmentation too. "
+                             "--no-seed-training-stream restores the unpinned file "
+                             "order and with it comparability to any run in "
+                             "results/ measured before this default moved. See "
+                             "research/2026_dino_ssl_measurements.md")
 
     # Model
     parser.add_argument("--variant", type=str, default="small", choices=list(VARIANTS))
