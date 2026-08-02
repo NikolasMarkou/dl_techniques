@@ -543,30 +543,89 @@ silent omission again.
    properly means touching a shared layer used across the repository.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
-9. **A reproducible augmentation stream under a PARALLEL `tf.data` map.**
-   `make_multi_crop_map_fn`'s `seed` seeds ONE shared `tf.random.Generator`, i.e. a
-   stream, not each element. MEASURED at seed 777 over 8 images: a serial `.map(fn)`
-   is bit-reproducible, while `.map(fn, num_parallel_calls=AUTOTUNE)` — the shipped
-   trainer's configuration — is not (two runs differ, maxdiff 1.5312). Making it real
-   needs `tf.random.stateless_*` keyed on a per-element counter, and the counter has to
-   come from `ds.enumerate()` placed AFTER `repeat()`, i.e. a change to
-   `src/train/energy_transformer/common.py`'s `build_raw_image_dataset` pipeline, which
-   every `src/train/` consumer shares. Until then `--seed` reproduces weight
-   initialization and shuffling but NOT the augmentation stream, and an A/B that assumes
-   identical data across two runs is unsound. The caveat is stated in the map fn's own
-   `seed:` docstring and pinned by `tests/test_datasets/test_multi_crop.py`.
-10. **Cropping local views from the ORIGINAL record rather than from a thumbnail.**
+9. **~~A reproducible augmentation stream under a PARALLEL `tf.data` map.~~ CLOSED —
+   shipped, opt-in, and it turned out to be a PRECONDITION, not a nicety.**
+   The defect was real: `make_multi_crop_map_fn`'s `seed` seeds ONE shared
+   `tf.random.Generator`, i.e. a stream, not each element, so under
+   `.map(fn, num_parallel_calls=AUTOTUNE)` — the shipped trainer's configuration —
+   two same-seed runs differ (MEASURED at seed 777 over 8 images, maxdiff 1.5312; a
+   serial `.map(fn)` is bit-reproducible). The fix now ships:
+   `make_stateless_multi_crop_map_fn` draws from `tf.random.stateless_uniform` keyed on
+   `(seed, per-draw counter, element index)`, the counter comes from `ds.enumerate()`
+   placed AFTER `repeat()` via `build_raw_image_dataset`'s `indexed_element_map_fn`
+   parameter, and `train_dino.py` opts in with **`--stateless-augmentation`**
+   (default OFF, because it changes what every batch CONTAINS and so makes a run
+   incomparable to every run measured without it).
+
+   **The measured consequence, which is stronger than the original item.** Two
+   processes, the real `train_dino.build_dataset`, sha1 of the first 3 batches:
+
+   | flags | batches across two processes |
+   |---|---|
+   | `--seed-training-stream` alone | **differ** (batch-0 mean 0.0999388 vs 0.0002119) |
+   | `--stateless-augmentation` alone | **differ** |
+   | **both together** | **bit-identical**, all 3 batches |
+
+   So `--seed` alone does NOT make two DINO runs comparable, and neither flag is
+   redundant: `--seed-training-stream` reaches the TFDS **file interleave**,
+   `--stateless-augmentation` reaches the **augmentation RNG**, and a controlled A/B
+   needs both. The bit-identity of the both-flags cell also rules out cuDNN
+   nondeterminism, `tf.data` `options.deterministic` and the element `.shuffle()` as
+   contributors. Pinned by `tests/test_datasets/test_multi_crop.py` and
+   `tests/test_train/test_energy_transformer/test_build_raw_image_dataset.py`.
+10. **Cropping local views from the ORIGINAL record rather than from a thumbnail —
+    the bounded remedy has now been RUN; the restructuring is still backlog.**
     `build_raw_image_dataset` resizes each record to `image_size` BEFORE the multi-crop
     `element_map_fn` runs, so with `image_size == global_crop_size` a "local crop of the
     source image" is a crop of an already-downsampled square. MEASURED at the smoke scale
     (`global_crop_size=96`, `local_scale=(0.05, 0.4)`, 2000 draws): local crop sides are
     19-69 px (mean 44) and are upsampled to 96 — 2.33x mean, 4.50x worst case — while 8 of
     the 10 (teacher, student) loss pairs carry a local student view. `train_dino.py`'s
-    `--source-image-size` is the bounded remedy (decode larger, crop, resize DOWN); its
-    default is deliberately left behaviour-preserving, so moving it is a measurement
-    someone still has to run. Cropping before the resize *and* before normalization would
-    restructure the shared pipeline and change the augmentation's value domain (D-025),
-    which is why it is a backlog item and not a patch.
+    `--source-image-size` is the bounded remedy (decode larger, crop, resize DOWN).
+
+    **It was run. Result: NO MEASURABLE DIFFERENCE.** `--source-image-size 224` vs the
+    `None` default, 2 seeds, each arm read against its OWN zero-step random-init control,
+    on a fully controlled stream (`--seed-training-stream --stateless-augmentation`):
+    effect **+0.0024** on the pre-registered endpoint (first evaluated epoch) and
+    **+0.0028** on the mean of the last 3 evaluated epochs — both an order of magnitude
+    inside the ±0.02 no-difference band.
+
+    **And the geometry, re-measured through the shipped `_random_resized_crop`
+    (N=2000 draws per source size).** At a 96 px source: local crop sides 21.4–61.0 px
+    (mean 44.1) → mean upsample **2.35x**, worst **4.50x**, **100%** of local views are
+    upsamples — this REPRODUCES the inherited 2.33x / 4.50x figures above, so those are
+    sound. At 224 px: sides 50.1–141.9 px (mean 102.9) → mean **1.006**, worst 1.92x, and
+    **39% of local views are still upsamples**. The earlier prediction that the mean
+    would fall *below* 1.0 is **FALSIFIED AS STATED** — it lands marginally above it.
+
+    **Read the null result precisely.** 224 px **mitigates** the thumbnail defect (2.3x
+    less mean interpolation, worst case 4.50x → 1.92x); it does **not** eliminate it.
+    So the no-difference verdict is NOT evidence that local-crop resolution is
+    irrelevant — it is evidence that a 2.3x reduction in interpolation buys no
+    measurable k-NN delta *at this scale*. Driving the mean genuinely below 1.0 needs a
+    larger source still, which is a different and more expensive run.
+
+    Still backlog: cropping before the resize *and* before normalization, which would
+    restructure the shared pipeline and change the augmentation's value domain (D-025).
+    That is why it remains an item and not a patch.
+
+> **Two measurement traps in the shipped defaults. Neither is a bug; both silently
+> produce a number that is not the number you think you are reading.**
+>
+> 1. **`--smoke` sets `max_steps=5`.** An unqualified `--smoke` "epoch" is 5 of its 295
+>    steps, so a `--smoke --epochs 40` run trains for 200 steps, not ~11 800. Any run
+>    meant to *train* rather than validate shapes must pass `--max-steps 100000` (or an
+>    explicit budget) alongside `--smoke`. This is not new: the `config.json` of the
+>    prior 40-epoch smoke artifact (`dino_smoke_step12`, under the gitignored run
+>    directory) already records `max_steps=100000`, i.e. that run needed the same
+>    workaround and nobody wrote it down.
+> 2. **`--smoke` also leaves `--knn-bank-batches 16 --knn-query-batches 8`** (512 bank
+>    images), while every historical k-NN number quoted for this trainer — including the
+>    0.2754–0.2949 zero-step control band in `knn_eval.py`'s docstring — was measured at
+>    **64 / 32** (2048 images). A k-NN top-1 over a 4x smaller bank is a **different
+>    estimator**, not a noisier reading of the same one, and it is not comparable to that
+>    band. Pass `--knn-bank-batches 64 --knn-query-batches 32` on anything you intend to
+>    compare against a historical figure.
 
 > **Training pipeline.** `src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the
 > trainable model, `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data
@@ -578,8 +637,8 @@ silent omission again.
 > ```
 >
 > `--smoke` pins a MEASURED shape-validation scale (`tiny`, 96px globals, 4 local crops,
-> `batch_size=32`, `dino_out_dim=4096`, a handful of steps; peak 1518.6 MiB of 10001 MiB
-> on an RTX 4070). That is **not** a paper reproduction. The trainer passes **no**
+> `batch_size=32`, `dino_out_dim=4096`, `max_steps=5` — see trap 1 above; peak 1518.6 MiB
+> of 10001 MiB on an RTX 4070). That is **not** a paper reproduction. The trainer passes **no**
 > `validation_data` — see § 5 Rule 1, which is the reason, not a preference.
 >
 > **Validation is `src/train/dino/knn_eval.py`.** `KNNEvalCallback` extracts FROZEN

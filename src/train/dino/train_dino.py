@@ -41,8 +41,24 @@ Scale
 -------------------------------------------------------------------------------
 ``--smoke`` pins the MEASURED shape-validation scale: ``variant=tiny``,
 ``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``, ``dino_out_dim=4096``,
-a handful of steps. On GPU 1 (RTX 4070) one full train step at that scale peaks at
+``max_steps=5``. On GPU 1 (RTX 4070) one full train step at that scale peaks at
 **1518.6 MiB of 10001 MiB**.
+
+**TRAP: ``--smoke`` sets ``max_steps=5``, so a ``--smoke`` "epoch" is 5 of its 295
+steps.** ``--smoke --epochs 40`` therefore trains for 200 steps, not ~11 800, and the
+resulting curve is not a training curve. Anything meant to TRAIN rather than validate
+shapes must pass ``--max-steps 100000`` (or an explicit budget) alongside ``--smoke``.
+This is not new: the ``config.json`` of the prior 40-epoch smoke artifact
+(``dino_smoke_step12``) already records ``max_steps=100000``, i.e. that run needed the
+same workaround and nobody wrote it down.
+
+**TRAP: ``--smoke`` also leaves ``knn_bank_batches=16`` / ``knn_query_batches=8``**
+(512 bank images), while every historical k-NN number for this trainer -- including the
+0.2754-0.2949 zero-step control band in `train.dino.knn_eval`'s docstring -- was
+measured at **64 / 32** (2048 images). A k-NN top-1 over a 4x smaller bank is a
+DIFFERENT ESTIMATOR, not a noisier reading of the same one. Pass
+``--knn-bank-batches 64 --knn-query-batches 32`` on anything you intend to compare
+against a historical figure.
 
 **How that number was obtained, because it is NOT reproducible by watching
 ``nvidia-smi`` during a run of this script.** It comes from a dedicated single-config
@@ -75,11 +91,61 @@ every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
 `knn_eval`'s module docstring carries the STOP thresholds (chance is 0.10 on
 imagenette's 10 classes).
 
+-------------------------------------------------------------------------------
+Making a run COMPARABLE: three flags, and the rule that BOTH stream flags are
+required
+-------------------------------------------------------------------------------
+============================  =================================================
+flag                          what it buys
+============================  =================================================
+``--random-init-repeats N``   DEFAULT-ON at 2. Runs the k-NN probe ``N`` times in
+                              ``on_train_begin``, BEFORE a single optimizer step,
+                              and writes ``<run_dir>/random_init_control.json``.
+                              Quote every k-NN delta against THAT, never against
+                              the 0.10 chance line. ``0`` disables it.
+``--seed-training-stream``    Seeds the TRAINING stream's TFDS **file interleave**
+                              with ``--seed`` (the k-NN bank's was already seeded,
+                              D-040). Default OFF.
+``--stateless-augmentation``  Draws the multi-crop augmentation from
+                              ``tf.random.stateless_uniform`` keyed on a
+                              per-element counter instead of one shared
+                              ``tf.random.Generator`` stream, which is the only
+                              thing that makes the **augmentation** reproducible
+                              under the shipped ``num_parallel_calls=AUTOTUNE``.
+                              Default OFF.
+============================  =================================================
+
+**THE RULE: ``--seed`` alone does NOT make two runs the same experiment. BOTH
+stream flags are required, and neither is redundant.** MEASURED at the data
+pipeline -- two separate PROCESSES, the real :func:`build_dataset`, sha1 of the
+first 3 batches::
+
+    --seed-training-stream  alone      49bf308a vs 4fbd3a6e   DIFFER
+                                       (batch-0 mean 0.0999388 vs 0.0002119)
+    --stateless-augmentation alone     e70e2ad2 vs 5f968198   DIFFER
+    BOTH                               2ce84c18 vs 2ce84c18   BIT-IDENTICAL
+
+The two flags reach two different unseeded sources -- the file interleave and the
+augmentation RNG -- so an A/B run without both is comparing models trained on
+different data. The bit-identity of the both-flags cell also rules out cuDNN
+nondeterminism, ``tf.data`` ``options.deterministic`` and the element
+``.shuffle()`` as contributors.
+
+**Both default OFF, deliberately.** Each changes what every training batch
+CONTAINS, so switching one on mid-programme makes a run incomparable to every run
+measured without it. Moving either default is a MEASUREMENT, not a cleanup.
+
 Usage::
 
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100 --gpu 1
+
+    # a CONTROLLED arm: reproducible stream, comparable estimator, real step budget
+    MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
+        --smoke --max-steps 100000 --epochs 60 --seed 42 \\
+        --seed-training-stream --stateless-augmentation \\
+        --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
 """
 
 import gc
@@ -200,6 +266,24 @@ class TrainingConfig:
     # (the teacher/student initialization, D-034). Changing the data pipeline in
     # the same run would make the result unattributable. Moving this default is a
     # measurement, not a cleanup.
+    #
+    # UPDATE -- THE MEASUREMENT HAS NOW BEEN RUN, and the default still does not move.
+    # `--source-image-size 224` vs `None`, 2 seeds, each arm read against its OWN
+    # zero-step random-init control, on a fully controlled stream
+    # (--seed-training-stream --stateless-augmentation): effect +0.0024 on the
+    # pre-registered endpoint and +0.0028 on the mean of the last 3 evaluated epochs --
+    # NO DIFFERENCE, an order of magnitude inside the +/-0.02 band.
+    #
+    # Read that null PRECISELY, because the geometry says why it is not the general
+    # claim it looks like. Re-measured through the shipped `_random_resized_crop`,
+    # N=2000 draws: at a 96 px source the mean local upsample is 2.35x, worst 4.50x,
+    # and 100% of local views are upsamples (this REPRODUCES the 2.33x/4.50x above);
+    # at 224 px the mean is 1.006 -- marginally ABOVE 1.0, NOT below, so the earlier
+    # "falls below 1.0" prediction is FALSIFIED AS STATED -- worst 1.92x, and 39% of
+    # local views are STILL upsamples. So 224 MITIGATES the thumbnail defect (2.3x
+    # less mean interpolation) rather than eliminating it, and the null is evidence
+    # that a 2.3x interpolation reduction buys no measurable k-NN delta AT THIS SCALE,
+    # NOT evidence that local-crop resolution is irrelevant.
     source_image_size: Optional[int] = None
 
     # DECISION plan-2026-08-01T195746-12a1f2db/D-009
@@ -842,8 +926,13 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "which means local crops are taken from an already-"
                              "downsampled thumbnail (MEASURED at global-crop-size=96: "
                              "local crop sides 19-69 px, upsampled 2.33x mean / 4.50x "
-                             "worst case). Set it larger (e.g. 224) to crop from a bigger "
-                             "source and resize DOWN. Must be >= --global-crop-size")
+                             "worst case, 100%% of local views). Set it larger (e.g. 224) "
+                             "to crop from a bigger source and resize DOWN: at 224 the "
+                             "mean upsample falls to 1.006 and 39%% of local views are "
+                             "still upsampled, i.e. MITIGATED not eliminated. MEASURED "
+                             "end-to-end (224 vs None, 2 seeds, controlled stream): NO "
+                             "DIFFERENCE in k-NN top-1 (+0.0024). Must be >= "
+                             "--global-crop-size")
     parser.add_argument("--stateless-augmentation", action="store_true",
                         help="Draw the multi-crop augmentation from "
                              "tf.random.stateless_uniform keyed on a per-element "
@@ -851,7 +940,11 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "stream. This is what makes --seed reproduce the "
                              "AUGMENTATION stream under the shipped AUTOTUNE map "
                              "(MEASURED at HEAD: two same-seed parallel maps "
-                             "differ, maxdiff 1.5312). Default OFF because it "
+                             "differ, maxdiff 1.5312). REQUIRED TOGETHER WITH "
+                             "--seed-training-stream for a reproducible run: "
+                             "MEASURED across two processes, this flag ALONE still "
+                             "gives different batches; both together are bit-"
+                             "identical. Default OFF because it "
                              "changes what every batch contains, so a run with it "
                              "on is not comparable to the runs measured without it")
     parser.add_argument("--seed-training-stream", action="store_true",
@@ -861,7 +954,11 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "instrument but not the data: `seed` reaches the "
                              "element shuffle and the augmentation, NOT the file "
                              "order, so two same-seed runs see a different example "
-                             "order from step 0. Default OFF because pinning the "
+                             "order from step 0. NOT SUFFICIENT ALONE: MEASURED "
+                             "across two processes, this flag by itself still gives "
+                             "different batches (the augmentation RNG is the "
+                             "residual source) -- pass --stateless-augmentation too. "
+                             "Default OFF because pinning the "
                              "file order changes what every batch contains, so a "
                              "run with it on is not comparable to the runs measured "
                              "without it")
@@ -960,11 +1057,14 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     # Runtime
     parser.add_argument("--seed", type=int, default=42,
                         help="Seeds weight initialization, dataset shuffling and the "
-                             "multi-crop generator. It does NOT make a run bit-"
-                             "reproducible: the multi-crop transform's seed reproduces a "
-                             "SERIAL .map() only, and this pipeline uses "
-                             "num_parallel_calls=AUTOTUNE (MEASURED: parallel runs at the "
-                             "same seed differ, maxdiff 1.5312). See "
+                             "multi-crop generator. ON ITS OWN it does NOT make a run "
+                             "bit-reproducible: the stateful multi-crop transform's seed "
+                             "reproduces a SERIAL .map() only and this pipeline uses "
+                             "num_parallel_calls=AUTOTUNE (maxdiff 1.5312), and the TFDS "
+                             "file interleave is unseeded. Add BOTH "
+                             "--seed-training-stream AND --stateless-augmentation and two "
+                             "same-seed processes produce BIT-IDENTICAL batches "
+                             "(MEASURED); either flag alone is not enough. See "
                              "dl_techniques/datasets/vision/multi_crop.py's module "
                              "docstring")
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")

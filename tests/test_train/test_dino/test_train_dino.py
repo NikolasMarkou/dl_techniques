@@ -375,8 +375,12 @@ class TestConfigValidation:
         """D-011: the half `TestCLIWiring` cannot see -- config -> the actual call.
 
         `build_knn_datasets` seeds the k-NN bank's TFDS file interleave (D-040) but
-        `build_dataset` does not seed the TRAINING stream's, so two same-seed runs
-        share the measuring instrument and NOT the data they are trained on.
+        `build_dataset` does not seed the TRAINING stream's BY DEFAULT, so two
+        same-seed runs share the measuring instrument and NOT the data they are
+        trained on. This flag closes that source -- and only that source: MEASURED
+        across two processes, this flag ALONE still yields different batches (the
+        augmentation RNG is the residual), so a reproducible run needs it TOGETHER
+        with `--stateless-augmentation`. Neither is redundant.
 
         The `False` arm is the non-vacuity control, and it asserts ABSENCE rather
         than `None`: `build_raw_image_dataset` is shared by 6 other `src/train/`

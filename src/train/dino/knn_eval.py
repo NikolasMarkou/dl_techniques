@@ -92,20 +92,36 @@ draws before). That fixes reproducibility; it does NOT shrink the band.
 Reading rules that follow from the measurement:
 
 * Two runs at the SAME ``--seed`` now share a bank, i.e. the same MEASURING INSTRUMENT.
-  They do NOT share the data they were trained on: `train_dino.build_dataset` (the
-  TRAINING pipeline) passes only ``seed=``, never ``shuffle_files_seed=``, so its TFDS
-  file interleave is still unseeded, and per D-035 the augmentation stream is
-  non-reproducible under ``num_parallel_calls=AUTOTUNE`` regardless. So a difference
-  between two same-seed runs is a difference in the model AS TRAINED ON A DIFFERENT
-  DATA STREAM -- it is no longer confounded by the bank, which is strictly less
-  confounding, not none. Two runs at DIFFERENT seeds share neither, and a ~0.02 gap
-  between them is expected from the bank alone.
+  **By default they still do NOT share the data they were trained on**, and that is
+  now FIXABLE rather than merely a caveat. Two unseeded sources had to be closed, and
+  MEASURED across two PROCESSES (real `train_dino.build_dataset`, sha1 of the first 3
+  batches) NEITHER is sufficient alone::
+
+      --seed-training-stream   alone   49bf308a vs 4fbd3a6e   DIFFER
+      --stateless-augmentation alone   e70e2ad2 vs 5f968198   DIFFER
+      BOTH                             2ce84c18 vs 2ce84c18   BIT-IDENTICAL
+
+  ``--seed-training-stream`` seeds `train_dino.build_dataset`'s TFDS file interleave;
+  ``--stateless-augmentation`` replaces the shared ``tf.random.Generator`` stream with
+  ``tf.random.stateless_uniform`` keyed per element, which is what survives
+  ``num_parallel_calls=AUTOTUNE`` (D-035). **Without BOTH, a difference between two
+  same-seed runs is a difference in the model AS TRAINED ON A DIFFERENT DATA STREAM**
+  -- no longer confounded by the bank, which is strictly less confounding, not none.
+  With both, the two runs are the same experiment and a difference is attributable.
+  Two runs at DIFFERENT seeds share neither, and a ~0.02 gap between them is expected
+  from the bank alone.
 * Every `dino_knn_top1_*` produced BEFORE this seeding -- including the runs in
   ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
   band, whatever the seed.
 * Quote the number against a zero-step random-init control at the same seed, never
   against the 0.10 chance line: an UNTRAINED ViT already scores ~0.28 on imagenette here,
   so "3x chance" is mostly architecture, not training.
+* **The band above is a band for ONE estimator: bank 64 / query 32 (2048 images).**
+  ``train_dino.py --smoke`` leaves ``knn_bank_batches=16`` / ``knn_query_batches=8``
+  (512 images). A k-NN top-1 over a 4x smaller bank is a DIFFERENT ESTIMATOR, not a
+  noisier reading of the same one, and it is NOT comparable to the 0.2754-0.2949
+  control band above. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` on any run
+  whose number you intend to read against a historical figure.
 
 -------------------------------------------------------------------------------
 The ZERO-OPTIMIZER-STEP control this callback now produces for itself
@@ -118,17 +134,33 @@ baseline. :meth:`KNNEvalCallback.on_train_begin` closes that: given a
 times BEFORE ``fit()`` performs a single update, and writes per-repeat values plus
 min/max/mean/range for every :attr:`~KNNEvalCallback.log_keys` entry to that JSON.
 
+The trainer points that at **``<run_dir>/random_init_control.json``**, a sibling of
+``config.json``. It is a SEPARATE ARTIFACT, not a CSV row, and deliberately so (D-004):
+`keras.callbacks.CSVLogger` appends a row per ``on_epoch_end`` ONLY, so a key written at
+``on_train_begin`` would reach no row at all, and mutating ``logs`` before epoch 0 is the
+one place that can disturb the fieldname freeze every DINO diagnostic column depends on.
+The separate file also keeps the provenance visible: the control is not an epoch, and the
+epoch-0 CSV row is POST-one-epoch -- a confusion this repo has already made.
+
 It is DEFAULT-ON at ``random_init_repeats=2`` in the trainer (``--random-init-repeats 0``
 disables it) because the measured failure mode of this codebase is quoting a k-NN delta
 with no control at all, and two feature extractions cost seconds against runs measured in
 tens of minutes.
 
-**The JSON's ``repeats_are_independent`` field is MEASURED, not assumed.** The trainer
+**HONEST CAVEAT, and it is the reason the JSON carries a
+``repeats_are_independent`` field at all: the repeats are NOT independent.** The trainer
 ``.take(n).cache()``s both probe datasets on purpose (the same samples every epoch), so
-re-iterating them across repeats replays the cache and the repeats are BIT-IDENTICAL --
-a spread of exactly 0.0 that says the instrument is deterministic at a fixed seed, NOT
-that the probe is noise-free across seeds. The field records which case a run was in, by
-fingerprinting the extracted bank rather than by trusting this paragraph.
+re-iterating them across repeats replays the cache and the repeats are BIT-IDENTICAL.
+MEASURED: two repeats over a cached bank produced the identical fingerprint and a k20
+range of exactly **0.0**.
+
+**Do not read that 0.0 as a noise estimate.** It says the instrument is deterministic at
+a fixed seed -- which is what ``shuffle_files_seed`` bought (D-040) -- NOT that the probe
+is noise-free. The genuine band lives ACROSS SEEDS and is not measurable from inside one
+run; the 0.2754-0.2949 band above is what it looks like. The field records which case a
+run was in by FINGERPRINTING the extracted bank, rather than by trusting this paragraph;
+so a within-run range of 0.0 alongside ``repeats_are_independent: false`` is the expected,
+correct output, and a spread reported without that flag would be a FAKE spread.
 
 -------------------------------------------------------------------------------
 Two things about this callback that are load-bearing, not cosmetic

@@ -78,6 +78,24 @@ a larger image and then resized DOWN. ``train_dino.py``'s ``source_image_size``
 config field does exactly that (its default preserves the behaviour measured
 above; see that field's documentation for why the default was not moved).
 
+**Re-measured at BOTH source sizes through this module's own
+``_random_resized_crop`` (N=2000 draws, ``out_size=96``), because the remedy has
+now been run end-to-end**::
+
+    source  96 px: local side 21.4-61.0 px (mean 44.1) -> 2.35x mean, 4.50x worst,
+                   100% of local views upsampled   [reproduces the table above]
+    source 224 px: local side 50.1-141.9 px (mean 102.9) -> 1.006 mean, 1.92x worst,
+                   39% of local views STILL upsampled
+
+So a 224 px source **MITIGATES** this defect -- 2.3x less mean interpolation --
+but does NOT eliminate it, and the mean lands marginally ABOVE 1.0, not below
+(an earlier prediction that it would fall below 1.0 is FALSIFIED as stated).
+The matching end-to-end A/B (224 vs the default, 2 seeds, each arm read against
+its own zero-step control, on a reproducible stream) found **NO DIFFERENCE** in
+k-NN top-1 (+0.0024). Read that as "a 2.3x interpolation reduction buys no
+measurable k-NN delta at the smoke scale", NOT as "crop resolution does not
+matter" -- 39% of local views are still interpolated in the treated arm.
+
 Augmentations: what is implemented, and what is NOT
 ---------------------------------------------------
 The paper's recipe is RandomResizedCrop, horizontal flip, colour jitter
@@ -131,7 +149,9 @@ MEASURED at HEAD, same seed (777), same 8 source images, ``global_crop_size=96``
     parallel .map(fn, AUTOTUNE) x2       identical = False   maxdiff 1.5312
     serial vs parallel                   identical = False   maxdiff 1.5908
 
-**So two runs of ``train_dino.py --seed 42`` see DIFFERENT augmentation streams.**
+**So two runs of ``train_dino.py --seed 42`` see DIFFERENT augmentation streams**
+(unless they pass ``--stateless-augmentation``, which routes them through the
+alternative below).
 The seed still reproduces weight initialization, shuffling order and every other
 ``set_seeds``-governed source; it does not reproduce this transform's randomness
 in the trainer's configuration. Any A/B that assumes bit-identical data between
@@ -156,6 +176,20 @@ enumeration is supplied by ``build_raw_image_dataset``'s
 ``indexed_element_map_fn`` parameter in
 ``src/train/energy_transformer/common.py``; ``train_dino.py`` opts in with
 ``--stateless-augmentation``.
+
+**MEASURED end-to-end, and it is NOT sufficient on its own.** Two separate
+PROCESSES building the real ``train_dino.build_dataset``, sha1 of the first 3
+batches::
+
+    --stateless-augmentation alone     e70e2ad2 vs 5f968198   DIFFER
+    --seed-training-stream   alone     49bf308a vs 4fbd3a6e   DIFFER
+    BOTH                               2ce84c18 vs 2ce84c18   BIT-IDENTICAL
+
+This transform is only ONE of the two unseeded sources; the other is the TFDS
+file interleave, which ``--seed-training-stream`` closes. A reproducible DINO
+run needs both flags, and the bit-identity of the both-flags cell also rules out
+cuDNN nondeterminism, ``tf.data`` ``options.deterministic`` and the element
+``.shuffle()`` as contributors.
 
 ``tests/test_datasets/test_multi_crop.py`` pins every half: the stateful
 serial guarantee that is real, the stream-not-per-element mechanism that scopes
