@@ -6,9 +6,9 @@ trainers** (`train_classification.py` x2, `train_masked_completion.py` x2,
 `train_dino.py` x3). The change that motivated the module — an
 `indexed_element_map_fn` that moves `.repeat()` before the element map and
 inserts an `.enumerate()` — alters the pipeline SHAPE, not just a parameter, so
-the DEFAULT-OFF path needs a guard that can see a shape change.
+the then-DEFAULT-OFF path needs a guard that can see a shape change.
 
-Three things here are load bearing:
+Four things here are load bearing:
 
 1. **`TestDefaultOffIsUnchanged` compares against a REFERENCE pipeline built by
    hand in this file**, in the exact pre-change order (`shuffle` -> `normalize`
@@ -26,9 +26,78 @@ Three things here are load bearing:
    that restarts each epoch freezes the augmentation per image, which is the
    failure D-035 RED-proved wrong; `test_the_counter_keeps_climbing_across_
    epochs` is the only thing here that can tell the two apart.
+4. **`test_a_file_order_seed_composes_with_an_indexed_map_fn`** covers the
+   combination the DINO trainer now runs BY DEFAULT (see the inventory below).
+   Read its docstring for what it does and does not reach.
 
 Every dataset below is `cifar10`, which `build_raw_image_dataset` builds
 IN-MEMORY from `keras.datasets` — no TFDS, no network, no spinning disk.
+
+---
+
+## The non-DINO impact audit (plan-2026-08-02T132301-93deeae2 step 9)
+
+Recorded HERE rather than in a plan directory because `plans/` is gitignored:
+after a fresh checkout this docstring is the only surviving copy.
+
+**The `indexed_element_map_fn=None` path is unchanged STRUCTURALLY, not merely
+measured-equal.** Commit `5f31ad3a` added a leading `if indexed_element_map_fn
+is not None:` branch and turned the pre-existing `if is_training:` tail into
+`elif is_training:`, touching nothing inside either pre-existing branch body.
+Python's `elif` can only divert control flow when the new leading condition is
+true, so at `indexed_element_map_fn=None` the `elif is_training / else` pair
+evaluates exactly as the old `if / else` did. The byte-identity measurements
+(this module's `TestDefaultOffIsUnchanged`, and the 56-array / 414,832-value
+worktree comparison in that commit's message) AGREE with that reading; they are
+not what establishes it.
+
+**No call site can route into the new branch by accident.**
+`indexed_element_map_fn` sits after the `*` in the signature
+(`common.py:88-102`), i.e. it is keyword-only, so no positional call — however
+many arguments it passes — can ever land in that slot.
+
+**Call-site inventory, re-derived at plan-2026-08-02T132301-93deeae2 step 9.**
+Still 7 invocations across 3 trainers. Line numbers drift; the enclosing symbol
+is the durable citation:
+
+| # | File / enclosing symbol | Split | Relevant kwargs |
+|---|---|---|---|
+| 1 | `train_masked_completion.py` `build_datasets` | train | `element_map_fn=map_fn`, `augment`, `seed` |
+| 2 | `train_masked_completion.py` `build_datasets` | val | `element_map_fn=map_fn`, `seed`, `is_training=False` |
+| 3 | `train_classification.py` `build_datasets` | train | `augment`, `seed` (no map fn) |
+| 4 | `train_classification.py` `build_datasets` | val | `seed`, `is_training=False` (no map fn) |
+| 5 | `train_dino.py` `build_dataset` | train | `augment=False`, `seed`, `**map_fn_kwarg`, `**stream_seed_kwarg` |
+| 6 | `train_dino.py` `build_knn_datasets` | bank | `augment=False`, `seed`, `shuffle_files_seed=config.seed` |
+| 7 | `train_dino.py` `build_knn_datasets` | query | `seed`, `is_training=False` (no map fn) |
+
+Sites 1-4, 6 and 7 pass every argument EXPLICITLY — no `**` spread — and the
+string `indexed_element_map_fn` does not occur anywhere in
+`train_masked_completion.py` or `train_classification.py`. Those six cannot
+reach the new branch at any flag setting; only site 5's `map_fn_kwarg` dict can
+name that slot.
+
+**The old "all 7 sites are non-indexed at defaults" sentence is now FALSE and
+must not be reinstated.** `plan-2026-08-02T132301-93deeae2` step 4 flipped
+`TrainingConfig.stateless_augmentation` to `True`, so site 5 takes the INDEXED
+branch BY DEFAULT; `--no-stateless-augmentation` is the off-switch back to
+`element_map_fn`. `seed_training_stream` flipped to `True` in the same step, so
+site 5 also passes `shuffle_files_seed=config.seed` by default — which is why
+that pairing gets a test below.
+
+**Three latent hazards for a FUTURE caller**, none of them a defect today:
+
+1. The `is_training=False` refusal (`common.py:181-190`) is a hard stop with no
+   fallback. A caller wanting a reproducible EVAL-time augmentation cannot get
+   one through this seam and needs a different mechanism — relaxing the guard
+   would reintroduce the frozen-per-image failure D-035 RED-proved wrong.
+2. `_call_indexed`'s nested-tuple unpacking heuristic
+   (`len(element) == 1 and isinstance(element[0], tuple)`, `common.py:304-307`)
+   is untested against anything but a 2-tuple `(image, label)`, which is all any
+   of the 7 sites produces. A `dict` element, or a 3+-element flat tuple, could
+   misroute the unpacking silently rather than raise.
+3. `shuffle_files_seed` together with `indexed_element_map_fn` — closed by
+   `test_a_file_order_seed_composes_with_an_indexed_map_fn`, within the limits
+   that test's own docstring states.
 """
 
 from typing import Any, List, Tuple
@@ -251,4 +320,65 @@ class TestIndexedElementMapFn:
         # Non-vacuity: the window really does straddle the epoch boundary, so
         # the monotonicity above is a claim about epoch 2 and not about a
         # comfortable stretch in the middle of epoch 1.
+        assert counters[-1] >= num_examples > counters[0]
+
+    def test_a_file_order_seed_composes_with_an_indexed_map_fn(self) -> None:
+        """`shuffle_files_seed` + `indexed_element_map_fn`, the DINO default.
+
+        `train_dino.py`'s `build_dataset` passes BOTH whenever
+        `stateless_augmentation` and `seed_training_stream` are on, which since
+        plan-2026-08-02T132301-93deeae2 step 4 is the shipped default. No test
+        had ever driven the two kwargs together.
+
+        WHAT THIS COVERS. That the two compose at all — neither refusal in
+        `common.py:172-190` fires, and the `.enumerate()`-after-`.repeat()`
+        counter still runs monotonically across the epoch boundary with a file
+        seed also set. A future refusal or reordering coupling the two would
+        land here.
+
+        WHAT THIS DOES NOT COVER. `shuffle_files_seed` only reaches
+        `tfds.ReadConfig(shuffle_seed=...)` on the IMAGENETTE branch; on the
+        in-memory cifar10 branch used throughout this module it is accepted and
+        then never read. So this test cannot observe the file interleave. It
+        asserts that inertness POSITIVELY (the emitted elements match the
+        no-file-seed build) rather than pretending to more reach than it has —
+        an imagenette version would need TFDS records on disk, which no test in
+        this module depends on. The file-order effect itself is measured in
+        `train_dino.py`'s `build_knn_datasets` docstring (D-040).
+        """
+        with_seed, _, _ = build_raw_image_dataset(
+            "cifar10", IMAGE_SIZE, BATCH_SIZE, is_training=True, augment=False,
+            indexed_element_map_fn=_indexed_pair_map_fn, seed=SEED,
+            shuffle_files_seed=SEED)
+        without_seed, _, _ = build_raw_image_dataset(
+            "cifar10", IMAGE_SIZE, BATCH_SIZE, is_training=True, augment=False,
+            indexed_element_map_fn=_indexed_pair_map_fn, seed=SEED)
+
+        for index, (a, b) in enumerate(
+                zip(_take(with_seed, 3), _take(without_seed, 3))):
+            np.testing.assert_array_equal(a, b, err_msg=(
+                f"batch {index}: `shuffle_files_seed` changed the cifar10 "
+                f"stream. It must reach ONLY the TFDS file interleave; if it "
+                f"starts affecting the in-memory branch, this test's stated "
+                f"coverage boundary is wrong, not just its assertion."
+            ))
+
+        counting_ds, num_examples, _ = build_raw_image_dataset(
+            "cifar10", IMAGE_SIZE, BATCH_SIZE, is_training=True, augment=False,
+            indexed_element_map_fn=_index_reporting_map_fn, seed=SEED,
+            shuffle_files_seed=SEED)
+        steps_per_epoch = num_examples // BATCH_SIZE
+        counters = np.concatenate(
+            _take(counting_ds.skip(steps_per_epoch - 2), 4))
+        expected_first = (steps_per_epoch - 2) * BATCH_SIZE
+        np.testing.assert_array_equal(
+            counters,
+            np.arange(expected_first, expected_first + 4 * BATCH_SIZE),
+            err_msg=(
+                "the per-element counter stops running monotonically across "
+                "the epoch boundary once `shuffle_files_seed` is also passed. "
+                "The two knobs are supposed to be independent -- this is the "
+                "combination the DINO trainer runs by default."
+            ),
+        )
         assert counters[-1] >= num_examples > counters[0]
