@@ -83,7 +83,7 @@ FLAG_SPEC: Dict[str, Tuple[str, Any]] = {
     "dino_out_dim": ("--dino-out-dim", 4096),                     # default: 65536
     "student_temp": ("--student-temp", 0.2),                      # default: 0.1
     "teacher_temp": ("--teacher-temp", 0.05),                     # default: 0.04
-    "teacher_temp_final": ("--teacher-temp-final", 0.09),         # default: 0.07
+    "teacher_temp_final": ("--teacher-temp-final", 0.09),         # default: 0.04
     "teacher_temp_warmup_epochs": ("--teacher-temp-warmup-epochs", 7),   # default: 30
     "center_momentum": ("--center-momentum", 0.95),               # default: 0.9
     "ema_decay_start": ("--ema-decay-start", 0.99),               # default: 0.996
@@ -285,6 +285,52 @@ class TestEMAWarmupResolution:
     def test_an_explicit_step_count_wins(self) -> None:
         assert trainer.resolve_ema_warmup_steps(
             trainer.TrainingConfig(ema_warmup_steps=11), steps_per_epoch=295) == 11
+
+
+class TestShippedTeacherTemperature:
+    """The `teacher_temp_final = 0.04` default (D-003) and its CONSEQUENCE."""
+
+    def test_the_shipped_default_is_the_measured_value(self) -> None:
+        """The improved arm ran `--teacher-temp-final 0.04`; the default now matches it.
+
+        Note what this does NOT claim: no temp-only arm was ever run at 60 epochs, so
+        this is "the value the measured PAIR used", not "the better value".
+        """
+        assert trainer.TrainingConfig().teacher_temp_final == 0.04
+
+    def test_teacher_temp_schedule_is_constant_at_shipped_defaults(self) -> None:
+        """The (c) claim, pinned mechanically instead of as a comment.
+
+        With `teacher_temp_final == teacher_temp` the linear ramp's delta is exactly
+        zero, so `teacher_temp_warmup_epochs` scales a term multiplied by zero and the
+        temperature never moves. This drives the REAL `create_teacher_temp_callback` --
+        an uncompiled `DINOLoss` is enough, no model, no dataset, no GPU -- so it pins
+        the shipped wiring, not a re-derivation of the schedule.
+        """
+        from dl_techniques.losses.dino_loss import DINOLoss
+
+        config = trainer.TrainingConfig()
+        loss = DINOLoss(out_dim=8)
+        callback = trainer.create_teacher_temp_callback(config, loss)
+
+        callback.on_epoch_begin(0)
+        at_epoch_0 = float(loss.teacher_temp)
+        # Well past the horizon: the ramp would have completed long ago if it moved.
+        callback.on_epoch_begin(config.teacher_temp_warmup_epochs + 5)
+        after_horizon = float(loss.teacher_temp)
+
+        assert at_epoch_0 == pytest.approx(config.teacher_temp), (
+            f"epoch 0 gave {at_epoch_0}, expected the start temperature "
+            f"{config.teacher_temp} -- the schedule is not wired to `teacher_temp`."
+        )
+        assert after_horizon == at_epoch_0, (
+            f"teacher_temp moved {at_epoch_0} -> {after_horizon} past the "
+            f"{config.teacher_temp_warmup_epochs}-epoch horizon. The shipped defaults are "
+            f"supposed to make the schedule CONSTANT, which is what makes "
+            f"`teacher_temp_warmup_epochs` an inert knob (see the D-003 field comment). "
+            f"If this fires, `teacher_temp_final` no longer equals `teacher_temp` and "
+            f"BOTH help strings' inertness claim is now false."
+        )
 
 
 # ---------------------------------------------------------------------------

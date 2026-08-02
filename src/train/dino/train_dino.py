@@ -339,8 +339,37 @@ class TrainingConfig:
     # Loss
     student_temp: float = 0.1
     teacher_temp: float = 0.04  # start of the warmup
-    teacher_temp_final: float = 0.07  # end of the warmup (paper: 0.04 -> 0.07)
-    teacher_temp_warmup_epochs: int = 30
+    # DECISION plan-2026-08-02T132301-93deeae2/D-003
+    # Ships at 0.04, i.e. EQUAL to `teacher_temp` above. Four facts, none optional:
+    #
+    # (a) Only the PAIR (`ema_warmup_epochs=1.0` -- the 295-step teacher freeze -- TOGETHER
+    #     with `teacher_temp_final=0.04`) has a 60-epoch IMPROVED verdict: 2 seeds, smoke
+    #     scale, controlled (bit-identical) stream, imagenette, GPU 1. There is NO
+    #     temp-only arm at 60 epochs. Nothing measured says 0.04 beats 0.07 on its own.
+    # (b) The teacher-temp arm ALONE was CLEARED at the pre-registered epoch-0 endpoint --
+    #     it is structurally inert there, because `create_teacher_temp_callback` assigns
+    #     only via `on_epoch_begin`, so it returned an EXACTLY-ZERO null at both seeds --
+    #     and was AMBIGUOUS on the exploratory last-3-epochs endpoint, where its effect
+    #     SHRANK from +0.0518 to +0.0387 once the training stream was controlled. It was
+    #     shipped into the improved arm against that matrix's own verdict label,
+    #     "must be confirmed, not shipped".
+    # (c) `teacher_temp_final == teacher_temp` makes the linear temp schedule CONSTANT, so
+    #     `teacher_temp_warmup_epochs` below is an INERT knob at the shipped defaults.
+    #     Mechanism, not belief: `create_teacher_temp_callback` builds
+    #     `linear_ema_schedule(decay_start=teacher_temp, decay_end=teacher_temp_final,
+    #     total_steps=teacher_temp_warmup_epochs)`, which returns
+    #     `decay_start + (decay_end - decay_start) * progress`. With the two endpoints
+    #     equal that delta is exactly 0.0, so `total_steps` only scales a term multiplied
+    #     by zero. Pinned by `test_teacher_temp_schedule_is_constant_at_shipped_defaults`.
+    # (d) This DEPARTS from the DINO paper's `0.04 -> 0.07` teacher-temperature warmup.
+    #     Anyone reproducing the paper recipe must pass `--teacher-temp-final 0.07`, which
+    #     also makes `teacher_temp_warmup_epochs` live again.
+    #
+    # Full evidence, including the confounds and the open EMA-vs-temp attribution
+    # question: `research/2026_dino_ssl_measurements.md` (section 8.4). See decisions.md
+    # D-003 and D-007 (the user ruling that shipped it).
+    teacher_temp_final: float = 0.04  # end of the warmup (paper: 0.04 -> 0.07)
+    teacher_temp_warmup_epochs: int = 30  # INERT at the shipped defaults -- see (c) above
     center_momentum: float = 0.9
 
     # Teacher EMA
@@ -1044,9 +1073,32 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--student-temp", type=float, default=0.1)
     parser.add_argument("--teacher-temp", type=float, default=0.04,
                         help="Teacher temperature at epoch 0 (start of the warmup)")
-    parser.add_argument("--teacher-temp-final", type=float, default=0.07,
-                        help="Teacher temperature after the warmup")
-    parser.add_argument("--teacher-temp-warmup-epochs", type=int, default=30)
+    parser.add_argument(
+        "--teacher-temp-final", type=float, default=0.04,
+        help="Teacher temperature after the warmup. Default 0.04 EQUALS "
+             "--teacher-temp, i.e. no warmup at all. (a) Only the PAIR "
+             "(--ema-warmup-epochs 1.0, the 295-step freeze, TOGETHER with this 0.04) "
+             "has a 60-epoch IMPROVED verdict, at 2 seeds, smoke scale, controlled "
+             "stream (plan-2026-08-01T195746-12a1f2db); no temp-only arm was ever run "
+             "at 60 epochs. (b) The teacher-temp arm ALONE was CLEARED at the "
+             "pre-registered epoch-0 endpoint -- structurally inert there, since the "
+             "schedule callback assigns only on_epoch_begin, and it returned an "
+             "exactly-zero null at both seeds -- AMBIGUOUS on the exploratory "
+             "last-3-epochs endpoint, and its exploratory effect SHRANK from +0.0518 to "
+             "+0.0387 once the training stream was controlled; it shipped into the "
+             "improved arm against that matrix's own 'must be confirmed, not shipped' "
+             "label. (c) Setting this equal to --teacher-temp makes the linear schedule "
+             "CONSTANT, which makes --teacher-temp-warmup-epochs an INERT knob. "
+             "(d) This DEPARTS from the DINO paper's 0.04 -> 0.07 warmup: to reproduce "
+             "the paper recipe pass --teacher-temp-final 0.07. Full evidence: "
+             "research/2026_dino_ssl_measurements.md")
+    parser.add_argument(
+        "--teacher-temp-warmup-epochs", type=int, default=30,
+        help="Epoch horizon of the linear --teacher-temp -> --teacher-temp-final ramp. "
+             "INERT AT THE SHIPPED DEFAULTS: the two endpoints are both 0.04, so the "
+             "schedule is constant and this value changes nothing. It becomes live again "
+             "only when --teacher-temp-final differs from --teacher-temp (e.g. the paper "
+             "recipe, --teacher-temp-final 0.07)")
     parser.add_argument("--center-momentum", type=float, default=0.9)
 
     # Teacher EMA
