@@ -17,73 +17,74 @@ teacher-temperature warmup   a stock ``LambdaCallback`` -> ``set_teacher_temp``
 **No custom ``train_step``. No bespoke training loop.** (`src/train/clip/train_clip.py`'s
 hand-rolled ``fit()`` is undocumented drift, not a template.)
 
+This docstring is the OPERATING MANUAL: what to run, what never to pass, which shipped
+defaults silently change what you measure. It does NOT carry the evidence -- the per-flag
+reference table and the headline result are in ``src/dl_techniques/models/dino/README.md``
+§ 6 (cited below as "README"), and the measurement record behind every number either file
+quotes is ``research/2026_dino_ssl_measurements.md``.
+
 -------------------------------------------------------------------------------
 THE ONE RULE THAT IS NOT OPTIONAL: this trainer NEVER passes ``validation_data``
 -------------------------------------------------------------------------------
 `DINOLoss` maintains its centering statistic by ``.assign()``-ing a ``keras.Variable``
 inside ``call()``. That is correct under stock ``fit()`` -- but ``call()`` runs on EVERY
-batch, and Keras runs the loss on validation batches too, so each one performs a full,
-unwanted centering EMA update. This is not a rounding error: MEASURED, a 4-sample
-validation set at ``batch_size=2`` doubled an epoch's update count from 2 to 4 and pushed
-the center **81% past** its correct value -- silently, with a finite loss and a clean exit.
-``validation_batch_size`` defaults to ``batch_size``, so the corruption scales with the
-validation batch COUNT.
+batch, and Keras runs the loss on validation batches too, so each validation batch
+performs a full, unwanted centering EMA update, silently, with a finite loss and a clean
+exit. ``validation_batch_size`` defaults to ``batch_size``, so the corruption scales with
+the validation batch COUNT. (The measured instance -- a 4-sample validation set pushing
+the center 81% past its correct value -- is in README § 5 Rule 1.)
 
 Consequences, both deliberate:
 
 * ``model.fit(...)`` below takes no ``validation_data`` and no ``validation_steps``.
 * There is therefore no ``val_loss``, so the callbacks monitor the TRAINING ``loss``.
-  Real validation for SSL pretraining is a k-NN probe on frozen features, which does not
-  invoke the loss at all -- `train.dino.knn_eval`; see "Validation" below.
+  Validation is a k-NN probe that never invokes the loss -- see "Validation" below.
 
 -------------------------------------------------------------------------------
-Scale
+Scale: what ``--smoke`` pins, and the two traps that ride along with it
 -------------------------------------------------------------------------------
-``--smoke`` pins the MEASURED shape-validation scale: ``variant=tiny``,
-``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``, ``dino_out_dim=4096``,
-``max_steps=5``. On GPU 1 (RTX 4070) one full train step at that scale peaks at
-**1518.6 MiB of 10001 MiB**.
+``--smoke`` pins the shape-validation scale -- ``variant=tiny``,
+``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``,
+``dino_out_dim=4096``, ``epochs=2``, ``max_steps=5``, ``ema_warmup_epochs=0.0`` and
+three more warmup pins; :data:`SMOKE_OVERRIDES` below is the authoritative list.
+Explicit flags still win over the preset. This validates SHAPES and wiring; it is
+**NOT a paper reproduction** (the paper uses ``dino_out_dim=65536``, 224px globals and
+hundreds of epochs). The defaults are the paper-shaped ones and cost accordingly.
 
-**TRAP: ``--smoke`` sets ``max_steps=5``, so a ``--smoke`` "epoch" is 5 of its 295
-steps.** ``--smoke --epochs 40`` therefore trains for 200 steps, not ~11 800, and the
-resulting curve is not a training curve. Anything meant to TRAIN rather than validate
-shapes must pass ``--max-steps 100000`` (or an explicit budget) alongside ``--smoke``.
-This is not new: the ``config.json`` of the prior 40-epoch smoke artifact
-(``dino_smoke_step12``) already records ``max_steps=100000``, i.e. that run needed the
-same workaround and nobody wrote it down.
+Two traps ride along with the preset (README § 6.3 has them at length). Neither is a bug;
+each silently hands you a number that is not the one you think you are reading.
 
-**TRAP: ``--smoke`` also leaves ``knn_bank_batches=16`` / ``knn_query_batches=8``**
-(512 bank images), while every historical k-NN number for this trainer -- including the
-0.2754-0.2949 zero-step control band in `train.dino.knn_eval`'s docstring -- was
-measured at **64 / 32** (2048 images). A k-NN top-1 over a 4x smaller bank is a
-DIFFERENT ESTIMATOR, not a noisier reading of the same one. Pass
-``--knn-bank-batches 64 --knn-query-batches 32`` on anything you intend to compare
-against a historical figure.
+**TRAP 1: ``--smoke`` sets ``max_steps=5``, so a ``--smoke`` "epoch" is 5 steps of the
+~295 an imagenette epoch has at ``batch_size=32``** -- ``--smoke --epochs 40`` trains for
+200 steps, not ~11 800, and that curve is not a training curve. Anything meant to TRAIN
+rather than validate shapes must pass ``--max-steps 100000`` (or an explicit budget).
 
-**How that number was obtained, because it is NOT reproducible by watching
-``nvidia-smi`` during a run of this script.** It comes from a dedicated single-config
-probe (D-026): one real ``train_on_batch`` -- forward, backward and the AdamW update --
-on a real multi-crop batch, with ``tf.config.experimental.reset_memory_stats`` called
-immediately before and ``get_memory_info('GPU:0')['peak']`` immediately after, ONE config
-per PROCESS (the peak is a high-water mark that does not reset between configs). Polling
-this trainer instead reads ~10 400 MiB, because ``train.common.setup_gpu``'s
-``set_memory_growth`` fails ("Physical devices cannot be modified after being
-initialized" -- TF is already initialized by an earlier import) and TF then pre-allocates
-~85% of the visible device. That polled figure is TF's ARENA, not the model's working
-set, and it neither confirms nor refutes the 1518.6 MiB above.
+**TRAP 2: ``--smoke`` leaves ``knn_bank_batches=16`` / ``knn_query_batches=8``** (512
+bank images), while the k-NN figures in ``research/2026_dino_ssl_measurements.md`` and
+`train.dino.knn_eval`'s zero-step control band were measured at **64 / 32** (2048
+images). A top-1 over a 4x smaller bank is a DIFFERENT ESTIMATOR, not a noisier reading
+of the same one. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` to compare against
+one of those figures.
 
-That is a SHAPE-VALIDATION scale, **NOT a paper
-reproduction** -- DINO uses ``dino_out_dim=65536``, 224px globals and hundreds of epochs.
-The defaults (no ``--smoke``) are the paper-shaped ones and are correspondingly expensive.
+**Memory, and why ``--gpu`` will not help you.** One full train step at the ``--smoke``
+scale peaks at **1518.6 MiB of the 10001 MiB free on GPU 1 (RTX 4070)** (probe method:
+the comment above :data:`SMOKE_OVERRIDES`; corroborated to within 1% in
+``research/2026_dino_ssl_measurements.md`` § 7). Do NOT read that off ``nvidia-smi``
+while this script runs -- in this trainer's import order TF is initialized before
+``train.common.setup_gpu``, which then logs ``GPU setup error: Physical devices cannot be
+modified after being initialized`` and leaves TF pre-allocating ~85% of the device
+(~10 400 MiB polled: TF's ARENA, not the working set). The same import order makes
+``--gpu N`` INERT in BOTH halves -- its ``CUDA_VISIBLE_DEVICES`` assignment lands after
+TF picked a device, and its other half IS that failed ``set_memory_growth``. **Select the
+device by prefixing ``CUDA_VISIBLE_DEVICES=N``**, as every ``Usage`` line below does.
 
 -------------------------------------------------------------------------------
 Validation, and the reason a decreasing loss is not enough
 -------------------------------------------------------------------------------
-`train.dino.knn_eval.KNNEvalCallback` is this run's ONLY validation signal: frozen
-student-backbone features, a weighted k-NN top-1 against imagenette's labels, and the
-two collapse numbers (mean pairwise feature cosine; entropy of the mean teacher
-softmax). It is INSERTED BEFORE ``CSVLogger`` -- appending it after would silently drop
-every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
+`train.dino.knn_eval.KNNEvalCallback` is this run's ONLY validation signal (frozen
+student-backbone features, a weighted k-NN top-1, and two collapse numbers; README § 6
+describes it). It is INSERTED BEFORE ``CSVLogger`` -- appending it after would silently
+drop every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
 
 **A decreasing loss does NOT rule out collapse.** Read
 ``results/<run>/training_log.csv``'s ``dino_collapse_flag`` / ``dino_feat_mean_cos`` /
@@ -92,40 +93,33 @@ every column (MEASURED; see the D-029 anchor in :func:`create_callbacks`).
 imagenette's 10 classes).
 
 -------------------------------------------------------------------------------
-Making a run COMPARABLE: three flags, and the rule that BOTH stream flags are
-required
+Making a run COMPARABLE: the default is reproducible, and ``--no-`` gives that up
 -------------------------------------------------------------------------------
+Three flags decide it (full reference with caveats: README § 6.2):
+
 ============================  =================================================
 flag                          what it buys
 ============================  =================================================
-``--random-init-repeats N``   DEFAULT-ON at 2. Runs the k-NN probe ``N`` times in
+``--random-init-repeats N``   Default 2. Runs the k-NN probe ``N`` times in
                               ``on_train_begin``, BEFORE a single optimizer step,
-                              and writes ``<run_dir>/random_init_control.json``.
-                              Quote every k-NN delta against THAT, never against
-                              the 0.10 chance line. ``0`` disables it.
-``--seed-training-stream``    Seeds the TRAINING stream's TFDS **file interleave**
-                              with ``--seed`` (the k-NN bank's was already seeded,
-                              D-040). Default ON; ``--no-seed-training-stream``
-                              restores the unpinned file order.
-``--stateless-augmentation``  Draws the multi-crop augmentation from
-                              ``tf.random.stateless_uniform`` keyed on a
-                              per-element counter instead of one shared
-                              ``tf.random.Generator`` stream, which is the only
-                              thing that makes the **augmentation** reproducible
-                              under the shipped ``num_parallel_calls=AUTOTUNE``.
-                              Default ON; ``--no-stateless-augmentation``
-                              restores the shared-Generator behaviour.
+                              into ``<run_dir>/random_init_control.json``. Quote
+                              every k-NN delta against THAT, never against the
+                              0.10 chance line. ``0`` disables it.
+``--seed-training-stream``    Default ON. Seeds the TRAINING stream's TFDS **file
+                              interleave** with ``--seed``.
+``--stateless-augmentation``  Default ON. Keys the multi-crop augmentation on a
+                              per-element counter (``stateless_uniform``) instead
+                              of one shared ``tf.random.Generator`` stream -- the
+                              only thing that makes the **augmentation**
+                              reproducible under the shipped
+                              ``num_parallel_calls=AUTOTUNE``.
 ============================  =================================================
 
 **THE RULE: ``--seed`` alone does NOT make two runs the same experiment. BOTH
-stream flags are required, and neither is redundant.** MEASURED at the data
-pipeline -- two separate PROCESSES, the real :func:`build_dataset`, sha1 of the
-first 3 batches::
-
-    --seed-training-stream  alone      49bf308a vs 4fbd3a6e   DIFFER
-                                       (batch-0 mean 0.0999388 vs 0.0002119)
-    --stateless-augmentation alone     e70e2ad2 vs 5f968198   DIFFER
-    BOTH                               2ce84c18 vs 2ce84c18   BIT-IDENTICAL
+stream flags are required TOGETHER, and neither is redundant.** MEASURED at the
+data pipeline (2 processes, the real :func:`build_dataset`, sha1 of the first 3
+batches): either flag ON ALONE still gave differing batches; both ON gave
+bit-identical ones. Table in ``research/2026_dino_ssl_measurements.md`` § 4.
 
 The two flags reach two different unseeded sources -- the file interleave and the
 augmentation RNG -- so an A/B run without both is comparing models trained on
@@ -133,25 +127,30 @@ different data. The bit-identity of the both-flags cell also rules out cuDNN
 nondeterminism, ``tf.data`` ``options.deterministic`` and the element
 ``.shuffle()`` as contributors.
 
-**Both default ON as of plan-2026-08-02-93deeae2**, so a run with no flags is
-reproducible. They shipped OFF before that, for comparability; that comparability
-is now BROKEN ONCE, deliberately, and ``--no-seed-training-stream
---no-stateless-augmentation`` restores it. Each flag changes what every training
-batch CONTAINS, so any run in ``results/`` predating this flip is not comparable
-to a default run today. See ``research/2026_dino_ssl_measurements.md``.
+**Both stream flags ship ON**, so a no-flag run is already reproducible against
+another no-flag run at the same ``--seed``; nothing needs to be remembered. The
+non-obvious direction is the off-switch: because the two close DIFFERENT holes,
+``--no-seed-training-stream`` OR ``--no-stateless-augmentation`` alone is enough
+to lose reproducibility. Passing BOTH restores the older stream (unpinned file
+order, shared ``Generator``) and with it comparability to runs in ``results/``
+recorded while the flags shipped OFF -- each flag changes what every training
+batch CONTAINS, so a default run today is not comparable to those.
 
 Usage::
 
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
-    MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
-        --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100 --gpu 1
 
-    # a CONTROLLED arm: reproducible stream, comparable estimator, real step budget
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
-        # (both stream flags are ON by default now; spelled out here for the record)
+        --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100
+
+    # a CONTROLLED arm: real step budget, comparable estimator, pinned seed.
+    # Both stream flags are ON by default, so they are NOT passed here.
+    MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
-        --seed-training-stream --stateless-augmentation \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2
+
+    # the OLD stream, to compare against a run recorded before the flags flipped
+    ... --no-seed-training-stream --no-stateless-augmentation
 """
 
 import gc
