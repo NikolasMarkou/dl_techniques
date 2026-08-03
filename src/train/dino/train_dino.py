@@ -47,14 +47,15 @@ Scale: what ``--smoke`` pins, and the two traps that ride along with it
 ``global_crop_size=96``, ``n_local_crops=4``, ``batch_size=32``,
 ``dino_out_dim=4096``, ``epochs=2``, ``max_steps=5``, ``ema_warmup_epochs=0.0`` and
 three more warmup pins; :data:`SMOKE_OVERRIDES` below is the authoritative list.
-Explicit flags win over the preset **only when the value you pass DIFFERS from the
-parser default**: :func:`config_from_args` fills a field whenever the parsed value
-equals ``parse_arguments([])``'s, so it cannot tell an explicit default from an
-omission. MEASURED: ``--smoke --ema-warmup-epochs 1.0`` resolves to
-``warmup_steps=0`` (1.0 IS the default, so the preset's ``0.0`` wins), while
-``--ema-warmup-epochs 1.5`` gives 442 and ``--ema-warmup-steps 295`` gives 295.
-**To pin a value the preset also pins, pass a NON-default value or a different
-flag.** This validates SHAPES and wiring; it is
+**Any flag you actually TYPE beats the preset -- at ANY value, including the flag's
+own parser default.** Provenance comes from a raw ``sys.argv`` scan
+(:func:`train.common.args.explicitly_set_flags`, threaded onto the parsed Namespace by
+:func:`parse_arguments`), NOT from comparing the parsed value against the default, so an
+explicitly-passed default is no longer indistinguishable from an omission. MEASURED at
+imagenette/batch 32 (``steps_per_epoch=295``): ``--smoke --ema-warmup-epochs 1.0``
+resolves to ``warmup_steps=295``, ``--ema-warmup-epochs 1.5`` gives 442, and
+``--ema-warmup-steps 295`` gives 295. **To pin a value the preset also pins, just pass
+the flag.** This validates SHAPES and wiring; it is
 **NOT a paper reproduction** (the paper uses ``dino_out_dim=65536``, 224px globals and
 hundreds of epochs). The defaults are the paper-shaped ones and cost accordingly.
 
@@ -161,9 +162,12 @@ Usage::
     # the IMPROVED ARM of the 60-epoch measurement (README § 6.1).
     # Both stream flags are ON by default, so they are NOT passed here.
     # `--ema-warmup-steps 295` IS required and is NOT redundant with the shipped
-    # `ema_warmup_epochs=1.0`: `--smoke` pins `ema_warmup_epochs=0.0`, and an
-    # explicit `--ema-warmup-epochs 1.0` cannot override it (see the preset note
-    # above). `295` is `num_train // batch_size` for imagenette at batch 32 only.
+    # `ema_warmup_epochs=1.0`: `--smoke` pins `ema_warmup_epochs=0.0` for any flag the
+    # caller does not type, so DROPPING this line gives NO freeze at all. Typing
+    # `--ema-warmup-epochs 1.0` would now also survive the preset and resolve to the
+    # same 295 (see the preset note above) -- but only at THIS scale, and the recorded
+    # `config.json` carries absolute STEPS, so the steps spelling is the faithful one.
+    # `295` is `num_train // batch_size` for imagenette at batch 32 only.
     #
     # `--knn-eval-every 4` and `--early-stopping-patience 70` are NOT decoration and
     # are NOT optional. The published endpoint is the mean of the last 3 EVALUATED
@@ -1290,12 +1294,13 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                             "nvidia-smi shows during a run (TF pre-allocates ~85%%; see "
                             "the module docstring). This validates SHAPES and wiring; it "
                             "is NOT a paper reproduction (the paper uses out_dim=65536, "
-                            "224px globals and hundreds of epochs). An explicit flag wins "
-                            "over the preset ONLY when the value you pass DIFFERS from the "
-                            "parser default: config_from_args cannot tell an explicit "
-                            "default from an omission, so --smoke --ema-warmup-epochs 1.0 "
-                            "(1.0 IS the default) is still overridden to 0.0, while 1.5 "
-                            "survives. See the module docstring."
+                            "224px globals and hundreds of epochs). Any flag you actually "
+                            "TYPE beats the preset, at ANY value, including the flag's own "
+                            "parser default: provenance is a sys.argv scan "
+                            "(train.common.args.explicitly_set_flags), not a "
+                            "parsed-value-vs-default comparison, so --smoke "
+                            "--ema-warmup-epochs 1.0 keeps 1.0 (295 steps at "
+                            "imagenette/batch 32). See the module docstring."
                         ))
 
     # Output
