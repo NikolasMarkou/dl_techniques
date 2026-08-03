@@ -57,8 +57,11 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "is the design, not a bug: run_full_suite contains each failure to "
             "its own benchmark, logs it, and keeps going, so a copy-task "
             "checkpoint legitimately produces ~4 tracebacks and still writes a "
-            "report covering the 2 benchmarks it could run. Pass --benchmarks to "
-            "run only the ones your checkpoint is shaped for."
+            "report covering the 2 benchmarks it could run -- and the report's "
+            "summary says so, under benchmarks_requested / benchmarks_completed "
+            "/ benchmarks_errored / errored_benchmarks. Pass --benchmarks to "
+            "run only the ones your checkpoint is shaped for; an unrecognised "
+            "name is refused, never skipped."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -116,19 +119,18 @@ def run_suite(
     )
     harness.save_report(report_path, report)
 
-    # Logged unconditionally: the count is how the caller sees that a benchmark
-    # died inside run_full_suite's own `except Exception` -- an empty or short
-    # report is the observable symptom, and under --quiet it is the only one.
+    # Logged unconditionally, and read from the summary rather than recomputed:
+    # `harness._compute_summary` is the one home for these counts, and a second
+    # derivation here could disagree with the JSON the same command just wrote.
+    summary = report.summary
     logger.info(
-        f"Recorded {len(report.runs)} benchmark run(s) in "
+        f"{summary['benchmarks_completed']} of "
+        f"{summary['benchmarks_requested']} benchmark(s) completed, "
+        f"{summary['benchmarks_errored']} raised, in "
         f"{report.total_runtime:.2f}s -> {report_path}"
     )
-    if not report.runs:
-        logger.warning(
-            "No benchmark produced a result. Re-run without --quiet to see "
-            "why each one failed (input-signature mismatches are the usual "
-            "cause: the suite's benchmarks do not share an input shape)."
-        )
+    for name, error in summary["errored_benchmarks"].items():
+        logger.warning(f"Benchmark '{name}' produced no result: {error}")
     return report_path
 
 

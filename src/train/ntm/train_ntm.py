@@ -1,9 +1,17 @@
-"""Neural Turing Machine training on the copy task."""
+"""Neural Turing Machine training on the copy task.
+
+Follows the repo's documented Pattern 2 (a local ``argparse``): this trainer
+does not use ``load_dataset`` -- it generates the copy task itself -- so the
+shared ``create_base_argument_parser`` contributed five flags it never read.
+"""
+
+import argparse
+from typing import List, Optional
 
 import keras
 import numpy as np
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory import create_ntm
 from . import CopyTaskGenerator, CopyTaskConfig
@@ -13,12 +21,33 @@ from . import CopyTaskGenerator, CopyTaskConfig
 # Training Pipeline
 # =====================================================================
 
-def main():
-    parser = create_base_argument_parser(
-        description="Train NTM on copy task",
-        default_dataset="copy",
-        dataset_choices=["copy"],
-    )
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Build and run this trainer's command-line parser.
+
+    :param argv: Argument list to parse. Uses ``sys.argv[1:]`` when None.
+    :return: The parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Train NTM on copy task")
+
+    # DECISION plan-2026-08-03T161943-02be1d7e/D-017
+    # Do NOT restore `create_base_argument_parser` here to "share the common
+    # flags". It has no opt-out, so it re-adds --dataset, --image-size,
+    # --weight-decay, --lr-schedule and --show-plots, none of which this script
+    # reads: `grep -c "args.<flag>"` was 0 for all five while they parsed
+    # cleanly, so `--weight-decay 0.05` silently did nothing. The four flags
+    # below are the only ones this trainer used from it, restated with the same
+    # defaults. See decisions.md D-017.
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Training batch size')
+    parser.add_argument('--learning-rate', type=float, default=1e-3,
+                        help='Initial learning rate')
+    parser.add_argument('--patience', type=int, default=50,
+                        help='Early stopping patience')
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU device index to use (default: all GPUs)')
+
     parser.add_argument('--memory-size', type=int, default=128)
     parser.add_argument('--memory-dim', type=int, default=20)
     parser.add_argument('--controller-dim', type=int, default=100)
@@ -32,7 +61,11 @@ def main():
     parser.add_argument('--validation-split', type=float, default=0.1)
     parser.add_argument('--num-eval-samples', type=int, default=20)
     parser.add_argument('--success-threshold', type=float, default=0.9)
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_arguments()
 
     if CopyTaskGenerator is None:
         logger.error("Cannot proceed without CopyTaskGenerator.")

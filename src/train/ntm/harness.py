@@ -133,6 +133,11 @@ class BenchmarkHarness:
         """
         self.config = config or BenchmarkSuiteConfig()
         self._runs: List[BenchmarkRun] = []
+        #: Benchmark name -> error string, for every benchmark of the last
+        #: ``run_full_suite`` call that raised instead of producing a result.
+        #: Reported in the summary so a crashed benchmark cannot be absent from
+        #: the report and silent at the same time.
+        self._failures: Dict[str, str] = {}
         self._start_time: Optional[float] = None
     
     def run_copy_task_benchmark(
@@ -513,29 +518,55 @@ class BenchmarkHarness:
         :param model_name: Name for reporting.
         :param benchmarks: Names of benchmarks to run, drawn from
             :attr:`BENCHMARK_METHODS`. Runs all of them if None.
-        :return: SuiteReport with all results.
+        :return: SuiteReport with all results. Its ``summary`` states how many
+            benchmarks were requested, how many completed and how many raised,
+            naming every one that raised together with its error string.
+        :raises ValueError: If any requested name is not in
+            :attr:`BENCHMARK_METHODS`. Naming the unknown ones and the valid set
+            is the same treatment ``BabiGenerator.__init__`` gives an
+            unimplemented task id and ``generate_split`` gives an unknown split.
         """
         self._runs = []
+        self._failures = {}
         self._start_time = time.time()
 
         if benchmarks is None:
             benchmarks = list(self.BENCHMARK_METHODS.keys())
+        requested = list(benchmarks)
 
-        for benchmark_name in benchmarks:
-            if benchmark_name in self.BENCHMARK_METHODS:
-                if self.config.verbose:
-                    logger.info(f"Running {benchmark_name}...")
-                try:
-                    getattr(self, self.BENCHMARK_METHODS[benchmark_name])(model)
-                except Exception as e:
-                    if self.config.verbose:
-                        logger.error(f"Error in {benchmark_name}: {e}", exc_info=True)
-        
+        # DECISION plan-2026-08-03T161943-02be1d7e/D-014
+        # Do NOT restore the `if benchmark_name in self.BENCHMARK_METHODS:` guard
+        # that used to wrap the loop body. It had no `else`, so a typo'd name ran
+        # nothing and reported success -- `run_full_suite(benchmarks=["copy_taks"])`
+        # returned `total_benchmarks: 0, benchmarks_failed: 0`. Validate up front
+        # and raise; and do NOT re-gate the failure log on `self.config.verbose`,
+        # because the report itself, not the log, is what a reader trusts. See
+        # decisions.md D-014.
+        unknown = [name for name in requested if name not in self.BENCHMARK_METHODS]
+        if unknown:
+            raise ValueError(
+                f"Benchmarks {unknown} are not implemented. "
+                f"Available benchmarks: {sorted(self.BENCHMARK_METHODS)}."
+            )
+
+        for benchmark_name in requested:
+            if self.config.verbose:
+                logger.info(f"Running {benchmark_name}...")
+            try:
+                getattr(self, self.BENCHMARK_METHODS[benchmark_name])(model)
+            except Exception as e:
+                self._failures[benchmark_name] = f"{type(e).__name__}: {e}"
+                logger.error(
+                    f"Benchmark '{benchmark_name}' raised "
+                    f"{type(e).__name__}: {e}",
+                    exc_info=self.config.verbose,
+                )
+
         total_runtime = time.time() - self._start_time
-        
+
         # Compute summary
-        summary = self._compute_summary()
-        
+        summary = self._compute_summary(requested)
+
         return SuiteReport(
             suite_name="MANN_Benchmark_Suite",
             model_name=model_name,
@@ -594,13 +625,38 @@ class BenchmarkHarness:
             logger.info(f"  Status: {status}")
         logger.info(f"{'='*50}")
     
-    def _compute_summary(self) -> Dict[str, Any]:
-        """Compute summary statistics from all runs.
-        
+    def _compute_summary(
+        self,
+        requested: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Compute summary statistics from all runs, including the ones that died.
+
+        The three count keys are deliberately distinct, because conflating them
+        is what made this report dishonest: ``benchmarks_completed`` is how many
+        produced a result, ``benchmarks_errored`` is how many raised, and
+        ``benchmarks_failed`` is how many ran to completion and did not meet
+        their own pass criterion. A reader who sees ``benchmarks_failed: 0`` must
+        be able to trust it, so a crash is counted under ``benchmarks_errored``
+        and named in ``errored_benchmarks`` rather than vanishing.
+
+        There is no ``total_benchmarks`` key. It used to mean ``len(self._runs)``
+        while reading like "how many were asked for", which is how a report
+        covering 2 of 6 benchmarks came to look complete.
+
+        :param requested: The benchmark names the caller asked for. Defaults to
+            the names that were actually recorded, for the ``save_report``
+            path that has no request list to hand.
         :return: Summary dictionary.
         """
+        if requested is None:
+            requested = [r.benchmark_name for r in self._runs]
+        failures = dict(self._failures)
+
         summary = {
-            "total_benchmarks": len(self._runs),
+            "benchmarks_requested": len(requested),
+            "benchmarks_completed": len(self._runs),
+            "benchmarks_errored": len(failures),
+            "errored_benchmarks": failures,
             "total_runtime": sum(r.runtime_seconds for r in self._runs),
             "benchmarks_passed": sum(
                 1 for r in self._runs 

@@ -39,6 +39,57 @@ from train.ntm.train_ntm import evaluate_model
 
 
 # ---------------------------------------------------------------------
+# Shared: the Pattern 2 conversion both trainers went through
+# ---------------------------------------------------------------------
+
+#: ``(flag, argparse dest)`` for the five flags ``create_base_argument_parser``
+#: contributes and neither NTM trainer ever reads. One home, because BOTH
+#: trainers are checked against it: ``train_multitask.py`` dropped them and
+#: ``train_ntm.py`` kept them for a whole iteration, and a second private copy
+#: of this list is how that asymmetry would come back unnoticed.
+DROPPED_BASE_PARSER_FLAGS: List[Tuple[str, str]] = [
+    ("--dataset", "dataset"),
+    ("--image-size", "image_size"),
+    ("--weight-decay", "weight_decay"),
+    ("--lr-schedule", "lr_schedule"),
+    ("--show-plots", "show_plots"),
+]
+
+
+def assert_flag_is_not_registered(
+        monkeypatch, module, prog: str, flag: str, dest: str) -> None:
+    """Assert a trainer's parser neither accepts ``flag`` nor produces ``dest``.
+
+    The namespace half is the load-bearing one, and an exit code alone is NOT
+    enough: measured against a parser that still registered all five,
+    ``--dataset 1`` exits non-zero on an invalid *choice* and ``--show-plots 1``
+    on the stray positional, so an exit-code-only guard went RED for only 3 of
+    the 5 flags. A registered flag always produces a namespace attribute, so its
+    absence is the fact that actually distinguishes "dropped" from "still there".
+
+    :param monkeypatch: pytest monkeypatch fixture.
+    :param module: The trainer module, which must expose ``parse_arguments``.
+    :param prog: Program name to place at ``sys.argv[0]``.
+    :param flag: The command-line flag that must be gone, e.g. ``--weight-decay``.
+    :param dest: The argparse destination it would populate, e.g. ``weight_decay``.
+    :raises AssertionError: If the flag parses, or exits zero when passed.
+    """
+    monkeypatch.setattr(sys, "argv", [prog])
+    args = module.parse_arguments()
+
+    assert not hasattr(args, dest), (
+        f"{prog}: {flag} is still registered — it parses into args.{dest} = "
+        f"{getattr(args, dest)!r} and nothing reads it"
+    )
+
+    monkeypatch.setattr(sys, "argv", [prog, flag, "1"])
+    with pytest.raises(SystemExit) as excinfo:
+        module.parse_arguments()
+
+    assert excinfo.value.code != 0
+
+
+# ---------------------------------------------------------------------
 # Fixtures and stubs
 # ---------------------------------------------------------------------
 
@@ -600,25 +651,17 @@ class TestPatternTwoArgumentSurface:
 
     # --- the five dropped flags ---------------------------------------------
 
-    @pytest.mark.parametrize(
-        "flag",
-        ["--dataset", "--image-size", "--weight-decay", "--lr-schedule",
-         "--show-plots"],
-    )
-    def test_inapplicable_base_parser_flags_are_gone(self, flag, monkeypatch):
+    @pytest.mark.parametrize("flag, dest", DROPPED_BASE_PARSER_FLAGS)
+    def test_inapplicable_base_parser_flags_are_gone(
+            self, flag, dest, monkeypatch):
         """A flag this trainer never reads must be REFUSED, not silently ignored.
 
         These five came from ``create_base_argument_parser``, which has no
         opt-out. They parsed cleanly and were then discarded — a user setting
-        ``--weight-decay 0.05`` got no weight decay and no warning. Exiting
-        non-zero on an unknown flag is the only outcome that tells them.
+        ``--weight-decay 0.05`` got no weight decay and no warning.
         """
-        monkeypatch.setattr(sys, "argv", ["train_multitask", flag, "1"])
-
-        with pytest.raises(SystemExit) as excinfo:
-            train_multitask.parse_arguments()
-
-        assert excinfo.value.code != 0
+        assert_flag_is_not_registered(
+            monkeypatch, train_multitask, "train_multitask", flag, dest)
 
     def test_the_kept_flags_are_all_still_parseable(self, monkeypatch):
         """The twelve retained flags must survive the Pattern 2 conversion.
@@ -643,6 +686,64 @@ class TestPatternTwoArgumentSurface:
         assert (args.steps_per_epoch, args.validation_steps) == (2, 1)
         assert args.clip_norm == pytest.approx(0.5)
         assert (args.num_eval_samples, args.gpu) == (8, 1)
+
+
+class TestTrainNtmPatternTwoArgumentSurface:
+    """``train_ntm.py`` gets the same treatment its sibling got.
+
+    It kept the five silent no-op flags for a whole iteration after
+    ``train_multitask.py`` dropped them — the asymmetry was drift, not a
+    decision, and this class is what stops it coming back on either side.
+    """
+
+    @pytest.mark.parametrize("flag, dest", DROPPED_BASE_PARSER_FLAGS)
+    def test_inapplicable_base_parser_flags_are_gone(
+            self, flag, dest, monkeypatch):
+        """A flag this trainer never reads must be REFUSED, not silently ignored.
+
+        ``grep -c "args.<flag>"`` was 0 for all five while ``--help`` advertised
+        every one of them.
+        """
+        assert_flag_is_not_registered(
+            monkeypatch, train_ntm, "train_ntm", flag, dest)
+
+    def test_the_flags_this_trainer_actually_reads_still_parse(self, monkeypatch):
+        """Companion control: a parser that refused everything would also pass above.
+
+        These are exactly the four common flags ``main()`` dereferences, at the
+        defaults the shared parser used to supply, plus the trainer's own knobs.
+        """
+        monkeypatch.setattr(sys, "argv", [
+            "train_ntm",
+            "--epochs", "3", "--batch-size", "8", "--learning-rate", "5e-4",
+            "--patience", "4", "--gpu", "1", "--memory-size", "16",
+            "--sequence-length", "5", "--vector-size", "4",
+            "--num-samples", "64", "--num-eval-samples", "6",
+        ])
+
+        args = train_ntm.parse_arguments()
+
+        assert (args.epochs, args.batch_size, args.patience, args.gpu) == (3, 8, 4, 1)
+        assert args.learning_rate == pytest.approx(5e-4)
+        assert (args.sequence_length, args.vector_size) == (5, 4)
+        assert (args.num_samples, args.num_eval_samples) == (64, 6)
+
+    def test_the_common_flag_defaults_match_the_shared_parser(self, monkeypatch):
+        """Restating a default is a chance to change it by accident.
+
+        The conversion must be a surface change only: a bare
+        ``python -m train.ntm.train_ntm`` has to train the same run it did
+        before the local parser existed.
+        """
+        monkeypatch.setattr(sys, "argv", ["train_ntm"])
+
+        args = train_ntm.parse_arguments()
+
+        assert args.epochs == 100
+        assert args.batch_size == 64
+        assert args.learning_rate == pytest.approx(1e-3)
+        assert args.patience == 50
+        assert args.gpu is None
 
 
 # ---------------------------------------------------------------------

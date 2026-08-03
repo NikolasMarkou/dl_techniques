@@ -54,7 +54,11 @@ MEASURED_MAX_ACTION_LENGTH = 8
 MEASURED_SPLIT_SIZES = {
     "simple": (356, 90),
     "length": (294, 152),
-    "add_prim_jump": (288, 158),
+    # 288/158 previously, which regression-LOCKED a leak: `jump left`,
+    # `jump right`, `jump twice` and `jump thrice` were in TRAIN. A count pin
+    # cannot see that, which is exactly how it got locked in -- see
+    # `TestAddPrimitiveHoldOutIsPure` below for the leak-shaped assertion.
+    "add_prim_jump": (284, 162),
     "add_prim_turn_left": (392, 54),
     "template_around_right": (442, 4),
 }
@@ -325,6 +329,55 @@ class TestTemplateAroundRightHoldOut:
         assert [len(part) for part in simple] != [len(part) for part in template]
 
 
+class TestAddPrimitiveHoldOutIsPure:
+    """No TRAINING command may contain the held-out primitive as a composition.
+
+    This is the leak-shaped assertion the pinned ``(train, test)`` counts could
+    not make. ``add_prim_jump`` shipped with ``jump left``, ``jump right``,
+    ``jump twice`` and ``jump thrice`` in TRAIN -- four of the compositions the
+    split exists to hold out -- and the count pin froze it as correct, because a
+    288/158 partition looks exactly as healthy as a 284/162 one. In Lake &
+    Baroni (2018)'s add-primitive split only the bare primitive is in training.
+    """
+
+    @pytest.mark.parametrize(
+        "split_type, primitive",
+        [("add_prim_jump", "jump"), ("add_prim_turn_left", "turn left")],
+        ids=["add_prim_jump", "add_prim_turn_left"],
+    )
+    def test_the_only_training_command_with_the_primitive_is_the_primitive(
+            self, split_type: str, primitive: str):
+        train, _ = _generator(split_type).generate_split()
+
+        leaked = sorted(
+            s.command for s in train
+            if ScanGenerator._contains_phrase(s.command_tokens, primitive)
+            and s.command != primitive
+        )
+
+        assert leaked == [], (
+            f"{split_type} trains on {len(leaked)} composition(s) of the "
+            f"held-out primitive {primitive!r}: {leaked}"
+        )
+
+    @pytest.mark.parametrize(
+        "split_type, primitive",
+        [("add_prim_jump", "jump"), ("add_prim_turn_left", "turn left")],
+        ids=["add_prim_jump", "add_prim_turn_left"],
+    )
+    def test_the_bare_primitive_is_still_in_train(
+            self, split_type: str, primitive: str):
+        """Non-vacuity control for the purity assertion above.
+
+        A split that put EVERYTHING containing the primitive into test would
+        satisfy the purity test for the wrong reason and destroy the point of an
+        add-primitive split, which is that the model has seen the word alone.
+        """
+        train, _ = _generator(split_type).generate_split()
+
+        assert primitive in {s.command for s in train}
+
+
 class TestNonDegeneracyValidator:
     """The seam refuses an empty side and says which split and why.
 
@@ -468,6 +521,110 @@ class TestBabiIsReachableFromTheFullSuite:
         assert "run_babi_benchmark" in called
 
 
+class TestFullSuiteCannotUnderReport:
+    """A suite run must never look cleaner than it was.
+
+    Two independent halves, both measured on the shipped code before the fix:
+    ``run_full_suite(benchmarks=["copy_taks", "not_a_benchmark"])`` returned a
+    report reading ``total_benchmarks: 0, benchmarks_failed: 0`` -- a typo ran
+    nothing and reported success -- and a real copy-task run in which four
+    benchmarks crashed wrote ``total_benchmarks: 2, benchmarks_failed: 0``.
+    """
+
+    @staticmethod
+    def _harness() -> BenchmarkHarness:
+        """Build a quiet harness.
+
+        :return: A harness with verbose logging off.
+        """
+        return BenchmarkHarness(BenchmarkSuiteConfig(verbose=False))
+
+    def test_an_unrecognised_benchmark_name_raises_instead_of_being_skipped(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._harness().run_full_suite(
+                model=None, model_name="probe",
+                benchmarks=["copy_taks", "not_a_benchmark"],
+            )
+
+        message = str(excinfo.value)
+        assert "copy_taks" in message and "not_a_benchmark" in message
+        # ... and it must point at the valid set, the way BabiGenerator's
+        # unimplemented-task raise and generate_split's unknown-split raise do.
+        for valid_name in BenchmarkHarness.BENCHMARK_METHODS:
+            assert valid_name in message
+
+    def test_a_recognised_name_is_still_accepted(self):
+        """Non-vacuity control: the raise must not reject everything."""
+        harness = self._harness()
+        harness.run_copy_task_benchmark = lambda model: None
+
+        report = harness.run_full_suite(
+            model=None, model_name="probe", benchmarks=["copy_task"])
+
+        assert report.summary["benchmarks_requested"] == 1
+
+    def test_a_benchmark_that_raises_is_counted_and_named_in_the_report(self):
+        harness = self._harness()
+
+        def boom(model):
+            raise ValueError("input signature mismatch")
+
+        harness.run_copy_task_benchmark = boom
+        harness.run_scan_benchmark = boom
+
+        report = harness.run_full_suite(
+            model=None, model_name="probe",
+            benchmarks=["copy_task", "scan"],
+        )
+
+        summary = report.summary
+        assert summary["benchmarks_requested"] == 2
+        assert summary["benchmarks_completed"] == 0
+        assert summary["benchmarks_errored"] == 2, (
+            "a suite in which every benchmark crashed reported "
+            f"{summary['benchmarks_errored']} errors"
+        )
+        assert set(summary["errored_benchmarks"]) == {"copy_task", "scan"}
+        assert "input signature mismatch" in summary["errored_benchmarks"]["scan"]
+
+    def test_a_partly_crashed_suite_reports_both_halves(self):
+        """The mixed case: some results AND some crashes, both visible.
+
+        This is the shape the step-8 artefact had -- 2 recorded, 4 crashed --
+        and the shape that read as a clean run.
+        """
+        harness = self._harness()
+        harness.run_copy_task_benchmark = lambda model: None
+
+        def boom(model):
+            raise RuntimeError("no")
+
+        harness.run_scan_benchmark = boom
+
+        report = harness.run_full_suite(
+            model=None, model_name="probe",
+            benchmarks=["copy_task", "scan"],
+        )
+
+        assert report.summary["benchmarks_requested"] == 2
+        assert report.summary["benchmarks_errored"] == 1
+        assert list(report.summary["errored_benchmarks"]) == ["scan"]
+
+    def test_a_clean_suite_reports_no_errors(self):
+        """Non-vacuity control for the two tests above."""
+        harness = self._harness()
+        harness.run_copy_task_benchmark = lambda model: None
+        harness.run_scan_benchmark = lambda model: None
+
+        report = harness.run_full_suite(
+            model=None, model_name="probe",
+            benchmarks=["copy_task", "scan"],
+        )
+
+        assert report.summary["benchmarks_errored"] == 0
+        assert report.summary["errored_benchmarks"] == {}
+
+
 # ---------------------------------------------------------------------
 # bAbI task 19 (path finding)
 # ---------------------------------------------------------------------
@@ -554,4 +711,114 @@ class TestBabiTask19IsNotDegenerate:
             assert sample.answer == expected, (
                 f"answer {sample.answer!r} is not the path through "
                 f"{sample.story} (expected {expected!r})"
+            )
+
+
+#: Unit grid displacement of each compass direction. Written out here rather
+#: than imported so this file's geometry check does not inherit the generator's
+#: own notion of where a direction points.
+_DISPLACEMENT = {
+    "north": (0, 1),
+    "south": (0, -1),
+    "east": (1, 0),
+    "west": (-1, 0),
+}
+
+
+def _room_coordinates(story: List[str]) -> Dict[str, tuple]:
+    """Lay a task-19 story out on a unit grid, independently of the generator.
+
+    Anchors the first sentence's reference room at the origin and propagates
+    every relation until no more rooms can be placed. Deliberately shares
+    nothing with :func:`_shortest_path_directions`, which searches the RELATION
+    GRAPH and therefore cannot see a geometric contradiction: a 3-edge path
+    graph always yields a path, even when two of its nodes are the same square.
+
+    :param story: The sample's story sentences.
+    :return: Mapping of room name to ``(x, y)``.
+    :raises AssertionError: If a sentence is unparseable or a room is unreachable.
+    """
+    relations = []
+    for sentence in story:
+        match = _RELATION.match(sentence)
+        assert match is not None, f"unparseable story sentence: {sentence!r}"
+        relations.append(match.groups())
+
+    # "near is <direction> of far" => near sits one step <direction> of far.
+    positions = {relations[0][2]: (0, 0)}
+    for _ in range(len(relations)):
+        for near, direction, far in relations:
+            dx, dy = _DISPLACEMENT[direction]
+            if far in positions and near not in positions:
+                x, y = positions[far]
+                positions[near] = (x + dx, y + dy)
+            elif near in positions and far not in positions:
+                x, y = positions[near]
+                positions[far] = (x - dx, y - dy)
+
+    unplaced = {name for r in relations for name in (r[0], r[2])} - set(positions)
+    assert not unplaced, f"rooms {unplaced} unreachable from {story}"
+    return positions
+
+
+class TestBabiTask19WorldsAreGeometricallyPossible:
+    """A task-19 story must describe a layout that can exist on a grid.
+
+    Drawing the three relation directions independently put two rooms on the
+    same square in 898 of 2000 samples (measured), and the same 898 gold answers
+    walked one step out and straight back. A model that answers the direct route
+    is scored WRONG against such a sample, so the benchmark punishes correct
+    spatial reasoning. Both assertions here are computed from the STORY TEXT via
+    this file's own displacement table, not from the generator's coordinates.
+    """
+
+    N_SAMPLES = 300
+
+    def test_every_room_in_a_sample_sits_on_its_own_square(self):
+        offenders = []
+        for sample in TestBabiTask19IsNotDegenerate._samples(self.N_SAMPLES):
+            positions = _room_coordinates(sample.story)
+            if len(set(positions.values())) != len(positions):
+                offenders.append((sample.story, positions))
+
+        assert offenders == [], (
+            f"{len(offenders)} of {self.N_SAMPLES} task-19 samples place two "
+            f"rooms on the same square, e.g. {offenders[0]}"
+        )
+
+    def test_no_answer_walks_out_and_immediately_back(self):
+        offenders = []
+        for sample in TestBabiTask19IsNotDegenerate._samples(self.N_SAMPLES):
+            steps = sample.answer.split(", ")
+            if any(BabiGenerator.INVERSE_DIRECTIONS[steps[i]] == steps[i + 1]
+                   for i in range(len(steps) - 1)):
+                offenders.append((sample.story, sample.answer))
+
+        assert offenders == [], (
+            f"{len(offenders)} of {self.N_SAMPLES} task-19 answers backtrack, "
+            f"e.g. {offenders[0]}"
+        )
+
+    def test_the_answer_walks_the_questioned_rooms_end_to_end(self):
+        """Non-vacuity control: the two assertions above are about a REAL path.
+
+        A generator that emitted a single-step answer, or one whose steps did
+        not join the question's two rooms, would satisfy both tests above while
+        being useless. This one walks the answer over this file's own
+        displacement table and requires it to land on the target room.
+        """
+        for sample in TestBabiTask19IsNotDegenerate._samples(50):
+            positions = _room_coordinates(sample.story)
+            q_match = _QUESTION.match(sample.question)
+            assert q_match is not None
+            origin, target = q_match.groups()
+
+            x, y = positions[origin]
+            for step in sample.answer.split(", "):
+                dx, dy = _DISPLACEMENT[step]
+                x, y = x + dx, y + dy
+
+            assert (x, y) == positions[target], (
+                f"walking {sample.answer!r} from {origin} lands on {(x, y)}, "
+                f"not on {target} at {positions[target]}"
             )

@@ -499,6 +499,30 @@ class BabiGenerator:
         way; the second and third relations already point along the direction of
         travel.
 
+        Geometry
+        --------
+        Place ``locs[1]`` at the origin on a unit grid. The story then fixes
+        ``p0 = d(first)``, ``p2 = d(second)`` and ``p3 = d(second) + d(third)``.
+        Drawing the three directions independently produced a world that cannot
+        exist ~45% of the time (measured: 898 of 2000 samples put two rooms on
+        the same square) and an answer that walked out and straight back in the
+        same 898 cases. The layout is therefore CONSTRUCTED from two constraints
+        rather than rejection-sampled, because those two are provably the only
+        ones:
+
+        * ``first != second`` <=> ``p0 != p2``, and it is also exactly the
+          condition under which the first two answer steps
+          (``inverse(first)``, ``second``) are opposites.
+        * ``third != inverse(second)`` <=> ``p3 != p1``, and likewise exactly
+          the condition under which the last two answer steps are opposites.
+
+        The remaining pairs need no constraint: ``p0``, ``p2`` and ``p3`` are all
+        non-zero so none can coincide with ``p1 = (0, 0)``; ``p3 != p2`` because
+        ``d(third)`` is non-zero; and ``p3 != p0`` because the sum of two unit
+        grid vectors is either zero, doubled, or diagonal, and never a unit
+        vector. So the two constraints above give four distinct rooms AND a
+        backtrack-free three-step answer, with no resampling loop.
+
         :param num_samples: Number of samples.
         :return: List of samples.
         """
@@ -506,9 +530,14 @@ class BabiGenerator:
 
         for _ in range(num_samples):
             locs = list(self._rng.choice(self.LOCATIONS, size=4, replace=False))
-            first, second, third = (
-                str(d) for d in self._rng.choice(self.DIRECTIONS, size=3)
-            )
+            second = str(self._rng.choice(self.DIRECTIONS))
+            first = str(self._rng.choice(
+                [d for d in self.DIRECTIONS if d != second]
+            ))
+            third = str(self._rng.choice(
+                [d for d in self.DIRECTIONS
+                 if d != self.INVERSE_DIRECTIONS[second]]
+            ))
 
             story = [
                 f"The {locs[0]} is {first} of the {locs[1]}",

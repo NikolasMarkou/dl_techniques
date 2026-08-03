@@ -52,28 +52,40 @@ TARGET_BIT_ACCURACY = 0.90
 
 # DECISION plan-2026-08-03T161943-02be1d7e/D-013
 # Do NOT remove `keras.utils.set_random_seed(RANDOM_SEED)` "because a real test
-# should not depend on a seed", and do NOT lower MAX_EPOCHS towards the measured
-# 26 to make the test snappier. Both were measured, not assumed: seed 7 never
-# reached the threshold in 250 epochs (302 s) while seeds 1234 and 99 crossed at
-# 26 and 22. An unseeded run is therefore a coin flip, and a tight cap converts
-# ordinary run-to-run drift into a red build. If this ever fails, raise the cap
-# from a NEW measurement -- never lower TARGET_BIT_ACCURACY. See decisions.md
-# D-013.
+# should not depend on a seed". Measured, not assumed: seed 7 never reached the
+# threshold in 250 epochs (302 s) while five other seeds crossed in 20-76. An
+# unseeded run is therefore a coin flip, and a guard that fires on luck teaches
+# the next author to delete it. See decisions.md D-013.
 #: Pinned seed. The run is seed-sensitive and this is not cosmetic: at
-#: ``sequence_length=8`` seed 1234 crossed the threshold at epoch 26 and seed 99
-#: at epoch 22, but seed 7 was still at 0.882 after 250 epochs (measured, GPU 1,
-#: 302 s). An unseeded version of this test would be flaky in the "never
-#: converges" direction, so the seed is part of the assertion, not decoration.
+#: ``sequence_length=8`` seeds 42/99/0/1234 crossed the threshold at epochs
+#: 20/22/22/26 and seed 2024 at 76, but seed 7 was still at 0.882 after 250
+#: epochs (measured, GPU 1, 302 s). An unseeded version of this test would be
+#: flaky in the "never converges" direction, so the seed is part of the
+#: assertion, not decoration.
 #: Seed 1234 reproduced epoch-for-epoch across two consecutive runs
 #: (val_acc 0.8862 @25, 0.9378 @26 both times).
 RANDOM_SEED = 1234
 
-#: Epoch cap. Derived, not guessed: the pinned seed crosses the threshold at
-#: epoch **26** (measured twice), so the cap is ~4.6x the measurement and the
-#: observed run consumes 22% of it -- comfortably inside the "first run must not
-#: exceed 60% of the cap" rule this plan set for convergence guards. At ~1.15 s
-#: per epoch the worst case (never converging) costs ~140 s.
-MAX_EPOCHS = 120
+# DECISION plan-2026-08-03T161943-02be1d7e/D-016
+# Do NOT lower MAX_EPOCHS back towards the pinned seed's 26 epochs to make the
+# test snappier, and do NOT compensate for a slow run by lowering
+# TARGET_BIT_ACCURACY. The threshold is the claim; the cap is only patience. The
+# previous cap of 120 was derived from ONE seed's 26 epochs and looked generous
+# at 4.6x -- but a plain 3-seed sweep found seed 2024 needing 76, i.e. 63% of
+# that cap, outside this plan's own 60%-headroom rule. Any change here needs a
+# NEW multi-seed measurement, not a single observation. See decisions.md D-016.
+#: Epoch cap. Derived from the SPREAD, not from the pinned seed: a six-seed
+#: sweep at this exact configuration crossed the threshold at epochs
+#: **20 (seed 42), 22 (seed 99), 22 (seed 0), 26 (seed 1234), 76 (seed 2024)**,
+#: with seed 7 not crossing within 250. The cap is therefore sized against the
+#: worst observed CONVERGING run (76), not the pinned one (26): at 200 the
+#: pinned seed consumes 13% and the slowest observed seed 38%, both comfortably
+#: inside the "first run must not exceed 60% of the cap" rule this plan set for
+#: convergence guards. The previous cap of 120 satisfied that rule only for the
+#: pinned seed -- seed 2024 would have consumed 63% of it. At ~1.15 s per epoch
+#: the worst case (never converging) costs ~230 s, which is the price of the
+#: cap being patience rather than the claim; TARGET_BIT_ACCURACY is the claim.
+MAX_EPOCHS = 200
 
 BATCH_SIZE = 32
 VALIDATION_SPLIT = 0.2

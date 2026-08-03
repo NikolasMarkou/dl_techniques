@@ -438,22 +438,31 @@ class ScanGenerator:
         primitive: str
     ) -> Tuple[List[ScanSample], List[ScanSample]]:
         """Split where primitive only appears alone in training.
-        
+
+        Lake & Baroni (2018)'s add-primitive split puts the BARE primitive in
+        training and holds out every composition of it. A composed command is
+        therefore a test command however short it is.
+
         :param samples: All samples.
         :param primitive: Primitive to hold out in compositions.
         :return: Train and test splits.
         """
         train = []
         test = []
-        
+
         for sample in samples:
             tokens = sample.command_tokens
             has_primitive = self._contains_phrase(tokens, primitive)
 
-
-            # If command is just the primitive, goes to train
-            if sample.command == primitive or \
-               (len(tokens) <= 2 and has_primitive):
+            # DECISION plan-2026-08-03T161943-02be1d7e/D-015
+            # Do NOT re-add the `or (len(tokens) <= 2 and has_primitive)` clause
+            # this condition used to carry. It looks like the way to keep the
+            # bare multiword primitive `turn left` in training, but `command ==
+            # primitive` already does that -- and the length test additionally
+            # leaked `jump left`, `jump right`, `jump twice` and `jump thrice`
+            # into TRAIN for the `add_prim_jump` split, i.e. it trained on four
+            # of the compositions the split exists to hold out. See D-015.
+            if sample.command == primitive:
                 train.append(sample)
             elif has_primitive:
                 # Composed commands with primitive go to test
