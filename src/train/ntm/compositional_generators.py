@@ -13,6 +13,29 @@ import numpy as np
 from .config import ScanTaskConfig
 
 
+# Size of the atomic-command pool the conjunction enumerator draws from. It
+# bounds a quadratic enumeration (pool * pool * len(CONJUNCTIONS)), which is the
+# only reason a bound exists at all. 14 = 4 bare primitives + 2 ``turn <dir>``
+# commands + 8 ``<prim> <dir>`` commands, i.e. every atomic command the grammar
+# currently defines. The ``turn <dir>`` entries are what make "turn left"
+# reachable inside a compound, and therefore what makes the
+# ``add_prim_turn_left`` split a real hold-out instead of a permanently empty
+# one. Extending the grammar past 14 atomic commands truncates here on purpose:
+# raise this deliberately, after re-checking the enumeration cost.
+_COMPOUND_POOL_SIZE = 14
+
+# LENGTH-split threshold derivation. Lake & Baroni (2018) train their LENGTH
+# split on action sequences of <= 22 tokens drawn from a corpus whose sequences
+# reach 48 tokens. This grammar's corpus is much shallower (measured max 8), so
+# reusing the paper's *absolute* 22 (or the 24 this file previously hardcoded)
+# puts the boundary above every sample and yields an empty test set. Applying
+# the paper's *ratio* to whatever maximum the corpus actually exhibits keeps the
+# split non-degenerate and survives a future grammar extension. Note the floor
+# reproduces the paper exactly at the paper's own scale: floor(48 * 22/48) == 22.
+_SCAN_PAPER_TRAIN_MAX_ACTION_LENGTH = 22
+_SCAN_PAPER_CORPUS_MAX_ACTION_LENGTH = 48
+
+
 class ScanSplit(Enum):
     """SCAN dataset split types."""
     SIMPLE = "simple"
@@ -156,10 +179,11 @@ class ScanGenerator:
         
         # Compound commands with conjunctions
         simple_commands = [p for p in self.PRIMITIVES] + \
+                         [f"turn {d}" for d in self.DIRECTIONS] + \
                          [f"{p} {d}" for p in self.PRIMITIVES for d in self.DIRECTIONS]
-        
-        for cmd1 in simple_commands[:10]:  # Limit for tractability
-            for cmd2 in simple_commands[:10]:
+
+        for cmd1 in simple_commands[:_COMPOUND_POOL_SIZE]:
+            for cmd2 in simple_commands[:_COMPOUND_POOL_SIZE]:
                 for conj in self.CONJUNCTIONS:
                     samples.append(self._create_sample(f"{cmd1} {conj} {cmd2}"))
         
@@ -287,17 +311,58 @@ class ScanGenerator:
         
         return train, test
     
+    @staticmethod
+    def _contains_phrase(tokens: List[str], phrase: str) -> bool:
+        """Test whether a token list contains a phrase as a token subsequence.
+
+        Substring matching (``phrase in command``) would also match "turn lefts"
+        and is not token-aware; matching only the phrase's first token routes
+        every "turn right" command as if it held "turn left".
+
+        :param tokens: Tokenized command.
+        :param phrase: Whitespace-separated phrase, one or more tokens.
+        :return: True when the phrase's tokens appear contiguously in ``tokens``.
+        """
+        needle = phrase.split()
+        width = len(needle)
+        return any(
+            tokens[i:i + width] == needle
+            for i in range(len(tokens) - width + 1)
+        )
+
+    @staticmethod
+    def _derive_length_threshold(samples: List[ScanSample]) -> int:
+        """Derive the LENGTH-split boundary from the corpus's own distribution.
+
+        Scales the SCAN paper's train/max action-length ratio (22 of 48) onto the
+        maximum action length this grammar actually produces, so the boundary
+        tracks the grammar instead of encoding one corpus's magic number.
+
+        :param samples: All samples, used only for their action lengths.
+        :return: Maximum action length assigned to training.
+        """
+        observed_max = max(len(s.action_tokens) for s in samples)
+        return (
+            observed_max
+            * _SCAN_PAPER_TRAIN_MAX_ACTION_LENGTH
+            // _SCAN_PAPER_CORPUS_MAX_ACTION_LENGTH
+        )
+
     def _length_split(
         self,
         samples: List[ScanSample],
-        length_threshold: int = 24
+        length_threshold: Optional[int] = None
     ) -> Tuple[List[ScanSample], List[ScanSample]]:
         """Split by output action sequence length.
-        
+
         :param samples: All samples.
-        :param length_threshold: Max action length for training.
+        :param length_threshold: Max action length for training. Derived from
+            the corpus's own action-length distribution when None.
         :return: Train and test splits.
         """
+        if length_threshold is None:
+            length_threshold = self._derive_length_threshold(samples)
+
         train = [s for s in samples if len(s.action_tokens) <= length_threshold]
         test = [s for s in samples if len(s.action_tokens) > length_threshold]
         
@@ -319,9 +384,9 @@ class ScanGenerator:
         
         for sample in samples:
             tokens = sample.command_tokens
-            has_primitive = primitive in sample.command or \
-                           (primitive.split()[0] in tokens if " " in primitive else primitive in tokens)
-            
+            has_primitive = self._contains_phrase(tokens, primitive)
+
+
             # If command is just the primitive, goes to train
             if sample.command == primitive or \
                (len(tokens) <= 2 and has_primitive):
