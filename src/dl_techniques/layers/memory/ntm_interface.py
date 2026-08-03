@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Literal
 
+from dl_techniques.utils.logger import logger
+
 
 # ---------------------------------------------------------------------
 # Enumerations
@@ -217,8 +219,6 @@ class NTMConfig:
     :type shift_range: int
     :param use_memory_init: Whether to learn initial memory state.
     :type use_memory_init: bool
-    :param clip_value: Gradient clipping value for stability.
-    :type clip_value: float
     :param epsilon: Small constant for numerical stability.
     :type epsilon: float
     """
@@ -232,7 +232,6 @@ class NTMConfig:
     addressing_mode: AddressingMode = AddressingMode.HYBRID
     shift_range: int = 3
     use_memory_init: bool = True
-    clip_value: float = 10.0
     epsilon: float = 1e-6
 
     def __post_init__(self) -> None:
@@ -280,7 +279,6 @@ class NTMConfig:
             "addressing_mode": self.addressing_mode.name,
             "shift_range": self.shift_range,
             "use_memory_init": self.use_memory_init,
-            "clip_value": self.clip_value,
             "epsilon": self.epsilon,
         }
 
@@ -295,6 +293,19 @@ class NTMConfig:
         :rtype: NTMConfig
         """
         config = config_dict.copy()
+        # DECISION plan-2026-08-03T130803-4c570ee4/D-003
+        # `clip_value` was a declared-but-never-read field; it was removed, so a
+        # stored config still carrying it would hard-fail in `cls(**config)`.
+        # Drop ONLY this one named legacy key. Do NOT generalize this into a
+        # blanket "drop every unknown key" filter: that silently swallows typos
+        # (the `create_ffn_layer` trap in plans/SYSTEM.md) and turns a loud
+        # TypeError into a wrong-config-that-runs. See decisions.md D-003.
+        if "clip_value" in config:
+            config.pop("clip_value")
+            logger.warning(
+                "NTMConfig.from_dict: ignoring removed legacy key 'clip_value' "
+                "(it never affected behaviour; use the optimizer's clipnorm instead)."
+            )
         if "addressing_mode" in config and isinstance(config["addressing_mode"], str):
             config["addressing_mode"] = AddressingMode[config["addressing_mode"]]
         return cls(**config)

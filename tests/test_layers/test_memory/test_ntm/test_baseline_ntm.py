@@ -11,6 +11,7 @@ Tests cover:
     - create_ntm factory
 """
 
+import pytest
 import numpy as np
 import keras
 from keras import ops
@@ -635,12 +636,39 @@ class TestNeuralTuringMachine:
             "addressing_mode": "HYBRID",
             "shift_range": 3,
             "use_memory_init": True,
-            "clip_value": 10.0,
             "epsilon": 1e-6,
         }
         ntm = NeuralTuringMachine(config_dict, output_dim=10)
 
         assert ntm.config.memory_size == 32
+
+    def test_from_dict_drops_legacy_clip_value(self):
+        """A stored config carrying the removed `clip_value` key must still load.
+
+        `clip_value` was a declared-but-never-read field, removed by decision
+        (decisions.md D-003). `NTMConfig.from_dict` does `cls(**config)`, so
+        without the named-key shim an old config dict would raise TypeError.
+        The key must be dropped, not absorbed as an attribute.
+        """
+        cfg = NTMConfig.from_dict(
+            {
+                "memory_size": 32,
+                "memory_dim": 16,
+                "controller_dim": 64,
+                "addressing_mode": "HYBRID",
+                "clip_value": 10.0,
+                "epsilon": 1e-6,
+            }
+        )
+
+        assert cfg.memory_size == 32
+        assert not hasattr(cfg, "clip_value")
+        assert "clip_value" not in cfg.to_dict()
+
+    def test_from_dict_still_rejects_unknown_keys(self):
+        """The shim must drop ONLY `clip_value` — a typo must stay a hard error."""
+        with pytest.raises(TypeError):
+            NTMConfig.from_dict({"memory_size": 32, "memmory_dim": 16})
 
     def test_call_return_sequences(self):
         """Test call with return_sequences=True."""
