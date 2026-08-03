@@ -25,6 +25,7 @@ from .config import ScanTaskConfig
 # raise this deliberately, after re-checking the enumeration cost.
 _COMPOUND_POOL_SIZE = 14
 
+# DECISION plan-2026-08-03T161943-02be1d7e/D-001
 # LENGTH-split threshold derivation. Lake & Baroni (2018) train their LENGTH
 # split on action sequences of <= 22 tokens drawn from a corpus whose sequences
 # reach 48 tokens. This grammar's corpus is much shallower (measured max 8), so
@@ -33,6 +34,10 @@ _COMPOUND_POOL_SIZE = 14
 # the paper's *ratio* to whatever maximum the corpus actually exhibits keeps the
 # split non-degenerate and survives a future grammar extension. Note the floor
 # reproduces the paper exactly at the paper's own scale: floor(48 * 22/48) == 22.
+# This decision also covers the two siblings fixed alongside it: the compound
+# pool extended to make `add_prim_turn_left` reachable (see `_COMPOUND_POOL_SIZE`
+# above) and the real `template_around_right` hold-out + the exhaustive-dispatch
+# non-degeneracy validator in `generate_split`. See decisions.md D-001.
 _SCAN_PAPER_TRAIN_MAX_ACTION_LENGTH = 22
 _SCAN_PAPER_CORPUS_MAX_ACTION_LENGTH = 48
 
