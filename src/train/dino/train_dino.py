@@ -74,17 +74,16 @@ images). A top-1 over a 4x smaller bank is a DIFFERENT ESTIMATOR, not a noisier 
 of the same one. Pass ``--knn-bank-batches 64 --knn-query-batches 32`` to compare against
 one of those figures.
 
-**Memory, and why ``--gpu`` will not help you.** One full train step at the ``--smoke``
-scale peaks at **1518.6 MiB of the 10001 MiB free on GPU 1 (RTX 4070)** (probe method:
-the comment above :data:`SMOKE_OVERRIDES`; corroborated to within 1% in
-``research/2026_dino_ssl_measurements.md`` § 7). Do NOT read that off ``nvidia-smi``
-while this script runs -- in this trainer's import order TF is initialized before
-``train.common.setup_gpu``, which then logs ``GPU setup error: Physical devices cannot be
-modified after being initialized`` and leaves TF pre-allocating ~85% of the device
-(~10 400 MiB polled: TF's ARENA, not the working set). The same import order makes
-``--gpu N`` INERT in BOTH halves -- its ``CUDA_VISIBLE_DEVICES`` assignment lands after
-TF picked a device, and its other half IS that failed ``set_memory_growth``. **Select the
-device by prefixing ``CUDA_VISIBLE_DEVICES=N``**, as every ``Usage`` line below does.
+**Memory, and why ``--gpu`` will not help you.** The measured smoke-scale peak, the probe
+that produced it, and why polling ``nvidia-smi`` answers a different question (TF's ARENA,
+not the working set) are all in ``research/2026_dino_ssl_measurements.md`` § 7; the
+probe method is also in the comment above :data:`SMOKE_OVERRIDES`. What you must ACT on:
+in this trainer's import order TF is initialized before ``train.common.setup_gpu``, which
+then logs ``GPU setup error: Physical devices cannot be modified after being initialized``.
+That same import order makes ``--gpu N`` INERT in BOTH halves -- its
+``CUDA_VISIBLE_DEVICES`` assignment lands after TF picked a device, and its other half IS
+that failed ``set_memory_growth``. **Select the device by prefixing
+``CUDA_VISIBLE_DEVICES=N``**, as every ``Usage`` line below does.
 
 -------------------------------------------------------------------------------
 Validation, and the reason a decreasing loss is not enough
@@ -124,38 +123,29 @@ flag                          what it buys
 ============================  =================================================
 
 **THE RULE: ``--seed`` alone does NOT make two runs the same experiment. BOTH
-stream flags are required TOGETHER, and neither is redundant.** MEASURED at the
-data pipeline (2 processes, the real :func:`build_dataset`, sha1 of the first 3
-batches): either flag ON ALONE still gave differing batches; both ON gave
-bit-identical ones. Table in ``research/2026_dino_ssl_measurements.md`` § 4.
+stream flags are required TOGETHER, and neither is redundant** -- they close the
+two DIFFERENT unseeded sources above, so an A/B run without both compares models
+trained on different data. The probe that established this, its result table and
+its SCOPE (CPU-only: no model was built and no GPU kernel ran, so it says NOTHING
+about cuDNN nondeterminism) are in ``research/2026_dino_ssl_measurements.md`` § 4.
 
-The two flags reach two different unseeded sources -- the file interleave and the
-augmentation RNG -- so an A/B run without both is comparing models trained on
-different data. For the pipeline that probe measured, the bit-identity of the
-both-flags cell also rules out ``tf.data`` ``options.deterministic`` and the
-element ``.shuffle()`` as residual contributors. It says NOTHING about cuDNN
-kernel nondeterminism: the probe was CPU-only, built no model and ran no GPU
-kernel.
-
-**Both stream flags ship ON**, so a no-flag run is already reproducible against
-another no-flag run at the same ``--seed``; nothing needs to be remembered. The
-non-obvious direction is the off-switch: because the two close DIFFERENT holes,
-``--no-seed-training-stream`` OR ``--no-stateless-augmentation`` alone is enough
-to lose reproducibility. Passing BOTH restores the older stream (unpinned file
-order, shared ``Generator``) and with it comparability to runs in ``results/``
-recorded while the flags shipped OFF -- each flag changes what every training
-batch CONTAINS, so a default run today is not comparable to those.
+Both ship ON, so a no-flag run is already reproducible against another no-flag run
+at the same ``--seed`` and nothing needs to be remembered. The non-obvious
+direction is the off-switch: ``--no-seed-training-stream`` OR
+``--no-stateless-augmentation`` ALONE is enough to lose it. Passing BOTH restores
+the older stream and with it comparability to runs in ``results/`` recorded while
+the flags shipped OFF -- each flag changes what every training batch CONTAINS, so
+a default run today is not comparable to those.
 
 Usage::
 
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
 
     # PAPER SCALE -- these ARE the no-flag defaults, spelled out. DOES NOT FIT ON
-    # GPU 1: MEASURED, this config at `--batch-size 32` requested a single 10.13 GB
-    # allocation against the 10001 MiB usable on the RTX 4070 and was aborted by the
-    # BFC allocator (research/2026_dino_ssl_measurements.md § 5 confound 5, § 7).
-    # It has never been run here, and NOTHING in the README's § 6.1 table was
-    # measured at it. Reduce `--batch-size` or use a larger device.
+    # GPU 1: MEASURED, aborted by the BFC allocator at `--batch-size 32`
+    # (research/2026_dino_ssl_measurements.md § 5 confound 5, § 7). It has never
+    # been run here, and NOTHING in the measurement record was measured at it.
+    # Reduce `--batch-size` or use a larger device.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --variant small --global-crop-size 224 --dino-out-dim 65536 --epochs 100
 
@@ -171,26 +161,17 @@ Usage::
     #
     # `--knn-eval-every 4` and `--early-stopping-patience 70` are NOT decoration and
     # are NOT optional. The published endpoint is the mean of the last 3 EVALUATED
-    # epochs, so the eval CADENCE defines which epochs it averages. READ OFF the
-    # TRACKED `research/dino_ssl_measurements_evidence/long_improved_s42/training_log.csv`
-    # (see that directory's README.md for the one-line re-derivation command):
-    # at the measured `4` the evaluated epochs
-    # are 0,4,...,56 and the last three are 48/52/56, whose k20 mean is 0.4326171875
-    # -- exactly the 0.4326 published in README § 6.1. At the parser default `1` the
-    # last three would be 57/58/59: a DIFFERENT endpoint, which cannot reproduce
-    # +0.1426. Patience `70` (default 30) exists so a 60-epoch horizon is actually
-    # run to its end.
+    # epochs, so the eval CADENCE defines which epochs it averages: `4` averages
+    # 48/52/56, the parser default `1` would average 57/58/59 -- a DIFFERENT
+    # ESTIMATOR that cannot reproduce the published endpoint. Patience `70`
+    # (default 30) exists so a 60-epoch horizon is actually run to its end.
     #
-    # VERIFIED by resolving this line through the real
-    # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffing
-    # the resulting config FIELD-BY-FIELD against the TRACKED
-    # `research/dino_ssl_measurements_evidence/long_improved_s42/config.json`
-    # (37 recorded keys vs the 38 fields the config dataclass carries today).
-    # The evidence lives under `research/` on purpose: it was copied out of a
-    # gitignored `results/` run directory, so `rm -rf results/` can no longer
-    # orphan this claim. Result: warmup_steps=295, teacher_temp_final=0.04, and
-    # every measurement-bearing field equal. Exactly three fields do not match,
-    # none of them measurement-bearing:
+    # VERIFIED, not asserted. Both arm lines here are resolved through the real
+    # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffed
+    # FIELD-BY-FIELD against the four TRACKED configs under
+    # `research/dino_ssl_measurements_evidence/` (RE-DERIVED by execution after this
+    # file's argument plumbing changed). Every measurement-bearing field is equal on
+    # all four arms; exactly three are not, none of them measurement-bearing:
     #   * `output_dir` / `experiment_name` -- deliberately left at their defaults
     #     here, because passing the values the recorded config.json carries would
     #     OVERWRITE the surviving artifacts of that run. Add them only if you
@@ -198,21 +179,17 @@ Usage::
     #   * `ema_warmup_epochs` -- absent from the recorded config.json entirely: the
     #     field did not exist when those runs were made. It is inert here anyway
     #     (`ema_warmup_steps=295 > 0` wins in resolve_ema_warmup_steps).
-    # Same diff run against `long_improved_s1337/config.json` with `--seed 1337`:
-    # identical outcome. RE-DERIVED by execution after this file's argument
-    # plumbing changed, against all four tracked configs -- still exactly these
-    # three fields, all four arms.
+    # That directory's README.md says why the evidence lives under `research/` and
+    # carries the one-line command that re-derives the endpoint from the tracked
+    # `training_log.csv`.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
         --ema-warmup-steps 295 \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
         --knn-eval-every 4 --early-stopping-patience 70
 
-    # the BASELINE arm of the same measurement, for the A/B. Same field-by-field
-    # diff against the tracked
-    # `research/dino_ssl_measurements_evidence/long_baseline_s42/config.json`,
-    # same three non-matching fields, and resolve_ema_warmup_steps gives 0 -- the
-    # baseline arm's no-freeze.
+    # the BASELINE arm of the same measurement, for the A/B: resolve_ema_warmup_steps
+    # gives 0 here -- the baseline arm's no-freeze.
     ... --smoke --max-steps 100000 --epochs 60 --seed 42 --teacher-temp-final 0.07 \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
         --knn-eval-every 4 --early-stopping-patience 70
@@ -762,13 +739,12 @@ def build_knn_datasets(config: TrainingConfig) -> Tuple[Any, Any]:
     is non-deterministic ACROSS PROCESSES even at a fixed ``--seed``, so two runs score
     against two different memory banks. MEASURED before this was seeded: four bank draws
     at ``seed=42`` (two per process, two processes) gave four different label sequences,
-    and four zero-optimizer-step k-NN controls at the smoke config spread
-    ``dino_knn_top1_k20`` over **0.2754 / 0.2900 / 0.2910 / 0.2949 (range 0.0195)** and
-    ``k10`` over **0.2773 / 0.2686 / 0.2793 / 0.2607 (range 0.0186)** -- a band LARGER
-    than the +0.0127 effect a step-14 A/B was trying to read out of it. The QUERY set is
+    and the four zero-optimizer-step k-NN controls they produced spread over a band LARGER
+    than the effect a step-14 A/B was trying to read out of it. The QUERY set is
     unaffected (the validation split is opened with ``shuffle_files=False``), which is why
     ``dino_feat_mean_cos`` was bit-identical across those same repeats while the k-NN
-    moved. See `knn_eval`'s module docstring for how to read the number.
+    moved. The four draws are in `knn_eval`'s module docstring, which also says how to
+    read the number; the record § 6 (iv) carries them verbatim.
     """
     bank_ds, _, _ = build_raw_image_dataset(
         config.dataset,

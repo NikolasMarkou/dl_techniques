@@ -528,79 +528,49 @@ collapse** — the collapsed solution is a genuine minimum of the cross-view obj
 read those columns in `results/<run>/training_log.csv` before calling a run good. That
 module's docstring carries the STOP thresholds and what to do when one fires.
 
-### 6.1 The headline result, and what today's default gives you
+### 6.1 What the headline measurement obliges you to pass
 
-Two configurations were run to **60 epochs at 2 seeds (42 and 1337)**, at the **smoke
-scale** (`tiny` backbone, 96 px views, `dino_out_dim=4096`, 4 local crops, batch 32) on
-imagenette, on a **bit-identical (fully controlled) training stream**, on GPU 1
-(RTX 4070). Each arm is read against **its own** zero-optimizer-step random-init control,
-written by `KNNEvalCallback.on_train_begin` before `fit()` takes a single step. The
-endpoint is `dino_knn_top1_k20`, mean of the last 3 evaluated epochs, and the verdict rule
-(IMPROVED at `delta >= 0.04` for both seeds; NOT IMPROVED at `<= 0.02` for both;
-INCONCLUSIVE otherwise) was fixed before the runs launched.
+**The result itself is NOT repeated here.** The 2-arm x 2-seed x 60-epoch comparison — its
+pre-registered decision rule, the per-arm zero-step controls, endpoints, deltas, verdicts
+and health diagnostics, the seed-dependent reading of the early k-NN dip, and the two
+caveats no flag can fix (the improved arm moves TWO keys at once, and `improved - baseline`
+is not a pre-registered endpoint) — is `research/2026_dino_ssl_measurements.md` **§ 1**
+(§ 2 = each arm's exact config, § 3 = the dip, § 8.1 = the attribution gap; § 8 item 9
+below is the same backlog entry). This README cites it rather than carrying it (§ Contents).
+What follows is only what you must DO differently because of it.
 
-| arm | seed | own control | endpoint | delta | verdict |
-|---|---|---|---|---|---|
-| improved | 42 | 0.2900 | 0.4326 | **+0.1426** | **IMPROVED** (both seeds) |
-| improved | 1337 | 0.2969 | 0.4661 | **+0.1693** | |
-| shipped default *at the time of measurement* | 42 | 0.2900 | 0.3363 | +0.0462 | **INCONCLUSIVE** |
-| shipped default *at the time of measurement* | 1337 | 0.2969 | 0.3285 | +0.0316 | (one seed clears 0.04, one does not) |
+**A no-flag run carries the improved arm's two treatment values and NOT its scale.** The
+two TREATMENT keys are now the shipped defaults (`ema_warmup_epochs=1.0`, which resolves to
+295 steps at imagenette/batch 32, and `teacher_temp_final=0.04` — changed from
+`ema_warmup_steps=0, teacher_temp_final=0.07` by `plan-2026-08-02T132301-93deeae2`). The
+SCALE is not inherited with them, and the measured scale is the only one those numbers
+exist at. From `parse_arguments([])` a no-flag run is `--variant small --global-crop-size
+224 --dino-out-dim 65536 --epochs 100 --knn-bank-batches 16 --knn-query-batches 8` with no
+`--max-steps`; every measured arm ran at `tiny` / 96 px / `dino_out_dim=4096` / 4 local
+crops / batch 32 / 60 epochs / bank 64 / query 32 / `--max-steps 100000` on GPU 1. So
+**`python -m train.dino.train_dino` with no flags reproduces nothing in that record**, and
+that no-flag configuration **has never been run at all** — it was aborted by the BFC
+allocator on GPU 1 (the record § 5 confound 5 and § 7).
 
-**Read the arm labels carefully.** The "shipped default" arm above is
-`ema_warmup_steps=0, teacher_temp_final=0.07` — what this repository shipped **when the
-measurement was taken**. Those two TREATMENT keys have since been changed
-(`plan-2026-08-02T132301-93deeae2`): the trainer now ships `ema_warmup_epochs=1.0` (which
-resolves to the same 295 steps at imagenette/batch 32) and `teacher_temp_final=0.04`.
+**To reproduce an arm, use the `--smoke`-scaled invocations in the `Usage::` block of
+`src/train/dino/train_dino.py`**, not the bare command. Both carry `--seed 42`; the
+seed-1337 arms are the same lines with `--seed 1337`. Those lines are checked, not
+asserted — resolved through the real `parse_arguments -> config_from_args ->
+resolve_ema_warmup_steps` and diffed field-by-field against the four TRACKED configs under
+`research/dino_ssl_measurements_evidence/`, whose `README.md` also carries the one-line
+endpoint re-derivation. The three fields that deliberately do NOT match, and why, are named
+at that `Usage::` block.
 
-**A no-flag run carries the improved arm's two treatment values, and nothing else about
-it.** It does *not* carry the improved arm's SCALE, which is the only scale any number in
-this table was measured at. Read from `parse_arguments([])`: a no-flag run is `--variant
-small --global-crop-size 224 --dino-out-dim 65536 --epochs 100 --knn-bank-batches 16
---knn-query-batches 8` with no `--max-steps`, whereas every row above ran at `tiny` / 96 px
-/ `dino_out_dim=4096` / 60 epochs / bank 64 / query 32 / `--max-steps 100000`. So
-**`python -m train.dino.train_dino` with no flags reproduces nothing in this table** — a
-different backbone, a different resolution, a 16x smaller head, a different k-NN estimator
-and a different horizon.
-
-**And that no-flag configuration has never been run at all.** `small` / 224 px /
-`out_dim=65536` at `batch_size=32` requested a single **10.13 GB** allocation against the
-**10001 MiB usable on GPU 1 (RTX 4070, 12 GB)** and was aborted by the BFC allocator
-(`research/2026_dino_ssl_measurements.md` § 5 confound 5 and § 7). The invocations that
-produced the table are the two `--smoke`-scaled arm lines in the `Usage::` block of
-`src/train/dino/train_dino.py`, not the bare command. Those two lines carry `--seed 42` and
-so reproduce the two `seed 42` rows; the `seed 1337` rows come from the same two lines with
-`--seed 1337` substituted, which was resolved and diffed against
-`long_improved_s1337/config.json` on the same three residual fields.
-
-Those two lines are checked, not asserted: each was resolved through the real
-`parse_arguments -> config_from_args -> resolve_ema_warmup_steps` and diffed field-by-field
-(38 keys) against `results/dino_plan12a1f2db/long_improved_s42/config.json` and
-`long_baseline_s42/config.json`. Every measurement-bearing field matches. Three do not, none
-of them measurement-bearing: `output_dir` and `experiment_name` (deliberately left at their
-defaults so a re-run cannot overwrite the recorded artifacts) and `ema_warmup_epochs` (a
-field that did not exist when those runs were made, and inert on the improved line because
-`--ema-warmup-steps 295` wins). Note in particular that both lines must carry
-`--knn-eval-every 4`: the endpoint is the mean of the last 3 *evaluated* epochs, so the
-cadence chooses which epochs it averages (48/52/56 at `4` — mean 0.4326, the number in the
-table above — versus 57/58/59 at the parser default `1`).
+**`--knn-eval-every 4` is the § 6.3 trap one level up.** The endpoint is the mean of the
+last 3 *evaluated* epochs, so the cadence picks which epochs get averaged — `4` averages
+48/52/56, the parser default `1` averages 57/58/59. That is a **different estimator**, not
+a noisier reading of the same one (exactly as `--smoke`'s 16/8 k-NN bank is a different
+estimator from 64/32, § 6.3 trap 2), and no other cadence reproduces the record's endpoint.
 
 To restore the OLD treatment keys at whatever scale you are running, pass
 `--ema-warmup-epochs 0 --teacher-temp-final 0.07` (verified: that resolves to
 `warmup_steps=0`, `teacher_temp_final=0.07`). That gives you the baseline arm's two
 values — not the baseline arm.
-
-Two caveats that do not shrink with re-reading. (i) The improved arm changes **two** config
-keys at once and the 60-epoch result cannot apportion credit between them; the two were
-separated only at 8 epochs (§ 8, item 9). (ii) `improved - baseline` at matched seeds
-(+0.0964 at s42, +0.1377 at s1337) is **not** a pre-registered endpoint and carries no
-verdict.
-
-**The early k-NN dip is reduced, not abolished, and the reduction is seed-dependent.** At
-the 60-epoch improved arm, the epoch-0 reading relative to that run's own control is
-**+0.0020 at seed 42** (above its control — no dip at that seed) and **-0.0273 at seed
-1337** (below its control — a real dip remains at that seed). The corresponding baseline
-readings are -0.0605 (s42) and -0.0625 (s1337). Do not restate this as a single claim
-quantified over both seeds; that form was written once and was false at seed 1337.
 
 ### 6.2 Per-flag reference
 
@@ -621,7 +591,7 @@ next to a measured one inherits none of its credibility.
 | `--seed-training-stream` / `--no-seed-training-stream` | Seeds the TRAINING stream's TFDS file interleave with `--seed`. | **ON** | MEASURED — same 2-process CPU-only sha1 probe | Also not sufficient alone (the augmentation RNG is the residual source). `--seed` on its own does **not** make two runs comparable. `--no-` restores the unpinned file order. |
 | `--source-image-size` | Resolution at which records are DECODED, i.e. what the multi-crop transform crops from. `None` means `--global-crop-size`, so local crops come from an already-downsampled thumbnail. | `None` | MEASURED-NO-DIFFERENCE — 8 epochs, 2 seeds, smoke scale, controlled stream | **+0.0024** on the pre-registered endpoint and +0.0028 on the exploratory one, both an order of magnitude inside the ±0.02 no-difference band. Geometry (N=2000 draws): at a 96 px source, 100% of local views are upsampled, mean 2.35x, worst 4.50x; at 224 px, mean 1.006, worst 1.92x, and 39% are still upsamples. So 224 px **mitigates** the defect and does not eliminate it — the null result is not evidence that crop resolution is irrelevant. |
 | `--smoke` | Preset pinning the shape-validation scale: `tiny`, 96 px globals, 4 local crops, batch 32, `dino_out_dim=4096`, 2 epochs, `max_steps=5`, `ema_warmup_epochs=0.0`. **Any flag you actually type beats the preset — at any value, including the flag's own parser default.** Provenance is a raw `sys.argv` scan (`explicitly_set_flags` in `src/train/common/args.py`, attached to the Namespace by `parse_arguments`), not a parsed-value-vs-default comparison, so an explicitly-passed default is no longer indistinguishable from an omission. MEASURED at imagenette/batch 32 (`steps_per_epoch=295`): `--smoke --ema-warmup-epochs 1.0` resolves to `warmup_steps=295`, `1.5` gives 442 and `--ema-warmup-steps 295` gives 295. | off | UNMEASURED as an arm — it is a scale, not a treatment | Validates SHAPES and wiring; it is **not** a paper reproduction. It carries two traps that silently change what you measure — see § 6.3. Note it pins `ema_warmup_epochs=0.0` on purpose, so `--smoke` keeps its historical no-freeze semantics rather than silently gaining the new default's teacher freeze. |
-| `--knn-bank-batches` / `--knn-query-batches` | Size of the k-NN memory bank (TRAIN split) and query set (VALIDATION split), in batches. | `16` / `8` | Not a treatment — it is the **estimator** | Every k-NN figure quoted in § 6.1 and in `research/2026_dino_ssl_measurements.md` was measured at **64 / 32** (2048 bank images). At the default 16 / 8 (512 images) a top-1 is a *different estimator*, not a noisier reading of the same one. Pass `--knn-bank-batches 64 --knn-query-batches 32` for anything you intend to compare. |
+| `--knn-bank-batches` / `--knn-query-batches` | Size of the k-NN memory bank (TRAIN split) and query set (VALIDATION split), in batches. | `16` / `8` | Not a treatment — it is the **estimator** | Every k-NN figure in `research/2026_dino_ssl_measurements.md` (which is where they all live — § 6.1 no longer restates them) was measured at **64 / 32** (2048 bank images). At the default 16 / 8 (512 images) a top-1 is a *different estimator*, not a noisier reading of the same one. Pass `--knn-bank-batches 64 --knn-query-batches 32` for anything you intend to compare. |
 | `--max-steps` | Caps `steps_per_epoch`. | `None` (full epoch); `--smoke` pins **5** | UNMEASURED | Not a treatment, but a silent scale change: see § 6.3 trap 1. |
 | `--random-init-repeats` | Repeats of the ZERO-OPTIMIZER-STEP k-NN control written to `<run_dir>/random_init_control.json` before `fit()` performs a single update. | `2` | MEASURED-NO-DIFFERENCE **by construction** | The bank is `.cache()`d, so repeats replay the identical bank and the within-run range is exactly 0.0. Each run records `repeats_are_independent: false`. **This is not a noise estimate.** The only genuine noise data are the across-seed spread and one 0.0020 cross-process datum. |
 | `--center-momentum` | Momentum of the `DINOLoss` centering EMA. | `0.9` | MEASURED — **CLEARED** as a cause of the early k-NN dip, 8 epochs, 2 seeds, unseeded stream | Effect **-0.0063** at `--center-momentum 0.0` in the dip matrix, i.e. removing the centering lag entirely made the dip marginally worse. That matrix ran on an unseeded stream whose own null was 0.0400 wide. |
@@ -638,7 +608,7 @@ reading.
    `config.json` already recorded `max_steps=100000` — that run needed the same workaround
    and nobody wrote it down.
 2. **`--smoke` leaves `--knn-bank-batches 16 --knn-query-batches 8`** (512 bank images),
-   while the k-NN numbers in § 6.1, in `research/2026_dino_ssl_measurements.md` and in the
+   while the k-NN numbers in `research/2026_dino_ssl_measurements.md` and the
    zero-step control band in `src/train/dino/knn_eval.py`'s docstring were all measured at
    **64 / 32** (2048 images). See the estimator caveat in
    § 6.2.
@@ -691,7 +661,7 @@ silent omission again.
 8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
    warning and is otherwise ignored.
 9. **Attributing the improved 60-epoch configuration to one of its two changes.** The
-   IMPROVED verdict in § 6.1 belongs to the PAIR (`ema_warmup_epochs 0 -> 1.0`,
+   IMPROVED verdict (`research/2026_dino_ssl_measurements.md` § 1) belongs to the PAIR (`ema_warmup_epochs 0 -> 1.0`,
    `teacher_temp_final 0.07 -> 0.04`). The two mechanisms were separated only at 8 epochs
    and never at 60, so no credit can be apportioned. Separately, `--ema-warmup-epochs` is
    itself a superset — it freezes the teacher EMA *and* re-bases the cosine EMA ramp — and
