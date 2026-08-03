@@ -2032,6 +2032,20 @@ README. What follows is the set of facts a trainer has to be built around.
    `resize_longest_side` first (§3, §6.1) and rescale the prompt coordinates
    by the same factor.
 
+7. **`original_size` must be a PYTHON TUPLE under `fit()`, not a tensor.**
+   Eagerly, either spelling works and the tests exercise both. Under any trace
+   (`fit`, `predict`, `tf.function`, `jit_compile`) a tensor `original_size`
+   makes `SAM.call` fail to trace at all: `postprocess_masks` slices by
+   `input_size[0]` and passes `original_size` to `ops.image.resize`, raising
+   `OperatorNotAllowedInGraphError: Iterating over a symbolic tf.Tensor is not
+   allowed`. This is a **known limitation scheduled for iteration 2**, not a
+   bug you can work around inside the model. It does not block training as
+   described here: `low_res_logits` — the target constraint 1 tells you to
+   supervise — is produced *before* `postprocess_masks` runs, so a wrapper
+   model that returns `low_res_logits` alone (constraint 2) never reaches the
+   failing code. It only bites a traced pipeline that consumes
+   `outputs['masks']`.
+
 
 ### Fine-tuning Strategies
 

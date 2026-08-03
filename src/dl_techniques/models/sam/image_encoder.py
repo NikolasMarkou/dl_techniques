@@ -748,8 +748,12 @@ class ImageEncoderViT(keras.Model):
                 f"attains a global receptive field. Supply global_attn_indexes "
                 f"(reference SAM uses 4 evenly-spaced indices, e.g. "
                 f"(2, 5, 8, 11) at depth=12), set window_size=0 to make every "
-                f"block global, or use window_size >= {grid_size} so a single "
-                f"window covers the whole grid."
+                f"block global, or use window_size={grid_size} so a single "
+                f"window covers the whole grid exactly. (window_size > "
+                f"{grid_size} is accepted too, but is NOT recommended: the "
+                f"relative-position tables are sized 2*window_size-1, so such "
+                f"an encoder is neither weight-compatible with a "
+                f"window_size=0 one nor free of zero-pad tokens in attention.)"
             )
 
         # Store all configuration parameters

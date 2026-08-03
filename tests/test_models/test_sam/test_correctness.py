@@ -2922,7 +2922,7 @@ class TestDensePositionalEncodingGraphSafety:
             keras.backend.clear_session()
             gc.collect()
 
-    def test_sam_forward_survives_trace_then_eager(self, seeded_sam):
+    def test_sam_forward_survives_trace_then_eager(self):
         """
         PROOF 3: end to end on the real reduced-SAM fixture, which is the object
         the reviewer poisoned. ``SAM.call`` is traced once and then called
@@ -2956,22 +2956,31 @@ class TestDensePositionalEncodingGraphSafety:
         would happily reuse it. Measured: against the cached code the fixture
         spelling PASSED, and the fresh spelling below FAILS. Trace-first is also
         the realistic order, because it is what ``fit()`` does to a new model.
+        For that reason this test must NOT take the ``seeded_sam`` fixture at
+        all --- an earlier spelling requested it only to ``del`` it on the first
+        line, which still built and retained the module-scoped model.
 
         With the step-11 cache installed this test fails with the ``out of
         scope`` ``TypeError`` raised from inside
         ``PositionEmbeddingRandom.call()``.
         """
-        del seeded_sam
         model = build_reduced_sam()
-        inputs = dict(sam_inputs())
-        inputs["original_size"] = (IMG_SIZE, IMG_SIZE)
-        traced = tf.function(lambda: model.call(inputs)["low_res_logits"])
-        traced_value = keras.ops.convert_to_numpy(traced()).copy()
-        eager_value = keras.ops.convert_to_numpy(model.call(inputs)["low_res_logits"])
-        assert traced_value.shape == eager_value.shape
-        assert np.all(np.isfinite(eager_value)), (
-            "the eager forward after a trace returned non-finite logits"
-        )
+        try:
+            inputs = dict(sam_inputs())
+            inputs["original_size"] = (IMG_SIZE, IMG_SIZE)
+            traced = tf.function(lambda: model.call(inputs)["low_res_logits"])
+            traced_value = keras.ops.convert_to_numpy(traced()).copy()
+            eager_value = keras.ops.convert_to_numpy(
+                model.call(inputs)["low_res_logits"]
+            )
+            assert traced_value.shape == eager_value.shape
+            assert np.all(np.isfinite(eager_value)), (
+                "the eager forward after a trace returned non-finite logits"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
 
     def test_grid_sizes_do_not_contaminate_each_other(self):
         """
@@ -3050,11 +3059,14 @@ class TestRealVariantForwardPass:
     was executed by ZERO tests. Everything else in this file runs at a 16x16
     grid with 2 global blocks.
 
-    `vit_b` only. `vit_l` (308M) and `vit_h` (637M) are constructed and counted
-    below but NOT forward-passed here: a 1024x1024 forward through 32 blocks
-    holds a 4096x4096x16 global-attention matrix, and the test gate must stay
-    runnable on the 12GB GPU 1 alongside other work. That residual gap is
-    declared in `verification.md` § Not Verified.
+    `vit_b` only is forward-passed. `vit_l` (308M) and `vit_h` (637M) are
+    constructed and counted below but NOT forward-passed here, and the
+    parameter-count test does not forward-pass ANY variant: a 1024x1024 forward
+    through 32 blocks holds a 4096x4096x16 global-attention matrix, measured at
+    a **6,754.5 MiB** peak on the 10,160 MiB GPU 1, which made the ordinary
+    gate un-runnable whenever the card was already in use. That residual
+    coverage gap -- no `vit_l`/`vit_h` forward anywhere -- is declared in
+    `verification.md` § Not Verified.
     """
 
     def test_vit_b_forward_at_reference_geometry(self):
@@ -3113,6 +3125,16 @@ class TestRealVariantForwardPass:
             keras.backend.clear_session()
             gc.collect()
 
+    # DECISION plan-2026-08-03T191222-1d751f81/D-027: count parameters by
+    # BUILDING, never by forward-passing, and do it under keras.device("cpu").
+    # Do NOT replace the explicit sub-layer builds below with the obvious
+    # `model.image_encoder(zeros((1, 1024, 1024, 3)))` -- that spelling
+    # measured a 6,754.5 MiB GPU peak for vit_h on a 10,160 MiB card and made
+    # the ordinary gate hard-OOM (unskippable) under any concurrent GPU work.
+    # And do NOT collapse the sub-layer builds into a bare
+    # `encoder.build(shape)`: ImageEncoderViT.build creates only `pos_embed`,
+    # so that alone counts 5,242,880 of vit_h's 637,026,048. See decisions.md
+    # D-027.
     @pytest.mark.parametrize(
         "variant,encoder_params",
         [
@@ -3136,27 +3158,44 @@ class TestRealVariantForwardPass:
         Parameter counts are exact integers and are process-independent, unlike
         the forward-pass magnitudes carried surprise #9 forbids asserting.
 
-        The components are counted WITHOUT a full-model forward: the prompt
-        encoder and mask decoder are variant-independent, and the image encoder
-        is `build()`-complete for counting once its blocks exist.
+        NO FORWARD PASS, AND NO GPU. An earlier spelling of this test called
+        `image_encoder(zeros((1, 1024, 1024, 3)))`, which for `vit_h` allocates
+        the 4096x4096x16 global-attention matrix: measured peak **6,754.5 MiB**
+        on the 10,160 MiB GPU 1, i.e. the ordinary gate hard-OOMed (it cannot
+        skip) whenever anything else held more than ~3.3 GB of that card --
+        which is this machine's normal working condition. Counting parameters
+        never needed the forward. `ImageEncoderViT.build` creates only
+        `pos_embed` (its sub-layers are built lazily on first call), so the
+        sub-layers are built EXPLICITLY below at the geometry the forward would
+        have given them, and the whole thing runs inside `keras.device("cpu")`.
+        Measured after the change: all three variants exact, peak GPU **0.0
+        MiB**. Do NOT "simplify" this back to a forward pass, and do NOT drop
+        the explicit sub-layer builds -- `build()` alone counts 5,242,880 of
+        `vit_h`'s 637,026,048. See decisions.md D-027.
         """
-        model = SAM.from_variant(variant)
-        try:
-            model.image_encoder(
-                keras.ops.convert_to_tensor(
-                    np.zeros((1, 1024, 1024, 3), dtype="float32")
+        with keras.device("cpu"):
+            model = SAM.from_variant(variant)
+            try:
+                encoder = model.image_encoder
+                image_shape = (1, encoder.img_size, encoder.img_size, encoder.in_chans)
+                token_shape = (
+                    1, encoder.grid_size, encoder.grid_size, encoder.embed_dim,
                 )
-            )
-            measured = int(model.image_encoder.count_params())
-            assert measured == encoder_params, (
-                f"{variant} image encoder measures {measured:,} params, README "
-                f"section 15 says {encoder_params:,} -- update the README table "
-                f"from this measurement"
-            )
-        finally:
-            del model
-            keras.backend.clear_session()
-            gc.collect()
+                encoder.build(image_shape)
+                encoder.patch_embed.build(image_shape)
+                for block in encoder.blocks:
+                    block.build(token_shape)
+                encoder.neck.build(token_shape)
+                measured = int(encoder.count_params())
+                assert measured == encoder_params, (
+                    f"{variant} image encoder measures {measured:,} params, "
+                    f"README section 15 says {encoder_params:,} -- update the "
+                    f"README table from this measurement"
+                )
+            finally:
+                del model
+                keras.backend.clear_session()
+                gc.collect()
 
     def test_prompt_encoder_and_mask_decoder_are_variant_independent(self):
         """
