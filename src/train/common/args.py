@@ -50,13 +50,14 @@ def explicitly_set_flags(
     * Any abbreviation at all when the parser was built with
       ``allow_abbrev=False`` — then a prefix is an argparse ERROR, so counting
       it as typed would be wrong. The flag is READ from the parser.
-    * Abbreviations of SINGLE-dash options (``-xy``). argparse resolves those
-      through a different code path (short-option/explicit-arg splitting).
-      The only single-dash option the three trainers register is argparse's
-      own ``-h`` (MEASURED: 43 / 45 / 35 option strings on the ``train_dino``,
-      ``train_video_jepa`` and ``train_lewm`` parsers, single-dash list
-      ``['-h']`` on each). ``-h`` is an EXACT match, so it IS reported, as
-      dest ``help`` — harmlessly: the help action prints and exits, so
+    * SINGLE-dash options other than ``-h`` — and rather than answer wrongly,
+      the scan REFUSES them: a parser registering one raises ``ValueError``.
+      argparse resolves single-dash tokens through a short-option code path
+      this scan does not reimplement, so an ATTACHED value (``-b8``) or a
+      GROUPED run of flags (``-vb 8``) parses fine and is reported as
+      not-typed, which is verbatim the regression D-016 exists to prevent.
+      ``-h`` is exempt: it is an EXACT match, so it IS reported, as dest
+      ``help`` — harmlessly, because the help action prints and exits, so
       ``parse_args`` never returns and no caller ever reads the report, and
       ``help`` is not a config field any preset can override.
     * A VALUE that happens to spell a registered option (``--name --smoke``).
@@ -64,11 +65,9 @@ def explicitly_set_flags(
       token scan deliberately does not reimplement. Unreachable in practice:
       argparse rejects that argv before the answer can matter.
 
-    Each shape above is a row in the table in
-    ``tests/test_train/test_common_args.py``, driven against a local probe
-    parser AND against the real ``train_dino`` parser. Change a branch here and
-    change that table in the same edit — this helper is shared by three
-    trainers and its docstring is the contract they rely on.
+    Change a branch here and change the list above in the same edit — this
+    helper is shared by three trainers and that list is the contract they
+    rely on.
 
     Args:
         parser: The fully-populated parser whose actions define the recognised
@@ -83,6 +82,10 @@ def explicitly_set_flags(
         The set of argparse ``dest`` names mentioned in ``argv``. Dest names,
         not flag spellings — so a caller can test membership against dataclass
         field names via its own rename map.
+
+    Raises:
+        ValueError: If ``parser`` registers any single-dash option other than
+            ``-h``, whose attached and grouped forms this scan cannot see.
     """
     # DECISION plan-2026-08-03T043010-cecf4357/D-016
     # Resolve each token the way argparse resolves it, INCLUDING unambiguous
@@ -99,6 +102,26 @@ def explicitly_set_flags(
     for action in parser._actions:
         for opt in action.option_strings:
             dest_by_opt[opt] = action.dest
+
+    # DECISION plan-2026-08-03T043010-cecf4357/D-021
+    # REFUSE rather than answer wrongly. MEASURED: argparse ACCEPTS `-b8` as
+    # {'batch_size': 8} and `-vb 8` as {'verbose': True, 'batch_size': 8}, and
+    # the loop below sees NEITHER — it reports set() for a flag the caller
+    # really typed, which is exactly the D-016 regression. Do NOT "fix" this by
+    # reimplementing argparse's short-option tokenizer (attached values,
+    # grouped flags, single-dash prefixes): that is a chunk of real surface
+    # with its own bugs, for a shape no current consumer uses. `-h` is exempt:
+    # it is an exact match and its action exits, so nobody reads the report.
+    unscannable = sorted(
+        o for o in dest_by_opt if not o.startswith("--") and o != "-h")
+    if unscannable:
+        raise ValueError(
+            f"explicitly_set_flags cannot scan single-dash options "
+            f"{unscannable}: argparse accepts attached (-b8) and grouped "
+            f"(-vb 8) forms that this token scan does not resolve, so it "
+            f"would silently report a typed flag as not-typed. Give the flag "
+            f"a long spelling, or extend the scan. See decisions.md D-021."
+        )
 
     tokens = sys.argv[1:] if argv is None else list(argv)
     allow_abbrev = getattr(parser, "allow_abbrev", True)

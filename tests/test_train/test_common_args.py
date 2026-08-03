@@ -8,8 +8,7 @@ Its blast radius is three trainers (``train_dino``, ``train_video_jepa``,
 INDIRECTLY, through the DINO parser, in ``tests/test_train/test_dino/``.
 
 The helper's docstring enumerates the token shapes it does and does not see.
-Every one of those claims is a row in ``_CASES`` below, so the docstring's
-"each verified by test" is checkable by reading the table.
+This module pins that enumeration as a table.
 
 Two assertions per reachable row:
 
@@ -29,11 +28,15 @@ disagreements) and lives in that review, not in the suite — it is a one-off
 proof of equivalence, not a regression gate. What belongs in the suite is the
 enumerated contract, which is what this module is.
 
-Also not covered, because it is unreachable through a successful parse: a VALUE
-that happens to spell a registered option (``--experiment-name --smoke``).
-argparse rejects that argv ("expected one argument") before the helper's answer
-can matter, and distinguishing it would require reimplementing nargs/type
-handling. The helper's docstring says so; there is no row for it.
+One documented shape has no row, because it is unreachable through a successful
+parse: a VALUE that happens to spell a registered option
+(``--experiment-name --smoke``). argparse rejects that argv ("expected one
+argument") before the helper's answer can matter, and distinguishing it would
+require reimplementing nargs/type handling.
+
+The single-dash shapes DO have rows, in ``_SHORT_DASH_CASES``: argparse accepts
+``-b8`` and ``-vb 8``, the token scan sees neither, and the helper therefore
+REFUSES any parser registering a single-dash option other than ``-h``.
 """
 
 from __future__ import annotations
@@ -43,7 +46,10 @@ import argparse
 import pytest
 
 
-def _probe_parser(allow_abbrev: bool = True) -> argparse.ArgumentParser:
+def _probe_parser(
+        allow_abbrev: bool = True,
+        short_options: bool = False,
+) -> argparse.ArgumentParser:
     """A throwaway parser carrying every shape the helper's docstring names.
 
     Deliberately LOCAL and tiny so the table below runs without importing a
@@ -60,8 +66,17 @@ def _probe_parser(allow_abbrev: bool = True) -> argparse.ArgumentParser:
       argv argparse accepts (none of the three real trainers has one, so this
       is the only place the ``--`` break is exercised on a parse that
       SUCCEEDS).
+
+    ``short_options=True`` additionally registers ``-n/--n-workers`` (takes a
+    value) and ``-v/--verbose`` (a flag) — the pair needed to type an ATTACHED
+    ``-n8`` and a GROUPED ``-vn 8``, both of which argparse accepts and the
+    token scan cannot see. No real trainer registers either; the flag exists
+    only to drive the refusal.
     """
     parser = argparse.ArgumentParser(prog="probe", allow_abbrev=allow_abbrev)
+    if short_options:
+        parser.add_argument("-n", "--n-workers", type=int, default=1)
+        parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--ema-warmup-epochs", type=float, default=1.0)
     parser.add_argument("--ema-warmup-steps", type=int, default=0)
@@ -115,22 +130,42 @@ _CASES = [
      ["--ema-warmup-ep=1.5"], set(), False),
     ("no-abbrev-parser-still-sees-the-exact-flag", False,
      ["--batch-size", "8"], {"batch_size"}, True),
-    ("no-abbrev-parser-still-sees-both-boolean-spellings", False,
+    ("no-abbrev-parser-still-sees-the-negative-boolean-spelling", False,
      ["--no-stateless-augmentation"], {"stateless_augmentation"}, True),
+]
+
+# Same shape, on a probe that registers SINGLE-dash options. Here `expected` is
+# an exception TYPE: argparse accepts every one of these argvs, the token scan
+# resolves none of the short forms, so the helper refuses the PARSER outright
+# rather than return a wrong set. The third row shows the refusal is a property
+# of the parser, not of the argv.
+_SHORT_DASH_CASES = [
+    ("single-dash-attached-value-is-refused-not-missed", True,
+     ["-n8"], ValueError, True),
+    ("single-dash-grouped-flags-are-refused-not-missed", True,
+     ["-vn", "8"], ValueError, True),
+    ("single-dash-registration-refuses-even-a-plain-long-flag", True,
+     ["--batch-size", "8"], ValueError, True),
 ]
 
 
 @pytest.mark.parametrize(
-    "allow_abbrev,argv,expected,reachable",
-    [c[1:] for c in _CASES],
-    ids=[c[0] for c in _CASES],
+    "allow_abbrev,argv,expected,reachable,short_options",
+    [c[1:] + (False,) for c in _CASES]
+    + [c[1:] + (True,) for c in _SHORT_DASH_CASES],
+    ids=[c[0] for c in _CASES + _SHORT_DASH_CASES],
 )
 def test_explicitly_set_flags_reports_exactly_the_documented_shapes(
-        allow_abbrev, argv, expected, reachable):
+        allow_abbrev, argv, expected, reachable, short_options):
     from train.common.args import explicitly_set_flags
 
-    parser = _probe_parser(allow_abbrev=allow_abbrev)
-    assert explicitly_set_flags(parser, argv) == expected
+    parser = _probe_parser(
+        allow_abbrev=allow_abbrev, short_options=short_options)
+    if isinstance(expected, type):
+        with pytest.raises(expected, match="single-dash"):
+            explicitly_set_flags(parser, argv)
+    else:
+        assert explicitly_set_flags(parser, argv) == expected
 
     if reachable:
         # The row is a real vector, not a look-alike: argparse accepts it.
