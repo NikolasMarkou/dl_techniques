@@ -66,6 +66,15 @@ pythonpath = [
 testpaths = [
     "tests"
 ]
+# Registered so the markers below stop emitting PytestUnknownMarkWarning.
+# NOTE: registration is documentation only -- there is deliberately no
+# `addopts = -m "not slow"` here, so marking a test `slow` does NOT keep it out
+# of a default run. A test that must not run by default needs its own opt-in
+# skipif (see tests/test_train/test_ntm/test_ntm_learnability.py).
+markers = [
+    "slow: takes more than a few seconds; usually needs a GPU",
+    "integration: exercises several components together rather than one unit",
+]
 
 [tool.pylint.main]
 recursive = true
