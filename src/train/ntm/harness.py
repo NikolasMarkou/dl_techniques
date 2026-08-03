@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import keras
 import numpy as np
 
+from dl_techniques.utils.logger import logger
+
 from .babi_generator import BabiGenerator, BabiSample
 from .compositional_generators import (
     CFQGenerator,
@@ -321,7 +323,7 @@ class BenchmarkHarness:
                 
             except ValueError as e:
                 if self.config.verbose:
-                    print(f"Skipping task {task_id}: {e}")
+                    logger.warning(f"Skipping task {task_id}: {e}")
         
         return all_results
     
@@ -514,12 +516,12 @@ class BenchmarkHarness:
         for benchmark_name in benchmarks:
             if benchmark_name in available_benchmarks:
                 if self.config.verbose:
-                    print(f"Running {benchmark_name}...")
+                    logger.info(f"Running {benchmark_name}...")
                 try:
                     available_benchmarks[benchmark_name](model)
                 except Exception as e:
                     if self.config.verbose:
-                        print(f"Error in {benchmark_name}: {e}")
+                        logger.error(f"Error in {benchmark_name}: {e}", exc_info=True)
         
         total_runtime = time.time() - self._start_time
         
@@ -561,24 +563,28 @@ class BenchmarkHarness:
         self._runs.append(run)
         
         if self.config.verbose:
-            self._print_run_summary(run)
-    
-    def _print_run_summary(self, run: BenchmarkRun) -> None:
-        """Print summary of a benchmark run.
-        
+            self._log_run_summary(run)
+
+    def _log_run_summary(self, run: BenchmarkRun) -> None:
+        """Log the summary of a benchmark run, one record per line.
+
+        The per-metric lines are emitted individually rather than joined into a
+        single record so the table stays readable under a log formatter that
+        prefixes every record with a timestamp and level.
+
         :param run: BenchmarkRun to summarize.
         """
-        print(f"\n{'='*50}")
-        print(f"Benchmark: {run.benchmark_name}")
-        print(f"Runtime: {run.runtime_seconds:.2f}s")
-        
+        logger.info(f"{'='*50}")
+        logger.info(f"Benchmark: {run.benchmark_name}")
+        logger.info(f"Runtime: {run.runtime_seconds:.2f}s")
+
         for metric_name, result in run.results.metrics.items():
-            print(f"  {metric_name}: {result.value:.4f}")
-        
+            logger.info(f"  {metric_name}: {result.value:.4f}")
+
         if run.results.passed is not None:
             status = "PASSED" if run.results.passed else "FAILED"
-            print(f"  Status: {status}")
-        print(f"{'='*50}\n")
+            logger.info(f"  Status: {status}")
+        logger.info(f"{'='*50}")
     
     def _compute_summary(self) -> Dict[str, Any]:
         """Compute summary statistics from all runs.
@@ -654,7 +660,7 @@ class BenchmarkHarness:
             json.dump(serializable_report, f, indent=2)
         
         if self.config.verbose:
-            print(f"Report saved to {filepath}")
+            logger.info(f"Report saved to {filepath}")
     
     def get_keras_metrics(self) -> List[keras.metrics.Metric]:
         """Get Keras metric objects for training callbacks.
