@@ -1844,6 +1844,70 @@ class TestEncoderDegenerateDefaults:
             keras.backend.clear_session()
             gc.collect()
 
+    def test_guard_does_not_fire_when_one_window_covers_the_whole_grid(self):
+        """
+        THE SECOND DISCRIMINATING CONTROL (F-R3).
+
+        ``img_size=224, patch_size=16`` gives a 14x14 token grid, so
+        ``window_size=14`` is ONE window covering the entire grid: every block
+        is effectively global and an empty ``global_attn_indexes`` is CORRECT,
+        not degenerate. The step-7 guard refused this legitimate configuration
+        because it only checked ``window_size > 0``.
+
+        The grid identity is asserted, not assumed, so the case cannot silently
+        stop being the one it claims to be.
+        """
+        img_size, patch_size, window_size = 224, 16, 14
+        assert img_size // patch_size == window_size, (
+            "premise check: this test is only the intended control while the "
+            "window exactly equals the token grid"
+        )
+        encoder = ImageEncoderViT(
+            img_size=img_size,
+            patch_size=patch_size,
+            embed_dim=32,
+            depth=2,
+            num_heads=2,
+            out_chans=OUT_CHANS,
+            window_size=window_size,
+            global_attn_indexes=(),
+            use_rel_pos=True,
+        )
+        try:
+            assert [blk.window_size for blk in encoder.blocks] == [14, 14]
+            output = encoder(
+                keras.ops.convert_to_tensor(
+                    np.zeros((1, img_size, img_size, 3), dtype="float32")
+                )
+            )
+            assert tuple(output.shape) == (1, 14, 14, OUT_CHANS)
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_a_window_smaller_than_the_grid_is_still_refused(self):
+        """
+        The genuinely degenerate case must STILL fire after the F-R3 relaxation.
+
+        Same geometry as the control above but ``window_size=7`` against the
+        14x14 grid: four tiles per block, no block global, no global receptive
+        field anywhere. A relaxation that widened to ``window_size >= grid`` by
+        dropping the refusal altogether would pass the control and fail here.
+        """
+        with pytest.raises(ValueError, match="Degenerate encoder configuration"):
+            ImageEncoderViT(
+                img_size=224,
+                patch_size=16,
+                embed_dim=32,
+                depth=2,
+                num_heads=2,
+                out_chans=OUT_CHANS,
+                window_size=7,
+                global_attn_indexes=(),
+                use_rel_pos=True,
+            )
+
     def test_guard_does_not_fire_on_reference_shaped_encoder(self):
         """A windowed encoder WITH global indices is accepted and really mixes both."""
         encoder = ImageEncoderViT(
@@ -2971,5 +3035,167 @@ class TestDensePositionalEncodingGraphSafety:
             )
         finally:
             del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+
+class TestRealVariantForwardPass:
+    """
+    F-R5 --- one REAL variant is actually forward-passed, at reference geometry.
+
+    Before this, `from_variant('vit_b'/'vit_l'/'vit_h')` were constructed and
+    attribute-asserted only, so the reference geometry -- a 64x64 token grid,
+    `window_size=14` (which does NOT divide 64, so window partition really pads),
+    `global_attn_indexes=(2, 5, 8, 11)`, `use_rel_pos=True`, `img_size=1024` --
+    was executed by ZERO tests. Everything else in this file runs at a 16x16
+    grid with 2 global blocks.
+
+    `vit_b` only. `vit_l` (308M) and `vit_h` (637M) are constructed and counted
+    below but NOT forward-passed here: a 1024x1024 forward through 32 blocks
+    holds a 4096x4096x16 global-attention matrix, and the test gate must stay
+    runnable on the 12GB GPU 1 alongside other work. That residual gap is
+    declared in `verification.md` § Not Verified.
+    """
+
+    def test_vit_b_forward_at_reference_geometry(self):
+        """
+        Construct `vit_b`, assert the reference geometry, then RUN it.
+
+        Measured cost: ~0.5 s to construct and ~4 s for the forward on GPU 1 at
+        batch 1, which is why it is an ordinary gate test rather than a
+        `slow`-marked one.
+        """
+        model = SAM.from_variant("vit_b")
+        try:
+            encoder = model.image_encoder
+            assert encoder.img_size == 1024
+            assert encoder.patch_size == 16
+            assert encoder.grid_size == 64
+            assert encoder.use_rel_pos is True
+            assert tuple(encoder.global_attn_indexes) == (2, 5, 8, 11)
+            assert encoder.window_size == 14
+            assert 64 % 14 != 0, (
+                "premise check: window_size=14 must NOT divide the 64x64 grid, "
+                "otherwise this test does not exercise window-partition padding"
+            )
+            window_sizes = [blk.window_size for blk in encoder.blocks]
+            assert window_sizes == [
+                0 if i in (2, 5, 8, 11) else 14 for i in range(12)
+            ], f"block window sizes are {window_sizes}"
+
+            inputs = {
+                "image": keras.ops.convert_to_tensor(
+                    np.random.RandomState(0)
+                    .uniform(0.0, 255.0, size=(1, 1024, 1024, 3))
+                    .astype("float32")
+                ),
+                "points": (
+                    keras.ops.convert_to_tensor([[[500.0, 500.0]]]),
+                    keras.ops.convert_to_tensor([[1]]),
+                ),
+                "original_size": keras.ops.convert_to_tensor((1024, 1024)),
+            }
+            outputs = model(inputs)
+
+            assert tuple(outputs["masks"].shape) == (1, 3, 1024, 1024)
+            assert tuple(outputs["low_res_logits"].shape) == (1, 3, 256, 256)
+            assert tuple(outputs["iou_predictions"].shape) == (1, 3)
+            logits = keras.ops.convert_to_numpy(outputs["low_res_logits"])
+            assert np.all(np.isfinite(logits)), (
+                "vit_b produced non-finite low_res_logits at reference geometry"
+            )
+            assert float(np.std(logits)) > 0.0, (
+                "vit_b's low_res_logits are constant -- a collapsed forward "
+                "pass would satisfy every shape assertion above"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    @pytest.mark.parametrize(
+        "variant,encoder_params",
+        [
+            ("vit_b", 89_670_912),
+            ("vit_l", 308_278_272),
+            ("vit_h", 637_026_048),
+        ],
+    )
+    def test_variant_parameter_counts_match_the_readme(
+        self, variant: str, encoder_params: int
+    ):
+        """
+        F-R4 --- pin README section 15's per-variant counts to a MEASUREMENT.
+
+        README section 15 previously quoted reference-PyTorch figures that two
+        of this iteration's own layout changes had falsified (the mask decoder
+        was listed at 3,143,424 against a real 4,058,340). Those numbers now
+        come from this measurement, and this test is what keeps them true: any
+        further layout change fails HERE with the new number in the message.
+
+        Parameter counts are exact integers and are process-independent, unlike
+        the forward-pass magnitudes carried surprise #9 forbids asserting.
+
+        The components are counted WITHOUT a full-model forward: the prompt
+        encoder and mask decoder are variant-independent, and the image encoder
+        is `build()`-complete for counting once its blocks exist.
+        """
+        model = SAM.from_variant(variant)
+        try:
+            model.image_encoder(
+                keras.ops.convert_to_tensor(
+                    np.zeros((1, 1024, 1024, 3), dtype="float32")
+                )
+            )
+            measured = int(model.image_encoder.count_params())
+            assert measured == encoder_params, (
+                f"{variant} image encoder measures {measured:,} params, README "
+                f"section 15 says {encoder_params:,} -- update the README table "
+                f"from this measurement"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_prompt_encoder_and_mask_decoder_are_variant_independent(self):
+        """
+        The other half of README section 15's table: 6,476 and 4,058,340 for
+        EVERY variant, which is what makes the table's per-variant totals add up.
+
+        4,058,340 is the number the reviewer measured against README's stale
+        3,143,424; it is pinned here so it cannot rot again.
+        """
+        model = SAM.from_variant("vit_b")
+        try:
+            feat = keras.ops.convert_to_tensor(
+                np.zeros((1, 64, 64, 256), dtype="float32")
+            )
+            sparse, dense = model.prompt_encoder(
+                points=(
+                    keras.ops.convert_to_tensor([[[500.0, 500.0]]]),
+                    keras.ops.convert_to_tensor([[1]]),
+                )
+            )
+            model.prompt_encoder(masks=keras.random.normal((1, 1, 256, 256)))
+            model.mask_decoder(
+                image_embeddings=feat,
+                image_pe=model.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse,
+                dense_prompt_embeddings=dense,
+                multimask_output=True,
+            )
+            assert int(model.prompt_encoder.count_params()) == 6_476, (
+                f"prompt encoder measures "
+                f"{int(model.prompt_encoder.count_params()):,} params, README "
+                f"section 15 says 6,476"
+            )
+            assert int(model.mask_decoder.count_params()) == 4_058_340, (
+                f"mask decoder measures "
+                f"{int(model.mask_decoder.count_params()):,} params, README "
+                f"section 15 says 4,058,340"
+            )
+        finally:
+            del model
             keras.backend.clear_session()
             gc.collect()

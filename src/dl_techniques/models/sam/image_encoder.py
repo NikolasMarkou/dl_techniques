@@ -727,15 +727,29 @@ class ImageEncoderViT(keras.Model):
         # requirement: `window_size == 0` already makes every block global and
         # an empty tuple is then CORRECT, not degenerate (measured: 4/4 global
         # blocks). The `window_size > 0` conjunct is the discriminating half.
-        # See decisions.md D-014.
-        if window_size > 0 and not global_attn_indexes:
+        #
+        # DECISION plan-2026-08-03T191222-1d751f81/D-026 (F-R3): the SECOND
+        # conjunct, `window_size < grid_size`, is equally load-bearing and was
+        # missing. A window at least as large as the token grid already covers
+        # the whole grid, so every block IS global and an empty
+        # `global_attn_indexes` is CORRECT — measured at the legitimate
+        # `img_size=224, patch_size=16, window_size=14` (grid 14x14), which the
+        # narrower guard refused. Do NOT drop either conjunct: without the
+        # first, a global-only encoder (`window_size=0`) is refused; without
+        # this one, a window-covers-grid encoder is. See decisions.md D-014,
+        # D-026.
+        grid_size = img_size // patch_size
+        if 0 < window_size < grid_size and not global_attn_indexes:
             raise ValueError(
                 f"Degenerate encoder configuration: window_size={window_size} "
                 f"> 0 with an empty global_attn_indexes windows every one of "
-                f"the {depth} blocks, so the encoder never attains a global "
-                f"receptive field. Supply global_attn_indexes (reference SAM "
-                f"uses 4 evenly-spaced indices, e.g. (2, 5, 8, 11) at "
-                f"depth=12), or set window_size=0 to make every block global."
+                f"the {depth} blocks into {window_size}x{window_size} tiles of "
+                f"the {grid_size}x{grid_size} token grid, so the encoder never "
+                f"attains a global receptive field. Supply global_attn_indexes "
+                f"(reference SAM uses 4 evenly-spaced indices, e.g. "
+                f"(2, 5, 8, 11) at depth=12), set window_size=0 to make every "
+                f"block global, or use window_size >= {grid_size} so a single "
+                f"window covers the whole grid."
             )
 
         # Store all configuration parameters

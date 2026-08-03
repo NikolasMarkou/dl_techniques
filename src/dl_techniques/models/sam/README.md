@@ -2861,47 +2861,71 @@ A: Yes! See Section 11 for detailed training strategies. Generally:
 
 ### Architecture Statistics
 
-**ViT-B (Base)**:
-```
-Total Parameters: 89,670,912
-├─ Image Encoder:  86,433,792  (96.4%)
-├─ Prompt Encoder:     93,696  (0.1%)
-└─ Mask Decoder:    3,143,424  (3.5%)
+**These figures are MEASURED from this package**, not quoted from the reference
+PyTorch implementation. Each variant was instantiated via
+`SAM.from_variant(...)`, forward-passed once per component at `img_size=1024`
+so that every lazily-created variable exists, and counted with
+`count_params()`. The previous version of this section quoted reference-SAM
+numbers that this repo's own layout changes had falsified (the
+`attention_downsample_rate=2` cross-attentions and the 3-layer MLP heads move
+the mask decoder by exactly −328,320 + the head growth), and whose "Total
+Parameters" line was in fact the image-encoder count.
 
-Layer Breakdown:
-├─ Patch Embedding:    590,592
-├─ Position Embedding: 262,144
-├─ Transformer Blocks: 85,054,464
-├─ Neck:               526,592
-├─ Prompt Dense PE:    16,384
-├─ Point Embeddings:    77,312
-└─ Mask Tokens:         3,143,424
+Reproduce with:
 
-Memory Footprint (FP32): ~4.2 GB
-Memory Footprint (FP16): ~2.1 GB
-```
-
-**ViT-L (Large)**:
-```
-Total Parameters: 308,278,272
-├─ Image Encoder: 303,315,968  (98.4%)
-├─ Prompt Encoder:     93,696  (0.03%)
-└─ Mask Decoder:    4,868,608  (1.6%)
-
-Memory Footprint (FP32): ~8.6 GB
-Memory Footprint (FP16): ~4.3 GB
+```python
+m = SAM.from_variant("vit_b")
+feat = m.image_encoder(keras.ops.zeros((1, 1024, 1024, 3)))
+sparse, dense = m.prompt_encoder(points=(keras.ops.zeros((1, 1, 2)),
+                                         keras.ops.zeros((1, 1), dtype="int32")))
+m.mask_decoder(image_embeddings=feat, image_pe=m.prompt_encoder.get_dense_pe(),
+               sparse_prompt_embeddings=sparse, dense_prompt_embeddings=dense,
+               multimask_output=True)
+[int(c.count_params()) for c in (m.image_encoder, m.prompt_encoder, m.mask_decoder)]
 ```
 
-**ViT-H (Huge)**:
-```
-Total Parameters: 637,026,304
-├─ Image Encoder: 632,049,664  (99.2%)
-├─ Prompt Encoder:     93,696  (0.01%)
-└─ Mask Decoder:    4,882,944  (0.8%)
+| Variant | Image Encoder | Prompt Encoder | Mask Decoder | Total |
+|---|---:|---:|---:|---:|
+| **ViT-B** | 89,670,912 (95.7%) | 6,476 (0.007%) | 4,058,340 (4.3%) | **93,735,728** |
+| **ViT-L** | 308,278,272 (98.7%) | 6,476 (0.002%) | 4,058,340 (1.3%) | **312,343,088** |
+| **ViT-H** | 637,026,048 (99.4%) | 6,476 (0.001%) | 4,058,340 (0.6%) | **641,090,864** |
 
-Memory Footprint (FP32): ~16.8 GB
-Memory Footprint (FP16): ~8.4 GB
+The prompt encoder and the mask decoder are **variant-independent** — both run
+at `prompt_embed_dim=256` for every variant, so only the image encoder scales.
+
+**ViT-B component breakdown** (measured the same way):
+
 ```
+Image Encoder                    89,670,912
+├─ Patch Embedding                  590,592
+├─ Position Embedding             3,145,728
+├─ Transformer Blocks            85,147,136
+└─ Neck                             787,456
+
+Prompt Encoder                        6,476
+├─ Random Gaussian PE matrix            256   (non-trainable)
+├─ Point Embeddings (4)               1,024
+├─ not_a_point_embed                    256
+├─ no_mask_embed                        256
+└─ Mask Downscaling CNN               4,684
+
+Mask Decoder                      4,058,340
+├─ IoU Token                            256
+├─ Mask Tokens (4)                    1,024
+├─ Two-Way Transformer            3,291,264
+├─ Output Upscaling                  73,952
+├─ Hypernetwork MLPs (4)            559,232
+└─ IoU Prediction Head              132,612
+```
+
+Memory footprints below are **NOT measured** — they are order-of-magnitude
+estimates for weights plus activations at batch 1, and are marked as such:
+
+| Variant | Weights (FP32, derived) | Peak footprint (FP32, *estimated*) |
+|---|---:|---:|
+| ViT-B | ~0.37 GB | ~4 GB |
+| ViT-L | ~1.25 GB | ~9 GB |
+| ViT-H | ~2.56 GB | ~17 GB |
 
 ### Computational Complexity
 
