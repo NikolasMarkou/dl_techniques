@@ -44,8 +44,11 @@ Example Usage
 >>> metrics = harness.get_keras_metrics()
 >>> model.compile(optimizer='adam', loss='bce', metrics=metrics)
 
-Note: `BenchmarkHarness` and the generators re-exported here have no caller in
-either training script -- see README.md "Library surface with no trainer caller".
+Note: `BenchmarkHarness` and the generators re-exported here are NOT exercised by
+the two `train_*.py` scripts, but they are no longer caller-less: the third entry
+point, `run_benchmark_suite.py`, drives `run_full_suite` end to end. The stateful
+`keras.metrics.Metric` classes and `CogsGenerator`/`CFQGenerator` still have no
+caller anywhere -- see README.md "Library surface without a caller".
 """
 from .config import (
     AlgorithmicTaskConfig,

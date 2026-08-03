@@ -96,8 +96,12 @@ class ScanTaskConfig:
     SCAN tests systematic recombination of navigation commands,
     a key test for compositional generalization.
     
-    :param split_type: Type of train/test split.
-        Options: 'simple', 'length', 'add_prim_jump', 'add_prim_turn_left'.
+    :param split_type: Type of train/test split. Must be the value of a
+        ``ScanSplit`` member -- all five of them: 'simple', 'length',
+        'add_prim_jump', 'add_prim_turn_left', 'template_around_right'.
+        Anything else raises ``ValueError`` from ``ScanGenerator.generate_split``
+        rather than silently falling back to 'simple', which is what it used to
+        do (and what listing only four of the five members here concealed).
     :param max_input_length: Maximum command sequence length.
     :param max_output_length: Maximum action sequence length.
     :param num_samples: Number of samples to generate.

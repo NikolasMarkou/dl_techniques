@@ -18,16 +18,17 @@ name.
 
 ## Contents at a glance
 
-| Module | What it is | Called by a trainer? |
-|--------|------------|----------------------|
+| Module | What it is | Called by an entry point? |
+|--------|------------|---------------------------|
 | `train_ntm.py` | Single-task copy-task trainer (runnable) | — it *is* an entry point |
 | `train_multitask.py` | Six-task multi-task trainer (runnable) | — it *is* an entry point |
+| `run_benchmark_suite.py` | Benchmark-suite CLI over a saved `.keras` model (runnable) | — it *is* an entry point |
 | `config.py` | Task/benchmark config dataclasses | yes |
 | `data_generators.py` | Copy, associative recall, repeat copy, priority access, traversal, dynamic n-gram, algorithmic | yes |
-| `metrics.py` | `evaluate_*` functions + stateful `keras.metrics.Metric` classes | evaluate functions: no (see below); classes: no |
-| `harness.py` | `BenchmarkHarness`, `create_benchmark_callbacks` | **no** |
-| `compositional_generators.py` | SCAN / COGS / CFQ generators | **no** |
-| `babi_generator.py` | bAbI QA story generator | **no** |
+| `metrics.py` | `evaluate_*` functions + stateful `keras.metrics.Metric` classes | evaluate functions: yes, via `harness.py`; classes: **no** |
+| `harness.py` | `BenchmarkHarness`, `create_benchmark_callbacks` | `BenchmarkHarness`: yes, by `run_benchmark_suite.py`; `create_benchmark_callbacks`: **no** |
+| `compositional_generators.py` | SCAN / COGS / CFQ generators | `ScanGenerator`: yes, via the `scan` benchmark; COGS/CFQ: **no** |
+| `babi_generator.py` | bAbI QA story generator | yes, via the `babi` benchmark |
 
 The authoritative list of public names is `__all__` in `src/train/ntm/__init__.py`.
 
@@ -35,8 +36,17 @@ The authoritative list of public names is `__all__` in `src/train/ntm/__init__.p
 
 ## Runnable entry points
 
-Both scripts take their common flags from `train.common.create_base_argument_parser`,
-so `--help` prints and exits without starting a run.
+There are **three**: `train_ntm.py`, `train_multitask.py` and
+`run_benchmark_suite.py`. All three parse arguments before touching a GPU, so
+`--help` prints and exits 0 without starting a run — pinned by
+`tests/test_train/test_ntm/test_ntm_trainers.py::TestCommandLineContract`, which
+tripwires `setup_gpu`.
+
+Only `train_ntm.py` still takes its common flags from
+`train.common.create_base_argument_parser`. `train_multitask.py` and
+`run_benchmark_suite.py` build a **local** `argparse.ArgumentParser` (the
+Pattern 2 shape documented in `src/train/CLAUDE.md`), because the shared
+vision-oriented parser contributed five flags neither of them reads.
 
 ### 1. Copy task — `train_ntm.py`
 
@@ -75,8 +85,10 @@ Flags (verbatim from `--help`):
 | `--success-threshold` | `0.9` | sequence accuracy above which the log says SUCCESS |
 
 The base parser also exposes `--image-size`, `--weight-decay`, `--lr-schedule`
-and `--show-plots`. **Neither NTM trainer reads them** — they are inherited from
-the shared vision-oriented parser and are silent no-ops here.
+and `--show-plots`. **`train_ntm.py` does not read any of them** — they are
+inherited from the shared vision-oriented parser and are silent no-ops here.
+`train_multitask.py` used to inherit the same dead tail and no longer does: it
+moved to a local parser and now rejects those flags outright.
 
 ### 2. Multi-task — `train_multitask.py`
 
@@ -94,9 +106,36 @@ MPLBACKEND=Agg python -m train.ntm.train_multitask \
     --controller-dim 256 --patience 50 --gpu 1
 ```
 
-Flags beyond the base parser: `--memory-size` (128), `--memory-dim` (20),
-`--controller-dim` (256), `--steps-per-epoch` (1000), `--validation-steps` (100),
-`--clip-norm` (1.0).
+Flags (verbatim from `--help`; this trainer uses a **local** parser, so this is
+the whole surface — there is no inherited base-parser tail):
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--epochs` | `100` | maximum training epochs |
+| `--batch-size` | `64` | rows per training/validation batch |
+| `--learning-rate` | `0.0001` | Adam learning rate |
+| `--patience` | `50` | EarlyStopping patience; matches `MultitaskNTMConfig.patience` |
+| `--steps-per-epoch` | `1000` | batches per training epoch |
+| `--validation-steps` | `100` | batches per validation pass |
+| `--clip-norm` | `1.0` | optimizer `clipnorm` |
+| `--num-eval-samples` | `1000` | rows per task in the final evaluation |
+| `--memory-size` | `128` | memory slots (N) |
+| `--memory-dim` | `20` | width of one memory slot (M) |
+| `--controller-dim` | `256` | controller hidden width |
+| `--controller-type` | `lstm` | `lstm`, `gru` or `feedforward` |
+| `--num-read-heads` / `--num-write-heads` | `1` / `1` | |
+| `--shift-range` | `3` | location-addressing shift width; must be a positive **odd** integer (`NTMConfig` validates) |
+| `--max-seq-length` | `100` | timeline width every task is padded/truncated to |
+| `--max-vector-size` | `16` | feature width every task is padded/truncated to |
+| `--gpu` | `None` | GPU device index |
+
+The last six of those (`--controller-type` through `--max-vector-size`) are new:
+those `MultitaskNTMConfig` fields previously had no flag at all. Conversely
+`--dataset`, `--image-size`, `--weight-decay`, `--lr-schedule` and `--show-plots`
+are **gone** — they came from the shared parser, were never read here, and the
+local parser now *refuses* them rather than accepting them as silent no-ops.
+Only `train_ntm.py` still carries that inherited-no-op tail (see its own note
+above).
 
 > **There is no `train_multitask_v2.py`.** Two near-duplicate multi-task
 > trainers used to exist; the argparse-less one was deleted and the surviving
@@ -108,31 +147,75 @@ Ctrl-C during `fit` saves the partially trained model to
 Both trainers write to a repo-root `results/` directory created by
 `train.common.create_callbacks`.
 
+### 3. Benchmark suite — `run_benchmark_suite.py`
+
+A thin CLI over `BenchmarkHarness`. It loads a saved `.keras` model, runs
+`run_full_suite(...)` and writes a JSON report. No measurement lives here —
+every metric comes from `harness.py` / `metrics.py`.
+
+```bash
+MPLBACKEND=Agg python -m train.ntm.run_benchmark_suite --help
+
+MPLBACKEND=Agg python -m train.ntm.run_benchmark_suite \
+    --checkpoint results/ntm_copy_.../final_model.keras \
+    --benchmarks copy_task length_generalization \
+    --output results/ntm_benchmarks --gpu 1
+```
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--checkpoint` | *(required)* | path to the saved `.keras` model |
+| `--output` | `results/ntm_benchmarks` | repo-root `results/` tree; never `src/results/` |
+| `--benchmarks` | all six | subset of `copy_task`, `associative_recall`, `length_generalization`, `memory_capacity`, `scan`, `babi` |
+| `--model-name` | checkpoint stem | name recorded in the report |
+| `--gpu` | `None` | GPU device index |
+| `--quiet` | off | sets `BenchmarkSuiteConfig.verbose=False`, which also silences the per-benchmark error log |
+
+> **Expect most benchmarks to ERROR on any single-task checkpoint. That is the
+> design, not a bug.** Each benchmark generates its own inputs with its own
+> shape and arity: the copy task feeds one `(batch, T, vector_size + 2)` tensor,
+> associative recall and memory capacity use a different feature width, SCAN
+> uses its own encoded command length, and bAbI passes **two** inputs
+> (story, question). A model trained for one of them cannot accept the others,
+> so `model.predict` raises. `run_full_suite` contains each failure to its own
+> benchmark, logs it with a traceback and keeps going — so a run against a
+> copy-task model legitimately prints ~4 tracebacks and still writes a report
+> with the 2 benchmarks it could run. **Measured** (step 8 of
+> `plan-2026-08-03T161943-02be1d7e`, freshly-built untrained copy-shaped NTM,
+> input `(23, 10)` → output `(23, 8)`): `copy_task` and
+> `length_generalization` recorded; `associative_recall` and `memory_capacity`
+> failed with `Matrix size-incompatible: In[0]: [32,13], In[1]: [18,128]`,
+> `scan` with `expected shape=(None, 23, 10), found shape=(32, 7)`, and `babi`
+> with `expects 1 input(s), but it received 2`. Pass `--benchmarks` to run only
+> the ones your checkpoint is shaped for.
+
+There is no `run_algorithmic_benchmark` entry in the suite: the method exists on
+`BenchmarkHarness` but is not in `BENCHMARK_METHODS`, so neither `run_full_suite`
+nor this CLI can reach it.
+
 ---
 
-## Library surface with no trainer caller
+## Library surface without a caller
 
-The following are implemented, importable and imported by
-`src/train/ntm/__init__.py`, but **no `train_*.py` in this package calls them**.
-Running a trainer does not exercise them, and nothing in the trainers proves
-they work end-to-end:
+`run_benchmark_suite.py` (above) now drives `BenchmarkHarness.run_full_suite`,
+`save_report`, `ScanGenerator`, `BabiGenerator` and the `evaluate_*` functions
+end to end, so the bulk of what this section used to list is exercised. What
+remains genuinely caller-less:
 
-- `harness.py` — `BenchmarkHarness` (`run_copy_task_benchmark`,
-  `run_associative_recall_benchmark`, `run_length_generalization_benchmark`,
-  `run_capacity_benchmark`, `run_babi_benchmark`, `run_scan_benchmark`,
-  `run_algorithmic_benchmark`, `run_full_suite`, `save_report`) and
-  `create_benchmark_callbacks`.
-- `compositional_generators.py` — `ScanGenerator`, `CogsGenerator`, `CFQGenerator`.
-- `babi_generator.py` — `BabiGenerator`.
+- `create_benchmark_callbacks` (`harness.py`) — no entry point builds them.
+- `BenchmarkHarness.run_algorithmic_benchmark` — implemented but absent from
+  `BENCHMARK_METHODS`, so unreachable from the suite or the CLI.
+- `BenchmarkHarness.get_keras_metrics` — nothing calls it.
+- `CogsGenerator` and `CFQGenerator` (`compositional_generators.py`) — imported
+  by `harness.py` but never used there; no benchmark consumes them.
 - The stateful `keras.metrics.Metric` classes in `metrics.py` —
   `SequenceAccuracy`, `PerStepAccuracy`, `BitErrorRate`, `ExactMatchAccuracy`,
-  plus `MemoryUtilizationMetric`. Neither trainer passes them to `compile()`;
+  plus `MemoryUtilizationMetric`. No trainer passes them to `compile()`;
   they compile with `keras.metrics.BinaryAccuracy` (and `MeanSquaredError`).
-- The `evaluate_*` functions in `metrics.py` are called only by `harness.py` and
-  by the test suite. `train_ntm.py` has its own local `evaluate_model`.
 
-Treat this surface as usable-but-unproven scaffolding, not as a validated
-benchmark pipeline.
+Note also that `train_ntm.py` keeps its own local `evaluate_model` rather than
+calling `evaluate_copy_task` — two implementations of nearly the same
+measurement, deliberately not unified.
 
 > **Name collision.** `dl_techniques.metrics.sequence_metrics` also defines
 > `SequenceAccuracy` and `BitErrorRate`. They are different classes from the ones
@@ -201,13 +284,28 @@ deliberately unchanged: it is reduced over the full tensor precisely *because*
 masked positions agree trivially, which is what makes it mean "the supervised
 region matched exactly".
 
-**2. `BabiTaskConfig.task_ids` defaults to all 20 bAbI tasks; `BabiGenerator`
-implements 10.** The implemented ids are 1, 2, 3, 6, 7, 8, 11, 15, 17, 19.
-`BabiGenerator.generate(task_id)` raises `ValueError` for the other ten;
-`BenchmarkHarness.run_babi_benchmark` catches it and logs a
-`Skipping task N: ...` warning (when the suite config's `verbose` is set), so a
-"full" bAbI run silently covers half the suite. Narrow `task_ids` yourself if you
-want that to be explicit.
+**2. `BabiGenerator` implements 10 of the 20 bAbI tasks — but it now says so.**
+The implemented ids are 1, 2, 3, 6, 7, 8, 11, 15, 17, 19, held in one place as
+`BabiGenerator.IMPLEMENTED_TASK_IDS` (derived from the task-generator map, so
+the two cannot disagree). `BabiTaskConfig.task_ids` defaults to exactly that
+set, and `BabiGenerator.__init__` raises `ValueError` listing every unsupported
+id you asked for:
+
+```
+ValueError: bAbI tasks [4, 5, 9, 10, 12, 13, 14, 16, 18, 20] are not implemented.
+Implemented task ids: [1, 2, 3, 6, 7, 8, 11, 15, 17, 19].
+```
+
+The two branches that used to swallow that error — `generate_all_tasks`'s bare
+`except ValueError: continue` and `run_babi_benchmark`'s `verbose`-gated one —
+are **deleted**, not merely logged. A short result dict is no longer a possible
+outcome. The consequence to know: `run_babi_benchmark` now also stops swallowing
+a model/benchmark **input-shape** mismatch, which used to be silent whenever
+`verbose=False`; it aborts the bAbI benchmark loudly instead, contained by
+`run_full_suite`'s own `except Exception`.
+
+The remaining honest limitation is that the other ten tasks are still
+unimplemented — the fix here was to stop under-reporting, not to write them.
 
 **3. `AlgorithmicTaskGenerator.SUPPORTED_TASKS` lists 10 tasks; only
 `insertion_sort` is reachable from a trainer.** The other nine (`bubble_sort`,
@@ -216,11 +314,33 @@ want that to be explicit.
 `train_multitask.py`'s task map selects them.
 
 **4. The SCAN generator is a small synthetic stand-in, not the released corpus.**
-`ScanGenerator` builds its samples from an inline grammar. Measured:
-`ScanGenerator(ScanTaskConfig(split_type="length")).generate_split()` returns
-254 train / **0 test** samples, because `_length_split` holds out action
-sequences longer than 24 tokens and the bundled grammar never emits one. The
-`length` split therefore does not test length generalization as-is.
+`ScanGenerator` builds its samples from an inline grammar — 446 command/action
+pairs, action lengths `{1: 6, 2: 84, 3: 204, 4: 136, 6: 8, 8: 8}`. The real SCAN
+release has ~20,900 pairs with action sequences up to 48 tokens. Treat any number
+from this generator as a smoke signal, not a SCAN result.
+
+Every split is now non-degenerate, and a degenerate one would raise rather than
+return. Measured `(train, test)` sizes at the current grammar:
+
+| `split_type` | train / test | Holds out |
+|--------------|--------------|-----------|
+| `simple` | 356 / 90 | a random 20% |
+| `length` | 294 / 152 | action sequences longer than a **corpus-derived** threshold (`observed_max * 22 // 48`, the SCAN paper's train/max ratio) — not the old hardcoded 24, which this grammar could never exceed and which therefore returned 446/0 |
+| `add_prim_jump` | 288 / 158 | every composed command containing `jump` |
+| `add_prim_turn_left` | 392 / 54 | every composed command containing `turn left` |
+| `template_around_right` | 442 / **4** | the `<prim> around right` template |
+
+An unrecognised `split_type` string now raises `ValueError` naming the five
+supported members. It used to silently alias to `simple`, as did
+`template_around_right` itself, which was declared in `ScanSplit` but never
+dispatched.
+
+> **`template_around_right` is a probe, not a peer split.** Its held-out side is
+> exactly 4 samples (`walk|run|jump|look around right`) out of 446. That is the
+> semantically correct hold-out for this grammar's template, and it is
+> deliberately not widened — but 4 samples cannot produce a stable accuracy
+> estimate. Use it to check that a model has *not* seen the template, not to
+> quote an accuracy. The other four splits are large enough to report.
 
 **5. `DynamicNGramGenerator` never sets `masks`.** `train_multitask.py` builds
 one itself, zeroing the first two timesteps (n-gram warm-up context) and the
@@ -244,11 +364,34 @@ batch in memory.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m pytest tests/test_train/test_ntm/ -q
+# 77 passed, 1 skipped
 ```
 
-`tests/test_train/test_ntm/test_ntm_trainers.py` covers the trainers' pure
-helpers and the argparse contract (`--help` exits 0 rather than starting a run).
-It deliberately contains no convergence or `fit`-scale test.
+Three files:
+
+- `test_ntm_trainers.py` — the trainers' pure helpers, the argparse contract for
+  all three entry points (`--help` exits 0 rather than starting a run, with a
+  `setup_gpu` tripwire), and one args→config assertion per `train_multitask.py`
+  flag.
+- `test_generators_scan_babi.py` — the SCAN and bAbI generators: per-split
+  partition guards, the corpus-derived length threshold, the unknown-split
+  raise, the bAbI construction refusal, and task 19's non-degeneracy.
+- `test_ntm_learnability.py` — the **one** convergence test. It is the `1 skipped`
+  above: double-gated by `pytest.mark.slow` **and** an explicit
+  `NTM_RUN_LEARNABILITY` opt-in, because this repo has no
+  `addopts = -m "not slow"`, so the marker alone would drop a ~50 s GPU job into
+  the default suite. To run it:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg NTM_RUN_LEARNABILITY=1 \
+      python -m pytest tests/test_train/test_ntm/test_ntm_learnability.py -m slow -v
+  ```
+
+  It trains a tiny NTM on the copy task to >90% validation bit accuracy. The
+  **seed is pinned** deliberately: convergence is seed-sensitive in the failing
+  direction (seeds 1234/99 crossed at epochs 26/22; seed 7 was still at 0.882
+  after 250 epochs). Treat it as a "the NTM still learns" liveness guard, not a
+  quality benchmark.
 
 The layer-level and model-level suites are separate:
 

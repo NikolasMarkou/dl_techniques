@@ -47,6 +47,19 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description="Run the MANN benchmark suite against a saved model.",
+        epilog=(
+            "EXPECT TRACEBACKS. Each benchmark generates its own inputs with its "
+            "own shape and arity -- copy_task feeds one (batch, T, vector_size+2) "
+            "tensor, associative_recall and memory_capacity use a different "
+            "feature width, scan uses its own encoded command length, and babi "
+            "passes TWO inputs (story, question). A model trained for one task "
+            "therefore CANNOT accept the others, and model.predict raises. That "
+            "is the design, not a bug: run_full_suite contains each failure to "
+            "its own benchmark, logs it, and keeps going, so a copy-task "
+            "checkpoint legitimately produces ~4 tracebacks and still writes a "
+            "report covering the 2 benchmarks it could run. Pass --benchmarks to "
+            "run only the ones your checkpoint is shaped for."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('--checkpoint', type=str, required=True,
