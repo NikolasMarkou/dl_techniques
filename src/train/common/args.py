@@ -50,16 +50,18 @@ def explicitly_set_flags(
     * Any abbreviation at all when the parser was built with
       ``allow_abbrev=False`` — then a prefix is an argparse ERROR, so counting
       it as typed would be wrong. The flag is READ from the parser.
-    * SINGLE-dash options other than ``-h`` — and rather than answer wrongly,
-      the scan REFUSES them: a parser registering one raises ``ValueError``.
-      argparse resolves single-dash tokens through a short-option code path
-      this scan does not reimplement, so an ATTACHED value (``-b8``) or a
-      GROUPED run of flags (``-vb 8``) parses fine and is reported as
-      not-typed, which is verbatim the regression D-016 exists to prevent.
-      ``-h`` is exempt: it is an EXACT match, so it IS reported, as dest
-      ``help`` — harmlessly, because the help action prints and exits, so
-      ``parse_args`` never returns and no caller ever reads the report, and
-      ``help`` is not a config field any preset can override.
+    * Options that are not long (``--``) spellings — and rather than answer
+      wrongly, the scan REFUSES them: a parser registering one raises
+      ``ValueError``. argparse resolves single-dash tokens through a
+      short-option code path this scan does not reimplement, so an ATTACHED
+      value (``-b8``) or a GROUPED run of flags (``-vb 8``) parses fine and is
+      reported as not-typed, which is verbatim the regression D-016 exists to
+      prevent. Exactly one exemption: ``-h`` bound to argparse's own HELP
+      ACTION, which IS reported (as dest ``help``) — harmlessly, because that
+      action prints and exits, so ``parse_args`` never returns and no caller
+      ever reads the report. The exemption is keyed on the ACTION, not on the
+      string: a parser that binds ``-h`` to something else (``add_help=False``
+      plus ``-h/--horizon``) is REFUSED like any other short option.
     * A VALUE that happens to spell a registered option (``--name --smoke``).
       Distinguishing that needs the parser's nargs/type machinery, which this
       token scan deliberately does not reimplement. Unreachable in practice:
@@ -84,8 +86,11 @@ def explicitly_set_flags(
         field names via its own rename map.
 
     Raises:
-        ValueError: If ``parser`` registers any single-dash option other than
-            ``-h``, whose attached and grouped forms this scan cannot see.
+        ValueError: If ``parser`` registers any option string that is not a
+            long (``--``) spelling, whose attached and grouped forms this scan
+            cannot see. The sole exemption is ``-h`` bound to argparse's HELP
+            ACTION — an action-type test, not a string test, because a parser
+            may bind the string ``-h`` to an ordinary value-taking option.
     """
     # DECISION plan-2026-08-03T043010-cecf4357/D-016
     # Resolve each token the way argparse resolves it, INCLUDING unambiguous
@@ -110,17 +115,32 @@ def explicitly_set_flags(
     # really typed, which is exactly the D-016 regression. Do NOT "fix" this by
     # reimplementing argparse's short-option tokenizer (attached values,
     # grouped flags, single-dash prefixes): that is a chunk of real surface
-    # with its own bugs, for a shape no current consumer uses. `-h` is exempt:
-    # it is an exact match and its action exits, so nobody reads the report.
+    # with its own bugs, for a shape no current consumer uses.
+    #
+    # DECISION plan-2026-08-03T043010-cecf4357/D-023
+    # The `-h` exemption is keyed on the ACTION TYPE, never on the STRING. Do
+    # NOT simplify this back to `o != "-h"`: MEASURED, `ArgumentParser(
+    # add_help=False)` + `add_argument("-h", "--horizon", type=int)` parses
+    # `["-h8"]` as {'horizon': 8} while a string-keyed refusal accepts the
+    # parser and reports set() — the guard FAILING OPEN on the one string it
+    # exempts, i.e. the very D-016 regression it exists to stop. What makes
+    # `-h` safe is not its spelling but that argparse's help action prints and
+    # exits, so no caller ever reads the report; `isinstance` asks exactly
+    # that. `parser._actions` is iterated (not `dest_by_opt`) so a
+    # `conflict_handler="resolve"` parser, where `-h` moves from the help
+    # action to another one, is seen too. See decisions.md D-023.
     unscannable = sorted(
-        o for o in dest_by_opt if not o.startswith("--") and o != "-h")
+        o for a in parser._actions for o in a.option_strings
+        if not o.startswith("--")
+        and not (o == "-h" and isinstance(a, argparse._HelpAction)))
     if unscannable:
         raise ValueError(
-            f"explicitly_set_flags cannot scan single-dash options "
-            f"{unscannable}: argparse accepts attached (-b8) and grouped "
-            f"(-vb 8) forms that this token scan does not resolve, so it "
-            f"would silently report a typed flag as not-typed. Give the flag "
-            f"a long spelling, or extend the scan. See decisions.md D-021."
+            f"explicitly_set_flags cannot scan the non-long options "
+            f"{unscannable}: this token scan resolves only long (--) "
+            f"spellings, and argparse accepts attached (-b8) and grouped "
+            f"(-vb 8) single-dash forms it does not see, so it would silently "
+            f"report a typed flag as not-typed. Give the flag a long "
+            f"spelling, or extend the scan. See decisions.md D-021, D-023."
         )
 
     tokens = sys.argv[1:] if argv is None else list(argv)

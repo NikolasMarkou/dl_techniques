@@ -36,7 +36,12 @@ require reimplementing nargs/type handling.
 
 The single-dash shapes DO have rows, in ``_SHORT_DASH_CASES``: argparse accepts
 ``-b8`` and ``-vb 8``, the token scan sees neither, and the helper therefore
-REFUSES any parser registering a single-dash option other than ``-h``.
+REFUSES any parser registering a short option — except ``-h`` bound to
+argparse's own help action, whose report nobody can read because that action
+exits. That exemption is keyed on the ACTION, not on the string, and the last
+two rows pin it: a parser binding ``-h`` to an ordinary value-taking option is
+refused, both when the help action is suppressed and when the string is taken
+off a live one.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ import pytest
 def _probe_parser(
         allow_abbrev: bool = True,
         short_options: bool = False,
+        steal_h: str = "",
 ) -> argparse.ArgumentParser:
     """A throwaway parser carrying every shape the helper's docstring names.
 
@@ -72,8 +78,24 @@ def _probe_parser(
     ``-n8`` and a GROUPED ``-vn 8``, both of which argparse accepts and the
     token scan cannot see. No real trainer registers either; the flag exists
     only to drive the refusal.
+
+    ``steal_h`` binds the STRING ``-h`` to an ordinary value-taking option
+    (``-h/--horizon``) instead of to argparse's help action, the one shape a
+    string-keyed refusal would let through. Two spellings of it, both of which
+    argparse accepts: ``"no-help"`` suppresses the help action outright
+    (``add_help=False``), ``"resolve"`` keeps it and lets the later
+    registration take ``-h`` off it (``conflict_handler="resolve"``), so the
+    parser still HAS a help action and the string alone cannot tell them
+    apart.
     """
-    parser = argparse.ArgumentParser(prog="probe", allow_abbrev=allow_abbrev)
+    parser = argparse.ArgumentParser(
+        prog="probe",
+        allow_abbrev=allow_abbrev,
+        add_help=steal_h != "no-help",
+        conflict_handler="resolve" if steal_h == "resolve" else "error",
+    )
+    if steal_h:
+        parser.add_argument("-h", "--horizon", type=int)
     if short_options:
         parser.add_argument("-n", "--n-workers", type=int, default=1)
         parser.add_argument("-v", "--verbose", action="store_true")
@@ -134,33 +156,43 @@ _CASES = [
      ["--no-stateless-augmentation"], {"stateless_augmentation"}, True),
 ]
 
-# Same shape, on a probe that registers SINGLE-dash options. Here `expected` is
+# Same shape, on probes that register a SINGLE-dash option. Here `expected` is
 # an exception TYPE: argparse accepts every one of these argvs, the token scan
 # resolves none of the short forms, so the helper refuses the PARSER outright
-# rather than return a wrong set. The third row shows the refusal is a property
-# of the parser, not of the argv.
+# rather than return a wrong set. Rows 1-3 carry `-n/-v`; row 3 shows the
+# refusal is a property of the parser, not of the argv. Rows 4-5 bind the
+# string `-h` to an ordinary value-taking option instead of to the help
+# action — the shape a refusal keyed on the STRING `-h` lets through, at which
+# point `-h8` parses as {'horizon': 8} and the helper reports set(). The
+# exemption is keyed on the ACTION TYPE, so both are refused (D-023).
+# (trailing fields: short_options, steal_h)
 _SHORT_DASH_CASES = [
     ("single-dash-attached-value-is-refused-not-missed", True,
-     ["-n8"], ValueError, True),
+     ["-n8"], ValueError, True, True, ""),
     ("single-dash-grouped-flags-are-refused-not-missed", True,
-     ["-vn", "8"], ValueError, True),
+     ["-vn", "8"], ValueError, True, True, ""),
     ("single-dash-registration-refuses-even-a-plain-long-flag", True,
-     ["--batch-size", "8"], ValueError, True),
+     ["--batch-size", "8"], ValueError, True, True, ""),
+    ("dash-h-bound-to-a-value-taking-option-is-refused-not-exempted", True,
+     ["-h8"], ValueError, True, False, "no-help"),
+    ("dash-h-stolen-from-a-live-help-action-is-refused-not-exempted", True,
+     ["-h9"], ValueError, True, False, "resolve"),
 ]
 
 
 @pytest.mark.parametrize(
-    "allow_abbrev,argv,expected,reachable,short_options",
-    [c[1:] + (False,) for c in _CASES]
-    + [c[1:] + (True,) for c in _SHORT_DASH_CASES],
+    "allow_abbrev,argv,expected,reachable,short_options,steal_h",
+    [c[1:] + (False, "") for c in _CASES]
+    + [c[1:] for c in _SHORT_DASH_CASES],
     ids=[c[0] for c in _CASES + _SHORT_DASH_CASES],
 )
 def test_explicitly_set_flags_reports_exactly_the_documented_shapes(
-        allow_abbrev, argv, expected, reachable, short_options):
+        allow_abbrev, argv, expected, reachable, short_options, steal_h):
     from train.common.args import explicitly_set_flags
 
     parser = _probe_parser(
-        allow_abbrev=allow_abbrev, short_options=short_options)
+        allow_abbrev=allow_abbrev, short_options=short_options,
+        steal_h=steal_h)
     if isinstance(expected, type):
         with pytest.raises(expected, match="single-dash"):
             explicitly_set_flags(parser, argv)
