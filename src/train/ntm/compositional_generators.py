@@ -4,6 +4,7 @@ Compositional Generalization Benchmark Generators.
 Generators for SCAN-style and COGS-style compositional generalization
 tasks that test systematic recombination of learned primitives.
 """
+import collections
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -277,21 +278,84 @@ class ScanGenerator:
         
         :param split_type: Type of split. Uses config default if None.
         :return: Tuple of (train_samples, test_samples).
+        :raises ValueError: If the split type is not a ``ScanSplit`` member, or
+            if the requested split leaves either side of the partition empty.
         """
         split = split_type or self.config.split_type
         all_samples = self.generate_all_samples()
-        
-        if split == "simple":
-            return self._simple_split(all_samples)
-        elif split == "length":
-            return self._length_split(all_samples)
-        elif split == "add_prim_jump":
-            return self._add_primitive_split(all_samples, "jump")
-        elif split == "add_prim_turn_left":
-            return self._add_primitive_split(all_samples, "turn left")
+
+        if split == ScanSplit.SIMPLE.value:
+            train, test = self._simple_split(all_samples)
+        elif split == ScanSplit.LENGTH.value:
+            train, test = self._length_split(all_samples)
+        elif split == ScanSplit.ADD_PRIM_JUMP.value:
+            train, test = self._add_primitive_split(all_samples, "jump")
+        elif split == ScanSplit.ADD_PRIM_TURN_LEFT.value:
+            train, test = self._add_primitive_split(all_samples, "turn left")
+        elif split == ScanSplit.TEMPLATE_AROUND_RIGHT.value:
+            train, test = self._template_split(all_samples, "around right")
         else:
-            return self._simple_split(all_samples)
-    
+            raise ValueError(
+                f"Split '{split}' not implemented. "
+                f"Available: {[member.value for member in ScanSplit]}"
+            )
+
+        self._validate_partition(split, train, test)
+        return train, test
+
+    @staticmethod
+    def _validate_partition(
+        split: str,
+        train: List[ScanSample],
+        test: List[ScanSample]
+    ) -> None:
+        """Refuse a partition with an empty side.
+
+        Called once, at the ``generate_split`` seam, rather than inside each
+        ``_*_split`` method: a check duplicated per split is a check a new split
+        can forget. An empty test set is the failure this whole module's split
+        defects shared, and it used to surface far downstream as
+        ``max() arg is an empty sequence`` inside ``encode_samples``.
+
+        :param split: Split identifier, for the message.
+        :param train: Training side of the partition.
+        :param test: Held-out side of the partition.
+        :raises ValueError: If either side is empty.
+        """
+        if train and test:
+            return
+
+        histogram = collections.Counter(
+            len(s.action_tokens) for s in list(train) + list(test)
+        )
+        raise ValueError(
+            f"Split '{split}' is degenerate: {len(train)} train / "
+            f"{len(test)} test. Action-length histogram of the corpus: "
+            f"{dict(sorted(histogram.items()))}."
+        )
+
+    def _template_split(
+        self,
+        samples: List[ScanSample],
+        template: str
+    ) -> Tuple[List[ScanSample], List[ScanSample]]:
+        """Split where a command template is held out of training entirely.
+
+        :param samples: All samples.
+        :param template: Whitespace-separated template phrase to hold out.
+        :return: Train and test splits.
+        """
+        train = []
+        test = []
+
+        for sample in samples:
+            if self._contains_phrase(sample.command_tokens, template):
+                test.append(sample)
+            else:
+                train.append(sample)
+
+        return train, test
+
     def _simple_split(
         self,
         samples: List[ScanSample],

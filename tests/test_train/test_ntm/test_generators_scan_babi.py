@@ -53,6 +53,7 @@ MEASURED_SPLIT_SIZES = {
     "length": (294, 152),
     "add_prim_jump": (288, 158),
     "add_prim_turn_left": (392, 54),
+    "template_around_right": (442, 4),
 }
 
 
@@ -235,3 +236,131 @@ def test_measured_split_sizes(split_type: str, expected):
     train, test = _generator(split_type).generate_split()
 
     assert (len(train), len(test)) == expected
+
+
+# ---------------------------------------------------------------------
+# SCAN dispatch, template hold-out and the non-degeneracy seam
+# ---------------------------------------------------------------------
+
+
+class TestScanSplitDispatch:
+    """Every enum member is handled; nothing else is silently accepted."""
+
+    def test_every_enum_member_is_pinned_by_a_measured_size(self):
+        assert {member.value for member in ScanSplit} == set(MEASURED_SPLIT_SIZES)
+
+    @pytest.mark.parametrize("member", list(ScanSplit), ids=lambda m: m.value)
+    def test_every_enum_member_partitions_non_degenerately(self, member: ScanSplit):
+        train, test = _generator(member.value).generate_split()
+
+        assert train, f"{member.value} produced an empty train set"
+        assert test, f"{member.value} produced an empty test set"
+
+    @pytest.mark.parametrize("member", list(ScanSplit), ids=lambda m: m.value)
+    def test_every_enum_member_partitions_exhaustively_and_disjointly(
+        self, member: ScanSplit
+    ):
+        generator = _generator(member.value)
+        corpus = [s.command for s in generator.generate_all_samples()]
+
+        train, test = generator.generate_split()
+        train_commands = [s.command for s in train]
+        test_commands = [s.command for s in test]
+
+        assert len(train_commands) + len(test_commands) == len(corpus)
+        assert sorted(train_commands + test_commands) == sorted(corpus)
+        assert set(train_commands).isdisjoint(set(test_commands))
+
+    def test_unknown_split_raises_instead_of_aliasing_to_simple(self):
+        generator = _generator("not_a_real_split")
+
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate_split()
+
+        message = str(excinfo.value)
+        assert "not_a_real_split" in message
+        for member in ScanSplit:
+            assert member.value in message
+
+    def test_explicit_split_type_argument_overrides_the_config(self):
+        generator = _generator("simple")
+
+        train, test = generator.generate_split("template_around_right")
+
+        assert (len(train), len(test)) == MEASURED_SPLIT_SIZES["template_around_right"]
+
+
+class TestTemplateAroundRightHoldOut:
+    """``template_around_right`` is a real hold-out, not an alias for simple."""
+
+    def test_held_out_side_is_exactly_the_around_right_commands(self):
+        generator = _generator("template_around_right")
+        corpus = generator.generate_all_samples()
+        expected = sorted(
+            s.command for s in corpus
+            if ScanGenerator._contains_phrase(s.command_tokens, "around right")
+        )
+
+        _, test = generator.generate_split()
+
+        assert sorted(s.command for s in test) == expected
+
+    def test_no_training_command_contains_the_held_out_template(self):
+        train, _ = _generator("template_around_right").generate_split()
+
+        leaked = [
+            s.command for s in train
+            if ScanGenerator._contains_phrase(s.command_tokens, "around right")
+        ]
+
+        assert leaked == []
+
+    def test_it_no_longer_aliases_to_the_simple_split(self):
+        simple = _generator("simple").generate_split()
+        template = _generator("template_around_right").generate_split()
+
+        assert [len(part) for part in simple] != [len(part) for part in template]
+
+
+class TestNonDegeneracyValidator:
+    """The seam refuses an empty side and says which split and why.
+
+    Also the dead-component probe for the validator: forcing its predicate to
+    accept everything makes both tests below go RED, so the validator is
+    load-bearing rather than decorative.
+    """
+
+    @staticmethod
+    def _uniform_length_generator(action_length: int = 4) -> ScanGenerator:
+        """A generator whose corpus has a single action length.
+
+        Every sample then sits strictly above the derived LENGTH threshold, so
+        the ``length`` split has an empty train side.
+
+        :param action_length: The single action length shared by all samples.
+        :return: A generator with a monkeypatched corpus.
+        """
+        generator = _generator("length")
+        corpus = _fake_samples([action_length] * 8)
+        generator.generate_all_samples = lambda: corpus
+        return generator
+
+    def test_a_degenerate_partition_raises(self):
+        generator = self._uniform_length_generator()
+
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate_split()
+
+        assert "degenerate" in str(excinfo.value)
+
+    def test_the_refusal_names_the_split_both_sizes_and_the_histogram(self):
+        generator = self._uniform_length_generator(action_length=4)
+
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate_split()
+
+        message = str(excinfo.value)
+        assert "length" in message
+        assert "0 train" in message
+        assert "8 test" in message
+        assert "{4: 8}" in message
