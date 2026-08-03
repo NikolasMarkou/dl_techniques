@@ -21,6 +21,7 @@ from dl_techniques.layers.memory.ntm_interface import (
     MemoryState,
     HeadState,
     NTMConfig,
+    circular_convolution,
 )
 from dl_techniques.layers.memory.baseline_ntm import (
     NTMMemory,
@@ -1078,6 +1079,103 @@ class TestAddressingHealth:
         gnorm = float(ops.sqrt(ops.sum(ops.square(mem_grad))))
         assert gnorm > 1e-8, (
             f"initial_memory gradient too small: {gnorm:.2e}"
+        )
+
+
+# ---------------------------------------------------------------------
+# Circular Convolution Shift Direction Tests
+# ---------------------------------------------------------------------
+
+
+class TestCircularConvolutionDirection:
+    """Delta-impulse guards pinning the DIRECTION of location-based addressing.
+
+    Graves et al. 2014 eq. 8 defines the shift as
+    ``w_tilde(i) = sum_j w(j) * s(i - j mod N)``. With ``w`` a delta impulse at
+    slot 0, this reduces to ``w_tilde(i) = s(i)``: all shift mass placed on
+    offset ``+1`` must land at slot ``1``.
+
+    Shift-vector index convention (derived by reading
+    ``ntm_interface.circular_convolution``: ``half_shift = shift_range // 2``
+    and, for shift-vector index ``i``, ``shift_offset = i - half_shift``).
+    For ``shift_range = 3``, ``half_shift = 1``, so:
+
+    ==========  ============
+    index       shift_offset
+    ==========  ============
+    0           -1
+    1            0
+    2           +1
+    ==========  ============
+
+    ``shift_range`` is deliberately 3 (never 1, where the shift is the identity
+    and the guard would be vacuous) and ``memory_size`` is 8 (not a degenerate
+    2- or 3-slot memory, where ``+1`` and ``-1`` alias).
+    """
+
+    MEMORY_SIZE = 8
+    SHIFT_RANGE = 3
+
+    def _delta_inputs(self, shift_index: int):
+        """Build ``w = e_0`` and a one-hot shift vector at ``shift_index``."""
+        weights = np.zeros((1, self.MEMORY_SIZE), dtype="float32")
+        weights[0, 0] = 1.0
+
+        shift = np.zeros((1, self.SHIFT_RANGE), dtype="float32")
+        shift[0, shift_index] = 1.0
+
+        return ops.convert_to_tensor(weights), ops.convert_to_tensor(shift)
+
+    def test_shift_direction_positive_offset_moves_forward(self):
+        """Offset +1 (index 2) must move a delta impulse from slot 0 to slot 1."""
+        weights, shift = self._delta_inputs(shift_index=2)
+
+        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+
+        assert int(np.argmax(out[0])) == 1, (
+            "Shift +1 moved the impulse to slot "
+            f"{int(np.argmax(out[0]))}, expected slot 1 "
+            f"(Graves eq. 8); full output: {out[0]}"
+        )
+        assert out[0, 1] >= 0.99, (
+            f"Shift +1 delivered only {out[0, 1]:.4f} mass to slot 1, "
+            f"expected ~1.0; full output: {out[0]}"
+        )
+
+    def test_shift_direction_negative_offset_moves_backward(self):
+        """Offset -1 (index 0) must move a delta impulse from slot 0 to slot N-1."""
+        weights, shift = self._delta_inputs(shift_index=0)
+
+        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+        last = self.MEMORY_SIZE - 1
+
+        assert int(np.argmax(out[0])) == last, (
+            "Shift -1 moved the impulse to slot "
+            f"{int(np.argmax(out[0]))}, expected slot {last} "
+            f"(Graves eq. 8); full output: {out[0]}"
+        )
+        assert out[0, last] >= 0.99, (
+            f"Shift -1 delivered only {out[0, last]:.4f} mass to slot {last}, "
+            f"expected ~1.0; full output: {out[0]}"
+        )
+
+    def test_shift_direction_zero_offset_is_identity(self):
+        """Offset 0 (index 1) must leave the delta impulse at slot 0.
+
+        This is the CONTROL: it holds under both the mirrored and the correct
+        shift convention, so it proves the probe is not simply always-red.
+        """
+        weights, shift = self._delta_inputs(shift_index=1)
+
+        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+
+        assert int(np.argmax(out[0])) == 0, (
+            "Shift 0 moved the impulse to slot "
+            f"{int(np.argmax(out[0]))}, expected slot 0; full output: {out[0]}"
+        )
+        assert out[0, 0] >= 0.99, (
+            f"Shift 0 delivered only {out[0, 0]:.4f} mass to slot 0, "
+            f"expected ~1.0; full output: {out[0]}"
         )
 
 
