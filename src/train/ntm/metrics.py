@@ -603,30 +603,44 @@ def evaluate_copy_task(
     :param model: Trained model.
     :param inputs: Input sequences.
     :param targets: Target sequences.
-    :param masks: Optional output masks.
-    :return: BenchmarkResults with multiple metrics.
+    :param masks: Optional output masks. Per-timestep, shape ``(batch, steps)``;
+        broadcast across the output axis.
+    :return: BenchmarkResults with multiple metrics. ``per_step_accuracy`` and
+        ``bit_error_rate`` are ``nan`` when the mask selects no element at all.
     """
     predictions = model.predict(inputs, verbose=0)
-    
-    # Apply mask if provided
+
+    # Apply mask if provided. Zeroing BOTH sides is what makes sequence accuracy
+    # mean "the supervised region matched exactly": masked-out positions become
+    # 0 == 0 and drop out of the all-match reduction.
     if masks is not None:
         mask_expanded = np.expand_dims(masks, -1)
         predictions = predictions * mask_expanded
         targets = targets * mask_expanded
-    
+        element_mask = np.broadcast_to(mask_expanded > 0, predictions.shape)
+    else:
+        element_mask = np.ones(predictions.shape, dtype=bool)
+
     # Binarize predictions
     pred_binary = (predictions > 0.5).astype(np.float32)
-    
-    # Sequence accuracy
+
+    # Sequence accuracy -- deliberately reduced over the FULL tensor (see above).
     seq_matches = np.all(pred_binary == targets, axis=(1, 2))
     seq_accuracy = np.mean(seq_matches)
-    
-    # Per-step accuracy
-    step_accuracy = np.mean(pred_binary == targets)
-    
-    # Bit error rate
-    bit_errors = np.mean(pred_binary != targets)
-    
+
+    # Per-step accuracy and bit error rate over the masked-TRUE elements only.
+    # Reducing these two over the full tensor dilutes them with the trivially
+    # agreeing 0 == 0 padding, which for the default CopyTaskConfig is roughly
+    # half the timeline (total_seq_len = 2*seq_len + delay + 2 vs seq_len
+    # supervised positions).
+    agreements = (pred_binary == targets)[element_mask]
+    if agreements.size:
+        step_accuracy = float(np.mean(agreements))
+        bit_errors = 1.0 - step_accuracy
+    else:
+        step_accuracy = float("nan")
+        bit_errors = float("nan")
+
     return BenchmarkResults(
         task_name="copy_task",
         metrics={

@@ -20,7 +20,7 @@ Usage:
 import keras
 import numpy as np
 from typing import Dict, Optional, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
@@ -55,6 +55,7 @@ class MultitaskNTMConfig:
     validation_steps: int = 100
     learning_rate: float = 1e-4
     clip_norm: float = 1.0
+    patience: int = 50
     save_dir: str = "results/multitask_ntm"
     checkpoint_dir: str = "results/multitask_ntm/checkpoints"
     log_dir: str = "results/multitask_ntm/logs"
@@ -108,7 +109,16 @@ class UnifiedTaskGenerator(keras.utils.Sequence):
             data = gen.generate(self.batch_size, sequence_length=seq_len)
             if data.masks is None:
                 mask = np.ones((self.batch_size, seq_len))
+                # Leading positions: the first `n_gram_order` (2) tokens are the
+                # warm-up context, drawn at random rather than predicted.
                 mask[:, :2] = 0.0
+                # Trailing position: DynamicNGramGenerator.generate only fills
+                # `targets[i, t, :]` for `t < sequence_length - 1` (see
+                # data_generators.py), so the last timestep's target row is all
+                # zero -- there is no "next token" after the last one. Leaving it
+                # supervised trains the model to predict "no token" and lets the
+                # accuracy metric count that undefined position.
+                mask[:, -1] = 0.0
                 data.masks = mask
             return data
         elif task_key == "insertion_sort":
@@ -218,7 +228,7 @@ def train_multitask_ntm(
         model_name="multitask",
         results_dir_prefix="ntm",
         monitor="val_loss",
-        patience=15,
+        patience=config.patience,
         use_lr_schedule=False,
     )
 
@@ -242,14 +252,25 @@ def train_multitask_ntm(
 def evaluate_tasks(model: keras.Model, config: MultitaskNTMConfig) -> None:
     """Evaluate the model on all tasks."""
     logger.info(f"Evaluating on {config.num_eval_samples} samples per task...")
-    eval_gen = UnifiedTaskGenerator(config, mode='val')
+    # DECISION plan-2026-08-03T130803-4c570ee4/D-007
+    # The evaluation generator draws `num_eval_samples` rows, not `batch_size`
+    # ones: every generator in UnifiedTaskGenerator sizes its output from
+    # `config.batch_size`, so the eval sample count has to arrive that way for
+    # the log line above to be true.
+    # Do NOT "simplify" this back to `UnifiedTaskGenerator(config, ...)` and do
+    # NOT delete `num_eval_samples`: this evaluation is a ONE-SHOT batch, so the
+    # only thing separating an honest eval size from the training batch size is
+    # this override. Reverting either half re-creates a log line that asserts a
+    # sample count the code never used. See decisions.md D-007.
+    eval_config = replace(config, batch_size=config.num_eval_samples)
+    eval_gen = UnifiedTaskGenerator(eval_config, mode='val')
     results = {}
 
-    for task_name, task_id in config.task_map.items():
+    for task_name, task_id in eval_config.task_map.items():
         raw_data = eval_gen._generate_raw_data(task_name)
         inputs, targets, masks = eval_gen._pad_and_normalize(raw_data, task_name)
 
-        task_one_hot = np.zeros((config.batch_size, config.num_tasks), dtype=np.float32)
+        task_one_hot = np.zeros((eval_config.batch_size, eval_config.num_tasks), dtype=np.float32)
         task_one_hot[:, task_id] = 1.0
 
         preds = model.predict({"sequence_in": inputs, "task_id_in": task_one_hot}, verbose=0)
@@ -293,6 +314,7 @@ def main() -> None:
         validation_steps=args.validation_steps,
         learning_rate=args.learning_rate,
         clip_norm=args.clip_norm,
+        patience=args.patience,
     )
     logger.info(f"Tasks: {list(config.task_map.keys())}, Memory: {config.memory_size}x{config.memory_dim}, "
                 f"Batch: {config.batch_size}, Epochs: {config.num_epochs}")
