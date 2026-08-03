@@ -300,6 +300,8 @@ def main() -> None:
     parser.add_argument('--steps-per-epoch', type=int, default=1000)
     parser.add_argument('--validation-steps', type=int, default=100)
     parser.add_argument('--clip-norm', type=float, default=1.0)
+    parser.add_argument('--num-eval-samples', type=int, default=1000,
+                        help='Rows drawn per task for the final evaluation.')
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
@@ -315,6 +317,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         clip_norm=args.clip_norm,
         patience=args.patience,
+        num_eval_samples=args.num_eval_samples,
     )
     logger.info(f"Tasks: {list(config.task_map.keys())}, Memory: {config.memory_size}x{config.memory_dim}, "
                 f"Batch: {config.batch_size}, Epochs: {config.num_epochs}")
