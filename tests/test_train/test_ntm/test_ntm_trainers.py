@@ -18,7 +18,7 @@ actually reaching ``create_callbacks``, and ``num_eval_samples`` actually
 sizing the evaluation batch it is logged as sizing.
 
 The final three groups are structural rather than defect-specific: the argparse
-contract both entry points must honour, the padding/truncation contract of
+contract all three entry points must honour, the padding/truncation contract of
 ``_pad_and_normalize``, and the phase layout of ``CopyTaskGenerator`` — the one
 generator the audit certified as correct, pinned so it cannot drift silently.
 """
@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pytest
 
-from train.ntm import train_multitask, train_ntm
+from train.ntm import run_benchmark_suite, train_multitask, train_ntm
 from train.ntm.config import CopyTaskConfig
 from train.ntm.data_generators import CopyTaskGenerator, TaskData
 from train.ntm.metrics import evaluate_copy_task
@@ -725,8 +725,11 @@ class TestEvaluationSampleCount:
 class TestCommandLineContract:
     """Every runnable script here must parse arguments before doing anything."""
 
-    @pytest.mark.parametrize("module", [train_ntm, train_multitask],
-                             ids=["train_ntm", "train_multitask"])
+    @pytest.mark.parametrize(
+        "module",
+        [train_ntm, train_multitask, run_benchmark_suite],
+        ids=["train_ntm", "train_multitask", "run_benchmark_suite"],
+    )
     def test_help_exits_zero_without_starting_training(
             self, module, monkeypatch, capsys):
         """``--help`` must print usage and exit 0, having started nothing.
@@ -737,7 +740,7 @@ class TestCommandLineContract:
         100-epoch run instead of printing help.
 
         Why this guard is not vacuous: ``setup_gpu`` is the first side effect
-        after ``parse_args()`` in both ``main()`` bodies, and it is replaced
+        after ``parse_args()`` in every ``main()`` body here, and it is replaced
         here by a tripwire that raises. A module that lost its argparse would
         never raise ``SystemExit`` — it would either fall through to the
         tripwire (``AssertionError``) or die on the now-undefined ``args``

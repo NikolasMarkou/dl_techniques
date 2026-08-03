@@ -100,15 +100,29 @@ class BenchmarkHarness:
     metrics, and generating reports.
     
     :param config: Configuration for the benchmark suite.
-    
+
     Example::
-    
+
         harness = BenchmarkHarness()
         results = harness.run_copy_task_benchmark(model)
         harness.run_full_suite(model, model_name="MyMANN")
         harness.save_report("results.json")
     """
-    
+
+    #: Benchmark name -> the method that runs it. This mapping is the single
+    #: home for the suite's benchmark names: ``run_full_suite`` dispatches
+    #: through it, and ``run_benchmark_suite.py`` builds its ``--benchmarks``
+    #: choices from its keys, so the CLI cannot drift out of step with the
+    #: suite. Adding a benchmark means adding one entry here, nowhere else.
+    BENCHMARK_METHODS: Dict[str, str] = {
+        "copy_task": "run_copy_task_benchmark",
+        "associative_recall": "run_associative_recall_benchmark",
+        "length_generalization": "run_length_generalization_benchmark",
+        "memory_capacity": "run_capacity_benchmark",
+        "scan": "run_scan_benchmark",
+        "babi": "run_babi_benchmark",
+    }
+
     def __init__(
         self,
         config: Optional[BenchmarkSuiteConfig] = None
@@ -497,30 +511,22 @@ class BenchmarkHarness:
         
         :param model: Keras model to evaluate.
         :param model_name: Name for reporting.
-        :param benchmarks: List of benchmarks to run. Runs all if None.
+        :param benchmarks: Names of benchmarks to run, drawn from
+            :attr:`BENCHMARK_METHODS`. Runs all of them if None.
         :return: SuiteReport with all results.
         """
         self._runs = []
         self._start_time = time.time()
-        
-        available_benchmarks = {
-            "copy_task": self.run_copy_task_benchmark,
-            "associative_recall": self.run_associative_recall_benchmark,
-            "length_generalization": self.run_length_generalization_benchmark,
-            "memory_capacity": self.run_capacity_benchmark,
-            "scan": self.run_scan_benchmark,
-            "babi": self.run_babi_benchmark,
-        }
-        
+
         if benchmarks is None:
-            benchmarks = list(available_benchmarks.keys())
-        
+            benchmarks = list(self.BENCHMARK_METHODS.keys())
+
         for benchmark_name in benchmarks:
-            if benchmark_name in available_benchmarks:
+            if benchmark_name in self.BENCHMARK_METHODS:
                 if self.config.verbose:
                     logger.info(f"Running {benchmark_name}...")
                 try:
-                    available_benchmarks[benchmark_name](model)
+                    getattr(self, self.BENCHMARK_METHODS[benchmark_name])(model)
                 except Exception as e:
                     if self.config.verbose:
                         logger.error(f"Error in {benchmark_name}: {e}", exc_info=True)
