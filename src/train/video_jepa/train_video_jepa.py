@@ -46,6 +46,7 @@ import keras
 import tensorflow as tf
 
 from train.common import setup_gpu, create_base_argument_parser, set_seeds
+from train.common.args import explicitly_set_flags
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.video_jepa.model import VideoJEPA
 from dl_techniques.datasets.synthetic_drone_video import (
@@ -369,7 +370,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--visualization-frequency", type=int, default=1,
                    help="Write visualization PNGs every N epochs.")
 
-    explicit = _explicitly_set_flags(p)
+    explicit = explicitly_set_flags(p)
     args = p.parse_args()
 
     if args.smoke:
@@ -378,22 +379,6 @@ def parse_args() -> argparse.Namespace:
                 setattr(args, key, value)
 
     return args
-
-
-def _explicitly_set_flags(parser: argparse.ArgumentParser) -> set:
-    """Inspect sys.argv against parser actions to record which dest names
-    the user passed explicitly. Used so --smoke does not silently overwrite
-    an intentional --depth 12."""
-    dest_by_opt: Dict[str, str] = {}
-    for action in parser._actions:
-        for opt in action.option_strings:
-            dest_by_opt[opt] = action.dest
-    explicit: set = set()
-    for token in sys.argv[1:]:
-        key = token.split("=", 1)[0]
-        if key in dest_by_opt:
-            explicit.add(dest_by_opt[key])
-    return explicit
 
 
 def _resolve_output_dir(args: argparse.Namespace) -> Path:
