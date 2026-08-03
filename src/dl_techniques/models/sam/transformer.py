@@ -147,6 +147,13 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         activation: String, activation function for FFN. Defaults to 'relu'.
         attention_dropout: Float, dropout rate for attention layers.
             Defaults to 0.0.
+        attention_downsample_rate: Integer, factor by which the internal
+            (per-head x heads) dimension of the two CROSS-attentions is reduced
+            relative to ``embedding_dim``. Reference SAM uses 2, so the cross
+            attentions run at ``embedding_dim // 2`` internally while
+            ``self_attn`` stays at full width. Requires
+            ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
+            Defaults to 2.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape (in call):
@@ -194,6 +201,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
         attention_dropout: float = 0.0,
+        attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -212,6 +220,19 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
         if not 0.0 <= attention_dropout < 1.0:
             raise ValueError(f"attention_dropout must be in [0, 1), got {attention_dropout}")
+        if attention_downsample_rate <= 0:
+            raise ValueError(
+                f"attention_downsample_rate must be positive, got "
+                f"{attention_downsample_rate}"
+            )
+        if embedding_dim % (num_heads * attention_downsample_rate) != 0:
+            raise ValueError(
+                f"embedding_dim ({embedding_dim}) must be divisible by "
+                f"num_heads * attention_downsample_rate "
+                f"({num_heads} * {attention_downsample_rate} = "
+                f"{num_heads * attention_downsample_rate}); otherwise the "
+                f"cross-attention key_dim would be silently floored"
+            )
 
         # Store all configuration parameters
         self.embedding_dim = embedding_dim
@@ -221,9 +242,21 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.activation = activation
         self.attention_dropout = attention_dropout
+        self.attention_downsample_rate = attention_downsample_rate
 
-        # Calculate key dimension for attention
+        # DECISION plan-2026-08-03T191222-1d751f81/D-009
+        # Two key dims, not one. Reference SAM's TwoWayAttentionBlock runs
+        # self_attn at FULL width and all three cross-attentions at
+        # embedding_dim // downsample_rate. Do NOT "simplify" this to a single
+        # self.key_dim applied everywhere (that is exactly the pre-repair state,
+        # finding F-4) and do NOT downsample self_attn too -- either variant is
+        # numerically plausible, produces the same weight COUNT, and silently
+        # breaks official-checkpoint key/shape compatibility. See decisions.md
+        # D-009.
         self.key_dim = embedding_dim // num_heads
+        self.cross_attn_key_dim = embedding_dim // (
+            num_heads * attention_downsample_rate
+        )
 
         # CREATE all sub-layers in __init__
 
@@ -243,7 +276,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         # 2. Cross-attention: tokens attending to image
         self.cross_attn_token_to_image = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=self.key_dim,
+            key_dim=self.cross_attn_key_dim,
             dropout=attention_dropout,
             name="cross_attn_token_to_image"
         )
@@ -270,7 +303,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         # 4. Cross-attention: image attending to tokens
         self.cross_attn_image_to_token = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=self.key_dim,
+            key_dim=self.cross_attn_key_dim,
             dropout=attention_dropout,
             name="cross_attn_image_to_token"
         )
@@ -436,6 +469,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             "normalization_type": self.normalization_type,
             "activation": self.activation,
             "attention_dropout": self.attention_dropout,
+            "attention_downsample_rate": self.attention_downsample_rate,
         })
         return config
 
@@ -487,6 +521,13 @@ class TwoWayTransformer(layers.Layer):
         activation: String, activation function for FFN. Defaults to 'relu'.
         attention_dropout: Float, dropout rate for attention layers.
             Defaults to 0.0.
+        attention_downsample_rate: Integer, forwarded to every
+            :class:`TwoWayAttentionBlock` and applied to
+            ``final_attn_token_to_image``. Reference SAM uses 2: the three
+            cross-attentions run at internal dim ``embedding_dim // 2`` while
+            each block's ``self_attn`` stays at full width. Requires
+            ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
+            Defaults to 2.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape (in call):
@@ -537,6 +578,7 @@ class TwoWayTransformer(layers.Layer):
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
         attention_dropout: float = 0.0,
+        attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -555,6 +597,19 @@ class TwoWayTransformer(layers.Layer):
             )
         if mlp_dim <= 0:
             raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
+        if attention_downsample_rate <= 0:
+            raise ValueError(
+                f"attention_downsample_rate must be positive, got "
+                f"{attention_downsample_rate}"
+            )
+        if embedding_dim % (num_heads * attention_downsample_rate) != 0:
+            raise ValueError(
+                f"embedding_dim ({embedding_dim}) must be divisible by "
+                f"num_heads * attention_downsample_rate "
+                f"({num_heads} * {attention_downsample_rate} = "
+                f"{num_heads * attention_downsample_rate}); otherwise the "
+                f"cross-attention key_dim would be silently floored"
+            )
 
         # Store all configuration parameters
         self.depth = depth
@@ -564,9 +619,17 @@ class TwoWayTransformer(layers.Layer):
         self.normalization_type = normalization_type
         self.activation = activation
         self.attention_dropout = attention_dropout
+        self.attention_downsample_rate = attention_downsample_rate
 
-        # Calculate key dimension for attention
+        # DECISION plan-2026-08-03T191222-1d751f81/D-009
+        # final_attn_token_to_image is a CROSS attention (queries -> refined
+        # image features), so it takes the downsampled key_dim, not
+        # self.key_dim. self.key_dim is retained only because it is part of the
+        # public attribute surface. See decisions.md D-009.
         self.key_dim = embedding_dim // num_heads
+        self.cross_attn_key_dim = embedding_dim // (
+            num_heads * attention_downsample_rate
+        )
 
         # CREATE all sub-layers in __init__
 
@@ -581,6 +644,7 @@ class TwoWayTransformer(layers.Layer):
                 normalization_type=normalization_type,
                 activation=activation,
                 attention_dropout=attention_dropout,
+                attention_downsample_rate=attention_downsample_rate,
                 name=f"block_{i}"
             )
             self.layers_list.append(block)
@@ -588,7 +652,7 @@ class TwoWayTransformer(layers.Layer):
         # Final attention: queries attend to refined image features
         self.final_attn_token_to_image = layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=self.key_dim,
+            key_dim=self.cross_attn_key_dim,
             dropout=attention_dropout,
             name="final_attn_token_to_image"
         )
@@ -731,6 +795,7 @@ class TwoWayTransformer(layers.Layer):
             "normalization_type": self.normalization_type,
             "activation": self.activation,
             "attention_dropout": self.attention_dropout,
+            "attention_downsample_rate": self.attention_downsample_rate,
         })
         return config
 

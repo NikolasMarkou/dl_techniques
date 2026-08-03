@@ -54,7 +54,10 @@ from dl_techniques.models.sam.image_encoder import (
 )
 from dl_techniques.models.sam.prompt_encoder import PromptEncoder
 from dl_techniques.models.sam.mask_decoder import MaskDecoder
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.sam.transformer import (
+    TwoWayAttentionBlock,
+    TwoWayTransformer,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture geometry.
@@ -80,6 +83,23 @@ GLOBAL_ATTN_INDEXES = (1, 3)
 #: Weight count of the default fixture, measured at commit 004d431d.
 #: Plan steps 3 and 4 change the checkpoint layout; this is their control.
 BASELINE_FIXTURE_WEIGHT_COUNT = 192
+
+#: Total scalar parameter count of the default fixture.
+#:
+#: This constant exists because the weight COUNT is blind to plan step 3: a
+#: ``key_dim`` change re-SHAPES the 8 tensors of a ``MultiHeadAttention``
+#: without adding or removing any, so 192 is identical before and after. The
+#: parameter count is what actually observes the layout change.
+#:
+#: Derivation (Keras 3 ``MultiHeadAttention``, embed dim ``E``, internal dim
+#: ``I = num_heads * key_dim``): query/key/value kernels ``E*I`` with bias
+#: ``I`` each, output kernel ``I*E`` with bias ``E`` -> ``131*I + 32`` at
+#: ``E = 32``. The fixture transformer is ``embedding_dim=32, num_heads=2,
+#: depth=2``, i.e. 5 cross-attentions (2 per block + the final one). Step 3
+#: moves each from ``I = 32`` (4224 params) to ``I = 16`` (2128), so
+#: ``327062 - 5 * 2096 = 316582``.
+FIXTURE_PARAM_COUNT_PRE_STEP3 = 327_062
+BASELINE_FIXTURE_PARAM_COUNT = 316_582
 
 #: Weight values are seeded to at least this magnitude (see
 #: :func:`seed_nonzero_weights`).
@@ -669,4 +689,233 @@ class TestRelPosInterpolationBranch:
         assert "has no `gather`" not in source, (
             "the ghost `# DECISION plan_2026-06-15_e6a0391c/D-004` gather "
             "comment is back in image_encoder.py"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F-4: attention_downsample_rate on the three cross-attentions
+# ---------------------------------------------------------------------------
+def _attention_internal_dims(transformer: TwoWayTransformer) -> Dict[str, int]:
+    """
+    Report the ACTUAL internal dim (``num_heads * key_dim``) of every attention.
+
+    Read off the constructed ``MultiHeadAttention`` objects rather than off the
+    config that was passed in: a constructor knob that is stored, serialized and
+    never wired through is the exact defect class this file exists to catch, and
+    ``create_ffn_layer`` in this same package silently drops unknown keys and
+    builds at the default width. Never trust that a kwarg landed.
+
+    Args:
+        transformer: A :class:`TwoWayTransformer` (built or unbuilt; ``key_dim``
+            and ``num_heads`` are set in ``__init__``).
+
+    Returns:
+        Mapping from a dotted attention path (``"block_0.self_attn"``,
+        ``"final_attn_token_to_image"``) to ``num_heads * key_dim``.
+    """
+    dims: Dict[str, int] = {}
+    for block in transformer.layers_list:
+        for name in (
+            "self_attn",
+            "cross_attn_token_to_image",
+            "cross_attn_image_to_token",
+        ):
+            attn = getattr(block, name)
+            dims[f"{block.name}.{name}"] = attn.num_heads * attn.key_dim
+    final = transformer.final_attn_token_to_image
+    dims["final_attn_token_to_image"] = final.num_heads * final.key_dim
+    return dims
+
+
+class TestAttentionDownsampleRate:
+    """F-4 -- reference SAM runs the three cross-attentions at ``E // 2``."""
+
+    def test_cross_attention_internal_dim(self):
+        """
+        The three cross-attentions are ``E // rate``; ``self_attn`` is ``E``.
+
+        RED before the fix: all four report ``E`` (probe P11), so BOTH
+        assertions below fire -- the ``cross_dims == {16}`` one first.
+        """
+        transformer = TwoWayTransformer(
+            depth=2, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+        )
+        assert transformer.attention_downsample_rate == 2, (
+            "attention_downsample_rate must default to 2 (reference SAM)"
+        )
+
+        dims = _attention_internal_dims(transformer)
+        cross_dims = {v for k, v in dims.items() if "self_attn" not in k}
+        self_dims = {v for k, v in dims.items() if k.endswith(".self_attn")}
+
+        assert cross_dims == {OUT_CHANS // 2}, (
+            f"cross-attentions must run at embedding_dim // 2 = "
+            f"{OUT_CHANS // 2}, measured {sorted(cross_dims)}; full dims: {dims}"
+        )
+        assert self_dims == {OUT_CHANS}, (
+            f"self_attn must stay at full width {OUT_CHANS}, measured "
+            f"{sorted(self_dims)}; full dims: {dims}"
+        )
+        assert len(dims) == 7, f"expected 6 block attentions + 1 final, got {dims}"
+
+        del transformer
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_rate_one_restores_full_width(self):
+        """
+        ``rate=1`` must put all seven attentions back at full width.
+
+        This is the discriminating control: a hardcoded ``// 2`` would pass
+        :meth:`test_cross_attention_internal_dim` and fail here.
+        """
+        transformer = TwoWayTransformer(
+            depth=1,
+            embedding_dim=OUT_CHANS,
+            num_heads=2,
+            mlp_dim=64,
+            attention_downsample_rate=1,
+        )
+        dims = _attention_internal_dims(transformer)
+        assert set(dims.values()) == {OUT_CHANS}, (
+            f"attention_downsample_rate=1 must give full width everywhere, "
+            f"measured {dims}"
+        )
+        del transformer
+        keras.backend.clear_session()
+        gc.collect()
+
+    @pytest.mark.parametrize("rate", [1, 2, 4])
+    def test_rate_round_trips_on_both_classes(self, rate: int):
+        """
+        The knob survives ``get_config``/``from_config`` on BOTH classes.
+
+        And -- the half that matters -- the RESTORED object's ACTUAL attention
+        widths match. A config key that round-trips while the rebuilt layer
+        ignores it is a dead knob, which is precisely what ``iou_head_depth``
+        already is elsewhere in this package.
+        """
+        block = TwoWayAttentionBlock(
+            embedding_dim=OUT_CHANS,
+            num_heads=2,
+            mlp_dim=64,
+            attention_downsample_rate=rate,
+        )
+        block_cfg = block.get_config()
+        assert block_cfg["attention_downsample_rate"] == rate, (
+            f"TwoWayAttentionBlock.get_config() dropped "
+            f"attention_downsample_rate: {sorted(block_cfg)}"
+        )
+        block_back = TwoWayAttentionBlock.from_config(block_cfg)
+        expected = OUT_CHANS // rate
+        for name in ("cross_attn_token_to_image", "cross_attn_image_to_token"):
+            attn = getattr(block_back, name)
+            assert attn.num_heads * attn.key_dim == expected, (
+                f"restored block's {name} width is "
+                f"{attn.num_heads * attn.key_dim}, expected {expected} -- the "
+                f"round-tripped knob is dead"
+            )
+        assert (
+            block_back.self_attn.num_heads * block_back.self_attn.key_dim
+            == OUT_CHANS
+        ), "restored block's self_attn must stay at full width"
+
+        transformer = TwoWayTransformer(
+            depth=2,
+            embedding_dim=OUT_CHANS,
+            num_heads=2,
+            mlp_dim=64,
+            attention_downsample_rate=rate,
+        )
+        tr_cfg = transformer.get_config()
+        assert tr_cfg["attention_downsample_rate"] == rate, (
+            f"TwoWayTransformer.get_config() dropped attention_downsample_rate:"
+            f" {sorted(tr_cfg)}"
+        )
+        tr_back = TwoWayTransformer.from_config(tr_cfg)
+        dims = _attention_internal_dims(tr_back)
+        cross_dims = {v for k, v in dims.items() if "self_attn" not in k}
+        assert cross_dims == {expected}, (
+            f"restored transformer cross-attention widths {sorted(cross_dims)} "
+            f"!= {expected}; full dims: {dims}"
+        )
+
+        del block, block_back, transformer, tr_back
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_indivisible_rate_raises_not_floors(self):
+        """
+        ``E % (heads * rate) != 0`` raises on BOTH classes, naming the product.
+
+        ``embedding_dim=12, num_heads=4`` is chosen so the PRE-EXISTING
+        ``embedding_dim % num_heads`` check passes (12 % 4 == 0) and only the
+        new one can fire; without it ``12 // (4 * 2) == 1`` would build a
+        4-wide cross-attention and every shape assertion in the suite would
+        still pass.
+        """
+        for cls, extra in (
+            (TwoWayAttentionBlock, {}),
+            (TwoWayTransformer, {"depth": 1}),
+        ):
+            with pytest.raises(ValueError, match=r"num_heads \* attention_downsample_rate"):
+                cls(embedding_dim=12, num_heads=4, mlp_dim=64, **extra)
+            with pytest.raises(ValueError, match="attention_downsample_rate must be positive"):
+                cls(
+                    embedding_dim=32,
+                    num_heads=2,
+                    mlp_dim=64,
+                    attention_downsample_rate=0,
+                    **extra,
+                )
+
+    def test_param_count_matches_hand_derivation(self, seeded_sam):
+        """
+        I-3 -- the measured parameter delta equals the hand-derived one.
+
+        The weight COUNT cannot see this step (``key_dim`` reshapes the 8 MHA
+        tensors without adding or removing any), so the scalar parameter count
+        is the instrument. The pre-mortem's STOP-IF is exactly a mismatch here.
+
+        Command that produced the numbers:
+            CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
+                tests/test_models/test_sam/test_correctness.py -q -k param_count
+        """
+        model, _ = seeded_sam
+        measured = int(sum(np.prod(w.shape) for w in model.weights))
+        assert measured == BASELINE_FIXTURE_PARAM_COUNT, (
+            f"fixture parameter count is {measured}, expected "
+            f"{BASELINE_FIXTURE_PARAM_COUNT} "
+            f"(pre-step-3 control was {FIXTURE_PARAM_COUNT_PRE_STEP3}; "
+            f"hand-derived delta -5 * 2096 = "
+            f"{BASELINE_FIXTURE_PARAM_COUNT - FIXTURE_PARAM_COUNT_PRE_STEP3})"
+        )
+        assert len(model.weights) == BASELINE_FIXTURE_WEIGHT_COUNT, (
+            "weight count must be UNCHANGED by step 3 -- a key_dim change "
+            "reshapes tensors, it does not add or remove them"
+        )
+
+    def test_roundtrip_still_value_exact_after_layout_change(self, seeded_sam):
+        """
+        I-2 re-proof against the post-step-3 layout, on a BUILT model.
+
+        Deliberately does not reuse the step-1 result: a layout change that
+        restores some weights and re-initializes the rest returns a plausible
+        model with drifted logits, and only a VALUE comparison can see it.
+        """
+        model, inputs = seeded_sam
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = roundtrip_low_res_logits(
+                model, inputs, os.path.join(tmpdir, "downsampled.keras")
+            )
+        assert result["max_abs_diff"] == 0.0, (
+            f"the .keras round-trip is no longer value-exact after the "
+            f"attention_downsample_rate layout change: max abs diff on "
+            f"low_res_logits = {result['max_abs_diff']}"
+        )
+        assert result["n_weights_after"] == result["n_weights_before"] == (
+            BASELINE_FIXTURE_WEIGHT_COUNT
+        ), (
+            f"weight count moved across the round-trip: "
+            f"{result['n_weights_before']} -> {result['n_weights_after']}"
         )
