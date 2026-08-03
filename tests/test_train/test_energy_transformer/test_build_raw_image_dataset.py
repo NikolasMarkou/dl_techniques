@@ -29,9 +29,22 @@ Four things here are load bearing:
 4. **`test_a_file_order_seed_composes_with_an_indexed_map_fn`** covers the
    combination the DINO trainer now runs BY DEFAULT (see the inventory below).
    Read its docstring for what it does and does not reach.
+5. **`TestTheImagenetteBranchWhereTheSeedIsLive`** covers that same pairing on
+   the branch where `shuffle_files_seed` is actually READ, which is the one
+   thing item 4 structurally cannot do (plan-2026-08-03T043010-cecf4357
+   step 9).
 
-Every dataset below is `cifar10`, which `build_raw_image_dataset` builds
-IN-MEMORY from `keras.datasets` — no TFDS, no network, no spinning disk.
+Every dataset here is `cifar10` — which `build_raw_image_dataset` builds
+IN-MEMORY from `keras.datasets`, no TFDS, no network, no spinning disk — WITH
+ONE DELIBERATE EXCEPTION: `TestTheImagenetteBranchWhereTheSeedIsLive` reads
+real prepared `imagenette/320px-v2` TFRecords off disk, because
+`shuffle_files_seed` reaches `tfds.ReadConfig(shuffle_seed=...)` on that branch
+and NOWHERE else, so no cifar10 test can observe it. That class is
+`skipif`-guarded on the records being present and never downloads anything;
+it is bounded to `.take(2)` batches of 4 at `image_size=32` and MEASURED at
+~2 s. Do not generalize it into a second TFDS-dependent test without measuring
+the cost — the "no spinning disk" property of the rest of this module is why it
+is cheap.
 
 ---
 
@@ -95,22 +108,30 @@ that pairing gets a test below.
    is untested against anything but a 2-tuple `(image, label)`, which is all any
    of the 7 sites produces. A `dict` element, or a 3+-element flat tuple, could
    misroute the unpacking silently rather than raise.
-3. `shuffle_files_seed` together with `indexed_element_map_fn` — closed by
-   `test_a_file_order_seed_composes_with_an_indexed_map_fn`, within the limits
-   that test's own docstring states. **State those limits plainly, because
-   "F-15c closed" reads stronger than what was measured: F-15c is closed for
-   REFUSAL-FREEDOM (the two kwargs compose without raising) and for
-   COUNTER-MONOTONICITY (the per-element index still advances) ONLY.** That test
-   runs on `cifar10`, whose in-memory branch (`common.py`'s `else`) accepts
-   `shuffle_files_seed` and never reads it; the seed is live only on the
-   `imagenette` branch, which is where it reaches
-   `tfds.ReadConfig(shuffle_seed=...)` and where site 5 actually runs in
-   production. **Nothing in this repository exercises seeded FILE ORDER together
-   with an indexed map fn on the branch where the seed is live.** Closing that
-   would need an imagenette-marked (TFDS-dependent) test, which this module
-   deliberately does not have.
+3. `shuffle_files_seed` together with `indexed_element_map_fn` — now covered on
+   BOTH branches, by two tests with deliberately different reach.
+   `test_a_file_order_seed_composes_with_an_indexed_map_fn` runs on `cifar10`,
+   whose in-memory branch (`common.py`'s `else`) accepts `shuffle_files_seed`
+   and never reads it, so it closes REFUSAL-FREEDOM (the two kwargs compose
+   without raising) and COUNTER-MONOTONICITY (the per-element index still
+   advances) ONLY — it asserts that inertness positively and cannot see a file
+   interleave. `TestTheImagenetteBranchWhereTheSeedIsLive` closes the rest on
+   the branch that does reach `tfds.ReadConfig(shuffle_seed=...)`, which is
+   where site 5 runs in production: the seed is READ (different seeds emit
+   different records), it REPRODUCES across builds, and the counter still
+   climbs. **The old sentence here — "Nothing in this repository exercises
+   seeded FILE ORDER together with an indexed map fn on the branch where the
+   seed is live" — is FALSE as of
+   plan-2026-08-03T043010-cecf4357 step 9 and must not be reinstated.** What
+   remains uncovered is narrower and worth stating: only 8 records off the HEAD
+   of the train stream are compared, at 2 of the split's possible file orders
+   (`imagenette/320px-v2` ships 2 train shards here), and nothing asserts WHICH
+   order a given seed selects — that is a tfds internal a version bump may
+   permute.
 """
 
+import os
+from glob import glob
 from typing import Any, List, Tuple
 
 import numpy as np
@@ -119,12 +140,33 @@ import tensorflow as tf
 
 from train.energy_transformer.common import (
     DATASET_NUM_CLASSES,
+    IMAGENETTE_TFDS_NAME,
     build_raw_image_dataset,
 )
 
 IMAGE_SIZE = 32
 BATCH_SIZE = 4
 SEED = 7
+
+# The ONE imagenette-dependent test below (class
+# `TestTheImagenetteBranchWhereTheSeedIsLive`) reads these prepared TFDS
+# records off disk. Everything else in this module is cifar10 and needs none
+# of it. `data_dir=None` inside `build_raw_image_dataset` inherits
+# `$TFDS_DATA_DIR`, so the skip predicate must resolve the same way TFDS does.
+_TFDS_DATA_DIR = os.environ.get(
+    "TFDS_DATA_DIR", os.path.expanduser("~/tensorflow_datasets"))
+_IMAGENETTE_RECORD_DIR = os.path.join(
+    _TFDS_DATA_DIR, *IMAGENETTE_TFDS_NAME.split("/"), "1.0.0")
+_IMAGENETTE_TRAIN_SHARDS = sorted(
+    glob(os.path.join(_IMAGENETTE_RECORD_DIR, "imagenette-train.tfrecord-*")))
+_IMAGENETTE_SKIP_REASON = (
+    f"imagenette TFDS records are not prepared: no "
+    f"`imagenette-train.tfrecord-*` under {_IMAGENETTE_RECORD_DIR!r} "
+    f"(TFDS_DATA_DIR={_TFDS_DATA_DIR!r}). This test reads REAL records; it "
+    f"must never download anything. Prepare `{IMAGENETTE_TFDS_NAME}` offline "
+    f"to run it. A SKIP here is NOT a pass -- the seeded-file-order guard "
+    f"simply did not run on this machine."
+)
 
 
 # ---------------------------------------------------------------------
@@ -158,8 +200,41 @@ def _index_reporting_map_fn(
     return tf.cast(index, tf.int64), label
 
 
+def _index_and_image_digest_map_fn(
+        index: tf.Tensor, image: tf.Tensor, label: tf.Tensor
+) -> Tuple[Any, Any]:
+    """Emit the counter AND a per-record fingerprint of the image.
+
+    The label alone cannot identify a record (10 classes, 8 samples), so it
+    cannot answer "were 8 DISTINCT records actually read" nor "did the file
+    order change". `(sum, max, min)` over the normalized image does: it is a
+    float64 triple that differs between any two natural images in practice,
+    and it is cheap enough to compute inside the pipeline.
+    """
+    del label
+    digest = tf.stack(
+        [tf.reduce_sum(image), tf.reduce_max(image), tf.reduce_min(image)])
+    return tf.cast(index, tf.int64), tf.cast(digest, tf.float64)
+
+
 def _take(ds: tf.data.Dataset, n_batches: int) -> List[np.ndarray]:
     return [np.asarray(x) for x, _ in ds.take(n_batches)]
+
+
+def _take_indices_and_digests(
+        ds: tf.data.Dataset, n_batches: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Drain `n_batches` of an `_index_and_image_digest_map_fn` pipeline.
+
+    Returns `(counters[n_batches * BATCH_SIZE], digests[same, 3])`, both
+    concatenated across batches so the caller sees one flat window.
+    """
+    counters: List[np.ndarray] = []
+    digests: List[np.ndarray] = []
+    for counter, digest in ds.take(n_batches):
+        counters.append(np.asarray(counter))
+        digests.append(np.asarray(digest))
+    return np.concatenate(counters), np.concatenate(digests)
 
 
 def _reference_pipeline(*, element_map_fn=None, is_training: bool):
@@ -347,15 +422,23 @@ class TestIndexedElementMapFn:
         seed also set. A future refusal or reordering coupling the two would
         land here.
 
-        WHAT THIS DOES NOT COVER. `shuffle_files_seed` only reaches
-        `tfds.ReadConfig(shuffle_seed=...)` on the IMAGENETTE branch; on the
-        in-memory cifar10 branch used throughout this module it is accepted and
-        then never read. So this test cannot observe the file interleave. It
-        asserts that inertness POSITIVELY (the emitted elements match the
-        no-file-seed build) rather than pretending to more reach than it has —
-        an imagenette version would need TFDS records on disk, which no test in
-        this module depends on. The file-order effect itself is measured in
-        `train_dino.py`'s `build_knn_datasets` docstring (D-040).
+        WHAT THIS DOES NOT COVER, AND WHAT NOW DOES. `shuffle_files_seed` only
+        reaches `tfds.ReadConfig(shuffle_seed=...)` on the IMAGENETTE branch;
+        on the in-memory cifar10 branch this test uses it is accepted and then
+        never read. So THIS test cannot observe the file interleave, and does
+        not pretend to: it asserts that inertness POSITIVELY (the emitted
+        elements match the no-file-seed build). The sentence that used to
+        follow — that an imagenette version "would need TFDS records on disk,
+        which no test in this module depends on" — is now OUT OF DATE:
+        `TestTheImagenetteBranchWhereTheSeedIsLive` at the bottom of this
+        module does exactly that, `skipif`-guarded on the prepared records,
+        and is where the seed being READ and REPRODUCIBLE is asserted. Keep
+        this cifar10 test anyway: it is the only one that runs when those
+        records are absent, and it is the only one that pins the seed's
+        INERTNESS on the in-memory branch — if `shuffle_files_seed` ever starts
+        perturbing cifar10, this fires and the imagenette test does not.
+        The file-order effect is also measured in `train_dino.py`'s
+        `build_knn_datasets` docstring (D-040).
         """
         with_seed, _, _ = build_raw_image_dataset(
             "cifar10", IMAGE_SIZE, BATCH_SIZE, is_training=True, augment=False,
@@ -393,3 +476,143 @@ class TestIndexedElementMapFn:
             ),
         )
         assert counters[-1] >= num_examples > counters[0]
+
+
+# ---------------------------------------------------------------------
+# 4. the imagenette branch -- the ONE place `shuffle_files_seed` is live
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _IMAGENETTE_TRAIN_SHARDS, reason=_IMAGENETTE_SKIP_REASON)
+class TestTheImagenetteBranchWhereTheSeedIsLive:
+    """Real TFDS records, because cifar10 structurally cannot carry this claim.
+
+    `test_a_file_order_seed_composes_with_an_indexed_map_fn` above closes F-15c
+    for REFUSAL-FREEDOM and COUNTER-MONOTONICITY only: it runs on cifar10,
+    whose in-memory branch accepts `shuffle_files_seed` and never reads it.
+    This class runs the SAME pairing on `imagenette`, the only branch that
+    builds `tfds.ReadConfig(shuffle_seed=...)` and hands it to
+    `builder.as_dataset` -- i.e. the branch DINO site 5 actually runs in
+    production.
+
+    Cost control, so this stays a unit test: `image_size=32`, `batch_size=4`,
+    `.take(2)`, and an explicit `shuffle_buffer` of 32 (the 4096 default would
+    decode 4096 full-size JPEGs per build). CPU only, no model, no `fit()`.
+    MEASURED at 16 builds: ~2 s total.
+    """
+
+    # Two `.take()` batches of `BATCH_SIZE`; small on purpose (see class doc).
+    N_BATCHES = 2
+
+    # DECISION plan-2026-08-03T043010-cecf4357/D-014
+    # Do NOT reduce this to a single same-seed determinism check, and do NOT
+    # reduce it to one hardcoded "seed A differs from seed B" pair.
+    # `imagenette/320px-v2` ships exactly TWO train shards, so the file order
+    # the seed selects has only TWO possible values. Consequences, both
+    # measured: (i) a same-seed equality assertion ALONE is near-vacuous,
+    # because a seed-IGNORED implementation still coincides ~50% of the time;
+    # (ii) a single different-seed pair is a coin flip in the other direction,
+    # so it would RED-prove nothing reliably. Asserting the PARTITION over
+    # several seeds is what makes both halves sharp: a seed-ignored build
+    # draws its order at random per call, so it must fail per-seed
+    # reproducibility with probability 1 - 2^-len(FILE_ORDER_SEEDS).
+    # The seed->order map is NOT hardcoded (it is a tfds-internal detail that a
+    # tfds upgrade may permute); the test only asserts that the seeds span more
+    # than one order. See decisions.md D-014.
+    FILE_ORDER_SEEDS = (0, 1, 2, 3, 4, 5, 6, 7)
+
+    def _build(self, shuffle_files_seed: int) -> Tuple[np.ndarray, np.ndarray]:
+        ds, num_examples, num_classes = build_raw_image_dataset(
+            "imagenette", IMAGE_SIZE, BATCH_SIZE, is_training=True,
+            augment=False,
+            indexed_element_map_fn=_index_and_image_digest_map_fn,
+            seed=SEED, shuffle_files_seed=shuffle_files_seed,
+            shuffle_buffer=32)
+        assert num_examples == 9469 and num_classes == 10, (
+            f"the imagenette train split reports {num_examples} examples / "
+            f"{num_classes} classes, not 9469/10. The records on disk are not "
+            f"the split this test was measured against; every number below is "
+            f"about a different dataset."
+        )
+        return _take_indices_and_digests(ds, self.N_BATCHES)
+
+    def test_a_live_file_order_seed_composes_with_an_indexed_map_fn(
+            self) -> None:
+        """The F-15c residual, closed on the branch where the seed is live.
+
+        Three claims, none of which cifar10 can support:
+
+        1. **The seed is READ.** Different `shuffle_files_seed` values produce
+           different emitted records, so the kwarg is not inert here.
+        2. **The seed REPRODUCES.** The same value, built twice, emits the
+           identical window -- which is the entire point of D-040 (a consumer
+           taking a small `.take(n)` sample and reporting a number off it).
+        3. **The two knobs COMPOSE.** The `indexed_element_map_fn` counter
+           still runs `0,1,2,...` across that window; neither knob clobbers
+           the other.
+
+        Plus the anti-vacuity floor: a `.take()` that yields nothing satisfies
+        every equality assertion trivially, so the number of DISTINCT records
+        actually read is asserted explicitly.
+        """
+        window = self.N_BATCHES * BATCH_SIZE
+        fingerprints = {}
+
+        for file_seed in self.FILE_ORDER_SEEDS:
+            first_counters, first_digests = self._build(file_seed)
+            second_counters, second_digests = self._build(file_seed)
+
+            # ANTI-VACUITY. Everything else here is an equality assertion, and
+            # equality over an EMPTY window is free.
+            assert first_digests.shape == (window, 3), (
+                f"shuffle_files_seed={file_seed}: read "
+                f"{first_digests.shape[0]} records, expected {window}. An "
+                f"empty or short `.take()` would pass every equality "
+                f"assertion below trivially."
+            )
+            assert np.unique(first_digests, axis=0).shape[0] == window, (
+                f"shuffle_files_seed={file_seed}: the {window} records read "
+                f"are not {window} DISTINCT records "
+                f"({np.unique(first_digests, axis=0).shape[0]} unique image "
+                f"fingerprints). A pipeline replaying one record would make "
+                f"the determinism assertion meaningless."
+            )
+
+            # (3) the counter still climbs -- the two knobs compose.
+            np.testing.assert_array_equal(
+                first_counters, np.arange(window), err_msg=(
+                    f"shuffle_files_seed={file_seed}: the per-element counter "
+                    f"is not 0..{window - 1} on the imagenette branch. "
+                    f"`shuffle_files_seed` must reach the TFDS file "
+                    f"interleave ONLY -- if it perturbs `.enumerate()`, the "
+                    f"stateless augmentation keyed on that counter is keyed "
+                    f"on something else."
+                ))
+
+            # (2) same seed -> same window, ACROSS BUILDS.
+            np.testing.assert_array_equal(
+                first_digests, second_digests, err_msg=(
+                    f"shuffle_files_seed={file_seed}: two builds at the SAME "
+                    f"file-order seed emitted DIFFERENT records. The seed "
+                    f"exists so a small `.take(n)` sample is stable run to "
+                    f"run (D-040); if it is dropped from "
+                    f"`tfds.ReadConfig(shuffle_seed=...)`, the file order is "
+                    f"redrawn per call and this is the assertion that fires."
+                ))
+            np.testing.assert_array_equal(
+                first_counters, second_counters,
+                err_msg="the counter itself is not reproducible across builds")
+
+            fingerprints[file_seed] = first_digests.tobytes()
+
+        # (1) the seed is READ: it selects among the available file orders.
+        assert len(set(fingerprints.values())) >= 2, (
+            f"all {len(self.FILE_ORDER_SEEDS)} file-order seeds emitted the "
+            f"IDENTICAL window, so `shuffle_files_seed` changed nothing and "
+            f"the reproducibility assertion above is vacuous for the seed. "
+            f"`imagenette/320px-v2` has 2 train shards here, i.e. 2 possible "
+            f"orders; MEASURED on this machine, seeds {{4, 5}} take one order "
+            f"and {{0, 1, 2, 3, 6, 7}} the other. If a tfds upgrade collapsed "
+            f"these 8 seeds onto one order this fires WITHOUT a defect -- "
+            f"widen FILE_ORDER_SEEDS rather than deleting the assertion."
+        )
