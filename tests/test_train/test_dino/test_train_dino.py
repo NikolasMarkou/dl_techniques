@@ -324,6 +324,77 @@ class TestSmokePreset:
         )
         assert config.variant == "tiny"  # untouched fields still get the preset
 
+    def test_an_explicit_default_value_also_beats_the_preset(self) -> None:
+        """`--smoke --ema-warmup-epochs 1.0`, where 1.0 IS the parser default.
+
+        This exact invocation silently resolved to `ema_warmup_epochs == 0.0` and a
+        warmup of 0 steps before this plan: the preset decided "did the caller override
+        this?" by re-parsing an empty argv and comparing PARSED VALUES, and a flag typed
+        at its own default is value-identical to an omission. The caller asked for a
+        one-epoch teacher freeze, got none, and nothing failed.
+
+        `--batch-size 8` (the sibling test above) cannot catch that class, because 8
+        differs from the default; only a flag typed AT its default separates provenance
+        from value. What makes the difference is `explicitly_set_flags` (in
+        `train.common.args`), whose result `parse_arguments` attaches to the Namespace
+        and `config_from_args` reads instead of re-parsing.
+
+        The second assertion is the BEHAVIOURAL one: carrying 1.0 into the config is
+        only useful if it also reaches the resolved step count.
+        """
+        config = trainer.config_from_args(
+            trainer.parse_arguments(["--smoke", "--ema-warmup-epochs", "1.0"]))
+        assert config.ema_warmup_epochs == 1.0, (
+            "--smoke overrode an EXPLICITLY TYPED --ema-warmup-epochs 1.0 back to "
+            "SMOKE_OVERRIDES' 0.0. The preset is comparing VALUES, not provenance, so "
+            "it cannot see a flag the caller typed at that flag's own default."
+        )
+        assert trainer.resolve_ema_warmup_steps(config, steps_per_epoch=295) == 295, (
+            "the explicitly requested one-epoch teacher freeze resolved to a different "
+            "step count -- an explicit --ema-warmup-epochs 1.0 under --smoke must reach "
+            "the resolver as 1.0 and yield one epoch's worth of steps."
+        )
+
+    def test_a_boolean_optional_action_flag_is_seen_at_either_spelling(self) -> None:
+        """`argparse.BooleanOptionalAction` owns TWO spellings under ONE dest.
+
+        A token scanner that looked at only the first registered option string would
+        register `--stateless-augmentation` and miss `--no-stateless-augmentation`, so
+        the off-switch would stop counting as something the caller typed.
+
+        The claim is split across two assertions on purpose, and the split is forced:
+        NEITHER reproducibility flag appears in `SMOKE_OVERRIDES`, so `--smoke` never
+        wants to overwrite this dest and the resolved config comes back the same whether
+        provenance works or not. Asserting only on the resolved value for THIS dest
+        would be vacuous. So:
+          (a) `--batch-size 8` in the same argv is the sensitivity control -- it proves
+              the resolved-config route is live while the boolean token is present, and
+              that the boolean token does not derail the scan of its neighbours;
+          (b) the provenance set itself is asserted for the boolean dest, since that is
+              the only place the dual-spelling claim is observable today. It is read off
+              the Namespace (the public product of `parse_arguments`) rather than from
+              `explicitly_set_flags`' internals -- the parser object is not exported.
+        If a boolean field ever enters `SMOKE_OVERRIDES`, fold (b) back into a pure
+        resolved-config assertion.
+        """
+        for spelling, expected in (("--no-stateless-augmentation", False),
+                                   ("--stateless-augmentation", True)):
+            args = trainer.parse_arguments(["--smoke", spelling, "--batch-size", "8"])
+            config = trainer.config_from_args(args)
+            assert config.stateless_augmentation is expected, (
+                f"{spelling} did not reach the config"
+            )
+            assert config.batch_size == 8, (
+                f"an explicit --batch-size 8 came back as {config.batch_size} when "
+                f"{spelling} was also on the command line -- the preset is clobbering a "
+                f"typed flag, so this test's provenance assertion below is unsupported"
+            )
+            assert "stateless_augmentation" in args.explicit_flags, (
+                f"{spelling} was NOT recorded as explicitly set. BooleanOptionalAction "
+                f"registers both --x and --no-x on one dest; provenance must count "
+                f"either spelling, or --smoke would override a field the caller typed."
+            )
+
     def test_smoke_still_means_no_teacher_ema_freeze(self) -> None:
         """`--smoke` must resolve to ZERO warmup, as it always has.
 
