@@ -1140,12 +1140,20 @@ class TestHeadDepthAndActivationDefault:
         keras.backend.clear_session()
         gc.collect()
 
-    def test_mask_decoder_activation_default_is_relu(self):
+    def test_activation_split_upscaler_gelu_heads_relu(self):
         """
-        F-6 -- the default is ``'relu'``, matching ``TwoWayTransformer``.
+        F-R1 -- the two halves of the decoder must DIFFER, as in reference SAM.
 
-        RED before the fix: ``'gelu'`` (probe P12), so the two halves of the
-        decoder disagreed with each other and with the paper.
+        Reference ``MaskDecoder(activation=nn.GELU)`` passes ``activation`` to
+        ``output_upscaling`` and to nothing else; the hypernetwork and IoU heads
+        hardcode ``F.relu`` inside ``MLP``. Routing ONE knob to both halves
+        cannot be right for both: step 4 flipped that single knob to ``'relu'``,
+        fixing the heads and silently breaking the upscaler.
+
+        The predecessor of this test asserted ``decoder.activation == 'relu'``
+        plus "the two halves agree", i.e. it CERTIFIED the new deviation. What
+        is asserted here instead is read off the CONSTRUCTED sub-layers, so a
+        config string that never reaches a layer cannot satisfy it.
         """
         decoder = MaskDecoder(
             transformer_dim=OUT_CHANS,
@@ -1153,38 +1161,80 @@ class TestHeadDepthAndActivationDefault:
                 depth=1, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
             ),
         )
-        assert decoder.activation == "relu", (
-            f"MaskDecoder.activation defaults to {decoder.activation!r}; "
-            f"reference SAM's MLP hardcodes ReLU and TwoWayTransformer already "
-            f"defaults to 'relu'"
+        upsample_acts = [
+            keras.activations.serialize(layer.activation)
+            for layer in decoder.output_upscaling.layers
+            if isinstance(layer, keras.layers.Activation)
+        ]
+        assert upsample_acts == ["gelu", "gelu"], (
+            f"output_upscaling activations are {upsample_acts}; reference SAM "
+            f"applies its GELU default there and only there"
         )
-        assert decoder.transformer.activation == decoder.activation, (
-            f"the two halves of the decoder still disagree: transformer "
-            f"{decoder.transformer.activation!r} vs decoder "
-            f"{decoder.activation!r}"
+
+        for head_name, head in [
+            ("hypernetwork_mlp_0", decoder.output_hypernetworks_mlps[0]),
+            ("iou_prediction_head", decoder.iou_prediction_head),
+        ]:
+            names = [
+                keras.activations.serialize(layer.activation)
+                for layer in head.layers
+            ]
+            assert names[:-1] == ["relu"] * (len(names) - 1), (
+                f"{head_name} hidden activations are {names[:-1]}; reference "
+                f"SAM hardcodes F.relu inside MLP"
+            )
+            assert names[-1] == "linear", (
+                f"{head_name} output layer is activated ({names[-1]})"
+            )
+
+        assert decoder.activation == "gelu", (
+            f"MaskDecoder.activation defaults to {decoder.activation!r}; it is "
+            f"the UPSCALER knob and reference SAM defaults it to GELU"
+        )
+        assert decoder.mlp_activation == "relu", (
+            f"MaskDecoder.mlp_activation defaults to "
+            f"{decoder.mlp_activation!r}; it is the MLP-head knob and "
+            f"reference SAM hardcodes ReLU"
+        )
+        assert decoder.activation != decoder.mlp_activation, (
+            "the two halves were collapsed onto one value again; reference SAM "
+            "makes them differ by construction (GELU upscaler, ReLU heads)"
         )
         del decoder
         keras.backend.clear_session()
         gc.collect()
 
     @pytest.mark.parametrize("depth", [2, 3])
-    @pytest.mark.parametrize("activation", ["relu", "gelu"])
-    def test_depth_and_activation_round_trip(self, depth: int, activation: str):
+    @pytest.mark.parametrize(
+        "activation,mlp_activation", [("gelu", "relu"), ("relu", "gelu")]
+    )
+    def test_depth_and_activation_round_trip(
+        self, depth: int, activation: str, mlp_activation: str
+    ):
         """
-        Both knobs survive ``get_config``/``from_config`` -- and stay LIVE.
+        All three knobs survive ``get_config``/``from_config`` -- and stay LIVE.
 
-        The restored object's ACTUAL ``Dense`` count and ACTUAL hidden
-        activation are asserted, not the config keys: a key that round-trips
-        while the rebuilt layer ignores it is precisely the dead knob this step
-        removes.
+        The restored object's ACTUAL ``Dense`` count, ACTUAL head hidden
+        activation and ACTUAL upscaler activation are asserted, not the config
+        keys: a key that round-trips while the rebuilt layer ignores it is
+        precisely the dead knob this work removes. The two parametrized pairs
+        are deliberately CROSSED, so a build that routed one knob to both halves
+        would fail on one of them.
         """
-        decoder = _build_decoder(iou_head_depth=depth, activation=activation)
+        decoder = _build_decoder(
+            iou_head_depth=depth,
+            activation=activation,
+            mlp_activation=mlp_activation,
+        )
         config = decoder.get_config()
         assert config["iou_head_depth"] == depth, (
             f"get_config() dropped iou_head_depth: {sorted(config)}"
         )
         assert config["activation"] == activation, (
             f"get_config() dropped activation: {sorted(config)}"
+        )
+        assert config["mlp_activation"] == mlp_activation, (
+            f"get_config() dropped mlp_activation: {sorted(config)}"
         )
 
         restored = MaskDecoder.from_config(config)
@@ -1200,9 +1250,18 @@ class TestHeadDepthAndActivationDefault:
         restored_act = keras.activations.serialize(
             restored.iou_prediction_head.layers[0].activation
         )
-        assert restored_act == activation, (
+        assert restored_act == mlp_activation, (
             f"restored IoU head hidden activation is {restored_act!r}, "
-            f"expected {activation!r}"
+            f"expected {mlp_activation!r}"
+        )
+        restored_upsample = [
+            keras.activations.serialize(layer.activation)
+            for layer in restored.output_upscaling.layers
+            if isinstance(layer, keras.layers.Activation)
+        ]
+        assert restored_upsample == [activation, activation], (
+            f"restored upscaler activations are {restored_upsample}, expected "
+            f"{[activation, activation]}"
         )
         assert len(restored.weights) == len(decoder.weights), (
             f"restored decoder has {len(restored.weights)} weights vs "

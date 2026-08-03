@@ -209,10 +209,15 @@ class MaskDecoder(keras.layers.Layer):
             Defaults to 256.
         normalization_type: String, type of normalization to use in upscaling module.
             Supports 'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation function to use in the upscaling module and
-            in every non-final MLP layer. Defaults to 'relu', matching reference
-            SAM's hardcoded ``MLP`` activation and ``TwoWayTransformer``'s own
-            default.
+        activation: String, activation applied inside the ``output_upscaling``
+            module ONLY. Defaults to 'gelu', which is reference SAM's
+            ``MaskDecoder(activation=nn.GELU)`` default -- there, ``activation``
+            is passed to ``output_upscaling`` and to nothing else.
+        mlp_activation: String, activation applied to every non-final layer of
+            the hypernetwork MLPs and the IoU head. Defaults to 'relu', which
+            reference SAM hardcodes inside ``MLP`` (``F.relu``). It is a
+            separate knob from ``activation`` because reference SAM makes the
+            two halves DIFFER; see the D-024 anchor below.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape (in call):
@@ -268,7 +273,8 @@ class MaskDecoder(keras.layers.Layer):
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
-        activation: str = 'relu',
+        activation: str = 'gelu',
+        mlp_activation: str = 'relu',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -295,7 +301,17 @@ class MaskDecoder(keras.layers.Layer):
         self.iou_head_depth = iou_head_depth
         self.iou_head_hidden_dim = iou_head_hidden_dim
         self.normalization_type = normalization_type
+        # DECISION plan-2026-08-03T191222-1d751f81/D-024
+        # These are TWO knobs on purpose. Do NOT "simplify" them back into one
+        # shared `activation`, and do NOT make them default to the same value
+        # "so the decoder agrees with itself" -- reference SAM deliberately
+        # makes them differ: `MaskDecoder.activation` defaults to `nn.GELU` and
+        # is passed ONLY to `output_upscaling`, while the hypernetwork/IoU heads
+        # hardcode `F.relu` inside `MLP`. One shared knob cannot be correct for
+        # both halves; routing a single value to both is what made this package
+        # trade a wrong-MLP deviation for a wrong-upscaler one. See D-024.
         self.activation = activation
+        self.mlp_activation = mlp_activation
 
         # Calculate number of mask tokens (multi-mask outputs + 1 single output)
         self.num_mask_tokens = num_multimask_outputs + 1
@@ -352,7 +368,7 @@ class MaskDecoder(keras.layers.Layer):
                     num_layers=self.iou_head_depth,
                     hidden_dim=transformer_dim,
                     output_dim=transformer_dim // 8,
-                    activation=activation,
+                    activation=mlp_activation,
                     dense_name_template=f"hyper_dense{{n}}_{i}",
                     name=f"hypernetwork_mlp_{i}",
                 )
@@ -365,7 +381,7 @@ class MaskDecoder(keras.layers.Layer):
             num_layers=self.iou_head_depth,
             hidden_dim=self.iou_head_hidden_dim,
             output_dim=self.num_mask_tokens,
-            activation=activation,
+            activation=mlp_activation,
             dense_name_template="iou_dense{n}",
             name="iou_prediction_head",
         )
@@ -636,6 +652,7 @@ class MaskDecoder(keras.layers.Layer):
             "iou_head_hidden_dim": self.iou_head_hidden_dim,
             "normalization_type": self.normalization_type,
             "activation": self.activation,
+            "mlp_activation": self.mlp_activation,
             "transformer": keras.layers.serialize(self.transformer),
         })
         # Note: self.transformer is passed in __init__ as a layer,

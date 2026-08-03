@@ -962,7 +962,8 @@ mask_decoder = MaskDecoder(
     num_multimask_outputs=3,          # Number of mask proposals
     iou_head_depth=3,                 # Layer count of EVERY MLP head
     iou_head_hidden_dim=256,          # Hidden dim of IoU MLP
-    activation='relu',                # Default; matches reference SAM's MLP
+    activation='gelu',                # Default; UPSCALER only (reference: nn.GELU)
+    mlp_activation='relu',            # Default; MLP heads only (reference: F.relu)
 )
 ```
 
@@ -981,10 +982,23 @@ output layer is linear. Reference SAM hardcodes `3` for the hypernetwork and
 applies the knob only to the IoU head — driving both from one knob is a
 deliberate deviation, reachable only at a non-default depth.
 
-**`activation`** defaults to `'relu'`. It defaulted to `'gelu'` before
-iteration 1, which disagreed with reference SAM and with `TwoWayTransformer`'s
-own `'relu'` default inside the same decoder; the change moves forward-pass
-values.
+**`activation` and `mlp_activation` are two SEPARATE knobs, and their defaults
+deliberately differ.** Reference SAM's `MaskDecoder(activation=nn.GELU)` passes
+`activation` to `output_upscaling` and to nothing else, while the hypernetwork
+and IoU heads hardcode `F.relu` inside `MLP`. So:
+
+- **`activation`** (default `'gelu'`) is applied inside `output_upscaling` only.
+- **`mlp_activation`** (default `'relu'`) is applied to every non-final layer of
+  the hypernetwork MLPs and the IoU head; the final layer of each head stays
+  linear so it can emit signed logits.
+
+Do **not** collapse these into one knob "so the decoder agrees with itself" —
+reference SAM makes the two halves differ by construction. This package shipped
+a single shared `activation` until the iteration-1 completion fix: at its
+original `'gelu'` the MLP heads were wrong, and flipping it to `'relu'` merely
+moved the deviation to the upscaler. Both halves now match reference. Forward-pass
+values moved twice as a result; no weight shape or count did (activations are
+parameter-free).
 
 **`sparse_prompt_embeddings` batching**: the decoder accepts a prompt batch of
 either `1` (broadcast to every image) or exactly `batch_size` (paired one to
