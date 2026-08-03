@@ -63,14 +63,25 @@ class BabiTaskConfig:
     The bAbI tasks test various reasoning capabilities including
     fact retrieval, counting, path-finding, and spatial reasoning.
     
-    :param task_ids: List of task IDs to generate (1-20).
+    :param task_ids: List of task IDs to generate. Defaults to the ten tasks
+        ``BabiGenerator`` implements; requesting any other id raises at
+        construction. It used to default to all twenty, and ten of them were
+        then dropped without a signal.
     :param vocab_size: Size of the vocabulary.
     :param max_story_length: Maximum number of sentences in a story.
     :param max_sentence_length: Maximum tokens per sentence.
     :param num_samples_per_task: Number of samples per task.
     :param random_seed: Seed for reproducibility.
     """
-    task_ids: List[int] = field(default_factory=lambda: list(range(1, 21)))
+    # DECISION plan-2026-08-03T161943-02be1d7e/D-010
+    # This literal restates BabiGenerator.IMPLEMENTED_TASK_IDS. Do NOT "fix" it by
+    # importing BabiGenerator here: babi_generator imports this module, so the
+    # import would be circular. The restatement is held in lockstep by
+    # test_generators_scan_babi.py::test_default_task_ids_are_exactly_the_implemented_set,
+    # which is the only thing keeping the two honest — do not delete that test.
+    task_ids: List[int] = field(
+        default_factory=lambda: [1, 2, 3, 6, 7, 8, 11, 15, 17, 19]
+    )
     vocab_size: int = 200
     max_story_length: int = 70
     max_sentence_length: int = 15

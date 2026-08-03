@@ -78,9 +78,22 @@ class BabiGenerator:
     
     def __init__(self, config: BabiTaskConfig) -> None:
         """Initialize the bAbI generator.
-        
+
         :param config: bAbI task configuration.
+        :raises ValueError: If ``config.task_ids`` requests any task this class
+            does not implement. The message names every unsupported id, not the
+            first one, so a caller fixes the whole config in one pass.
         """
+        unsupported = [
+            task_id for task_id in config.task_ids
+            if task_id not in self.IMPLEMENTED_TASK_IDS
+        ]
+        if unsupported:
+            raise ValueError(
+                f"bAbI tasks {unsupported} are not implemented. "
+                f"Implemented task ids: {sorted(self.IMPLEMENTED_TASK_IDS)}."
+            )
+
         self.config = config
         self._rng = np.random.default_rng(config.random_seed)
         self._build_vocabulary()
@@ -131,27 +144,14 @@ class BabiGenerator:
         :raises ValueError: If task_id is not supported.
         """
         num_samples = num_samples or self.config.num_samples_per_task
-        
-        generator_map = {
-            1: self._generate_task1,
-            2: self._generate_task2,
-            3: self._generate_task3,
-            6: self._generate_task6,
-            7: self._generate_task7,
-            8: self._generate_task8,
-            11: self._generate_task11,
-            15: self._generate_task15,
-            17: self._generate_task17,
-            19: self._generate_task19
-        }
-        
-        if task_id not in generator_map:
+
+        if task_id not in self.IMPLEMENTED_TASK_IDS:
             raise ValueError(
                 f"Task {task_id} not implemented. "
-                f"Available: {list(generator_map.keys())}"
+                f"Available: {sorted(self.IMPLEMENTED_TASK_IDS)}"
             )
-        
-        return generator_map[task_id](num_samples)
+
+        return self._TASK_GENERATORS[task_id](self, num_samples)
     
     def _generate_task1(self, num_samples: int) -> List[BabiSample]:
         """Task 1: Single Supporting Fact.
@@ -506,19 +506,39 @@ class BabiGenerator:
         
         return samples
     
+    # The single home for "which bAbI tasks does this class actually implement".
+    # It lives at class level, and IMPLEMENTED_TASK_IDS is derived from it rather
+    # than written out again, so the id set and the generators cannot drift apart.
+    # Declared after the generators because a class body executes top-down.
+    _TASK_GENERATORS = {
+        1: _generate_task1,
+        2: _generate_task2,
+        3: _generate_task3,
+        6: _generate_task6,
+        7: _generate_task7,
+        8: _generate_task8,
+        11: _generate_task11,
+        15: _generate_task15,
+        17: _generate_task17,
+        19: _generate_task19,
+    }
+
+    IMPLEMENTED_TASK_IDS = frozenset(_TASK_GENERATORS)
+
     def generate_all_tasks(self) -> Dict[int, List[BabiSample]]:
-        """Generate samples for all configured tasks.
-        
+        """Generate samples for every configured task.
+
+        Every requested task produces samples: ``__init__`` has already refused
+        any unimplemented id, so there is no skip branch here. There used to be
+        one (a bare ``except ValueError: continue``) and it dropped ten of the
+        twenty default tasks with no signal at all.
+
         :return: Dictionary mapping task_id to list of samples.
         """
-        results = {}
-        for task_id in self.config.task_ids:
-            try:
-                results[task_id] = self.generate(task_id)
-            except ValueError:
-                # Skip unimplemented tasks
-                continue
-        return results
+        return {
+            task_id: self.generate(task_id)
+            for task_id in self.config.task_ids
+        }
     
     def encode_sample(
         self,

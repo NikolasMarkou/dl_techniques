@@ -293,38 +293,39 @@ class BenchmarkHarness:
         
         :param model: Keras model to evaluate.
         :param config: bAbI task configuration.
-        :return: Dictionary mapping task ID to BenchmarkResults.
+        :return: Dictionary mapping task ID to BenchmarkResults, with one entry
+            per requested task — never fewer.
+        :raises ValueError: If the config requests an unimplemented task (raised
+            by ``BabiGenerator.__init__``, before any task runs). There is
+            deliberately no per-task skip branch: a returned dict shorter than
+            ``config.task_ids`` was the defect, and ``run_full_suite``'s own
+            ``except Exception`` already contains a loud failure.
         """
         config = config or self.config.babi_config
         generator = BabiGenerator(config)
-        
+
         all_results = {}
-        
+
         for task_id in config.task_ids:
-            try:
-                samples = generator.generate(task_id)
-                stories, questions, answers = generator.encode_batch(samples)
-                
-                start_time = time.time()
-                results = evaluate_babi_task(
-                    model, stories, questions, answers, task_id
-                )
-                runtime = time.time() - start_time
-                
-                all_results[task_id] = results
-                
-                self._record_run(
-                    f"bAbI_task_{task_id}",
-                    model.name if hasattr(model, 'name') else "unknown",
-                    results,
-                    runtime,
-                    {"task_id": task_id}
-                )
-                
-            except ValueError as e:
-                if self.config.verbose:
-                    logger.warning(f"Skipping task {task_id}: {e}")
-        
+            samples = generator.generate(task_id)
+            stories, questions, answers = generator.encode_batch(samples)
+
+            start_time = time.time()
+            results = evaluate_babi_task(
+                model, stories, questions, answers, task_id
+            )
+            runtime = time.time() - start_time
+
+            all_results[task_id] = results
+
+            self._record_run(
+                f"bAbI_task_{task_id}",
+                model.name if hasattr(model, 'name') else "unknown",
+                results,
+                runtime,
+                {"task_id": task_id}
+            )
+
         return all_results
     
     def run_scan_benchmark(
@@ -508,6 +509,7 @@ class BenchmarkHarness:
             "length_generalization": self.run_length_generalization_benchmark,
             "memory_capacity": self.run_capacity_benchmark,
             "scan": self.run_scan_benchmark,
+            "babi": self.run_babi_benchmark,
         }
         
         if benchmarks is None:

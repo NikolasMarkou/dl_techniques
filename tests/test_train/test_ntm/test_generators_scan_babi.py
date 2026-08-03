@@ -34,7 +34,9 @@ from train.ntm.compositional_generators import (
     _SCAN_PAPER_CORPUS_MAX_ACTION_LENGTH,
     _SCAN_PAPER_TRAIN_MAX_ACTION_LENGTH,
 )
-from train.ntm.config import ScanTaskConfig
+from train.ntm.babi_generator import BabiGenerator
+from train.ntm.config import BabiTaskConfig, BenchmarkSuiteConfig, ScanTaskConfig
+from train.ntm.harness import BenchmarkHarness
 
 
 # ---------------------------------------------------------------------
@@ -364,3 +366,102 @@ class TestNonDegeneracyValidator:
         assert "0 train" in message
         assert "8 test" in message
         assert "{4: 8}" in message
+
+
+# ---------------------------------------------------------------------
+# bAbI coverage honesty
+# ---------------------------------------------------------------------
+
+# Measured against the shipped generators by calling generate() for each id
+# 1..20 and recording which ones raise.
+MEASURED_IMPLEMENTED_TASK_IDS = [1, 2, 3, 6, 7, 8, 11, 15, 17, 19]
+MEASURED_UNIMPLEMENTED_TASK_IDS = [4, 5, 9, 10, 12, 13, 14, 16, 18, 20]
+
+
+class TestBabiImplementedTaskIds:
+    """One home for "which tasks exist", and a default that matches it."""
+
+    def test_implemented_task_ids_are_exactly_the_ids_that_generate(self):
+        generator = BabiGenerator(BabiTaskConfig(task_ids=[1]))
+
+        generated = []
+        for task_id in range(1, 21):
+            try:
+                generator.generate(task_id, num_samples=1)
+            except ValueError:
+                continue
+            generated.append(task_id)
+
+        assert generated == MEASURED_IMPLEMENTED_TASK_IDS
+        assert set(generated) == BabiGenerator.IMPLEMENTED_TASK_IDS
+
+    def test_default_task_ids_are_exactly_the_implemented_set(self):
+        # The pin for the config.py restatement (D-010): the default list is
+        # written out by hand because importing BabiGenerator into config.py
+        # would be circular, so this assertion is what keeps the two in lockstep.
+        assert set(BabiTaskConfig().task_ids) == BabiGenerator.IMPLEMENTED_TASK_IDS
+
+    def test_the_default_config_constructs_and_generates_every_task_it_asks_for(self):
+        config = BabiTaskConfig(num_samples_per_task=2)
+
+        results = BabiGenerator(config).generate_all_tasks()
+
+        assert sorted(results) == sorted(config.task_ids)
+        assert all(len(samples) == 2 for samples in results.values())
+
+
+class TestBabiRefusesUnimplementedTasks:
+    """An unimplemented id fails at construction, naming all of them."""
+
+    def test_construction_raises_and_names_every_unsupported_id(self):
+        config = BabiTaskConfig(task_ids=list(range(1, 21)))
+
+        with pytest.raises(ValueError) as excinfo:
+            BabiGenerator(config)
+
+        message = str(excinfo.value)
+        for task_id in MEASURED_UNIMPLEMENTED_TASK_IDS:
+            assert str(task_id) in message
+        # Not just the first offender.
+        assert str(MEASURED_UNIMPLEMENTED_TASK_IDS[-1]) in message
+
+    def test_the_refusal_lists_the_implemented_ids(self):
+        with pytest.raises(ValueError) as excinfo:
+            BabiGenerator(BabiTaskConfig(task_ids=[4]))
+
+        message = str(excinfo.value)
+        assert str(sorted(BabiGenerator.IMPLEMENTED_TASK_IDS)) in message
+
+    def test_requesting_an_unimplemented_task_raises_instead_of_returning_a_short_dict(self):
+        # The old behaviour: generate_all_tasks() swallowed the ValueError and
+        # returned a dict with ten fewer keys than requested, with no signal.
+        config = BabiTaskConfig(task_ids=[1, 4], num_samples_per_task=1)
+
+        with pytest.raises(ValueError):
+            BabiGenerator(config).generate_all_tasks()
+
+
+class TestBabiIsReachableFromTheFullSuite:
+    """``run_full_suite`` must actually dispatch bAbI."""
+
+    def test_babi_is_dispatched_by_the_default_full_suite(self):
+        harness = BenchmarkHarness(BenchmarkSuiteConfig(verbose=False))
+        called = []
+
+        for name in (
+            "run_copy_task_benchmark",
+            "run_associative_recall_benchmark",
+            "run_length_generalization_benchmark",
+            "run_capacity_benchmark",
+            "run_scan_benchmark",
+            "run_babi_benchmark",
+        ):
+            setattr(
+                harness,
+                name,
+                lambda model, _name=name: called.append(_name),
+            )
+
+        harness.run_full_suite(model=None, model_name="probe")
+
+        assert "run_babi_benchmark" in called
