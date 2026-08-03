@@ -17,6 +17,8 @@ Usage:
     python -m train.ntm.train_multitask --epochs 100 --batch-size 64 --gpu 0
 """
 
+import argparse
+
 import keras
 import numpy as np
 from typing import Dict, Optional, Tuple
@@ -25,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.models.ntm.model_multitask import NTMMultiTask
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, create_callbacks
 
 from .data_generators import (
     CopyTaskGenerator, CopyTaskConfig,
@@ -288,21 +290,75 @@ def evaluate_tasks(model: keras.Model, config: MultitaskNTMConfig) -> None:
             results[task_name] = accuracy
 
 
-def main() -> None:
-    parser = create_base_argument_parser(
+def parse_arguments() -> argparse.Namespace:
+    """Build and run the trainer's command-line parser.
+
+    # DECISION plan-2026-08-03T161943-02be1d7e/D-005
+    This is a LOCAL parser (`src/train/CLAUDE.md` Pattern 2), not
+    `train.common.create_base_argument_parser`. Do NOT "restore" the shared
+    parser here: it has no opt-out, so it forced five flags this trainer never
+    reads (`--dataset`, `--image-size`, `--weight-decay`, `--lr-schedule`,
+    `--show-plots`) onto the CLI as silent no-ops, while six
+    `MultitaskNTMConfig` fields had no flag at all. The rule this file must keep
+    is that EVERY flag below is forwarded into the `MultitaskNTMConfig(...)`
+    call in `main()` — an unforwarded flag is a silent no-op, which is the bug
+    class this parser exists to remove. `tests/test_train/test_ntm/
+    test_ntm_trainers.py::TestPatternTwoArgumentSurface` pins both halves; do
+    not delete it. See decisions.md D-005.
+
+    :return: The parsed arguments.
+    """
+    parser = argparse.ArgumentParser(
         description="Train Multi-Task NTM",
-        default_dataset="ntm_tasks",
-        dataset_choices=["ntm_tasks"],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('--memory-size', type=int, default=128)
-    parser.add_argument('--memory-dim', type=int, default=20)
-    parser.add_argument('--controller-dim', type=int, default=256)
-    parser.add_argument('--steps-per-epoch', type=int, default=1000)
-    parser.add_argument('--validation-steps', type=int, default=100)
-    parser.add_argument('--clip-norm', type=float, default=1.0)
+    # Training loop
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Maximum training epochs.')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Rows per training/validation batch.')
+    parser.add_argument('--learning-rate', type=float, default=1e-4,
+                        help='Adam learning rate.')
+    parser.add_argument('--patience', type=int, default=50,
+                        help='EarlyStopping patience, in epochs.')
+    parser.add_argument('--steps-per-epoch', type=int, default=1000,
+                        help='Batches drawn per training epoch.')
+    parser.add_argument('--validation-steps', type=int, default=100,
+                        help='Batches drawn per validation pass.')
+    parser.add_argument('--clip-norm', type=float, default=1.0,
+                        help='Global gradient-norm clip.')
     parser.add_argument('--num-eval-samples', type=int, default=1000,
                         help='Rows drawn per task for the final evaluation.')
-    args = parser.parse_args()
+    # NTM architecture
+    parser.add_argument('--memory-size', type=int, default=128,
+                        help='Number of memory slots (N).')
+    parser.add_argument('--memory-dim', type=int, default=20,
+                        help='Width of each memory slot (M).')
+    parser.add_argument('--controller-dim', type=int, default=256,
+                        help='Controller hidden width.')
+    parser.add_argument('--controller-type', type=str, default='lstm',
+                        choices=['lstm', 'gru', 'feedforward'],
+                        help='NTM controller cell type.')
+    parser.add_argument('--num-read-heads', type=int, default=1,
+                        help='Number of NTM read heads.')
+    parser.add_argument('--num-write-heads', type=int, default=1,
+                        help='Number of NTM write heads.')
+    parser.add_argument('--shift-range', type=int, default=3,
+                        help='Location-addressing shift width; must be a '
+                             'positive ODD integer (NTMConfig validates this).')
+    # Task frame
+    parser.add_argument('--max-seq-length', type=int, default=100,
+                        help='Timeline width every task is padded/truncated to.')
+    parser.add_argument('--max-vector-size', type=int, default=16,
+                        help='Feature width every task is padded/truncated to.')
+    # Device
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU device index.')
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_arguments()
 
     setup_gpu(args.gpu)
 
@@ -310,6 +366,12 @@ def main() -> None:
         memory_size=args.memory_size,
         memory_dim=args.memory_dim,
         controller_dim=args.controller_dim,
+        controller_type=args.controller_type,
+        num_read_heads=args.num_read_heads,
+        num_write_heads=args.num_write_heads,
+        shift_range=args.shift_range,
+        max_seq_length=args.max_seq_length,
+        max_vector_size=args.max_vector_size,
         batch_size=args.batch_size,
         num_epochs=args.epochs,
         steps_per_epoch=args.steps_per_epoch,

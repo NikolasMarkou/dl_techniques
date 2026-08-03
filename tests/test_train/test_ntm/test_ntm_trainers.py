@@ -463,9 +463,186 @@ class TestPatienceWiring:
         assert len(recorded) == 1, "create_callbacks was never reached"
         assert recorded[0]["patience"] == 7
 
-    def test_default_patience_comes_from_the_base_parser(self):
-        """The config default must match the base parser's ``--patience`` default."""
+    def test_default_patience_agrees_between_parser_and_config(self, monkeypatch):
+        """The ``--patience`` default is 50 in BOTH the parser and the config.
+
+        Renamed from ``test_default_patience_comes_from_the_base_parser``: the
+        base parser is gone (``train_multitask`` is now Pattern 2, a local
+        ``argparse``), so that name asserted a source of truth that no longer
+        exists. The fact worth pinning survived the move — the two defaults must
+        agree, or a bare ``python -m train.ntm.train_multitask`` and a direct
+        ``MultitaskNTMConfig()`` would train with different patience.
+
+        Asserting only ``MultitaskNTMConfig().patience == 50`` would be
+        half-blind: it would still pass if the local parser were written with the
+        shared parser's old default of 15.
+        """
+        monkeypatch.setattr(sys, "argv", ["train_multitask"])
+        args = train_multitask.parse_arguments()
+
+        assert args.patience == 50
         assert MultitaskNTMConfig().patience == 50
+
+
+# ---------------------------------------------------------------------
+# Pattern 2 — every flag must reach MultitaskNTMConfig
+# ---------------------------------------------------------------------
+
+
+def _config_from_argv(monkeypatch, tmp_path, argv: List[str]) -> MultitaskNTMConfig:
+    """Drive ``main()`` end-to-end and return the config it actually built.
+
+    The capture point is ``create_multitask_ntm_model``, the first consumer of
+    the config inside ``train_multitask_ntm``. Capturing at the parser instead
+    would prove only that argparse works, which is never the defect: the
+    documented bug class in this repo is a flag that parses fine and is then
+    never forwarded into the config.
+
+    :param monkeypatch: pytest monkeypatch fixture.
+    :param tmp_path: pytest tmp_path fixture, used as the fake results dir.
+    :param argv: Command-line arguments AFTER the program name.
+    :return: The ``MultitaskNTMConfig`` the trainer constructed.
+    """
+    captured: List[MultitaskNTMConfig] = []
+
+    def spy_create_model(config: MultitaskNTMConfig):
+        captured.append(config)
+        return _StubKerasModel()
+
+    monkeypatch.setattr(train_multitask, "setup_gpu", lambda gpu: None)
+    monkeypatch.setattr(train_multitask, "create_generators",
+                        lambda config: (None, None))
+    monkeypatch.setattr(train_multitask, "create_multitask_ntm_model",
+                        spy_create_model)
+    monkeypatch.setattr(train_multitask, "compile_model",
+                        lambda model, config: None)
+    monkeypatch.setattr(train_multitask, "create_callbacks",
+                        lambda **kwargs: ([], str(tmp_path)))
+    monkeypatch.setattr(train_multitask, "evaluate_tasks",
+                        lambda model, config: None)
+    monkeypatch.setattr(sys, "argv", ["train_multitask"] + argv)
+
+    train_multitask.main()
+
+    assert len(captured) == 1, "create_multitask_ntm_model was never reached"
+    return captured[0]
+
+
+class TestPatternTwoArgumentSurface:
+    """The local parser must expose exactly the trainer's real config space.
+
+    Six ``MultitaskNTMConfig`` fields previously had no flag at all, and five
+    flags inherited from ``create_base_argument_parser`` were parsed and
+    discarded. Both halves are pinned here — the additions one assertion at a
+    time (a single mutation of the shared ``MultitaskNTMConfig(...)`` call would
+    otherwise "prove" all six at once), and the removals as a set.
+    """
+
+    # --- the six added flags, one assertion + one mutation each -------------
+
+    def test_controller_type_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--controller-type gru`` must arrive as ``config.controller_type``."""
+        config = _config_from_argv(
+            monkeypatch, tmp_path, ["--controller-type", "gru"])
+        assert config.controller_type == "gru"
+
+    def test_num_read_heads_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--num-read-heads 3`` must arrive as ``config.num_read_heads``."""
+        config = _config_from_argv(
+            monkeypatch, tmp_path, ["--num-read-heads", "3"])
+        assert config.num_read_heads == 3
+
+    def test_num_write_heads_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--num-write-heads 2`` must arrive as ``config.num_write_heads``."""
+        config = _config_from_argv(
+            monkeypatch, tmp_path, ["--num-write-heads", "2"])
+        assert config.num_write_heads == 2
+
+    def test_shift_range_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--shift-range 5`` must arrive as ``config.shift_range``.
+
+        5 is used rather than 4 because ``NTMConfig`` rejects even shift ranges,
+        so an even probe value would be untrainable and could not be smoke-run.
+        """
+        config = _config_from_argv(monkeypatch, tmp_path, ["--shift-range", "5"])
+        assert config.shift_range == 5
+
+    def test_max_seq_length_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--max-seq-length 40`` must arrive as ``config.max_seq_length``."""
+        config = _config_from_argv(
+            monkeypatch, tmp_path, ["--max-seq-length", "40"])
+        assert config.max_seq_length == 40
+
+    def test_max_vector_size_flag_reaches_the_config(self, monkeypatch, tmp_path):
+        """``--max-vector-size 12`` must arrive as ``config.max_vector_size``."""
+        config = _config_from_argv(
+            monkeypatch, tmp_path, ["--max-vector-size", "12"])
+        assert config.max_vector_size == 12
+
+    # --- controls: every probe value differs from the dataclass default ------
+
+    def test_probe_values_differ_from_the_dataclass_defaults(self):
+        """Non-vacuity control for the six assertions above.
+
+        Each test passes a value the dataclass would NOT produce on its own, so
+        dropping that field from the ``MultitaskNTMConfig(...)`` call makes the
+        matching assertion fail. If a probe ever equalled the default, its guard
+        would pass whether or not the flag was wired — this control is what
+        stops that from happening silently.
+        """
+        default = MultitaskNTMConfig()
+        assert default.controller_type != "gru"
+        assert default.num_read_heads != 3
+        assert default.num_write_heads != 2
+        assert default.shift_range != 5
+        assert default.max_seq_length != 40
+        assert default.max_vector_size != 12
+
+    # --- the five dropped flags ---------------------------------------------
+
+    @pytest.mark.parametrize(
+        "flag",
+        ["--dataset", "--image-size", "--weight-decay", "--lr-schedule",
+         "--show-plots"],
+    )
+    def test_inapplicable_base_parser_flags_are_gone(self, flag, monkeypatch):
+        """A flag this trainer never reads must be REFUSED, not silently ignored.
+
+        These five came from ``create_base_argument_parser``, which has no
+        opt-out. They parsed cleanly and were then discarded — a user setting
+        ``--weight-decay 0.05`` got no weight decay and no warning. Exiting
+        non-zero on an unknown flag is the only outcome that tells them.
+        """
+        monkeypatch.setattr(sys, "argv", ["train_multitask", flag, "1"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            train_multitask.parse_arguments()
+
+        assert excinfo.value.code != 0
+
+    def test_the_kept_flags_are_all_still_parseable(self, monkeypatch):
+        """The twelve retained flags must survive the Pattern 2 conversion.
+
+        Companion to the test above: a parser that refused everything would pass
+        the dropped-flag parametrisation for the wrong reason.
+        """
+        monkeypatch.setattr(sys, "argv", [
+            "train_multitask",
+            "--epochs", "1", "--batch-size", "4", "--learning-rate", "1e-3",
+            "--patience", "2", "--memory-size", "8", "--memory-dim", "4",
+            "--controller-dim", "16", "--steps-per-epoch", "2",
+            "--validation-steps", "1", "--clip-norm", "0.5",
+            "--num-eval-samples", "8", "--gpu", "1",
+        ])
+
+        args = train_multitask.parse_arguments()
+
+        assert (args.epochs, args.batch_size, args.patience) == (1, 4, 2)
+        assert args.learning_rate == pytest.approx(1e-3)
+        assert (args.memory_size, args.memory_dim, args.controller_dim) == (8, 4, 16)
+        assert (args.steps_per_epoch, args.validation_steps) == (2, 1)
+        assert args.clip_norm == pytest.approx(0.5)
+        assert (args.num_eval_samples, args.gpu) == (8, 1)
 
 
 # ---------------------------------------------------------------------
