@@ -448,20 +448,66 @@ class TestSAMSerialization:
         assert isinstance(reconstructed.mask_decoder, MaskDecoder)
 
     def test_save_and_load(self, small_model):
-        """Test full save and load cycle."""
+        """Save a **BUILT** model and prove the round-trip on VALUES.
+
+        Until iteration 1 / step 12 this test saved an *unbuilt* model — Keras
+        emitted "You are saving a model that has not yet been built", the
+        archive stored no weights, and the only assertion was `isinstance`.
+        That combination passes even when every weight is re-initialized on
+        load, which is exactly the failure mode a `.keras` layout change
+        produces. Build first, then compare `low_res_logits` values.
+        """
+        inputs = {
+            'image': keras.random.normal(shape=(1, 256, 256, 3), seed=17),
+            'points': (
+                keras.ops.convert_to_tensor([[[100.0, 100.0]]]),
+                keras.ops.convert_to_tensor([[1]])
+            ),
+            'original_size': keras.ops.convert_to_tensor((256, 256)),
+        }
+
+        # BUILD before saving. Without this the archive carries no weights.
+        reference = keras.ops.convert_to_numpy(
+            small_model(inputs, multimask_output=True)['low_res_logits']
+        )
+        n_weights = len(small_model.weights)
+        assert n_weights > 0, (
+            "the fixture must be BUILT before saving; an unbuilt save stores "
+            "no weights and makes the comparison below meaningless"
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = os.path.join(tmpdir, 'sam_model.keras')
 
-            # Save model
             small_model.save(model_path)
             assert os.path.exists(model_path)
 
-            # Load model
             loaded_model = keras.models.load_model(model_path)
             assert isinstance(loaded_model, SAM)
+            assert len(loaded_model.weights) == n_weights, (
+                f"weight-list length moved on load: {n_weights} -> "
+                f"{len(loaded_model.weights)}"
+            )
+
+            restored = keras.ops.convert_to_numpy(
+                loaded_model(inputs, multimask_output=True)['low_res_logits']
+            )
+
+        max_abs_diff = float(np.max(np.abs(reference - restored)))
+        assert max_abs_diff == 0.0, (
+            f"low_res_logits moved across the .keras round-trip: max abs diff "
+            f"{max_abs_diff!r}. An `isinstance` assertion cannot see this."
+        )
 
     def test_output_consistency_after_loading(self, small_model):
-        """Test that loaded model produces identical outputs."""
+        """Test that loaded model produces identical outputs.
+
+        Compares `low_res_logits`, NOT the binarized `masks`. The uint8
+        comparison this test used to make is quantifiably blind: it saturates
+        at an absolute difference of 1, and it is entirely insensitive to any
+        logit change that does not move a pixel across `mask_threshold` —
+        scaling every logit by a positive constant leaves it bit-identical.
+        """
         image = keras.random.normal(shape=(1, 256, 256, 3))
         points = (
             keras.ops.convert_to_tensor([[[100.0, 100.0]]]),
@@ -480,12 +526,12 @@ class TestSAMSerialization:
             # Get outputs from loaded model
             outputs_loaded = loaded_model(inputs, multimask_output=True)
 
-            # Compare outputs
+            # Compare outputs on the differentiable float logits.
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(outputs_original['masks']),
-                keras.ops.convert_to_numpy(outputs_loaded['masks']),
+                keras.ops.convert_to_numpy(outputs_original['low_res_logits']),
+                keras.ops.convert_to_numpy(outputs_loaded['low_res_logits']),
                 rtol=1e-5, atol=1e-5,
-                err_msg="Masks should match after loading"
+                err_msg="low_res_logits should match after loading"
             )
 
             np.testing.assert_allclose(
@@ -851,24 +897,70 @@ class TestSAMEdgeCases:
             assert keras.ops.shape(outputs['masks'])[3] == w
 
     def test_mask_threshold_effect(self, model):
-        """Test that mask_threshold affects binary mask output."""
-        image = keras.random.normal(shape=(1, 256, 256, 3))
+        """`mask_threshold` must actually MOVE the binary mask.
+
+        The previous body asserted only that both outputs were binary, which
+        is tautologically true of any `cast(x > t, 'uint8')` for every `t` —
+        including a hardcoded one that ignores `mask_threshold` entirely. It
+        never checked that the two outputs DIFFER. The thresholds below are
+        derived from the model's own measured logit range, so the test does
+        not depend on where random weights happen to put the logits.
+        """
+        image = keras.random.normal(shape=(1, 256, 256, 3), seed=23)
         points = (
             keras.ops.convert_to_tensor([[[128.0, 128.0]]]),
             keras.ops.convert_to_tensor([[1]])
         )
         inputs = {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))}
 
-        # Test with different thresholds
-        model.mask_threshold = 0.0
-        outputs_low = model(inputs)
+        # Read the full-resolution float logits the threshold is applied to.
+        model.binarize_masks = False
+        logits = keras.ops.convert_to_numpy(model(inputs)['masks'])
+        model.binarize_masks = True
 
-        model.mask_threshold = 0.5
-        outputs_high = model(inputs)
+        lo, hi = float(logits.min()), float(logits.max())
+        assert lo < hi, (
+            f"degenerate probe: the mask logits are constant at {lo!r}, so no "
+            f"threshold could distinguish anything"
+        )
 
-        # Both should produce binary masks
-        assert keras.ops.all((outputs_low['masks'] == 0) | (outputs_low['masks'] == 1))
-        assert keras.ops.all((outputs_high['masks'] == 0) | (outputs_high['masks'] == 1))
+        # Below every logit -> all ones. Above every logit -> all zeros.
+        model.mask_threshold = lo - 1.0
+        masks_all_on = keras.ops.convert_to_numpy(model(inputs)['masks'])
+        model.mask_threshold = hi + 1.0
+        masks_all_off = keras.ops.convert_to_numpy(model(inputs)['masks'])
+
+        # Still binary (the original, weak property — kept as a regression pin).
+        for m in (masks_all_on, masks_all_off):
+            assert np.all((m == 0) | (m == 1))
+
+        # ...and the threshold is LIVE: every pixel flips between the two.
+        assert masks_all_on.min() == 1, (
+            "a threshold below every logit must mark every pixel foreground; "
+            "got some zeros, so mask_threshold is not being applied"
+        )
+        assert masks_all_off.max() == 0, (
+            "a threshold above every logit must mark every pixel background; "
+            "got some ones, so mask_threshold is not being applied"
+        )
+        n_diff = int(np.count_nonzero(masks_all_on != masks_all_off))
+        assert n_diff == masks_all_on.size, (
+            f"only {n_diff} of {masks_all_on.size} pixels responded to the "
+            f"threshold change"
+        )
+
+        # An intermediate threshold must binarize at exactly that boundary.
+        mid = 0.5 * (lo + hi)
+        model.mask_threshold = mid
+        masks_mid = keras.ops.convert_to_numpy(model(inputs)['masks'])
+        np.testing.assert_array_equal(
+            masks_mid, (logits > mid).astype(masks_mid.dtype),
+            err_msg=(
+                "the binary mask is not `low-res-upscaled logits > "
+                "mask_threshold`; the threshold is being ignored or applied "
+                "to a different tensor"
+            )
+        )
 
 
 # Run tests with: pytest test_sam_model.py -v

@@ -4,7 +4,22 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Segment Anything Model (SAM)** in **Keras 3**, based on the groundbreaking paper ["Segment Anything"](https://arxiv.org/abs/2304.02643) by Kirillov et al. (2023).
+An implementation of the **Segment Anything Model (SAM)** architecture in
+**Keras 3**, based on the paper
+["Segment Anything"](https://arxiv.org/abs/2304.02643) by Kirillov et al.
+(2023).
+
+> **Scope, stated up front.** This package ships the **architecture and its
+> forward pass** — not weights and not a trainer.
+> - **No pretrained checkpoint** ships here or is downloaded.
+>   `SAM.from_variant('vit_b')` builds a randomly initialized model. Any
+>   qualitative claim below ("high-quality mask", "works on any domain")
+>   describes SAM *as published*, not what these random weights produce.
+> - **No trainer ships here.** `src/train/sam/` does not exist; §11 states the
+>   constraints a trainer must be built around instead of pretending to be one.
+> - Loading official Meta SAM weights is **not** demonstrated. Two known
+>   blockers were removed (cross-attention internal dim, MLP head depth), but
+>   no key-mapping layer exists and no official checkpoint was ever loaded.
 
 ---
 
@@ -198,11 +213,17 @@ Here's how data flows through SAM step by step:
 
 STEP 1: Image Preprocessing
 ───────────────────────────
-Input Image (Any Size)
+Input Image (up to 1024x1024 -- SEE BELOW)
     │
     ├─► Normalize: (pixel - mean) / std
-    ├─► Pad to 1024x1024 (if needed)
+    ├─► Pad (bottom/right) to 1024x1024 if SMALLER
     └─► Shape: (B, 1024, 1024, 3)
+
+  `SAM.preprocess` PADS ONLY. An image LARGER than the encoder's `img_size`
+  in either axis raises `ValueError` naming the offending size. Downscale it
+  first with `resize_longest_side(image, model.image_encoder.img_size)`
+  (`dl_techniques.models.sam.preprocessing`), which is the transform reference
+  SAM assumes has already been applied.
 
 
 STEP 2: Image Encoding (Run Once per Image) ️ ~200ms
@@ -497,12 +518,19 @@ Input Types:
 │                                             │
 │  Step 2: Type Embeddings                    │
 │  ┌────────────────────────────────┐         │
-│  │  Point Foreground → [e_fg]     │         │
 │  │  Point Background → [e_bg]     │         │
+│  │  Point Foreground → [e_fg]     │         │
 │  │  Box Top-Left     → [e_tl]     │         │
 │  │  Box Bottom-Right → [e_br]     │         │
-│  │  Box (generic)    → [e_box]    │         │
 │  └────────────────────────────────┘         │
+│  Exactly FOUR embeddings. There is no       │
+│  generic "box" embedding.                   │
+│                                             │
+│  Padding rows (label == -1): the positional │
+│  encoding is ZEROED and only the learned    │
+│  `not_a_point_embed` remains, so a padding  │
+│  row does not depend on where its dummy     │
+│  coordinate sits.                           │
 │                                             │
 │  Output: (B, N_sparse, 256)                 │
 └─────────────────────────────────────────────┘
@@ -512,6 +540,12 @@ Input Types:
 │  (Masks)                                    │
 │                                             │
 │  Input Mask: (B, 1, 256, 256)               │
+│  REQUIRED size: exactly                     │
+│  4 * image_embedding_size in BOTH axes      │
+│  (the conv stack strides by 2 twice).       │
+│  Anything else raises ValueError inside     │
+│  `_embed_masks`, naming the required and    │
+│  the offending size.                        │
 │       │                                     │
 │       ├─► Conv2D(16 channels, 2×2, stride 2)│
 │       │       + GELU                        │
@@ -540,9 +574,16 @@ Input:
   Label: 1 (foreground)
 
 Processing:
-  1. PE(512, 512) → [0.125, 0.923, -0.707, ...]  (128-dim)
+  1. PE(512.5, 512.5) → [0.125, 0.923, -0.707, ...]   (+0.5 pixel centre)
   2. + Foreground embedding → [e_fg]
-  3. Final: (1, 1, 256) sparse embedding
+  3. A PADDING row is appended, because no box was supplied:
+     its positional encoding is zeroed and it carries
+     `not_a_point_embed` alone.
+  4. Final: (1, 2, 256) sparse embeddings   <- TWO rows, not one
+
+Note: the padding row is appended only on a point-only prompt
+(`pad = boxes is None`). Supply a box alongside the point and the
+result is (1, 3, 256): 1 point + 2 box corners, no padding row.
 ```
 
 **Example 2: Bounding Box**
@@ -552,10 +593,11 @@ Input:
 
 Processing:
   1. Top-left corner:     PE(100, 100) + [e_tl]
-  2. Top-right corner:    PE(900, 100) + [e_tr]
-  3. Bottom-left corner:  PE(100, 900) + [e_bl]
-  4. Bottom-right corner: PE(900, 900) + [e_br]
-  5. Final: (1, 4, 256) sparse embeddings
+  2. Bottom-right corner: PE(900, 900) + [e_br]
+  3. Final: (1, 2, 256) sparse embeddings
+
+A box is TWO corners, not four. There is no top-right / bottom-left
+embedding, and a box-only prompt appends no padding row.
 ```
 
 **Example 3: Mask Prompt**
@@ -714,6 +756,11 @@ pip install keras>=3.8.0 tensorflow>=2.18.0 numpy
 
 ### Your First Segmentation (30 seconds)
 
+> **`SAM.from_variant(...)` returns RANDOM weights.** It builds the
+> architecture; it does not load a checkpoint, and no pretrained SAM weights
+> ship with or are downloaded by this repo. The snippet below exercises the
+> API and the shapes — the masks it produces are noise.
+
 ```python
 import keras
 import numpy as np
@@ -831,7 +878,18 @@ embedding = encoder(image)  # Shape: (2, 64, 64, 256)
 | `embed_dim` | Internal feature dimension | 768 (Base), 1024 (Large), 1280 (Huge) |
 | `depth` | Number of transformer layers | 12 (Base), 24 (Large), 32 (Huge) |
 | `num_heads` | Multi-head attention heads | 12-16 |
+| `use_rel_pos` | Relative position biases in attention | `True` (the default) |
+| `window_size` | Windowed-attention window; `0` = every block global | 14 |
 | `global_attn_indexes` | Layers using global attention | Varies by model size |
+
+**A windowed-only encoder is REFUSED.** Constructing `ImageEncoderViT` with
+`window_size > 0` **and** an empty `global_attn_indexes` raises `ValueError`:
+every block would then be windowed and the receptive field would never become
+global. Pass a reference-shaped tuple (`(2, 5, 8, 11)` for a 12-block encoder)
+or set `window_size=0` to make every block global. `use_rel_pos` defaults to
+`True`, matching every released SAM variant; note that this adds two
+`rel_pos_h` / `rel_pos_w` tables per block, so it is a `.keras` layout change
+relative to a pre-iteration-1 default-constructed encoder.
 
 ### 6.2 Prompt Encoder (`PromptEncoder`)
 
@@ -894,6 +952,7 @@ transformer = TwoWayTransformer(
     embedding_dim=256,
     num_heads=8,
     mlp_dim=2048,
+    attention_downsample_rate=2,      # See note below
 )
 
 # Create mask decoder
@@ -901,9 +960,39 @@ mask_decoder = MaskDecoder(
     transformer_dim=256,              # Must match prompt encoder
     transformer=transformer,           # Two-way transformer
     num_multimask_outputs=3,          # Number of mask proposals
-    iou_head_depth=3,                 # Depth of IoU prediction MLP
+    iou_head_depth=3,                 # Layer count of EVERY MLP head
     iou_head_hidden_dim=256,          # Hidden dim of IoU MLP
+    activation='relu',                # Default; matches reference SAM's MLP
 )
+```
+
+**`attention_downsample_rate`** (default `2`) makes the three CROSS-attentions
+(`cross_attn_token_to_image`, `cross_attn_image_to_token`,
+`final_attn_token_to_image`) run at internal dim `embedding_dim // rate`, as
+reference SAM does. `self_attn` always runs at full `embedding_dim`. Setting
+`rate=1` restores the old uniform-width behaviour. `embedding_dim` must be
+divisible by `num_heads * rate` or construction raises `ValueError`.
+
+**`iou_head_depth`** is a LIVE knob (it was stored, serialized and never read
+before iteration 1). It sets the layer count of the IoU head **and** of every
+hypernetwork MLP; at the default of `3` this is identical to reference SAM
+(two hidden layers + a linear output). Every hidden layer is activated and the
+output layer is linear. Reference SAM hardcodes `3` for the hypernetwork and
+applies the knob only to the IoU head — driving both from one knob is a
+deliberate deviation, reachable only at a non-default depth.
+
+**`activation`** defaults to `'relu'`. It defaulted to `'gelu'` before
+iteration 1, which disagreed with reference SAM and with `TwoWayTransformer`'s
+own `'relu'` default inside the same decoder; the change moves forward-pass
+values.
+
+**`sparse_prompt_embeddings` batching**: the decoder accepts a prompt batch of
+either `1` (broadcast to every image) or exactly `batch_size` (paired one to
+one). Anything else raises `ValueError` — an intermediate value used to tile
+into an interleaved `[a, b, a, b]` order and score every image against the
+wrong prompt with no error at all.
+
+```python
 
 # Predict masks
 masks, iou_pred = mask_decoder(
@@ -1380,6 +1469,11 @@ class InteractiveSegmenter:
         Process a new image and cache its embedding.
         This is the slow operation (~150-450ms).
         """
+        # preprocess() PADS ONLY and raises ValueError on an oversize image.
+        # resize_longest_side pins the longest side to img_size (reference
+        # SAM's transform); rescale prompt coordinates by the same factor.
+        image = resize_longest_side(image, self.model.image_encoder.img_size)
+
         self.current_image = image
         self.image_shape = image.shape[1:3]
         
@@ -1773,7 +1867,9 @@ def batch_prompts(model, image, all_points, batch_size=32):
     Returns:
         List of masks, one per prompt
     """
-    # Cache image embedding
+    # Cache image embedding. preprocess() pads only -- an oversize image
+    # raises ValueError, so pin the longest side to img_size first.
+    image = resize_longest_side(image, model.image_encoder.img_size)
     preprocessed = model.preprocess(image)
     image_embedding = model.image_encoder(preprocessed)
     
@@ -1877,173 +1973,114 @@ print(f"Quantized size: {os.path.getsize('sam_model_quantized.tflite') / 1e6:.1f
 
 ## 11. Training and Fine-tuning
 
-### Training SAM from Scratch
+### Training SAM: what ships today
 
-SAM was trained on a massive dataset, but you can train from scratch on your domain.
+**No trainer ships in this package, and this section deliberately does not
+write one.** Authoring `src/train/sam/` — the trainer plus the per-instance
+prompt data pipeline — is scheduled work, not something to copy out of a
+README. What follows is the set of facts a trainer has to be built around.
 
-```python
-import keras
-import tensorflow as tf
-from dl_techniques.models.sam import SAM
+1. **Supervise `low_res_logits`.** It is the only differentiable mask output at
+   the default `binarize_masks=True`, and it is the resolution reference SAM
+   computes its loss at. `outputs['masks']` is a thresholded `uint8` tensor:
+   differentiating it returns `None` for **every** trainable variable, so a
+   trainer that supervises it trains nothing and reports no error. See
+   "Output contract" in §6.4.
 
-# Create model
-model = SAM.from_variant('vit_b')
+2. **A dict `y_pred` cannot be trained by stock `fit()` on keras 3.8.0.**
+   `CompileLoss.build` broadcasts a single `Loss` across every leaf of the
+   output structure and then dies with a `KeyError`. `SAM.call` returns a dict,
+   so training requires a thin **single-tensor wrapper model** that returns
+   `low_res_logits` alone (plus, optionally, `iou_predictions` as a second
+   output — not a nested dict).
 
-# Define loss functions
-def dice_loss(y_true, y_pred):
-    """Dice loss for segmentation."""
-    smooth = 1e-6
-    y_pred = keras.ops.sigmoid(y_pred)
-    
-    intersection = keras.ops.sum(y_true * y_pred, axis=[1, 2, 3])
-    union = keras.ops.sum(y_true, axis=[1, 2, 3]) + keras.ops.sum(y_pred, axis=[1, 2, 3])
-    
-    dice = (2.0 * intersection + smooth) / (union + smooth)
-    return 1.0 - dice
+3. **Reuse the repo's losses; do not hand-roll dice/focal again.**
+   `dl_techniques.losses.segmentation_loss` (`SegmentationLosses`,
+   `create_loss_function`) and
+   `dl_techniques.losses.segmentation_wrapper_loss`
+   (`SegmentationWrapperLoss`, `create_segmentation_wrapper_loss`) already
+   provide dice / focal / combined segmentation losses with serialization.
 
-def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """Focal loss for handling class imbalance."""
-    y_pred = keras.ops.sigmoid(y_pred)
-    
-    ce = keras.ops.binary_crossentropy(y_true, y_pred, from_logits=False)
-    p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
-    alpha_t = y_true * alpha + (1 - y_true) * (1 - alpha)
-    
-    focal = alpha_t * keras.ops.power(1 - p_t, gamma) * ce
-    return keras.ops.mean(focal)
+4. **Do NOT write a custom `train_step`.** This repo's convention is stock
+   `keras.Model.fit()` with any extra signal fed through the `tf.data` inputs.
+   An earlier revision of this section shipped a `SAMTrainer(keras.Model)` with
+   a hand-written `train_step`, a raw `tf.GradientTape`, a manual
+   `apply_gradients`, and four re-implemented loss functions. It was removed:
+   it violated the convention, duplicated `losses/segmentation_loss.py`, and
+   was never executed by any test.
 
-def combined_loss(y_true, y_pred):
-    """Combination of dice and focal loss."""
-    return dice_loss(y_true, y_pred) + focal_loss(y_true, y_pred)
+5. **Prompts are per-instance data, not a model concern.** The largest unknown
+   in a SAM pipeline is sampling point/box prompts per ground-truth mask each
+   epoch. There is no repo precedent for it, and it is the reason the trainer
+   is its own scheduled piece of work.
 
-def iou_loss(y_true_iou, y_pred_iou):
-    """MSE loss for IoU predictions."""
-    return keras.ops.mean(keras.ops.square(y_true_iou - y_pred_iou))
+6. **Preprocess before the model.** `SAM.preprocess` pads only; resize with
+   `resize_longest_side` first (§3, §6.1) and rescale the prompt coordinates
+   by the same factor.
 
-# Custom training step
-class SAMTrainer(keras.Model):
-    def __init__(self, sam_model, **kwargs):
-        super().__init__(**kwargs)
-        self.sam = sam_model
-        
-    def call(self, inputs):
-        return self.sam(inputs)
-    
-    def train_step(self, data):
-        inputs, targets = data
-        
-        with tf.GradientTape() as tape:
-            # Forward pass
-            outputs = self.sam(inputs, training=True)
-            
-            # Compute losses
-            mask_loss = combined_loss(targets['masks'], outputs['low_res_logits'])
-            iou_loss_val = iou_loss(targets['ious'], outputs['iou_predictions'])
-            
-            # Total loss
-            total_loss = mask_loss + 0.1 * iou_loss_val
-        
-        # Backward pass
-        gradients = tape.gradient(total_loss, self.sam.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.sam.trainable_variables))
-        
-        return {
-            'loss': total_loss,
-            'mask_loss': mask_loss,
-            'iou_loss': iou_loss_val
-        }
-
-# Create trainer
-trainer = SAMTrainer(model)
-
-# Compile
-trainer.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=0.01)
-)
-
-# Train
-history = trainer.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=100,
-    callbacks=[
-        keras.callbacks.ModelCheckpoint('sam_best.keras', save_best_only=True),
-        keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
-        keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True)
-    ]
-)
-```
 
 ### Fine-tuning Strategies
 
+> **`SAM.from_variant(...)` builds a RANDOMLY INITIALIZED model.** It is an
+> architecture constructor, not a checkpoint loader. No pretrained SAM weights
+> ship with this repo, none are downloaded, and none of the "fine-tuning"
+> recipes below start from Meta's weights — they start from noise. Iteration 1
+> removed two known blockers to *ever* loading official SAM weights (the
+> cross-attention internal dim and the head depth); it did not demonstrate such
+> a load, and no key-mapping layer exists.
+
 **Strategy 1: Freeze Image Encoder**
 
-For domain adaptation with limited data:
+The trainability mechanics below are real; the training loop they feed is not
+written yet (see above).
 
 ```python
-# Load pretrained model
+# Randomly initialized architecture -- NOT pretrained weights.
 model = SAM.from_variant('vit_b')
 
-# Freeze image encoder (keep pretrained features)
+# Freeze the image encoder (in a real fine-tune, its features would come
+# from a checkpoint; from_variant gives you random ones).
 model.image_encoder.trainable = False
 
-# Fine-tune only prompt encoder and mask decoder
+# Train only prompt encoder and mask decoder
 model.prompt_encoder.trainable = True
 model.mask_decoder.trainable = True
-
-# Use smaller learning rate
-trainer = SAMTrainer(model)
-trainer.compile(optimizer=keras.optimizers.AdamW(learning_rate=1e-5))
-
-# Train on domain-specific data
-trainer.fit(domain_dataset, epochs=20)
 ```
 
 **Strategy 2: Progressive Unfreezing**
 
-Gradually unfreeze layers:
+Unfreeze in stages. Only the trainability mechanics are shown — the loop that
+would consume them is iteration-2 work.
 
 ```python
-def progressive_unfreeze(model, trainer, dataset, stages):
-    """
-    Progressively unfreeze model components.
-    
-    Args:
-        model: SAM model
-        trainer: SAMTrainer instance
-        dataset: Training dataset
-        stages: List of (component_name, epochs, lr) tuples
-    """
-    for component, epochs, lr in stages:
-        print(f"\n=== Training {component} for {epochs} epochs ===")
-        
-        # Set trainability
-        if component == 'decoder':
-            model.mask_decoder.trainable = True
-            model.prompt_encoder.trainable = True
-            model.image_encoder.trainable = False
-        elif component == 'encoder_top':
-            # Unfreeze top layers of image encoder
-            for layer in model.image_encoder.layers[-8:]:
-                layer.trainable = True
-        elif component == 'encoder_all':
-            model.image_encoder.trainable = True
-        
-        # Update learning rate
-        trainer.optimizer.learning_rate.assign(lr)
-        
-        # Train
-        trainer.fit(dataset, epochs=epochs)
+def set_trainable_stage(model, component):
+    """Set which SAM components are trainable for one stage.
 
-# Usage
+    Args:
+        model: SAM model.
+        component: one of 'decoder', 'encoder_top', 'encoder_all'.
+    """
+    if component == 'decoder':
+        model.mask_decoder.trainable = True
+        model.prompt_encoder.trainable = True
+        model.image_encoder.trainable = False
+    elif component == 'encoder_top':
+        # Unfreeze the top blocks of the image encoder
+        for layer in model.image_encoder.layers[-8:]:
+            layer.trainable = True
+    elif component == 'encoder_all':
+        model.image_encoder.trainable = True
+    else:
+        raise ValueError(f"unknown component: {component!r}")
+
+# A plausible stage schedule (component, epochs, lr):
 stages = [
     ('decoder', 10, 1e-4),        # Train decoder first
     ('encoder_top', 5, 5e-5),     # Then top encoder layers
     ('encoder_all', 5, 1e-5),     # Finally full model
 ]
-
-progressive_unfreeze(model, trainer, train_dataset, stages)
 ```
+
 
 **Strategy 3: Task-Specific Heads**
 
@@ -2088,8 +2125,10 @@ base_sam = SAM.from_variant('vit_b')
 model_with_head = SAMWithCustomHead(base_sam, num_classes=10)
 
 # Multi-task training
-def multitask_loss(outputs, targets):
-    seg_loss = combined_loss(targets['masks'], outputs['low_res_logits'])
+def multitask_loss(outputs, targets, seg_loss_fn):
+    # seg_loss_fn: build it from dl_techniques.losses.segmentation_loss /
+    # segmentation_wrapper_loss -- do not hand-roll dice/focal here.
+    seg_loss = seg_loss_fn(targets['masks'], outputs['low_res_logits'])
     cls_loss = keras.losses.categorical_crossentropy(
         targets['labels'], outputs['class_probs']
     )
@@ -2104,11 +2143,32 @@ def multitask_loss(outputs, targets):
 
 ### Saving and Loading
 
-SAM supports multiple serialization formats:
+SAM supports multiple serialization formats.
+
+> **Build the model before you save it.** `SAM.from_variant(...)` returns an
+> unbuilt model whose sub-layer variables do not exist yet; saving it produces
+> a Keras "you are saving a model that has not yet been built" warning and an
+> archive that carries no weights. Call the model once on real inputs first —
+> every snippet below does. On load, `SAM.build_from_config` runs a
+> full-resolution dummy forward to materialize the lazily built variables
+> BEFORE the archive is restored (at `vit_h` that is a 1024x1024 forward
+> through 630M parameters); a cheaper `build()`-only path was measured and
+> rejected because it materializes only part of the weight list and leaves the
+> rest silently re-initialized.
 
 ```python
 # Method 1: Full model save (recommended)
 model = SAM.from_variant('vit_b')
+
+# BUILD FIRST -- an unbuilt save stores no weights.
+model({
+    'image': keras.random.normal(shape=(1, 1024, 1024, 3)),
+    'points': (
+        keras.ops.convert_to_tensor([[[512.0, 512.0]]]),
+        keras.ops.convert_to_tensor([[1]])
+    ),
+    'original_size': (1024, 1024)
+})
 
 # Save entire model
 model.save('sam_model.keras')
@@ -2134,13 +2194,30 @@ print(f"Output shape: {outputs['masks'].shape}")
 
 ```python
 # Method 2: Weights only
+#
+# NOTE: `sam_weights.weights.h5` is a file YOU produce below. No such
+# artifact ships with this repo and none is downloaded -- there is no
+# pretrained SAM checkpoint here to load.
 model = SAM.from_variant('vit_b')
+
+# BUILD FIRST, on both sides -- weights of an unbuilt model do not exist,
+# and load_weights into an unbuilt model has nothing to match against.
+build_inputs = {
+    'image': keras.random.normal(shape=(1, 1024, 1024, 3)),
+    'points': (
+        keras.ops.convert_to_tensor([[[512.0, 512.0]]]),
+        keras.ops.convert_to_tensor([[1]])
+    ),
+    'original_size': (1024, 1024)
+}
+model(build_inputs)
 
 # Save weights
 model.save_weights('sam_weights.weights.h5')
 
 # Load weights into new model
 new_model = SAM.from_variant('vit_b')
+new_model(build_inputs)
 new_model.load_weights('sam_weights.weights.h5')
 ```
 
@@ -2300,6 +2377,19 @@ curl -X POST http://localhost:8501/v1/models/sam:predict \
 
 ## 13. Testing & Validation
 
+**The real suite lives at `tests/test_models/test_sam/`** —
+`test_model.py` (shape / dtype / API coverage) and `test_correctness.py`
+(guards each proven RED against a deliberate re-break: gradient counts per
+output key, the rel-pos interpolation branch, padding-point invariance,
+weight-count + value-exact `.keras` round-trip, the tiling / mask-shape /
+oversize / degenerate-encoder refusals, and the dense-PE cache). Run it with:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_models/test_sam/ -q
+```
+
+The illustrative snippets below are a starting point, not that suite.
+
 ### Unit Tests
 
 ```python
@@ -2363,9 +2453,13 @@ def test_serialization():
         'original_size': (1024, 1024)
     })
     
+    # Compare the FLOAT logits, not the binarized `masks`. A uint8 comparison
+    # saturates at an absolute difference of 1 and is blind to any logit
+    # change that does not move a pixel across `mask_threshold` -- scaling
+    # every logit by a positive constant leaves it bit-identical.
     np.testing.assert_allclose(
-        keras.ops.convert_to_numpy(outputs1['masks']),
-        keras.ops.convert_to_numpy(outputs2['masks']),
+        keras.ops.convert_to_numpy(outputs1['low_res_logits']),
+        keras.ops.convert_to_numpy(outputs2['low_res_logits']),
         rtol=1e-5, atol=1e-5
     )
     print("✓ Serialization successful")
@@ -2632,10 +2726,14 @@ model.export('sam_savedmodel')  # TensorFlow SavedModel format
 
 **Q: What's the optimal image size for SAM?**
 
-A: SAM is designed for 1024×1024 images. The model will pad/resize images to this size automatically, but for best results:
-- Resize your images to 1024×1024 before inference
-- If your images are much larger, consider tiling
-- If smaller, padding is automatic but may affect edge quality
+A: SAM is designed for 1024×1024 images. `SAM.preprocess` **pads only — it
+never resizes**, and an image larger than the encoder's `img_size` in either
+axis raises `ValueError`:
+- **Larger than 1024 in any axis**: downscale first with
+  `resize_longest_side(image, 1024)` from
+  `dl_techniques.models.sam.preprocessing`, and scale your prompt coordinates
+  by the same factor. Tiling is an alternative when you need full resolution.
+- **Smaller**: bottom/right padding is automatic, but may affect edge quality.
 
 **Q: How many prompts should I provide?**
 
@@ -3022,10 +3120,13 @@ This implementation is based on the work by Kirillov et al. (2023) and follows t
 ### Common Commands
 
 ```python
-# Create model
+# Create model (RANDOM weights -- no checkpoint ships with this repo)
 import keras
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.sam import SAM, resize_longest_side
 model = SAM.from_variant('vit_b')  # or 'vit_l', 'vit_h'
+
+# Preprocess: preprocess() pads only; pin the longest side to img_size first
+image = resize_longest_side(image, model.image_encoder.img_size)
 
 # Single point
 outputs = model({
@@ -3072,5 +3173,12 @@ points = (
 boxes = keras.ops.convert_to_tensor([[[x1, y1, x2, y2]]])  # Shape: (B, N, 4)
 
 # Masks: Low-res mask hint
+# REQUIRED: spatial size == 4 * image_embedding_size in BOTH axes
+# (256 = 4 * 64 for a 1024-image / 16-patch encoder). Anything else raises.
 masks = keras.random.normal(shape=(B, 1, 256, 256))  # Shape: (B, 1, H, W)
+
+# Output keys
+# 'masks'           uint8 0/1 by default -- NOT differentiable
+# 'iou_predictions' float
+# 'low_res_logits'  float -- THE training target
 ```
