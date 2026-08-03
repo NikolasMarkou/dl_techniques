@@ -930,7 +930,12 @@ def circular_convolution(
     # fixed shift size at construction.
     for i in range(shift.shape[-1]):
         shift_offset = i - half_shift
-        rolled = ops.roll(weights, shift=-shift_offset, axis=-1)
+        # DECISION plan-2026-08-03T130803-4c570ee4/D-001
+        # Graves et al. 2014 eq. 8: w~(i) = sum_j w(j) * s(i - j mod N).
+        # keras.ops.roll(a, k)[i] == a[(i - k) mod N], so the tap carrying offset
+        # k is roll(w, +k). Do NOT "simplify" this back to shift=-shift_offset:
+        # that mirrors the shift (offset +1 lands at slot N-1). See decisions.md D-001.
+        rolled = ops.roll(weights, shift=shift_offset, axis=-1)
         shifted_versions.append(rolled)
 
     # Stack: (batch, num_shifts, memory_size)

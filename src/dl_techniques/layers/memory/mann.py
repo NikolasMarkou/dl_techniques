@@ -278,10 +278,14 @@ class MannLayer(keras.layers.Layer):
 
         # 3. Convolutional shift (1D circular convolution with 3-element shift kernel)
         # s has shape (batch, 3) representing shift weights for [-1, 0, +1]
+        # Graves et al. 2014 eq. 8: w~(i) = sum_j w(j) * s(i - j mod N).
+        # keras.ops.roll(a, k)[i] == a[(i - k) mod N], so the tap carrying offset k
+        # is roll(w, +k). Do NOT swap these signs back: that mirrors the shift
+        # (the +1 tap would land at slot N-1). See decisions.md D-001.
         w_shifted = (
-            s[:, 0:1] * ops.roll(w_g, shift=1, axis=-1) +
+            s[:, 0:1] * ops.roll(w_g, shift=-1, axis=-1) +
             s[:, 1:2] * w_g +
-            s[:, 2:3] * ops.roll(w_g, shift=-1, axis=-1)
+            s[:, 2:3] * ops.roll(w_g, shift=1, axis=-1)
         )
 
         # 4. Sharpening
