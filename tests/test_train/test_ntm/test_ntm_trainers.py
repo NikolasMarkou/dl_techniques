@@ -16,6 +16,11 @@ the ``dynamic_ngram`` final-timestep mask, the undiluted ``per_step_accuracy``
 / ``bit_error_rate`` in ``evaluate_copy_task``, the ``--patience`` flag
 actually reaching ``create_callbacks``, and ``num_eval_samples`` actually
 sizing the evaluation batch it is logged as sizing.
+
+The final three groups are structural rather than defect-specific: the argparse
+contract both entry points must honour, the padding/truncation contract of
+``_pad_and_normalize``, and the phase layout of ``CopyTaskGenerator`` — the one
+generator the audit certified as correct, pinned so it cannot drift silently.
 """
 
 import sys
@@ -25,7 +30,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pytest
 
-from train.ntm import train_multitask
+from train.ntm import train_multitask, train_ntm
 from train.ntm.config import CopyTaskConfig
 from train.ntm.data_generators import CopyTaskGenerator, TaskData
 from train.ntm.metrics import evaluate_copy_task
@@ -533,3 +538,215 @@ class TestEvaluationSampleCount:
         assert model.seen_batches == [5] * config.num_tasks
         assert any("Evaluating on 5 samples" in message
                    for message in recorder.messages)
+
+
+# ---------------------------------------------------------------------
+# E1 — the argparse contract of both entry points
+# ---------------------------------------------------------------------
+
+
+class TestCommandLineContract:
+    """Every runnable script here must parse arguments before doing anything."""
+
+    @pytest.mark.parametrize("module", [train_ntm, train_multitask],
+                             ids=["train_ntm", "train_multitask"])
+    def test_help_exits_zero_without_starting_training(
+            self, module, monkeypatch, capsys):
+        """``--help`` must print usage and exit 0, having started nothing.
+
+        This is the regression guard for the defect that motivated the
+        multi-task consolidation: the deleted trainer had NO argparse at all,
+        so ``python -m train.ntm.train_multitask --help`` silently launched a
+        100-epoch run instead of printing help.
+
+        Why this guard is not vacuous: ``setup_gpu`` is the first side effect
+        after ``parse_args()`` in both ``main()`` bodies, and it is replaced
+        here by a tripwire that raises. A module that lost its argparse would
+        never raise ``SystemExit`` — it would either fall through to the
+        tripwire (``AssertionError``) or die on the now-undefined ``args``
+        (``NameError``). Both make ``pytest.raises(SystemExit)`` fail, and
+        neither is reachable while the parser exits during ``parse_args``.
+        The tripwire is therefore also the proof that no training started.
+        """
+
+        def tripwire(_gpu):
+            raise AssertionError(
+                f"{module.__name__}.main() reached setup_gpu on --help: "
+                "argument parsing did not short-circuit"
+            )
+
+        monkeypatch.setattr(module, "setup_gpu", tripwire)
+        monkeypatch.setattr(sys, "argv", [module.__name__, "--help"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            module.main()
+
+        assert excinfo.value.code == 0
+        assert "usage:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------
+# E1 — _pad_and_normalize shape/mask invariants
+# ---------------------------------------------------------------------
+
+
+def _padding_generator(max_seq: int = 8, max_vec: int = 6) -> UnifiedTaskGenerator:
+    """Build a generator whose padding frame is small enough to reason about.
+
+    :param max_seq: Timeline width every task is normalized to.
+    :param max_vec: Feature width every task is normalized to.
+    :return: A validation-mode generator with that frame.
+    """
+    config = MultitaskNTMConfig(
+        batch_size=2, max_seq_length=max_seq, max_vector_size=max_vec
+    )
+    return UnifiedTaskGenerator(config, mode='val')
+
+
+def _ramp(batch: int, steps: int, dim: int, offset: float = 0.0) -> np.ndarray:
+    """Build a distinct, non-binary value at every position.
+
+    Non-binary values matter: they would expose a normalization or rescaling
+    step, which a 0/1 payload could hide.
+
+    :param batch: Number of rows.
+    :param steps: Number of timesteps.
+    :param dim: Feature width.
+    :param offset: Added to every element, to separate inputs from targets.
+    :return: Array of shape ``(batch, steps, dim)``.
+    """
+    size = batch * steps * dim
+    return (np.arange(size, dtype=np.float32).reshape(batch, steps, dim)
+            * 0.125 + 1.0 + offset)
+
+
+class TestPadAndNormalize:
+    """``_pad_and_normalize`` must pad with zeros and preserve real content."""
+
+    @pytest.mark.parametrize("curr_seq", [5, 8], ids=["shorter", "exactly_max"])
+    def test_padding_preserves_content_and_zeroes_the_rest(self, curr_seq):
+        """Real content survives byte-exact; every padded cell is zero.
+
+        Runs at a sequence shorter than the frame and at exactly the frame
+        width, where no padding is needed at all — an off-by-one that dropped
+        the final timestep would pass the ``shorter`` case and fail this one.
+
+        The values are non-binary and all distinct, so a rescale or a
+        transpose could not reproduce them by accident.
+        """
+        generator = _padding_generator()
+        max_seq = generator.config.max_seq_length
+        max_vec = generator.config.max_vector_size
+        batch, in_dim = 2, 4
+
+        inputs = _ramp(batch, curr_seq, in_dim)
+        targets = _ramp(batch, curr_seq, in_dim, offset=100.0)
+        masks = np.zeros((batch, curr_seq), dtype=np.float32)
+        masks[:, -2:] = 1.0
+
+        data = TaskData(inputs=inputs, targets=targets, masks=masks)
+        out_in, out_tg, out_mask = generator._pad_and_normalize(data, "copy")
+
+        assert out_in.shape == (batch, max_seq, max_vec)
+        assert out_tg.shape == (batch, max_seq, max_vec)
+        assert out_mask.shape == (batch, max_seq)
+
+        # Content preserved, unscaled and untruncated.
+        np.testing.assert_array_equal(out_in[:, :curr_seq, :in_dim], inputs)
+        np.testing.assert_array_equal(out_tg[:, :curr_seq, :in_dim], targets)
+        np.testing.assert_array_equal(out_mask[:, :curr_seq], masks)
+
+        # Padding is zero in inputs, targets AND mask.
+        assert np.all(out_in[:, curr_seq:, :] == 0.0)
+        assert np.all(out_in[:, :, in_dim:] == 0.0)
+        assert np.all(out_tg[:, curr_seq:, :] == 0.0)
+        assert np.all(out_tg[:, :, in_dim:] == 0.0)
+        assert np.all(out_mask[:, curr_seq:] == 0.0)
+
+    def test_oversized_input_is_truncated_not_wrapped(self):
+        """Content past the frame is dropped, never folded back into it.
+
+        The function clamps with ``min(curr_seq, max_seq)`` on both axes, so
+        an over-long sequence loses its tail. The guard that matters is the
+        negative one: the out-of-frame payload carries a sentinel value that
+        must appear nowhere in the output, which a wrap-around or a reshape
+        would smuggle back in. The mask is truncated the same way, so no
+        dropped position stays supervised.
+        """
+        generator = _padding_generator()
+        max_seq = generator.config.max_seq_length
+        max_vec = generator.config.max_vector_size
+        batch, curr_seq, in_dim = 2, 12, 9
+        sentinel = -7.5
+
+        inputs = _ramp(batch, curr_seq, in_dim)
+        inputs[:, max_seq:, :] = sentinel
+        inputs[:, :, max_vec:] = sentinel
+        targets = inputs.copy()
+        masks = np.ones((batch, curr_seq), dtype=np.float32)
+
+        data = TaskData(inputs=inputs, targets=targets, masks=masks)
+        out_in, out_tg, out_mask = generator._pad_and_normalize(data, "copy")
+
+        assert out_in.shape == (batch, max_seq, max_vec)
+        np.testing.assert_array_equal(out_in, inputs[:, :max_seq, :max_vec])
+        np.testing.assert_array_equal(out_tg, targets[:, :max_seq, :max_vec])
+        assert not np.any(out_in == sentinel), "truncated content re-entered the frame"
+        assert not np.any(out_tg == sentinel), "truncated content re-entered the frame"
+        assert np.all(out_mask == 1.0)
+
+
+# ---------------------------------------------------------------------
+# E1 — CopyTaskGenerator phase layout
+# ---------------------------------------------------------------------
+
+
+class TestCopyTaskGeneratorLayout:
+    """``CopyTaskGenerator``'s mask and targets must match its stated layout."""
+
+    def test_mask_marks_exactly_the_output_phase(self):
+        """Mask, targets and the documented ``output_start`` all agree.
+
+        The generator's own comment fixes the layout as ``[start marker,
+        sequence, delimiter, delay, output]`` with the output phase beginning
+        at ``seq_len + delay + 2``. This pins all three facts that layout
+        implies, against a batch large enough that a stray off-by-one cannot
+        hide:
+
+        1. the mask is 1 on exactly ``[output_start, output_start + seq_len)``
+           and 0 everywhere else;
+        2. the targets in that window are the sequence the inputs presented in
+           ``[1, 1 + seq_len)``, so mask and supervision coincide;
+        3. the targets are all-zero outside it, which is what makes
+           ``evaluate_copy_task``'s zero-both-sides ``sequence_accuracy``
+           sound.
+        """
+        seq_len, vec_size, num_samples = 6, 5, 8
+        config = CopyTaskConfig(
+            sequence_length=seq_len,
+            vector_size=vec_size,
+            num_samples=num_samples,
+            random_seed=1,
+        )
+        data = CopyTaskGenerator(config).generate()
+
+        delay = config.delay_length
+        output_start = seq_len + delay + 2
+        total_steps = seq_len * 2 + delay + 2
+        assert data.inputs.shape == (num_samples, total_steps, vec_size + 2)
+        assert data.targets.shape == (num_samples, total_steps, vec_size)
+
+        expected_mask = np.zeros((num_samples, total_steps), dtype=np.float32)
+        expected_mask[:, output_start:output_start + seq_len] = 1.0
+        np.testing.assert_array_equal(data.masks, expected_mask)
+
+        presented = data.inputs[:, 1:1 + seq_len, :vec_size]
+        supervised = data.targets[:, output_start:output_start + seq_len, :]
+        np.testing.assert_array_equal(supervised, presented)
+
+        outside = data.targets.copy()
+        outside[:, output_start:output_start + seq_len, :] = 0.0
+        assert np.all(outside == 0.0), "targets exist outside the masked window"
+
+        # The sequence is not degenerate, so the equality above is informative.
+        assert presented.min() == 0.0 and presented.max() == 1.0
