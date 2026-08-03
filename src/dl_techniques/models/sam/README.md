@@ -2396,7 +2396,8 @@ curl -X POST http://localhost:8501/v1/models/sam:predict \
 (guards each proven RED against a deliberate re-break: gradient counts per
 output key, the rel-pos interpolation branch, padding-point invariance,
 weight-count + value-exact `.keras` round-trip, the tiling / mask-shape /
-oversize / degenerate-encoder refusals, and the dense-PE cache). Run it with:
+oversize / degenerate-encoder refusals, and the positional-encoding
+graph-safety guards). Run it with:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_models/test_sam/ -q

@@ -53,7 +53,10 @@ from dl_techniques.models.sam.image_encoder import (
     WindowedAttentionWithRelPos,
 )
 from dl_techniques.models.sam.preprocessing import resize_longest_side
-from dl_techniques.models.sam.prompt_encoder import PromptEncoder
+from dl_techniques.models.sam.prompt_encoder import (
+    PromptEncoder,
+    PositionEmbeddingRandom,
+)
 from dl_techniques.models.sam.mask_decoder import MaskDecoder
 from dl_techniques.models.sam.transformer import (
     TwoWayAttentionBlock,
@@ -2746,18 +2749,26 @@ class TestEncoderOutputGridAndInstanceAttributes:
             gc.collect()
 
 
-class TestDensePositionalEncodingCache:
-    """
-    Plan step 11 / finding F-16 --- the cumsum coordinate grid is cached.
 
-    What is cached is the normalized ``(h, w, 2)`` COORDINATE GRID, not the
-    encoded positional encoding. The encoded PE depends on
-    ``positional_encoding_gaussian_matrix``, a non-trainable weight that
-    ``load_model`` restores AFTER ``SAM.build_from_config``'s dummy forward has
-    already run ``get_dense_pe`` --- so a cache of the encoded value would be
-    filled with pre-restore garbage and never invalidated. That is what
-    ``test_dense_pe_tracks_a_weight_change`` exists to refuse; measured, the
-    frozen value would be up to 1.9986 away from the correct one.
+class TestDensePositionalEncodingGraphSafety:
+    """
+    F-R2 / plan step 14 --- the coordinate grid is RECOMPUTED, never memoized.
+
+    Step 11 (F-16, D-020) cached the normalized ``(h, w, 2)`` grid on the
+    instance. The cache was correct in every way the suite could then see -- it
+    depends on no weight, so the staleness class D-020 reasoned about really is
+    absent -- and it was still a defect, for a reason no round-trip, weight-count
+    or value test in this file could reach: a tensor produced inside a
+    ``tf.function`` / ``predict`` / ``fit`` / ``jit_compile`` trace belongs to
+    that trace's ``FuncGraph``. A slot filled during the first trace hands a dead
+    ``SymbolicTensor`` to every later call, so the layer raises
+    ``TypeError: ... is out of scope and cannot be used here`` forever -- eagerly
+    AND on a second trace.
+
+    The guards below are the ones the whole plan lacked: they execute the layer
+    under a trace and then eagerly, in that order. Carried surprise #8, sharpened
+    --- a value-exact round-trip is not a sufficient instrument for a cache, and
+    neither is a same-context recompute comparison.
     """
 
     def _encoder(self, grid: int = GRID_SIZE) -> PromptEncoder:
@@ -2770,39 +2781,138 @@ class TestDensePositionalEncodingCache:
         encoder.build(None)
         return encoder
 
-    def test_cached_grid_is_bit_identical_to_a_fresh_recomputation(self):
-        """PROOF 1: the cache changes no value at all."""
+    def test_no_memoized_tensor_state_survives_a_call(self):
+        """
+        PROOF 0, structural: the layer holds no tensor-valued instance slot.
+
+        This is the property the graph guards below rest on, asserted directly
+        so that a future re-introduction of a cache fails HERE with a readable
+        message rather than as an "out of scope" TypeError three tests down.
+        """
         encoder = self._encoder()
         try:
             pe_layer = encoder.pe_layer
-            first = keras.ops.convert_to_numpy(encoder.get_dense_pe()).copy()
-            cached_grid = keras.ops.convert_to_numpy(
-                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
-            ).copy()
-            # Force a full recomputation by dropping the cache.
-            pe_layer._coord_grid_key = None
-            pe_layer._coord_grid_cache = None
-            fresh_grid = keras.ops.convert_to_numpy(
-                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
-            )
-            assert float(np.max(np.abs(cached_grid - fresh_grid))) == 0.0, (
-                "the cached coordinate grid is not bit-identical to a fresh one"
-            )
-            pe_layer._coord_grid_key = None
-            pe_layer._coord_grid_cache = None
-            second = keras.ops.convert_to_numpy(encoder.get_dense_pe())
-            assert float(np.max(np.abs(first - second))) == 0.0, (
-                "get_dense_pe moved when the cache was dropped"
+            encoder.get_dense_pe()
+            leftovers = {
+                name: type(value).__name__
+                for name, value in vars(pe_layer).items()
+                if name.startswith("_coord")
+            }
+            assert leftovers == {}, (
+                f"PositionEmbeddingRandom memoized {leftovers}; a tensor cached "
+                f"on the instance is graph-poisonous (F-R2)"
             )
         finally:
             del encoder
             keras.backend.clear_session()
             gc.collect()
 
-    def test_cache_invalidates_on_a_different_grid_size(self):
+    def test_position_embedding_survives_trace_then_eager_then_trace(self):
         """
-        PROOF 2: a second size must not be served the first size's grid, and
-        returning to the first size must give the first size's grid back.
+        PROOF 1, the exact sequence the reviewer used to break the cache.
+
+        Trace the layer under ``tf.function``, then call it EAGERLY, then trace a
+        SECOND time. With the step-11 cache installed the eager call raised
+        ``TypeError: <tf.Tensor 'stack:0' ...> is out of scope and cannot be
+        used here``, because the slot held the first trace's symbolic tensor.
+        """
+        pe_layer = PositionEmbeddingRandom(num_pos_feats=OUT_CHANS // 2)
+        pe_layer.build(None)
+        try:
+            traced = tf.function(lambda: pe_layer.call((8, 8)))
+
+            first = keras.ops.convert_to_numpy(traced()).copy()
+            # The call that used to raise.
+            eager = keras.ops.convert_to_numpy(pe_layer.call((8, 8))).copy()
+            # A second trace must also still work.
+            second = keras.ops.convert_to_numpy(traced())
+
+            assert first.shape == (OUT_CHANS, 8, 8)
+            assert float(np.max(np.abs(first - eager))) == 0.0, (
+                "the eager call after a trace returned a different value"
+            )
+            assert float(np.max(np.abs(first - second))) == 0.0, (
+                "the second trace returned a different value"
+            )
+        finally:
+            del pe_layer
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_prompt_encoder_dense_pe_survives_trace_then_eager(self):
+        """
+        PROOF 2: the same sequence through the real ``get_dense_pe`` path, which
+        is what ``SAM.call`` and therefore any trainer actually reaches.
+        """
+        encoder = self._encoder()
+        try:
+            traced = tf.function(lambda: encoder.get_dense_pe())
+            traced_value = keras.ops.convert_to_numpy(traced()).copy()
+            eager_value = keras.ops.convert_to_numpy(encoder.get_dense_pe())
+            assert tuple(eager_value.shape) == (1, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+            assert float(np.max(np.abs(traced_value - eager_value))) == 0.0, (
+                "get_dense_pe disagreed between a traced and an eager call"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_sam_forward_survives_trace_then_eager(self, seeded_sam):
+        """
+        PROOF 3: end to end on the real reduced-SAM fixture, which is the object
+        the reviewer poisoned. ``SAM.call`` is traced once and then called
+        eagerly; with the cache installed the eager call raised inside
+        ``PositionEmbeddingRandom.call()``.
+
+        Only ``low_res_logits`` is compared: it is the differentiable output and
+        the one every other round-trip guard in this file uses, so a drift here
+        is directly comparable to those.
+
+        Two deliberate deviations from the obvious spelling, both forced and both
+        measured -- neither is a convenience:
+
+        1. ``model.call(...)`` is traced, not ``model(...)``. Keras\' ``__call__``
+           refuses a Python ``int`` inside a positional input dict
+           (``ValueError: Only input tensors may be passed as positional
+           arguments``), and deviation 2 needs one.
+        2. ``original_size`` is a PYTHON tuple, not a tensor. With a tensor,
+           ``SAM.call`` does not trace AT ALL: ``postprocess_masks`` raises
+           ``OperatorNotAllowedInGraphError: Iterating over a symbolic tf.Tensor
+           is not allowed`` at ``model.py:616``. That is a SEPARATE,
+           PRE-EXISTING limitation of ``SAM.call`` under ``tf.function``,
+           declared in ``verification.md`` § Not Verified; it long predates the
+           F-16 cache and it is not what this test is about.
+
+        A THIRD constraint, and the one that decides whether this test is
+        discriminating at all: the model must be FRESH, so that the very first
+        call it ever receives is the traced one. Reusing the ``seeded_sam``
+        fixture makes the test vacuous --- the fixture already forward-passes
+        eagerly, so a cache would already hold a valid EagerTensor and the trace
+        would happily reuse it. Measured: against the cached code the fixture
+        spelling PASSED, and the fresh spelling below FAILS. Trace-first is also
+        the realistic order, because it is what ``fit()`` does to a new model.
+
+        With the step-11 cache installed this test fails with the ``out of
+        scope`` ``TypeError`` raised from inside
+        ``PositionEmbeddingRandom.call()``.
+        """
+        del seeded_sam
+        model = build_reduced_sam()
+        inputs = dict(sam_inputs())
+        inputs["original_size"] = (IMG_SIZE, IMG_SIZE)
+        traced = tf.function(lambda: model.call(inputs)["low_res_logits"])
+        traced_value = keras.ops.convert_to_numpy(traced()).copy()
+        eager_value = keras.ops.convert_to_numpy(model.call(inputs)["low_res_logits"])
+        assert traced_value.shape == eager_value.shape
+        assert np.all(np.isfinite(eager_value)), (
+            "the eager forward after a trace returned non-finite logits"
+        )
+
+    def test_grid_sizes_do_not_contaminate_each_other(self):
+        """
+        PROOF 4 (retained from the cache suite, now a plain correctness pin):
+        each requested size gets its own grid, including a non-square one.
         """
         encoder = self._encoder()
         try:
@@ -2813,7 +2923,7 @@ class TestDensePositionalEncodingCache:
             g8 = keras.ops.convert_to_numpy(pe_layer._coord_grid(8, 8)).copy()
             assert g16.shape == (GRID_SIZE, GRID_SIZE, 2)
             assert g8.shape == (8, 8, 2), (
-                f"a second size was served a stale grid of shape {g8.shape}"
+                f"a second size came back with shape {g8.shape}"
             )
             back = keras.ops.convert_to_numpy(
                 pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
@@ -2821,7 +2931,6 @@ class TestDensePositionalEncodingCache:
             assert float(np.max(np.abs(back - g16))) == 0.0, (
                 "returning to the first size did not reproduce its grid"
             )
-            # Non-square is the case a single scalar key would get wrong.
             assert tuple(
                 keras.ops.convert_to_numpy(pe_layer._coord_grid(8, 16)).shape
             ) == (8, 16, 2)
@@ -2830,53 +2939,16 @@ class TestDensePositionalEncodingCache:
             keras.backend.clear_session()
             gc.collect()
 
-    def test_cache_does_not_leak_across_instances(self):
-        """
-        PROOF 3a: per-instance state. Two encoders at different grid sizes must
-        not see each other's cache, and the cache must not be class-level.
-        """
-        small, large = self._encoder(grid=8), self._encoder(grid=GRID_SIZE)
-        try:
-            a = keras.ops.convert_to_numpy(small.get_dense_pe())
-            b = keras.ops.convert_to_numpy(large.get_dense_pe())
-            assert tuple(a.shape) == (1, 8, 8, OUT_CHANS)
-            assert tuple(b.shape) == (1, GRID_SIZE, GRID_SIZE, OUT_CHANS)
-            assert small.pe_layer._coord_grid_cache is not large.pe_layer._coord_grid_cache
-            assert "_coord_grid_cache" not in type(small.pe_layer).__dict__, (
-                "the cache slot is defined on the CLASS, so every instance "
-                "shares it"
-            )
-        finally:
-            del small, large
-            keras.backend.clear_session()
-            gc.collect()
-
-    def test_cache_is_not_serialized(self):
-        """PROOF 3b: nothing derived may enter get_config."""
-        encoder = self._encoder()
-        try:
-            encoder.get_dense_pe()
-            config = encoder.pe_layer.get_config()
-            assert "_coord_grid_cache" not in config
-            assert "_coord_grid_key" not in config
-            restored = type(encoder.pe_layer).from_config(config)
-            assert restored._coord_grid_cache is None, (
-                "a restored layer came back with a populated cache"
-            )
-            assert restored._coord_grid_key is None
-        finally:
-            del encoder
-            keras.backend.clear_session()
-            gc.collect()
-
     def test_dense_pe_tracks_a_weight_change(self):
         """
-        PROOF 3c, and the load-staleness guard.
+        Retained from the cache suite --- the guard that refuses a cache of the
+        ENCODED positional encoding.
 
         ``get_dense_pe`` must recompute from the CURRENT
         ``positional_encoding_gaussian_matrix``. A cache of the encoded PE would
         freeze the value produced by ``build_from_config``'s dummy forward,
-        which runs BEFORE the saved weights are restored.
+        which runs BEFORE the saved weights are restored --- measured at up to
+        1.9986 away from the correct value, silently and forever.
         """
         encoder = self._encoder()
         try:
