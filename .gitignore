@@ -226,3 +226,35 @@ logs/
 *.tfrecord
 
 .claude/
+
+# DECISION plan-2026-08-03T043010-cecf4357/D-015
+# Untracked worktree cruft: an auto-fetched dataset cache and LaTeX build byproducts.
+# Nothing here is authored content; every pattern was verified against `git ls-files`
+# to shadow ZERO tracked files before being added.
+#
+# `/data/` is ROOT-ANCHORED on purpose. Bare `data/` would ignore a `data/` directory
+# at ANY depth (e.g. a future `src/dl_techniques/.../data/` of real source assets).
+# The cruft is only the repo-root tree that `src/train/logic/clevr_hans_data.py`
+# auto-downloads (CLEVR-Hans3, ~2.6 GB, 27k files).
+/data/
+#
+# LaTeX/paper build artifacts, SCOPED to `research/papers/` rather than repo-wide.
+# `*.out` and `*.zip` are plausible extensions for real deliverables elsewhere in the
+# tree (golden-output fixtures, release archives); repo-wide they would hide such a
+# file with no error and no warning. LaTeX is only ever built here.
+# (`*.log` is already ignored repo-wide above, so no `.log` line is needed.)
+research/papers/**/*.aux
+research/papers/**/*.out
+research/papers/**/*.toc
+research/papers/**/*.fls
+research/papers/**/*.fdb_latexmk
+research/papers/**/*.synctex.gz
+research/papers/**/*.zip
+#
+# DO NOT ADD `*.pdf` (or `research/papers/**/*.pdf`). You will be tempted to; don't.
+# Four paper PDFs are TRACKED (band_rms, bfunet, correlations, logical_net) and
+# `research/papers/cliffordnet_extensions/cliffordnet.pdf` is an untracked FIFTH
+# deliverable awaiting commit. Ignoring `*.pdf` would not untrack the four, but it
+# WOULD make cliffordnet.pdf permanently invisible to `git status` and `git add -A`,
+# silently blocking it from ever being committed without `git add -f`. Its visibility
+# as `??` is the feature, not the noise.
