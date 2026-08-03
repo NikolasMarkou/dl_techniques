@@ -34,46 +34,10 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
-# ConvUNeXt-parity feature components (reused as-is; already bias-free + serializable).
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
-from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.match_channels import MatchChannels
 
-
-# DECISION plan_2026-07-04_58ac8e73/D-002: ONE helper folds the per-level downsample sites
-# (inter-level pools + the last-level pool that feeds the bottleneck) into a uniform call so
-# the OFF/ON swap logic lives in one place (mirrors bfconvunext _downsample_and_skip D-001).
-# OFF path MUST reproduce the exact prior ops/names (MaxPooling2D named `downsample_name`,
-# raw pre-downsample skip); a local copy is kept here rather than importing bfconvunext's
-# private helper (cross-module `_`-import) or refactoring that checkpoint-sensitive file.
-def _downsample_and_skip(
-        x: keras.KerasTensor,
-        use_laplacian_pyramid: bool,
-        laplacian_kernel_size: Tuple[int, int],
-        downsample_name: str,
-        pyramid_name: str,
-        pool_type: str = "max",
-) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Return ``(skip, downsampled)`` for one encoder junction.
-
-    OFF path (default, byte-identical): skip = pre-downsample tensor; downsample =
-    ``MaxPooling2D(2,2)`` named ``downsample_name`` (``AveragePooling2D`` when
-    ``pool_type='average'`` — a linear, Miyasawa-clean operator). ON path: a bias-free
-    ``LaplacianPyramidLevel`` split — high band becomes the skip, low band continues down.
-    """
-    if use_laplacian_pyramid:
-        low, high = LaplacianPyramidLevel(
-            blur_kernel_size=laplacian_kernel_size,
-            name=pyramid_name,
-        )(x)
-        return high, low
-    skip = x
-    pool_layer = (
-        keras.layers.AveragePooling2D if pool_type == "average"
-        else keras.layers.MaxPooling2D
-    )
-    downsampled = pool_layer(pool_size=(2, 2), name=downsample_name)(x)
-    return skip, downsampled
+from .common import _downsample_and_skip
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations

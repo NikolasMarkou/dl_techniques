@@ -88,9 +88,10 @@ from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
-from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.match_channels import MatchChannels
 from dl_techniques.layers.attention.factory import create_attention_layer
+
+from .common import _downsample_and_skip
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -409,55 +410,6 @@ def _apply_residual_convnext_block(
         y = StochasticDepth(drop_path_rate, name=f'{name}_drop_path')(y)
     return keras.layers.Add(name=f'{name}_residual')([residual, y])
 
-
-# DECISION plan_2026-06-19_c90809b5/D-001: ONE helper folds the two downsample sites
-# (inter-level pools + the standalone bottleneck pool) into a uniform per-level call so
-# the OFF/ON swap logic lives in one place. Do NOT special-case the bottleneck pool
-# separately (duplicates the swap at two sites -> drift risk) and do NOT author a new
-# pyramid layer (reuse-only: LaplacianPyramidLevel is already bias-free + registered).
-# OFF path MUST reproduce the exact prior ops/names (MaxPooling2D named `downsample_name`,
-# raw pre-downsample skip) — existing `.keras` checkpoints depend on byte-identical names.
-# See decisions.md D-001.
-def _downsample_and_skip(
-        x: keras.KerasTensor,
-        use_laplacian_pyramid: bool,
-        laplacian_kernel_size: Tuple[int, int],
-        downsample_name: str,
-        pyramid_name: str,
-        pool_type: str = "max",
-) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Produce ``(skip, downsampled)`` for one encoder junction.
-
-    OFF path (default, byte-identical to the original architecture): the skip is
-    the pre-downsample tensor and downsampling is ``MaxPooling2D(2, 2)`` named
-    ``downsample_name``. With ``pool_type='average'`` the downsample uses
-    ``AveragePooling2D(2, 2)`` instead -- a LINEAR (and bias-free / homogeneous)
-    operator, so the encoder path stays linear for the Miyasawa/Tweedie
-    residual-as-score interpretation (MaxPooling is non-linear). Pooling layers are
-    weightless, so the swap does not affect checkpoint weight transfer.
-
-    ON path: a channel-preserving, bias-free ``LaplacianPyramidLevel`` split. The
-    full-resolution high-frequency band becomes the skip; the half-resolution low
-    band continues down the encoder. Bias-free and homogeneous by construction
-    (fixed blur + average pool + bilinear upsample, zero learnable bias). The
-    pyramid already pools linearly, so ``pool_type`` does not apply here.
-    """
-    if use_laplacian_pyramid:
-        low, high = LaplacianPyramidLevel(
-            blur_kernel_size=laplacian_kernel_size,
-            name=pyramid_name,
-        )(x)
-        return high, low
-    skip = x
-    pool_layer = (
-        keras.layers.AveragePooling2D if pool_type == "average"
-        else keras.layers.MaxPooling2D
-    )
-    downsampled = pool_layer(
-        pool_size=(2, 2),
-        name=downsample_name,
-    )(x)
-    return skip, downsampled
 
 
 def _make_supervision_activation(activation, name):
