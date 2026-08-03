@@ -385,10 +385,10 @@ class MaskDecoder(keras.layers.Layer):
         self.iou_token.build((None,))
         self.mask_tokens.build((None,))
 
-        # Build transformer (if it has a build method)
-        if hasattr(self.transformer, 'build') and callable(self.transformer.build):
-            # Transformer will be built on first call with actual shapes
-            pass
+        # The transformer is deliberately NOT built here: it builds its own
+        # sublayers lazily on the first call, from the actual query/key shapes.
+        # (A no-op `if hasattr(self.transformer, 'build'): pass` used to sit
+        # here and read as if it did something.)
 
         # Build upscaling network
         # Input shape: (batch, H, W, transformer_dim)

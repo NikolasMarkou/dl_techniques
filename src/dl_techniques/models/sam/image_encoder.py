@@ -692,7 +692,10 @@ class ImageEncoderViT(keras.Model):
         4D tensor with shape: `(batch_size, img_size, img_size, in_chans)`.
 
     Output shape:
-        4D tensor with shape: `(batch_size, img_size/patch_size/4, img_size/patch_size/4, out_chans)`.
+        4D tensor with shape: `(batch_size, img_size/patch_size, img_size/patch_size, out_chans)`.
+        The neck is a pair of 1x1/3x3 convolutions at stride 1, so it changes the
+        channel count only; the spatial grid is set by the patch embedding alone
+        (measured: `(1, 64, 64, out_chans)` at `img_size=1024, patch_size=16`).
     """
 
     def __init__(

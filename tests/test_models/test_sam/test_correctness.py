@@ -2459,3 +2459,386 @@ class TestBuildFromConfigLoadCost:
                 del model
                 keras.backend.clear_session()
                 gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# Plan step 11 / findings F-12..F-16 --- hygiene
+# ---------------------------------------------------------------------------
+class TestComputeOutputShapeIsCallableByKeras:
+    """
+    Plan step 11 / finding F-14 --- every ``compute_output_shape`` in the
+    package must actually be invocable by Keras.
+
+    **F-14's stated cause is FALSIFIED and its scope is narrower than claimed**,
+    both verified by execution against keras 3.8.0. Keras does NOT require a
+    single ``input_shape``: ``update_shapes_dict_for_target_fn`` supports a
+    multi-argument ``compute_output_shape`` provided every argument is named
+    ``<call argument>_shape``. Nor does a tuple-of-tuples return break anything
+    --- ``compute_output_spec`` maps it with ``tree.map_shape_structure``.
+
+    The real defect was argument NAMES: ``TwoWayAttentionBlock`` declared
+    ``query_shape``/``key_shape`` against ``call(queries, keys, ...)`` and
+    ``TwoWayTransformer`` declared ``image_shape``/``point_shape`` against
+    ``call(image_embedding, image_pe, point_embedding)``, so Keras raised
+    ``ValueError`` before reaching either body. ``MaskDecoder`` and
+    ``PromptEncoder`` were already callable and are UNCHANGED; their two tests
+    here pass both before and after this step and are labelled as regression
+    pins, not as coverage of a fixed defect.
+    """
+
+    def test_two_way_attention_block_shape_is_callable(self):
+        """RED before the fix: ValueError from the argument-name check."""
+        block = TwoWayAttentionBlock(embedding_dim=32, num_heads=2, mlp_dim=64)
+        try:
+            queries, keys = block.compute_output_spec(
+                keras.KerasTensor((1, 5, 32)),
+                keras.KerasTensor((1, 256, 32)),
+                keras.KerasTensor((1, 5, 32)),
+                keras.KerasTensor((1, 256, 32)),
+            )
+            assert tuple(queries.shape) == (1, 5, 32)
+            assert tuple(keys.shape) == (1, 256, 32)
+        finally:
+            del block
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_two_way_transformer_shape_is_callable(self):
+        """
+        RED before the fix, and the body is exercised too: the key axis must be
+        the FLATTENED image grid, which a name-only correction could still get
+        wrong.
+        """
+        transformer = TwoWayTransformer(
+            depth=2, embedding_dim=32, num_heads=2, mlp_dim=64
+        )
+        try:
+            queries, keys = transformer.compute_output_spec(
+                keras.KerasTensor((1, 16, 16, 32)),
+                keras.KerasTensor((1, 16, 16, 32)),
+                keras.KerasTensor((1, 5, 32)),
+            )
+            assert tuple(queries.shape) == (1, 5, 32), (
+                f"queries must follow point_embedding; got {tuple(queries.shape)}"
+            )
+            assert tuple(keys.shape) == (1, 16 * 16, 32), (
+                f"keys must be the image grid flattened to 256; got "
+                f"{tuple(keys.shape)}"
+            )
+        finally:
+            del transformer
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_mask_decoder_shape_is_callable(self):
+        """
+        REGRESSION PIN, not coverage: this site was already callable, so it
+        passes both ways. F-14 named it wrongly.
+        """
+        transformer = TwoWayTransformer(
+            depth=2, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+        )
+        decoder = MaskDecoder(
+            transformer_dim=OUT_CHANS, transformer=transformer,
+            iou_head_hidden_dim=32,
+        )
+        try:
+            masks, iou = decoder.compute_output_spec(
+                keras.KerasTensor((1, GRID_SIZE, GRID_SIZE, OUT_CHANS)),
+                keras.KerasTensor((1, GRID_SIZE, GRID_SIZE, OUT_CHANS)),
+                keras.KerasTensor((1, 5, OUT_CHANS)),
+                keras.KerasTensor((1, GRID_SIZE, GRID_SIZE, OUT_CHANS)),
+                True,
+            )
+            assert tuple(masks.shape)[1] == decoder.num_mask_tokens
+            assert tuple(iou.shape) == (None, decoder.num_mask_tokens)
+        finally:
+            del decoder, transformer
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_prompt_encoder_shape_is_callable(self):
+        """
+        REGRESSION PIN, not coverage: already callable before this step.
+        Exercised through a tuple-valued first call argument (``points``),
+        which is the shape structure most likely to break the resolution.
+        """
+        encoder = PromptEncoder(
+            embed_dim=OUT_CHANS,
+            image_embedding_size=(GRID_SIZE, GRID_SIZE),
+            input_image_size=(IMG_SIZE, IMG_SIZE),
+            mask_in_chans=8,
+        )
+        try:
+            sparse, dense = encoder.compute_output_spec(
+                (keras.KerasTensor((1, 1, 2)), keras.KerasTensor((1, 1)))
+            )
+            assert tuple(sparse.shape) == (None, None, OUT_CHANS)
+            assert tuple(dense.shape) == (None, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+
+class TestEncoderOutputGridAndInstanceAttributes:
+    """
+    Plan step 11 / findings F-12 and F-13.
+
+    F-12 was a docstring claiming the encoder emits ``img_size/patch_size/4``.
+    A docstring cannot be RED-proved, so what is pinned here is the FACT the
+    docstring got wrong.
+
+    **F-13's premise is FALSIFIED, verified by execution.** The class-level
+    ``mask_threshold``/``image_format`` pair was not dead-and-shadowed: TF's
+    ``KerasAutoTrackable.__setattr__`` short-circuits on
+    ``getattr(self, name) is value``, and at the defaults the assigned objects
+    ARE the class-level ones (``"RGB"`` is interned; the ``0.0`` constants are
+    deduped), so ``__init__`` set nothing and the class attributes were the live
+    storage. Measured before the deletion: ``'mask_threshold' in
+    instance.__dict__`` was ``False``.
+    """
+
+    def test_encoder_output_grid_is_img_size_over_patch_size(self):
+        """
+        The neck is stride-1, so the grid comes from the patch embedding alone
+        --- no further /4. This is the claim F-12's docstring inverted.
+        """
+        encoder = ImageEncoderViT(
+            img_size=IMG_SIZE, patch_size=PATCH_SIZE, embed_dim=EMBED_DIM,
+            depth=1, num_heads=NUM_HEADS, out_chans=OUT_CHANS,
+            use_rel_pos=True, window_size=WINDOW_SIZE, global_attn_indexes=(0,),
+        )
+        try:
+            out = encoder(
+                keras.ops.convert_to_tensor(
+                    np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype="float32")
+                )
+            )
+            expected = (1, IMG_SIZE // PATCH_SIZE, IMG_SIZE // PATCH_SIZE, OUT_CHANS)
+            assert tuple(out.shape) == expected, (
+                f"encoder grid must be img_size/patch_size, got "
+                f"{tuple(out.shape)} against {expected}"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_threshold_and_format_are_stored_on_the_instance(self):
+        """
+        RED before the deletion: both were absent from ``__dict__`` because the
+        trackable short-circuit skipped the assignment entirely.
+        """
+        model = build_reduced_sam()
+        try:
+            assert "mask_threshold" in model.__dict__, (
+                "mask_threshold is not on the instance; the class-level default "
+                "is shadowing the assignment via the trackable short-circuit"
+            )
+            assert "image_format" in model.__dict__, (
+                "image_format is not on the instance; same short-circuit"
+            )
+            assert model.mask_threshold == 0.0
+            assert model.image_format == "RGB"
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_class_carries_no_shadowing_defaults(self):
+        """The pair must be gone from the class body, not merely overwritten."""
+        assert "mask_threshold" not in SAM.__dict__
+        assert "image_format" not in SAM.__dict__
+
+    def test_a_non_default_threshold_still_reaches_the_instance(self):
+        """
+        NON-FIRING CONTROL: the non-default path always worked (a distinct
+        object never hits the short-circuit) and must keep working, so a
+        "fix" that only repaired the default case is not enough.
+        """
+        encoder = ImageEncoderViT(
+            img_size=IMG_SIZE, patch_size=PATCH_SIZE, embed_dim=EMBED_DIM,
+            depth=1, num_heads=NUM_HEADS, out_chans=OUT_CHANS,
+            use_rel_pos=True, window_size=WINDOW_SIZE, global_attn_indexes=(0,),
+        )
+        prompt_encoder = PromptEncoder(
+            embed_dim=OUT_CHANS,
+            image_embedding_size=(GRID_SIZE, GRID_SIZE),
+            input_image_size=(IMG_SIZE, IMG_SIZE), mask_in_chans=8,
+        )
+        transformer = TwoWayTransformer(
+            depth=2, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+        )
+        decoder = MaskDecoder(
+            transformer_dim=OUT_CHANS, transformer=transformer,
+            iou_head_hidden_dim=32,
+        )
+        model = SAM(
+            image_encoder=encoder, prompt_encoder=prompt_encoder,
+            mask_decoder=decoder, mask_threshold=0.5,
+        )
+        try:
+            assert model.mask_threshold == 0.5
+            assert model.get_config()["mask_threshold"] == 0.5
+        finally:
+            del model, decoder, transformer, prompt_encoder, encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+
+class TestDensePositionalEncodingCache:
+    """
+    Plan step 11 / finding F-16 --- the cumsum coordinate grid is cached.
+
+    What is cached is the normalized ``(h, w, 2)`` COORDINATE GRID, not the
+    encoded positional encoding. The encoded PE depends on
+    ``positional_encoding_gaussian_matrix``, a non-trainable weight that
+    ``load_model`` restores AFTER ``SAM.build_from_config``'s dummy forward has
+    already run ``get_dense_pe`` --- so a cache of the encoded value would be
+    filled with pre-restore garbage and never invalidated. That is what
+    ``test_dense_pe_tracks_a_weight_change`` exists to refuse; measured, the
+    frozen value would be up to 1.9986 away from the correct one.
+    """
+
+    def _encoder(self, grid: int = GRID_SIZE) -> PromptEncoder:
+        encoder = PromptEncoder(
+            embed_dim=OUT_CHANS,
+            image_embedding_size=(grid, grid),
+            input_image_size=(IMG_SIZE, IMG_SIZE),
+            mask_in_chans=8,
+        )
+        encoder.build(None)
+        return encoder
+
+    def test_cached_grid_is_bit_identical_to_a_fresh_recomputation(self):
+        """PROOF 1: the cache changes no value at all."""
+        encoder = self._encoder()
+        try:
+            pe_layer = encoder.pe_layer
+            first = keras.ops.convert_to_numpy(encoder.get_dense_pe()).copy()
+            cached_grid = keras.ops.convert_to_numpy(
+                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
+            ).copy()
+            # Force a full recomputation by dropping the cache.
+            pe_layer._coord_grid_key = None
+            pe_layer._coord_grid_cache = None
+            fresh_grid = keras.ops.convert_to_numpy(
+                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
+            )
+            assert float(np.max(np.abs(cached_grid - fresh_grid))) == 0.0, (
+                "the cached coordinate grid is not bit-identical to a fresh one"
+            )
+            pe_layer._coord_grid_key = None
+            pe_layer._coord_grid_cache = None
+            second = keras.ops.convert_to_numpy(encoder.get_dense_pe())
+            assert float(np.max(np.abs(first - second))) == 0.0, (
+                "get_dense_pe moved when the cache was dropped"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_cache_invalidates_on_a_different_grid_size(self):
+        """
+        PROOF 2: a second size must not be served the first size's grid, and
+        returning to the first size must give the first size's grid back.
+        """
+        encoder = self._encoder()
+        try:
+            pe_layer = encoder.pe_layer
+            g16 = keras.ops.convert_to_numpy(
+                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
+            ).copy()
+            g8 = keras.ops.convert_to_numpy(pe_layer._coord_grid(8, 8)).copy()
+            assert g16.shape == (GRID_SIZE, GRID_SIZE, 2)
+            assert g8.shape == (8, 8, 2), (
+                f"a second size was served a stale grid of shape {g8.shape}"
+            )
+            back = keras.ops.convert_to_numpy(
+                pe_layer._coord_grid(GRID_SIZE, GRID_SIZE)
+            )
+            assert float(np.max(np.abs(back - g16))) == 0.0, (
+                "returning to the first size did not reproduce its grid"
+            )
+            # Non-square is the case a single scalar key would get wrong.
+            assert tuple(
+                keras.ops.convert_to_numpy(pe_layer._coord_grid(8, 16)).shape
+            ) == (8, 16, 2)
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_cache_does_not_leak_across_instances(self):
+        """
+        PROOF 3a: per-instance state. Two encoders at different grid sizes must
+        not see each other's cache, and the cache must not be class-level.
+        """
+        small, large = self._encoder(grid=8), self._encoder(grid=GRID_SIZE)
+        try:
+            a = keras.ops.convert_to_numpy(small.get_dense_pe())
+            b = keras.ops.convert_to_numpy(large.get_dense_pe())
+            assert tuple(a.shape) == (1, 8, 8, OUT_CHANS)
+            assert tuple(b.shape) == (1, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+            assert small.pe_layer._coord_grid_cache is not large.pe_layer._coord_grid_cache
+            assert "_coord_grid_cache" not in type(small.pe_layer).__dict__, (
+                "the cache slot is defined on the CLASS, so every instance "
+                "shares it"
+            )
+        finally:
+            del small, large
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_cache_is_not_serialized(self):
+        """PROOF 3b: nothing derived may enter get_config."""
+        encoder = self._encoder()
+        try:
+            encoder.get_dense_pe()
+            config = encoder.pe_layer.get_config()
+            assert "_coord_grid_cache" not in config
+            assert "_coord_grid_key" not in config
+            restored = type(encoder.pe_layer).from_config(config)
+            assert restored._coord_grid_cache is None, (
+                "a restored layer came back with a populated cache"
+            )
+            assert restored._coord_grid_key is None
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_dense_pe_tracks_a_weight_change(self):
+        """
+        PROOF 3c, and the load-staleness guard.
+
+        ``get_dense_pe`` must recompute from the CURRENT
+        ``positional_encoding_gaussian_matrix``. A cache of the encoded PE would
+        freeze the value produced by ``build_from_config``'s dummy forward,
+        which runs BEFORE the saved weights are restored.
+        """
+        encoder = self._encoder()
+        try:
+            matrix = encoder.pe_layer.positional_encoding_gaussian_matrix
+            assert not matrix.trainable, (
+                "premise check: this weight is non-trainable, which is exactly "
+                "why a stale cache of it would never be corrected by training"
+            )
+            before = keras.ops.convert_to_numpy(encoder.get_dense_pe()).copy()
+            matrix.assign(
+                np.random.RandomState(0)
+                .normal(size=tuple(matrix.shape))
+                .astype("float32")
+            )
+            after = keras.ops.convert_to_numpy(encoder.get_dense_pe())
+            assert float(np.max(np.abs(before - after))) > 0.0, (
+                "get_dense_pe did not follow its own weight -- the encoded "
+                "positional encoding is being cached, which silently freezes "
+                "every loaded model at its pre-restore value"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()

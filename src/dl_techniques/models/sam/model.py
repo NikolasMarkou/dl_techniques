@@ -264,10 +264,6 @@ class SAM(keras.Model):
         predictions with different prompts very efficient.
     """
 
-    # Class attributes (can be overridden per instance)
-    mask_threshold: float = 0.0
-    image_format: str = "RGB"
-
     def __init__(
         self,
         image_encoder: ImageEncoderViT,
@@ -294,6 +290,17 @@ class SAM(keras.Model):
         self.image_encoder = image_encoder
         self.prompt_encoder = prompt_encoder
         self.mask_decoder = mask_decoder
+        # DECISION plan-2026-08-03T191222-1d751f81/D-019: do NOT re-add
+        # class-level `mask_threshold` / `image_format` defaults above
+        # `__init__`. They were NOT the dead shadowed pair F-13 described:
+        # TF's `KerasAutoTrackable.__setattr__` short-circuits
+        # `if getattr(self, name) is value: return`, and BOTH defaults are
+        # identical objects to the class-level ones (`"RGB"` is interned; the
+        # `0.0` constants are deduped), so at the defaults these two lines set
+        # NOTHING and the class attributes were the live storage. Measured:
+        # with the pair present, `'mask_threshold' in instance.__dict__` was
+        # False. Removing them makes the assignment actually reach the instance
+        # dict; the resolved values are unchanged.
         self.mask_threshold = mask_threshold
         self.image_format = image_format
         self.binarize_masks = bool(binarize_masks)

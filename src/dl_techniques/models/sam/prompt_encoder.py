@@ -139,6 +139,10 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         self.scale = scale
         # Will be created in build()
         self.positional_encoding_gaussian_matrix = None
+        # Single-slot cache for the normalized coordinate grid (see
+        # `_coord_grid`). Per-instance, derived-only, never serialized.
+        self._coord_grid_key: Optional[Tuple[int, int, str]] = None
+        self._coord_grid_cache: Optional[keras.KerasTensor] = None
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
@@ -185,17 +189,47 @@ class PositionEmbeddingRandom(keras.layers.Layer):
             Positional encoding tensor of shape (2*num_pos_feats, height, width).
         """
         h, w = size
-        # Create coordinate grid
-        grid = ops.ones((h, w), dtype=self.compute_dtype)
-        y_embed = ops.cumsum(grid, axis=0) - 0.5
-        x_embed = ops.cumsum(grid, axis=1) - 0.5
-        # Normalize to [0, 1]
-        y_embed = y_embed / ops.cast(h, dtype=self.compute_dtype)
-        x_embed = x_embed / ops.cast(w, dtype=self.compute_dtype)
-        # Stack and encode
-        pe = self._pe_encoding(ops.stack([x_embed, y_embed], axis=-1))
+        pe = self._pe_encoding(self._coord_grid(h, w))
         # Return as (C, H, W) for compatibility with original SAM
         return ops.transpose(pe, (2, 0, 1))
+
+    def _coord_grid(self, h: int, w: int) -> keras.KerasTensor:
+        """
+        Return the normalized ``(h, w, 2)`` ``(x, y)`` coordinate grid.
+
+        The grid is a pure function of ``(h, w)`` and the compute dtype -- it
+        depends on no weight -- so it is cached in a single slot keyed on
+        exactly those three things and rebuilt whenever any of them changes.
+
+        Args:
+            h: Grid height.
+            w: Grid width.
+
+        Returns:
+            Tensor of shape ``(h, w, 2)`` holding pixel-centre coordinates
+            normalized to ``[0, 1]``, ``x`` first.
+        """
+        # DECISION plan-2026-08-03T191222-1d751f81/D-020: cache the COORDINATE
+        # GRID, do NOT cache the encoded positional encoding returned by
+        # `_pe_encoding` (nor `PromptEncoder.get_dense_pe`'s output), however
+        # much more it would save. That output depends on
+        # `positional_encoding_gaussian_matrix`, a NON-TRAINABLE weight that is
+        # restored by `load_model` AFTER `SAM.build_from_config`'s dummy
+        # forward has already populated such a cache -- measured: a cache
+        # filled pre-restore returns a grid up to 1.9986 away from the correct
+        # one, silently and forever. The grid below depends on no weight, so it
+        # cannot go stale.
+        key = (int(h), int(w), str(self.compute_dtype))
+        if self._coord_grid_key != key or self._coord_grid_cache is None:
+            grid = ops.ones((h, w), dtype=self.compute_dtype)
+            y_embed = ops.cumsum(grid, axis=0) - 0.5
+            x_embed = ops.cumsum(grid, axis=1) - 0.5
+            # Normalize to [0, 1]
+            y_embed = y_embed / ops.cast(h, dtype=self.compute_dtype)
+            x_embed = x_embed / ops.cast(w, dtype=self.compute_dtype)
+            self._coord_grid_cache = ops.stack([x_embed, y_embed], axis=-1)
+            self._coord_grid_key = key
+        return self._coord_grid_cache
 
     def forward_with_coords(
         self,

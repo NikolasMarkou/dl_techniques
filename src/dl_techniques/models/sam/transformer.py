@@ -437,21 +437,29 @@ class TwoWayAttentionBlock(keras.layers.Layer):
 
     def compute_output_shape(
         self,
-        query_shape: Tuple[Optional[int], ...],
-        key_shape: Tuple[Optional[int], ...]
+        queries_shape: Tuple[Optional[int], ...],
+        keys_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
         Compute output shapes.
 
+        The argument names are load-bearing, not cosmetic: for a
+        `compute_output_shape()` with more than one argument Keras 3 requires
+        every name to be `<call argument>_shape`, and it resolves them against
+        this layer's `call(queries, keys, query_pe, key_pe)`. The previous
+        `query_shape` / `key_shape` matched no call argument, so Keras raised
+        `ValueError` before reaching the body and the method was uncallable by
+        the framework.
+
         Args:
-            query_shape: Shape of queries.
-            key_shape: Shape of keys.
+            queries_shape: Shape of the `queries` argument of `call`.
+            keys_shape: Shape of the `keys` argument of `call`.
 
         Returns:
-            Tuple of (query_output_shape, key_output_shape), which are
+            Tuple of (queries_output_shape, keys_output_shape), which are
             identical to the input shapes.
         """
-        return query_shape, key_shape
+        return queries_shape, keys_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -749,28 +757,34 @@ class TwoWayTransformer(layers.Layer):
 
     def compute_output_shape(
         self,
-        image_shape: Tuple[Optional[int], ...],
-        point_shape: Tuple[Optional[int], ...]
+        image_embedding_shape: Tuple[Optional[int], ...],
+        point_embedding_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
         Compute output shapes.
 
+        The argument names must be `<call argument>_shape` for every argument
+        (Keras 3's rule for a multi-argument `compute_output_shape`), resolved
+        against `call(image_embedding, image_pe, point_embedding)`. The previous
+        `image_shape` / `point_shape` matched no call argument and made this
+        method uncallable by the framework.
+
         Args:
-            image_shape: Shape of image_embedding (B, H, W, C).
-            point_shape: Shape of point_embedding (B, N, C).
+            image_embedding_shape: Shape of image_embedding (B, H, W, C).
+            point_embedding_shape: Shape of point_embedding (B, N, C).
 
         Returns:
             Tuple of (query_shape, key_shape):
-            - query_shape: (B, N, C) - same as point_shape
+            - query_shape: (B, N, C) - same as point_embedding_shape
             - key_shape: (B, H*W, C) - flattened image shape
         """
-        batch_size = point_shape[0]
-        num_queries = point_shape[1]
-        embedding_dim = point_shape[2]
+        batch_size = point_embedding_shape[0]
+        num_queries = point_embedding_shape[1]
+        embedding_dim = point_embedding_shape[2]
 
         # Image is flattened spatially
-        if image_shape[1] is not None and image_shape[2] is not None:
-            num_keys = image_shape[1] * image_shape[2]
+        if image_embedding_shape[1] is not None and image_embedding_shape[2] is not None:
+            num_keys = image_embedding_shape[1] * image_embedding_shape[2]
         else:
             num_keys = None
 
