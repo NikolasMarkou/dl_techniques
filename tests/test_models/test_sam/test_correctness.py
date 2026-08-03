@@ -1455,3 +1455,249 @@ class TestOutputContract:
             del model
             keras.backend.clear_session()
             gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# Step 6 -- F-1: the padding point's positional encoding must be ZEROED.
+#
+# Reference SAM does `point_embedding[labels == -1] = 0.0` and only THEN adds
+# `not_a_point_embed`, so a padding row carries the not-a-point embedding alone.
+# Before the fix the Fourier PE of the dummy (0, 0) point survived and
+# `not_a_point_embed` was merely added on top, which made a padding row depend
+# on its coordinates. This fires on EVERY point-only prompt (`PromptEncoder.call`
+# sets `pad=(boxes is None)`) -- the most common prompt in practice.
+#
+# Measured RED on the pre-fix code, at this file's probe geometry:
+#   * padding row vs a constant-9.0 `not_a_point_embed`: max abs diff 0.962855
+#     (the finding recorded 0.976 at its own geometry; the exact magnitude is a
+#     draw of the RANDOM Fourier matrix and is NOT asserted anywhere here --
+#     surprise #5 forbids pinning a cross-process numeric constant)
+#   * two padding points at different coordinates: max abs diff 1.727846
+# Both are exactly 0.0 after the fix, and exact 0.0 IS assertable: it is an
+# invariance, not a magnitude.
+# ---------------------------------------------------------------------------
+NOT_A_POINT_CONSTANT = 9.0
+PE_EMBED_DIM = 8
+
+
+def build_probe_prompt_encoder(
+    not_a_point_value: float = NOT_A_POINT_CONSTANT,
+) -> PromptEncoder:
+    """
+    Build a tiny `PromptEncoder` whose type embeddings are known constants.
+
+    `not_a_point_embed` is zero-initialized in the shipped code (carried
+    surprise #1), which would make every assertion below pass identically with
+    the fix present or absent -- the "guard passes both ways" trap this plan
+    exists to remove. Each type embedding is therefore assigned a distinct,
+    provably non-zero constant so that a padding row is only equal to
+    ``not_a_point_value`` when the coordinate PE really was zeroed.
+
+    Args:
+        not_a_point_value: Constant assigned to every entry of
+            ``not_a_point_embed``. Must be non-zero.
+
+    Returns:
+        A built :class:`PromptEncoder` with ``embed_dim = PE_EMBED_DIM``.
+    """
+    assert not_a_point_value != 0.0, (
+        "a zero not_a_point_embed makes every guard in this section vacuous"
+    )
+    encoder = PromptEncoder(
+        embed_dim=PE_EMBED_DIM,
+        image_embedding_size=(16, 16),
+        input_image_size=(IMG_SIZE, IMG_SIZE),
+    )
+    encoder.build(None)
+
+    weight = encoder.not_a_point_embed.weights[0]
+    weight.assign(np.full(weight.shape, not_a_point_value, dtype="float32"))
+    # Distinct constants per point type: 1.0 (background), 2.0 (foreground),
+    # 3.0 / 4.0 (box corners). Distinct so a mis-selected type embedding is
+    # visible rather than silently absorbed.
+    for index, embedding in enumerate(encoder.point_embeddings):
+        type_weight = embedding.weights[0]
+        type_weight.assign(
+            np.full(type_weight.shape, float(index) + 1.0, dtype="float32")
+        )
+    return encoder
+
+
+class TestPaddingPointPositionalEncoding:
+    """F-1: `labels == -1` rows must lose their coordinate PE entirely."""
+
+    def test_padding_row_equals_not_a_point_embed_exactly(self):
+        """
+        Probe P2's primary shape, as an EXACT equality.
+
+        RED on the pre-fix code: the padding row came back as
+        ``not_a_point_embed + PE((0, 0))`` -- max abs diff 0.962855 from the
+        constant 9.0. This is the assertion that fired.
+        """
+        encoder = build_probe_prompt_encoder()
+        try:
+            coords = keras.ops.convert_to_tensor([[[100.0, 120.0]]])
+            labels = keras.ops.convert_to_tensor([[1]])
+            embedded = keras.ops.convert_to_numpy(
+                encoder._embed_points(coords, labels, pad=True)
+            )
+            assert embedded.shape == (1, 2, PE_EMBED_DIM), (
+                f"pad=True must append exactly one row; got {embedded.shape}"
+            )
+            padding_row = embedded[0, 1]
+            diff = float(np.max(np.abs(padding_row - NOT_A_POINT_CONSTANT)))
+            assert diff == 0.0, (
+                f"the padding point's coordinate positional encoding SURVIVED: "
+                f"the row is not_a_point_embed + PE((0,0)), max abs deviation "
+                f"{diff:.6f} from the constant {NOT_A_POINT_CONSTANT}"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_padding_points_are_coordinate_invariant(self):
+        """
+        Probe P2's second shape: a padding point must not depend on WHERE it is.
+
+        RED on the pre-fix code: two ``label == -1`` rows at (10, 20) and
+        (200, 240) differed by up to 1.727846. This is the assertion that fired.
+        The invariance is asserted at EXACTLY 0.0 -- it is an identity, not a
+        tolerance.
+        """
+        encoder = build_probe_prompt_encoder()
+        try:
+            coords = keras.ops.convert_to_tensor([[[10.0, 20.0], [200.0, 240.0]]])
+            labels = keras.ops.convert_to_tensor([[-1, -1]])
+            embedded = keras.ops.convert_to_numpy(
+                encoder._embed_points(coords, labels, pad=False)
+            )
+            diff = float(np.max(np.abs(embedded[0, 0] - embedded[0, 1])))
+            assert diff == 0.0, (
+                f"two padding points at DIFFERENT coordinates produced "
+                f"different embeddings (max abs diff {diff:.6f}); their "
+                f"coordinate PE was not zeroed"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_non_padding_points_keep_their_positional_encoding(self):
+        """
+        CONTROL against over-zeroing -- passes BOTH before and after the fix.
+
+        The expected value is recomputed independently from
+        ``pe_layer.forward_with_coords`` plus the type embedding, so this test
+        is blind to the ``ops.where`` under test and can only fail if the fix
+        also touched a ``label in (0, 1)`` row. A fix that zeroed everything
+        would satisfy both assertions above and fail only here.
+        """
+        encoder = build_probe_prompt_encoder()
+        try:
+            coords = keras.ops.convert_to_tensor([[[10.0, 20.0], [200.0, 240.0]]])
+            labels = keras.ops.convert_to_tensor([[0, 1]])
+            got = keras.ops.convert_to_numpy(
+                encoder._embed_points(coords, labels, pad=False)
+            )
+
+            expected_pe = keras.ops.convert_to_numpy(
+                encoder.pe_layer.forward_with_coords(
+                    coords + 0.5, encoder.input_image_size
+                )
+            )
+            # Background -> point_embeddings[0] (1.0), foreground -> [1] (2.0).
+            expected = expected_pe + np.array([[[1.0], [2.0]]], dtype="float32")
+
+            assert np.max(np.abs(got - expected)) == 0.0, (
+                "a non-padding point's embedding is no longer "
+                "PE(coords + 0.5) + its type embedding -- the padding fix "
+                "over-reached into labels 0/1"
+            )
+            # Guard the guard: the PE contribution must be non-trivial, else
+            # this equality would hold even under total zeroing.
+            assert float(np.max(np.abs(expected_pe))) > 1e-3, (
+                "the positional encoding is ~zero at this geometry, so this "
+                "control cannot discriminate"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_pad_true_row_matches_an_explicit_minus_one_label(self):
+        """
+        The implicitly appended padding row and an explicit ``-1`` label must
+        agree bit for bit.
+
+        `_embed_points` appends the padding point AFTER the ``points + 0.5``
+        pixel-centre offset, so the implicit padding coordinate is a literal
+        ``(0, 0)`` while an explicitly supplied ``(0, 0)`` becomes ``(0.5,
+        0.5)``. Pre-fix those are two DIFFERENT positional encodings and this
+        assertion fires (max abs diff 0.999900 measured) -- a second, previously
+        unrecorded symptom of the same defect. Post-fix both are zeroed and the
+        routes are indistinguishable, which is the property reference SAM has.
+        """
+        encoder = build_probe_prompt_encoder()
+        try:
+            coords = keras.ops.convert_to_tensor([[[100.0, 120.0]]])
+            labels = keras.ops.convert_to_tensor([[1]])
+            implicit = keras.ops.convert_to_numpy(
+                encoder._embed_points(coords, labels, pad=True)
+            )[0, 1]
+
+            explicit_coords = keras.ops.convert_to_tensor(
+                [[[100.0, 120.0], [0.0, 0.0]]]
+            )
+            explicit_labels = keras.ops.convert_to_tensor([[1, -1]])
+            explicit = keras.ops.convert_to_numpy(
+                encoder._embed_points(explicit_coords, explicit_labels, pad=False)
+            )[0, 1]
+
+            assert np.max(np.abs(implicit - explicit)) == 0.0, (
+                "the appended padding row differs from an explicitly labelled "
+                "-1 point at the same coordinates"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_point_only_call_appends_one_zeroed_padding_row(self):
+        """
+        The defect's real reach: through `call`, on the most common prompt.
+
+        `call` sets ``pad=(boxes is None)``, so a point-only prompt gets the
+        padding row and a prompt carrying boxes does not. Both branches are
+        asserted here so that "no padding row at all" cannot pass as a fix.
+        """
+        encoder = build_probe_prompt_encoder()
+        try:
+            coords = keras.ops.convert_to_tensor([[[100.0, 120.0]]])
+            labels = keras.ops.convert_to_tensor([[1]])
+
+            sparse, _ = encoder(points=(coords, labels))
+            sparse = keras.ops.convert_to_numpy(sparse)
+            assert sparse.shape == (1, 2, PE_EMBED_DIM), (
+                f"a point-only prompt must carry 1 point + 1 padding row; got "
+                f"{sparse.shape}"
+            )
+            diff = float(np.max(np.abs(sparse[0, 1] - NOT_A_POINT_CONSTANT)))
+            assert diff == 0.0, (
+                f"the padding row reaching the mask decoder on a point-only "
+                f"prompt is not not_a_point_embed (max abs deviation "
+                f"{diff:.6f})"
+            )
+
+            boxes = keras.ops.convert_to_tensor([[[10.0, 10.0, 90.0, 90.0]]])
+            sparse_with_box, _ = encoder(points=(coords, labels), boxes=boxes)
+            assert keras.ops.convert_to_numpy(sparse_with_box).shape == (
+                1, 3, PE_EMBED_DIM
+            ), (
+                "with boxes present no padding point may be appended: expected "
+                "1 point + 2 box corners"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()

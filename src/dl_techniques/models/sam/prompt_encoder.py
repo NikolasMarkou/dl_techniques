@@ -464,6 +464,26 @@ class PromptEncoder(layers.Layer):
         # Get positional encoding for coordinates
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
 
+        # DECISION plan-2026-08-03T191222-1d751f81/D-013
+        # ZERO the positional encoding of every label == -1 row BEFORE any type
+        # embedding is added. Reference SAM does `point_embedding[labels == -1] = 0.0`
+        # and only then adds `not_a_point_embed`, so a padding point carries the
+        # not-a-point embedding ALONE.
+        # Do NOT delete this and rely on the additive `not_a_point_embed` block
+        # below: without this line the Fourier PE of the dummy (0, 0) padding
+        # point SURVIVES and `not_a_point_embed` is merely added on top. That
+        # makes a padding point's embedding depend on its coordinates (measured
+        # up to 1.85 apart for two padding points at different coordinates) and
+        # silently diverges from reference SAM on EVERY point-only prompt, which
+        # is the most common prompt in practice (`call` sets `pad=(boxes is None)`).
+        # Do NOT move it after the additive blocks either -- that would zero the
+        # type embedding as well. See decisions.md D-013.
+        point_embedding = ops.where(
+            ops.expand_dims(labels, -1) == -1,
+            ops.zeros_like(point_embedding),
+            point_embedding
+        )
+
         # Add type embeddings based on labels using conditional operations
         # Label -1: not-a-point (padding)
         point_embedding = point_embedding + ops.where(
