@@ -2023,7 +2023,9 @@ class TestFormerlyDroppingConstructionSites:
 # That is precisely what shipped: at `3ada9cdb` `Qwen3(ffn_type='mlp')` raised
 # `create_ffn_layer('mlp'): 1 unsupported parameter(s) ['ffn_expansion_factor']`.
 # MEASURED across the full 21-type registry, HEAD vs a pristine `f013c232`
-# worktree, on `Qwen3` / `Qwen3SOM` / `Qwen3MEGA`:
+# worktree, on `Qwen3` / `Qwen3SOM` / a third qwen family that has since been
+# deleted as dead code (plan-2026-08-03-4c570ee4/D-006). The measurement below
+# is the historical record from that run and is not re-derived here:
 #
 #     dense block path  (`ffn_args`)  : 12 of 21 constructed -> 1 of 21
 #     MoE expert path (`ffn_config`)  :  7 of 21 constructed -> 1 of 21
@@ -2197,14 +2199,6 @@ _MODEL_FFN_RECIPES: Dict[str, List[Dict[str, Any]]] = {
          "moe_intermediate_size": 64},
     ],
     "Qwen3SOM": [
-        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
-         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
-        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
-         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
-         "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
-         "moe_intermediate_size": 64},
-    ],
-    "Qwen3MEGA": [
         {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
          "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
         {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,

@@ -22,9 +22,11 @@ as R4. Output shape is preserved (`controller_units + num_read_heads * memory_di
 so callers migrating from `MannLayer(...)` to `create_mann(...)` see no
 shape change, only an implementation swap.
 
-Note: `MannLayer` (the legacy class) is intentionally NOT deprecated here —
-existing callers (`src/dl_techniques/models/qwen/qwen3_mega.py`) continue to
-use it directly. New code should prefer `create_mann(...)`.
+Note: `MannLayer` (the legacy class) was intentionally NOT deprecated when the
+decision above was taken, because a model still imported it directly. That
+caller has since been deleted (plan-2026-08-03-4c570ee4/D-006), so `MannLayer`
+now has ZERO consumers in `src/` — its only remaining surface is its own unit
+test. New code should use `create_mann(...)`.
 """
 
 from __future__ import annotations
