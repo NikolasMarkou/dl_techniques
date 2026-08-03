@@ -98,7 +98,18 @@ def main():
 
 
 def evaluate_model(model, data, num_eval=20, success_threshold=0.9):
-    """Detailed evaluation of NTM copy task performance."""
+    """Detailed evaluation of NTM copy task performance.
+
+    Scores the output phase only: per-sequence exact match and per-bit
+    accuracy over the positions the task mask marks as supervised.
+
+    :param model: Object exposing ``predict(inputs, verbose=...)``.
+    :param data: ``TaskData`` with ``inputs``, ``targets`` and per-timestep ``masks``.
+    :param num_eval: Number of sequences to draw, without replacement.
+    :param success_threshold: Sequence accuracy above which the task counts as solved.
+    :return: Dict with ``bit_accuracy``, ``sequence_accuracy`` and
+        ``num_evaluated`` (rows that were not fully masked out).
+    """
     indices = np.random.choice(len(data.inputs), num_eval, replace=False)
     eval_inputs = data.inputs[indices]
     eval_targets = data.targets[indices]
@@ -111,9 +122,15 @@ def evaluate_model(model, data, num_eval=20, success_threshold=0.9):
     bit_accs = []
 
     for i in range(num_eval):
-        mask_boolean = eval_masks[i].astype(bool).flatten()
-        p_valid = preds_binary[i].flatten()[mask_boolean]
-        t_valid = eval_targets[i].flatten()[mask_boolean]
+        # The mask is per-TIMESTEP, shape (seq_len,), while a prediction is
+        # per-ELEMENT, shape (seq_len, output_dim). Broadcast the mask across
+        # the output dimension before flattening -- flattening the mask instead
+        # only lines up when output_dim == 1.
+        mask_boolean = np.broadcast_to(
+            eval_masks[i].astype(bool)[:, None], preds_binary[i].shape
+        ).ravel()
+        p_valid = preds_binary[i].ravel()[mask_boolean]
+        t_valid = eval_targets[i].ravel()[mask_boolean]
 
         if len(p_valid) == 0:
             continue
@@ -121,15 +138,22 @@ def evaluate_model(model, data, num_eval=20, success_threshold=0.9):
         seq_accs.append(1.0 if np.array_equal(p_valid, t_valid) else 0.0)
         bit_accs.append(np.mean(p_valid == t_valid))
 
-    mean_bit_acc = np.mean(bit_accs)
-    mean_seq_acc = np.mean(seq_accs)
+    mean_bit_acc = float(np.mean(bit_accs)) if bit_accs else float("nan")
+    mean_seq_acc = float(np.mean(seq_accs)) if seq_accs else float("nan")
 
-    logger.info(f"Evaluation (N={num_eval}): Bit Acc={mean_bit_acc:.2%}, Sequence Acc={mean_seq_acc:.2%}")
+    logger.info(f"Evaluation (N={len(seq_accs)}/{num_eval}): "
+                f"Bit Acc={mean_bit_acc:.2%}, Sequence Acc={mean_seq_acc:.2%}")
 
     if mean_seq_acc > success_threshold:
         logger.info("SUCCESS: NTM has solved the copy task!")
     else:
         logger.info("STATUS: NTM needs more training or tuning.")
+
+    return {
+        "bit_accuracy": mean_bit_acc,
+        "sequence_accuracy": mean_seq_acc,
+        "num_evaluated": len(seq_accs),
+    }
 
 
 if __name__ == '__main__':
