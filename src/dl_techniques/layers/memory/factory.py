@@ -14,19 +14,21 @@ All three return fully-built Keras layers ready for use in `keras.Sequential`
 or the functional API.
 
 # DECISION plan_2026-05-13_8c1dc6fd/D-002
-`create_mann` returns a `NeuralTuringMachine` (not a `MannLayer`). Rationale
-(see plan decisions.md D-002): the standalone `MannLayer` class duplicates the
+`create_mann` returns a `NeuralTuringMachine`, not a dedicated MANN class.
+Rationale (see plan decisions.md D-002): a standalone MANN layer duplicates the
 NTM addressing/read/write logic that `NTMCell` already implements, and the
 NTM RNN-cell wrapper subsumes the LSTMCell-based rewrite originally proposed
-as R4. Output shape is preserved (`controller_units + num_read_heads * memory_dim`)
-so callers migrating from `MannLayer(...)` to `create_mann(...)` see no
-shape change, only an implementation swap.
+as R4. Output shape is preserved (`controller_units + num_read_heads * memory_dim`),
+so this is an implementation choice, not a shape contract change.
 
-Note: `MannLayer` (the legacy class) was intentionally NOT deprecated when the
-decision above was taken, because a model still imported it directly. That
-caller has since been deleted (plan-2026-08-03-4c570ee4/D-006), so `MannLayer`
-now has ZERO consumers in `src/` — its only remaining surface is its own unit
-test. New code should use `create_mann(...)`.
+# DECISION plan-2026-08-03T161943-02be1d7e/D-004
+The legacy `MannLayer` class (`mann.py`) that the paragraph above refers to has
+been DELETED. Do NOT reintroduce a standalone MANN class as a "simpler" or
+"more faithful" alternative to this factory: the deleted class had zero
+consumers, was unreachable through this module, and carried its own independent
+copy of the location-shift math — the two copies drifted and one was fixed
+while the other stayed wrong. `create_mann(...)` is the only MANN construction
+path. See decisions.md D-004.
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ def create_mann(
 
     The output dimensionality is set to
     ``output_dim = controller_units + num_read_heads * memory_dim`` to preserve
-    the historical shape contract of the legacy `MannLayer` class. The internal
+    the historical MANN shape contract. The internal
     architecture is the standard NTM (NTMMemory + NTMReadHead + NTMWriteHead +
     NTMController wrapped in keras.layers.RNN(NTMCell)).
 

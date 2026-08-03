@@ -50,8 +50,6 @@ via `dl_techniques.layers.memory.*`:
   `AddressingMode` enum (CONTENT + HYBRID only), state dataclasses
   (`MemoryState`, `HeadState`, `NTMOutput`), and utility functions
   (`cosine_similarity`, `circular_convolution`, `sharpen_weights`).
-- **MANN** (`mann.py`) — `MannLayer` standalone class (legacy entry point;
-  new callers prefer the `create_mann(...)` factory).
 - **SOM family** (`som_nd_layer.py`, `som_2d_layer.py`, `som_nd_soft_layer.py`) —
   `SOMLayer` (N-D hard winner), `SOM2dLayer` (2D specialization),
   `SoftSOMLayer` (differentiable / per-dim or global softmax).
@@ -59,8 +57,9 @@ via `dl_techniques.layers.memory.*`:
   (differentiable soft-assignment grid; uses orthogonal hypersphere init +
   soft-orthonormal regularization).
 - **Factory** (`factory.py`) — uniform construction surface:
-  `create_mann(...)` (returns a `NeuralTuringMachine`
-  configured to preserve the historical MANN output shape) and `create_som_2d(...)`.
+  `create_mann(...)` and `create_som_2d(...)`. `create_mann` is the ONLY MANN
+  construction path — there is no standalone MANN class; it returns a
+  `NeuralTuringMachine` configured to preserve the historical MANN output shape.
 
 ### Logic (`logic/`)
 Arithmetic operators, logic operators, neural circuit.

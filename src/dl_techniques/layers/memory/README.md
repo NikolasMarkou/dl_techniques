@@ -11,7 +11,7 @@ addressable memory** — either a learned content/location-addressable matrix
 | Family | Type of memory | Differentiable? | Typical use |
 |--------|----------------|-----------------|-------------|
 | **NTM** | External memory matrix with read/write heads (content + location addressing) | yes | Algorithmic / sequence tasks needing scratchpad memory |
-| **MANN** | Standalone NTM-style layer (single-block memory + controller) | yes | Drop-in memory-augmented sequence layer |
+| **MANN** | The NTM memory, configured with MANN knobs via `create_mann(...)` — no separate class | yes | Drop-in memory-augmented sequence layer |
 | **SOM** | Topographic grid of prototypes (hard or soft winner-take-all) | hard: no, soft: yes | Unsupervised representation, clustering, quantization |
 
 ## Families
@@ -39,11 +39,10 @@ Files:
 Reference: Santoro et al., 2016, *One-shot Learning with Memory-Augmented
 Neural Networks* (arXiv:1605.06065).
 
-File:
-
-- `mann.py` — `MannLayer`. Standalone implementation; does **not** inherit
-  from `BaseNTM`. Kept separate by design (different controller/head wiring
-  and self-contained configuration).
+There is no standalone MANN class. MANN is available only as a configuration of
+the NTM pipeline, through `factory.py`'s `create_mann(...)`, which returns a
+`NeuralTuringMachine` whose output width matches the historical MANN contract
+(`controller_units + num_read_heads * memory_dim`).
 
 ### SOM — Self-Organizing Map
 
@@ -70,7 +69,7 @@ All names below are importable directly from `dl_techniques.layers.memory`.
 | `DifferentiableAddressingHead`, `DifferentiableSelectCopy`, `SimpleSelectCopy` | Layer | `base_layers` | NTM |
 | `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`, `NTMCell`, `NeuralTuringMachine` | Layer | `baseline_ntm` | NTM |
 | `create_ntm` | factory fn | `baseline_ntm` | NTM |
-| `MannLayer` | Layer | `mann` | MANN |
+| `create_mann` | factory fn | `factory` | MANN |
 | `SOMLayer`, `SOM2dLayer`, `SoftSOMLayer` | Layer | `som_nd_layer`, `som_2d_layer`, `som_nd_soft_layer` | SOM |
 
 ## Usage
@@ -101,13 +100,13 @@ config = NTMConfig(
 ntm = NeuralTuringMachine(config, output_dim=10)
 ```
 
-### MANN
+### MANN (factory)
 
 ```python
-from dl_techniques.layers.memory import MannLayer
+from dl_techniques.layers.memory import create_mann
 
-mann = MannLayer(memory_size=128, memory_dim=40, controller_units=200)
-y = mann(x)
+mann = create_mann(memory_locations=128, memory_dim=40, controller_units=200)
+y = mann(x)  # x: (batch, time, features)
 ```
 
 ### SOM (hard winner, N-D grid)
