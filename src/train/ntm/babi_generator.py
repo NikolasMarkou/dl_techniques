@@ -49,6 +49,13 @@ class BabiGenerator:
     OBJECTS = ["apple", "football", "milk", "ball", "box", "key", "wallet", "phone"]
     LOCATIONS = ["garden", "kitchen", "bedroom", "bathroom", "office", "hallway"]
     DIRECTIONS = ["north", "south", "east", "west"]
+    # "A is <d> of B" means you travel INVERSE_DIRECTIONS[d] to get from A to B.
+    INVERSE_DIRECTIONS = {
+        "north": "south",
+        "south": "north",
+        "east": "west",
+        "west": "east",
+    }
     COLORS = ["red", "blue", "green", "yellow", "white", "black"]
     SIZES = ["small", "large", "tiny", "big"]
     ANIMALS = ["cat", "dog", "mouse", "lion", "wolf", "sheep"]
@@ -478,32 +485,47 @@ class BabiGenerator:
     
     def _generate_task19(self, num_samples: int) -> List[BabiSample]:
         """Task 19: Path Finding.
-        
-        Find path between locations.
-        
+
+        Find the path along a fixed 4-node chain
+        ``locs[0] -> locs[1] -> locs[2] -> locs[3]``. The topology is fixed; the
+        three relation directions are drawn per sample and the answer is DERIVED
+        from them, so no answer string is reusable across samples. This
+        generator used to emit the constant ``"south, east, south"`` for every
+        sample — correct for its one hardcoded topology, and scored 100% by any
+        model that memorised the string.
+
+        The first hop is inverted because the story states where ``locs[0]`` is
+        relative to ``locs[1]``, while the question asks how to travel the other
+        way; the second and third relations already point along the direction of
+        travel.
+
         :param num_samples: Number of samples.
         :return: List of samples.
         """
         samples = []
-        
+
         for _ in range(num_samples):
             locs = list(self._rng.choice(self.LOCATIONS, size=4, replace=False))
-            
-            # Create path connections
+            first, second, third = (
+                str(d) for d in self._rng.choice(self.DIRECTIONS, size=3)
+            )
+
             story = [
-                f"The {locs[0]} is north of the {locs[1]}",
-                f"The {locs[2]} is east of the {locs[1]}",
-                f"The {locs[3]} is south of the {locs[2]}"
+                f"The {locs[0]} is {first} of the {locs[1]}",
+                f"The {locs[2]} is {second} of the {locs[1]}",
+                f"The {locs[3]} is {third} of the {locs[2]}"
             ]
-            
+
+            path = [self.INVERSE_DIRECTIONS[first], second, third]
+
             samples.append(BabiSample(
                 story=story,
                 question=f"How do you go from the {locs[0]} to the {locs[3]}?",
-                answer="south, east, south",
+                answer=", ".join(path),
                 supporting_facts=[0, 1, 2],
                 task_id=19
             ))
-        
+
         return samples
     
     # The single home for "which bAbI tasks does this class actually implement".

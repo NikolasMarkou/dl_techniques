@@ -22,6 +22,7 @@ Every count asserted below was MEASURED against the shipped code, not predicted.
 """
 
 import collections
+import re
 from typing import Dict, List
 
 import pytest
@@ -465,3 +466,92 @@ class TestBabiIsReachableFromTheFullSuite:
         harness.run_full_suite(model=None, model_name="probe")
 
         assert "run_babi_benchmark" in called
+
+
+# ---------------------------------------------------------------------
+# bAbI task 19 (path finding)
+# ---------------------------------------------------------------------
+
+_RELATION = re.compile(r"^The (\w+) is (\w+) of the (\w+)$")
+_QUESTION = re.compile(r"^How do you go from the (\w+) to the (\w+)\?$")
+
+
+def _shortest_path_directions(story: List[str], question: str) -> List[str]:
+    """Re-derive the travel directions from a task-19 sample, independently.
+
+    Deliberately does NOT reuse the generator's index arithmetic: it rebuilds a
+    direction graph from the story text and searches it, so a generator that
+    randomises directions but derives the answer wrongly cannot agree with it by
+    construction.
+
+    :param story: The sample's story sentences.
+    :param question: The sample's question.
+    :return: The directions travelled from the question's origin to its target.
+    :raises AssertionError: If a sentence or the question is not parseable, or
+        no path exists.
+    """
+    edges: Dict[str, List] = {}
+    for sentence in story:
+        match = _RELATION.match(sentence)
+        assert match is not None, f"unparseable story sentence: {sentence!r}"
+        near, direction, far = match.groups()
+        # "near is <direction> of far" => from far, travel <direction> to near.
+        edges.setdefault(far, []).append((direction, near))
+        edges.setdefault(near, []).append(
+            (BabiGenerator.INVERSE_DIRECTIONS[direction], far)
+        )
+
+    q_match = _QUESTION.match(question)
+    assert q_match is not None, f"unparseable question: {question!r}"
+    origin, target = q_match.groups()
+
+    queue = collections.deque([(origin, [])])
+    seen = {origin}
+    while queue:
+        node, path = queue.popleft()
+        if node == target:
+            return path
+        for direction, neighbour in edges.get(node, []):
+            if neighbour in seen:
+                continue
+            seen.add(neighbour)
+            queue.append((neighbour, path + [direction]))
+
+    raise AssertionError(f"no path from {origin} to {target} in {story}")
+
+
+class TestBabiTask19IsNotDegenerate:
+    """Two independent properties: the answers vary, AND each one is correct.
+
+    Either one alone is passable by a broken generator — a fixed answer passes
+    nothing but a randomly-shuffled answer string would pass the variety test,
+    and a generator that never randomised would pass the correctness test. Both
+    mutations were proven RED separately.
+    """
+
+    @staticmethod
+    def _samples(n: int = 100):
+        """Generate task-19 samples at the pinned seed.
+
+        :param n: Number of samples.
+        :return: The generated samples.
+        """
+        config = BabiTaskConfig(task_ids=[19], num_samples_per_task=n)
+        return BabiGenerator(config).generate(19)
+
+    def test_task19_answers_are_not_all_the_same_string(self):
+        answers = {sample.answer for sample in self._samples(100)}
+
+        assert len(answers) > 1, (
+            f"task 19 emitted a single answer for 100 samples: {answers}"
+        )
+
+    def test_task19_answer_is_the_derived_path_of_its_own_story(self):
+        for sample in self._samples(100):
+            expected = ", ".join(
+                _shortest_path_directions(sample.story, sample.question)
+            )
+            assert sample.answer == expected, (
+                f"answer {sample.answer!r} is not the path through "
+                f"{sample.story} (expected {expected!r})"
+            )
