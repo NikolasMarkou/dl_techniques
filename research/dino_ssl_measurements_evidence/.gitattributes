@@ -1,0 +1,6 @@
+# Verbatim evidence records copied out of a gitignored `results/` run
+# directory and sha256-verified. `core.autocrlf=input` would silently strip the
+# CRLF line endings the training CSVs were written with, so the committed blob
+# would NOT be byte-identical to the artifact it claims to preserve. `-text`
+# stores these bytes exactly as they are on disk. Do not remove.
+* -text

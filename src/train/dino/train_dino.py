@@ -171,8 +171,10 @@ Usage::
     #
     # `--knn-eval-every 4` and `--early-stopping-patience 70` are NOT decoration and
     # are NOT optional. The published endpoint is the mean of the last 3 EVALUATED
-    # epochs, so the eval CADENCE defines which epochs it averages. READ OFF
-    # `long_improved_s42/training_log.csv`: at the measured `4` the evaluated epochs
+    # epochs, so the eval CADENCE defines which epochs it averages. READ OFF the
+    # TRACKED `research/dino_ssl_measurements_evidence/long_improved_s42/training_log.csv`
+    # (see that directory's README.md for the one-line re-derivation command):
+    # at the measured `4` the evaluated epochs
     # are 0,4,...,56 and the last three are 48/52/56, whose k20 mean is 0.4326171875
     # -- exactly the 0.4326 published in README § 6.1. At the parser default `1` the
     # last three would be 57/58/59: a DIFFERENT endpoint, which cannot reproduce
@@ -181,19 +183,25 @@ Usage::
     #
     # VERIFIED by resolving this line through the real
     # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffing
-    # the resulting config FIELD-BY-FIELD against
-    # `results/dino_plan12a1f2db/long_improved_s42/config.json` (38 keys). Result:
-    # warmup_steps=295, teacher_temp_final=0.04, and every measurement-bearing field
-    # equal. Exactly three fields do not match, none of them measurement-bearing:
+    # the resulting config FIELD-BY-FIELD against the TRACKED
+    # `research/dino_ssl_measurements_evidence/long_improved_s42/config.json`
+    # (37 recorded keys vs the 38 fields the config dataclass carries today).
+    # The evidence lives under `research/` on purpose: it was copied out of a
+    # gitignored `results/` run directory, so `rm -rf results/` can no longer
+    # orphan this claim. Result: warmup_steps=295, teacher_temp_final=0.04, and
+    # every measurement-bearing field equal. Exactly three fields do not match,
+    # none of them measurement-bearing:
     #   * `output_dir` / `experiment_name` -- deliberately left at their defaults
-    #     here, because passing the recorded `results/dino_plan12a1f2db` +
-    #     `long_improved_s42` would OVERWRITE the surviving artifacts. Add them only
-    #     if you intend to replace that run.
+    #     here, because passing the values the recorded config.json carries would
+    #     OVERWRITE the surviving artifacts of that run. Add them only if you
+    #     intend to replace it.
     #   * `ema_warmup_epochs` -- absent from the recorded config.json entirely: the
     #     field did not exist when those runs were made. It is inert here anyway
     #     (`ema_warmup_steps=295 > 0` wins in resolve_ema_warmup_steps).
     # Same diff run against `long_improved_s1337/config.json` with `--seed 1337`:
-    # identical outcome.
+    # identical outcome. RE-DERIVED by execution after this file's argument
+    # plumbing changed, against all four tracked configs -- still exactly these
+    # three fields, all four arms.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino \\
         --smoke --max-steps 100000 --epochs 60 --seed 42 \\
         --ema-warmup-steps 295 \\
@@ -201,8 +209,10 @@ Usage::
         --knn-eval-every 4 --early-stopping-patience 70
 
     # the BASELINE arm of the same measurement, for the A/B. Same field-by-field
-    # diff against `long_baseline_s42/config.json`, same three non-matching fields,
-    # and resolve_ema_warmup_steps gives 0 -- the baseline arm's no-freeze.
+    # diff against the tracked
+    # `research/dino_ssl_measurements_evidence/long_baseline_s42/config.json`,
+    # same three non-matching fields, and resolve_ema_warmup_steps gives 0 -- the
+    # baseline arm's no-freeze.
     ... --smoke --max-steps 100000 --epochs 60 --seed 42 --teacher-temp-final 0.07 \\
         --knn-bank-batches 64 --knn-query-batches 32 --random-init-repeats 2 \\
         --knn-eval-every 4 --early-stopping-patience 70
