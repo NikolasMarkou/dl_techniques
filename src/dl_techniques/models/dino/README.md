@@ -556,10 +556,15 @@ allocator on GPU 1 (the record § 5 confound 5 and § 7).
 `src/train/dino/train_dino.py`**, not the bare command. Both carry `--seed 42`; the
 seed-1337 arms are the same lines with `--seed 1337`. Those lines are checked, not
 asserted — resolved through the real `parse_arguments -> config_from_args ->
-resolve_ema_warmup_steps` and diffed field-by-field against the four TRACKED configs under
+resolve_ema_warmup_steps` and diffed field-by-field against the TRACKED configs under
 `research/dino_ssl_measurements_evidence/`, whose `README.md` also carries the one-line
-endpoint re-derivation. The three fields that deliberately do NOT match, and why, are named
-at that `Usage::` block.
+endpoint re-derivation. **The diff pins BOTH axes**: each arm line is compared against its
+own ARM's record at its own typed SEED (improved ↔ `long_improved_s42`, baseline ↔
+`long_baseline_s42`), and only that pairing gives the three-field residual. Crossing the
+seed adds `seed` (4 fields); crossing the ARM adds `ema_warmup_steps` and
+`teacher_temp_final` (5), which is the treatment under test, not bookkeeping; crossing both
+gives 6. The three fields that deliberately do NOT match under the correct pairing, and why,
+are named at that `Usage::` block.
 
 **`--knn-eval-every 4` is the § 6.3 trap one level up.** The endpoint is the mean of the
 last 3 *evaluated* epochs, so the cadence picks which epochs get averaged — `4` averages

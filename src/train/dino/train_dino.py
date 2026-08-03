@@ -170,15 +170,23 @@ Usage::
     #
     # VERIFIED, not asserted. Both arm lines here are resolved through the real
     # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffed
-    # FIELD-BY-FIELD against the four TRACKED configs under
+    # FIELD-BY-FIELD against the TRACKED configs under
     # `research/dino_ssl_measurements_evidence/` (RE-DERIVED by execution after this
-    # file's argument plumbing changed), EACH ARM LINE AGAINST ITS OWN SEED'S RECORD:
-    # as printed below they carry `--seed 42` and diff against the two `_s42` configs;
-    # substitute `--seed 1337` to diff against the two `_s1337` configs. Without that
-    # substitution `seed` is a FOURTH difference, and it IS measurement-bearing -- the
-    # two seeds are different runs, not two readings of one.
-    # Every measurement-bearing field is equal on all four arms; exactly three are
-    # not, none of them measurement-bearing:
+    # file's argument plumbing changed). The diff is ONE-TO-ONE and BOTH axes are
+    # pinned -- each arm line against ITS OWN ARM'S record at ITS OWN TYPED SEED: the
+    # improved line below against `long_improved_s42`, the baseline line against
+    # `long_baseline_s42`. Substitute `--seed 1337` in a line to pair it with that
+    # same arm's `_s1337` record instead. Only those four pairings give the
+    # three-field residual stated next. MEASURED over the full 4x4 (2 arm lines x
+    # 2 typed seeds x 4 recorded configs):
+    #   * own arm, own seed    -> 3 differences, the three named below
+    #   * own arm, other seed  -> 4: `seed` is added, and it IS measurement-bearing --
+    #     two seeds are different runs, not two readings of one
+    #   * other arm, same seed -> 5: `ema_warmup_steps` and `teacher_temp_final` are
+    #     added, which is the arm TREATMENT itself, not a bookkeeping difference
+    #   * other arm, other seed -> 6
+    # Under the correct pairing every measurement-bearing field is equal; exactly
+    # three are not, none of them measurement-bearing:
     #   * `output_dir` / `experiment_name` -- deliberately left at their defaults
     #     here, because passing the values the recorded config.json carries would
     #     OVERWRITE the surviving artifacts of that run. Add them only if you

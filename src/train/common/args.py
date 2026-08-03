@@ -30,13 +30,13 @@ def explicitly_set_flags(
     either spelling counts as an explicit mention of that dest. The
     ``--flag=value`` equals form is handled by splitting on the first ``=``.
 
-    **What the scan DOES see** (each verified by test):
-    ``--flag value``; ``--flag=value``; both ``BooleanOptionalAction``
-    spellings; and — when the parser allows abbreviation, which is argparse's
-    default — an UNAMBIGUOUS long-option PREFIX such as ``--ema-warmup-ep`` for
-    ``--ema-warmup-epochs``, resolved the way argparse itself resolves it
-    (exact match first, then a prefix matching exactly one registered long
-    option).
+    **What the scan DOES see**: ``--flag value``; ``--flag=value``; both
+    ``BooleanOptionalAction`` spellings; and — when the parser allows
+    abbreviation, which is argparse's default — an UNAMBIGUOUS long-option
+    PREFIX such as ``--ema-warmup-ep`` for ``--ema-warmup-epochs``, resolved
+    the way argparse itself resolves it (exact match first, then a prefix
+    matching exactly one registered long option), at either the spaced or the
+    ``=`` form.
 
     **What the scan does NOT see**, deliberately:
 
@@ -47,12 +47,28 @@ def explicitly_set_flags(
       argparse rejects such a token with "ambiguous option", so it cannot
       appear in an argv that parsed successfully; it is reported as not-typed
       rather than guessed.
+    * Any abbreviation at all when the parser was built with
+      ``allow_abbrev=False`` — then a prefix is an argparse ERROR, so counting
+      it as typed would be wrong. The flag is READ from the parser.
     * Abbreviations of SINGLE-dash options (``-xy``). argparse resolves those
-      through a different code path (short-option/explicit-arg splitting);
-      no trainer using this helper registers a single-dash option.
+      through a different code path (short-option/explicit-arg splitting).
+      The only single-dash option the three trainers register is argparse's
+      own ``-h`` (MEASURED: 43 / 45 / 35 option strings on the ``train_dino``,
+      ``train_video_jepa`` and ``train_lewm`` parsers, single-dash list
+      ``['-h']`` on each). ``-h`` is an EXACT match, so it IS reported, as
+      dest ``help`` — harmlessly: the help action prints and exits, so
+      ``parse_args`` never returns and no caller ever reads the report, and
+      ``help`` is not a config field any preset can override.
     * A VALUE that happens to spell a registered option (``--name --smoke``).
       Distinguishing that needs the parser's nargs/type machinery, which this
-      token scan deliberately does not reimplement.
+      token scan deliberately does not reimplement. Unreachable in practice:
+      argparse rejects that argv before the answer can matter.
+
+    Each shape above is a row in the table in
+    ``tests/test_train/test_common_args.py``, driven against a local probe
+    parser AND against the real ``train_dino`` parser. Change a branch here and
+    change that table in the same edit — this helper is shared by three
+    trainers and its docstring is the contract they rely on.
 
     Args:
         parser: The fully-populated parser whose actions define the recognised

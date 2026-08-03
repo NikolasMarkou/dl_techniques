@@ -474,9 +474,6 @@ def test_readme_symbols_named_in_import_blocks_resolve():
 # every file and then exempting the scanner's own source — is a per-file
 # exemption, and a per-file exemption list is precisely the shape this guard
 # must not grow (it would make it a value-agreement checker in disguise).
-# Consequence, for whoever is tempted to widen this tuple: THIS FILE is inside
-# the scan set and its docstring below names the § 6.2 effect sizes verbatim, so
-# adding any of them here makes the guard fire on its own source.
 _FORBIDDEN_TEN_THOUSANDTHS = (
     # section 1 endpoints (mean of last 3 evaluated epochs), improved / baseline
     4326, 4661, 3363, 3285,
@@ -490,6 +487,30 @@ _FORBIDDEN_TEN_THOUSANDTHS = (
     2969,
 )
 FORBIDDEN_LITERALS = tuple(f"0.{v:04d}" for v in _FORBIDDEN_TEN_THOUSANDTHS)
+
+# The record values that ARE restated inside the scan set and are deliberately
+# NOT forbidden — the inventory behind the SCOPE block in the guard's docstring.
+# MEASURED by scanning every `0.\d{4,}` literal in the record against
+# RESTATEMENT_SCAN_DIRS: sixteen distinct values, in three groups.
+#
+# Stored as integer ten-thousandths for the SAME reason as the forbidden set
+# above, and it matters more here: THIS FILE sits inside RESTATEMENT_SCAN_DIRS,
+# so writing these sixteen out as `0.xxxx` text would import sixteen fresh
+# copies of measured values into the very subtree this module polices — the
+# defect the guard exists to reduce, committed by the guard's own source.
+_NOT_COVERED_TEN_THOUSANDTHS = (
+    # (a) README § 6.2's eleven per-flag effect sizes. FIVE of the eleven are
+    # also quoted in `train_dino.py` (MEASURED: entries 3, 4, 7, 9 and 10 of
+    # this row).
+    0, 20, 24, 28, 63, 371, 387, 400, 498, 518, 625,
+    # (b) the zero-step control-band WIDTH (`knn_eval.py`, `test_train_dino.py`)
+    195,
+    # (c) the four `--seed 42` zero-step k20 control draws — the band whose
+    # endpoints the docstring's exception list names in words below
+    2754, 2900, 2910, 2949,
+)
+NOT_COVERED_RESTATED_LITERALS = tuple(
+    f"0.{v:04d}" for v in _NOT_COVERED_TEN_THOUSANDTHS)
 
 MEASUREMENT_RECORD = REPO_ROOT / "research" / "2026_dino_ssl_measurements.md"
 
@@ -533,16 +554,18 @@ def test_no_headline_measurement_is_restated_inside_the_dino_subtree():
     * NOT COVERED: the record's OTHER measured values. MEASURED by scanning
       every ``0.\\d{4,}`` literal in the record against these four directories:
       **16 distinct record values are restated here and are deliberately not
-      forbidden** — the eleven § 6.2 per-flag effect sizes in the README
-      (``0.0000``, ``0.0020``, ``0.0024``, ``0.0028``, ``0.0063``, ``0.0371``,
-      ``0.0387``, ``0.0400``, ``0.0498``, ``0.0518``, ``0.0625``, four of which
-      are also quoted in ``train_dino.py``), the control-band WIDTH ``0.0195``,
-      and the four band draws listed as exceptions below. The § 6.2 sizes are
-      kept ON PURPOSE: each sits inside one long markdown table row, so
-      forbidding them would delete almost no lines while destroying the
-      MEASURED / NO-DIFFERENCE / UNMEASURED reference a reader ACTS on, and
-      exempting them file-by-file would grow the per-file exception list this
-      guard must not have. Their drift risk is real and unguarded.
+      forbidden**. They are three CLASSES, not a list to be re-typed here —
+      the exact values are ``_NOT_COVERED_TEN_THOUSANDTHS`` above, held as
+      integers precisely so this docstring does not become a seventeenth home
+      for them: (a) the ELEVEN § 6.2 per-flag effect sizes in the README, FIVE
+      of which are also quoted in ``train_dino.py``; (b) the zero-step
+      control-band WIDTH; (c) the four band draws listed as exceptions below.
+      The § 6.2 sizes are kept ON PURPOSE: each sits inside one long markdown
+      table row, so forbidding them would delete almost no lines while
+      destroying the MEASURED / NO-DIFFERENCE / UNMEASURED reference a reader
+      ACTS on, and exempting them file-by-file would grow the per-file
+      exception list this guard must not have. Their drift risk is real and
+      unguarded.
     * NOT COVERED, geographically: only ``RESTATEMENT_SCAN_DIRS`` (four
       directories) is walked. ``src/train/common/``, ``tests/test_losses/``,
       ``tests/test_datasets/`` and the rest of ``research/`` are NOT scanned, so
@@ -565,12 +588,13 @@ def test_no_headline_measurement_is_restated_inside_the_dino_subtree():
     Two measured values are knowingly OUTSIDE the forbidden set, both because
     they cannot be removed from the subtree without losing something real:
 
-    * ``1518.6`` MiB (the shape-validation peak) lives inside an argparse
-      ``help=`` string in ``train_dino.py`` — an executable literal, not prose.
-    * The four zero-step control draws at ``--seed 42`` (the ``0.2754``-``0.2949``
-      k20 band) are stated ONCE in ``knn_eval.py``'s reading rules, where the
-      band WIDTH is the instruction a caller needs before quoting a delta, and
-      once historically in ``test_knn_eval.py``.
+    * The shape-validation peak MiB figure lives inside an argparse ``help=``
+      string in ``train_dino.py`` — an executable literal, not prose.
+    * The four zero-step control draws at ``--seed 42`` (the k20 band, group
+      (c) of ``_NOT_COVERED_TEN_THOUSANDTHS``) are stated ONCE in
+      ``knn_eval.py``'s reading rules, where the band WIDTH is the instruction
+      a caller needs before quoting a delta, and once historically in
+      ``test_knn_eval.py``.
 
     The k10 control triple is not forbidden either, for the opposite reason: it
     has no home in the record, so exactly one copy is kept in ``knn_eval.py``.
@@ -587,6 +611,20 @@ def test_no_headline_measurement_is_restated_inside_the_dino_subtree():
 
     # Anti-vacuity (ii): there is something to forbid.
     assert FORBIDDEN_LITERALS, "the forbidden-literal inventory is empty"
+
+    # (ii-b): the two inventories are DISJOINT. Every value is either forbidden
+    # or documented-as-restated, never both. This is the future mistake the
+    # SCOPE block warns about: widening the forbidden tuple to cover a § 6.2
+    # effect size makes the guard fire on the README rows it deliberately
+    # keeps, and this says so by name instead of as a confusing restatement
+    # report.
+    both = sorted(set(FORBIDDEN_LITERALS) & set(NOT_COVERED_RESTATED_LITERALS))
+    assert not both, (
+        f"{both} are in BOTH the forbidden inventory and the "
+        f"deliberately-not-covered inventory — decide which, and if the "
+        f"answer is 'forbidden', the restatement it names must be removed "
+        f"from the subtree in the same edit"
+    )
 
     # Anti-vacuity (iii): every forbidden literal still exists AT ITS HOME. If a
     # number is renamed or re-derived in the record, this fails loudly instead of
