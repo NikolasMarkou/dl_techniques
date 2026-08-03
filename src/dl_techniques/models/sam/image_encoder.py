@@ -295,6 +295,10 @@ class WindowedAttentionWithRelPos(layers.Layer):
         relative_coords = (q_coords - k_coords) + float(k_size - 1) * max(q_size / k_size, 1.0)
 
         # Gather the embeddings using the coordinates.
+        # `keras.ops.gather` does not exist on keras 3.8; `ops.take(..., axis=0)`
+        # is the row-gather. (Verified by execution, not assumed: an earlier
+        # comment here framed this as a keras.ops limitation in general, which
+        # misled a later reader into thinking row-gathering was unavailable.)
         return ops.take(rel_pos_resized, ops.cast(relative_coords, 'int32'), axis=0)
 
     def _add_decomposed_rel_pos(
