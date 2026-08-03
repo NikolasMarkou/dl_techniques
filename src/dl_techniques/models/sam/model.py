@@ -179,6 +179,12 @@ class SAM(keras.Model):
             Defaults to 0.0.
         image_format: String, expected color format of input images. Currently
             only 'RGB' is supported. Defaults to 'RGB'.
+        binarize_masks: Boolean, controls the `'masks'` output only. At `True`
+            (the default, and reference SAM's own contract) `'masks'` is the
+            thresholded `uint8` mask, which is **gradient-dead**. At `False`
+            `'masks'` carries the full-resolution float logits and is
+            differentiable. `'low_res_logits'` is unaffected and is the
+            training target in both cases. Defaults to True.
         **kwargs: Additional arguments for the Model base class.
 
     Input shape (in call):
@@ -195,10 +201,28 @@ class SAM(keras.Model):
 
     Output shape:
         Dictionary with the following keys:
-        - 'masks': Binary masks of shape (batch_size, num_masks, H, W)
+        - 'masks': Shape (batch_size, num_masks, H, W). Binary `uint8` masks at
+            the default `binarize_masks=True`; float logits at `False`.
         - 'iou_predictions': Quality scores of shape (batch_size, num_masks)
         - 'low_res_logits': Low-resolution mask logits of shape
             (batch_size, num_masks, H/4, W/4)
+
+    Training contract:
+        **`low_res_logits` is THE training target.** It is the only mask output
+        that is differentiable at every setting, and it is what reference SAM
+        supervises (upsampling to full resolution costs memory and buys no
+        signal). At the default `binarize_masks=True` the `'masks'` output is
+        cast to `uint8`, so differentiating it returns `None` for **every**
+        trainable variable -- a trainer that supervises `'masks'` trains
+        nothing and reports no error. Set `binarize_masks=False` if a
+        full-resolution differentiable mask is genuinely required.
+
+        Independently of that flag, this model's dict output **cannot be
+        trained with stock `compile()`/`fit()` on keras 3.8.0**: given a dict
+        `y_pred`, `CompileLoss.build` broadcasts one `Loss` across every leaf of
+        the structure and dies with a `KeyError`. A trainer therefore needs a
+        thin single-tensor wrapper model that returns `low_res_logits` alone.
+        No such wrapper ships in this package yet.
 
     Attributes:
         image_encoder: The ViT image encoder.
@@ -208,6 +232,7 @@ class SAM(keras.Model):
         pixel_std: Image normalization standard deviation.
         mask_threshold: Threshold for binary mask conversion.
         image_format: Expected image format.
+        binarize_masks: Whether the `'masks'` output is thresholded to `uint8`.
 
     Example:
         ```python
@@ -252,6 +277,7 @@ class SAM(keras.Model):
         pixel_std: List[float] = [58.395, 57.12, 57.375],
         mask_threshold: float = 0.0,
         image_format: str = "RGB",
+        binarize_masks: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -270,6 +296,7 @@ class SAM(keras.Model):
         self.mask_decoder = mask_decoder
         self.mask_threshold = mask_threshold
         self.image_format = image_format
+        self.binarize_masks = bool(binarize_masks)
 
         # Convert normalization parameters to tensors
         self.pixel_mean = ops.array(pixel_mean, dtype="float32")
@@ -367,9 +394,23 @@ class SAM(keras.Model):
 
         Returns:
             Dictionary containing:
-            - 'masks': Binary segmentation masks
-            - 'iou_predictions': Predicted IoU scores for each mask
-            - 'low_res_logits': Low-resolution mask logits
+            - 'masks': Full-resolution masks. At the default
+              `binarize_masks=True` these are thresholded `uint8` masks and are
+              **not differentiable** -- differentiating this key returns `None`
+              for every trainable variable. At `binarize_masks=False` they are
+              float logits and carry gradient.
+            - 'iou_predictions': Predicted IoU scores for each mask.
+            - 'low_res_logits': Low-resolution mask logits. **This is the
+              training target** -- it is differentiable at both settings of
+              `binarize_masks` and is the output reference SAM supervises.
+
+        Note:
+            This dict is an inference contract, not a `fit()` contract. On
+            keras 3.8.0 a dict `y_pred` cannot be trained with stock
+            `compile()`/`fit()`: `CompileLoss.build` broadcasts a single `Loss`
+            across every leaf of the structure and raises `KeyError`. A trainer
+            must wrap this model in a single-tensor model that emits
+            `low_res_logits` alone.
         """
         # Validate inputs
         if 'image' not in inputs:
@@ -413,8 +454,20 @@ class SAM(keras.Model):
             inputs["original_size"]
         )
 
-        # Convert to binary masks
-        masks = ops.cast(masks > self.mask_threshold, dtype='uint8')
+        # DECISION plan-2026-08-03T191222-1d751f81/D-011: the `uint8` cast is
+        # GRADIENT-DEAD -- differentiating `outputs['masks']` yields `None` for
+        # EVERY trainable variable, so a trainer supervising this key trains
+        # nothing and says nothing. It stays the DEFAULT because it is reference
+        # SAM's own output contract; `binarize_masks=False` is the escape hatch.
+        # Do NOT "simplify" this back to an unconditional cast, and do NOT
+        # instead add a fourth `masks_logits` output key: that widens a dict
+        # `y_pred` which already cannot be consumed by stock `compile()`/`fit()`
+        # on keras 3.8.0, and pays a full-resolution tensor on every forward.
+        # Flipping the default to float logits was also rejected (it breaks the
+        # pre-existing binary-mask assertions and diverges from reference SAM).
+        # `low_res_logits` is THE training target either way. See D-002.
+        if self.binarize_masks:
+            masks = ops.cast(masks > self.mask_threshold, dtype='uint8')
 
         return {
             "masks": masks,
@@ -645,6 +698,7 @@ class SAM(keras.Model):
             "pixel_std": self._pixel_std_list,
             "mask_threshold": self.mask_threshold,
             "image_format": self.image_format,
+            "binarize_masks": self.binarize_masks,
         })
         return config
 

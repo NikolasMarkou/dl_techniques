@@ -1254,3 +1254,204 @@ class TestHeadDepthAndActivationDefault:
             f"weight count moved across the round-trip: "
             f"{result['n_weights_before']} -> {result['n_weights_after']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Plan step 5 (F-2): the `masks` output contract and its gradient behaviour.
+#
+# `SAM.call` casts `masks` to uint8. An integer cast has no gradient, so
+# differentiating `outputs['masks']` returns None for EVERY trainable variable:
+# a trainer that supervises the headline output trains nothing and says nothing.
+# The repair is a serialized `binarize_masks` flag whose DEFAULT is byte-
+# identical to that behaviour (reference SAM thresholds too, and 68 tests assert
+# binary masks), with `False` returning the differentiable float logits.
+#
+# These counts are measured on THIS fixture (202 weights / 201 trainable) and
+# are pinned exactly, never as a bare `> 0` -- a `> 0` guard cannot tell a live
+# flag from a dead one.
+#
+# The 18 variables that never receive a gradient from a mask output are the
+# unused prompt-encoder weights (box / mask-prompt embeddings, which a
+# point-only prompt does not touch) plus the IoU head, which sits on a parallel
+# branch. `iou_predictions` symmetrically leaves 42 out.
+# ---------------------------------------------------------------------------
+#: (n_none, n_total) for `masks` at `binarize_masks=True` -- fully dead.
+GRAD_MASKS_BINARIZED = (201, 201)
+#: (n_none, n_total) for `masks` at `binarize_masks=False` -- as live as logits.
+GRAD_MASKS_FLOAT = (18, 201)
+#: (n_none, n_total) for `low_res_logits` -- identical at BOTH flag settings.
+GRAD_LOW_RES_LOGITS = (18, 201)
+
+
+def _build_seeded_sam(binarize_masks: bool) -> Tuple[SAM, Dict[str, Any]]:
+    """
+    Build, run and seed a reduced SAM at an explicit `binarize_masks` setting.
+
+    Args:
+        binarize_masks: Value forwarded to the :class:`SAM` constructor.
+
+    Returns:
+        ``(model, inputs)`` -- built and seeded, ready for a probe.
+    """
+    encoder_model = build_reduced_sam()
+    model = SAM(
+        image_encoder=encoder_model.image_encoder,
+        prompt_encoder=encoder_model.prompt_encoder,
+        mask_decoder=encoder_model.mask_decoder,
+        binarize_masks=binarize_masks,
+    )
+    inputs = sam_inputs()
+    model(inputs)
+    seed_nonzero_weights(model)
+    return model, inputs
+
+
+class TestOutputContract:
+    """F-2: `masks` is gradient-dead by default; `low_res_logits` is the target."""
+
+    def test_masks_are_gradient_dead_at_the_default(self, seeded_sam):
+        """
+        The DEFAULT contract, pinned as an exact pair.
+
+        This is not a regression guard for the fix -- it is the documented
+        property the fix deliberately PRESERVES (assumption A-6). It exists so
+        that a future "cleanup" flipping the default is caught here rather than
+        in a trainer that silently learns nothing.
+        """
+        model, inputs = seeded_sam
+        assert model.binarize_masks is True, (
+            "the module fixture is expected to use the shipped default"
+        )
+        assert gradient_none_counts(model, inputs, "masks") == (
+            GRAD_MASKS_BINARIZED
+        ), (
+            "the uint8 default no longer kills every gradient; the documented "
+            "training contract in SAM's docstring and README is now wrong"
+        )
+        assert gradient_none_counts(model, inputs, "low_res_logits") == (
+            GRAD_LOW_RES_LOGITS
+        ), (
+            "low_res_logits is documented as THE training target; its gradient "
+            "coverage moved"
+        )
+
+    def test_masks_carry_gradient_when_not_binarized(self):
+        """
+        The repair, pinned as an exact pair.
+
+        RED against BOTH failure shapes:
+          * flag absent entirely -> `SAM(binarize_masks=False)` raises;
+          * flag present in `__init__`/`get_config` but ignored by `call` (the
+            dead-knob shape this plan already found once, in `iou_head_depth`)
+            -> `masks` still reports (201, 201) and this assertion fires.
+        """
+        model, inputs = _build_seeded_sam(binarize_masks=False)
+        try:
+            assert gradient_none_counts(model, inputs, "masks") == (
+                GRAD_MASKS_FLOAT
+            ), (
+                "binarize_masks=False did not make `masks` differentiable -- "
+                "the flag is stored but `call` ignores it (a dead knob)"
+            )
+            # The escape hatch must not cost the documented target anything.
+            assert gradient_none_counts(model, inputs, "low_res_logits") == (
+                GRAD_LOW_RES_LOGITS
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_binarize_masks_false_returns_float_logits_not_a_uint8_mask(self):
+        """
+        Dtype and value-range discriminator for the same dead-knob shape.
+
+        A dead flag returns uint8 zeros and ones here. Both assertions below
+        fire on that, independently of the gradient probe -- an all-0/1 float
+        tensor would still be suspicious, so the dtype check is the primary.
+        """
+        model, inputs = _build_seeded_sam(binarize_masks=False)
+        try:
+            masks = model(inputs)["masks"]
+            assert keras.backend.standardize_dtype(masks.dtype) == "float32", (
+                f"binarize_masks=False still returned "
+                f"{keras.backend.standardize_dtype(masks.dtype)} masks"
+            )
+            values = keras.ops.convert_to_numpy(masks)
+            assert not np.all(np.isin(values, (0.0, 1.0))), (
+                "binarize_masks=False returned a thresholded 0/1 tensor; the "
+                "flag reached the dtype but not the threshold"
+            )
+            assert np.all(np.isfinite(values))
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_default_masks_are_exactly_the_thresholded_logits(self):
+        """
+        Assumption A-6, on ONE model so the weights are identical by construction.
+
+        The pre-change code was an unconditional
+        ``ops.cast(masks > self.mask_threshold, 'uint8')``. This asserts the
+        default path still produces exactly that, bit for bit, from the same
+        weights and the same input -- so no pre-existing binary-mask assertion
+        can have moved. Comparing two SEPARATELY constructed models would prove
+        nothing: `seed_nonzero_weights` offsets each model's own random init, so
+        their weights differ.
+        """
+        model, inputs = _build_seeded_sam(binarize_masks=True)
+        try:
+            binarized = keras.ops.convert_to_numpy(model(inputs)["masks"])
+            assert binarized.dtype == np.uint8, (
+                f"the default no longer emits uint8 masks: {binarized.dtype}"
+            )
+
+            model.binarize_masks = False
+            logits = keras.ops.convert_to_numpy(model(inputs)["masks"])
+            expected = (logits > model.mask_threshold).astype(np.uint8)
+
+            assert np.array_equal(binarized, expected), (
+                f"the default masks output is no longer the thresholded "
+                f"full-resolution logits: {int((binarized != expected).sum())} "
+                f"of {binarized.size} pixels differ"
+            )
+            # Guard the guard: a degenerate all-zero or all-one mask would make
+            # the comparison above nearly free.
+            fraction = float(binarized.mean())
+            assert 0.01 < fraction < 0.99, (
+                f"the fixture's masks are degenerate ({fraction:.3f} ones), so "
+                f"this equality proves little"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    @pytest.mark.parametrize("binarize", [True, False])
+    def test_binarize_masks_round_trips_through_config(self, binarize: bool):
+        """`get_config`/`from_config` preserve the flag at BOTH values."""
+        model = build_reduced_sam()
+        model = SAM(
+            image_encoder=model.image_encoder,
+            prompt_encoder=model.prompt_encoder,
+            mask_decoder=model.mask_decoder,
+            binarize_masks=binarize,
+        )
+        try:
+            config = model.get_config()
+            assert "binarize_masks" in config, (
+                "binarize_masks is not serialized; a saved model would silently "
+                "come back with the gradient-dead default"
+            )
+            assert config["binarize_masks"] is binarize
+
+            restored = SAM.from_config(config)
+            assert restored.binarize_masks is binarize, (
+                f"binarize_masks did not survive from_config: "
+                f"{restored.binarize_masks} != {binarize}"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()

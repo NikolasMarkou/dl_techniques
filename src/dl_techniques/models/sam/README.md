@@ -304,14 +304,16 @@ Mask Logits (B, 3, 256, 256)
     ├─► Upsample to 1024x1024
     ├─► Remove padding (crop to input size)
     ├─► Scale to original image size
-    └─► Threshold at 0.0
-            └─► Binary Masks (B, 3, H_orig, W_orig)
+    └─► Threshold at 0.0   (only when binarize_masks=True, the default)
+            └─► Binary Masks (B, 3, H_orig, W_orig), uint8, NO gradient
 
 Final Outputs:
-  ├─► masks: (B, 3, H_orig, W_orig)
+  ├─► masks: (B, 3, H_orig, W_orig)     uint8 + gradient-dead by default
   ├─► iou_predictions: (B, 3)
-  └─► low_res_logits: (B, 3, 256, 256)
+  └─► low_res_logits: (B, 3, 256, 256)  <- THE training target
 ```
+
+See "Output contract: `low_res_logits` is THE training target" in section 6.
 
 ### Key Design Decisions Explained
 
@@ -940,6 +942,7 @@ model = SAM(
     pixel_std=[58.395, 57.12, 57.375],       # ImageNet std
     mask_threshold=0.0,                       # Binary threshold
     image_format='RGB',
+    binarize_masks=True,                      # See "Output contract" below
 )
 
 # Full inference
@@ -957,6 +960,37 @@ masks = outputs['masks']              # (B, 3, H, W) - upscaled to original
 iou = outputs['iou_predictions']      # (B, 3)
 logits = outputs['low_res_logits']    # (B, 3, 256, 256)
 ```
+
+### Output contract: `low_res_logits` is THE training target
+
+`outputs['masks']` is, by default, a **thresholded `uint8` tensor**. A cast to an
+integer dtype has no gradient, so differentiating that key returns `None` for
+**every** trainable variable. A trainer that supervises `outputs['masks']`
+therefore trains nothing, silently — no error, no warning, a loss that simply
+never moves the weights.
+
+| Output key | dtype at `binarize_masks=True` (default) | Differentiable | Use it for |
+|---|---|---|---|
+| `masks` | `uint8`, 0/1 | **No** — 0 of N variables receive a gradient | Visualization, evaluation, export |
+| `iou_predictions` | float | Yes | Mask-quality supervision |
+| `low_res_logits` | float, `(B, N, 256, 256)` | Yes | **Training** |
+
+Set `binarize_masks=False` to make `masks` carry the full-resolution float
+logits instead; it is then differentiable, and the default `True` remains
+byte-identical to reference SAM's own thresholded output contract. Either way,
+`low_res_logits` is what you supervise: it is the resolution reference SAM
+computes its loss at, and upsampling to full resolution costs memory without
+adding signal.
+
+**Standing constraint — a dict output cannot be trained with stock `fit()`.**
+On keras 3.8.0, passing a dict `y_pred` to `compile()`/`fit()` makes
+`CompileLoss.build` broadcast a single `Loss` across every leaf of the output
+structure, which then dies with a `KeyError`. This is independent of
+`binarize_masks`. Training SAM requires a thin **single-tensor wrapper model**
+that returns `low_res_logits` alone (and, if mask-quality supervision is wanted,
+a second output rather than a nested dict). No such wrapper ships in this
+package yet, and the training snippets further down this README are illustrative
+of the loss, not runnable end-to-end pipelines.
 
 ---
 
