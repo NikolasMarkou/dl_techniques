@@ -12,6 +12,9 @@ which is about the PACKAGE rather than any one model version:
 4. ``input_shape`` is refused by all three factories.
 5. Every path and every import ``src/dl_techniques/models/dino/README.md`` names
    resolves on disk / imports cleanly.
+6. No headline measurement endpoint from ``research/2026_dino_ssl_measurements.md``
+   is restated anywhere in the DINO subtree (added by
+   plan-2026-08-03T043010-cecf4357 step 8).
 
 Each guard was RED-proven by injecting the corresponding dead component; the
 injected component and the assertion that fired are recorded in the plan's
@@ -460,3 +463,126 @@ def test_readme_symbols_named_in_import_blocks_resolve():
             )
             checked += 1
     assert checked >= 5, f"only {checked} README symbols checked — extractor broken"
+
+
+# ---------------------------------------------------------------------
+# 6. The measurement-restatement guard
+# ---------------------------------------------------------------------
+#
+# Stored as integer ten-thousandths and formatted at import time, so THIS FILE
+# does not itself contain the literals it forbids. The alternative — scanning
+# every file and then exempting the scanner's own source — is a per-file
+# exemption, and a per-file exemption list is precisely the shape this guard
+# must not grow (it would make it a value-agreement checker in disguise).
+_FORBIDDEN_TEN_THOUSANDTHS = (
+    # section 1 endpoints (mean of last 3 evaluated epochs), improved / baseline
+    4326, 4661, 3363, 3285,
+    # section 1 deltas vs each arm's own zero-step control, k20
+    1426, 1693, 462, 316,
+    # the descriptive (NOT pre-registered) arm-to-arm differences
+    964, 1377,
+    # the secondary k10 endpoint's four deltas
+    1364, 1517, 488, 296,
+    # the `--seed 1337` zero-step control
+    2969,
+)
+FORBIDDEN_LITERALS = tuple(f"0.{v:04d}" for v in _FORBIDDEN_TEN_THOUSANDTHS)
+
+MEASUREMENT_RECORD = REPO_ROOT / "research" / "2026_dino_ssl_measurements.md"
+
+# The DINO subtree. The record itself (the single home) and
+# `research/dino_ssl_measurements_evidence/` (the raw per-epoch records, which
+# are the source data rather than a citation of it) are deliberately outside it.
+RESTATEMENT_SCAN_DIRS = (
+    REPO_ROOT / "src" / "dl_techniques" / "models" / "dino",
+    REPO_ROOT / "src" / "train" / "dino",
+    REPO_ROOT / "tests" / "test_train" / "test_dino",
+    REPO_ROOT / "tests" / "test_models" / "test_dino",
+)
+# Derived by enumerating the four directories at write time: 7 + 3 + 2 + 7.
+MIN_SCANNED_FILES = 19
+_SCANNED_SUFFIXES = {".py", ".md", ".json", ".txt", ".csv", ".yaml", ".yml"}
+
+
+def _restatement_scan_files():
+    files = []
+    for root in RESTATEMENT_SCAN_DIRS:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            if path.suffix in _SCANNED_SUFFIXES:
+                files.append(path)
+    return files
+
+
+def test_no_headline_measurement_is_restated_inside_the_dino_subtree():
+    """A headline measurement endpoint has exactly ONE home:
+    ``research/2026_dino_ssl_measurements.md``. Four separate drift escapes were
+    caused by a second copy of a number going stale, so this forbids the copy
+    rather than trying to agree with it.
+
+    This is a FORBID-RESTATEMENT check, not a value-agreement check. It never
+    asserts that two numbers are equal — only that a measurement endpoint does
+    not appear at all outside its home. Absence of a literal is a far weaker and
+    more stable claim than text equality (this house has already retired one
+    ``inspect.getsource`` text-diff guard for asserting on TEXT, not behaviour),
+    and it needs no per-home regex: the homes state their numbers in different
+    textual forms, so a value checker would need one parser per site.
+
+    MEASUREMENT ENDPOINTS ONLY. Configuration values are deliberately NOT
+    forbidden — ``295`` steps/epoch, ``0.04`` teacher temp, ``1.0`` warmup
+    epochs, bank ``64`` / query ``32``, ``60`` epochs are inputs, they legitimately
+    appear in code, ``--help`` strings and tests, and forbidding them would make
+    this a lint against the source rather than against restated results.
+
+    Two measured values are knowingly OUTSIDE the forbidden set, both because
+    they cannot be removed from the subtree without losing something real:
+
+    * ``1518.6`` MiB (the shape-validation peak) lives inside an argparse
+      ``help=`` string in ``train_dino.py`` — an executable literal, not prose.
+    * The four zero-step control draws at ``--seed 42`` (the ``0.2754``-``0.2949``
+      k20 band) are stated ONCE in ``knn_eval.py``'s reading rules, where the
+      band WIDTH is the instruction a caller needs before quoting a delta, and
+      once historically in ``test_knn_eval.py``.
+
+    The k10 control triple is not forbidden either, for the opposite reason: it
+    has no home in the record, so exactly one copy is kept in ``knn_eval.py``.
+    Deleting data to satisfy an instrument is the inverse of the point.
+    """
+    files = _restatement_scan_files()
+
+    # Anti-vacuity (i): the scan actually reached the subtree.
+    assert len(files) >= MIN_SCANNED_FILES, (
+        f"restatement scan opened only {len(files)} files, expected at least "
+        f"{MIN_SCANNED_FILES} — a directory moved or the walk stopped matching, "
+        f"and a guard that scans nothing passes forever"
+    )
+
+    # Anti-vacuity (ii): there is something to forbid.
+    assert FORBIDDEN_LITERALS, "the forbidden-literal inventory is empty"
+
+    # Anti-vacuity (iii): every forbidden literal still exists AT ITS HOME. If a
+    # number is renamed or re-derived in the record, this fails loudly instead of
+    # leaving the guard watching for a string that can no longer appear anywhere.
+    record = MEASUREMENT_RECORD.read_text(encoding="utf-8")
+    homeless = [lit for lit in FORBIDDEN_LITERALS if lit not in record]
+    assert not homeless, (
+        f"{homeless} are forbidden everywhere but no longer appear in "
+        f"{MEASUREMENT_RECORD.name} — the inventory has drifted from the home it "
+        f"protects and must be re-derived from section 1"
+    )
+
+    restatements = []
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lit in FORBIDDEN_LITERALS:
+            if lit in text:
+                restatements.append(f"{path.relative_to(REPO_ROOT)}: {lit}")
+
+    assert not restatements, (
+        "a headline measurement endpoint is restated outside "
+        f"{MEASUREMENT_RECORD.name}:\n  " + "\n  ".join(restatements) + "\n"
+        "Cite the record instead of copying the number. If the value genuinely "
+        "cannot leave the code, it is not a citation and belongs in the "
+        "documented exception list in this test's docstring."
+    )
