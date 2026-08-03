@@ -395,6 +395,39 @@ class TestSmokePreset:
                 f"either spelling, or --smoke would override a field the caller typed."
             )
 
+    def test_an_unambiguous_abbreviation_counts_as_typed(self) -> None:
+        """`--smoke --ema-warmup-ep 1.5`, where the flag is ABBREVIATED.
+
+        argparse accepts any unambiguous PREFIX of a long option by default
+        (`parser.allow_abbrev` is True), so `--ema-warmup-ep` parses as
+        `--ema-warmup-epochs` and `args.ema_warmup_epochs` really is 1.5. The first
+        version of the provenance scan tested `token in dest_by_opt` — literal
+        membership — which a prefix never satisfies, so `--smoke` overrode a flag the
+        caller had actually typed, at a NON-default value. That was strictly worse than
+        the value-comparison code it replaced: the old code kept 1.5 because 1.5 differs
+        from the 1.0 default, and this one did not. Regression, not an inherited hole.
+
+        1.5 (not 1.0) is deliberate: at the default the abbreviated and non-abbreviated
+        paths agree for the wrong reason. 442 == int(1.5 * 295), derived by execution,
+        not copied from a review.
+
+        The fix lives in `explicitly_set_flags` (`train.common.args`), which now
+        resolves a token the way argparse does — exact match first, then a prefix
+        matching exactly one registered long option, and only when the parser's own
+        `allow_abbrev` permits it.
+        """
+        config = trainer.config_from_args(
+            trainer.parse_arguments(["--smoke", "--ema-warmup-ep", "1.5"]))
+        assert config.ema_warmup_epochs == 1.5, (
+            "--smoke overrode an EXPLICITLY TYPED (but abbreviated) --ema-warmup-ep "
+            "1.5. argparse resolved the abbreviation and parsed 1.5; the provenance "
+            "scan did not, so the preset could not see a flag the caller typed."
+        )
+        assert trainer.resolve_ema_warmup_steps(config, steps_per_epoch=295) == 442, (
+            "the abbreviated --ema-warmup-ep 1.5 did not reach the resolver as 1.5 "
+            "(1.5 * 295 == 442 steps)"
+        )
+
     def test_smoke_still_means_no_teacher_ema_freeze(self) -> None:
         """`--smoke` must resolve to ZERO warmup, as it always has.
 

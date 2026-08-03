@@ -2,7 +2,11 @@
 
 Defaults track the BDD100K **full-spec** sanity build. Use ``--smoke`` for
 fast CPU/iteration runs (synthetic dataset, tiny dims). User-provided
-flags always win over ``--smoke`` overrides.
+flags always win over ``--smoke`` overrides: a flag counts as user-provided if
+it was TYPED, at any value (including the flag's own default, and including an
+unambiguous argparse abbreviation), because provenance comes from a raw
+``sys.argv`` scan -- :func:`train.common.args.explicitly_set_flags`, the shared
+home this script now imports rather than defining its own copy.
 
 Usage:
 

@@ -51,7 +51,9 @@ three more warmup pins; :data:`SMOKE_OVERRIDES` below is the authoritative list.
 own parser default.** Provenance comes from a raw ``sys.argv`` scan
 (:func:`train.common.args.explicitly_set_flags`, threaded onto the parsed Namespace by
 :func:`parse_arguments`), NOT from comparing the parsed value against the default, so an
-explicitly-passed default is no longer indistinguishable from an omission. MEASURED at
+explicitly-passed default is no longer indistinguishable from an omission. The scan
+resolves a token the way argparse itself does, so an unambiguous ABBREVIATION
+(``--ema-warmup-ep``) counts as typed exactly like the full spelling. MEASURED at
 imagenette/batch 32 (``steps_per_epoch=295``): ``--smoke --ema-warmup-epochs 1.0``
 resolves to ``warmup_steps=295``, ``--ema-warmup-epochs 1.5`` gives 442, and
 ``--ema-warmup-steps 295`` gives 295. **To pin a value the preset also pins, just pass
@@ -170,8 +172,13 @@ Usage::
     # parse_arguments -> config_from_args -> resolve_ema_warmup_steps and diffed
     # FIELD-BY-FIELD against the four TRACKED configs under
     # `research/dino_ssl_measurements_evidence/` (RE-DERIVED by execution after this
-    # file's argument plumbing changed). Every measurement-bearing field is equal on
-    # all four arms; exactly three are not, none of them measurement-bearing:
+    # file's argument plumbing changed), EACH ARM LINE AGAINST ITS OWN SEED'S RECORD:
+    # as printed below they carry `--seed 42` and diff against the two `_s42` configs;
+    # substitute `--seed 1337` to diff against the two `_s1337` configs. Without that
+    # substitution `seed` is a FOURTH difference, and it IS measurement-bearing -- the
+    # two seeds are different runs, not two readings of one.
+    # Every measurement-bearing field is equal on all four arms; exactly three are
+    # not, none of them measurement-bearing:
     #   * `output_dir` / `experiment_name` -- deliberately left at their defaults
     #     here, because passing the values the recorded config.json carries would
     #     OVERWRITE the surviving artifacts of that run. Add them only if you

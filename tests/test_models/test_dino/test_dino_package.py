@@ -474,6 +474,9 @@ def test_readme_symbols_named_in_import_blocks_resolve():
 # every file and then exempting the scanner's own source — is a per-file
 # exemption, and a per-file exemption list is precisely the shape this guard
 # must not grow (it would make it a value-agreement checker in disguise).
+# Consequence, for whoever is tempted to widen this tuple: THIS FILE is inside
+# the scan set and its docstring below names the § 6.2 effect sizes verbatim, so
+# adding any of them here makes the guard fire on its own source.
 _FORBIDDEN_TEN_THOUSANDTHS = (
     # section 1 endpoints (mean of last 3 evaluated epochs), improved / baseline
     4326, 4661, 3363, 3285,
@@ -516,10 +519,34 @@ def _restatement_scan_files():
 
 
 def test_no_headline_measurement_is_restated_inside_the_dino_subtree():
-    """A headline measurement endpoint has exactly ONE home:
+    """A section-1 HEADLINE measurement endpoint has exactly ONE home:
     ``research/2026_dino_ssl_measurements.md``. Four separate drift escapes were
     caused by a second copy of a number going stale, so this forbids the copy
     rather than trying to agree with it.
+
+    SCOPE, stated exactly, because the claim above is narrower than "no measured
+    number is ever restated in this repo" and must not be read as that:
+
+    * COVERED: the 15 literals in ``FORBIDDEN_LITERALS`` — section 1's per-arm
+      endpoints, its deltas-vs-own-control, the descriptive arm-to-arm
+      differences, the k10 endpoint deltas, and the ``--seed 1337`` control.
+    * NOT COVERED: the record's OTHER measured values. MEASURED by scanning
+      every ``0.\\d{4,}`` literal in the record against these four directories:
+      **16 distinct record values are restated here and are deliberately not
+      forbidden** — the eleven § 6.2 per-flag effect sizes in the README
+      (``0.0000``, ``0.0020``, ``0.0024``, ``0.0028``, ``0.0063``, ``0.0371``,
+      ``0.0387``, ``0.0400``, ``0.0498``, ``0.0518``, ``0.0625``, four of which
+      are also quoted in ``train_dino.py``), the control-band WIDTH ``0.0195``,
+      and the four band draws listed as exceptions below. The § 6.2 sizes are
+      kept ON PURPOSE: each sits inside one long markdown table row, so
+      forbidding them would delete almost no lines while destroying the
+      MEASURED / NO-DIFFERENCE / UNMEASURED reference a reader ACTS on, and
+      exempting them file-by-file would grow the per-file exception list this
+      guard must not have. Their drift risk is real and unguarded.
+    * NOT COVERED, geographically: only ``RESTATEMENT_SCAN_DIRS`` (four
+      directories) is walked. ``src/train/common/``, ``tests/test_losses/``,
+      ``tests/test_datasets/`` and the rest of ``research/`` are NOT scanned, so
+      a restatement landing there is invisible to this test.
 
     This is a FORBID-RESTATEMENT check, not a value-agreement check. It never
     asserts that two numbers are equal — only that a measurement endpoint does

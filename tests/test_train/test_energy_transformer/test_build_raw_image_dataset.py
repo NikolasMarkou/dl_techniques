@@ -498,7 +498,11 @@ class TestTheImagenetteBranchWhereTheSeedIsLive:
     Cost control, so this stays a unit test: `image_size=32`, `batch_size=4`,
     `.take(2)`, and an explicit `shuffle_buffer` of 32 (the 4096 default would
     decode 4096 full-size JPEGs per build). CPU only, no model, no `fit()`.
-    MEASURED at 16 builds: ~2 s total.
+    MEASURED at 16 builds: a few seconds of `call` time — 3.0 s to 5.0 s across
+    six timed runs on this machine, varying with page cache and with what else
+    the module already ran. A single figure would be false precision; the number
+    that matters is that it is an order of magnitude under D-006's 60 s STOP, so
+    treat this as a ceiling check, not a pin to regress against.
     """
 
     # Two `.take()` batches of `BATCH_SIZE`; small on purpose (see class doc).

@@ -30,10 +30,35 @@ def explicitly_set_flags(
     either spelling counts as an explicit mention of that dest. The
     ``--flag=value`` equals form is handled by splitting on the first ``=``.
 
+    **What the scan DOES see** (each verified by test):
+    ``--flag value``; ``--flag=value``; both ``BooleanOptionalAction``
+    spellings; and — when the parser allows abbreviation, which is argparse's
+    default — an UNAMBIGUOUS long-option PREFIX such as ``--ema-warmup-ep`` for
+    ``--ema-warmup-epochs``, resolved the way argparse itself resolves it
+    (exact match first, then a prefix matching exactly one registered long
+    option).
+
+    **What the scan does NOT see**, deliberately:
+
+    * Tokens after a bare ``--`` separator. argparse treats those as
+      positionals, so a positional whose text happens to equal an option
+      string must NOT be reported as an explicit flag. Scanning stops there.
+    * An AMBIGUOUS prefix (matching two or more registered long options).
+      argparse rejects such a token with "ambiguous option", so it cannot
+      appear in an argv that parsed successfully; it is reported as not-typed
+      rather than guessed.
+    * Abbreviations of SINGLE-dash options (``-xy``). argparse resolves those
+      through a different code path (short-option/explicit-arg splitting);
+      no trainer using this helper registers a single-dash option.
+    * A VALUE that happens to spell a registered option (``--name --smoke``).
+      Distinguishing that needs the parser's nargs/type machinery, which this
+      token scan deliberately does not reimplement.
+
     Args:
         parser: The fully-populated parser whose actions define the recognised
             option strings. Pass it BEFORE or AFTER ``parse_args``; only the
-            registered actions are read, never the parse result.
+            registered actions and ``parser.allow_abbrev`` are read, never the
+            parse result.
         argv: Token list to scan, WITHOUT the program name (the same list shape
             ``parse_args`` accepts). ``None`` reads ``sys.argv[1:]``, which is
             what a production entry point wants; tests pass an explicit list.
@@ -43,18 +68,36 @@ def explicitly_set_flags(
         not flag spellings — so a caller can test membership against dataclass
         field names via its own rename map.
     """
+    # DECISION plan-2026-08-03T043010-cecf4357/D-016
+    # Resolve each token the way argparse resolves it, INCLUDING unambiguous
+    # long-option prefixes. Do NOT go back to a plain `token in dest_by_opt`
+    # membership test: argparse accepts `--ema-warmup-ep 1.5` as
+    # `--ema-warmup-epochs`, so a literal-only scan reports "not typed" for a
+    # flag the caller really typed and a `--smoke`-style preset then silently
+    # overrides it. Do NOT "fix" it instead by building the parser with
+    # allow_abbrev=False — that removes an abbreviation users can already use.
+    # `allow_abbrev` is READ, not assumed: with abbreviation off, a prefix is
+    # an argparse ERROR, so it must not count as explicit. See decisions.md
+    # D-016 for the reproduction of the regression this repairs.
     dest_by_opt = {}
     for action in parser._actions:
         for opt in action.option_strings:
             dest_by_opt[opt] = action.dest
 
     tokens = sys.argv[1:] if argv is None else list(argv)
+    allow_abbrev = getattr(parser, "allow_abbrev", True)
 
     explicit: Set[str] = set()
     for token in tokens:
+        if token == "--":
+            break
         key = token.split("=", 1)[0]
         if key in dest_by_opt:
             explicit.add(dest_by_opt[key])
+        elif allow_abbrev and key.startswith("--") and len(key) > 2:
+            matches = [opt for opt in dest_by_opt if opt.startswith(key)]
+            if len(matches) == 1:
+                explicit.add(dest_by_opt[matches[0]])
     return explicit
 
 
