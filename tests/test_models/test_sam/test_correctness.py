@@ -485,3 +485,188 @@ class TestInstrumentSelfProofs:
         model, inputs = seeded_sam
         with pytest.raises(KeyError, match="not_an_output"):
             gradient_none_counts(model, inputs, "not_an_output")
+
+
+# ---------------------------------------------------------------------------
+# F-3: the `_get_rel_pos` interpolation branch
+# ---------------------------------------------------------------------------
+#: Geometry that forces the interpolation branch. ``rel_pos`` is built at
+#: ``2 * REL_POS_TABLE_SIZE - 1 = 15`` rows, while a forward pass at
+#: ``REL_POS_QUERY_SIZE`` needs ``2 * 6 - 1 = 11`` -- so the branch runs.
+REL_POS_DIM = 16
+REL_POS_HEADS = 2
+REL_POS_HEAD_DIM = REL_POS_DIM // REL_POS_HEADS  # 8
+REL_POS_TABLE_SIZE = 8
+REL_POS_QUERY_SIZE = 6
+REL_POS_STORED_LEN = 2 * REL_POS_TABLE_SIZE - 1  # 15
+REL_POS_TARGET_LEN = 2 * REL_POS_QUERY_SIZE - 1  # 11
+
+
+def build_mismatched_rel_pos_attention() -> WindowedAttentionWithRelPos:
+    """
+    Build an attention layer whose ``input_size`` != its forward query size.
+
+    This mismatch is the ONLY way to reach ``_get_rel_pos``'s interpolation
+    branch: in-package every construction site passes ``input_size`` equal to
+    the query grid, which is why the branch had zero prior execution.
+
+    Returns:
+        A BUILT :class:`WindowedAttentionWithRelPos` with seeded non-zero
+        weights (``rel_pos_h`` / ``rel_pos_w`` are zero-initialized, which would
+        make the whole path numerically inert -- carried surprise #1).
+    """
+    layer = WindowedAttentionWithRelPos(
+        dim=REL_POS_DIM,
+        num_heads=REL_POS_HEADS,
+        use_rel_pos=True,
+        input_size=(REL_POS_TABLE_SIZE, REL_POS_TABLE_SIZE),
+    )
+    layer.build((1, REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, REL_POS_DIM))
+    seed_nonzero_weights(layer)
+    return layer
+
+
+class TestRelPosInterpolationBranch:
+    """F-3 -- `_get_rel_pos` must interpolate the DISTANCE axis and not raise."""
+
+    def test_rel_pos_interpolation_branch_runs_and_is_finite(self):
+        """
+        A forward pass at ``input_size != q_size`` must complete.
+
+        RED before the fix (measured, commit 90d352f9):
+            ``ValueError: Cannot squeeze axis=0, because the dimension is not 1.``
+            raised from ``image_encoder.py:273`` -- the 3-D ``(1, C, L)`` tensor
+            is read by ``ops.image.resize`` as unbatched ``(h=1, w=C, c=L)``.
+        """
+        layer = build_mismatched_rel_pos_attention()
+        assert tuple(layer.rel_pos_h.shape) == (
+            REL_POS_STORED_LEN,
+            REL_POS_HEAD_DIM,
+        ), "fixture no longer creates a table that needs interpolation"
+        assert REL_POS_STORED_LEN != REL_POS_TARGET_LEN, (
+            "geometry no longer reaches the interpolation branch"
+        )
+
+        x = keras.ops.convert_to_tensor(
+            np.random.RandomState(0)
+            .normal(0.0, 1.0, (1, REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, REL_POS_DIM))
+            .astype("float32")
+        )
+        y = keras.ops.convert_to_numpy(layer(x))
+
+        assert y.shape == (1, REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, REL_POS_DIM), (
+            f"interpolation branch produced {y.shape}, expected the input shape"
+        )
+        assert np.all(np.isfinite(y)), "interpolated rel-pos produced non-finite output"
+
+        del layer
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_rel_pos_interpolation_is_observable(self):
+        """
+        The interpolated bias must actually change the attention output.
+
+        Without this, the branch could "work" by silently contributing zeros --
+        which is precisely what an UNSEEDED fixture would report, since
+        ``rel_pos_h``/``rel_pos_w`` are zero-initialized.
+        """
+        layer = build_mismatched_rel_pos_attention()
+        x = keras.ops.convert_to_tensor(
+            np.random.RandomState(1)
+            .normal(0.0, 1.0, (1, REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, REL_POS_DIM))
+            .astype("float32")
+        )
+        with_bias = keras.ops.convert_to_numpy(layer(x))
+
+        layer.rel_pos_h.assign(np.zeros(layer.rel_pos_h.shape, dtype="float32"))
+        layer.rel_pos_w.assign(np.zeros(layer.rel_pos_w.shape, dtype="float32"))
+        without_bias = keras.ops.convert_to_numpy(layer(x))
+
+        assert float(np.max(np.abs(with_bias - without_bias))) > 0.0, (
+            "zeroing rel_pos_h/rel_pos_w did not change the output -- the "
+            "interpolated relative-position bias is inert and this guard would "
+            "pass with the feature broken"
+        )
+
+        del layer
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_rel_pos_interpolation_axis_mapping(self):
+        """
+        Prove WHICH axis is interpolated: distance resampled, channels intact.
+
+        The correct mapping is an unverified hypothesis until measured, so both
+        halves are asserted directly on ``_get_rel_pos``:
+
+        * a ramp along the DISTANCE axis stays strictly monotone after resizing
+          and stays identical across channels;
+        * a table that is CONSTANT along distance but distinct per channel comes
+          back bit-identical -- no channel is blended into another.
+
+        The pre-fix implementation resized the channel axis instead, so this
+        assertion is unreachable there (it raised first).
+        """
+        layer = build_mismatched_rel_pos_attention()
+        n_c = REL_POS_HEAD_DIM
+
+        # (a) ramp along distance, identical across channels
+        ramp = np.tile(
+            np.arange(REL_POS_STORED_LEN, dtype="float32")[:, None], (1, n_c)
+        )
+        layer.rel_pos_h.assign(ramp)
+        out = keras.ops.convert_to_numpy(
+            layer._get_rel_pos(
+                REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, layer.rel_pos_h
+            )
+        )
+        assert out.shape == (REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, n_c), (
+            f"_get_rel_pos returned {out.shape}, expected "
+            f"(q, k, head_dim) = ({REL_POS_QUERY_SIZE}, {REL_POS_QUERY_SIZE}, {n_c})"
+        )
+        # Re-derive the resampled distance table from the gathered result: row
+        # i, col j gathers resized row (i - j + k_size - 1), so the anti-diagonal
+        # walk out[i, 0] for increasing i walks the table in increasing distance.
+        distance_walk = out[:, 0, 0]
+        assert np.all(np.diff(distance_walk) > 0), (
+            f"distance axis is not monotone after interpolation: {distance_walk}"
+        )
+        channel_spread = float(np.max(out.max(axis=-1) - out.min(axis=-1)))
+        assert channel_spread == 0.0, (
+            f"a channel-identical ramp came back channel-dependent (spread "
+            f"{channel_spread}) -- the resize touched the wrong axis"
+        )
+
+        # (b) constant along distance, distinct per channel -> untouched
+        per_channel = np.arange(1.0, n_c + 1.0, dtype="float32")
+        layer.rel_pos_h.assign(np.tile(per_channel[None, :], (REL_POS_STORED_LEN, 1)))
+        out_const = keras.ops.convert_to_numpy(
+            layer._get_rel_pos(
+                REL_POS_QUERY_SIZE, REL_POS_QUERY_SIZE, layer.rel_pos_h
+            )
+        )
+        assert float(np.max(np.abs(out_const - per_channel))) == 0.0, (
+            "a per-channel constant table was altered by the distance-axis "
+            "interpolation -- channels are being blended"
+        )
+
+        del layer
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_ghost_gather_decision_comment_is_gone(self):
+        """
+        SC-4 -- the stale `keras.ops has no gather` anchor must not be reinstated.
+
+        It documented a resolved framework triviality as if it were a live
+        blocker on the very function this step repairs.
+        """
+        import dl_techniques.models.sam.image_encoder as image_encoder_module
+
+        with open(image_encoder_module.__file__, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        assert "has no `gather`" not in source, (
+            "the ghost `# DECISION plan_2026-06-15_e6a0391c/D-004` gather "
+            "comment is back in image_encoder.py"
+        )

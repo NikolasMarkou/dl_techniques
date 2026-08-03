@@ -265,12 +265,24 @@ class WindowedAttentionWithRelPos(layers.Layer):
         max_rel_dist = 2 * max(q_size, k_size) - 1
         # Interpolate relative positional embeddings if needed.
         if ops.shape(rel_pos)[0] != max_rel_dist:
+            # DECISION plan-2026-08-03T191222-1d751f81/D-007: `rel_pos` is
+            # `(L, C)` = (relative-distance positions, head channels) and ONLY
+            # the distance axis may be interpolated. Reshape to a 4-D BATCHED
+            # image `(1, 1, L, C)` so `ops.image.resize` maps L -> width and C
+            # -> channels, then resize the width axis alone with `size=(1, D)`.
+            # Do NOT feed a 3-D `(1, C, L)` tensor here: `ops.image.resize`
+            # reads a 3-D input as UNBATCHED `(h, w, c)`, so `(1, C, L)` is
+            # read as h=1/w=C/c=L, it resizes the CHANNEL table instead of the
+            # distance table, and the following squeeze raises
+            # ValueError("Cannot squeeze axis=0, because the dimension is not
+            # 1."). See decisions.md D-007.
+            shape = ops.shape(rel_pos)
             rel_pos_resized = ops.image.resize(
-                ops.transpose(ops.expand_dims(rel_pos, axis=0), (0, 2, 1)),
-                size=(ops.shape(rel_pos)[1], max_rel_dist),
+                ops.reshape(rel_pos, (1, 1, shape[0], shape[1])),
+                size=(1, max_rel_dist),
                 interpolation='bilinear'
             )
-            rel_pos_resized = ops.squeeze(ops.transpose(rel_pos_resized, (0, 2, 1)), axis=0)
+            rel_pos_resized = ops.reshape(rel_pos_resized, (max_rel_dist, shape[1]))
         else:
             rel_pos_resized = rel_pos
 
@@ -283,9 +295,6 @@ class WindowedAttentionWithRelPos(layers.Layer):
         relative_coords = (q_coords - k_coords) + float(k_size - 1) * max(q_size / k_size, 1.0)
 
         # Gather the embeddings using the coordinates.
-        # DECISION plan_2026-06-15_e6a0391c/D-004: keras.ops has no `gather`; use
-        # `ops.take(..., axis=0)` (equivalent row-gather) — `ops.gather` raised
-        # AttributeError on Keras 3.8.
         return ops.take(rel_pos_resized, ops.cast(relative_coords, 'int32'), axis=0)
 
     def _add_decomposed_rel_pos(
