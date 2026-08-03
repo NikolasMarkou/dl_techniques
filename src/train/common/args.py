@@ -1,9 +1,61 @@
 """Common argument parser utilities for training scripts."""
 
+import sys
 import argparse
-from typing import Optional, List
+from typing import Optional, List, Sequence, Set
 
 from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig
+
+
+# ---------------------------------------------------------------------
+
+def explicitly_set_flags(
+        parser: argparse.ArgumentParser,
+        argv: Optional[Sequence[str]] = None,
+) -> Set[str]:
+    """Record which argparse **dest** names the caller passed explicitly.
+
+    Scans the raw token list against the parser's registered option strings, so
+    it reports PROVENANCE ("was this flag typed?") rather than VALUE ("does this
+    differ from the default?").
+
+    Why it exists: a ``--smoke``-style preset must lose to any flag the caller
+    actually typed, INCLUDING one typed at the flag's own parser default. A
+    parsed-value-vs-default comparison structurally cannot express that — an
+    explicitly-passed default and an omission produce the identical Namespace.
+    Scanning the tokens is the only place the distinction still survives.
+
+    ``argparse.BooleanOptionalAction`` registers BOTH ``--x`` and ``--no-x`` on
+    one dest, and this function iterates ``action.option_strings`` (plural), so
+    either spelling counts as an explicit mention of that dest. The
+    ``--flag=value`` equals form is handled by splitting on the first ``=``.
+
+    Args:
+        parser: The fully-populated parser whose actions define the recognised
+            option strings. Pass it BEFORE or AFTER ``parse_args``; only the
+            registered actions are read, never the parse result.
+        argv: Token list to scan, WITHOUT the program name (the same list shape
+            ``parse_args`` accepts). ``None`` reads ``sys.argv[1:]``, which is
+            what a production entry point wants; tests pass an explicit list.
+
+    Returns:
+        The set of argparse ``dest`` names mentioned in ``argv``. Dest names,
+        not flag spellings — so a caller can test membership against dataclass
+        field names via its own rename map.
+    """
+    dest_by_opt = {}
+    for action in parser._actions:
+        for opt in action.option_strings:
+            dest_by_opt[opt] = action.dest
+
+    tokens = sys.argv[1:] if argv is None else list(argv)
+
+    explicit: Set[str] = set()
+    for token in tokens:
+        key = token.split("=", 1)[0]
+        if key in dest_by_opt:
+            explicit.add(dest_by_opt[key])
+    return explicit
 
 
 # ---------------------------------------------------------------------

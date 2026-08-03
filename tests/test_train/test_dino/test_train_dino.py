@@ -58,6 +58,12 @@ EXCLUDED_DESTS: Dict[str, str] = {
         "a PRESET, not a value: it overrides other fields (SMOKE_OVERRIDES) rather than "
         "carrying one of its own. Its effect is pinned by TestSmokePreset below."
     ),
+    "explicit_flags": (
+        "NOT a CLI flag at all: PROVENANCE data that parse_arguments attaches to the "
+        "returned Namespace -- the set of dests the caller actually typed, which is how "
+        "--smoke tells an explicitly-passed default from an omission. It appears in "
+        "vars(args) but has no flag and must feed no config field."
+    ),
 }
 
 # A field belongs here only if it is intentionally NOT settable from the CLI. None is.

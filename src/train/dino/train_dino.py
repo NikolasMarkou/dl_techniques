@@ -228,6 +228,7 @@ from train.common import (
     save_config_json,
     create_callbacks as create_common_callbacks,
 )
+from train.common.args import explicitly_set_flags
 from train.energy_transformer.common import (
     SUPPORTED_DATASETS,
     build_optimizer,
@@ -1317,7 +1318,12 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                              "docstring")
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # Provenance, computed HERE because this is the only place the raw tokens exist:
+    # which dests the caller actually typed, at any value. `config_from_args` stays a pure
+    # function of its argument by reading this off the Namespace as DATA.
+    args.explicit_flags = explicitly_set_flags(parser, argv)
+    return args
 
 
 # Config-field -> argparse dest, for the handful that differ. Used by the --smoke preset
@@ -1384,19 +1390,24 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
     )
 
     if args.smoke:
-        # An EXPLICIT flag wins over the preset ONLY IF its value DIFFERS from the parser
-        # default -- the equality test below cannot tell an explicit value that happens to
-        # equal the default from an omission. So `--smoke --batch-size 8` really uses 8,
-        # but `--smoke --ema-warmup-epochs 1.0` (1.0 IS the parser default) is silently
-        # overridden to 0.0. MEASURED: that invocation resolves to warmup_steps=0, while
-        # `--ema-warmup-epochs 1.5` -> 442 and `--ema-warmup-steps 295` -> 295 survive.
-        # Do NOT "fix" this by tracking sentinels here: the module docstring and README
-        # § 6.2 state the limitation instead, because a sentinel default would break the
-        # parser/dataclass default agreement that `--smoke` itself relies on.
-        defaults = parse_arguments([])
+        # DECISION plan-2026-08-03T043010-cecf4357/D-001
+        # ANY explicitly-typed flag beats the preset, INCLUDING one typed at its own
+        # parser default: `--smoke --ema-warmup-epochs 1.0` now keeps 1.0.
+        # Do NOT restore the previous `defaults = parse_arguments([])` value-equality
+        # test. Comparing PARSED VALUES cannot distinguish an explicitly-passed default
+        # from an omission -- the Namespace is identical either way -- so it silently
+        # overrode any flag typed at its default value. Provenance must come from the raw
+        # tokens, which only `parse_arguments` can see; it arrives here as DATA on the
+        # Namespace, so this function still reads no global (H-01).
+        # `getattr` default: a hand-built Namespace (tests, callers that skip
+        # `parse_arguments`) carries no provenance, so nothing is treated as explicit and
+        # the preset applies in full -- the safe direction for a preset.
+        explicit = getattr(args, "explicit_flags", frozenset())
         for field_name, smoke_value in SMOKE_OVERRIDES.items():
+            # SMOKE_OVERRIDES keys are dataclass FIELD names; `explicit` holds argparse
+            # DEST names. The handful that differ are remapped here (I-2).
             arg_name = _ARG_FOR_FIELD.get(field_name, field_name)
-            if getattr(args, arg_name) == getattr(defaults, arg_name):
+            if arg_name not in explicit:
                 values[field_name] = smoke_value
 
     return TrainingConfig(**values)
