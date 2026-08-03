@@ -27,22 +27,25 @@ Supported Tasks
 
 Example Usage
 -------------
->>> from mann_benchmarks import BenchmarkHarness, CopyTaskConfig
->>> 
+>>> from train.ntm import BenchmarkHarness, CopyTaskConfig
+>>>
 >>> # Create harness with default config
 >>> harness = BenchmarkHarness()
->>> 
+>>>
 >>> # Run individual benchmark
 >>> results = harness.run_copy_task_benchmark(model)
 >>> print(f"Sequence Accuracy: {results.metrics['sequence_accuracy'].value}")
->>> 
+>>>
 >>> # Run full suite
 >>> report = harness.run_full_suite(model, model_name="MyMANN")
 >>> harness.save_report("results.json", report)
->>> 
+>>>
 >>> # Use Keras metrics in training
 >>> metrics = harness.get_keras_metrics()
 >>> model.compile(optimizer='adam', loss='bce', metrics=metrics)
+
+Note: `BenchmarkHarness` and the generators re-exported here have no caller in
+either training script -- see README.md "Library surface with no trainer caller".
 """
 from .config import (
     AlgorithmicTaskConfig,
