@@ -551,7 +551,46 @@ class PromptEncoder(layers.Layer):
         Returns:
             Dense mask embeddings of shape
             (batch_size, image_embedding_size[0], image_embedding_size[1], embed_dim).
+
+        Raises:
+            ValueError: If the mask's spatial size is not exactly
+                `4 * image_embedding_size`. The downscaling stack is a fixed
+                two-stride-2 convolution chain; any other input size produces a
+                silently wrong-shaped dense embedding.
         """
+        # DECISION plan-2026-08-03T191222-1d751f81/D-016: `mask_downscaling` is
+        # a FIXED 4x downscaling conv stack, so the only mask size it can map
+        # onto the image-embedding grid is exactly 4 * image_embedding_size.
+        # Measured: a 32x32 mask against image_embedding_size=(16, 16) returns
+        # (1, 8, 8, 8) from here without complaint, and the failure only
+        # surfaces much later and elsewhere, as a broadcast error inside
+        # `image_embeddings + dense_embeddings` in the mask decoder -- a message
+        # that names neither the mask nor this layer. Refuse AT THE POINT OF
+        # VIOLATION. Do NOT "fix" this by resizing the mask here: reference SAM
+        # requires the caller to supply the mask in the model's padded input
+        # frame, and a hidden resize would misalign it with the image without
+        # any signal. Static shapes are read deliberately, so this is a plain
+        # Python branch that is skipped (not traced) on an unknown extent.
+        expected_h = 4 * self.image_embedding_size[0]
+        expected_w = 4 * self.image_embedding_size[1]
+        static_shape = tuple(masks.shape)
+        if len(static_shape) == 4:
+            mask_h, mask_w = static_shape[2], static_shape[3]
+            if (
+                (mask_h is not None and int(mask_h) != expected_h)
+                or (mask_w is not None and int(mask_w) != expected_w)
+            ):
+                raise ValueError(
+                    f"PromptEncoder mask prompt must be exactly "
+                    f"4 * image_embedding_size = ({expected_h}, {expected_w}) "
+                    f"in its spatial dimensions, because the mask-downscaling "
+                    f"stack applies a fixed 4x reduction; got mask spatial size "
+                    f"({mask_h}, {mask_w}) from shape {static_shape} with "
+                    f"image_embedding_size={tuple(self.image_embedding_size)}. "
+                    f"Resize the mask prompt to "
+                    f"(batch, 1, {expected_h}, {expected_w}) before calling."
+                )
+
         # Keras Conv2D expects channel-last format
         # Input is (B, 1, H, W), transpose to (B, H, W, 1)
         masks_transposed = ops.transpose(masks, (0, 2, 3, 1))

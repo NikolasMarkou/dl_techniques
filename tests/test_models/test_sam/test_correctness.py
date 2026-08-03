@@ -2106,3 +2106,235 @@ class TestResizeLongestSide:
                 ),
                 0,
             )
+
+
+# ---------------------------------------------------------------------------
+# Plan step 9 / findings F-9 + F-10 --- geometry guards
+# ---------------------------------------------------------------------------
+def _build_probe_decoder() -> MaskDecoder:
+    """A reduced MaskDecoder matching the module fixture's decoder geometry."""
+    return MaskDecoder(
+        transformer_dim=OUT_CHANS,
+        transformer=TwoWayTransformer(
+            depth=2, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+        ),
+        iou_head_hidden_dim=32,
+    )
+
+
+def _decoder_inputs(batch_size: int, sparse_batch: int) -> Dict[str, Any]:
+    """Decoder call kwargs at an explicit (image batch, sparse batch) pair."""
+    rng = np.random.RandomState(5)
+    embedding = rng.normal(
+        size=(batch_size, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+    ).astype("float32")
+    return dict(
+        image_embeddings=keras.ops.convert_to_tensor(embedding),
+        image_pe=keras.ops.convert_to_tensor(
+            rng.normal(size=(1, GRID_SIZE, GRID_SIZE, OUT_CHANS)).astype("float32")
+        ),
+        sparse_prompt_embeddings=keras.ops.convert_to_tensor(
+            rng.normal(size=(sparse_batch, 2, OUT_CHANS)).astype("float32")
+        ),
+        dense_prompt_embeddings=keras.ops.convert_to_tensor(
+            rng.normal(
+                size=(batch_size, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+            ).astype("float32")
+        ),
+        multimask_output=True,
+    )
+
+
+class TestSparseBatchTilingGuard:
+    """
+    Plan step 9 / finding F-9 --- ``MaskDecoder`` refuses an impossible or
+    order-scrambling prompt tile.
+
+    ``ops.tile(sparse, [batch_size // sparse_batch, 1, 1])`` is integer
+    division. Two probe geometries break it, in two different ways:
+
+    * ``B=1`` with 3 prompt rows -> factor ``0`` -> opaque
+      ``InvalidArgumentError`` (a crash, at least loud).
+    * ``B=4`` with 2 prompt sets -> tiles to ``[a, b, a, b]`` rather than
+      ``[a, a, b, b]``, so every image is scored against the WRONG prompt with
+      no error at all (the dangerous one).
+
+    ``B=2`` with 1 shared prompt set is the working geometry and is the
+    non-firing control: it is the only thing that can tell this guard from an
+    over-broad one that simply demands ``sparse_batch == batch_size``.
+    """
+
+    def test_impossible_tile_batch_one_three_prompts_is_refused(self):
+        decoder = _build_probe_decoder()
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                decoder(**_decoder_inputs(batch_size=1, sparse_batch=3))
+            message = str(excinfo.value)
+            assert "3" in message and "batch_size=1" in message, (
+                f"the raise must name BOTH the sparse batch and the image "
+                f"batch; got: {message}"
+            )
+        finally:
+            del decoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_order_scrambling_tile_batch_four_two_prompts_is_refused(self):
+        """
+        The silent one. Pre-fix this returned a plausible result computed
+        against mismatched prompts, so nothing in the suite could see it.
+        """
+        decoder = _build_probe_decoder()
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                decoder(**_decoder_inputs(batch_size=4, sparse_batch=2))
+            message = str(excinfo.value)
+            assert "batch_size=4" in message, (
+                f"the raise must name the image batch; got: {message}"
+            )
+        finally:
+            del decoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_on_the_working_shared_prompt_geometry(self):
+        """
+        THE NON-FIRING CONTROL.
+
+        ``B=2`` / ``sparse_batch=1`` is the shared-prompt broadcast that works
+        today and must keep working; a guard demanding an exact match would
+        pass both raising tests above and break the model's most common call.
+        """
+        decoder = _build_probe_decoder()
+        try:
+            masks, iou = decoder(**_decoder_inputs(batch_size=2, sparse_batch=1))
+            assert tuple(masks.shape)[0] == 2
+            assert tuple(iou.shape)[0] == 2
+            assert bool(np.all(np.isfinite(keras.ops.convert_to_numpy(masks))))
+        finally:
+            del decoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_on_per_image_prompts(self):
+        """
+        SECOND NON-FIRING CONTROL.
+
+        ``sparse_batch == batch_size`` is the other legitimate geometry (one
+        prompt set per image, tile factor 1). A guard that only allowed
+        ``sparse_batch == 1`` would satisfy every other assertion here.
+        """
+        decoder = _build_probe_decoder()
+        try:
+            masks, _ = decoder(**_decoder_inputs(batch_size=3, sparse_batch=3))
+            assert tuple(masks.shape)[0] == 3
+        finally:
+            del decoder
+            keras.backend.clear_session()
+            gc.collect()
+
+
+class TestMaskPromptShapeGuard:
+    """
+    Plan step 9 / finding F-10 --- ``PromptEncoder`` refuses a mask prompt whose
+    spatial size is not ``4 * image_embedding_size``.
+
+    The mask-downscaling stack is a fixed two-stride-2 conv chain. Pre-fix, a
+    32x32 mask against ``image_embedding_size=(16, 16)`` returned ``(1, 8, 8, 8)``
+    from the encoder without complaint; the failure surfaced far downstream as a
+    broadcast error inside ``image_embeddings + dense_embeddings``, naming
+    neither the mask nor the prompt encoder.
+    """
+
+    IMAGE_EMBEDDING_SIZE = (16, 16)
+
+    def _encoder(self) -> PromptEncoder:
+        return PromptEncoder(
+            embed_dim=OUT_CHANS,
+            image_embedding_size=self.IMAGE_EMBEDDING_SIZE,
+            input_image_size=(IMG_SIZE, IMG_SIZE),
+            mask_in_chans=8,
+        )
+
+    def _mask(self, h: int, w: int) -> keras.KerasTensor:
+        return keras.ops.convert_to_tensor(
+            np.random.RandomState(7).normal(size=(1, 1, h, w)).astype("float32")
+        )
+
+    def test_probe_geometry_32x32_against_16x16_grid_is_refused(self):
+        """The exact probe P19 geometry."""
+        encoder = self._encoder()
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                encoder(masks=self._mask(32, 32))
+            message = str(excinfo.value)
+            assert "(64, 64)" in message, (
+                f"the raise must name the REQUIRED size (4 * 16); got: {message}"
+            )
+            assert "(32, 32)" in message, (
+                f"the raise must name the offending size; got: {message}"
+            )
+            assert "image_embedding_size=(16, 16)" in message, (
+                f"the raise must name the grid it was measured against; got: "
+                f"{message}"
+            )
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    @pytest.mark.parametrize("h,w", [(64, 32), (32, 64), (128, 128), (63, 64)])
+    def test_any_axis_mismatch_is_refused(self, h: int, w: int):
+        """Both too-small and too-large, and single-axis mismatches."""
+        encoder = self._encoder()
+        try:
+            with pytest.raises(ValueError):
+                encoder(masks=self._mask(h, w))
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_on_the_required_size(self):
+        """
+        THE NON-FIRING CONTROL.
+
+        A 64x64 mask against a (16, 16) grid is exactly the contract and must
+        produce a dense embedding on the grid. A guard that fired here (or one
+        that merely demanded "some" 4x relation without pinning the grid) would
+        satisfy every raising assertion above.
+        """
+        encoder = self._encoder()
+        try:
+            _, dense = encoder(masks=self._mask(64, 64))
+            assert tuple(dense.shape) == (1, 16, 16, OUT_CHANS), (
+                f"a contract-sized mask must yield a grid-sized dense "
+                f"embedding; got {tuple(dense.shape)}"
+            )
+            assert bool(np.all(np.isfinite(keras.ops.convert_to_numpy(dense))))
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_when_no_mask_prompt_is_given(self):
+        """
+        SECOND NON-FIRING CONTROL: the no-mask path must not be touched at all.
+
+        ``call`` substitutes the learned `no_mask_embed` when `masks is None`;
+        a guard placed one level too high would break every point-only prompt,
+        i.e. the most common call in the package.
+        """
+        encoder = self._encoder()
+        try:
+            _, dense = encoder(
+                points=(
+                    keras.ops.convert_to_tensor([[[10.0, 20.0]]]),
+                    keras.ops.convert_to_tensor([[1]]),
+                )
+            )
+            assert tuple(dense.shape) == (1, 16, 16, OUT_CHANS)
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()

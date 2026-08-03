@@ -485,6 +485,12 @@ class MaskDecoder(keras.layers.Layer):
             Tuple of (masks, iou_predictions):
             - masks: All mask logits, shape (batch_size, num_mask_tokens, H*4, W*4)
             - iou_predictions: Quality scores, shape (batch_size, num_mask_tokens)
+
+        Raises:
+            ValueError: If `sparse_prompt_embeddings`'s batch dimension is
+                neither 1 (a shared prompt set) nor exactly the image batch
+                size (one prompt set per image). Any other value is either an
+                impossible tile or an order-scrambling one.
         """
         # Concatenate IoU token and mask tokens: shape (num_mask_tokens + 1, transformer_dim)
         output_tokens = ops.concatenate(
@@ -507,6 +513,38 @@ class MaskDecoder(keras.layers.Layer):
         # Tile sparse prompt embeddings up to the image batch size so the
         # concat (and downstream cross-attention) batch dims agree.
         sparse_batch = ops.shape(sparse_prompt_embeddings)[0]
+
+        # DECISION plan-2026-08-03T191222-1d751f81/D-015: the tile factor below
+        # is INTEGER DIVISION, and only two sparse batch sizes are meaningful:
+        # 1 (a shared prompt broadcast over the image batch) and `batch_size`
+        # (one prompt set per image). Everything else is silently wrong rather
+        # than merely unsupported. Measured: B=1 with 3 prompt rows gives a tile
+        # factor of 0 and an opaque `InvalidArgumentError`; B=4 with 2 prompt
+        # sets tiles to [a, b, a, b] -- NOT [a, a, b, b] -- so every image is
+        # scored against the wrong prompt with no error at all. Do NOT "fix"
+        # this by switching the tile to `ops.repeat` (that would make the
+        # B=4/2 case silently *plausible* instead of refused, and the correct
+        # per-image pairing is the caller's contract, not a guess this layer
+        # gets to make), and do NOT ceil/clamp the factor.
+        # The check reads STATIC shapes so it is a plain Python branch: under
+        # tracing with an unknown batch dim it is skipped rather than traced.
+        static_batch = image_embeddings.shape[0]
+        static_sparse = sparse_prompt_embeddings.shape[0]
+        if (
+            static_batch is not None
+            and static_sparse is not None
+            and static_sparse not in (1, static_batch)
+        ):
+            raise ValueError(
+                f"MaskDecoder cannot tile {static_sparse} sparse prompt rows "
+                f"onto an image batch of {static_batch}: sparse_batch must be "
+                f"1 (one prompt set shared by every image) or exactly "
+                f"batch_size={static_batch} (one prompt set per image). Got "
+                f"sparse_prompt_embeddings batch {static_sparse} vs "
+                f"image_embeddings batch {static_batch}. Tile or split the "
+                f"prompts before calling the decoder."
+            )
+
         sparse_prompt_embeddings = ops.tile(
             sparse_prompt_embeddings,
             [batch_size // sparse_batch, 1, 1]
