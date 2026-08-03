@@ -489,7 +489,47 @@ class SAM(keras.Model):
         Returns:
             Preprocessed image of shape (batch_size, img_size, img_size, 3)
             where img_size is the encoder's expected size (typically 1024).
+
+        Raises:
+            ValueError: If either spatial extent of `x` exceeds the encoder's
+                `img_size`. This method only PADS; it never resizes. Apply
+                `dl_techniques.models.sam.resize_longest_side` first, exactly as
+                reference SAM's `ResizeLongestSide` transform does.
         """
+        img_size = self.image_encoder.img_size
+
+        # DECISION plan-2026-08-03T191222-1d751f81/D-005: refuse an oversize
+        # image HERE, at the point where the contract is violated. Without this,
+        # `pad_h`/`pad_w` below go negative and `ops.pad` raises
+        # `InvalidArgumentError` -- which is an `OpError`, NOT a `ValueError`
+        # (verified by execution: its MRO is OpError -> Exception), so a caller
+        # cannot catch it as an input-validation error and the message names
+        # neither the offending size nor the remedy. Do NOT "fix" this by
+        # clamping the pad to zero (silently crops the image) and do NOT resize
+        # inside `preprocess` (reference SAM resizes the raw image BEFORE the
+        # model so prompt coordinates can be rescaled in the same frame; a
+        # hidden resize here would leave every prompt in the wrong frame).
+        # The static shape is used, not `ops.shape`, so the check is a plain
+        # Python branch that neither traces into the graph nor fires on an
+        # unknown-at-trace-time extent.
+        static_shape = tuple(x.shape)
+        if len(static_shape) == 4:
+            for axis_name, dim in (
+                ("height", static_shape[1]),
+                ("width", static_shape[2]),
+            ):
+                if dim is not None and int(dim) > img_size:
+                    raise ValueError(
+                        f"SAM.preprocess pads to the encoder size and cannot "
+                        f"shrink an image: input {axis_name}={int(dim)} exceeds "
+                        f"image_encoder.img_size={img_size} (input shape "
+                        f"{static_shape}). Apply "
+                        f"`dl_techniques.models.sam.resize_longest_side(image, "
+                        f"{img_size})` before the model, as reference SAM's "
+                        f"ResizeLongestSide transform does, and rescale the "
+                        f"prompt coordinates by the same factor."
+                    )
+
         # Normalize using ImageNet statistics
         x = ops.cast(x, self.compute_dtype)
         x = (x - self.pixel_mean) / self.pixel_std

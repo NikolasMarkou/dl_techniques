@@ -52,6 +52,7 @@ from dl_techniques.models.sam.image_encoder import (
     ImageEncoderViT,
     WindowedAttentionWithRelPos,
 )
+from dl_techniques.models.sam.preprocessing import resize_longest_side
 from dl_techniques.models.sam.prompt_encoder import PromptEncoder
 from dl_techniques.models.sam.mask_decoder import MaskDecoder
 from dl_techniques.models.sam.transformer import (
@@ -1865,3 +1866,243 @@ class TestEncoderDegenerateDefaults:
             del encoder
             keras.backend.clear_session()
             gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# Plan step 8 / finding F-8 --- oversize `preprocess` input
+# ---------------------------------------------------------------------------
+class TestPreprocessOversizeGuard:
+    """
+    ``SAM.preprocess`` PADS to the encoder size; it can never shrink.
+
+    Pre-fix, an image larger than ``img_size`` produced a negative ``pad_h`` /
+    ``pad_w`` and ``ops.pad`` raised ``tf.errors.InvalidArgumentError``. That is
+    not an input-validation error a caller can catch: its MRO is
+    ``InvalidArgumentError -> OpError -> Exception``, so it is **not** a
+    ``ValueError`` subclass (asserted by execution in
+    :meth:`test_invalid_argument_error_is_not_a_value_error` --- without that
+    assertion a ``pytest.raises(Exception)`` here would pass against the
+    *unfixed* code and prove nothing).
+    """
+
+    def test_invalid_argument_error_is_not_a_value_error(self):
+        """
+        THE EXCEPTION-FAMILY PROOF, executed rather than assumed.
+
+        This is what makes the oversize guard's ``pytest.raises(ValueError)``
+        discriminating: the pre-fix failure mode is in a disjoint exception
+        family, so the guard cannot be satisfied by the old behaviour.
+        """
+        assert not issubclass(tf.errors.InvalidArgumentError, ValueError), (
+            "InvalidArgumentError became a ValueError subclass; the oversize "
+            "guard's pytest.raises(ValueError) would no longer discriminate "
+            "the fixed code from the unfixed code and must be redesigned"
+        )
+        assert issubclass(tf.errors.InvalidArgumentError, Exception)
+
+    def test_oversize_input_raises_value_error_naming_size_and_remedy(self):
+        """An image larger than `img_size` is refused with an actionable message."""
+        model = build_reduced_sam()
+        try:
+            oversize = keras.ops.convert_to_tensor(
+                np.zeros((1, IMG_SIZE + 32, IMG_SIZE + 64, 3), dtype="float32")
+            )
+            with pytest.raises(ValueError) as excinfo:
+                model.preprocess(oversize)
+            message = str(excinfo.value)
+            assert str(IMG_SIZE + 32) in message, (
+                f"the raise must name the offending extent; got: {message}"
+            )
+            assert f"img_size={IMG_SIZE}" in message, (
+                f"the raise must name the encoder img_size; got: {message}"
+            )
+            assert "resize_longest_side" in message, (
+                f"the raise must name the in-repo remedy; got: {message}"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_oversize_in_either_axis_alone_is_refused(self):
+        """Height-only and width-only overflows are both caught."""
+        model = build_reduced_sam()
+        try:
+            for shape in (
+                (1, IMG_SIZE + 1, IMG_SIZE, 3),
+                (1, IMG_SIZE, IMG_SIZE + 1, 3),
+            ):
+                tensor = keras.ops.convert_to_tensor(
+                    np.zeros(shape, dtype="float32")
+                )
+                with pytest.raises(ValueError):
+                    model.preprocess(tensor)
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_on_a_within_size_image(self):
+        """
+        THE NON-FIRING CONTROL.
+
+        A smaller-than-``img_size`` image must still be padded, not refused --
+        an over-broad guard (e.g. one demanding an exact match) would satisfy
+        every raising assertion above and break the model outright.
+        """
+        model = build_reduced_sam()
+        try:
+            small = keras.ops.convert_to_tensor(
+                np.zeros((1, IMG_SIZE - 40, IMG_SIZE - 90, 3), dtype="float32")
+            )
+            padded = model.preprocess(small)
+            assert tuple(padded.shape) == (1, IMG_SIZE, IMG_SIZE, 3), (
+                f"a within-size image must be padded to the encoder size; got "
+                f"{tuple(padded.shape)}"
+            )
+            exact = keras.ops.convert_to_tensor(
+                np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype="float32")
+            )
+            assert tuple(model.preprocess(exact).shape) == (
+                1, IMG_SIZE, IMG_SIZE, 3
+            ), "an exactly-img_size image must not be refused"
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_resize_longest_side_makes_an_oversize_image_acceptable(self):
+        """The raise names a remedy; the remedy must actually work end to end."""
+        model = build_reduced_sam()
+        try:
+            raw = np.random.RandomState(3).uniform(
+                0.0, 255.0, size=(1, 400, IMG_SIZE * 2, 3)
+            ).astype("float32")
+            resized = resize_longest_side(
+                keras.ops.convert_to_tensor(raw), IMG_SIZE
+            )
+            padded = model.preprocess(resized)
+            assert tuple(padded.shape) == (1, IMG_SIZE, IMG_SIZE, 3), (
+                f"resize_longest_side must produce an input preprocess accepts; "
+                f"got {tuple(padded.shape)}"
+            )
+        finally:
+            del model
+            keras.backend.clear_session()
+            gc.collect()
+
+
+class TestResizeLongestSide:
+    """
+    Plan step 8 / D-005 --- the transform reference SAM assumes exists.
+
+    The classic defect in a longest-side resize is an ORIENTATION bug: scaling
+    by the wrong axis passes every square-image test and every landscape test
+    while silently up-scaling portraits past the target. Both orientations are
+    therefore asserted, and the assertions are asymmetric (each pins which axis
+    must equal the target).
+    """
+
+    def test_landscape_pins_the_width_and_preserves_aspect(self):
+        image = keras.ops.convert_to_tensor(
+            np.zeros((300, 900, 3), dtype="float32")
+        )
+        out = tuple(resize_longest_side(image, 1024).shape)
+        # scale = 1024/900; 300*scale = 341.33 -> int(+0.5) = 341
+        assert out == (341, 1024, 3), (
+            f"landscape: the WIDTH is the longest side and must equal the "
+            f"target; got {out}"
+        )
+
+    def test_portrait_pins_the_height_and_preserves_aspect(self):
+        """
+        THE ORIENTATION DISCRIMINATOR.
+
+        Exactly the transpose of the landscape case. A transform that always
+        scaled by (say) the width would return ``(3413, 1024, 3)`` here --
+        larger than the target on the long axis -- while still passing the
+        landscape test.
+        """
+        image = keras.ops.convert_to_tensor(
+            np.zeros((900, 300, 3), dtype="float32")
+        )
+        out = tuple(resize_longest_side(image, 1024).shape)
+        assert out == (1024, 341, 3), (
+            f"portrait: the HEIGHT is the longest side and must equal the "
+            f"target; got {out}"
+        )
+
+    @pytest.mark.parametrize(
+        "h,w",
+        [(300, 900), (900, 300), (1000, 1000), (37, 1201), (1201, 37), (512, 512)],
+    )
+    def test_longest_side_hits_the_target_exactly(self, h: int, w: int):
+        """Across both orientations and extreme aspect ratios."""
+        image = keras.ops.convert_to_tensor(
+            np.zeros((h, w, 3), dtype="float32")
+        )
+        new_h, new_w, _ = tuple(resize_longest_side(image, 1024).shape)
+        assert max(new_h, new_w) == 1024, (
+            f"the longest side must equal the target exactly; "
+            f"({h},{w}) -> ({new_h},{new_w})"
+        )
+        assert min(new_h, new_w) <= 1024
+        # Aspect ratio preserved to within the +-0.5 px of the rounding rule.
+        # Compared as short/long so the tolerance is orientation-symmetric.
+        before = min(h, w) / max(h, w)
+        after = min(new_h, new_w) / max(new_h, new_w)
+        assert abs(after - before) < (1.0 / max(new_h, new_w)), (
+            f"aspect ratio not preserved: ({h},{w}) -> ({new_h},{new_w})"
+        )
+
+    def test_square_image_at_target_is_a_shape_no_op(self):
+        image = keras.ops.convert_to_tensor(
+            np.random.RandomState(11).uniform(
+                0.0, 1.0, size=(256, 256, 3)
+            ).astype("float32")
+        )
+        out = resize_longest_side(image, 256)
+        assert tuple(out.shape) == (256, 256, 3)
+        assert float(
+            np.max(np.abs(
+                keras.ops.convert_to_numpy(out)
+                - keras.ops.convert_to_numpy(image)
+            ))
+        ) == 0.0, "a no-op resize must not perturb the pixel values"
+
+    def test_batched_rank_four_input_keeps_its_batch_axis(self):
+        image = keras.ops.convert_to_tensor(
+            np.zeros((2, 300, 900, 3), dtype="float32")
+        )
+        assert tuple(resize_longest_side(image, 1024).shape) == (2, 341, 1024, 3)
+
+    def test_rounding_rule_matches_reference_int_plus_half(self):
+        """
+        Reference SAM rounds with ``int(x + 0.5)``, not Python's ``round``.
+
+        ``h=2, w=3, target=3`` gives an exact ``.5``: ``2 * 1.0 = 2.0`` is
+        uninteresting, so use ``h=1, w=2, target=5`` -> ``1 * 2.5 = 2.5``.
+        ``int(2.5 + 0.5) == 3`` while ``round(2.5) == 2`` (banker's rounding).
+        This test is what makes that distinction load-bearing.
+        """
+        assert round(2.5) == 2, "python round is banker's rounding"
+        image = keras.ops.convert_to_tensor(
+            np.zeros((1, 2, 3), dtype="float32")
+        )
+        assert tuple(resize_longest_side(image, 5).shape) == (3, 5, 3), (
+            "the rounding rule must be int(x + 0.5), not round()"
+        )
+
+    def test_bad_rank_and_bad_target_are_refused(self):
+        with pytest.raises(ValueError, match="rank 3"):
+            resize_longest_side(
+                keras.ops.convert_to_tensor(np.zeros((300, 900), dtype="float32")),
+                1024,
+            )
+        with pytest.raises(ValueError, match="target_length"):
+            resize_longest_side(
+                keras.ops.convert_to_tensor(
+                    np.zeros((300, 900, 3), dtype="float32")
+                ),
+                0,
+            )
