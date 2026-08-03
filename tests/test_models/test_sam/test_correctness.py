@@ -2338,3 +2338,124 @@ class TestMaskPromptShapeGuard:
             del encoder
             keras.backend.clear_session()
             gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# Plan step 10 / finding F-11 --- build_from_config load cost
+# ---------------------------------------------------------------------------
+class TestBuildFromConfigLoadCost:
+    """
+    Plan step 10 / finding F-11 --- ``SAM.build_from_config`` must materialize
+    the COMPLETE weight set before Keras restores the saved values.
+
+    F-11 observed that ``build_from_config`` runs a full-resolution dummy
+    forward on every ``load_model`` and proposed replacing it with an explicit
+    ``build()`` chain. The plan pre-committed a rule: replace it ONLY IF the
+    chain gives an identical weight count AND a value-exact round-trip.
+    Measured on this fixture, the chain alone materializes **138 of 202**
+    weights, so 64 are created fresh (random) on the first real ``call()`` after
+    restore and the ``low_res_logits`` drift is of order 1-2 absolute. The
+    dummy forward is therefore KEPT (D-018), and these guards exist so a future
+    author cannot re-apply the "optimization" silently.
+
+    The load WALL-CLOCK is deliberately asserted nowhere: it varies across
+    processes (carried surprise #8) and a cross-process constant would be a
+    flake generator. It is recorded in the ``build_from_config`` docstring
+    instead.
+    """
+
+    def _saved_fixture(self, tmpdir: str) -> Tuple[SAM, Dict[str, Any], str]:
+        model = build_reduced_sam()
+        inputs = sam_inputs()
+        model(inputs)
+        seed_nonzero_weights(model)
+        path = os.path.join(tmpdir, "sam_load_cost.keras")
+        model.save(path)
+        return model, inputs, path
+
+    def test_load_materializes_every_weight_before_any_forward(self):
+        """
+        The load-time count is the ONLY count that can see the defect.
+
+        Sampled before the restored model is ever called, the shipped
+        implementation must already hold the full weight set; the build-only
+        variant holds 138.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model, _, path = self._saved_fixture(tmpdir)
+            try:
+                restored = keras.models.load_model(path)
+                n_at_load = len(restored.weights)
+                assert n_at_load == BASELINE_FIXTURE_WEIGHT_COUNT, (
+                    f"build_from_config materialized {n_at_load} weights at "
+                    f"load time, expected {BASELINE_FIXTURE_WEIGHT_COUNT}. Any "
+                    f"weight not yet created when Keras restores the archive is "
+                    f"built FRESH on the first call and its saved value is "
+                    f"silently dropped (F-11 / D-018)"
+                )
+                del restored
+            finally:
+                del model
+                keras.backend.clear_session()
+                gc.collect()
+
+    def test_weight_count_does_not_grow_on_the_first_forward_after_load(self):
+        """
+        States the property directly: nothing may be built lazily after restore.
+
+        This is also why a post-forward count is a blind instrument -- both the
+        shipped and the build-only variants report 202 once a forward has run.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model, inputs, path = self._saved_fixture(tmpdir)
+            try:
+                restored = keras.models.load_model(path)
+                n_at_load = len(restored.weights)
+                restored(inputs)
+                n_after_forward = len(restored.weights)
+                assert n_at_load == n_after_forward, (
+                    f"{n_after_forward - n_at_load} weight(s) were created by "
+                    f"the first forward pass after load ({n_at_load} -> "
+                    f"{n_after_forward}); those were restored from nothing"
+                )
+                del restored
+            finally:
+                del model
+                keras.backend.clear_session()
+                gc.collect()
+
+    def test_restored_weight_values_match_the_saved_ones_before_any_forward(self):
+        """
+        The VALUE guard, which is what actually discriminates.
+
+        Index-aligned comparison of every weight against the pre-save values,
+        sampled before the restored model is called. Under the build-only
+        variant exactly 64 of 202 differ.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model, _, path = self._saved_fixture(tmpdir)
+            try:
+                saved = [
+                    keras.ops.convert_to_numpy(w).copy() for w in model.weights
+                ]
+                restored = keras.models.load_model(path)
+                got = [keras.ops.convert_to_numpy(w) for w in restored.weights]
+                assert len(saved) == len(got), (
+                    f"weight-list length moved on load: {len(saved)} -> {len(got)}"
+                )
+                differing = [
+                    i
+                    for i, (a, b) in enumerate(zip(saved, got))
+                    if a.shape != b.shape or float(np.max(np.abs(a - b))) > 0.0
+                ]
+                assert not differing, (
+                    f"{len(differing)} of {len(saved)} restored weights differ "
+                    f"from the saved values before any forward pass "
+                    f"(indices {differing[:8]}...); these were re-initialized, "
+                    f"not restored"
+                )
+                del restored
+            finally:
+                del model
+                keras.backend.clear_session()
+                gc.collect()

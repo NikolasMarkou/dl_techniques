@@ -360,7 +360,32 @@ class SAM(keras.Model):
         Runs the static `build()` chain plus a single dummy forward pass so that
         every lazily-built sublayer (ViT blocks, two-way transformer, mask-decoder
         heads) creates its variables BEFORE Keras restores the saved weights.
+
+        Cost, measured (F-11):
+            The dummy forward is a full-resolution forward pass at the encoder's
+            own `img_size`, plus a `(1, num_masks, img_size, img_size)`
+            postprocess, on EVERY `load_model`. On the reduced test fixture
+            (`img_size=256`, 321,862 params) `keras.models.load_model` takes
+            roughly **0.82-0.86 s** steady-state (median ~0.84 s over 15 loads in
+            3 processes; the first load in a process runs ~1.1 s from warm-up).
+            The cost scales with the encoder, so a `vit_h` load pays a 1024x1024
+            forward through 630M parameters. Wall-clock is deliberately NOT
+            asserted anywhere: it is not reproducible across processes.
+            Dropping the dummy forward saves ~0.29 s at fixture size (median
+            0.54 s) and is REJECTED -- see the DECISION anchor below.
         """
+        # DECISION plan-2026-08-03T191222-1d751f81/D-018: do NOT replace this
+        # dummy forward with the `self.build(None)` chain alone, however
+        # wasteful the full-resolution pass looks. Measured on the reduced
+        # fixture: the build chain alone materializes only 138 of 202 weights at
+        # load time, so Keras restores 138 and the remaining 64 are created
+        # FRESH (random) on the first real `call()` -- a `low_res_logits` drift
+        # of order 1-2 absolute, with no error and no warning. The weight COUNT
+        # cannot see it: sampled after any forward pass, both variants report
+        # 202/201/321,862 identically. Any future optimization here must be
+        # judged by (a) `len(restored.weights)` sampled BEFORE the first call and
+        # (b) index-aligned weight VALUES, never by a post-forward count.
+        # Pinned by `TestBuildFromConfigLoadCost` in test_correctness.py.
         img_size = int(config.get("img_size") or self.image_encoder.img_size)
         if not self.built:
             self.build(None)
