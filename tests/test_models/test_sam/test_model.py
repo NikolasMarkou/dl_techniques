@@ -109,7 +109,8 @@ class TestSAMInstantiation:
             embed_dim=256,
             depth=2,
             num_heads=4,
-            out_chans=128
+            out_chans=128,
+            global_attn_indexes=(1,),
         )
 
         prompt_encoder = PromptEncoder(
@@ -143,7 +144,8 @@ class TestSAMInstantiation:
     def test_invalid_pixel_mean_length(self):
         """Test that invalid pixel_mean length raises error."""
         image_encoder = ImageEncoderViT(
-            img_size=256, patch_size=16, embed_dim=256, depth=2, num_heads=4
+            img_size=256, patch_size=16, embed_dim=256, depth=2, num_heads=4,
+            global_attn_indexes=(1,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=256, image_embedding_size=(16, 16),
@@ -163,7 +165,8 @@ class TestSAMInstantiation:
     def test_invalid_image_format(self):
         """Test that invalid image format raises error."""
         image_encoder = ImageEncoderViT(
-            img_size=256, patch_size=16, embed_dim=256, depth=2, num_heads=4
+            img_size=256, patch_size=16, embed_dim=256, depth=2, num_heads=4,
+            global_attn_indexes=(1,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=256, image_embedding_size=(16, 16),
@@ -193,7 +196,8 @@ class TestSAMForwardPass:
             embed_dim=128,
             depth=2,
             num_heads=4,
-            out_chans=64
+            out_chans=64,
+            global_attn_indexes=(1,),
         )
 
         prompt_encoder = PromptEncoder(
@@ -383,7 +387,8 @@ class TestSAMSerialization:
             embed_dim=128,
             depth=2,
             num_heads=4,
-            out_chans=64
+            out_chans=64,
+            global_attn_indexes=(1,),
         )
 
         prompt_encoder = PromptEncoder(
@@ -503,7 +508,8 @@ class TestSAMPreprocessing:
             embed_dim=64,
             depth=1,
             num_heads=4,
-            out_chans=32
+            out_chans=32,
+            global_attn_indexes=(0,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=32,
@@ -572,7 +578,8 @@ class TestSAMPostprocessing:
             embed_dim=64,
             depth=1,
             num_heads=4,
-            out_chans=32
+            out_chans=32,
+            global_attn_indexes=(0,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=32,
@@ -646,7 +653,8 @@ class TestSAMShapeConsistency:
             embed_dim=128,
             depth=2,
             num_heads=4,
-            out_chans=64
+            out_chans=64,
+            global_attn_indexes=(1,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=64,
@@ -745,7 +753,8 @@ class TestSAMEdgeCases:
             embed_dim=64,
             depth=1,
             num_heads=4,
-            out_chans=32
+            out_chans=32,
+            global_attn_indexes=(0,),
         )
         prompt_encoder = PromptEncoder(
             embed_dim=32,

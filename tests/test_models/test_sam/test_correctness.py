@@ -1701,3 +1701,167 @@ class TestPaddingPointPositionalEncoding:
             del encoder
             keras.backend.clear_session()
             gc.collect()
+
+
+class TestEncoderDegenerateDefaults:
+    """
+    Plan step 7 / finding F-7 --- ``ImageEncoderViT`` must not silently be a
+    windowed-only encoder with no global-attention block at all.
+
+    The shipped defaults were ``use_rel_pos=False``, ``window_size=14``,
+    ``global_attn_indexes=()``: measured on the pre-fix code, a default
+    ``depth=4`` encoder reported block window sizes ``[14, 14, 14, 14]``, i.e.
+    **zero** global blocks, so its receptive field never became global.
+    ``SAM.from_variant`` overrode both, but every direct construction --- all 9
+    fixtures in ``test_model.py`` included --- silently got the degenerate
+    model.
+
+    The guard's discriminating half is the ``window_size > 0`` conjunct:
+    ``window_size == 0`` already makes every block global, so an empty
+    ``global_attn_indexes`` is CORRECT there, not degenerate. A guard that
+    fired on both configurations would be the defect, not the fix.
+    """
+
+    ENCODER_KWARGS = dict(
+        img_size=IMG_SIZE,
+        patch_size=PATCH_SIZE,
+        embed_dim=EMBED_DIM,
+        depth=4,
+        num_heads=NUM_HEADS,
+        out_chans=OUT_CHANS,
+    )
+
+    def test_shipped_defaults_are_refused(self):
+        """The exact defaults must raise --- exception TYPE checked, not `Exception`."""
+        with pytest.raises(ValueError) as excinfo:
+            ImageEncoderViT(**self.ENCODER_KWARGS)
+        message = str(excinfo.value)
+        assert "global_attn_indexes" in message, (
+            f"the raise must name the offending argument; got: {message}"
+        )
+        assert "window_size=14" in message, (
+            f"the raise must name the offending window_size value; got: {message}"
+        )
+        assert "(2, 5, 8, 11)" in message, (
+            f"the raise must name the reference SAM global-index pattern; got: "
+            f"{message}"
+        )
+
+    def test_explicit_windowed_only_is_refused(self):
+        """An explicitly-passed empty tuple is refused exactly like the default."""
+        with pytest.raises(ValueError):
+            ImageEncoderViT(
+                window_size=WINDOW_SIZE,
+                global_attn_indexes=(),
+                **self.ENCODER_KWARGS,
+            )
+
+    def test_guard_does_not_fire_on_global_only_encoder(self):
+        """
+        THE DISCRIMINATING CONTROL.
+
+        ``window_size=0`` makes every block global; an empty
+        ``global_attn_indexes`` is then correct. A guard that also fired here
+        would be over-broad, so this test must pass for the guard to be right.
+        """
+        encoder = ImageEncoderViT(window_size=0, **self.ENCODER_KWARGS)
+        try:
+            window_sizes = [blk.window_size for blk in encoder.blocks]
+            assert window_sizes == [0, 0, 0, 0], (
+                f"window_size=0 must leave every block global; got {window_sizes}"
+            )
+            output = encoder(
+                keras.ops.convert_to_tensor(
+                    np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype="float32")
+                )
+            )
+            assert tuple(output.shape) == (1, GRID_SIZE, GRID_SIZE, OUT_CHANS)
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_guard_does_not_fire_on_reference_shaped_encoder(self):
+        """A windowed encoder WITH global indices is accepted and really mixes both."""
+        encoder = ImageEncoderViT(
+            window_size=WINDOW_SIZE,
+            global_attn_indexes=(1, 3),
+            **self.ENCODER_KWARGS,
+        )
+        try:
+            window_sizes = [blk.window_size for blk in encoder.blocks]
+            assert window_sizes == [WINDOW_SIZE, 0, WINDOW_SIZE, 0], (
+                f"global_attn_indexes must zero exactly the named blocks; got "
+                f"{window_sizes}"
+            )
+            assert sum(1 for w in window_sizes if w == 0) == 2
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_use_rel_pos_defaults_to_true(self):
+        """
+        The default flip itself, asserted on the LAYOUT rather than on values.
+
+        Carried surprise #1: ``rel_pos_h`` / ``rel_pos_w`` are zero-initialized,
+        so at initialization this flip is numerically INERT --- measured max abs
+        output difference **exactly 0.0** between ``use_rel_pos=True`` and
+        ``False`` when the 57 shared weights are transplanted and the rel-pos
+        tables keep their zero init. With the tables seeded non-zero the same
+        comparison moves (8.42e-4). A value-level guard on freshly-initialized
+        weights therefore could not observe this change at all; the observable
+        consequence is the two extra weight tensors per block.
+        """
+        default_encoder = ImageEncoderViT(
+            window_size=WINDOW_SIZE, global_attn_indexes=(1, 3), **self.ENCODER_KWARGS
+        )
+        try:
+            assert default_encoder.use_rel_pos is True, (
+                "use_rel_pos must default to True (reference SAM sets it for "
+                "every released variant)"
+            )
+            assert all(blk.attn.use_rel_pos for blk in default_encoder.blocks), (
+                "the default must reach every block's attention layer, not just "
+                "the encoder's own attribute"
+            )
+            default_encoder(
+                keras.ops.convert_to_tensor(
+                    np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype="float32")
+                )
+            )
+            rel_pos_weights = [
+                w for w in default_encoder.weights
+                if w.path.rsplit("/", 1)[-1] in ("rel_pos_h", "rel_pos_w")
+            ]
+            assert len(rel_pos_weights) == 8, (
+                f"depth=4 with use_rel_pos=True must create 2 rel-pos tables per "
+                f"block; got {len(rel_pos_weights)}"
+            )
+            assert all(
+                float(np.abs(keras.ops.convert_to_numpy(w)).max()) == 0.0
+                for w in rel_pos_weights
+            ), (
+                "carried surprise #1 no longer holds: rel-pos tables are no "
+                "longer zero-initialized, so the inertness reasoning above must "
+                "be re-derived"
+            )
+        finally:
+            del default_encoder
+            keras.backend.clear_session()
+            gc.collect()
+
+    def test_config_round_trip_preserves_the_accepted_configuration(self):
+        """`from_config(get_config())` must not resurrect a refused configuration."""
+        encoder = ImageEncoderViT(
+            window_size=WINDOW_SIZE, global_attn_indexes=(1, 3), **self.ENCODER_KWARGS
+        )
+        try:
+            restored = ImageEncoderViT.from_config(encoder.get_config())
+            assert restored.use_rel_pos is True
+            assert tuple(restored.global_attn_indexes) == (1, 3)
+            assert restored.window_size == WINDOW_SIZE
+        finally:
+            del encoder
+            keras.backend.clear_session()
+            gc.collect()

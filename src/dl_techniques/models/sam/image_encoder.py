@@ -667,9 +667,21 @@ class ImageEncoderViT(keras.Model):
         out_chans: Integer, the number of output channels from the neck module.
         qkv_bias: Boolean, whether to use bias in QKV projections.
         use_rel_pos: Boolean, whether to use relative positional embeddings.
-        window_size: Integer, the size for windowed attention.
+            Defaults to `True`, matching reference SAM (all released variants
+            set it). Note that `rel_pos_h`/`rel_pos_w` are zero-initialized, so
+            enabling this is numerically inert until the tables are trained.
+        window_size: Integer, the size for windowed attention. Set to `0` to
+            make every block global, in which case `global_attn_indexes` is
+            correctly empty.
         global_attn_indexes: Tuple of integers, indices of `ViTBlock`s that
-            should use global attention instead of windowed attention.
+            should use global attention instead of windowed attention. Must be
+            non-empty whenever `window_size > 0`; reference SAM uses four
+            evenly-spaced indices (e.g. `(2, 5, 8, 11)` at `depth=12`).
+
+    Raises:
+        ValueError: If `window_size > 0` and `global_attn_indexes` is empty —
+            that configuration windows every block, so the encoder never
+            attains a global receptive field.
         normalization_type: String, type of normalization to use in blocks.
             Defaults to 'layer_norm'.
         ffn_type: String, type of FFN to use in blocks. Defaults to 'mlp'.
@@ -694,7 +706,7 @@ class ImageEncoderViT(keras.Model):
         mlp_ratio: float = 4.0,
         out_chans: int = 256,
         qkv_bias: bool = True,
-        use_rel_pos: bool = False,
+        use_rel_pos: bool = True,
         window_size: int = 14,
         global_attn_indexes: Tuple[int, ...] = (),
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
@@ -703,6 +715,26 @@ class ImageEncoderViT(keras.Model):
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # DECISION plan-2026-08-03T191222-1d751f81/D-014: refuse the
+        # windowed-only encoder. `window_size > 0` with an EMPTY
+        # `global_attn_indexes` windows every block, so the receptive field is
+        # never global — the shipped defaults did exactly this. Do NOT
+        # "simplify" this to an unconditional `global_attn_indexes` non-empty
+        # requirement: `window_size == 0` already makes every block global and
+        # an empty tuple is then CORRECT, not degenerate (measured: 4/4 global
+        # blocks). The `window_size > 0` conjunct is the discriminating half.
+        # See decisions.md D-014.
+        if window_size > 0 and not global_attn_indexes:
+            raise ValueError(
+                f"Degenerate encoder configuration: window_size={window_size} "
+                f"> 0 with an empty global_attn_indexes windows every one of "
+                f"the {depth} blocks, so the encoder never attains a global "
+                f"receptive field. Supply global_attn_indexes (reference SAM "
+                f"uses 4 evenly-spaced indices, e.g. (2, 5, 8, 11) at "
+                f"depth=12), or set window_size=0 to make every block global."
+            )
+
         # Store all configuration parameters
         self.img_size = img_size
         self.patch_size = patch_size
