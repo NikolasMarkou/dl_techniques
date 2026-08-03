@@ -117,6 +117,57 @@ from dl_techniques.layers.norms import create_normalization_layer
 # ---------------------------------------------------------------------
 
 
+def _build_mlp_head(
+    *,
+    num_layers: int,
+    hidden_dim: int,
+    output_dim: int,
+    activation: str,
+    dense_name_template: str,
+    name: str,
+) -> keras.Sequential:
+    """
+    Build reference SAM's ``MLP``: ``num_layers`` Dense layers, last one linear.
+
+    Interface contract (shared by the hypernetwork MLPs and the IoU head):
+
+    Args:
+        num_layers: Total number of ``Dense`` layers, i.e. reference SAM's
+            ``MLP(..., num_layers=N)``. ``N`` layers means ``N - 1`` hidden
+            layers of width ``hidden_dim`` followed by one ``output_dim``
+            layer. Must be ``>= 1``; callers validate.
+        hidden_dim: Width of every layer except the last.
+        output_dim: Width of the last layer.
+        activation: Activation applied to every layer EXCEPT the last, which is
+            always linear (reference SAM applies ``relu`` to all but the final
+            ``Linear``, so the head can emit signed logits).
+        dense_name_template: Naming pattern for the sub-layers, containing a
+            single ``{n}`` placeholder filled with the 1-based layer index --
+            e.g. ``"iou_dense{n}"`` or ``"hyper_dense{n}_0"``. Chosen so that
+            at ``num_layers == 2`` the names are byte-identical to the ones
+            this package shipped before the depth knob was made live.
+        name: Name of the returned ``Sequential``.
+
+    Returns:
+        An UNBUILT ``keras.Sequential`` of ``num_layers`` ``Dense`` layers.
+
+    Raises:
+        ValueError: never directly; ``num_layers < 1`` yields an empty
+            ``Sequential``, which is why every caller validates the depth first.
+    """
+    dense_layers = []
+    for index in range(num_layers):
+        is_last = index == num_layers - 1
+        dense_layers.append(
+            keras.layers.Dense(
+                output_dim if is_last else hidden_dim,
+                activation=None if is_last else activation,
+                name=dense_name_template.format(n=index + 1),
+            )
+        )
+    return keras.Sequential(dense_layers, name=name)
+
+
 @keras.saving.register_keras_serializable()
 class MaskDecoder(keras.layers.Layer):
     """
@@ -149,14 +200,19 @@ class MaskDecoder(keras.layers.Layer):
         num_multimask_outputs: Integer, number of mask predictions to generate
             beyond the single output mask. Defaults to 3. Total masks =
             num_multimask_outputs + 1.
-        iou_head_depth: Integer, number of layers in the IoU prediction head.
-            Currently not used (kept for compatibility). Defaults to 3.
+        iou_head_depth: Integer, total number of Dense layers in EACH MLP head
+            -- the IoU prediction head and every hypernetwork MLP. Matches
+            reference SAM's ``MLP(..., num_layers=N)``: ``N - 1`` hidden layers
+            plus one linear output layer. Must be positive. Defaults to 3,
+            which is reference SAM's value for both heads.
         iou_head_hidden_dim: Integer, hidden dimension of the IoU prediction head.
             Defaults to 256.
         normalization_type: String, type of normalization to use in upscaling module.
             Supports 'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation function to use in upscaling and MLPs.
-            Defaults to 'gelu'.
+        activation: String, activation function to use in the upscaling module and
+            in every non-final MLP layer. Defaults to 'relu', matching reference
+            SAM's hardcoded ``MLP`` activation and ``TwoWayTransformer``'s own
+            default.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape (in call):
@@ -212,7 +268,7 @@ class MaskDecoder(keras.layers.Layer):
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
-        activation: str = 'gelu',
+        activation: str = 'relu',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -222,6 +278,13 @@ class MaskDecoder(keras.layers.Layer):
             raise ValueError(f"transformer_dim must be positive, got {transformer_dim}")
         if num_multimask_outputs <= 0:
             raise ValueError(f"num_multimask_outputs must be positive, got {num_multimask_outputs}")
+        if iou_head_depth <= 0:
+            raise ValueError(
+                f"iou_head_depth must be positive, got {iou_head_depth}. It is the "
+                f"TOTAL number of Dense layers per MLP head (reference SAM uses 3); "
+                f"a non-positive value would build an empty Sequential that passes "
+                f"the token straight through and only fails later as a shape error."
+            )
         if iou_head_hidden_dim <= 0:
             raise ValueError(f"iou_head_hidden_dim must be positive, got {iou_head_hidden_dim}")
 
@@ -267,37 +330,45 @@ class MaskDecoder(keras.layers.Layer):
             keras.layers.Activation(activation, name="upsample_act2"),
         ], name="output_upscaling")
 
-        # Hypernetwork MLPs: one for each mask token
-        # Each MLP transforms mask token embedding -> mask prediction parameters
-        # Architecture: transformer_dim -> transformer_dim -> transformer_dim//8
+        # Hypernetwork MLPs: one for each mask token.
+        # Each MLP transforms a mask token embedding into the parameters of the
+        # final dynamic convolution. Reference SAM:
+        #   MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)
+        # i.e. (iou_head_depth - 1) hidden layers at transformer_dim, then one
+        # linear layer at transformer_dim // 8.
+        #
+        # DECISION plan-2026-08-03T191222-1d751f81/D-010
+        # Do NOT hardcode 3 here (nor 2, which is what shipped before). Reference
+        # SAM hardcodes 3 for the hypernetwork and uses iou_head_depth only for
+        # the IoU head; this package instead drives BOTH from iou_head_depth, so
+        # the knob is observably live and the two heads cannot silently diverge.
+        # A hardcoded depth passes every count/shape assertion at the default and
+        # is indistinguishable from a dead knob -- which is exactly the defect
+        # (F-5) this replaced. See decisions.md D-010.
         self.output_hypernetworks_mlps = []
         for i in range(self.num_mask_tokens):
-            mlp = keras.Sequential([
-                keras.layers.Dense(
-                    transformer_dim,
+            self.output_hypernetworks_mlps.append(
+                _build_mlp_head(
+                    num_layers=self.iou_head_depth,
+                    hidden_dim=transformer_dim,
+                    output_dim=transformer_dim // 8,
                     activation=activation,
-                    name=f"hyper_dense1_{i}"
-                ),
-                keras.layers.Dense(
-                    transformer_dim // 8,
-                    name=f"hyper_dense2_{i}"
+                    dense_name_template=f"hyper_dense{{n}}_{i}",
+                    name=f"hypernetwork_mlp_{i}",
                 )
-            ], name=f"hypernetwork_mlp_{i}")
-            self.output_hypernetworks_mlps.append(mlp)
+            )
 
         # IoU prediction head
-        # Predicts mask quality score for each mask token
-        self.iou_prediction_head = keras.Sequential([
-            keras.layers.Dense(
-                self.iou_head_hidden_dim,
-                activation=activation,
-                name="iou_dense1"
-            ),
-            keras.layers.Dense(
-                self.num_mask_tokens,
-                name="iou_dense2"
-            )
-        ], name="iou_prediction_head")
+        # Predicts a mask quality score for each mask token. Reference SAM:
+        #   MLP(transformer_dim, iou_head_hidden_dim, num_mask_tokens, iou_head_depth)
+        self.iou_prediction_head = _build_mlp_head(
+            num_layers=self.iou_head_depth,
+            hidden_dim=self.iou_head_hidden_dim,
+            output_dim=self.num_mask_tokens,
+            activation=activation,
+            dense_name_template="iou_dense{n}",
+            name="iou_prediction_head",
+        )
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """

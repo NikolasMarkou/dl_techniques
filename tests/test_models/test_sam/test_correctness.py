@@ -80,26 +80,39 @@ NUM_HEADS = 4
 OUT_CHANS = 32
 GLOBAL_ATTN_INDEXES = (1, 3)
 
-#: Weight count of the default fixture, measured at commit 004d431d.
-#: Plan steps 3 and 4 change the checkpoint layout; this is their control.
-BASELINE_FIXTURE_WEIGHT_COUNT = 192
+#: Weight count of the default fixture.
+#:
+#: Step 3 did NOT move it (``key_dim`` reshapes the 8 tensors of a
+#: ``MultiHeadAttention`` without adding or removing any). Step 4 DOES: making
+#: the dead ``iou_head_depth`` knob live adds one ``Dense`` (2 tensors) to each
+#: of the 4 hypernetwork MLPs and to the IoU head:
+#: ``192 + 4 * 2 + 2 = 202``.
+FIXTURE_WEIGHT_COUNT_PRE_STEP4 = 192
+BASELINE_FIXTURE_WEIGHT_COUNT = 202
 
 #: Total scalar parameter count of the default fixture.
 #:
-#: This constant exists because the weight COUNT is blind to plan step 3: a
+#: This constant exists because the weight COUNT was blind to plan step 3: a
 #: ``key_dim`` change re-SHAPES the 8 tensors of a ``MultiHeadAttention``
-#: without adding or removing any, so 192 is identical before and after. The
-#: parameter count is what actually observes the layout change.
+#: without adding or removing any, so 192 was identical before and after. The
+#: parameter count is what actually observed that layout change.
 #:
-#: Derivation (Keras 3 ``MultiHeadAttention``, embed dim ``E``, internal dim
-#: ``I = num_heads * key_dim``): query/key/value kernels ``E*I`` with bias
+#: Step 3 derivation (Keras 3 ``MultiHeadAttention``, embed dim ``E``, internal
+#: dim ``I = num_heads * key_dim``): query/key/value kernels ``E*I`` with bias
 #: ``I`` each, output kernel ``I*E`` with bias ``E`` -> ``131*I + 32`` at
 #: ``E = 32``. The fixture transformer is ``embedding_dim=32, num_heads=2,
 #: depth=2``, i.e. 5 cross-attentions (2 per block + the final one). Step 3
-#: moves each from ``I = 32`` (4224 params) to ``I = 16`` (2128), so
+#: moved each from ``I = 32`` (4224 params) to ``I = 16`` (2128), so
 #: ``327062 - 5 * 2096 = 316582``.
+#:
+#: Step 4 derivation (``transformer_dim = 32``, ``iou_head_hidden_dim = 32``,
+#: ``num_mask_tokens = 4``, ``iou_head_depth = 3``): each head gains exactly one
+#: ``32 -> 32`` ``Dense``, i.e. ``32 * 32 + 32 = 1056`` params and 2 tensors.
+#: There are 4 hypernetwork MLPs plus 1 IoU head, so
+#: ``316582 + 5 * 1056 = 321862`` params and ``192 + 5 * 2 = 202`` weights.
 FIXTURE_PARAM_COUNT_PRE_STEP3 = 327_062
-BASELINE_FIXTURE_PARAM_COUNT = 316_582
+FIXTURE_PARAM_COUNT_PRE_STEP4 = 316_582
+BASELINE_FIXTURE_PARAM_COUNT = 321_862
 
 #: Weight values are seeded to at least this magnitude (see
 #: :func:`seed_nonzero_weights`).
@@ -886,13 +899,19 @@ class TestAttentionDownsampleRate:
         assert measured == BASELINE_FIXTURE_PARAM_COUNT, (
             f"fixture parameter count is {measured}, expected "
             f"{BASELINE_FIXTURE_PARAM_COUNT} "
-            f"(pre-step-3 control was {FIXTURE_PARAM_COUNT_PRE_STEP3}; "
-            f"hand-derived delta -5 * 2096 = "
-            f"{BASELINE_FIXTURE_PARAM_COUNT - FIXTURE_PARAM_COUNT_PRE_STEP3})"
+            f"(pre-step-3 control {FIXTURE_PARAM_COUNT_PRE_STEP3}, step-3 "
+            f"hand-derived delta -5 * 2096 -> {FIXTURE_PARAM_COUNT_PRE_STEP4}; "
+            f"pre-step-4 control {FIXTURE_PARAM_COUNT_PRE_STEP4}, step-4 "
+            f"hand-derived delta +5 * 1056 = "
+            f"{BASELINE_FIXTURE_PARAM_COUNT - FIXTURE_PARAM_COUNT_PRE_STEP4})"
         )
         assert len(model.weights) == BASELINE_FIXTURE_WEIGHT_COUNT, (
-            "weight count must be UNCHANGED by step 3 -- a key_dim change "
-            "reshapes tensors, it does not add or remove them"
+            f"weight count is {len(model.weights)}, expected "
+            f"{BASELINE_FIXTURE_WEIGHT_COUNT}. Step 3 must NOT move it (a "
+            f"key_dim change reshapes tensors without adding or removing "
+            f"them); step 4 moves it by exactly +10 "
+            f"({FIXTURE_WEIGHT_COUNT_PRE_STEP4} -> "
+            f"{BASELINE_FIXTURE_WEIGHT_COUNT})"
         )
 
     def test_roundtrip_still_value_exact_after_layout_change(self, seeded_sam):
@@ -912,6 +931,322 @@ class TestAttentionDownsampleRate:
             f"the .keras round-trip is no longer value-exact after the "
             f"attention_downsample_rate layout change: max abs diff on "
             f"low_res_logits = {result['max_abs_diff']}"
+        )
+        assert result["n_weights_after"] == result["n_weights_before"] == (
+            BASELINE_FIXTURE_WEIGHT_COUNT
+        ), (
+            f"weight count moved across the round-trip: "
+            f"{result['n_weights_before']} -> {result['n_weights_after']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F-5 + F-6: head depth driven by `iou_head_depth`, and the ReLU default
+# ---------------------------------------------------------------------------
+def _dense_names(sequential: keras.Sequential) -> list:
+    """
+    Report the ACTUAL ``Dense`` sub-layer names of a head, in build order.
+
+    Read off the constructed object rather than off the config: ``iou_head_depth``
+    is the package's own textbook example of a knob that is stored, serialized
+    and never wired through, so a config-level assertion would have passed for
+    the entire lifetime of the defect.
+
+    Args:
+        sequential: A ``keras.Sequential`` head (a hypernetwork MLP or the IoU
+            prediction head).
+
+    Returns:
+        The ordered list of layer names.
+    """
+    return [layer.name for layer in sequential.layers]
+
+
+def _build_decoder(iou_head_depth: int = 3, **overrides: Any) -> MaskDecoder:
+    """
+    Build a standalone :class:`MaskDecoder` at the fixture's decoder geometry.
+
+    Args:
+        iou_head_depth: Number of ``Dense`` layers per head.
+        **overrides: Forwarded verbatim to :class:`MaskDecoder`.
+
+    Returns:
+        A BUILT decoder (its weights exist, so weight counts are meaningful).
+    """
+    decoder = MaskDecoder(
+        transformer_dim=OUT_CHANS,
+        transformer=TwoWayTransformer(
+            depth=2, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+        ),
+        iou_head_depth=iou_head_depth,
+        iou_head_hidden_dim=32,
+        **overrides,
+    )
+    decoder.build(None)
+    return decoder
+
+
+class TestHeadDepthAndActivationDefault:
+    """F-5 + F-6 -- the heads honour ``iou_head_depth`` and default to ReLU."""
+
+    def test_head_sublayer_names_honor_default_depth(self):
+        """
+        At the default ``iou_head_depth=3`` both heads have THREE ``Dense``s.
+
+        RED before the fix (measured, commit 71ddd2d3): probe P12's lists,
+        ``['hyper_dense1_0', 'hyper_dense2_0']`` and
+        ``['iou_dense1', 'iou_dense2']`` -- two layers regardless of the knob.
+        """
+        decoder = _build_decoder(iou_head_depth=3)
+
+        hyper_names = _dense_names(decoder.output_hypernetworks_mlps[0])
+        assert hyper_names == [
+            "hyper_dense1_0",
+            "hyper_dense2_0",
+            "hyper_dense3_0",
+        ], f"hypernetwork MLP 0 has layers {hyper_names}, expected 3 at depth 3"
+
+        iou_names = _dense_names(decoder.iou_prediction_head)
+        assert iou_names == ["iou_dense1", "iou_dense2", "iou_dense3"], (
+            f"IoU head has layers {iou_names}, expected 3 at depth 3"
+        )
+
+        del decoder
+        keras.backend.clear_session()
+        gc.collect()
+
+    @pytest.mark.parametrize("depth", [1, 2, 3, 4])
+    def test_head_layer_count_tracks_depth(self, depth: int):
+        """
+        The number of ``Dense`` layers in BOTH heads equals ``iou_head_depth``.
+
+        Parametrised over depths on both sides of the default so a hardcoded
+        ``3`` (the shape of the reference implementation, and the most likely
+        wrong fix) cannot pass.
+        """
+        decoder = _build_decoder(iou_head_depth=depth)
+        for i, mlp in enumerate(decoder.output_hypernetworks_mlps):
+            names = _dense_names(mlp)
+            assert len(names) == depth, (
+                f"hypernetwork MLP {i} has {len(names)} Dense layers "
+                f"({names}) at iou_head_depth={depth}"
+            )
+        iou_names = _dense_names(decoder.iou_prediction_head)
+        assert len(iou_names) == depth, (
+            f"IoU head has {len(iou_names)} Dense layers ({iou_names}) at "
+            f"iou_head_depth={depth}"
+        )
+        del decoder
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_head_depth_knob_is_live_not_merely_present(self):
+        """
+        THE discriminating guard: depth 2 and depth 3 must differ in WEIGHTS.
+
+        A test that only checks ``depth=3`` cannot tell a live knob from a dead
+        one -- the pre-fix code would satisfy it the moment the hardcoded layout
+        happened to match. Two constructions of the SAME class with only the knob
+        changed must produce measurably different objects, in both the weight
+        COUNT and the scalar parameter count.
+
+        Hand-derived, at ``transformer_dim = 32`` / ``iou_head_hidden_dim = 32``:
+        one extra ``32 -> 32`` ``Dense`` per head = ``32 * 32 + 32 = 1056``
+        params and 2 tensors, over 4 hypernetwork MLPs + 1 IoU head, so
+        ``+10`` weights and ``+5280`` params.
+        """
+        shallow = _build_decoder(iou_head_depth=2)
+        deep = _build_decoder(iou_head_depth=3)
+
+        n_shallow, n_deep = len(shallow.weights), len(deep.weights)
+        assert n_deep != n_shallow, (
+            f"iou_head_depth=2 and iou_head_depth=3 built the SAME number of "
+            f"weights ({n_shallow}) -- the knob is stored but dead, which is "
+            f"exactly finding F-5"
+        )
+        assert n_deep - n_shallow == 10, (
+            f"weight delta between depth 2 and 3 is {n_deep - n_shallow}, "
+            f"hand-derived +10 (2 tensors x (4 hypernetwork MLPs + 1 IoU head))"
+        )
+
+        p_shallow = int(sum(np.prod(w.shape) for w in shallow.weights))
+        p_deep = int(sum(np.prod(w.shape) for w in deep.weights))
+        assert p_deep - p_shallow == 5 * 1056, (
+            f"parameter delta between depth 2 and 3 is {p_deep - p_shallow}, "
+            f"hand-derived +{5 * 1056}"
+        )
+
+        del shallow, deep
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_hidden_widths_match_reference_mlp(self):
+        """
+        Widths, not just counts: hidden layers are wide, the output is narrow.
+
+        Reference SAM's ``MLP(input, hidden, output, num_layers)`` makes every
+        layer but the last ``hidden``-wide. Adding depth by stacking layers of
+        the OUTPUT width would satisfy every count assertion above while
+        bottlenecking the head to ``transformer_dim // 8``.
+        """
+        decoder = _build_decoder(iou_head_depth=3)
+
+        hyper_units = [
+            layer.units for layer in decoder.output_hypernetworks_mlps[0].layers
+        ]
+        assert hyper_units == [OUT_CHANS, OUT_CHANS, OUT_CHANS // 8], (
+            f"hypernetwork MLP widths are {hyper_units}, expected two hidden "
+            f"layers at transformer_dim={OUT_CHANS} then "
+            f"{OUT_CHANS // 8} out"
+        )
+
+        iou_units = [layer.units for layer in decoder.iou_prediction_head.layers]
+        assert iou_units == [32, 32, decoder.num_mask_tokens], (
+            f"IoU head widths are {iou_units}, expected two hidden layers at "
+            f"iou_head_hidden_dim=32 then {decoder.num_mask_tokens} out"
+        )
+
+        del decoder
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_hidden_layers_are_activated_and_output_is_linear(self):
+        """
+        Every layer but the last carries the activation; the last is linear.
+
+        Reference SAM applies ``relu`` to all but the final ``Linear``. A depth
+        fix that activated the output too would emit non-negative mask logits
+        and every shape assertion in this suite would still pass.
+        """
+        decoder = _build_decoder(iou_head_depth=3)
+        for head_name, head in [
+            ("hypernetwork_mlp_0", decoder.output_hypernetworks_mlps[0]),
+            ("iou_prediction_head", decoder.iou_prediction_head),
+        ]:
+            names = [
+                keras.activations.serialize(layer.activation)
+                for layer in head.layers
+            ]
+            assert names[:-1] == ["relu"] * (len(names) - 1), (
+                f"{head_name} hidden activations are {names[:-1]}, expected "
+                f"all 'relu'"
+            )
+            assert names[-1] == "linear", (
+                f"{head_name} output layer is activated ({names[-1]}); the "
+                f"final layer must be linear"
+            )
+        del decoder
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_mask_decoder_activation_default_is_relu(self):
+        """
+        F-6 -- the default is ``'relu'``, matching ``TwoWayTransformer``.
+
+        RED before the fix: ``'gelu'`` (probe P12), so the two halves of the
+        decoder disagreed with each other and with the paper.
+        """
+        decoder = MaskDecoder(
+            transformer_dim=OUT_CHANS,
+            transformer=TwoWayTransformer(
+                depth=1, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+            ),
+        )
+        assert decoder.activation == "relu", (
+            f"MaskDecoder.activation defaults to {decoder.activation!r}; "
+            f"reference SAM's MLP hardcodes ReLU and TwoWayTransformer already "
+            f"defaults to 'relu'"
+        )
+        assert decoder.transformer.activation == decoder.activation, (
+            f"the two halves of the decoder still disagree: transformer "
+            f"{decoder.transformer.activation!r} vs decoder "
+            f"{decoder.activation!r}"
+        )
+        del decoder
+        keras.backend.clear_session()
+        gc.collect()
+
+    @pytest.mark.parametrize("depth", [2, 3])
+    @pytest.mark.parametrize("activation", ["relu", "gelu"])
+    def test_depth_and_activation_round_trip(self, depth: int, activation: str):
+        """
+        Both knobs survive ``get_config``/``from_config`` -- and stay LIVE.
+
+        The restored object's ACTUAL ``Dense`` count and ACTUAL hidden
+        activation are asserted, not the config keys: a key that round-trips
+        while the rebuilt layer ignores it is precisely the dead knob this step
+        removes.
+        """
+        decoder = _build_decoder(iou_head_depth=depth, activation=activation)
+        config = decoder.get_config()
+        assert config["iou_head_depth"] == depth, (
+            f"get_config() dropped iou_head_depth: {sorted(config)}"
+        )
+        assert config["activation"] == activation, (
+            f"get_config() dropped activation: {sorted(config)}"
+        )
+
+        restored = MaskDecoder.from_config(config)
+        restored.build(None)
+        assert len(_dense_names(restored.iou_prediction_head)) == depth, (
+            f"restored IoU head has "
+            f"{len(_dense_names(restored.iou_prediction_head))} Dense layers, "
+            f"expected {depth} -- the round-tripped knob is dead"
+        )
+        assert len(_dense_names(restored.output_hypernetworks_mlps[0])) == depth, (
+            "restored hypernetwork MLP ignored the round-tripped iou_head_depth"
+        )
+        restored_act = keras.activations.serialize(
+            restored.iou_prediction_head.layers[0].activation
+        )
+        assert restored_act == activation, (
+            f"restored IoU head hidden activation is {restored_act!r}, "
+            f"expected {activation!r}"
+        )
+        assert len(restored.weights) == len(decoder.weights), (
+            f"restored decoder has {len(restored.weights)} weights vs "
+            f"{len(decoder.weights)} -- the layouts diverge"
+        )
+
+        del decoder, restored
+        keras.backend.clear_session()
+        gc.collect()
+
+    def test_nonpositive_depth_raises(self):
+        """
+        ``iou_head_depth <= 0`` raises at construction, naming the knob.
+
+        Without the raise, ``depth=0`` builds a head with zero ``Dense`` layers
+        -- a ``Sequential`` that passes the ``transformer_dim``-wide token
+        straight through and only fails much later as a shape mismatch.
+        """
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match="iou_head_depth must be positive"):
+                MaskDecoder(
+                    transformer_dim=OUT_CHANS,
+                    transformer=TwoWayTransformer(
+                        depth=1, embedding_dim=OUT_CHANS, num_heads=2, mlp_dim=64
+                    ),
+                    iou_head_depth=bad,
+                )
+
+    def test_roundtrip_still_value_exact_after_head_depth_change(self, seeded_sam):
+        """
+        I-2 re-proof against the post-step-4 layout, on a BUILT model.
+
+        Step 4 moves the weight COUNT (unlike step 3), which is exactly the
+        situation where a ``.keras`` restore can silently re-initialize the new
+        tensors and return a plausible model with drifted logits.
+        """
+        model, inputs = seeded_sam
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = roundtrip_low_res_logits(
+                model, inputs, os.path.join(tmpdir, "head_depth.keras")
+            )
+        assert result["max_abs_diff"] == 0.0, (
+            f"the .keras round-trip is no longer value-exact after the "
+            f"iou_head_depth layout change: max abs diff on low_res_logits = "
+            f"{result['max_abs_diff']}"
         )
         assert result["n_weights_after"] == result["n_weights_before"] == (
             BASELINE_FIXTURE_WEIGHT_COUNT
