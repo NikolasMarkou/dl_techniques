@@ -191,6 +191,13 @@ class SAM2MemoryBank:
     :param use_signed_tpos_enc_to_obj_ptrs: Report signed rather than absolute
         temporal differences for object pointers.
     :type use_signed_tpos_enc_to_obj_ptrs: bool
+    :param only_obj_ptrs_in_the_past_for_eval: Restrict CONDITIONING-frame
+        object pointers to frames at or before the queried frame (at or after
+        it when tracking in reverse). Shipped value ``True``. Without it a
+        conditioning frame from the FUTURE contributes its pointer to the
+        memory of an earlier frame, which is a silent information leak: the
+        shapes, the token count and the loss are all unchanged.
+    :type only_obj_ptrs_in_the_past_for_eval: bool
     :param fifo_capacity: Explicit non-conditioning FIFO capacity. ``None``
         derives it from ``num_maskmem`` and the evaluation stride so that no
         frame the selection policy can reach is ever evicted.
@@ -224,6 +231,7 @@ class SAM2MemoryBank:
             max_obj_ptrs_in_encoder: int = 16,
             max_cond_frames: Optional[int] = None,
             use_signed_tpos_enc_to_obj_ptrs: bool = False,
+            only_obj_ptrs_in_the_past_for_eval: bool = True,
             fifo_capacity: Optional[int] = None,
             stop_gradient: bool = True,
     ) -> None:
@@ -264,6 +272,8 @@ class SAM2MemoryBank:
         self.max_cond_frames = max_cond_frames
         self.use_signed_tpos_enc_to_obj_ptrs = bool(
             use_signed_tpos_enc_to_obj_ptrs)
+        self.only_obj_ptrs_in_the_past_for_eval = bool(
+            only_obj_ptrs_in_the_past_for_eval)
         self._fifo_capacity_override = fifo_capacity
         self.stop_gradient = bool(stop_gradient)
 
@@ -562,9 +572,25 @@ class SAM2MemoryBank:
                 return float((frame_idx - other) * sign)
             return float(abs(frame_idx - other))
 
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-041
+        # Conditioning pointers are filtered to the PAST (to the future when
+        # tracking in reverse). Do NOT drop this filter: a conditioning frame
+        # is kept indefinitely and may sit anywhere in the video, so without it
+        # a prompt given at frame 50 contributes its object pointer to the
+        # memory assembled for frame 10. Nothing about that is observable from
+        # outside -- same token count, same shapes, same loss -- it simply
+        # leaks future information into an earlier frame's prediction. See
+        # decisions.md D-041.
+        def in_the_past(other: int) -> bool:
+            if not self.only_obj_ptrs_in_the_past_for_eval:
+                return True
+            return other >= frame_idx if track_in_reverse else other <= frame_idx
+
         chosen: List[Tuple[int, float]] = []
         for cond_idx in sorted(self.cond_frames):
             if self.cond_frames[cond_idx].obj_ptr is None:
+                continue
+            if not in_the_past(cond_idx):
                 continue
             if len(chosen) >= max_obj_ptrs:
                 return chosen

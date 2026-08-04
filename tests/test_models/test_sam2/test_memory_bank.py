@@ -474,15 +474,70 @@ class TestObjectPointerLayout:
             assert set(block) == {float(abs(20 - frame))}
 
     def test_signed_temporal_positions_when_configured(self):
-        """``use_signed_tpos_enc_to_obj_ptrs`` reports a signed difference."""
+        """``use_signed_tpos_enc_to_obj_ptrs`` reports a signed difference.
+
+        The past-only filter is turned OFF here on purpose: this probe reads
+        frame 4 against a conditioning frame at 8, i.e. a FUTURE pointer, which
+        is exactly what that filter exists to exclude. Leaving it on would make
+        the forward arm read an empty tuple.
+        """
         signed = SAM2MemoryBank(
             num_maskmem=NUM_MASKMEM, mem_dim=MEM_DIM, hidden_dim=HIDDEN_DIM,
-            fifo_capacity=64, use_signed_tpos_enc_to_obj_ptrs=True)
+            fifo_capacity=64, use_signed_tpos_enc_to_obj_ptrs=True,
+            only_obj_ptrs_in_the_past_for_eval=False)
         populate(signed, [], cond_frames=[8])
         forward = signed.read(4).obj_ptr_tpos[0]
         reverse = signed.read(4, track_in_reverse=True).obj_ptr_tpos[0]
         assert forward == -4.0
         assert reverse == 4.0
+
+    def test_future_conditioning_pointers_are_excluded_by_default(self):
+        """``only_obj_ptrs_in_the_past_for_eval`` defaults ON and filters.
+
+        A conditioning frame is kept indefinitely and may sit anywhere in the
+        video, so a prompt given at frame 8 would otherwise contribute its
+        object pointer to the memory assembled for frame 4. The leak is
+        entirely silent: same shapes, same token count, same loss.
+        """
+        bank = SAM2MemoryBank(
+            num_maskmem=NUM_MASKMEM, mem_dim=MEM_DIM, hidden_dim=HIDDEN_DIM,
+            fifo_capacity=64)
+        assert bank.only_obj_ptrs_in_the_past_for_eval is True, (
+            "the shipped config sets only_obj_ptrs_in_the_past_for_eval true"
+        )
+        populate(bank, [], cond_frames=[2, 8])
+
+        readout = bank.read(4)
+        assert readout.obj_ptr_frames == (2,), (
+            f"frame 4's memory drew pointers from {readout.obj_ptr_frames}; "
+            f"frame 8 is in the FUTURE and must not contribute"
+        )
+        assert readout.num_obj_ptr_tokens == TOKENS_PER_POINTER
+
+    def test_the_filter_flips_with_the_tracking_direction(self):
+        """Tracking in reverse makes the FUTURE the past.
+
+        Without this arm the filter could be a hardcoded ``t <= frame_idx`` and
+        look correct: forward tracking is the only direction the other tests
+        exercise.
+        """
+        bank = SAM2MemoryBank(
+            num_maskmem=NUM_MASKMEM, mem_dim=MEM_DIM, hidden_dim=HIDDEN_DIM,
+            fifo_capacity=64)
+        populate(bank, [], cond_frames=[2, 8])
+        assert bank.read(4, track_in_reverse=True).obj_ptr_frames == (8,)
+
+    def test_disabling_the_filter_restores_both_pointers(self):
+        """The negative control: with the filter off, nothing is dropped.
+
+        This is what proves the two assertions above measure the FILTER and not
+        some unrelated reason frame 8 fails to appear.
+        """
+        bank = SAM2MemoryBank(
+            num_maskmem=NUM_MASKMEM, mem_dim=MEM_DIM, hidden_dim=HIDDEN_DIM,
+            fifo_capacity=64, only_obj_ptrs_in_the_past_for_eval=False)
+        populate(bank, [], cond_frames=[2, 8])
+        assert bank.read(4).obj_ptr_frames == (2, 8)
 
     def test_pointer_cap_is_honoured(self, bank):
         """``max_obj_ptrs`` bounds the tail block."""

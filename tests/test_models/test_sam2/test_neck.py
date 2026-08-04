@@ -31,6 +31,9 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
+from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
+    PositionEmbeddingSine2D,
+)
 from dl_techniques.models.sam2.hiera import Hiera
 from dl_techniques.models.sam2.neck import SAM2FpnNeck, SAM2ImageEncoder
 
@@ -506,6 +509,90 @@ class TestPositionEncodingWidth:
                 d_model=d_model, backbone_channel_list=(8, 4),
                 fpn_top_down_levels=(1,))
             assert neck.pos_enc_channels == d_model
+
+    def test_the_half_pixel_offset_deviation_is_pinned_at_its_MEASURED_size(
+            self) -> None:
+        """An ACCEPTED, measured deviation from the reference sine encoding.
+
+        The reused :class:`PositionEmbeddingSine2D` normalizes coordinates as
+        ``(cumsum - 0.5) / cumsum[-1]``, i.e. pixel CENTRES at
+        ``(i + 0.5) / H``. The reference ``PositionEmbeddingSine._pe`` uses
+        ``arange(1, H + 1) / last``, i.e. pixel EDGES at ``(i + 1) / H``. The
+        two differ by exactly half a pixel, so the position argument differs by
+        ``scale / (2H) = pi / H`` radians everywhere.
+
+        **This is documented and accepted, not fixed.** The layer is shared
+        across the repository, the offset is the DETR / SAM 1
+        ``PositionEmbeddingRandom`` convention (SAM 1 applies the same ``-0.5``
+        at ``position_encoding.py:161``), and both sine encodings here feed
+        randomly initialized projections that are trained with them -- so it is
+        a fixed reparametrization of an input, not an error, for any model
+        trained in this repo. It WOULD matter to a port loading released
+        upstream weights, which is why the magnitude is measured and pinned
+        rather than left in prose.
+
+        Everything else about the layer matches the reference, including the
+        interleaved ``sin(even) / cos(odd)`` layout -- only the offset differs.
+
+        MEASURED max absolute difference over the full encoding (amplitude 1):
+
+        ==========  ==================  ===============
+        grid        max abs difference  as % of ampl.
+        ==========  ==================  ===============
+        ``32``      ``0.0980``          ``9.8%``
+        ``64``      ``0.0491``          ``4.9%``
+        ``256``     ``0.0123``          ``1.2%``
+        ==========  ==================  ===============
+
+        i.e. it shrinks as ``pi / H`` and is largest on the COARSEST level.
+        """
+        import math
+
+        def reference_pe(edge: int, num_pos_feats: int) -> np.ndarray:
+            """Transcribe the reference ``_pe`` in float64 numpy."""
+            scale, temperature = 2 * math.pi, 10000.0
+            y = np.arange(1, edge + 1, dtype="float64")[None, :, None].repeat(edge, 2)
+            x = np.arange(1, edge + 1, dtype="float64")[None, None, :].repeat(edge, 1)
+            y = y / (y[:, -1:, :] + 1e-6) * scale
+            x = x / (x[:, :, -1:] + 1e-6) * scale
+            dim_t = np.arange(num_pos_feats, dtype="float64")
+            dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+            pos_x, pos_y = x[..., None] / dim_t, y[..., None] / dim_t
+            pos_x = np.stack(
+                (np.sin(pos_x[..., 0::2]), np.cos(pos_x[..., 1::2])),
+                axis=4).reshape(1, edge, edge, -1)
+            pos_y = np.stack(
+                (np.sin(pos_y[..., 0::2]), np.cos(pos_y[..., 1::2])),
+                axis=4).reshape(1, edge, edge, -1)
+            return np.concatenate([pos_y, pos_x], axis=3)
+
+        expected = {32: 0.0980, 64: 0.0491, 256: 0.0123}
+        for edge, magnitude in expected.items():
+            layer = PositionEmbeddingSine2D(num_pos_feats=128)
+            # The layer emits (batch, channels, height, width); the reference
+            # transcription above is channels-last.
+            ours = np.transpose(ops.convert_to_numpy(
+                layer(np.zeros((1, edge, edge, 3), dtype="float32"))
+            ).astype("float64"), (0, 2, 3, 1))
+            reference = reference_pe(edge, 128)
+            measured = float(np.abs(ours - reference).max())
+
+            assert measured == pytest.approx(magnitude, abs=5e-4), (
+                f"at grid {edge} the deviation from the reference sine "
+                f"encoding is {measured:.4f}, not the documented "
+                f"{magnitude:.4f}. Either the shared layer's normalization "
+                f"changed or the reference transcription is stale -- this "
+                f"deviation is ACCEPTED at its measured size, so a change in "
+                f"that size is a real change"
+            )
+            # The half-pixel reading, asserted rather than merely stated: the
+            # deviation is the encoding's derivative times pi / H.
+            assert measured == pytest.approx(
+                math.pi / edge, rel=0.02), (
+                f"the deviation at grid {edge} is {measured}, which is not "
+                f"pi/{edge} = {math.pi / edge} -- it is no longer a pure "
+                f"half-pixel offset and needs re-diagnosing"
+            )
 
     def test_encoding_is_cast_to_the_feature_dtype(self) -> None:
         """`PositionEmbeddingSine2D` returns float32 at every policy.

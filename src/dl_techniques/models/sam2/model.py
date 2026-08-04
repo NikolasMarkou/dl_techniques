@@ -17,6 +17,23 @@ This module assembles the six components built by the preceding steps into one
 ``no_obj_ptr``
     The learned "no object" pointer blended in by the object score.
 
+``no_obj_embed_spatial``
+    ``(1, mem_dim)`` — the SPATIAL no-object embedding, added into the encoded
+    memory in proportion to ``1 - is_obj_appearing``. This is the SECOND,
+    independent no-object mechanism: ``no_obj_ptr`` marks the pointer stream,
+    this one marks the spatial stream. Shipping only the former leaves an
+    occluded frame's spatial memory indistinguishable from a visible frame's.
+
+It also owns two projections that belong to no component:
+
+``obj_ptr_proj``
+    A 3-layer MLP (``use_mlp_for_obj_ptr_proj: true``) turning the decoder's
+    selected output token into an object pointer.
+``obj_ptr_tpos_proj``
+    ``Dense(mem_dim)`` (``proj_tpos_enc_in_obj_ptrs: true``) projecting the
+    object-pointer TEMPORAL sine encoding down to the memory width, so it does
+    not interfere with the spatial positional encoding.
+
 **Two entry points, deliberately different in kind.**
 
 * :meth:`SAM2.call` is the IMAGE path. It is traceable under ``tf.function``
@@ -32,6 +49,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import keras
 from keras import ops
 
+from dl_techniques.models.sam.mask_decoder import _build_mlp_head
 from dl_techniques.models.sam.prompt_encoder import PromptEncoder
 from dl_techniques.models.sam.transformer import TwoWayTransformer
 from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
@@ -47,6 +65,85 @@ from dl_techniques.utils.logger import logger
 #: mask downsampler and the retained coarsest FPN level must agree on it, or the
 #: encoded memory cannot be added to the pixel features.
 MEMORY_STRIDE = 16
+
+#: Depth of ``obj_ptr_proj``. Fixed by ``use_mlp_for_obj_ptr_proj: true``, which
+#: selects ``MLP(hidden_dim, hidden_dim, hidden_dim, 3)`` over a single Linear.
+_OBJ_PTR_PROJ_DEPTH = 3
+
+#: Temperature of the object-pointer TEMPORAL sine encoding.
+_OBJ_PTR_TPOS_TEMPERATURE = 10000.0
+
+
+def _sine_positional_encoding_1d(
+        positions: Any,
+        dim: int,
+        temperature: float = _OBJ_PTR_TPOS_TEMPERATURE,
+) -> Any:
+    """Encode scalar positions as a 1D sine/cosine embedding.
+
+    Interface contract (the object-pointer temporal encoding is its only
+    caller today, but the shape rule is general):
+
+    :param positions: ``(N,)`` scalar positions, already normalized by the
+        caller. Anything ``ops.convert_to_tensor`` accepts.
+    :type positions: Any
+    :param dim: Output width. Must be positive and EVEN -- the two halves are
+        the sines and the cosines of the same ``dim // 2`` frequencies.
+    :type dim: int
+    :param temperature: Geometric base of the frequency ladder.
+    :type temperature: float
+    :return: ``(N, dim)`` float32 encoding.
+    :rtype: Any
+    :raises ValueError: If ``dim`` is not a positive even number.
+
+    The layout is ``concat([sin(a), cos(a)])`` -- the two halves are
+    CONTIGUOUS, not interleaved. Interleaving is the more common convention and
+    produces an encoding with the same shape, the same norm and the same
+    pairwise distances under a fixed permutation, so it is invisible to every
+    structural assertion and only shows up against a projection trained on the
+    other layout.
+    """
+    if dim <= 0 or dim % 2 != 0:
+        raise ValueError(
+            f"dim must be a positive even number so the sine and cosine "
+            f"halves are equal-width, got {dim}"
+        )
+    half = dim // 2
+    frequency_index = ops.arange(half, dtype="float32")
+    divisor = ops.power(
+        ops.cast(temperature, "float32"),
+        2.0 * ops.floor(frequency_index / 2.0) / float(half),
+    )
+    angles = ops.expand_dims(
+        ops.cast(ops.convert_to_tensor(positions), "float32"), axis=-1
+    ) / divisor
+    return ops.concatenate([ops.sin(angles), ops.cos(angles)], axis=-1)
+
+
+def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
+    """Gather each batch row's highest-IoU entry along the mask axis.
+
+    Interface contract (both the pointer selection in :meth:`SAM2._decode` and
+    the memory selection in :meth:`SAM2._store_memory` call it, so the two
+    cannot drift apart):
+
+    :param tensor: ``(B, M, ...)`` -- axis 1 is the mask/token axis.
+    :type tensor: Any
+    :param iou_predictions: ``(B, M)`` predicted IoU per entry.
+    :type iou_predictions: Any
+    :return: ``(B, 1, ...)`` -- axis 1 retained with length 1, so the result
+        substitutes directly for a ``[:, 0:1]`` slice.
+    :rtype: Any
+
+    At ``M == 1`` this is exactly ``tensor[:, 0:1]``, so the single-mask path
+    is unchanged; the two differ only under ``multimask_output=True``, where
+    index 0 is multimask token 1 and is chosen by POSITION rather than by the
+    model's own IoU estimate.
+    """
+    index = ops.argmax(iou_predictions, axis=-1)
+    index = ops.cast(ops.reshape(index, (-1,) + (1,) * (len(tensor.shape) - 1)),
+                     "int32")
+    return ops.take_along_axis(tensor, index, axis=1)
 
 
 @keras.saving.register_keras_serializable()
@@ -84,10 +181,14 @@ class SAM2(keras.Model):
         attention.
     :type max_obj_ptrs_in_encoder: int
     :param soft_no_obj_ptr: Blend ``no_obj_ptr`` with the SIGMOID of the object
-        score rather than its hard threshold.
+        score rather than its hard threshold. Defaults to ``False``, which is
+        both the reference default and what the shipped config leaves unset.
     :type soft_no_obj_ptr: bool
-    :param fixed_no_obj_ptr: Additionally scale the predicted pointer by the
-        object-appearing factor before the blend.
+    :param fixed_no_obj_ptr: Scale the predicted pointer by the
+        object-appearing factor BEFORE adding the no-object term. Defaults to
+        ``True``, which is what the shipped config sets; it is the reference
+        CLASS default that is ``False``, and taking the class default here
+        would ship an un-configured model.
     :type fixed_no_obj_ptr: bool
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
@@ -157,8 +258,16 @@ class SAM2(keras.Model):
             directly_add_no_mem_embed: bool = True,
             memory_temporal_stride_for_eval: int = 1,
             max_obj_ptrs_in_encoder: int = 16,
-            soft_no_obj_ptr: bool = True,
-            fixed_no_obj_ptr: bool = False,
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-037
+            # These two defaults are the SHIPPED CONFIGURATION, not the
+            # reference class signature: `sam2.1_hiera_l.yaml` sets
+            # `fixed_no_obj_ptr: true` and leaves `soft_no_obj_ptr` unset (its
+            # reference default is False). This port has no YAML layer, so the
+            # constructor defaults ARE the shipped config and taking the class
+            # signature's values would ship a model no released checkpoint was
+            # trained as. Do NOT "restore" them to True/False. See D-037.
+            soft_no_obj_ptr: bool = False,
+            fixed_no_obj_ptr: bool = True,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -192,6 +301,32 @@ class SAM2(keras.Model):
         self.mem_dim = int(self.memory_encoder.out_dim)
         self._validate_component_agreement()
 
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-036
+        # These two projections and `no_obj_embed_spatial` are NOT optional and
+        # deliberately have no config flags. The shipped `sam2.1_hiera_l.yaml`
+        # sets `use_mlp_for_obj_ptr_proj`, `proj_tpos_enc_in_obj_ptrs`,
+        # `add_tpos_enc_to_obj_ptrs` and `no_obj_embed_spatial` all TRUE, and
+        # this port has no YAML layer to carry them. Do NOT "restore
+        # configurability" by adding flags defaulting to the reference class
+        # signature (which turns all four off): every one of them is silent
+        # when absent -- the model builds, trains and serializes without them,
+        # and the only symptom is that every object pointer becomes temporally
+        # indistinguishable. That is exactly how they went missing the first
+        # time. See decisions.md D-036.
+        self.obj_ptr_proj = _build_mlp_head(
+            num_layers=_OBJ_PTR_PROJ_DEPTH,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            activation="relu",
+            dense_name_template="obj_ptr_proj_dense{n}",
+            name="obj_ptr_proj",
+        )
+        # Projects the pointer TEMPORAL encoding from `hidden_dim` (the width
+        # the sine encoding is generated at, because `proj_tpos_enc_in_obj_ptrs`
+        # is on) down to the memory width.
+        self.obj_ptr_tpos_proj = keras.layers.Dense(
+            self.mem_dim, name="obj_ptr_tpos_proj")
+
         # Plain-Python streaming state. Never a weight, never serialized: a
         # memory bank is a per-VIDEO object, not part of the architecture.
         self.memory_bank = SAM2MemoryBank(
@@ -207,6 +342,7 @@ class SAM2(keras.Model):
         self.no_mem_embed = None
         self.no_mem_pos_enc = None
         self.no_obj_ptr = None
+        self.no_obj_embed_spatial = None
 
     # -----------------------------------------------------------------
     # construction-time agreement
@@ -453,6 +589,18 @@ class SAM2(keras.Model):
             initializer="zeros",
             trainable=True,
         )
+        # The SPATIAL no-object embedding -- the second, independent
+        # no-object mechanism (D-036). `no_obj_ptr` marks the pointer stream;
+        # this marks the encoded spatial memory of an occluded frame.
+        self.no_obj_embed_spatial = self.add_weight(
+            name="no_obj_embed_spatial",
+            shape=(1, self.mem_dim),
+            initializer="zeros",
+            trainable=True,
+        )
+
+        self.obj_ptr_proj.build((None, self.hidden_dim))
+        self.obj_ptr_tpos_proj.build((None, self.hidden_dim))
 
         logger.debug(
             "SAM2 built: image_size=%d grid=%d hidden_dim=%d mem_dim=%d "
@@ -585,16 +733,40 @@ class SAM2(keras.Model):
                 high_res_features=[fpn[0], fpn[1]],
                 training=training,
             )
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-038
+        # The pointer token is gathered by the model's OWN best-IoU estimate,
+        # never by position. Do NOT "simplify" this back to
+        # `pointer_tokens[:, 0, :]`: under `multimask_output=True` the decoder
+        # has already sliced away the single-mask token, so index 0 is
+        # *multimask token 1* -- an arbitrary one of three. The memory and the
+        # object pointer would then be built from a mask the model did not
+        # judge best, with no shape error and no measurable symptom at batch 1
+        # on the single-mask path (where M == 1 and the two agree exactly).
+        # See decisions.md D-038.
+        selected_token = ops.squeeze(
+            _select_best_by_iou(pointer_tokens, iou), axis=1)
+        pointer = self.obj_ptr_proj(selected_token, training=training)
         return {
             "low_res_logits": low_res_logits,
             "iou_predictions": iou,
             "object_score_logits": object_score_logits,
             "object_pointer": self._blend_object_pointer(
-                pointer_tokens[:, 0, :], object_score_logits),
+                pointer, object_score_logits),
         }
 
     def _blend_object_pointer(self, pointer: Any, score: Any) -> Any:
         """Interpolate the predicted pointer towards the learned ``no_obj_ptr``.
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-039
+        # The `lambda * pointer` multiply happens ONLY under
+        # `fixed_no_obj_ptr`; the `(1 - lambda) * no_obj_ptr` term is added
+        # UNCONDITIONALLY. Do NOT "tidy" this into the symmetric-looking
+        # `lambda * pointer + (1 - lambda) * no_obj`: the two expressions
+        # coincide at lambda in {0, 1} and NOWHERE else, so a guard sited at
+        # saturated object scores (+-30 logits) cannot tell them apart while
+        # every real input lies strictly between. At `score = 0` the reference
+        # returns `ptr + 0.5 * no_obj` and the symmetric form returns
+        # `0.5 * ptr + 0.5 * no_obj`. See decisions.md D-039.
 
         :param pointer: ``(B, hidden_dim)`` predicted pointer.
         :type pointer: Any
@@ -611,7 +783,7 @@ class SAM2(keras.Model):
         if self.fixed_no_obj_ptr:
             pointer = appearing * pointer
         no_obj = ops.cast(self.no_obj_ptr, pointer.dtype)
-        return appearing * pointer + (1.0 - appearing) * no_obj
+        return pointer + (1.0 - appearing) * no_obj
 
     # -----------------------------------------------------------------
     # the video path -- plain Python, NEVER traced
@@ -775,8 +947,28 @@ class SAM2(keras.Model):
 
         The bank returns one slot index per selected FRAME plus that frame's
         token count; this expands them per TOKEN and gathers the learned rows.
-        Object-pointer tokens sit at the tail and get zeros — their temporal
-        signal rides on the pointer values themselves.
+
+        The two halves of the memory sequence carry temporal signal by
+        DIFFERENT means, and neither is optional:
+
+        * spatial frame tokens get a learned row of ``maskmem_tpos_enc``,
+          selected by the bank's slot index;
+        * object-pointer tokens get a FIXED sine encoding of the bank's
+          ``obj_ptr_tpos`` (how many frames away that pointer is), projected to
+          ``mem_dim`` by :attr:`obj_ptr_tpos_proj`.
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-040
+        # The pointer tail is NOT zeros. Do NOT "simplify" it back to
+        # `ops.zeros(...)` on the theory that "the temporal signal rides on the
+        # pointer values themselves" -- it does not. The rotary embedding in
+        # memory attention is spatial-only and is broadcast identically across
+        # every memory token, and `maskmem_tpos_enc` is indexed by SPATIAL slot
+        # and never reaches the pointer tail. With zeros here, a pointer from
+        # frame t-1 and a pointer from frame t-15 are numerically
+        # indistinguishable to memory attention, which is the entire mechanism
+        # `add_tpos_enc_to_obj_ptrs: true` exists to provide. The bank was
+        # already computing and returning `obj_ptr_tpos` and NOTHING consumed
+        # it. See decisions.md D-040.
 
         :param readout: The bank's ``_MemoryReadout``.
         :type readout: Any
@@ -795,13 +987,36 @@ class SAM2(keras.Model):
             table, ops.convert_to_tensor(per_token, dtype="int32"), axis=0)
         encoding = ops.expand_dims(encoding, axis=0)
         if readout.num_obj_ptr_tokens:
-            encoding = ops.concatenate([
-                encoding,
-                ops.zeros(
-                    (1, readout.num_obj_ptr_tokens, self.mem_dim),
-                    dtype=encoding.dtype),
-            ], axis=1)
+            encoding = ops.concatenate(
+                [encoding, self._object_pointer_temporal_encoding(readout)],
+                axis=1)
         return ops.cast(encoding, memory.dtype)
+
+    def _object_pointer_temporal_encoding(self, readout: Any) -> Any:
+        """Sine-encode and project the pointer tail's temporal differences.
+
+        The bank hands back ``obj_ptr_tpos`` already expanded PER TOKEN (each
+        ``hidden_dim``-wide pointer splits into ``hidden_dim // mem_dim``
+        tokens that share their pointer's temporal difference), so the sine
+        encoding is taken per token here. That is value-identical to encoding
+        per pointer and repeating afterwards -- the same function applied to
+        already-duplicated inputs -- and avoids a second expansion rule that
+        could drift from the bank's.
+
+        :param readout: The bank's ``_MemoryReadout``.
+        :type readout: Any
+        :return: ``(1, num_obj_ptr_tokens, mem_dim)``.
+        :rtype: Any
+        """
+        # Normalized exactly as the reference does: by the largest temporal
+        # difference the pointer cap can produce, so the encoding's frequency
+        # content does not depend on how far into the video the tracker is.
+        # `max(..., 1)` only guards the degenerate cap of 1.
+        span = float(max(self.max_obj_ptrs_in_encoder - 1, 1))
+        positions = [float(diff) / span for diff in readout.obj_ptr_tpos]
+        encoding = _sine_positional_encoding_1d(positions, self.hidden_dim)
+        encoding = self.obj_ptr_tpos_proj(encoding, training=False)
+        return ops.expand_dims(encoding, axis=0)
 
     def _store_memory(
             self,
@@ -822,7 +1037,11 @@ class SAM2(keras.Model):
         :param is_conditioning: Store in the conditioning bucket.
         :type is_conditioning: bool
         """
-        logits = outputs["low_res_logits"][:, 0:1, :, :]
+        # The SAME best-IoU selection the object pointer uses (D-038), through
+        # the shared helper so the frame's memory and its pointer can never be
+        # built from different masks.
+        logits = _select_best_by_iou(
+            outputs["low_res_logits"], outputs["iou_predictions"])
         logits = ops.transpose(logits, (0, 2, 3, 1))
         # A Python tuple of ints from config: `len()`-able, so this resize is
         # graph-legal as well as eager-legal.
@@ -832,6 +1051,7 @@ class SAM2(keras.Model):
 
         memory, memory_pos = self.memory_encoder([
             ops.stop_gradient(features), ops.stop_gradient(high_res)])
+        memory = self._mark_occlusion(memory, outputs["object_score_logits"])
         self.memory_bank.add_frame(
             frame_idx,
             maskmem_features=memory,
@@ -839,6 +1059,28 @@ class SAM2(keras.Model):
             obj_ptr=ops.stop_gradient(outputs["object_pointer"]),
             is_conditioning=is_conditioning,
         )
+
+    def _mark_occlusion(self, memory: Any, score: Any) -> Any:
+        """Add ``no_obj_embed_spatial`` in proportion to ``1 - is_appearing``.
+
+        The threshold is HARD (``score > 0``) here, unlike the object-pointer
+        blend, which follows :attr:`soft_no_obj_ptr`. That asymmetry is the
+        reference's: the spatial mark is a binary "this frame is occluded" flag
+        on the memory, while the pointer blend may be soft.
+
+        :param memory: ``(B, h, w, mem_dim)`` encoded memory.
+        :type memory: Any
+        :param score: ``(B, 1)`` object-score logits.
+        :type score: Any
+        :return: ``(B, h, w, mem_dim)`` memory with the occlusion mark added.
+        :rtype: Any
+        """
+        appearing = ops.cast(
+            ops.reshape(score, (-1, 1, 1, 1)) > 0, memory.dtype)
+        embedding = ops.cast(
+            ops.reshape(self.no_obj_embed_spatial, (1, 1, 1, self.mem_dim)),
+            memory.dtype)
+        return memory + (1.0 - appearing) * embedding
 
     # -----------------------------------------------------------------
     # shapes / config

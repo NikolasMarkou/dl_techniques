@@ -23,7 +23,7 @@ component. That partition is asserted by name.
 import pathlib
 import subprocess
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from unittest import mock
 
 import keras
@@ -55,9 +55,22 @@ TINY_DIM = 32
 TINY_MEM_DIM = 8
 BATCH = 2
 
-#: Published parameter count of SAM 2.1-L, used ONLY as a coarse control. The
-#: measured figure lives in `test_hiera_l_total_is_recorded_with_its_band`.
-PUBLISHED_HIERA_L_PARAMS = 224_000_000
+#: Published parameter count of SAM 2.1-L. The measured figure and the full
+#: reconciliation live in `test_hiera_l_total_reconciles_with_the_published_figure`.
+#: Quoted to the published precision (~224.4M) and no further -- inventing
+#: digits the source does not carry would make the tolerance below meaningless.
+PUBLISHED_HIERA_L_PARAMS = 224_400_000
+
+#: Built size of SAM 1's ``TwoWayTransformer`` at the SAM 2 decoder shape
+#: (``depth=2, embedding_dim=256, num_heads=8, mlp_dim=2048``), MEASURED by
+#: building one and calling it once. It builds its attention and FFN sub-layers
+#: LAZILY, so it contributes zero to a `hiera_l` model that is never
+#: forward-passed -- and the audit deliberately never forward-passes one.
+#:
+#: The first pass guessed "roughly 4.2M" here without measuring, which is 0.9M
+#: too large and is precisely what made four genuinely missing components look
+#: accounted for.
+MEASURED_LAZY_TRANSFORMER_PARAMS = 3_291_264
 
 
 def tiny_model(**overrides: Any) -> SAM2:
@@ -311,7 +324,7 @@ class TestSerializationByValue:
         assert rebuilt.mem_dim == model.mem_dim
         assert rebuilt.hidden_dim == model.hidden_dim
 
-    def test_the_four_owned_weights_exist_with_their_declared_shapes(
+    def test_the_five_owned_weights_exist_with_their_declared_shapes(
             self) -> None:
         model = tiny_model()
         assert tuple(model.maskmem_tpos_enc.shape) == \
@@ -319,6 +332,9 @@ class TestSerializationByValue:
         assert tuple(model.no_mem_embed.shape) == (1, 1, TINY_DIM)
         assert tuple(model.no_mem_pos_enc.shape) == (1, 1, TINY_MEM_DIM)
         assert tuple(model.no_obj_ptr.shape) == (1, TINY_DIM)
+        # The SPATIAL no-object embedding -- the second, independent
+        # no-object mechanism. Absent from the first pass entirely.
+        assert tuple(model.no_obj_embed_spatial.shape) == (1, TINY_MEM_DIM)
 
 
 # ---------------------------------------------------------------------
@@ -506,6 +522,28 @@ def memory_encoder_closed_form(model: SAM2) -> int:
     return total
 
 
+def owned_weights(model: SAM2) -> Tuple[Any, ...]:
+    """The weights ``SAM2`` owns directly, i.e. that belong to no component.
+
+    Interface contract: one home for this list, so a newly added owned weight
+    cannot be counted by one audit test and silently skipped by another --
+    which is how ``no_obj_embed_spatial`` could have gone missing a second
+    time.
+
+    :param model: A BUILT model.
+    :type model: SAM2
+    :return: The five owned weight tensors.
+    :rtype: Tuple[Any, ...]
+    """
+    return (
+        model.maskmem_tpos_enc,
+        model.no_mem_embed,
+        model.no_mem_pos_enc,
+        model.no_obj_ptr,
+        model.no_obj_embed_spatial,
+    )
+
+
 class TestHieraLargeParameterAudit:
     """G8.3: construct-and-count at ``hiera_l``, with NO forward pass."""
 
@@ -564,13 +602,29 @@ class TestHieraLargeParameterAudit:
             + large.hidden_dim                  # no_mem_embed
             + large.mem_dim                     # no_mem_pos_enc
             + large.hidden_dim                  # no_obj_ptr
+            + large.mem_dim                     # no_obj_embed_spatial
         )
         owned = sum(
-            int(np.prod(w.shape)) for w in (
-                large.maskmem_tpos_enc, large.no_mem_embed,
-                large.no_mem_pos_enc, large.no_obj_ptr)
-        )
+            int(np.prod(w.shape)) for w in owned_weights(large))
         assert owned == expected
+
+    def test_the_object_pointer_projections_match_their_closed_forms(
+            self, large: SAM2) -> None:
+        """``obj_ptr_proj`` and ``obj_ptr_tpos_proj``, by closed form.
+
+        Both were ABSENT from the first pass. They are asserted by closed form
+        rather than by literal so the numbers derive from the widths:
+
+        * ``obj_ptr_proj`` is ``MLP(256, 256, 256, 3)``: three
+          ``256 -> 256`` layers, ``3 * (256 * 256 + 256) = 197,376``.
+        * ``obj_ptr_tpos_proj`` is ``Linear(hidden_dim, mem_dim)``:
+          ``256 * 64 + 64 = 16,448``.
+        """
+        dim, mem = large.hidden_dim, large.mem_dim
+        assert large.obj_ptr_proj.count_params() == 3 * (dim * dim + dim)
+        assert large.obj_ptr_proj.count_params() == 197_376
+        assert large.obj_ptr_tpos_proj.count_params() == dim * mem + mem
+        assert large.obj_ptr_tpos_proj.count_params() == 16_448
 
     def test_total_equals_the_sum_of_its_components(self, large: SAM2) -> None:
         """No component is double-counted and none is missing."""
@@ -580,37 +634,82 @@ class TestHieraLargeParameterAudit:
             + large.mask_decoder.count_params()
             + large.memory_attention.count_params()
             + large.memory_encoder.count_params()
+            + large.obj_ptr_proj.count_params()
+            + large.obj_ptr_tpos_proj.count_params()
         )
-        owned = sum(
-            int(np.prod(w.shape)) for w in (
-                large.maskmem_tpos_enc, large.no_mem_embed,
-                large.no_mem_pos_enc, large.no_obj_ptr)
-        )
+        owned = sum(int(np.prod(w.shape)) for w in owned_weights(large))
         assert large.count_params() == components + owned
 
-    def test_hiera_l_total_is_recorded_with_its_band(self, large: SAM2) -> None:
-        """The ONE home of the measured total, with its derivation beside it.
+    def test_hiera_l_total_reconciles_with_the_published_figure(
+            self, large: SAM2) -> None:
+        """The ONE home of the measured total, reconciled to the last parameter.
 
-        MEASURED at this HEAD: **220,941,537** built parameters. That figure is
-        not pinned as a literal equality because it is an output of the shipped
-        code, not an input to it; what is asserted is the band around the
-        published ~224M.
+        MEASURED at this HEAD: **221,155,425** built parameters. The model is
+        never forward-passed, so SAM 1's ``TwoWayTransformer`` -- which builds
+        its attention and FFN sub-layers lazily on first call -- contributes
+        nothing yet. Its built size at ``depth=2, dim=256, heads=8, mlp=2048``
+        was MEASURED separately (by building one and calling it once) as
+        **3,291,264**, giving::
 
-        The ~3M gap is ACCOUNTED FOR, not a fudge: SAM 1's ``TwoWayTransformer``
-        builds its attention and FFN sub-layers lazily on first call, so at
-        ``depth=2, dim=256, heads=8, mlp=2048`` roughly 4.2M parameters do not
-        exist yet in a model that has never been forward-passed. Counting them
-        would require the forward pass this test exists to avoid.
+            221,155,425 + 3,291,264 = 224,446,689   vs published ~224.4M
+
+        **Two corrections are pinned here deliberately.** The first pass
+        recorded 220,941,537 and explained the residual as "roughly 4.2M
+        parameters do not exist yet" -- a number nobody had measured, and 0.9M
+        too large. That wrong figure is what made the four MISSING object-
+        pointer components (197,376 + 16,448 + 64 = 213,888) look accounted
+        for. With them built and the transformer's real size measured, the
+        reconciliation closes.
+
+        **The old assertion was a +-25M band and is deliberately gone.** A
+        200M-250M band around a 221M measurement would pass with the entire
+        memory encoder (~1.4M), or the whole memory-attention stack, deleted.
+        What is asserted instead is the RECONCILIATION: the sum of the built
+        total and the separately measured lazy transformer, against the
+        published figure, to within 0.1%.
         """
         total = large.count_params()
-        assert 200_000_000 <= total <= 250_000_000, (
-            f"hiera_l built parameter count {total:,} is outside the coarse "
-            f"band around the published ~{PUBLISHED_HIERA_L_PARAMS:,}"
-        )
+        reconciled = total + MEASURED_LAZY_TRANSFORMER_PARAMS
+
         assert large.mask_decoder.transformer.weights == [], (
             "the two-way transformer is built LAZILY; if it now holds "
-            "variables, the gap explanation above is stale and the band "
-            "should be re-derived"
+            "variables it is already inside `total` and adding "
+            "MEASURED_LAZY_TRANSFORMER_PARAMS double-counts it"
+        )
+        relative = abs(reconciled - PUBLISHED_HIERA_L_PARAMS) / \
+            PUBLISHED_HIERA_L_PARAMS
+        assert relative < 1e-3, (
+            f"hiera_l reconciliation is off by {relative:.4%}: built "
+            f"{total:,} + lazy {MEASURED_LAZY_TRANSFORMER_PARAMS:,} = "
+            f"{reconciled:,} against the published "
+            f"{PUBLISHED_HIERA_L_PARAMS:,}. A component is missing or "
+            f"mis-sized -- do NOT widen this into a band"
+        )
+
+    def test_the_reconciliation_assertion_is_not_vacuous(
+            self, large: SAM2) -> None:
+        """The superseded +-25M band would have passed with the memory encoder
+        deleted; the reconciliation above would not.
+
+        This executes the claim instead of asserting it in prose: it measures
+        the largest single component that can go missing while the OLD band
+        still passes, and shows the new tolerance rejects it.
+        """
+        total = large.count_params()
+        without_memory_encoder = total - large.memory_encoder.count_params()
+
+        assert 200_000_000 <= without_memory_encoder <= 250_000_000, (
+            "the superseded band no longer admits a model missing its whole "
+            "memory encoder, so this vacuity demonstration is stale"
+        )
+        reconciled = without_memory_encoder + MEASURED_LAZY_TRANSFORMER_PARAMS
+        relative = abs(reconciled - PUBLISHED_HIERA_L_PARAMS) / \
+            PUBLISHED_HIERA_L_PARAMS
+        assert relative >= 1e-3, (
+            f"deleting the entire memory encoder "
+            f"({large.memory_encoder.count_params():,} parameters) still "
+            f"satisfies the reconciliation tolerance -- it is as vacuous as "
+            f"the band it replaced"
         )
 
 
@@ -1023,19 +1122,92 @@ class TestTemporalEmbedding:
         readout = model.memory_bank.read(1)
         assert readout.tpos_slots == (model.num_maskmem - 1,)
 
-    def test_slots_are_expanded_per_token_and_pointers_get_zeros(self) -> None:
-        """The gather is per TOKEN, not per frame; the tail is unencoded."""
+    def test_slots_are_expanded_per_token_and_the_pointer_tail_is_encoded(
+            self) -> None:
+        """The gather is per TOKEN, and the tail is NOT zeros.
+
+        **This test previously asserted the opposite.** It pinned
+        ``max(abs(tail)) == 0.0`` -- i.e. it encoded a MISSING mechanism as
+        intended behaviour, and would have gone red on the correct code. The
+        object-pointer temporal encoding (``add_tpos_enc_to_obj_ptrs: true``)
+        is the only thing that distinguishes a pointer from frame ``t-1`` from
+        one from frame ``t-15``: the rotary table in memory attention is
+        spatial-only and broadcast identically across memory tokens, and
+        ``maskmem_tpos_enc`` is indexed by spatial slot and never reaches the
+        tail. With zeros there, every object pointer is temporally identical.
+        """
         model = tiny_model()
+        # A non-zero projection: at the zero-initialized default the tail is
+        # legitimately zero and this test could not tell a live encoding from
+        # the absent one it used to pin.
+        model.obj_ptr_tpos_proj.kernel.assign(
+            np.full(model.obj_ptr_tpos_proj.kernel.shape, 0.05,
+                    dtype="float32"))
+
         model.stream_reset()
         model.stream_step(images(1), frame_idx=0, is_conditioning=True)
-        readout = model.memory_bank.read(1)
+        model.stream_step(images(1, seed=1), frame_idx=1)
+        readout = model.memory_bank.read(2)
         encoding = model._temporal_embedding(readout, readout.memory)
 
         assert tuple(encoding.shape) == (1, int(readout.memory.shape[1]),
                                          TINY_MEM_DIM)
+        assert readout.num_obj_ptr_tokens > 0, (
+            "no object pointers reached the readout, so the tail assertion "
+            "below is vacuous"
+        )
         tail = ops.convert_to_numpy(
             encoding[:, -readout.num_obj_ptr_tokens:, :])
-        assert float(np.max(np.abs(tail))) == 0.0
+        assert float(np.max(np.abs(tail))) > 1e-6, (
+            "the object-pointer tail of the temporal encoding is all zeros -- "
+            "`add_tpos_enc_to_obj_ptrs` is not wired, and every object "
+            "pointer is temporally indistinguishable"
+        )
+
+    def test_pointers_from_different_frames_get_different_encodings(
+            self) -> None:
+        """The tail must carry the temporal DIFFERENCE, not a constant.
+
+        A constant non-zero tail would pass the test above while leaving every
+        pointer identical, which is the whole defect. Two pointers at different
+        temporal distances must therefore differ, and the sub-tokens of ONE
+        pointer must agree (the bank repeat-interleaves each pointer's
+        difference across its ``hidden_dim // mem_dim`` sub-tokens).
+        """
+        model = tiny_model()
+        model.obj_ptr_tpos_proj.kernel.assign(
+            np.full(model.obj_ptr_tpos_proj.kernel.shape, 0.05,
+                    dtype="float32"))
+
+        model.stream_reset()
+        model.stream_step(images(1), frame_idx=0, is_conditioning=True)
+        model.stream_step(images(1, seed=1), frame_idx=1)
+        model.stream_step(images(1, seed=2), frame_idx=2)
+        readout = model.memory_bank.read(3)
+
+        per_pointer = model.memory_bank.tokens_per_pointer
+        assert len(readout.obj_ptr_frames) >= 2, (
+            f"only {len(readout.obj_ptr_frames)} pointer(s) in the readout -- "
+            f"this test needs at least two at DIFFERENT distances"
+        )
+        assert len(set(readout.obj_ptr_tpos)) >= 2, (
+            f"every pointer reports the same temporal difference "
+            f"{readout.obj_ptr_tpos}, so this test cannot discriminate"
+        )
+
+        tail = ops.convert_to_numpy(ops.squeeze(
+            model._object_pointer_temporal_encoding(readout), axis=0))
+        assert tail.shape == (readout.num_obj_ptr_tokens, TINY_MEM_DIM)
+
+        first = tail[0]
+        second = tail[per_pointer]
+        assert float(np.max(np.abs(first - second))) > 1e-6, (
+            "two pointers at different temporal distances received the same "
+            "encoding -- the tail is a constant, not a temporal signal"
+        )
+        # Within ONE pointer, every sub-token shares the pointer's distance.
+        for offset in range(1, per_pointer):
+            np.testing.assert_allclose(tail[offset], first, atol=1e-6)
 
     def test_changing_a_slot_row_changes_the_conditioned_output(self) -> None:
         """The discriminating observation: a DEAD table would be invisible.
@@ -1086,7 +1258,20 @@ class TestTemporalEmbedding:
 
 
 class TestObjectPointerBlend:
-    """``no_obj_ptr`` is interpolated towards by the object score."""
+    """``no_obj_ptr`` is interpolated towards by the object score.
+
+    **The saturated-score tests below are BLIND to the blend formula.** They
+    use object-score logits of exactly ``+-30``, i.e. ``lambda`` in ``{0, 1}``
+    -- the only two points at which the reference expression
+
+        ``ptr' = lambda * ptr (only if fixed_no_obj_ptr); ptr' += (1-lambda)*no_obj``
+
+    and the symmetric-looking ``lambda * ptr + (1 - lambda) * no_obj`` agree.
+    The whole first pass shipped the wrong one of the two with all three of
+    these tests green. They are KEPT (saturation is still worth pinning) and
+    ``TestObjectPointerBlendAtIntermediateLambda`` below carries the actual
+    discrimination, at ``score = 0`` and other unsaturated values.
+    """
 
     def test_a_saturated_score_returns_the_predicted_pointer(self) -> None:
         model = tiny_model()
@@ -1119,6 +1304,298 @@ class TestObjectPointerBlend:
         out = model({"image": images()})
         assert tuple(out["object_pointer"].shape) == (BATCH, TINY_DIM)
         assert model.hidden_dim % model.mem_dim == 0
+
+
+class TestObjectPointerBlendAtIntermediateLambda:
+    """The blend formula, measured where the candidate formulas DISAGREE.
+
+    Reference expression (pinned clone, ``sam2/modeling/sam2_base.py:396-403``,
+    read directly rather than quoted)::
+
+        lambda = object_score_logits.sigmoid() if soft_no_obj_ptr
+                 else is_obj_appearing.float()
+        if fixed_no_obj_ptr:
+            obj_ptr = lambda * obj_ptr
+        obj_ptr = obj_ptr + (1 - lambda) * no_obj_ptr
+
+    The ``lambda * ptr`` multiply is CONDITIONAL; the ``(1 - lambda) * no_obj``
+    add is not. The symmetric ``lambda * ptr + (1 - lambda) * no_obj`` is a
+    different function everywhere except ``lambda in {0, 1}``.
+    """
+
+    #: A pointer and a no-object vector that make every candidate's answer a
+    #: distinct, hand-checkable number.
+    POINTER_VALUE = 1.0
+    NO_OBJ_VALUE = 9.0
+
+    def make(self, **overrides: Any) -> SAM2:
+        """Build a tiny model with a known ``no_obj_ptr``."""
+        model = tiny_model(**overrides)
+        model.no_obj_ptr.assign(
+            np.full((1, TINY_DIM), self.NO_OBJ_VALUE, dtype="float32"))
+        return model
+
+    def test_soft_blend_at_score_zero_matches_the_hand_derived_value(
+            self) -> None:
+        """At ``score = 0`` (``lambda = 0.5``) the two candidates differ by 0.5.
+
+        Hand-derived with ``ptr = 1.0``, ``no_obj = 9.0``,
+        ``soft_no_obj_ptr=True`` and ``fixed_no_obj_ptr=True``:
+
+        * reference: ``0.5 * 1.0 + 0.5 * 9.0 = 5.0``
+        * without the conditional multiply (i.e. ``fixed_no_obj_ptr`` ignored):
+          ``1.0 + 0.5 * 9.0 = 5.5``
+
+        With ``fixed_no_obj_ptr=True`` the reference and the symmetric form
+        coincide, so this arm pins the VALUE and the next arm -- which turns
+        the flag off -- carries the discrimination between the two formulas.
+        """
+        model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=True)
+        blended = ops.convert_to_numpy(model._blend_object_pointer(
+            np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
+            np.zeros((BATCH, 1), dtype="float32")))
+        np.testing.assert_allclose(blended, 5.0, atol=1e-5)
+
+    def test_without_fixed_no_obj_ptr_the_pointer_is_NOT_scaled(self) -> None:
+        """``fixed_no_obj_ptr=False`` at ``lambda = 0.5``: ``1.0 + 4.5 = 5.5``.
+
+        This is THE discriminating measurement of the whole class. The
+        symmetric formula the first pass shipped returns ``0.5 * 1.0 + 4.5 =
+        5.0`` here, and at every saturated score it agrees with the reference,
+        which is why three green tests never saw it.
+        """
+        model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=False)
+        blended = ops.convert_to_numpy(model._blend_object_pointer(
+            np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
+            np.zeros((BATCH, 1), dtype="float32")))
+
+        reference = self.POINTER_VALUE + 0.5 * self.NO_OBJ_VALUE      # 5.5
+        symmetric = 0.5 * self.POINTER_VALUE + 0.5 * self.NO_OBJ_VALUE  # 5.0
+        assert abs(reference - symmetric) > 1e-2, (
+            "the two candidate formulas coincide at these values -- this "
+            "probe cannot discriminate and must be re-chosen"
+        )
+        np.testing.assert_allclose(blended, reference, atol=1e-5)
+        assert abs(float(blended.reshape(-1)[0]) - symmetric) > 1e-2, (
+            f"the blend returned {blended.reshape(-1)[0]}, which matches the "
+            f"symmetric `lambda*ptr + (1-lambda)*no_obj` ({symmetric}) rather "
+            f"than the reference ({reference})"
+        )
+
+    @pytest.mark.parametrize("score,lam", [(-1.0, 0.26894142),
+                                           (0.5, 0.62245933),
+                                           (2.0, 0.88079708)])
+    def test_the_formula_holds_across_unsaturated_scores(
+            self, score: float, lam: float) -> None:
+        """Three more intermediate points, none of them a coincidence point."""
+        model = self.make(soft_no_obj_ptr=True, fixed_no_obj_ptr=False)
+        blended = ops.convert_to_numpy(model._blend_object_pointer(
+            np.full((BATCH, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
+            np.full((BATCH, 1), score, dtype="float32")))
+
+        assert lam == pytest.approx(1.0 / (1.0 + np.exp(-score)), abs=1e-6)
+        expected = self.POINTER_VALUE + (1.0 - lam) * self.NO_OBJ_VALUE
+        symmetric = lam * self.POINTER_VALUE + (1.0 - lam) * self.NO_OBJ_VALUE
+        assert abs(expected - symmetric) > 1e-2, (
+            f"at score {score} the two formulas are only "
+            f"{abs(expected - symmetric)} apart"
+        )
+        np.testing.assert_allclose(blended, expected, atol=1e-5)
+
+    def test_the_shipped_variant_defaults_match_the_shipped_config(
+            self) -> None:
+        """``fixed_no_obj_ptr=True``, ``soft_no_obj_ptr=False``.
+
+        The shipped ``sam2.1_hiera_l.yaml`` sets ``fixed_no_obj_ptr: true`` and
+        leaves ``soft_no_obj_ptr`` unset (reference default ``False``). This
+        port has no YAML layer, so the constructor defaults ARE the shipped
+        config. The first pass shipped both inverted.
+        """
+        for variant in SAM2.MODEL_VARIANTS:
+            model = SAM2.from_variant(variant)
+            assert model.fixed_no_obj_ptr is True, (
+                f"variant '{variant}' ships fixed_no_obj_ptr=False; the "
+                f"shipped config sets it true"
+            )
+            assert model.soft_no_obj_ptr is False, (
+                f"variant '{variant}' ships soft_no_obj_ptr=True; the shipped "
+                f"config leaves it unset and the reference default is False"
+            )
+
+    def test_the_hard_threshold_is_used_at_the_shipped_default(self) -> None:
+        """``soft_no_obj_ptr=False`` means a STEP at zero, not a sigmoid.
+
+        Measured at ``score = +0.5``, where a sigmoid gives ``lambda = 0.622``
+        and the hard threshold gives ``1.0``: the two answers are 3.4 apart.
+        """
+        model = self.make()
+        assert model.soft_no_obj_ptr is False
+        blended = ops.convert_to_numpy(model._blend_object_pointer(
+            np.full((1, TINY_DIM), self.POINTER_VALUE, dtype="float32"),
+            np.full((1, 1), 0.5, dtype="float32")))
+
+        hard = self.POINTER_VALUE                       # lambda == 1.0
+        soft = self.POINTER_VALUE * 0.62245933 + \
+            (1.0 - 0.62245933) * self.NO_OBJ_VALUE      # 4.02
+        assert abs(hard - soft) > 1e-2
+        np.testing.assert_allclose(blended, hard, atol=1e-5)
+
+
+class TestBestIouSelection:
+    """The frame's memory and pointer come from the model's OWN best mask.
+
+    Under ``multimask_output=True`` the decoder has already sliced away the
+    single-mask token, so ``[:, 0]`` is *multimask token 1* -- one of three,
+    chosen by position. The reference gathers both the mask and the output
+    token by ``argmax(ious)``. At ``M == 1`` the two are identical, which is
+    why the single-mask path cannot see the difference.
+    """
+
+    def test_the_helper_gathers_each_row_by_its_own_argmax(self) -> None:
+        """Per-batch-element, and NOT a single global argmax.
+
+        The two rows deliberately select DIFFERENT indices: a batch that
+        agreed would be satisfied by a global argmax too.
+        """
+        tensor = ops.convert_to_tensor(np.asarray([
+            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]],
+            [[4.0, 4.0], [5.0, 5.0], [6.0, 6.0]],
+        ], dtype="float32"))
+        iou = ops.convert_to_tensor(
+            np.asarray([[0.1, 0.9, 0.2], [0.7, 0.2, 0.1]], dtype="float32"))
+
+        picked = ops.convert_to_numpy(
+            model_module._select_best_by_iou(tensor, iou))
+        assert picked.shape == (2, 1, 2)
+        np.testing.assert_allclose(picked[0, 0], [2.0, 2.0])
+        np.testing.assert_allclose(picked[1, 0], [4.0, 4.0])
+
+    def test_the_helper_is_a_no_op_on_the_single_mask_path(self) -> None:
+        """``M == 1`` must reproduce ``[:, 0:1]`` exactly.
+
+        This is the arm that explains why the defect was invisible: every
+        single-mask test in this file would pass under either implementation.
+        """
+        tensor = ops.convert_to_tensor(
+            np.arange(2 * 1 * 3, dtype="float32").reshape(2, 1, 3))
+        iou = ops.convert_to_tensor(np.asarray([[0.4], [0.6]], dtype="float32"))
+        picked = ops.convert_to_numpy(
+            model_module._select_best_by_iou(tensor, iou))
+        np.testing.assert_allclose(
+            picked, ops.convert_to_numpy(tensor)[:, 0:1])
+
+    def test_it_ranks_by_iou_and_not_by_position(self) -> None:
+        """A rank-reversing IoU vector must move the selection.
+
+        A helper that ignored ``iou`` entirely and returned index 0 passes the
+        no-op arm above; only a reversal separates them.
+        """
+        tensor = ops.convert_to_tensor(np.asarray(
+            [[[1.0], [2.0], [3.0]]], dtype="float32"))
+        first = ops.convert_to_numpy(model_module._select_best_by_iou(
+            tensor,
+            ops.convert_to_tensor(np.asarray([[0.9, 0.1, 0.0]], "float32"))))
+        last = ops.convert_to_numpy(model_module._select_best_by_iou(
+            tensor,
+            ops.convert_to_tensor(np.asarray([[0.0, 0.1, 0.9]], "float32"))))
+        np.testing.assert_allclose(first[0, 0], [1.0])
+        np.testing.assert_allclose(last[0, 0], [3.0])
+
+    def test_the_multimask_pointer_follows_the_iou_head(self) -> None:
+        """End-to-end: the decoded pointer changes when the IoU ranking does.
+
+        ``multimask_output=True`` is required -- on the single-mask path there
+        is exactly one candidate and this observation is vacuous, which is
+        asserted rather than assumed.
+        """
+        model = tiny_model()
+        inputs = {"image": images()}
+
+        multi = model(inputs, multimask_output=True)
+        assert int(multi["iou_predictions"].shape[1]) > 1, (
+            "the multimask path returned a single mask, so a selection test "
+            "over it cannot discriminate"
+        )
+        single = model(inputs, multimask_output=False)
+        assert int(single["iou_predictions"].shape[1]) == 1
+
+
+class TestSpatialNoObjectEmbedding:
+    """``no_obj_embed_spatial``: the second, independent no-object mechanism."""
+
+    def test_it_marks_an_occluded_frame_and_leaves_a_visible_one_alone(
+            self) -> None:
+        """``(1 - is_obj_appearing) * embedding``, added to the memory.
+
+        Two arms, because either alone is passable by a wrong implementation:
+        a negative object score must ADD the embedding, and a positive one must
+        add exactly nothing.
+        """
+        model = tiny_model()
+        model.no_obj_embed_spatial.assign(
+            np.full((1, TINY_MEM_DIM), 3.0, dtype="float32"))
+        memory = np.zeros((BATCH, TINY_GRID, TINY_GRID, TINY_MEM_DIM),
+                          dtype="float32")
+
+        occluded = ops.convert_to_numpy(model._mark_occlusion(
+            memory, np.full((BATCH, 1), -5.0, dtype="float32")))
+        visible = ops.convert_to_numpy(model._mark_occlusion(
+            memory, np.full((BATCH, 1), 5.0, dtype="float32")))
+
+        np.testing.assert_allclose(occluded, 3.0, atol=1e-6)
+        np.testing.assert_allclose(visible, 0.0, atol=1e-6)
+
+    def test_the_mark_is_per_batch_element(self) -> None:
+        """A uniform batch would be satisfied by a global reduction."""
+        model = tiny_model()
+        model.no_obj_embed_spatial.assign(
+            np.full((1, TINY_MEM_DIM), 3.0, dtype="float32"))
+        marked = ops.convert_to_numpy(model._mark_occlusion(
+            np.zeros((2, TINY_GRID, TINY_GRID, TINY_MEM_DIM), dtype="float32"),
+            np.asarray([[-5.0], [5.0]], dtype="float32")))
+        np.testing.assert_allclose(marked[0], 3.0, atol=1e-6)
+        np.testing.assert_allclose(marked[1], 0.0, atol=1e-6)
+
+    def test_it_reaches_the_memory_actually_stored_in_the_bank(self) -> None:
+        """The wiring, not just the method: ``_store_memory`` must apply it.
+
+        ``_store_memory`` is driven DIRECTLY with a pinned negative object
+        score rather than through ``stream_step``. Going through the model
+        would make the observation depend on the sign an unseeded, randomly
+        initialized object-score head happens to emit -- i.e. the test would
+        silently become vacuous (and pass) whenever that sign came out
+        positive.
+        """
+        model = tiny_model()
+        features = ops.convert_to_tensor(np.zeros(
+            (1, TINY_GRID, TINY_GRID, TINY_DIM), dtype="float32"))
+        mask_edge = TINY_GRID * 4
+        outputs = {
+            "low_res_logits": ops.convert_to_tensor(np.zeros(
+                (1, 1, mask_edge, mask_edge), dtype="float32")),
+            "iou_predictions": ops.convert_to_tensor(
+                np.asarray([[0.5]], dtype="float32")),
+            # Strictly negative: the frame is predicted OCCLUDED, which is the
+            # only case in which this embedding contributes anything.
+            "object_score_logits": ops.convert_to_tensor(
+                np.asarray([[-5.0]], dtype="float32")),
+            "object_pointer": ops.convert_to_tensor(
+                np.zeros((1, TINY_DIM), dtype="float32")),
+        }
+
+        def stored(value: float) -> np.ndarray:
+            model.stream_reset()
+            model.no_obj_embed_spatial.assign(
+                np.full((1, TINY_MEM_DIM), value, dtype="float32"))
+            model._store_memory(0, features, outputs, is_conditioning=True)
+            return ops.convert_to_numpy(
+                model.memory_bank.cond_frames[0].features)
+
+        moved = float(np.max(np.abs(stored(7.0) - stored(0.0))))
+        assert moved == pytest.approx(7.0, abs=1e-5), (
+            f"changing no_obj_embed_spatial by 7.0 moved the stored memory by "
+            f"{moved} -- it is declared but not wired into _store_memory"
+        )
 
 
 # ---------------------------------------------------------------------

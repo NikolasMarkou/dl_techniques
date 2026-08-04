@@ -4,8 +4,12 @@ Guards for SAM 2's memory encoder (plan step 5, guards G5.1-G5.5).
 Every mechanism guarded here is SILENT when ported wrong -- the model builds,
 forward-passes, trains and serializes either way:
 
-    * The mask affine ``sigmoid(20x - 10)`` degrades to a bare ``sigmoid(x)``
-      with identical shapes, an identical output range and a plausible loss.
+    * The mask transform ``20 * sigmoid(x) - 10`` degrades to EITHER a bare
+      ``sigmoid(x)`` or the order-swapped ``sigmoid(20x - 10)`` with identical
+      shapes and a plausible loss. The two wrong candidates additionally share
+      an output range with each other, so a guard written against only one of
+      them cannot see the other -- which is exactly how the order defect
+      survived the first pass.
     * The downsampler's signature default ``k=4/s=4/p=0`` reaches the SAME
       total stride of 16 as the shipped ``k=3/s=2/p=1``, with two convolutions
       instead of four. An assertion on the output resolution is therefore
@@ -19,7 +23,7 @@ forward-passes, trains and serializes either way:
 
 Guard map:
 
-    G5.1  ``TestAffineSigmoidValue``     -- VALUE oracle, not liveness
+    G5.1  ``TestAffineSigmoidValue``     -- VALUE oracle over THREE candidates
     G5.2  ``TestDownSamplerGeometry``    -- layer count + derived channel ladder
           ``TestDownSamplerVacuity``     -- proves the stride assertion vacuous
     G5.3  ``TestAdditiveFusion``         -- fuser width 256, not 512
@@ -146,58 +150,162 @@ def no_tf32() -> Iterator[None]:
 # ---------------------------------------------------------------------
 
 
-class TestAffineSigmoidValue:
-    """``sigmoid(20x - 10)``, asserted as a VALUE, never as liveness.
+#: The three candidate readings of the mask transform, as pure NumPy on
+#: float64. `upstream` is the one the reference implementation computes; the
+#: other two are the readings that produce a model which builds, trains and
+#: serializes identically.
+#:
+#: Derived BY HAND from the reference expression, which is (pinned clone
+#: `sam2/modeling/sam2_base.py:705-712`):
+#:
+#:     mask_for_mem = torch.sigmoid(pred_masks_high_res)   # line 705
+#:     mask_for_mem = mask_for_mem * sigmoid_scale_for_mem_enc   # line 708
+#:     mask_for_mem = mask_for_mem + sigmoid_bias_for_mem_enc    # line 710
+#:     memory_encoder(pix_feat, mask_for_mem, skip_mask_sigmoid=True)  # 711
+#:
+#: i.e. sigmoid FIRST, affine SECOND, and the encoder's own sigmoid is skipped.
+MASK_TRANSFORM_CANDIDATES = {
+    "upstream": lambda x: 1.0 / (1.0 + np.exp(-x)) * SIGMOID_SCALE + SIGMOID_BIAS,
+    "order_swapped": lambda x: 1.0 / (1.0 + np.exp(-(SIGMOID_SCALE * x + SIGMOID_BIAS))),
+    "bare_sigmoid": lambda x: 1.0 / (1.0 + np.exp(-x)),
+}
 
-    A liveness probe ("the mask branch moves the output") goes green on code
-    computing a bare ``sigmoid(x)``: both are monotone maps into ``(0, 1)`` and
-    both move the output. Only the transformed VALUE distinguishes them.
+
+class TestAffineSigmoidValue:
+    """``20 * sigmoid(x) - 10``, asserted as a VALUE against THREE candidates.
+
+    A liveness probe ("the mask branch moves the output") goes green on all
+    three candidates -- every one of them is a monotone map that moves the
+    output. A two-candidate guard is not enough either: the FIRST version of
+    this class discriminated ``sigmoid(20x - 10)`` from ``sigmoid(x)`` and went
+    green on shipped code computing neither the reference transform nor
+    anything with the reference's range. Every assertion below therefore names
+    all three candidates and states the measured separation.
     """
 
-    def test_transforms_a_known_logit_to_a_known_probability(
+    #: Hand-derived from the reference expression, per probe logit:
+    #: ``(upstream, order_swapped, bare_sigmoid)``. The middle column saturates
+    #: for ``|x| >= 5`` because ``20x - 10`` reaches ``+-90`` there.
+    #:
+    #: ==========  =============  ==================  ==============
+    #: logit       upstream       order_swapped       bare_sigmoid
+    #: ==========  =============  ==================  ==============
+    #: ``0.0``     ``0.0``        ``4.5398e-5``       ``0.5``
+    #: ``0.6``     ``+2.913126``  ``0.880797``        ``0.645656``
+    #: ``+5.0``    ``+9.866143``  ``~1.0``            ``0.993307``
+    #: ``-5.0``    ``-9.866143``  ``~0.0``            ``0.006693``
+    #: ==========  =============  ==================  ==============
+    HAND_DERIVED = {
+        0.0: (0.0, 4.539787e-5, 0.5),
+        0.6: (2.913126, 0.880797, 0.645656),
+        5.0: (9.866143, 1.0, 0.993307),
+        -5.0: (-9.866143, 0.0, 0.0066929),
+    }
+
+    def test_transforms_known_logits_to_the_hand_derived_values(
             self, encoder: SAM2MemoryEncoder) -> None:
-        """At logit 0.6 the affine gives ``sigmoid(2.0)``, not ``sigmoid(0.6)``.
+        """The transform matches ``upstream`` and NEITHER wrong candidate.
 
-        ``20 * 0.6 - 10 == 2.0``. The two candidate answers differ by 0.235,
-        which is 5 orders of magnitude above the 1e-6 tolerance.
+        **Logit 0.0 is a COINCIDENCE POINT, and is handled explicitly.** There
+        the reference gives exactly ``0.0`` while ``sigmoid(20x - 10)`` gives
+        ``4.54e-5``: the two are 4.5e-5 apart, so a guard sited only at
+        ``x = 0`` cannot separate them at any usable tolerance. This was
+        MEASURED here -- the first draft of this test parametrized over ``0.0``
+        and its own separation assertion fired. Rather than quietly drop the
+        probe, the test keeps it (it is the only logit at which the reference
+        returns exactly zero, and the value at which a liveness probe is
+        maximally blind), skips the candidates it cannot separate THERE, and
+        then requires that every wrong candidate was separated by at least one
+        probe in the set. That closes the defect class this round exists to
+        repair: a fixture sited exactly where the correct and broken variants
+        agree.
         """
-        probe = np.full((1, 1, 1, 1), 0.6, dtype="float32")
-        actual = float(ops.convert_to_numpy(
-            encoder._affine_sigmoid(probe)).reshape(-1)[0])
+        discriminated: Dict[str, List[float]] = {
+            "order_swapped": [], "bare_sigmoid": []}
 
-        affine_answer = 1.0 / (1.0 + np.exp(-2.0))
-        bare_answer = 1.0 / (1.0 + np.exp(-0.6))
+        for probe, hand in self.HAND_DERIVED.items():
+            probe_array = np.full((1, 1, 1, 1), probe, dtype="float32")
+            actual = float(ops.convert_to_numpy(
+                encoder._affine_sigmoid(probe_array)).reshape(-1)[0])
 
-        assert affine_answer == pytest.approx(0.880797, abs=1e-6)
-        assert bare_answer == pytest.approx(0.645656, abs=1e-6)
-        assert actual == pytest.approx(affine_answer, abs=1e-6), (
-            f"the mask affine produced {actual}; sigmoid(20x-10) at x=0.6 is "
-            f"{affine_answer}, a bare sigmoid(x) is {bare_answer}"
+            expected = {
+                name: float(fn(np.float64(probe)))
+                for name, fn in MASK_TRANSFORM_CANDIDATES.items()
+            }
+            # The hand-computed table asserted against the closed forms, so a
+            # typo in either one is caught rather than propagated.
+            assert expected["upstream"] == pytest.approx(hand[0], abs=1e-5)
+            assert expected["order_swapped"] == pytest.approx(hand[1], abs=1e-5)
+            assert expected["bare_sigmoid"] == pytest.approx(hand[2], abs=1e-5)
+
+            assert actual == pytest.approx(expected["upstream"], abs=1e-5), (
+                f"at logit {probe} the mask transform produced {actual}; "
+                f"20*sigmoid(x)-10 is {expected['upstream']}, "
+                f"sigmoid(20x-10) is {expected['order_swapped']}, "
+                f"a bare sigmoid(x) is {expected['bare_sigmoid']}"
+            )
+            for wrong in discriminated:
+                if abs(expected["upstream"] - expected[wrong]) <= 1e-2:
+                    # A coincidence point for THIS candidate. Skip it here and
+                    # let another probe in the set carry the discrimination.
+                    continue
+                discriminated[wrong].append(probe)
+                assert abs(actual - expected[wrong]) > 1e-2, (
+                    f"at logit {probe} the transform produced {actual}, which "
+                    f"matches the WRONG '{wrong}' candidate "
+                    f"({expected[wrong]}) rather than {expected['upstream']}"
+                )
+
+        for wrong, probes in discriminated.items():
+            assert probes, (
+                f"no probe in {sorted(self.HAND_DERIVED)} separates the "
+                f"'{wrong}' candidate from the reference by more than 1e-2 -- "
+                f"this test is blind to it and the probe set must be extended"
+            )
+
+    def test_the_range_is_signed_and_twenty_wide_not_a_probability(
+            self, encoder: SAM2MemoryEncoder) -> None:
+        """The output spans ``(-10, +10)``; both wrong candidates span ``(0, 1)``.
+
+        This is the structural half of the guard: it does not depend on any
+        particular probe value. Saturating logits pin the two limits, which are
+        ``sigmoid_bias`` and ``sigmoid_scale + sigmoid_bias`` exactly.
+        """
+        saturating = np.array(
+            [-1.0e4, 1.0e4], dtype="float32").reshape((1, 1, 2, 1))
+        limits = ops.convert_to_numpy(
+            encoder._affine_sigmoid(saturating)).reshape(-1)
+
+        assert float(limits[0]) == pytest.approx(SIGMOID_BIAS, abs=1e-4), (
+            f"the lower limit is {limits[0]}, not sigmoid_bias={SIGMOID_BIAS} "
+            f"-- a (0, 1)-ranged candidate would give ~0.0 here"
         )
-        assert abs(actual - bare_answer) > 0.2, (
-            f"the transformed value is within 0.2 of a BARE sigmoid "
-            f"({bare_answer}) -- the scale/bias is not being applied"
+        assert float(limits[1]) == pytest.approx(
+            SIGMOID_SCALE + SIGMOID_BIAS, abs=1e-4), (
+            f"the upper limit is {limits[1]}, not scale+bias="
+            f"{SIGMOID_SCALE + SIGMOID_BIAS} -- a (0, 1)-ranged candidate "
+            f"would give ~1.0 here"
         )
 
     @pytest.mark.usefixtures("no_tf32")
-    def test_affine_is_the_transform_the_forward_pass_actually_uses(
+    def test_the_transform_is_what_the_forward_pass_actually_uses(
             self,
             encoder: SAM2MemoryEncoder,
             pix_feat: np.ndarray,
             mask_logits: np.ndarray,
     ) -> None:
-        """End-to-end: ``call`` uses exactly ``sigmoid(20x - 10)``.
+        """End-to-end: ``call`` applies ``20 * sigmoid(x) - 10``, not either twin.
 
-        The previous test reads a private method. This one proves the FORWARD
+        The previous tests read a private method. This one proves the FORWARD
         PASS uses it, by feeding a ``skip_mask_sigmoid=True`` twin -- weights
-        copied verbatim -- two candidate hand-transformed masks and asking
-        which one the encoder reproduces.
+        copied verbatim -- all THREE candidate hand-transformed masks and
+        asking which one the encoder reproduces.
 
-        **The test is two-sided and self-calibrating**: it asserts agreement
-        with the affine candidate AND disagreement with the bare-sigmoid
-        candidate, with the measured margin between them in the message. A
-        one-sided tolerance would be a hypothesis about float noise; this
-        compares the two distances the tolerance has to separate.
+        **The test is self-calibrating**: it asserts agreement with the
+        reference candidate AND disagreement with both wrong ones, with every
+        measured distance in the failure message. A one-sided tolerance would
+        be a hypothesis about float noise; this compares the distances the
+        tolerance has to separate.
 
         **Bit identity is deliberately NOT demanded.** MEASURED at step 5: the
         same comparison returns exactly 0.0 when this file runs alone and
@@ -216,42 +324,38 @@ class TestAffineSigmoidValue:
         twin.set_weights(encoder.get_weights())
 
         logits = mask_logits.astype("float64")
-        affine_mask = 1.0 / (1.0 + np.exp(
-            -(SIGMOID_SCALE * logits + SIGMOID_BIAS)))
-        bare_mask = 1.0 / (1.0 + np.exp(-logits))
-
         actual = ops.convert_to_numpy(
             encoder([pix_feat, mask_logits])[0]).astype("float64")
-        as_affine = ops.convert_to_numpy(
-            twin([pix_feat, affine_mask.astype("float32")])[0]
-        ).astype("float64")
-        as_bare = ops.convert_to_numpy(
-            twin([pix_feat, bare_mask.astype("float32")])[0]
-        ).astype("float64")
 
-        to_affine = float(np.abs(actual - as_affine).max())
-        to_bare = float(np.abs(actual - as_bare).max())
+        distances = {}
+        for name, transform in MASK_TRANSFORM_CANDIDATES.items():
+            candidate = transform(logits).astype("float32")
+            reproduced = ops.convert_to_numpy(
+                twin([pix_feat, candidate])[0]).astype("float64")
+            distances[name] = float(np.abs(actual - reproduced).max())
 
-        assert to_affine < 1e-5, (
-            f"the forward pass does not apply sigmoid(20x-10) to the mask: "
-            f"distance to the affine twin {to_affine}, to the bare-sigmoid "
-            f"twin {to_bare}"
+        assert distances["upstream"] < 1e-5, (
+            f"the forward pass does not apply 20*sigmoid(x)-10 to the mask; "
+            f"distances to the three candidate twins: {distances}"
         )
-        assert to_bare > 1e-3, (
-            f"the affine and bare-sigmoid candidates are only {to_bare} apart "
-            f"at these weights -- this oracle cannot discriminate and the "
-            f"probe must be re-seeded"
-        )
+        for wrong in ("order_swapped", "bare_sigmoid"):
+            assert distances[wrong] > 1e-3, (
+                f"the '{wrong}' twin is only {distances[wrong]} from the "
+                f"shipped forward pass at these weights -- this oracle cannot "
+                f"discriminate it and the probe must be re-seeded "
+                f"(all distances: {distances})"
+            )
 
-    def test_affine_survives_a_logit_that_overflows_float16(
+    def test_the_transform_stays_finite_under_mixed_float16(
             self,
             pix_feat: np.ndarray,
     ) -> None:
-        """``20 * x`` must not overflow before the sigmoid saturates it.
+        """Saturating logits must stay finite and land on the exact limits.
 
-        Under ``mixed_float16`` the compute dtype's maximum is 65504, so a
-        logit of 1e4 overflows at ``20 * x = 2e5``. Computing the affine in the
-        VARIABLE dtype (float32 under this policy) keeps it finite.
+        Under ``mixed_float16`` the compute dtype's maximum is 65504. The
+        transform is taken in the VARIABLE dtype (float32 under this policy),
+        so a logit of 1e4 saturates the sigmoid rather than overflowing any
+        intermediate, and the result is ``scale + bias`` exactly.
         """
         previous = keras.mixed_precision.global_policy()
         keras.mixed_precision.set_global_policy("mixed_float16")
@@ -268,10 +372,11 @@ class TestAffineSigmoidValue:
             keras.mixed_precision.set_global_policy(previous)
 
         assert np.isfinite(transformed).all(), (
-            "the mask affine produced non-finite values under mixed_float16 -- "
-            "20 * x overflowed the compute dtype before the sigmoid saturated"
+            "the mask transform produced non-finite values under "
+            "mixed_float16"
         )
-        assert float(transformed.min()) == pytest.approx(1.0, abs=1e-3)
+        assert float(transformed.min()) == pytest.approx(
+            SIGMOID_SCALE + SIGMOID_BIAS, abs=1e-2)
 
 # ---------------------------------------------------------------------
 # G5.2 -- downsampler geometry
@@ -791,12 +896,17 @@ class TestDeadComponentPartition:
             assert float(np.abs(base - scaled).max()) == pytest.approx(
                 0.0, abs=1e-7)
 
-        # G5.1's value oracle is UNAFFECTED -- it reads the affine directly.
+        # G5.1's value oracle is UNAFFECTED -- it reads the transform directly.
+        # The expectation is taken from G5.1's own hand-derived table rather
+        # than restated, so the two cannot drift apart again: this assertion
+        # held the SUPERSEDED value 0.880797 (= the order-swapped candidate at
+        # logit 0.6) through the whole first pass.
         probe = np.full((1, 1, 1, 1), 0.6, dtype="float32")
         with zeroed_variables(killed):
             value = float(ops.convert_to_numpy(
                 encoder._affine_sigmoid(probe)).reshape(-1)[0])
-        assert value == pytest.approx(0.880797, abs=1e-6)
+        assert value == pytest.approx(
+            TestAffineSigmoidValue.HAND_DERIVED[0.6][0], abs=1e-5)
 
     def test_zeroing_the_pixel_projection_leaves_the_mask_branch_alive(
             self,

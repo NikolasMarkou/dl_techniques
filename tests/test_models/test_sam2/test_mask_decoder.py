@@ -54,6 +54,14 @@ NUM_SPARSE = 3
 NUM_MULTIMASK = 3
 NUM_MASK_TOKENS = NUM_MULTIMASK + 1
 
+#: Edge length of the mask this decoder emits at the SHIPPED configuration:
+#: ``image_size=1024`` over ``backbone_stride=16`` is a 64x64 feature grid, and
+#: the decoder upscales 4x. ``256 * 256 == 65,536`` elements, which is ABOVE
+#: float16's largest finite value of ``65,504`` -- the reason the stability head
+#: must accumulate its area counts in float32. Every other geometry constant in
+#: this file is deliberately toy-sized; this one is deliberately not.
+SHIPPED_MASK_EDGE = 256
+
 
 # ---------------------------------------------------------------------
 # helpers
@@ -518,6 +526,84 @@ class TestStabilityScore:
         score = npy(decoder._get_stability_scores(stacked))
         assert score.shape == (1, 2)
         np.testing.assert_allclose(score, np.asarray([[0.625, 1.0]]), atol=1e-6)
+
+    def test_the_area_sums_do_not_overflow_float16_at_the_SHIPPED_mask_size(
+            self):
+        """``mixed_float16`` at 256x256: finite scores, and no selection flip.
+
+        **A toy grid cannot reproduce this.** Every other test in this class
+        runs at ``4 x 4 = 16`` elements. The shipped ``image_size=1024`` makes
+        the decoder emit ``256 x 256 = 65,536`` logits per mask, and float16's
+        largest finite value is ``65,504`` -- so the area COUNT overflows on
+        the very first configuration anyone actually runs. This repo has
+        measured exactly that trap before (a 15-combination toy sweep went
+        15/15 green while the paper-scale configuration overflowed), so the arm
+        below runs at the shipped size and nowhere smaller.
+
+        The failure is a behaviour INVERSION, not merely a NaN: ``area_i`` and
+        ``area_u`` both become ``inf``, ``inf / inf`` is ``NaN``,
+        ``NaN >= 0.98`` evaluates **False**, and a maximally-confident single
+        mask is silently discarded in favour of a multimask token on the
+        default ``training=None`` path. Both halves are asserted.
+        """
+        previous = keras.mixed_precision.global_policy()
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            decoder = make_decoder()
+            edge = SHIPPED_MASK_EDGE
+            delta = decoder.dynamic_multimask_stability_delta
+
+            # Token 0 is uniformly ABOVE +delta -> area_i == area_u ==
+            # edge**2, i.e. a perfectly stable single mask (score 1.0).
+            # Tokens 1..3 are uniformly below -delta, so the two candidates are
+            # separated by 10.0 in value and the choice is directly readable.
+            logits = np.full((1, 4, edge, edge), -5.0, dtype="float16")
+            logits[:, 0] = 5.0
+            logits_tensor = ops.convert_to_tensor(logits)
+
+            # NEGATIVE CONTROL: prove this size really is in the overflowing
+            # regime, so the assertions below are not vacuous. Summing the SAME
+            # boolean count in float16 -- which is what the pre-fix code did --
+            # must be non-finite.
+            naive = npy(ops.sum(
+                ops.cast(
+                    ops.reshape(logits_tensor, (1, 4, -1)) > delta, "float16"),
+                axis=-1,
+            ))
+            assert edge * edge > 65504, (
+                f"the probe grid has {edge * edge} elements, which float16 "
+                f"represents exactly -- this test cannot see the overflow"
+            )
+            assert not np.isfinite(naive[0, 0]), (
+                f"summing the area in float16 produced the finite value "
+                f"{naive[0, 0]} at {edge}x{edge} -- the overflow this test "
+                f"guards does not occur here and the probe must be enlarged"
+            )
+
+            stability = npy(decoder._get_stability_scores(logits_tensor))
+            assert np.all(np.isfinite(stability)), (
+                f"stability scores are non-finite under mixed_float16 at the "
+                f"shipped {edge}x{edge} mask size: {stability} -- the area "
+                f"counts are being accumulated in the input dtype"
+            )
+            np.testing.assert_allclose(
+                stability[0, 0], 1.0, atol=1e-6)
+
+            # The behaviour half: token 0 must be KEPT, not silently replaced.
+            iou = ops.convert_to_tensor(
+                np.asarray([[0.5, 0.9, 0.1, 0.1]], dtype="float16"))
+            masks_out, _ = decoder._dynamic_multimask_via_stability(
+                logits_tensor, iou)
+            chosen = float(npy(masks_out).mean())
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+        assert chosen == pytest.approx(5.0, abs=1e-3), (
+            f"the stable single mask (value +5.0) was replaced by a multimask "
+            f"token (value -5.0): the selection returned a mean of {chosen}. "
+            f"A NaN stability score compares False against the threshold, so "
+            f"this inversion is silent"
+        )
 
     def test_delta_zero_is_refused(self):
         """At ``delta == 0`` the score is the constant 1 and the guard is dead."""
@@ -1085,6 +1171,35 @@ class TestConventions:
         """Every silent-width defect is a construction-time error."""
         with pytest.raises(ValueError, match=match):
             make_decoder(**kwargs)
+
+    def test_hypernetwork_depth_is_fixed_at_three_not_tied_to_the_iou_head(self):
+        """``iou_head_depth`` must move the IoU head ALONE.
+
+        The reference hardcodes ``MLP(dim, dim, dim // 8, 3)`` for the mask
+        hypernetworks while exposing the IoU head's depth. The two agree at the
+        default ``iou_head_depth=3``, so a port that reuses the parameter for
+        both is invisible at every shipped configuration and silently
+        restructures all four mask heads at any other. The probe therefore uses
+        a NON-default depth -- at the default it cannot discriminate.
+        """
+        default = make_decoder()
+        assert default.iou_head_depth == 3, (
+            "this probe assumes the default depth is 3, so that the "
+            "non-default depth below actually differs from it"
+        )
+        assert len(default.output_hypernetworks_mlps[0].layers) == 3
+        assert len(default.iou_prediction_head.layers) == 3
+
+        deeper = make_decoder(iou_head_depth=5)
+        assert len(deeper.iou_prediction_head.layers) == 5, (
+            "iou_head_depth no longer reaches the IoU head at all"
+        )
+        for index, mlp in enumerate(deeper.output_hypernetworks_mlps):
+            assert len(mlp.layers) == 3, (
+                f"hypernetwork MLP {index} has {len(mlp.layers)} layers at "
+                f"iou_head_depth=5; the reference fixes it at 3 independently "
+                f"of the IoU head's depth"
+            )
 
     def test_iou_sigmoid_knob_is_live(self):
         """``iou_prediction_use_sigmoid`` changes the value, not just the config."""

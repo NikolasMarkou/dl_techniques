@@ -68,11 +68,19 @@ from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
 
 # Scale applied to the current frame's positional encoding when it is folded
 # into the memory-attention INPUT (`pos_enc_at_input=True`). This is a fixed
-# architectural constant of SAM 2, not a tunable: the same positional tensor is
-# re-added at full strength inside the attention sub-blocks, so the input-level
-# injection is deliberately attenuated. It is intentionally NOT an `__init__`
-# parameter -- exposing it would invite a "harmless" retune that silently
-# changes what every downstream layer sees.
+# architectural constant of SAM 2, not a tunable, and it is intentionally NOT an
+# `__init__` parameter -- exposing it would invite a "harmless" retune that
+# silently changes what every downstream layer sees.
+#
+# NOTE ON THE RATIONALE. An earlier version of this comment justified the 0.1 by
+# claiming "the same positional tensor is re-added at full strength inside the
+# attention sub-blocks". That is FALSE under the shipped configuration:
+# `pos_enc_at_attn=False` and `pos_enc_at_cross_attn_queries=False`, so
+# `query_pos` is re-added at NO attention sub-block and this attenuated
+# injection is the only place the current frame's positional encoding enters at
+# all. The constant's VALUE is unchanged (it is the reference's); only the
+# reason given for it was wrong, and a wrong reason is what licenses a later
+# "simplification" to 1.0.
 _INPUT_POS_ENC_SCALE = 0.1
 
 # ---------------------------------------------------------------------

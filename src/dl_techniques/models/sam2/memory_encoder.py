@@ -7,10 +7,13 @@ attention later reads as keys and values.
 Three mechanisms in this file are SILENT when ported wrong -- the model builds,
 forward-passes, trains and serializes either way:
 
-1. **The mask is passed through** ``sigmoid(20 * x - 10)``\\ **, not a bare
-   sigmoid.** The affine turns the soft sigmoid into a near-step function
-   centred at logit ``+0.5``, so the memory stores a nearly binary mask. A bare
-   sigmoid produces the same shapes and a plausible loss.
+1. **The mask is passed through** ``20 * sigmoid(x) - 10``\\ **, i.e. the affine
+   is applied AFTER the sigmoid, not before it.** The transform rescales a
+   probability in ``(0, 1)`` into the wide SIGNED range ``(-10, +10)``. Two
+   wrong readings produce the same shapes and a plausible loss: a bare
+   ``sigmoid(x)`` (range ``(0, 1)``), and the affine-then-sigmoid
+   ``sigmoid(20 * x - 10)``, which is a near-step function also in ``(0, 1)``
+   and therefore ~20x narrower with no negative half at all.
 2. **The downsampler's layer COUNT comes from the shipped configuration, not
    from the reference class signature.** At ``k=3, s=2, p=1`` it is four
    convolutions; the signature default ``k=4, s=4, p=0`` is two. **Both give a
@@ -497,7 +500,7 @@ class SAM2MemoryEncoder(keras.layers.Layer):
 
     .. code-block:: text
 
-        masks  = sigmoid(sigmoid_scale * masks + sigmoid_bias)
+        masks  = sigmoid(masks) * sigmoid_scale + sigmoid_bias
         masks  = mask_downsampler(masks)          # -> (H', W', in_dim)
         x      = pix_feat_proj(pix_feat)          # 1x1, NOT identity
         x      = x + masks                        # ADDITIVE, never concat
@@ -505,12 +508,17 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         x      = out_proj(x)                      # -> (H', W', out_dim)
         pos    = position_encoding(x)             # on the POST-out_proj x
 
-    **The affine on the mask logits.** ``sigmoid(20 * x - 10)`` is a near-step
-    function centred at logit ``+0.5``, so the memory stores an almost binary
-    mask. A bare ``sigmoid(x)`` -- the obvious reading -- has the same shape,
-    the same range, and produces a plausible loss. The affine is evaluated in
-    the layer's **variable** dtype, so under ``mixed_float16`` a large logit
-    cannot overflow the intermediate ``20 * x`` before the sigmoid saturates it.
+    **The affine on the mask logits, and its ORDER.** The sigmoid comes FIRST
+    and the affine SECOND: ``20 * sigmoid(x) - 10`` maps a probability onto the
+    signed range ``(-10, +10)``. Reversing the two -- ``sigmoid(20 * x - 10)``
+    -- yields a near-step function in ``(0, 1)``: same shape, same dtype, a
+    plausible loss, a ~20x smaller dynamic range and no negative half. A bare
+    ``sigmoid(x)`` is the third plausible reading. At ``x = 0`` the three give
+    ``0.0``, ``4.54e-5`` and ``0.5``; the guard in
+    ``test_memory_encoder.py::TestMaskAffine`` discriminates all three at once.
+    The transform is evaluated in the layer's **variable** dtype so that under
+    ``mixed_float16`` neither the sigmoid nor the ``* 20`` rescale is taken at
+    reduced precision.
 
     **The positional-encoding width.** The reference config's
     ``num_pos_feats: 64`` belongs to a class that halves its argument
@@ -518,6 +526,20 @@ class SAM2MemoryEncoder(keras.layers.Layer):
     ``2 * num_pos_feats``. The default here is therefore ``out_dim // 2``, and
     the invariant to assert is the OUTPUT width
     (:attr:`pos_enc_channels` ``== out_dim``), never the constructor argument.
+
+    **A KNOWN, ACCEPTED half-pixel deviation in that encoding.** The reused
+    :class:`PositionEmbeddingSine2D` normalizes coordinates to pixel CENTRES
+    (``(i + 0.5) / H``, the DETR / SAM 1 convention); the reference SAM 2 sine
+    encoding uses pixel EDGES (``(i + 1) / H``). Everything else matches,
+    including the interleaved sin/cos layout. The position argument therefore
+    differs by ``pi / H`` radians, MEASURED as a max absolute difference of
+    0.098 / 0.049 / 0.012 at grids 32 / 64 / 256 against an amplitude of 1.
+    This is accepted rather than corrected: the layer is shared repo-wide and
+    both encodings feed projections trained alongside them, so it is a fixed
+    reparametrization rather than an error -- but it WOULD matter to a port
+    loading released upstream weights. The magnitude is pinned by
+    ``test_neck.py::TestPositionEncodingWidth::
+    test_the_half_pixel_offset_deviation_is_pinned_at_its_MEASURED_size``.
 
     :param in_dim: Channel width of the incoming pixel features and of the
         fused stream.
@@ -741,12 +763,22 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         super().build(input_shape)
 
     def _affine_sigmoid(self, masks: Any) -> Any:
-        """Apply ``sigmoid(sigmoid_scale * masks + sigmoid_bias)``.
+        """Apply ``sigmoid(masks) * sigmoid_scale + sigmoid_bias``.
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-033
+        # SIGMOID FIRST, AFFINE SECOND. Do NOT "simplify" this to
+        # `sigmoid(scale * masks + bias)`: that is a different function
+        # (a near-step map into `(0, 1)` instead of an affine rescale into
+        # `(-10, +10)`), it produces the same shapes, the same dtype and a
+        # plausible loss, and it is exactly the defect this round exists to
+        # repair. The order is fixed by the reference implementation, which
+        # sigmoids the mask itself and then calls the encoder with
+        # `skip_mask_sigmoid=True`. See decisions.md D-033.
 
         Evaluated in the layer's VARIABLE dtype rather than its compute dtype:
-        under ``mixed_float16`` the intermediate ``20 * x`` would otherwise
-        overflow for ``|x| > 3277`` before the sigmoid could saturate it. The
-        result is cast back to the compute dtype.
+        under ``mixed_float16`` the post-sigmoid ``* 20`` would otherwise be
+        taken at reduced precision. The result is cast back to the compute
+        dtype.
 
         :param masks: Mask logits.
         :type masks: Any
@@ -759,7 +791,7 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         scale = ops.cast(self.sigmoid_scale, self.variable_dtype)
         bias = ops.cast(self.sigmoid_bias, self.variable_dtype)
         return ops.cast(
-            ops.sigmoid(work * scale + bias), self.compute_dtype)
+            ops.sigmoid(work) * scale + bias, self.compute_dtype)
 
     def call(
             self,

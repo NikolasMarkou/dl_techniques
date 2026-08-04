@@ -53,6 +53,13 @@ from dl_techniques.models.sam.mask_decoder import _build_mlp_head
 
 # ---------------------------------------------------------------------
 
+#: Depth of each mask-token hypernetwork MLP. Fixed by the reference
+#: implementation (``MLP(dim, dim, dim // 8, 3)``) and deliberately independent
+#: of ``iou_head_depth``, which IS a constructor parameter. See D-035.
+_HYPERNETWORK_MLP_DEPTH = 3
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class SAM2MaskDecoder(keras.layers.Layer):
@@ -297,11 +304,20 @@ class SAM2MaskDecoder(keras.layers.Layer):
             transformer_dim // 4, kernel_size=1, name="conv_s1"
         )
 
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-035
+        # The hypernetwork MLPs are FIXED at 3 layers and are deliberately NOT
+        # tied to `iou_head_depth`. Do NOT "deduplicate" the two by passing
+        # `self.iou_head_depth` here: the reference hardcodes
+        # `MLP(dim, dim, dim // 8, 3)` for the hypernetworks while exposing the
+        # IoU head's depth as a parameter. The two agree at the default
+        # `iou_head_depth=3`, so the coupling is invisible at every shipped
+        # configuration and silently restructures the mask heads at any other.
+        # See decisions.md D-035.
         self.output_hypernetworks_mlps: List[keras.Sequential] = []
         for i in range(self.num_mask_tokens):
             self.output_hypernetworks_mlps.append(
                 _build_mlp_head(
-                    num_layers=self.iou_head_depth,
+                    num_layers=_HYPERNETWORK_MLP_DEPTH,
                     hidden_dim=transformer_dim,
                     output_dim=transformer_dim // 8,
                     activation=mlp_activation,
@@ -584,16 +600,31 @@ class SAM2MaskDecoder(keras.layers.Layer):
         mask thresholded at ``-delta``. It measures robustness to a threshold
         shift; it is NOT an IoU against ground truth and uses no labels.
 
+        The two areas are COUNTS, and are accumulated in **float32 regardless
+        of the input dtype** -- see the decision anchor below.
+
         :param mask_logits: ``(B, M, H, W)`` mask logits.
         :type mask_logits: keras.KerasTensor
-        :return: ``(B, M)`` stability scores in ``[0, 1]``.
+        :return: ``(B, M)`` stability scores in ``[0, 1]``, always float32.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-034
+        # The two areas are summed in float32, NEVER in `mask_logits.dtype`.
+        # Do NOT "simplify" this back to the input dtype: at the shipped
+        # `image_size=1024` this head sees 256 x 256 = 65,536 logits per mask,
+        # and float16's largest finite value is 65,504. MEASURED under
+        # `mixed_float16` at that exact size: an all-positive mask gives
+        # `stability = [nan nan nan nan]`, `NaN >= 0.98` evaluates False, and a
+        # maximally-confident single mask is therefore SILENTLY replaced by a
+        # multimask token on the default `training=None` path -- a behaviour
+        # INVERSION, not merely a NaN. A toy grid cannot reproduce it; the arm
+        # in `test_mask_decoder.py` that guards this runs at the shipped
+        # 256x256. See decisions.md D-034.
         delta = self.dynamic_multimask_stability_delta
         shape = ops.shape(mask_logits)
         flat = ops.reshape(mask_logits, (shape[0], shape[1], -1))
-        area_i = ops.sum(ops.cast(flat > delta, mask_logits.dtype), axis=-1)
-        area_u = ops.sum(ops.cast(flat > -delta, mask_logits.dtype), axis=-1)
+        area_i = ops.sum(ops.cast(flat > delta, "float32"), axis=-1)
+        area_u = ops.sum(ops.cast(flat > -delta, "float32"), axis=-1)
         # `area_u == 0` means the mask is empty even at the permissive
         # threshold: it is trivially self-consistent, so the score is 1.0. The
         # division is made safe FIRST -- a `where` alone still evaluates the
