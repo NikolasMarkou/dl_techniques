@@ -46,6 +46,7 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 from keras import ops
 
+from ...losses.sam_mask_loss import match_mask_axis
 from .model import SAM
 
 # ---------------------------------------------------------------------------
@@ -556,20 +557,21 @@ class SAMTrainingModel(keras.Model):
         # instruction and unnecessary. The key is emitted only when `gt_mask` is
         # supplied, so an inference-shaped call keeps the two-key contract.
         if gt_mask is not None:
-            # Each round predicts the SAME ground truth, so the GT stack is
-            # repeated once per round to line up with the concatenated mask
-            # axis. `ops.concatenate` matches the round-major order the logits
-            # were concatenated in -- `ops.repeat` would interleave and silently
-            # score round r against mask r's GT -- and unlike `ops.tile` it
-            # preserves the static shape under `fit()`'s trace (measured: tile
-            # returned `(None, None, None, None)` from a `(None, 1, 64, 64)`
-            # input, which then broke the loss's own shape guard).
-            if self.num_refinement_rounds > 1:
-                gt_for_iou = ops.concatenate(
-                    [gt_mask] * self.num_refinement_rounds, axis=1
-                )
-            else:
-                gt_for_iou = gt_mask
+            # DECISION plan-2026-08-03T191222-1d751f81/D-044: the repetition
+            # factor is DERIVED from the two shapes by the SAME function the
+            # loss uses, never recomputed here. Do NOT "simplify" this back to
+            # `[gt_mask] * self.num_refinement_rounds`: the mask axis is
+            # `M * R`, not `R`, so at `multimask_output=True` (M=3) and the
+            # trainer's default `R=3` that spelling stacked 3 GT copies against
+            # 9 logits and died with
+            # `ValueError: Dimensions must be equal, but are 9 and 3`. The two
+            # halves of one contract must not each own a copy of the
+            # derivation. `match_mask_axis` also carries the round-major
+            # `concatenate` (not `repeat`, not `tile`) reasoning; see its
+            # docstring.
+            gt_for_iou = match_mask_axis(
+                gt_mask, tuple(gt_mask.shape), tuple(all_logits.shape)
+            )
             achieved = ops.stop_gradient(
                 achieved_mask_iou(all_logits, gt_for_iou)
             )

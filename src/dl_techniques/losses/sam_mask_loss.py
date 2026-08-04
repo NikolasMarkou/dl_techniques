@@ -108,7 +108,7 @@ def _require_channels_last(tensor: Any, channels: int, who: str) -> None:
         )
 
 
-def _match_mask_axis(
+def match_mask_axis(
     truth: Any,
     true_shape: Tuple[Optional[int], ...],
     pred_shape: Tuple[Optional[int], ...],
@@ -120,6 +120,21 @@ def _match_mask_axis(
     mask axis, so ``y_pred`` is ``(B, M*R, h, w)`` while the pipeline's
     ``y_true`` stays ``(B, M, h, w)`` -- and MUST stay that way, or every data
     source would have to know the model's round count.
+
+    **This function is THE single source of truth for that alignment**, and it
+    is public for exactly that reason. ``SAMTrainingModel.call`` calls it too,
+    to line the GT up with ``all_logits`` before ``achieved_mask_iou``. Do NOT
+    re-derive the factor at either call site: the model used to compute it as
+    ``self.num_refinement_rounds`` while this function derived it as
+    ``pred_masks // true_masks``, and the two halves of one contract disagreed
+    at ``multimask_output=True`` -- ``M*R = 9`` logits against ``R = 3``
+    repeats of the GT, a hard
+    ``ValueError: Dimensions must be equal, but are 9 and 3`` at the trainer's
+    own shipped defaults. The interface contract: caller supplies the tensor
+    plus BOTH static shapes (the model has them from `.shape`, the loss from
+    its own guards); the return is either ``truth`` untouched or ``truth``
+    concatenated ``pred_masks // true_masks`` times on axis 1; the failure mode
+    is a raised ``ValueError`` on a non-multiple, never a silent tile.
 
     Args:
         truth: The GT mask stack, already cast to the prediction's dtype.
@@ -141,8 +156,9 @@ def _match_mask_axis(
         return truth
     if pred_masks % true_masks != 0:
         raise ValueError(
-            f"SAMMaskLoss cannot align y_true's mask axis ({true_masks}) with "
-            f"y_pred's ({pred_masks}): {pred_masks} is not a whole multiple of "
+            f"match_mask_axis cannot align the GT mask axis ({true_masks}) "
+            f"with the prediction's ({pred_masks}): {pred_masks} is not a "
+            f"whole multiple of "
             f"{true_masks}. y_pred carries num_masks * num_refinement_rounds "
             f"masks concatenated round-major; y_true must carry either the same "
             f"number or exactly num_masks."
@@ -253,7 +269,7 @@ class SAMMaskLoss(keras.losses.Loss):
 
         probabilities = ops.sigmoid(y_pred) if self.from_logits else y_pred
         truth = ops.cast(y_true, probabilities.dtype)
-        truth = _match_mask_axis(truth, true_shape, pred_shape)
+        truth = match_mask_axis(truth, true_shape, pred_shape)
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-036: focal gets a TWO-channel
         # one-hot and dice gets a ONE-channel channels-last stack. Do NOT

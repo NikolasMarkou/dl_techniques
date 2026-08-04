@@ -2020,7 +2020,10 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \
     --data-source coco --coco-max-images 200 --epochs 50
 ```
 
-Or wire it by hand:
+Or wire it by hand — **note that this exact snippet has never been executed.**
+Every executed run on record (§13, and the limitations below) used the reduced
+`tiny` geometry; `from_variant('vit_b')` at `image_size=1024` is constructible
+and validated, but its memory and throughput under `fit()` are unmeasured:
 
 ```python
 from dl_techniques.models.sam import SAM, SAMTrainingModel
@@ -2104,9 +2107,19 @@ model.fit(build_sam_dataset(2048, image_size=1024, batch_size=1))
    And `build()` calls `self.sam.build(None)` first, which materializes the
    whole SAM without a forward pass.
 
-9. **Preprocess before the model.** `SAM.preprocess` pads only; resize with
-   `resize_longest_side` first (§3, §6.1) and rescale the prompt coordinates by
-   the same factor.
+9. **Preprocess before the model — and the shipped COCO path does NOT do
+   this.** `SAM.preprocess` pads only, so an aspect-preserving pipeline resizes
+   with `resize_longest_side` first (§3, §6.1) and rescales the prompt
+   coordinates by the same factor. That is the recipe for your own data;
+   `resize_longest_side` currently has **zero production consumers**
+   (`grep -rn resize_longest_side src/` finds only its definition, its export
+   and this document). `train.sam.data`'s COCO source instead squashes each
+   image to a square via the loader's own resize, so a non-square COCO image
+   reaches the model with a distorted aspect ratio. Mask, box and image are
+   derived from the same resized frame, but **no test asserts that they still
+   agree after a strongly non-square source image**, so an asymmetric resize on
+   one of the three would not be caught. Fixing either is a data-pipeline
+   change no shipped step made.
 
 10. **Initial prompts are DATA; refinement prompts are not.** The point sampled
     inside the GT mask and the jittered box come from the `tf.data` pipeline
@@ -2119,10 +2132,21 @@ trainer:
 - **No official Meta SAM checkpoint has ever been loaded** in this repository.
   Every reference-fidelity claim is an architectural argument, not a
   measurement against real weights, and no key-mapping layer exists.
-- **No test ever forward-passes `vit_l` or `vit_h`** — they are constructed and
-  parameter-counted (§15), and the trainer has never been run at those widths
-  or at `vit_b`'s. The trainer's default and its only executed configuration is
-  a reduced-WIDTH `tiny` geometry at real SAM patch/window geometry.
+- **No test ever forward-passes `vit_b`, `vit_l` or `vit_h`**, and the trainer
+  has never been run at any of those widths. The one forward pass on record for
+  them is §15's own parameter measurement, which ran each COMPONENT once at
+  `img_size=1024` so that every lazily-created variable existed — a one-off
+  measurement, not a gate, and not a whole-model forward. Do not read §15's
+  table as evidence that these variants train. The trainer's default and its
+  only executed configuration is a reduced-WIDTH `tiny` geometry at real SAM
+  patch/window geometry.
+- **`--multimask-output` runs, but its objective is an approximation.** All
+  `num_multimask_outputs` proposals are supervised against the same single
+  ground-truth mask, because the shipped pipeline emits exactly one GT per
+  instance and `SAMMaskLoss` repeats it across the mask axis. The paper's
+  "back-propagate only the minimum loss over the masks" rule is **not**
+  implemented, so this flag does not reproduce SAM's ambiguity-aware training;
+  it trains three proposals toward one answer. The default is `False`.
 - **`SAM.call` cannot be traced**, so no traced pipeline can consume
   `outputs['masks']`. This is a property of `postprocess_masks`, not a bug the
   wrapper hides.

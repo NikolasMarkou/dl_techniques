@@ -144,6 +144,7 @@ from .segmentation_wrapper_loss import (
 from .sam_mask_loss import (
     SAMMaskLoss,
     SAMIoULoss,
+    match_mask_axis,
     to_dice_layout,
     to_focal_layout,
 )

@@ -1164,6 +1164,17 @@ def _refined(
     round count is: the data pipeline must not have to know how many rounds the
     model runs, and ``SAMMaskLoss`` repeats the GT across the concatenated mask
     axis itself.
+
+    The mask axis is pinned to **1 at every configuration**, including
+    ``multimask_output=True``, because that is the ONLY stack the shipped
+    pipeline can emit: `src/train/sam/data.py`'s `to_training_record` ends in
+    `gt_stack = tf.expand_dims(mask, axis=0)`, unconditionally, and neither the
+    round count nor the multimask flag reaches it. This helper used to set
+    `num_masks = 3 if multimask_output else 1`, a shape no data source
+    produces, and that fiction is exactly why the 208-test model gate stayed
+    green while `--multimask-output` crashed at the trainer's own defaults.
+    Do NOT re-introduce a GT mask axis > 1 here to "make the shapes line up" --
+    lining them up in the fixture is what hides the defect.
     """
     keras.utils.set_random_seed(seed)
     model = (cls or SAMTrainingModel)(
@@ -1171,7 +1182,7 @@ def _refined(
         multimask_output=multimask_output,
         num_refinement_rounds=rounds,
     )
-    num_masks = 3 if multimask_output else 1
+    num_masks = 1
     gt = _gt_mask_stack(num_masks)
     x = _wrapper_inputs()
     x[INPUT_GT_MASK] = gt
