@@ -41,12 +41,12 @@ describe.
 
 Target keys have ONE home
 -------------------------
-The two target keys come from ``models/sam2/training_model.py``'s exported
+The three target keys come from ``models/sam2/training_model.py``'s exported
 constants, and ``tests/test_train/test_sam2/test_data.py`` asserts the emitted
-target key set equals that module's ``OUTPUT_KEYS``. When the wrapper grows the
-``iou_supervision`` output, that assertion goes RED here -- which is the point:
-a pipeline target the model does not produce, or a model output nothing
-supervises, cannot pass unnoticed.
+target key set equals that module's ``OUTPUT_KEYS``. That assertion was RED by
+design between step 2 and step 4, while the wrapper had two output keys and the
+plan asked for three -- which is the point: a pipeline target the model does not
+produce, or a model output nothing supervises, cannot pass unnoticed.
 
 Nothing is written to disk. Every clip is generated in memory, per epoch.
 
@@ -67,6 +67,7 @@ from dl_techniques.models.sam2.training_model import (
     INPUT_IMAGE,
     INPUT_POINT_COORDS,
     INPUT_POINT_LABELS,
+    SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
     SAM2_OBJECT_SCORE_LOGITS,
 )
@@ -501,19 +502,28 @@ def to_video_training_record(
             jitter_box(record[RECORD_BOX], image_size), axis=0
         )
     # DECISION plan-2026-08-04T044628-4c240b4c/D-058
-    # TWO target keys, not three. The plan specified an `iou_supervision`
-    # target here too, but `SAM2TrainingModel` does not emit that output yet --
-    # step 4 adds it, together with the `SAM2_IOU_SUPERVISION` constant that
-    # names it. Do NOT invent that string locally: a key spelled in two places
-    # is exactly the drift H-5 exists to prevent, and `compile(loss={...})`
-    # reports the mismatch as a key error with no cause attached. The coupling
-    # is executable instead:
+    # THREE target keys, each sourced from `models/sam2/training_model.py`'s
+    # exported constants. Do NOT spell any of these strings locally: a key
+    # spelled in two places is exactly the drift H-5 exists to prevent, and
+    # `compile(loss={...})` reports the mismatch as a key error with no cause
+    # attached. The coupling is executable:
     # `test_the_target_keys_are_exactly_the_wrappers_output_keys` asserts this
-    # dict's keys equal `training_model.OUTPUT_KEYS`, so step 4 CANNOT add the
-    # output without adding the target. See decisions.md D-058.
+    # dict's keys equal `training_model.OUTPUT_KEYS`. That canary was RED BY
+    # DESIGN from step 2 until step 4 added the `iou_supervision` output; it is
+    # what made adding the output without the target impossible.
+    # See decisions.md D-058.
+    #
+    # The `iou_supervision` TARGET is structurally unused, and that is a
+    # property of the quantity rather than an omission: the achieved IoU is a
+    # function of the prediction and the ground truth together, so it exists
+    # only inside the model, which packs it into `y_pred` alongside the
+    # predicted IoU. `SAMIoULoss` reads both from there and ignores `y_true`
+    # entirely. A `tf.data` pipeline cannot produce it; the zeros are a
+    # placeholder Keras requires, not a supervision signal.
     targets = {
         SAM2_LOW_RES_LOGITS: mask,
         SAM2_OBJECT_SCORE_LOGITS: tf.expand_dims(present, axis=-1),
+        SAM2_IOU_SUPERVISION: tf.zeros((tf.shape(mask)[0], 2), tf.float32),
     }
     return inputs, targets
 

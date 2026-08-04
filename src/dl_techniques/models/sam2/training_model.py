@@ -52,6 +52,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 from keras import ops
 
+from ...losses.sam2_video_loss import SAM2GatedMaskLoss, mask_presence_gate
+from ...losses.sam_mask_loss import SAMIoULoss
+from ..sam.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
 from .model import SAM2, _select_best_by_iou
 
@@ -67,8 +70,17 @@ SAM2_LOW_RES_LOGITS = "low_res_logits"
 #: in this package thresholds it hard at ``> 0``, so a trainer that does not
 #: put a loss on this key trains a permanently frozen occlusion head.
 SAM2_OBJECT_SCORE_LOGITS = "object_score_logits"
+#: Key of the packed IoU supervision pair, ``(B, T, 2)``: ``[..., 0]`` is the
+#: model's predicted IoU and ``[..., 1]`` the IoU it actually achieved against
+#: the ground truth, already ``stop_gradient``-ed. Both channels are ZEROED on
+#: rows the ground truth calls absent, which is what makes ``SAMIoULoss``
+#: reusable unchanged (D-052): ``zero - zero`` contributes exactly ``0`` to the
+#: mean and exactly ``0`` to the gradient, reproducing upstream's
+#: ``loss_iou * target_obj``.
+SAM2_IOU_SUPERVISION = "iou_supervision"
 #: Keys :meth:`SAM2TrainingModel.call` always returns, in a stable order.
-OUTPUT_KEYS: Tuple[str, ...] = (SAM2_LOW_RES_LOGITS, SAM2_OBJECT_SCORE_LOGITS)
+OUTPUT_KEYS: Tuple[str, ...] = (
+    SAM2_LOW_RES_LOGITS, SAM2_OBJECT_SCORE_LOGITS, SAM2_IOU_SUPERVISION)
 
 #: Input key of the clip, ``(B, T, image_size, image_size, 3)``.
 INPUT_IMAGE = "image"
@@ -78,8 +90,9 @@ INPUT_POINT_COORDS = "point_coords"
 INPUT_POINT_LABELS = "point_labels"
 #: Input key of the optional frame-0 box prompt, ``(B, K, 4)`` xyxy.
 INPUT_BOXES = "boxes"
-#: Input key of the optional per-frame binary ground truth, ``(B, T, h, w)``.
-#: Unused by this step; step 4's ``iou_supervision`` output reads it.
+#: Input key of the per-frame binary ground truth, ``(B, T, h, w)``. REQUIRED:
+#: :data:`SAM2_IOU_SUPERVISION` is computed from it, and the presence gate that
+#: zeroes it is derived from it too.
 INPUT_GT_MASKS = "gt_masks"
 
 
@@ -118,13 +131,14 @@ class SAM2TrainingModel(keras.Model):
     * ``low_res_logits``: ``(B, T, h, w)`` -- ``M == 1``, so ``T`` is
       unambiguous on that axis.
     * ``object_score_logits``: ``(B, T, 1)``.
+    * ``iou_supervision``: ``(B, T, 2)`` -- see :data:`SAM2_IOU_SUPERVISION`.
 
     Example:
 
     .. code-block:: python
 
         trainer = SAM2TrainingModel(create_sam2("tiny"), num_frames=4)
-        trainer.compile(optimizer="adam", loss={...})
+        compile_sam2_video_trainer(trainer)
         trainer.fit(dataset)
     """
 
@@ -328,6 +342,55 @@ class SAM2TrainingModel(keras.Model):
             is_conditioning=(frame_idx == 0),
         )
 
+    def _iou_supervision(
+            self,
+            outputs: Dict[str, Any],
+            gt_frame: Any,
+    ) -> Any:
+        """Pack one frame's ``(predicted, achieved)`` IoU pair, gated.
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-052
+        # BOTH channels are zeroed on a GT-absent row, and `SAMIoULoss` is
+        # reused UNCHANGED. Do NOT "fix" this by packing a third presence
+        # channel and writing a `SAM2IoULoss`: `SAMIoULoss` computes
+        # `mean(square(predicted - achieved))`, so zeroing both sides makes an
+        # absent row contribute exactly 0 to the mean AND exactly 0 to the
+        # gradient -- which is upstream's `loss_iou * target_obj` exactly, not
+        # an approximation of it (plan assumption A-5, hand-verified in
+        # `tests/test_losses/test_sam2_video_loss.py`).
+        #
+        # The hazard this carries, named here because it is invisible at the
+        # call site: zeroing both sides of a comparison makes `zero == zero`
+        # always agree, so NO liveness probe on this output can discriminate a
+        # correct gate from a dead one. Any guard over it must assert the loss
+        # VALUE against a hand-computed gated number. And the gate must come
+        # from `gt_frame` -- gating on `outputs["object_score_logits"]` would
+        # be self-fulfilling and would additionally couple the IoU head's
+        # supervision to a head that is itself being trained.
+        # See decisions.md D-052.
+
+        :param outputs: :meth:`SAM2._decode`'s output dict for this frame.
+        :type outputs: Dict[str, Any]
+        :param gt_frame: ``(B, 1, h, w)`` ground truth for this frame -- the
+            frame axis kept as a length-1 mask axis so it lines up with
+            ``low_res_logits`` without a reshape.
+        :type gt_frame: Any
+        :return: ``(B, 1, 2)``; concatenating over frames gives ``(B, T, 2)``.
+        :rtype: Any
+        """
+        logits = outputs["low_res_logits"]
+        truth = ops.cast(gt_frame, logits.dtype)
+        predicted = ops.cast(outputs["iou_predictions"], logits.dtype)
+        # `achieved_mask_iou` is IMPORTED from SAM 1's training model, not
+        # re-derived: it is public, frame-agnostic and the single source of
+        # truth for "the IoU this thresholded prediction actually got". It
+        # thresholds, so it is already gradient-free; the explicit
+        # `stop_gradient` states the intent rather than relying on that.
+        achieved = ops.stop_gradient(achieved_mask_iou(logits, truth))
+        packed = ops.stack([predicted, achieved], axis=-1)
+        present = ops.reshape(mask_presence_gate(truth), (-1, 1, 1))
+        return ops.where(present, packed, ops.zeros_like(packed))
+
     # -----------------------------------------------------------------
     # the traced forward
     # -----------------------------------------------------------------
@@ -361,6 +424,17 @@ class SAM2TrainingModel(keras.Model):
             raise ValueError(
                 f"'{INPUT_POINT_COORDS}' and '{INPUT_POINT_LABELS}' must be "
                 f"supplied together; got keys {sorted(inputs.keys())}"
+            )
+        if INPUT_GT_MASKS not in inputs:
+            raise ValueError(
+                f"SAM2TrainingModel input dict must contain '{INPUT_GT_MASKS}' "
+                f"-- (B, T, h, w) binary ground truth; got keys "
+                f"{sorted(inputs.keys())}. It is REQUIRED, not optional: the "
+                f"'{SAM2_IOU_SUPERVISION}' output packs the IoU this "
+                f"prediction achieved against it, and the ground-truth "
+                f"presence gate that zeroes absent rows is derived from it. "
+                f"Emitting zeros instead would leave the IoU head with a "
+                f"silently dead loss."
             )
         boxes = inputs.get(INPUT_BOXES)
         if not has_coords and boxes is None:
@@ -404,8 +478,11 @@ class SAM2TrainingModel(keras.Model):
         coords = inputs[INPUT_POINT_COORDS] if has_coords else None
         labels = inputs[INPUT_POINT_LABELS] if has_coords else None
 
+        gt_masks = inputs[INPUT_GT_MASKS]
+
         frame_logits: List[Any] = []
         frame_scores: List[Any] = []
+        frame_iou: List[Any] = []
         for t in range(self.num_frames):
             features = vision_features[:, t]
             features_pos = vision_pos[-1][:, t]
@@ -446,6 +523,8 @@ class SAM2TrainingModel(keras.Model):
             )
             frame_logits.append(outputs["low_res_logits"])
             frame_scores.append(outputs["object_score_logits"])
+            frame_iou.append(
+                self._iou_supervision(outputs, gt_masks[:, t:t + 1]))
 
             self._store(bank, t, features, outputs, training)
 
@@ -454,6 +533,7 @@ class SAM2TrainingModel(keras.Model):
             # concatenation IS the frame axis (D-051).
             SAM2_LOW_RES_LOGITS: ops.concatenate(frame_logits, axis=1),
             SAM2_OBJECT_SCORE_LOGITS: ops.stack(frame_scores, axis=1),
+            SAM2_IOU_SUPERVISION: ops.concatenate(frame_iou, axis=1),
         }
 
     # -----------------------------------------------------------------
@@ -476,6 +556,7 @@ class SAM2TrainingModel(keras.Model):
             SAM2_LOW_RES_LOGITS: (
                 batch, self.num_frames, mask_grid, mask_grid),
             SAM2_OBJECT_SCORE_LOGITS: (batch, self.num_frames, 1),
+            SAM2_IOU_SUPERVISION: (batch, self.num_frames, 2),
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -504,3 +585,72 @@ class SAM2TrainingModel(keras.Model):
         config = dict(config)
         config["sam2"] = keras.layers.deserialize(config["sam2"])
         return cls(**config)
+
+
+def compile_sam2_video_trainer(
+        model: SAM2TrainingModel,
+        optimizer: Any = "adam",
+        mask_weight: float = 1.0,
+        object_score_weight: float = 1.0,
+        iou_weight: float = 1.0,
+        **compile_kwargs: Any,
+) -> None:
+    """Compile ``model`` with the three losses SAM 2 is trained with.
+
+    This function exists so that the ``loss=`` dict has exactly ONE home. H-5:
+    a dict ``y_pred`` requires ``loss=`` keyed to the output NAMES, and nothing
+    in Keras checks the two sets against each other -- a key spelled in the
+    trainer and again in the pipeline drifts silently. Both read
+    :data:`OUTPUT_KEYS` through this function instead.
+
+    :param model: The wrapper to compile.
+    :type model: SAM2TrainingModel
+    :param optimizer: Any Keras optimizer or its string name.
+    :type optimizer: Any
+    :param mask_weight: Weight of the gated focal+dice term. The focal:dice
+        ratio itself lives inside :class:`SAM2GatedMaskLoss`.
+    :type mask_weight: float
+    :param object_score_weight: Weight of the object-score BCE. Upstream's
+        ``loss_class: 1``.
+    :type object_score_weight: float
+    :param iou_weight: Weight of the IoU regression term.
+    :type iou_weight: float
+    :param compile_kwargs: Forwarded to ``keras.Model.compile``. Passing
+        ``jit_compile`` here overrides the mandatory ``False`` and will make the
+        first ``fit()`` step raise on a GPU; see the module docstring.
+    :type compile_kwargs: Any
+    """
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-052
+    # The object-score term is MANDATORY, not optional, and it is stock
+    # `BinaryCrossentropy(from_logits=True)` -- upstream's `loss_class` is
+    # `sigmoid_focal_loss(..., focal_gamma_obj_score=0.0,
+    # focal_alpha_obj_score=-1.0)` at `loss_class: 1`, which IS a plain BCE.
+    # Do NOT drop this key to "train the masks first", and do NOT write a
+    # bespoke loss class for it (one call site, no behaviour of its own).
+    # Dropping it is silent and total: every consumer of `object_score_logits`
+    # in this package thresholds it HARD at `> 0` (`_suppress_absent_object`
+    # D-043, `_mark_occlusion`, `_blend_object_pointer` at the shipped
+    # `soft_no_obj_ptr=False`), so the score head has NO differentiable
+    # consumer. A mask-only loss can neither train it nor re-open the mask path
+    # it has closed -- `ops.where` passes no gradient through the suppressed
+    # branch -- and at random init every score is negative, so the whole mask
+    # output is the constant -1024 with a finite, falling, meaningless loss.
+    # Likewise `jit_compile=False` is MANDATORY (D-055): `Hiera`'s stem bicubic
+    # resize has no XLA GPU kernel and Keras 3.8 defaults `fit()` to
+    # `jit_compile='auto'`. See decisions.md D-052 and D-055.
+    compile_kwargs.setdefault("jit_compile", False)
+    model.compile(
+        optimizer=optimizer,
+        loss={
+            SAM2_LOW_RES_LOGITS: SAM2GatedMaskLoss(),
+            SAM2_OBJECT_SCORE_LOGITS: keras.losses.BinaryCrossentropy(
+                from_logits=True),
+            SAM2_IOU_SUPERVISION: SAMIoULoss(),
+        },
+        loss_weights={
+            SAM2_LOW_RES_LOGITS: float(mask_weight),
+            SAM2_OBJECT_SCORE_LOGITS: float(object_score_weight),
+            SAM2_IOU_SUPERVISION: float(iou_weight),
+        },
+        **compile_kwargs,
+    )

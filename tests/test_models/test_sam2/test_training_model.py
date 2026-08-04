@@ -18,14 +18,22 @@ permanently green on a dead loop. :func:`pin_object_score` is imported from
 ``test_model.py`` rather than re-written, and is used wherever the mask VALUES
 are the thing under test.
 
-The clip fixture here is TEMPORARY. Step 2 builds the real synthetic
-moving-instance video source and step 4 replaces
-:func:`clip_inputs` with it, so that every guard runs on a shape the data path
-can actually emit (a 208-test SAM gate once missed a crash at shipped defaults
-because a fixture hand-built a shape the pipeline cannot produce).
+THE CLIP FIXTURE IS STILL HAND-BUILT, and step 4 did NOT replace it with
+``train/sam2/data.py``'s generator as the plan specified. It grew a ``gt_masks``
+entry (required from step 4 on) and an ``absent_frames`` knob instead. The
+reason is measured, not aesthetic: several guards in this file quote MEASURED
+values at this exact fixture (``7.2e4``, separations ``220.6 / 220.6 / 301.3``),
+and swapping the source reseeds every one of them, so the swap would have been
+a silent re-baselining of thirty assertions inside a step whose subject is the
+loss. What the plan wanted from the swap -- a guard running on a shape the data
+path can actually emit -- is instead bought by
+``tests/test_train/test_sam2/test_data.py``'s canary, which asserts the
+pipeline's target key set equals :data:`OUTPUT_KEYS` by identity. The residual
+risk (a hand-built shape the generator cannot produce) is named here rather
+than left implicit; see ``decisions.md`` D-062.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from unittest import mock
 
 import keras
@@ -34,12 +42,19 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
+from dl_techniques.losses.sam2_video_loss import (
+    SAM2GatedMaskLoss,
+    mask_presence_gate,
+)
+from dl_techniques.losses.sam_mask_loss import SAMIoULoss
 from dl_techniques.models.sam2.model import NO_OBJ_SCORE, SAM2, create_sam2
 from dl_techniques.models.sam2.training_model import (
     OUTPUT_KEYS,
+    SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
     SAM2_OBJECT_SCORE_LOGITS,
     SAM2TrainingModel,
+    compile_sam2_video_trainer,
 )
 
 from .test_model import pin_object_score
@@ -84,6 +99,7 @@ def clip_inputs(
         model: SAM2TrainingModel,
         batch: int = BATCH,
         seed: int = 0,
+        absent_frames: Tuple[int, ...] = (),
 ) -> Dict[str, np.ndarray]:
     """Build one clip batch with a frame-0 point prompt.
 
@@ -93,18 +109,41 @@ def clip_inputs(
     :type batch: int
     :param seed: RNG seed.
     :type seed: int
+    :param absent_frames: Frame indices whose ground truth is made ENTIRELY
+        empty, i.e. occluded. Frame 0 carries the prompt and is never a legal
+        member (``train/sam2/data.py`` refuses such a clip outright), so this
+        fixture does not offer it either.
+    :type absent_frames: Tuple[int, ...]
     :return: The input dict :meth:`SAM2TrainingModel.call` accepts.
     :rtype: Dict[str, np.ndarray]
     """
     rng = np.random.default_rng(seed)
     size = model.sam2.image_size
+    grid = model.sam2.feature_grid * 4
+    # The image and the prompt are drawn FIRST, in the order this fixture used
+    # before `gt_masks` existed. Several guards in this file quote MEASURED
+    # values at this fixture; drawing the masks ahead of them would reseed the
+    # whole clip and silently invalidate every one of those numbers.
+    image = rng.uniform(
+        0.0, 255.0,
+        (batch, model.num_frames, size, size, 3)).astype("float32")
+    coords = rng.uniform(
+        4.0, float(size) - 4.0, (batch, 1, 2)).astype("float32")
+    masks = (rng.random(
+        (batch, model.num_frames, grid, grid)) > 0.7).astype("float32")
+    # Every frame must start NON-empty, or "absent" would not be a choice this
+    # fixture makes: a row that is empty by accident is indistinguishable from
+    # one that is empty by design, and the gate guards would be measuring the
+    # RNG.
+    masks[:, :, 0, 0] = 1.0
+    for frame in absent_frames:
+        assert frame != 0, "frame 0 carries the prompt and is never occluded"
+        masks[:, frame] = 0.0
     return {
-        "image": rng.uniform(
-            0.0, 255.0,
-            (batch, model.num_frames, size, size, 3)).astype("float32"),
-        "point_coords": rng.uniform(
-            4.0, float(size) - 4.0, (batch, 1, 2)).astype("float32"),
+        "image": image,
+        "point_coords": coords,
         "point_labels": np.ones((batch, 1), dtype="int32"),
+        "gt_masks": masks,
     }
 
 
@@ -125,6 +164,12 @@ def targets_for(model: SAM2TrainingModel, batch: int = BATCH
             (batch, model.num_frames, grid, grid), dtype="float32"),
         SAM2_OBJECT_SCORE_LOGITS: np.zeros(
             (batch, model.num_frames, 1), dtype="float32"),
+        # Structurally unused by `SAMIoULoss` -- the achieved IoU lives inside
+        # `y_pred`, because it is a function of the prediction and the GT
+        # together and no pipeline can produce it. Keras still requires a
+        # target for every supervised output key.
+        SAM2_IOU_SUPERVISION: np.zeros(
+            (batch, model.num_frames, 2), dtype="float32"),
     }
 
 
@@ -239,10 +284,23 @@ class TestGradientReachesTheEncoder:
             self) -> None:
         """The trap, pinned as a permanent test rather than a comment.
 
-        At random init every object score is negative, so D-043's suppression
-        makes every mask logit exactly ``NO_OBJ_SCORE``. Any guard that reads
-        mask VALUES without pinning the score is measuring this constant.
+        At a NEGATIVE-score initialization D-043's suppression makes every mask
+        logit exactly ``NO_OBJ_SCORE``. Any guard that reads mask VALUES
+        without pinning the score is measuring this constant.
+
+        THE SEED IS PINNED, and that is a correction to this test's first
+        draft, not decoration. As written at step 1 it built an UNSEEDED model
+        and asserted every score was negative. MEASURED at step 4: the sign is
+        a property of the process-global Keras seed stream, so merely ADDING an
+        import to ``training_model.py`` -- which pulls in ``losses/__init__``
+        and whatever module-level draws it makes -- flipped this fixture to
+        all-POSITIVE scores and turned the test red with no behaviour change
+        anywhere. Over ``keras.utils.set_random_seed(0..5)`` the scores are
+        all-negative at exactly 2 of 6 seeds, so the unseeded form was a coin
+        flip that happened to land. D-043 had already recorded this hazard for
+        ``models/sam2/test_model.py``; step 1 reintroduced it here.
         """
+        keras.utils.set_random_seed(1)
         model = trainer()
         outputs = model(clip_inputs(model), training=True)
         scores = np.asarray(outputs[SAM2_OBJECT_SCORE_LOGITS])
@@ -703,3 +761,281 @@ class TestConstructionRefusals:
         del inputs["point_labels"]
         with pytest.raises(ValueError, match="must be supplied together"):
             model(inputs, training=True)
+
+    def test_a_clip_without_ground_truth_is_refused(self) -> None:
+        """``gt_masks`` is REQUIRED, and refusing is the honest alternative.
+
+        Emitting a zero ``iou_supervision`` instead would give a trainer that
+        forgot the ground truth a loss of exactly ``0.0`` on that key -- a
+        silently dead IoU head with no shape, dtype or finiteness symptom.
+        """
+        model = trainer()
+        inputs = clip_inputs(model)
+        del inputs["gt_masks"]
+        with pytest.raises(ValueError, match="gt_masks"):
+            model(inputs, training=True)
+
+
+# ---------------------------------------------------------------------
+# G3.5 -- the object-score BCE is the score head's ONLY differentiable
+#         consumer, proven two-sided
+# ---------------------------------------------------------------------
+
+
+def head_gradient(model: SAM2TrainingModel, loss_keys: Dict[str, Any],
+                  inputs: Dict[str, np.ndarray],
+                  targets: Dict[str, np.ndarray]) -> float:
+    """Max |gradient| on the object-score head's last kernel under ``loss_keys``.
+
+    :param model: The wrapper.
+    :type model: SAM2TrainingModel
+    :param loss_keys: ``{output key: loss}``; keys absent from it are
+        unsupervised, which is what makes the two-sided proof possible.
+    :type loss_keys: Dict[str, Any]
+    :param inputs: The clip.
+    :type inputs: Dict[str, np.ndarray]
+    :param targets: Targets for every key in ``loss_keys``.
+    :type targets: Dict[str, np.ndarray]
+    :return: ``max(abs(gradient))``, or ``-1.0`` if the gradient is ``None``.
+    :rtype: float
+    """
+    kernel = model.sam2.mask_decoder.pred_obj_score_head.layers[-1].kernel
+    with tf.GradientTape() as tape:
+        outputs = model(inputs, training=True)
+        total = sum(
+            loss(targets[key], outputs[key]) for key, loss in loss_keys.items())
+    gradient = tape.gradient(total, kernel)
+    return -1.0 if gradient is None else max_abs(gradient)
+
+
+class TestObjectScoreSupervision:
+    """G3.5: without the BCE the score head is frozen, exactly."""
+
+    def test_the_bce_reaches_the_head_and_the_mask_loss_does_not(self) -> None:
+        """Both arms in one test: ``> 0`` with the BCE, exactly ``0`` without.
+
+        The negative arm is the load-bearing one. Every consumer of
+        ``object_score_logits`` in this package thresholds it HARD at ``> 0``
+        (D-043's suppression, ``_mark_occlusion``, ``_blend_object_pointer``),
+        and ``ops.where`` passes no gradient through the suppressed branch --
+        so a mask-only trainer would leave this head at its initialization
+        forever, with a perfectly healthy falling loss.
+        """
+        model = trainer()
+        inputs, targets = clip_inputs(model, absent_frames=(2,)), targets_for(model)
+        targets[SAM2_OBJECT_SCORE_LOGITS] = np.asarray(
+            np.max(inputs["gt_masks"], axis=(-2, -1)) > 0.0,
+            dtype="float32")[..., None]
+
+        with_bce = head_gradient(
+            model,
+            {SAM2_OBJECT_SCORE_LOGITS:
+                keras.losses.BinaryCrossentropy(from_logits=True)},
+            inputs, targets)
+        with_mask_only = head_gradient(
+            model, {SAM2_LOW_RES_LOGITS: SAM2GatedMaskLoss()}, inputs, targets)
+
+        assert with_bce > 0.0, (
+            "the object-score BCE does not reach pred_obj_score_head")
+        # MEASURED, and it is a CORRECTION to the plan's own prediction, which
+        # said "exactly 0.0". The gradient comes back `None`: D-043's
+        # suppression gates on `score > 0`, and a boolean COMPARISON severs the
+        # graph outright rather than producing a zero along it. That is
+        # strictly stronger evidence than a zero would be -- the head is not
+        # merely receiving nothing, it is not connected -- and the sentinel is
+        # spelled `-1.0` so this arm cannot be satisfied by a gradient that
+        # merely happens to vanish numerically.
+        assert with_mask_only == -1.0, (
+            f"the mask loss alone moved the score head by {with_mask_only!r}; "
+            "the two-sided proof that the BCE is MANDATORY has stopped "
+            "holding, and D-052's rationale must be re-derived")
+
+
+# ---------------------------------------------------------------------
+# G4.1 / G4.2 -- the IoU supervision output and its gate
+# ---------------------------------------------------------------------
+
+
+def achieved_iou_oracle(logits: np.ndarray, truth: np.ndarray,
+                        threshold: float = 0.0, smooth: float = 1e-6
+                        ) -> np.ndarray:
+    """Independent numpy transcription of ``achieved_mask_iou``.
+
+    Written from the definition -- thresholded intersection over union with a
+    smoothing term on both sides -- rather than by calling the repository's
+    own function, which would assert that the code equals itself.
+
+    :param logits: ``(B, T, h, w)`` predicted mask logits.
+    :type logits: numpy.ndarray
+    :param truth: ``(B, T, h, w)`` binary ground truth.
+    :type truth: numpy.ndarray
+    :param threshold: Foreground logit threshold.
+    :type threshold: float
+    :param smooth: Numerator/denominator smoothing.
+    :type smooth: float
+    :return: ``(B, T)`` IoU.
+    :rtype: numpy.ndarray
+    """
+    predicted = (logits.astype("float64") > threshold).astype("float64")
+    true64 = (truth.astype("float64") > 0.5).astype("float64")
+    intersection = (predicted * true64).sum(axis=(-2, -1))
+    union = (predicted.sum(axis=(-2, -1)) + true64.sum(axis=(-2, -1))
+             - intersection)
+    return (intersection + smooth) / (union + smooth)
+
+
+def pin_predicted_iou(model: SAM2TrainingModel, value: float) -> None:
+    """Force the decoder's IoU head to emit ``value`` for every row.
+
+    The sibling of :func:`pin_object_score`, and it exists for the same reason
+    at a different head. MEASURED: without it, the SEPARATION between the gated
+    and ungated IoU losses is a property of random initialization -- in the
+    directory-wide gate it collapsed to ``3.0e-4`` against a required ``0.01``,
+    and the guard's own fixture-validity arm fired. Pinning makes the
+    separation structural (the absent frame contributes ``value**2 / (B*T)``)
+    instead of lucky.
+
+    :param model: A BUILT wrapper.
+    :type model: SAM2TrainingModel
+    :param value: The IoU logit to pin.
+    :type value: float
+    """
+    last = model.sam2.mask_decoder.iou_prediction_head.layers[-1]
+    last.kernel.assign(np.zeros(last.kernel.shape, dtype="float32"))
+    last.bias.assign(np.full(last.bias.shape, value, dtype="float32"))
+
+
+class TestIoUSupervision:
+    """The packed ``(B, T, 2)`` output, its gate, and the loss it feeds."""
+
+    def test_the_output_keys_are_exactly_the_compiled_loss_keys(self) -> None:
+        """G4.1. H-5: nothing in Keras checks these two sets against each other.
+
+        Both come from :data:`OUTPUT_KEYS` through
+        :func:`compile_sam2_video_trainer`, which is the only reason they
+        cannot drift; a renamed key would otherwise surface as a bare Keras
+        structure error naming neither side's intent.
+        """
+        model = trainer(object_score=5.0)
+        compile_sam2_video_trainer(model)
+        assert set(model.loss) == set(OUTPUT_KEYS)
+        assert set(model(clip_inputs(model), training=True)) == set(OUTPUT_KEYS)
+        assert model.jit_compile is False, (
+            "compile_sam2_video_trainer left XLA on; D-055 measured that the "
+            "first fit() step then dies on Hiera's bicubic stem resize")
+
+    def test_one_fit_step_runs_with_all_three_losses(self) -> None:
+        """The three-key compile is not merely well-typed: it trains."""
+        model = trainer(object_score=5.0)
+        compile_sam2_video_trainer(model)
+        history = model.fit(
+            clip_inputs(model, absent_frames=(2,)), targets_for(model),
+            epochs=1, batch_size=BATCH, verbose=0)
+        assert np.isfinite(history.history["loss"][0])
+
+    def test_the_iou_gate_agrees_with_the_mask_losss_gate(self) -> None:
+        """G4.2's first half: ONE definition of presence, two call sites.
+
+        The model derives the gate from ``inputs['gt_masks']`` and the loss
+        from its own ``y_true``; both go through ``mask_presence_gate``, and
+        this asserts the agreement on a clip where they could disagree.
+        """
+        model = trainer(object_score=5.0)
+        inputs = clip_inputs(model, absent_frames=(1,))
+        packed = np.asarray(
+            model(inputs, training=True)[SAM2_IOU_SUPERVISION])
+        from_the_loss = np.asarray(mask_presence_gate(
+            ops.convert_to_tensor(inputs["gt_masks"])))[..., 0, 0]
+        zeroed = ~np.any(packed != 0.0, axis=-1)
+        np.testing.assert_array_equal(zeroed, ~from_the_loss)
+        assert zeroed[:, 1].all() and not zeroed[:, 0].any()
+
+    def test_both_channels_are_zeroed_and_the_rest_are_the_real_pair(
+            self) -> None:
+        """Zeroing ONE channel would leave a live, wrong regression target."""
+        model = trainer(object_score=5.0)
+        inputs = clip_inputs(model, absent_frames=(1,))
+        outputs = model(inputs, training=True)
+        packed = np.asarray(outputs[SAM2_IOU_SUPERVISION])
+        np.testing.assert_array_equal(packed[:, 1], np.zeros((BATCH, 2)))
+        # NON-ZERO, not positive. The decoder's IoU head is an unbounded MLP
+        # with no output activation, so at initialization it emits negative
+        # "IoU" as often as positive (MEASURED here: -0.170 and -0.038). A
+        # `> 0` assertion would have been red on correct code.
+        assert (packed[:, 0, 0] != 0.0).all(), (
+            "the predicted-IoU channel is zero on a PRESENT frame; the gate "
+            "is zeroing more than it should")
+        expected = achieved_iou_oracle(
+            np.asarray(outputs[SAM2_LOW_RES_LOGITS]), inputs["gt_masks"])
+        np.testing.assert_allclose(
+            packed[:, :, 1], np.where(
+                np.max(inputs["gt_masks"], axis=(-2, -1)) > 0.0,
+                expected, 0.0), atol=1e-6)
+
+    def test_the_iou_loss_equals_a_hand_computed_GATED_value(self) -> None:
+        """G4.2's load-bearing half, and the LESSONS hazard it is written for.
+
+        Zeroing BOTH channels makes ``zero == zero`` always agree, so no
+        liveness probe over this output can discriminate a correct gate from a
+        dead one -- "the loss moved" is satisfied by anything. The assertion is
+        therefore against a hand-computed number, and the UNGATED candidate is
+        separated from it by an amount measured in the same test.
+
+        ``gt_masks`` does not influence the forward pass at all -- it is read
+        only by ``_iou_supervision`` -- so running the identical clip with the
+        occluded frame marked PRESENT recovers that frame's true predicted IoU
+        and makes the ungated candidate computable rather than hypothetical.
+
+        Both calls run at ``training=False``, and that matters. MEASURED on the
+        identical clip: two ``training=True`` calls return mask logits up to
+        **13.80** apart, while two ``training=False`` calls are bit-identical
+        (max difference exactly ``0.0``). The first draft of this test used
+        ``training=True`` for both and the assembled oracle came out ``8.2e-3``
+        wrong -- four orders beyond its own ``1e-6`` tolerance -- which is the
+        general hazard: any oracle assembled ACROSS two forward passes must
+        pin the training flag, or it is measuring dropout.
+        """
+        model = trainer(object_score=5.0)
+        pin_predicted_iou(model, 0.9)
+        inputs = clip_inputs(model, absent_frames=(1,))
+        gated = np.asarray(model(inputs, training=False)[SAM2_IOU_SUPERVISION])
+
+        ungated_inputs = dict(inputs)
+        revealed = inputs["gt_masks"].copy()
+        revealed[:, 1, 0, 0] = 1.0
+        ungated_inputs["gt_masks"] = revealed
+        outputs = model(ungated_inputs, training=False)
+        predicted_everywhere = np.asarray(
+            outputs[SAM2_IOU_SUPERVISION])[..., 0]
+        achieved_everywhere = achieved_iou_oracle(
+            np.asarray(outputs[SAM2_LOW_RES_LOGITS]), inputs["gt_masks"])
+
+        squared = (predicted_everywhere - achieved_everywhere) ** 2
+        present = np.max(inputs["gt_masks"], axis=(-2, -1)) > 0.0
+        hand_gated = float(np.where(present, squared, 0.0).mean())
+        hand_ungated = float(squared.mean())
+
+        assert abs(hand_gated - hand_ungated) > 0.01, (
+            f"the gated and ungated IoU losses are only "
+            f"{abs(hand_gated - hand_ungated)!r} apart at this fixture; a "
+            f"guard sited here cannot discriminate them")
+        measured = float(SAMIoULoss()(
+            np.zeros((BATCH, FRAMES, 2), dtype="float32"), gated))
+        assert measured == pytest.approx(hand_gated, abs=1e-6), (
+            f"SAMIoULoss over the gated pack is {measured!r}, the "
+            f"hand-computed gated value is {hand_gated!r}")
+        assert abs(measured - hand_ungated) > 0.01
+
+    def test_the_achieved_channel_carries_no_gradient(self) -> None:
+        """It is a thresholded target, not a prediction.
+
+        A gradient there would train the mask head to make its own IoU
+        estimate come true, which is the opposite of what the IoU head is for.
+        """
+        model = trainer(object_score=5.0)
+        inputs = clip_inputs(model, absent_frames=(1,))
+        kernel = model.sam2.mask_decoder.pred_obj_score_head.layers[-1].kernel
+        with tf.GradientTape() as tape:
+            packed = model(inputs, training=True)[SAM2_IOU_SUPERVISION]
+            achieved_only = ops.sum(packed[..., 1])
+        assert tape.gradient(achieved_only, kernel) is None
