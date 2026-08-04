@@ -141,7 +141,7 @@ class SAMTrainingModel(keras.Model):
             ... to a layer that is already built`` on the second traced call.
         **kwargs: Forwarded to ``keras.Model``.
 
-    Input dict (from ``tf.data``):
+    Input dict (from the ``keras``/data pipeline):
         - ``image``: ``(B, H, W, 3)`` float, values in ``[0, 255]``. ``H`` and
           ``W`` must not exceed ``sam.image_encoder.img_size``; ``preprocess``
           pads, it never resizes (use ``resize_longest_side`` upstream).
@@ -310,7 +310,7 @@ class SAMTrainingModel(keras.Model):
         # packed into the SAME tensor as the IoU prediction, and that is forced
         # by the framework, not chosen for convenience. The achieved IoU is a
         # function of the prediction AND the GT together, so it exists only
-        # here; a `tf.data` pipeline cannot produce it, and stock
+        # here; a data pipeline cannot produce it, and stock
         # `compile(loss={...})` hands each loss only its own output key. Do NOT
         # "fix" this by (a) supervising `iou_predictions` against a pipeline
         # target -- there is no such target; (b) adding a separate `iou_target`
