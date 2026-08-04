@@ -791,11 +791,15 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         ``mixed_float16`` the intermediate ``sigmoid(x) * 20`` lives near
         ``+-10``, where float16's spacing is ``7.8e-3``; subtracting 10 then
         leaves an output near 0 quantized at that coarse spacing rather than at
-        the ``4.9e-4`` its own magnitude would allow. MEASURED over logits in
-        ``[-1, 1]`` against a float64 oracle, with float16 INPUT in both arms:
-        max error ``2.4e-3`` computing in float32, ``1.3e-2`` computing in
-        float16 -- a 5.3x loss, on 81% of the probed logits. The result is cast
-        back to the compute dtype, so this costs the caller nothing.
+        the ``4.9e-4`` its own magnitude would allow. MEASURED over 401 logits
+        in ``[-1, 1]`` against a float64 oracle, with float16 INPUT in both
+        arms and a CORRECTLY-ROUNDED float16 sigmoid in the naive arm (so the
+        comparison is against the best any kernel can do, not against one
+        kernel's error): max error ``2.4318e-3`` computing the intermediate in
+        float32, ``8.696e-3`` computing it in float16 -- a 3.6x loss, strictly
+        worse at 289 of the 401 probed logits and never better at 377 of them.
+        The result is cast back to the compute dtype, so this costs the caller
+        nothing.
 
         :param masks: Mask logits.
         :type masks: Any

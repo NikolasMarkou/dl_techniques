@@ -378,6 +378,14 @@ class TestSerializationByValue:
         """`isinstance` proves nothing here; every weight is compared by VALUE."""
         model = tiny_model()
         x = images()
+        # The forward arm below is the only BEHAVIOURAL check in this test, and
+        # without this pin it is decided by an unseeded sign: at a negative
+        # object score D-043 makes both sides uniformly NO_OBJ_SCORE and
+        # `max_abs_diff == 0.0` holds no matter what the restored graph does.
+        # Pinning POSITIVE keeps the real decoder output on both sides. The
+        # per-weight comparison above is unaffected either way; this makes the
+        # forward comparison mean what it says.
+        pin_object_score(model, 5.0)
         reference = model({"image": x})["low_res_logits"]
 
         path = tmp_path / "sam2_tiny.keras"

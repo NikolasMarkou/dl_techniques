@@ -368,6 +368,23 @@ class TestAffineSigmoidValue:
         The naive arm is asserted to be genuinely worse BEFORE the shipped arm
         is asserted to be good, so the probe cannot silently drift into a
         regime where the two agree.
+
+        THE TWIN IS COMPUTED IN NUMPY, AND THE THRESHOLD IS THE
+        CORRECTLY-ROUNDED FLOOR. An earlier revision built the twin with
+        ``ops.sigmoid`` on a float16 tensor and asserted ``> 1.0e-2``. That
+        made the guard DEVICE-DEPENDENT for a non-defect reason: TensorFlow's
+        CPU half-precision sigmoid carries its own kernel error and scores
+        1.2816e-2, but a correctly-rounded float16 sigmoid -- a normal
+        GPU/XLA kernel choice, and this suite's gate runs on GPU -- scores
+        8.696e-3, i.e. BELOW that threshold, so the pre-assertion would have
+        reported drift where the only thing that changed was a kernel. The
+        twin here rounds a float32 sigmoid ONCE to float16 and then does the
+        multiply and the subtract in float16, which is the best any kernel can
+        do; its 8.696e-3 is therefore a floor, not a measurement of TF. The
+        threshold is ``5e-3``: below that floor with 74% of margin, and still
+        2.1x above the shipped path's 2.4318e-3. Deleting the
+        ``variable_dtype`` cast puts the shipped arm at 8.696e-3 or worse on
+        ANY device, so the guard stays red-provable everywhere.
         """
         logits64 = np.linspace(-1.0, 1.0, 401, dtype="float64")
         oracle = 1.0 / (1.0 + np.exp(-logits64)) * SIGMOID_SCALE + SIGMOID_BIAS
@@ -389,16 +406,21 @@ class TestAffineSigmoidValue:
             keras.mixed_precision.set_global_policy(previous)
 
         # The dead-component twin: the SAME expression with the intermediate
-        # taken in the compute dtype, i.e. exactly what deleting the cast does.
-        naive = ops.convert_to_numpy(
-            ops.sigmoid(ops.convert_to_tensor(logits16))
-            * np.float16(SIGMOID_SCALE) + np.float16(SIGMOID_BIAS)
+        # taken in the compute dtype, i.e. exactly what deleting the cast does
+        # -- but with a CORRECTLY-ROUNDED float16 sigmoid, so the number below
+        # is the best case for the naive path on any device rather than one
+        # kernel's error. numpy, not `ops`, for exactly that reason.
+        sigmoid16 = (
+            1.0 / (1.0 + np.exp(-logits16.astype("float32")))
+        ).astype("float16")
+        naive = (
+            sigmoid16 * np.float16(SIGMOID_SCALE) + np.float16(SIGMOID_BIAS)
         ).astype("float64")
 
         shipped_error = float(np.abs(shipped - oracle).max())
         naive_error = float(np.abs(naive - oracle).max())
 
-        assert naive_error > 1.0e-2, (
+        assert naive_error > 5.0e-3, (
             f"the float16-intermediate twin is only {naive_error} from the "
             f"float64 oracle over these logits, so this probe is no longer in "
             f"a regime where the cast can matter and it must be re-sited "

@@ -149,6 +149,12 @@ def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
     is unchanged; the two differ only under ``multimask_output=True``, where
     index 0 is multimask token 1 and is chosen by POSITION rather than by the
     model's own IoU estimate.
+
+    INFERENCE-ONLY. Do NOT reuse this to pick which multimask slice a training
+    loss supervises: upstream selects that slice by ``argmin(20 * loss_mask +
+    loss_dice)`` against the ground truth (``training/loss_fns.py:219-297``),
+    not by the predicted IoU, which is itself one of the things being trained.
+    See ``progress.md`` "Iteration 2 -- carried constraints".
     """
     index = ops.argmax(iou_predictions, axis=-1)
     index = ops.cast(ops.reshape(index, (-1,) + (1,) * (len(tensor.shape) - 1)),
@@ -672,7 +678,9 @@ class SAM2(keras.Model):
 
         :param inputs: ``{'image': (B, image_size, image_size, 3)}`` plus the
             optional prompt keys ``'points'`` (a ``(coords, labels)`` pair),
-            ``'boxes'`` and ``'masks'``.
+            ``'boxes'`` and ``'masks'``. ``'masks'`` is a low-resolution mask
+            PROMPT; see the re-feed note below before passing a previous
+            call's ``low_res_logits`` back in through it.
         :type inputs: Dict[str, Any]
         :param training: Keras training flag.
         :type training: Optional[bool]
@@ -680,9 +688,56 @@ class SAM2(keras.Model):
             configured default (S-3).
         :type multimask_output: Optional[bool]
         :return: ``{'low_res_logits', 'iou_predictions', 'object_score_logits',
-            'object_pointer'}``. ``low_res_logits`` is the training target.
+            'object_pointer'}``.
         :rtype: Dict[str, Any]
         :raises ValueError: If ``'image'`` is absent.
+
+        ``low_res_logits`` is the training target, WITH ONE CAVEAT that a loss
+        must account for: on any batch row whose ``object_score_logits`` is
+        ``<= 0`` it is not a prediction at all but the uniform constant
+        :data:`NO_OBJ_SCORE` (``-1024``), written by
+        :meth:`_suppress_absent_object` (D-043). ``ops.where`` passes no
+        gradient through the unselected branch, so on such a row the mask
+        path is gradient-free and the decoder learns nothing from a mask loss.
+        The score head itself is likewise unreachable from a mask loss --
+        every consumer of ``object_score_logits`` in this package thresholds
+        it hard at ``> 0`` -- so it needs an explicit loss on that output key.
+        Upstream's recipe is a plain BCE at weight 1
+        (``training/loss_fns.py:219-297``,
+        ``sam2.1_hiera_b+_MOSE_finetune.yaml:288-293``), with the mask/dice/IoU
+        losses gated by GROUND-TRUTH presence rather than by this predicted
+        score. See ``progress.md`` "Iteration 2 -- carried constraints".
+
+        DIVERGENCE FROM UPSTREAM ON THE SINGLE-IMAGE PATH. The suppression is
+        applied by this port's shared :meth:`_decode`, so it fires for
+        :meth:`call` as well as for :meth:`stream_step`. Upstream applies it
+        only inside ``_forward_sam_heads`` (``sam2_base.py:358-368``), which is
+        what the VIDEO predictor uses; its IMAGE predictor bypasses that method
+        entirely, calling ``self.model.sam_mask_decoder(...)`` directly
+        (``sam2_image_predictor.py:420``) and returning the real mask. So on a
+        false-negative occlusion call -- a trained checkpoint whose score head
+        emits a negative logit for an object that IS present -- upstream's
+        ``SAM2ImagePredictor.predict`` hands back the mask and this method
+        hands back ``-1024``. The behaviour is deliberate: this package exists
+        to serve the memory-conditioned video path, where a mask that
+        contradicts its own occlusion flag is a state the reference never
+        writes into the memory bank. A caller that wants the image predictor's
+        semantics reads ``object_score_logits`` and re-runs
+        :meth:`SAM2MaskDecoder.call` itself.
+
+        THE UPSTREAM ``+-32`` CLAMP IS DELIBERATELY NOT APPLIED HERE. Both
+        upstream sites (``sam2_image_predictor.py:434``,
+        ``sam2_video_predictor.py:262``) clamp at a mask-PROMPT boundary, not
+        on a model output: the video predictor clamps the previous frame's
+        ``pred_masks`` immediately before re-feeding them, and the image
+        predictor clamps only the copy it returns for use as the next call's
+        ``mask_input`` -- the upsampled masks it actually reports are computed
+        from the UNCLAMPED logits at ``:425-427``. Applying it in
+        :meth:`_decode` would therefore change no segmentation while destroying
+        the ``-1024`` sentinel that D-043 exists to write. This port has no
+        internal re-feed loop, so there is no site that needs it; a caller who
+        does re-feed ``low_res_logits`` through the ``'masks'`` prompt key must
+        clamp to ``[-32, 32]`` first, exactly as both upstream predictors do.
         """
         if "image" not in inputs:
             raise ValueError("SAM2 inputs must contain an 'image' key")
@@ -745,6 +800,19 @@ class SAM2(keras.Model):
             )
         low_res_logits = self._suppress_absent_object(
             low_res_logits, object_score_logits)
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-047
+        # Do NOT add upstream's `torch.clamp(low_res_masks, -32.0, 32.0)` here
+        # "for parity". Both upstream sites apply it at a mask-PROMPT boundary
+        # -- `sam2_video_predictor.py:262` on the previous frame's `pred_masks`
+        # just before re-feeding them, `sam2_image_predictor.py:434` only on the
+        # copy returned for use as the next call's `mask_input` (the masks it
+        # reports come from `postprocess_masks` at `:425-427`, computed from the
+        # UNCLAMPED logits). Here it would change no segmentation while
+        # overwriting the `-1024` sentinel the line above just wrote, turning
+        # every D-043 guard into an assertion about `-32`. The clamp belongs at
+        # the caller's re-feed, which is where `SAM2.call`'s docstring puts it.
+        # See decisions.md D-047.
+        #
         # DECISION plan-2026-08-04T044628-4c240b4c/D-038
         # The pointer token is gathered by the model's OWN best-IoU estimate,
         # never by position. Do NOT "simplify" this back to
