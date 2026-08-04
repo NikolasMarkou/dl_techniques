@@ -8,6 +8,7 @@ for a model problem: the synthetic source needs no COCO on disk and no
 the loss, and nothing else.
 """
 
+import os
 from typing import Any, Dict, Tuple
 
 import keras
@@ -29,6 +30,7 @@ from dl_techniques.models.sam.training_model import (
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
 
 from train.sam.data import (
+    DATA_SOURCES,
     MASK_DIVISOR,
     MIN_MASK_PIXELS,
     PADDING_LABEL,
@@ -37,6 +39,7 @@ from train.sam.data import (
     RECORD_MASK,
     _box_from_mask,
     build_sam_dataset,
+    coco_instance_samples,
     sample_point_in_mask,
     synthetic_instance_samples,
 )
@@ -278,3 +281,102 @@ class TestEndToEndFitOverTheSyntheticSource:
         first = float(history.history["loss"][0])
         after = float(model.evaluate(dataset.take(1), verbose=0)[0])
         assert after < first, f"loss did not fall: {first} -> {after}"
+
+
+# ---------------------------------------------------------------------------
+# Plan step 6 -- the COCO arm.
+# ---------------------------------------------------------------------------
+COCO_ANNOTATIONS = os.path.join(
+    "/media/arxwn/data0_4tb/datasets/coco_2017", "annotations",
+    "instances_val2017.json",
+)
+requires_coco = pytest.mark.skipif(
+    not os.path.exists(COCO_ANNOTATIONS),
+    reason=f"local COCO 2017 not found at {COCO_ANNOTATIONS}",
+)
+
+
+class TestSourceRegistry:
+    """Both sources are reachable by name, and an unknown name is refused."""
+
+    def test_both_sources_are_registered(self) -> None:
+        assert set(DATA_SOURCES) == {"synthetic", "coco"}
+
+    def test_an_unknown_source_is_refused_by_name(self) -> None:
+        """
+        A silently-defaulted source is how a smoke number gets quoted as a
+        real-data number.
+        """
+        with pytest.raises(ValueError, match="unknown data source"):
+            build_sam_dataset(
+                num_samples=1, image_size=IMG_SIZE, batch_size=1, source="cocoa"
+            )
+
+
+@requires_coco
+class TestCocoSource:
+    """The COCO arm emits the SAME record contract as the synthetic one."""
+
+    def test_records_match_the_shared_contract(self) -> None:
+        records = list(
+            coco_instance_samples(
+                6, image_size=IMG_SIZE, split="val2017", max_images=32, seed=0
+            )
+        )
+        assert len(records) == 6
+        for record in records:
+            assert record[RECORD_IMAGE].shape == (IMG_SIZE, IMG_SIZE, 3)
+            assert record[RECORD_MASK].shape == (
+                IMG_SIZE // MASK_DIVISOR,
+                IMG_SIZE // MASK_DIVISOR,
+            )
+            assert record[RECORD_MASK].sum() > 0
+            assert record[RECORD_BOX].shape == (4,)
+
+    def test_the_image_domain_is_0_255_not_the_loader_default_0_1(self) -> None:
+        """
+        The loader's own default is ``pixel_scale = 1/255``. ``SAM.preprocess``
+        normalizes in the 0-255 domain, so inheriting that default would hand
+        the model a 255x under-exposed image with every shape assertion green.
+        """
+        records = list(
+            coco_instance_samples(
+                4, image_size=IMG_SIZE, split="val2017", max_images=32, seed=0
+            )
+        )
+        assert max(float(r[RECORD_IMAGE].max()) for r in records) > 100.0
+
+    def test_the_box_is_in_image_pixels_not_normalized(self) -> None:
+        """
+        ``_build_instances`` returns a box normalized to ``[0, 1]`` (the
+        detection head's frame); a SAM prompt lives in image pixels. A missed
+        rescale would put every box in the top-left 1x1 pixel, invisibly to
+        every shape assertion.
+        """
+        records = list(
+            coco_instance_samples(
+                8, image_size=IMG_SIZE, split="val2017", max_images=32, seed=0
+            )
+        )
+        widest = max(
+            float(r[RECORD_BOX][2] - r[RECORD_BOX][0]) for r in records
+        )
+        assert widest > 1.0, f"widest box was {widest} px -- still normalized?"
+        assert all(float(r[RECORD_BOX].max()) <= IMG_SIZE + 1e-3 for r in records)
+
+    def test_a_fit_step_runs_over_the_coco_arm(self) -> None:
+        keras.utils.set_random_seed(5)
+        model = SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=1)
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss={LOW_RES_LOGITS: SAMMaskLoss(), IOU_SUPERVISION: SAMIoULoss()},
+        )
+        dataset = build_sam_dataset(
+            num_samples=4,
+            image_size=IMG_SIZE,
+            batch_size=2,
+            source="coco",
+            source_kwargs={"split": "val2017", "max_images": 32},
+        )
+        history = model.fit(dataset, epochs=1, verbose=0)
+        assert np.isfinite(history.history["loss"][-1])

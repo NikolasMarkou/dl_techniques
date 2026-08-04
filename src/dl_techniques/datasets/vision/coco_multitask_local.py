@@ -96,6 +96,17 @@ class COCO2017MultiTaskLoader(keras.utils.PyDataset):
         )
         self.config = config
         self._rng = random.Random(config.seed)
+        #: Cumulative reasons instances were rejected by `_build_instances`.
+        #: A drop that is not counted is a silent epoch shrink -- this
+        #: repository has already shipped one (a benchmark that quietly dropped
+        #: 10 of 20 tasks while reporting a full run).
+        self.instance_drop_counts: Dict[str, int] = {
+            "unknown_category": 0,
+            "shape_mismatch": 0,
+            "degenerate_box": 0,
+            "empty_after_resize": 0,
+            "images_without_instances": 0,
+        }
 
         ann_file = os.path.join(
             config.coco_root, "annotations", f"instances_{config.split}.json"
@@ -177,6 +188,115 @@ class COCO2017MultiTaskLoader(keras.utils.PyDataset):
 
         return mask_full
 
+    def _build_instances(
+        self,
+        image_id: int,
+        out_hw: Tuple[int, int],
+        max_instances: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the PER-INSTANCE masks of *image_id*, one record per object.
+
+        This is the sibling of :meth:`_build_mask`, and it exists because
+        ``_build_mask`` already computes exactly this and then destroys it:
+        ``self.coco.annToMask(ann)`` produces the per-instance binary mask, and
+        the very next statement paints it into a shared class map where
+        overlapping instances of the SAME category become indistinguishable
+        ("last-painted wins"). Promptable segmentation needs the instances.
+
+        ``_build_mask``'s own output is untouched by this method.
+
+        :param image_id: COCO image id.
+        :param out_hw: ``(height, width)`` the masks are resized to.
+        :param max_instances: Keep at most this many instances (the first
+            ``max_instances`` in COCO annotation order, so the selection is
+            deterministic). ``None`` keeps all.
+        :returns: A list of
+            ``{"mask": (H, W) float32 binary, "box": (4,) float32 xyxy
+            normalized to [0, 1], "class_index": int, "annotation_id": int}``.
+            The list is **EMPTY** for an image with no eligible annotation --
+            that is a real COCO condition (e.g. val2017 image ``58636``), and
+            it is the caller's job to skip-and-count such an image rather than
+            let it silently shrink an epoch. Every rejected annotation is
+            counted in :attr:`instance_drop_counts`.
+        """
+        info = self.coco.loadImgs(image_id)[0]
+        h, w = info["height"], info["width"]
+        anns = self.coco.loadAnns(
+            self.coco.getAnnIds(imgIds=image_id, iscrowd=False)
+        )
+        tgt_h, tgt_w = out_hw
+
+        instances: List[Dict[str, Any]] = []
+        for ann in anns:
+            if max_instances is not None and len(instances) >= max_instances:
+                break
+            cls_idx = self.cat_id_to_idx.get(ann["category_id"])
+            if cls_idx is None:
+                self.instance_drop_counts["unknown_category"] += 1
+                continue
+            m = self.coco.annToMask(ann)
+            if m.shape != (h, w):
+                # The same silent `continue` `_build_mask` has always had --
+                # kept for identical selection behaviour, but COUNTED here.
+                self.instance_drop_counts["shape_mismatch"] += 1
+                continue
+            box = self._normalized_xyxy(ann, float(h), float(w))
+            if box is None:
+                self.instance_drop_counts["degenerate_box"] += 1
+                continue
+            if (tgt_h, tgt_w) != (h, w):
+                resized = np.asarray(
+                    Image.fromarray(m.astype(np.uint8), mode="L").resize(
+                        (tgt_w, tgt_h), resample=Image.NEAREST
+                    ),
+                    dtype=np.float32,
+                )
+            else:
+                resized = m.astype(np.float32)
+            if resized.sum() <= 0.0:
+                # An object that vanishes at the target resolution cannot be
+                # prompted (no pixel to sample a point from) and would be
+                # supervised as "predict nothing". Dropped and counted.
+                self.instance_drop_counts["empty_after_resize"] += 1
+                continue
+            instances.append(
+                {
+                    "mask": (resized > 0.0).astype(np.float32),
+                    "box": np.asarray(box, dtype=np.float32),
+                    "class_index": int(cls_idx),
+                    "annotation_id": int(ann["id"]),
+                }
+            )
+        if not instances:
+            self.instance_drop_counts["images_without_instances"] += 1
+        return instances
+
+    def _normalized_xyxy(
+        self, ann: Dict[str, Any], img_h: float, img_w: float
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Convert one COCO ``bbox`` (pixel xywh) to normalized xyxy.
+
+        Single source of truth for the conversion: :meth:`_build_instances` and
+        :meth:`_build_detection_labels` both call it, so the two can never drift
+        into disagreeing about what a box is.
+
+        :param ann: A COCO annotation dict.
+        :param img_h: Original image height in pixels.
+        :param img_w: Original image width in pixels.
+        :returns: ``(x1, y1, x2, y2)`` in ``[0, 1]``, or ``None`` when the box
+            is degenerate (non-positive extent, or empty after clipping).
+        """
+        x, y, w, h = ann["bbox"]
+        if w <= 0 or h <= 0:
+            return None
+        x1 = max(0.0, x / img_w)
+        y1 = max(0.0, y / img_h)
+        x2 = min(1.0, (x + w) / img_w)
+        y2 = min(1.0, (y + h) / img_h)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return float(x1), float(y1), float(x2), float(y2)
+
     def _build_classification(self, image_id: int) -> np.ndarray:
         """80-dim multi-hot vector — 1 wherever ≥ 1 instance of that class."""
         ann_ids = self.coco.getAnnIds(imgIds=image_id, iscrowd=False)
@@ -212,15 +332,10 @@ class COCO2017MultiTaskLoader(keras.utils.PyDataset):
             cls_idx = self.cat_id_to_idx.get(ann["category_id"])
             if cls_idx is None:
                 continue
-            x, y, w, h = ann["bbox"]  # COCO native: pixel xywh
-            if w <= 0 or h <= 0:
+            box = self._normalized_xyxy(ann, img_h, img_w)
+            if box is None:
                 continue
-            x1 = max(0.0, x / img_w)
-            y1 = max(0.0, y / img_h)
-            x2 = min(1.0, (x + w) / img_w)
-            y2 = min(1.0, (y + h) / img_h)
-            if x2 <= x1 or y2 <= y1:
-                continue
+            x1, y1, x2, y2 = box
             labels[i, 0] = float(cls_idx)
             labels[i, 1:] = [x1, y1, x2, y2]
         return labels
