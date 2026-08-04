@@ -569,7 +569,9 @@ def build_sam2_video_dataset(
     :type num_background_points: int
     :param include_box: Whether to add a jittered frame-0 box prompt.
     :type include_box: bool
-    :return: A batched dataset of ``(inputs, targets)`` dicts.
+    :return: A batched dataset of ``(inputs, targets)`` dicts. The batch axis
+        is STATIC (``drop_remainder=True``) -- see D-068 below; a partial last
+        batch is dropped, and the drop is counted and logged.
     :rtype: tensorflow.data.Dataset
     """
     mask_size = mask_size or image_size // MASK_DIVISOR
@@ -603,4 +605,29 @@ def build_sam2_video_dataset(
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-068
+    # `drop_remainder=True` is a HARD REQUIREMENT of this pipeline, not a
+    # throughput choice. Do NOT relax it to keep the last partial batch:
+    # MEASURED at step 5, a batch axis of `None` reaches
+    # `SAM2._decode`, which reads `int(pointer_tokens.shape[1])` (the D-044
+    # conditional gather) and `SAM2TrainingModel._unflatten`, which reads the
+    # encoder outputs' trailing dims -- and under an unknown batch the image
+    # encoder's positional encodings trace as `(None, 16, 16, None)`, their
+    # CHANNEL axis unknown. Both raise `TypeError: int() argument must be a
+    # string, a bytes-like object or a real number, not 'NoneType'` at the
+    # FIRST `fit()` step, from inside `models/sam2/model.py`, which this
+    # iteration must leave byte-unchanged. A `fit()` over numpy arrays never
+    # sees it, because Keras traces those with a static batch -- so this is
+    # invisible to every hand-built fixture and shows up only here.
+    # See decisions.md D-068.
+    remainder = num_clips % batch_size
+    if remainder:
+        logger.warning(
+            "build_sam2_video_dataset: %d of %d clip(s) are dropped -- the "
+            "batch axis must be STATIC (see D-068) so the last partial batch "
+            "cannot be emitted. Choose a num_clips divisible by batch_size "
+            "(%d) if you need every clip in the epoch.",
+            remainder, num_clips, batch_size,
+        )
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    return dataset.prefetch(tf.data.AUTOTUNE)
