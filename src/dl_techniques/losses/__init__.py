@@ -140,6 +140,14 @@ from .segmentation_wrapper_loss import (
     create_segmentation_wrapper_loss,
 )
 
+# from .sam_mask_loss -- SAM-specific adapters over SegmentationWrapperLoss
+from .sam_mask_loss import (
+    SAMMaskLoss,
+    SAMIoULoss,
+    to_dice_layout,
+    to_focal_layout,
+)
+
 # from .siglip_contrastive_loss
 from .siglip_contrastive_loss import (
     SigLIPContrastiveLoss,
@@ -274,6 +282,11 @@ __all__ = [
     # segmentation_wrapper_loss
     "SegmentationWrapperLoss",
     "create_segmentation_wrapper_loss",
+    # sam_mask_loss
+    "SAMMaskLoss",
+    "SAMIoULoss",
+    "to_dice_layout",
+    "to_focal_layout",
     # siglip_contrastive_loss
     "SigLIPContrastiveLoss",
     "AdaptiveSigLIPLoss",

@@ -27,10 +27,15 @@ Usage
     >>> trainer = SAMTrainingModel(sam, multimask_output=False)
     >>> trainer.compile(
     ...     optimizer="adam",
-    ...     loss={"low_res_logits": mask_loss, "iou_predictions": iou_loss},
-    ...     loss_weights={"low_res_logits": 20.0, "iou_predictions": 1.0},
+    ...     loss={"low_res_logits": SAMMaskLoss(), "iou_supervision": SAMIoULoss()},
+    ...     loss_weights={"low_res_logits": 1.0, "iou_supervision": 1.0},
     ... )
     >>> trainer.fit(dataset)          # dataset yields (inputs_dict, y_true_dict)
+
+    ``loss=`` may key a SUBSET of the output keys (measured), which is why
+    ``iou_predictions`` can stay unsupervised while ``iou_supervision`` carries
+    the IoU term. ``SAMMaskLoss`` already carries the focal:dice mix internally,
+    so ``loss_weights`` only balances mask against IoU.
 
 This module makes **no accuracy claim**. It proves that the training path runs
 with live gradients; it does not claim SAM trained to any quality.
@@ -51,8 +56,15 @@ from .model import SAM
 LOW_RES_LOGITS = "low_res_logits"
 #: Key of the predicted IoU scores.
 IOU_PREDICTIONS = "iou_predictions"
-#: Every key `call` returns, in a stable order.
+#: Key of the packed IoU supervision pair, emitted ONLY when `gt_mask` is in
+#: the inputs. Shape `(B, M, 2)`: `[..., 0]` is the predicted IoU (the same
+#: values as `iou_predictions`, differentiable) and `[..., 1]` is the achieved
+#: IoU, already `stop_gradient`-ed. See `SAMIoULoss` and D-036.
+IOU_SUPERVISION = "iou_supervision"
+#: Keys `call` ALWAYS returns, in a stable order.
 OUTPUT_KEYS: Tuple[str, ...] = (LOW_RES_LOGITS, IOU_PREDICTIONS)
+#: Keys `call` returns conditionally on the inputs it was given.
+OPTIONAL_OUTPUT_KEYS: Tuple[str, ...] = (IOU_SUPERVISION,)
 
 #: Input keys `call` understands. `image` is required; the prompt keys are
 #: optional but at least one prompt must be present.
@@ -60,6 +72,50 @@ INPUT_IMAGE = "image"
 INPUT_POINT_COORDS = "point_coords"
 INPUT_POINT_LABELS = "point_labels"
 INPUT_BOXES = "boxes"
+#: Optional binary GT mask stack `(B, M, h, w)` at `low_res_logits` resolution.
+#: Supplying it turns the `iou_supervision` output on.
+INPUT_GT_MASK = "gt_mask"
+
+#: Logit threshold at which a mask pixel counts as foreground when the achieved
+#: IoU is measured. Matches `SAM.mask_threshold`'s own default.
+IOU_MASK_THRESHOLD = 0.0
+#: Added to the IoU numerator and denominator so an empty union gives 1.0.
+IOU_SMOOTH = 1e-6
+
+
+def achieved_mask_iou(
+    mask_logits: Any,
+    gt_masks: Any,
+    threshold: float = IOU_MASK_THRESHOLD,
+    smooth: float = IOU_SMOOTH,
+) -> Any:
+    """
+    IoU actually achieved by a THRESHOLDED mask prediction against the GT.
+
+    This is the target reference SAM trains the IoU head to predict. Because it
+    is computed on the thresholded prediction it carries no gradient with
+    respect to the logits; ``SAMTrainingModel.call`` additionally wraps it in
+    ``ops.stop_gradient`` so the intent is explicit rather than incidental.
+
+    Args:
+        mask_logits: Predicted mask logits, ``(B, M, h, w)``.
+        gt_masks: Binary ground truth, ``(B, M, h, w)``.
+        threshold: Logit threshold for "foreground".
+        smooth: Added to numerator and denominator so an empty union gives
+            ``1.0`` rather than ``nan``.
+
+    Returns:
+        ``(B, M)`` IoU in ``[0, 1]``.
+    """
+    predicted = ops.cast(mask_logits > threshold, "float32")
+    truth = ops.cast(gt_masks > 0.5, "float32")
+    intersection = ops.sum(predicted * truth, axis=[-2, -1])
+    union = (
+        ops.sum(predicted, axis=[-2, -1])
+        + ops.sum(truth, axis=[-2, -1])
+        - intersection
+    )
+    return (intersection + smooth) / (union + smooth)
 
 
 @keras.saving.register_keras_serializable()
@@ -93,10 +149,15 @@ class SAMTrainingModel(keras.Model):
         - ``point_labels``: ``(B, N)`` int; ``1`` foreground, ``0`` background,
           ``-1`` padding.
         - ``boxes``: ``(B, K, 4)`` float xyxy, optional.
+        - ``gt_mask``: ``(B, M, 4*grid, 4*grid)`` binary, optional. Supplying it
+          turns on the ``iou_supervision`` output.
 
     Output dict:
         - ``low_res_logits``: ``(B, M, 4*grid, 4*grid)`` float logits.
         - ``iou_predictions``: ``(B, M)`` float.
+        - ``iou_supervision``: ``(B, M, 2)``, present only when ``gt_mask`` is
+          supplied. ``[..., 0]`` is the predicted IoU, ``[..., 1]`` the achieved
+          IoU (stop-gradient). ``SAMIoULoss`` reads both from this one tensor.
 
     Raises:
         ValueError: from ``call`` if ``image`` is absent, if the point keys are
@@ -240,10 +301,32 @@ class SAMTrainingModel(keras.Model):
             training=training,
         )
 
-        return {
+        outputs = {
             LOW_RES_LOGITS: low_res_logits,
             IOU_PREDICTIONS: iou_predictions,
         }
+
+        # DECISION plan-2026-08-03T191222-1d751f81/D-036: the IoU target is
+        # packed into the SAME tensor as the IoU prediction, and that is forced
+        # by the framework, not chosen for convenience. The achieved IoU is a
+        # function of the prediction AND the GT together, so it exists only
+        # here; a `tf.data` pipeline cannot produce it, and stock
+        # `compile(loss={...})` hands each loss only its own output key. Do NOT
+        # "fix" this by (a) supervising `iou_predictions` against a pipeline
+        # target -- there is no such target; (b) adding a separate `iou_target`
+        # output key -- the loss for `iou_predictions` would still never see it;
+        # or (c) writing a custom `train_step`, which is forbidden by standing
+        # instruction and unnecessary. The key is emitted only when `gt_mask` is
+        # supplied, so an inference-shaped call keeps the two-key contract.
+        if INPUT_GT_MASK in inputs:
+            achieved = ops.stop_gradient(
+                achieved_mask_iou(low_res_logits, inputs[INPUT_GT_MASK])
+            )
+            outputs[IOU_SUPERVISION] = ops.stack(
+                [iou_predictions, achieved], axis=-1
+            )
+
+        return outputs
 
     def get_config(self) -> Dict[str, Any]:
         """

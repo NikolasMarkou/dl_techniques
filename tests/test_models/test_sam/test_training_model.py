@@ -27,14 +27,18 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.models.sam import SAM, SAMTrainingModel
+from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
 from dl_techniques.models.sam.training_model import (
     INPUT_BOXES,
+    INPUT_GT_MASK,
     INPUT_IMAGE,
     INPUT_POINT_COORDS,
     INPUT_POINT_LABELS,
     IOU_PREDICTIONS,
+    IOU_SUPERVISION,
     LOW_RES_LOGITS,
     OUTPUT_KEYS,
+    achieved_mask_iou,
 )
 
 from .test_correctness import (
@@ -361,6 +365,13 @@ def _wrapper_inputs(
             (WRAPPER_BATCH, 1, 1),
         )
     return inputs
+
+
+def _gt_mask_stack(num_masks: int) -> np.ndarray:
+    """A binary GT mask stack with real structure (a filled rectangle)."""
+    gt = np.zeros((WRAPPER_BATCH, num_masks, LOW_RES, LOW_RES), dtype="float32")
+    gt[:, :, 12:40, 20:52] = 1.0
+    return gt
 
 
 def _wrapper_targets(num_masks: int, seed: int = 1) -> Dict[str, np.ndarray]:
@@ -965,3 +976,173 @@ class TestSAMTrainingModelSerialization:
             model.save(path)
             with pytest.raises(TypeError, match="missing 1 required positional argument"):
                 keras.models.load_model(path)
+
+
+# ===========================================================================
+# Plan step 3 -- the loss wiring, on the real wrapper
+# ===========================================================================
+class TestIoUSupervisionOutput:
+    """
+    The `iou_supervision` key: present only when `gt_mask` is supplied, and
+    carrying the prediction next to its own stop-gradient target.
+    """
+
+    def test_the_key_is_absent_without_a_gt_mask(self) -> None:
+        """An inference-shaped call keeps the two-key contract."""
+        model, x, _ = _built_wrapper()
+        assert set(model(x).keys()) == set(OUTPUT_KEYS)
+
+    def test_the_key_appears_with_a_gt_mask_and_packs_both_values(self) -> None:
+        """
+        ``[..., 0]`` must be the SAME numbers as ``iou_predictions`` and
+        ``[..., 1]`` the achieved IoU -- a packed pair whose halves were swapped
+        or duplicated would still have the right shape.
+        """
+        model, x, _ = _built_wrapper()
+        x = dict(x)
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        out = model(x)
+        assert IOU_SUPERVISION in out
+        assert tuple(out[IOU_SUPERVISION].shape) == (WRAPPER_BATCH, 1, 2)
+        packed = ops.convert_to_numpy(out[IOU_SUPERVISION])
+        predicted = ops.convert_to_numpy(out[IOU_PREDICTIONS])
+        expected_achieved = ops.convert_to_numpy(
+            achieved_mask_iou(out[LOW_RES_LOGITS], ops.convert_to_tensor(x[INPUT_GT_MASK]))
+        )
+        assert float(np.max(np.abs(packed[..., 0] - predicted))) == 0.0
+        assert float(np.max(np.abs(packed[..., 1] - expected_achieved))) == 0.0
+
+    def test_the_achieved_half_carries_no_gradient(self) -> None:
+        """
+        The target must not train the mask branch to make itself easy to
+        predict.
+
+        The assertion is on gradient VALUES, not on ``None``: ``ops.stack``
+        keeps ``iou_predictions`` structurally connected to the packed tensor,
+        so slicing ``[..., 1]`` yields ZERO gradients for 159 of the 201
+        variables rather than ``None`` (measured -- only 42 come back ``None``).
+        A ``None``-counting assertion would have failed for a reason that has
+        nothing to do with the stop-gradient actually holding.
+        """
+        model, x, _ = _built_wrapper()
+        x = dict(x)
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        with tf.GradientTape() as tape:
+            achieved = model(x)[IOU_SUPERVISION][..., 1]
+            loss = tf.reduce_sum(achieved)
+        grads = tape.gradient(loss, model.trainable_variables)
+        worst = max(
+            (float(tf.reduce_max(tf.abs(tf.convert_to_tensor(g)))) for g in grads if g is not None),
+            default=0.0,
+        )
+        assert worst == 0.0, f"the achieved-IoU half leaked gradient (max |g| = {worst})"
+
+    def test_the_predicted_half_does_carry_gradient(self) -> None:
+        """The control: without it, the previous test would also pass for a
+        packed tensor that was gradient-dead on BOTH halves."""
+        model, x, _ = _built_wrapper()
+        x = dict(x)
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(model(x)[IOU_SUPERVISION][..., 0])
+        grads = tape.gradient(loss, model.trainable_variables)
+        assert sum(1 for g in grads if g is not None) > 0
+
+
+class TestEndToEndLossWiring:
+    """
+    SC-5 applied to the training path: the shipped losses train the real
+    wrapper under stock ``fit()`` with a dict ``loss=``, and the dead-component
+    probe still turns it RED.
+    """
+
+    @staticmethod
+    def _compiled() -> Tuple[SAMTrainingModel, Dict[str, Any], Dict[str, Any]]:
+        keras.utils.set_random_seed(7)
+        model = SAMTrainingModel(build_reduced_sam(), multimask_output=False)
+        gt = _gt_mask_stack(1)
+        x = _wrapper_inputs()
+        x[INPUT_GT_MASK] = gt
+        y = {
+            LOW_RES_LOGITS: gt,
+            IOU_SUPERVISION: np.zeros((WRAPPER_BATCH, 1, 2), dtype="float32"),
+        }
+        model(x)
+        seed_nonzero_weights(model)
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss={LOW_RES_LOGITS: SAMMaskLoss(), IOU_SUPERVISION: SAMIoULoss()},
+            loss_weights={LOW_RES_LOGITS: 1.0, IOU_SUPERVISION: 1.0},
+        )
+        return model, x, y
+
+    def test_a_dict_loss_over_a_subset_of_output_keys_trains(self) -> None:
+        """
+        ``iou_predictions`` is deliberately left unsupervised, so ``loss=`` keys
+        a strict SUBSET of the three output keys -- the configuration F-5
+        measured working and ``SYSTEM.md:173`` claims is impossible.
+        """
+        model, x, y = self._compiled()
+        report = fit_one_step_moved_variables(model, x, y, batch_size=WRAPPER_BATCH)
+        assert report.n_moved > 0, report.summary()
+        assert np.isfinite(report.final_loss)
+
+    def test_the_dead_component_probe_still_turns_it_red(self) -> None:
+        """The green above is not vacuous."""
+        model, x, y = self._compiled()
+        with outputs_stop_gradient(model):
+            with pytest.raises(ValueError, match=NO_GRADIENTS_MESSAGE):
+                fit_one_step_moved_variables(model, x, y, batch_size=WRAPPER_BATCH)
+
+    def test_the_iou_head_moves_only_when_the_iou_loss_is_wired(self) -> None:
+        """
+        A liveness probe for the IoU term specifically: with the mask loss
+        alone, the IoU head's own layers must NOT move; adding ``SAMIoULoss``
+        must make them move. A loss term nobody can show is live is decorative.
+        """
+        def run(with_iou: bool) -> set:
+            keras.utils.set_random_seed(7)
+            model = SAMTrainingModel(build_reduced_sam(), multimask_output=False)
+            gt = _gt_mask_stack(1)
+            x = _wrapper_inputs()
+            x[INPUT_GT_MASK] = gt
+            y: Dict[str, Any] = {LOW_RES_LOGITS: gt}
+            model(x)
+            seed_nonzero_weights(model)
+            losses: Dict[str, Any] = {LOW_RES_LOGITS: SAMMaskLoss()}
+            if with_iou:
+                losses[IOU_SUPERVISION] = SAMIoULoss()
+                # MEASURED: `y_true`'s keys must match the keys `loss=` covers,
+                # NOT the model's output keys. Supplying an `iou_supervision`
+                # target while `loss=` omits that key raises
+                # `ValueError: y_true and y_pred have different structures.`
+                # This refines F-5 item 1, which recorded only that `loss=` may
+                # key a subset of the OUTPUT keys.
+                y[IOU_SUPERVISION] = np.zeros(
+                    (WRAPPER_BATCH, 1, 2), dtype="float32"
+                )
+            model.compile(
+                optimizer=keras.optimizers.Adam(learning_rate=1e-3), loss=losses
+            )
+            report = fit_one_step_moved_variables(
+                model, x, y, batch_size=WRAPPER_BATCH
+            )
+            head = model.sam.mask_decoder.iou_prediction_head
+            moved = _ids(
+                [
+                    lookup
+                    for label, lookup in zip(
+                        variable_labels(model), model.trainable_variables
+                    )
+                    if label in set(report.moved)
+                ]
+            )
+            return _ids(head.trainable_variables) & moved
+
+        without_iou = run(False)
+        with_iou = run(True)
+        assert without_iou == set(), (
+            "the IoU prediction head moved with no IoU loss wired -- the probe "
+            "cannot discriminate"
+        )
+        assert len(with_iou) > 0, "SAMIoULoss did not move the IoU prediction head"
