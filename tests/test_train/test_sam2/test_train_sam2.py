@@ -33,8 +33,10 @@ import numpy as np
 import pytest
 
 import train.sam2.train_sam2 as train_sam2_module
+from dl_techniques.models.sam2.model import create_sam2
 from dl_techniques.models.sam2.training_model import (
     OUTPUT_KEYS,
+    SAM2TrainingModel,
     SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
     SAM2_OBJECT_SCORE_LOGITS,
@@ -50,7 +52,9 @@ from train.sam2.train_sam2 import (
     build_parser,
     config_from_argv,
     create_dataset,
+    OPEN_GATE_SCORE_BIAS,
     create_sam2_training_model,
+    open_object_score_gate,
     parse_arguments,
     resolved_output_dir,
     train_sam2,
@@ -1041,3 +1045,97 @@ class TestTheTrainersOwnFactoriesTrain:
             tuple(targets[SAM2_LOW_RES_LOGITS].shape)[2:]
             == tuple(outputs[SAM2_LOW_RES_LOGITS].shape)[2:]
         )
+
+
+
+# ---------------------------------------------------------------------
+# G9.2 -- the object-score gate is OPEN at step 0
+# ---------------------------------------------------------------------
+
+
+class TestTheObjectScoreGateOpensAtStepZero:
+    """D-075: the trainer's model starts predicting "the object is present".
+
+    D-043's suppression is HARD -- ``_decode`` replaces the whole mask output
+    with the ``-1024`` sentinel through ``ops.where`` wherever
+    ``object_score_logits <= 0``, and ``ops.where`` passes NO gradient to the
+    suppressed branch. At random init the score head's sign is arbitrary
+    (D-065), so without this initializer the mask loss starts structurally
+    disconnected on most frames and has to wait for the score BCE to cross
+    zero.
+
+    Both arms are here, because either alone is satisfiable: the trainer's
+    model must be gate-OPEN, and a model built WITHOUT the call must be
+    gate-closed at the same seed -- otherwise the first arm is measuring the
+    seed, not the initializer.
+    """
+
+    @staticmethod
+    def _scores_and_masks(model: Any) -> Tuple[Any, Any]:
+        """One forward pass over a real pipeline batch."""
+        config = SAM2TrainingConfig(
+            variant="tiny", num_frames=2, occlusion_frames=0,
+            num_clips_train=2, num_clips_val=2, batch_size=2, seed=7)
+        train_dataset, _ = create_dataset(config)
+        inputs, _ = next(iter(train_dataset))
+        outputs = model(inputs, training=False)
+        return (np.asarray(outputs[SAM2_OBJECT_SCORE_LOGITS]),
+                np.asarray(outputs[SAM2_LOW_RES_LOGITS]))
+
+    def test_the_trainers_model_predicts_present_on_every_frame(self) -> None:
+        """The GREEN arm: every score is positive, so no frame is suppressed."""
+        keras.utils.set_random_seed(1)
+        config = SAM2TrainingConfig(
+            variant="tiny", num_frames=2, occlusion_frames=0,
+            num_clips_train=2, num_clips_val=2, batch_size=2, seed=7)
+        model = create_sam2_training_model(config)
+        scores, masks = self._scores_and_masks(model)
+        assert np.all(scores > 0.0), (
+            f"the object-score gate is closed on some frame at step 0: "
+            f"{scores.ravel()}")
+        # ... and therefore the mask output is a real map, not the sentinel.
+        assert len(np.unique(masks)) > 1, (
+            "the mask output is a single constant at step 0; D-043's "
+            "suppression fired despite a positive score")
+
+    def test_the_same_seed_is_gate_closed_without_the_initializer(
+            self) -> None:
+        """The RED arm: delete the call and the gate shuts at this seed.
+
+        MEASURED at seed 1: without :func:`open_object_score_gate` the score
+        head predicts "absent" and the whole mask output collapses to the
+        ``-1024`` sentinel with ONE unique value per frame -- the exact
+        signature iteration 2 shipped.
+        """
+        keras.utils.set_random_seed(1)
+        config = SAM2TrainingConfig(
+            variant="tiny", num_frames=2, occlusion_frames=0,
+            num_clips_train=2, num_clips_val=2, batch_size=2, seed=7)
+        model = SAM2TrainingModel(
+            create_sam2(config.variant, multimask_output=False),
+            num_frames=config.num_frames, seed=config.seed)
+        model.build(None)
+        scores, masks = self._scores_and_masks(model)
+        assert np.any(scores <= 0.0), (
+            "this seed no longer lands on the negative-score branch, so the "
+            f"green arm above proves nothing about the initializer: {scores.ravel()}")
+        assert len(np.unique(masks[scores[..., 0] <= 0.0])) == 1
+
+    def test_the_constant_is_upstreams_own_assume_present_value(self) -> None:
+        """``10.0``, and it is not a tuning knob picked here.
+
+        Upstream substitutes ``object_score_logits = 10.0 * ones`` when
+        ``pred_obj_scores`` is off, with the comment "assuming the object is
+        present" (``sam2/modeling/sam/mask_decoder.py``). The bias really is
+        written -- asserted by reading it back, because an initializer that
+        silently no-ops looks exactly like one that works.
+        """
+        assert OPEN_GATE_SCORE_BIAS == 10.0
+        keras.utils.set_random_seed(1)
+        model = SAM2TrainingModel(
+            create_sam2("tiny", multimask_output=False), num_frames=2)
+        model.build(None)
+        open_object_score_gate(model)
+        bias = np.asarray(
+            model.sam2.mask_decoder.pred_obj_score_head.layers[-1].bias)
+        np.testing.assert_allclose(bias, OPEN_GATE_SCORE_BIAS)

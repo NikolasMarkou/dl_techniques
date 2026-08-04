@@ -354,24 +354,64 @@ class TestStopGradientBoundaries:
             "frame 0's own mask loss does not move no_mem_embed, so the "
             "zero measured across frames proves nothing")
 
-    def test_the_memory_encoder_is_fully_disconnected_from_the_loss(
-            self) -> None:
-        """The complementary arm, and its shape is DIFFERENT.
+    def test_the_memory_encoder_receives_gradient(self) -> None:
+        """INVERTED at the iteration-2 completion-fix round. Read this.
 
-        The memory encoder's output reaches nothing except the bank, and the
-        bank detaches on insertion, so its variables are structurally
-        disconnected -- MEASURED as ``None`` for all 40 of them, not as zeros.
-        The two arms of this class therefore assert two different measured
-        facts, and neither was predicted correctly from reading the code.
+        As shipped, this test asserted ``all(g is None)`` over every
+        memory-encoder variable and was GREEN -- it pinned a DEFECT as the
+        intended behaviour. The memory encoder's inputs were detached in
+        ``_store`` AND its outputs were detached again by the bank's
+        ``stop_gradient=True`` default AND once more on the read side in
+        ``_condition``, so 38 of its 40 variables had no path to any loss and
+        the memory-writing path shipped frozen at initialization (D-071).
+        A green two-sided guard is not evidence that the boundary is right; it
+        is evidence that the boundary is where the guard says it is.
+
+        The fix is truncated BPTT (D-074): the INPUT detach in ``_store`` stays
+        -- that is what bounds the graph -- and the two output-side detaches
+        go. So the correct assertion is the opposite one, and the truncation is
+        proven separately by
+        :meth:`test_no_mem_embed_gets_exactly_zero_gradient_from_a_later_frame`
+        above, which is the arm that would go red if the graph became T-deep.
         """
         model = trainer(object_score=5.0)
         grads = last_frame_mask_gradients(model, clip_inputs(model))
         hits = [(v.path, g) for v, g in zip(model.trainable_variables, grads)
                 if "memory_encoder" in v.path]
         assert hits, "no memory-encoder variables were found"
+        missing = [p for p, g in hits if g is None]
+        assert not missing, (
+            f"{len(missing)} of {len(hits)} memory-encoder gradients are "
+            f"None, so the memory-writing path is frozen again: {missing[:5]}")
+        assert max(max_abs(g) for _, g in hits) > 0.0, (
+            "every memory-encoder gradient is structurally connected but "
+            "numerically zero; the path is live in shape only")
+
+    def test_obj_ptr_proj_is_still_frozen_and_that_is_stated(self) -> None:
+        """The LIMITATION of D-074's fix, pinned rather than left to rot.
+
+        ``obj_ptr_proj`` cannot be repaired the same way. The object pointer
+        bypasses the memory encoder entirely, so leaving it un-detached at the
+        bank rebuilds the whole T-deep graph that the truncation removes; its
+        only usable truncation point is its own INPUT, which is computed inside
+        ``SAM2._decode`` -- an iteration-1 file this iteration must leave
+        byte-unchanged.
+
+        This test exists so the limitation is a measured fact with a name,
+        not a sentence in a docstring. If a later iteration moves the
+        truncation into ``_decode``, this test goes red and points at the
+        decision that has to be revisited.
+        """
+        model = trainer(object_score=5.0)
+        grads = last_frame_mask_gradients(model, clip_inputs(model))
+        hits = [(v.path, g) for v, g in zip(model.trainable_variables, grads)
+                if "obj_ptr_proj" in v.path]
+        assert hits, "no obj_ptr_proj variables were found"
         assert all(g is None for _, g in hits), (
-            "some memory-encoder gradients are non-None: "
-            f"{[p for p, g in hits if g is not None]}")
+            "obj_ptr_proj now receives gradient. That may be an improvement, "
+            "but it is NOT what D-074 shipped: check that the object-pointer "
+            "path has not re-opened the T-deep recursion, then update this "
+            "test and decisions.md D-074 together.")
 
 
 # ---------------------------------------------------------------------

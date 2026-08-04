@@ -548,6 +548,59 @@ def create_dataset(
 # ---------------------------------------------------------------------------
 # MODEL
 # ---------------------------------------------------------------------------
+#: Initial bias of ``pred_obj_score_head``'s final layer, applied ONCE at the
+#: start of a training run by :func:`open_object_score_gate`. The value is
+#: upstream's own "assume the object is present" constant: when
+#: ``pred_obj_scores`` is disabled it substitutes
+#: ``object_score_logits = 10.0 * ones`` (``sam2/modeling/sam/mask_decoder.py``).
+OPEN_GATE_SCORE_BIAS = 10.0
+
+
+def open_object_score_gate(
+        model: SAM2TrainingModel,
+        bias: float = OPEN_GATE_SCORE_BIAS,
+) -> None:
+    """Initialize the object-score head to "present" so the mask gate is open.
+
+    Interface contract: takes a BUILT :class:`SAM2TrainingModel`, assigns the
+    final ``pred_obj_score_head`` layer's bias in place, and returns ``None``.
+    It is an INITIALIZER -- call it once, on a freshly constructed model,
+    before ``fit()``. It is deliberately NOT in ``SAM2TrainingModel.build()``:
+    ``build()`` also runs on ``load_model``, and an assignment there would
+    overwrite a restored score head every time anyone rebuilt the wrapper.
+
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-075
+    # This exists because D-043's suppression gate is HARD: `_decode` replaces
+    # the whole mask output with the `-1024` sentinel through `ops.where`
+    # wherever `object_score_logits <= 0`, and `ops.where` passes NO gradient
+    # to the suppressed branch. At random init the score head's sign is
+    # arbitrary (D-065) -- MEASURED at seed 42 on the toy clips: sign accuracy
+    # vs GT presence 0.375, mask logits `min -1024 / mean -867`, 1 unique value
+    # per (clip, frame). So most frames start with the mask loss structurally
+    # disconnected and must wait for the score BCE to cross zero.
+    #
+    # Upstream never enters this regime and therefore needs no equivalent: its
+    # ONLY published recipe is a FINETUNE from a released checkpoint
+    # (`sam2.1_hiera_b+_MOSE_finetune.yaml`, `checkpoint_path:` set,
+    # `base_lr: 5.0e-6`), where a pretrained score head predicts "present" from
+    # step 0. Its own `pred_obj_score_head` has no special init. Do NOT read
+    # the absence of this call upstream as evidence it is wrong here; read it
+    # as evidence that training this port FROM SCRATCH is a regime upstream
+    # never enters. See decisions.md D-075.
+
+    :param model: A built :class:`SAM2TrainingModel`.
+    :type model: SAM2TrainingModel
+    :param bias: The constant written into every unit of the head's final
+        bias. Defaults to :data:`OPEN_GATE_SCORE_BIAS`.
+    :type bias: float
+    :raises AttributeError: If the mask decoder has no
+        ``pred_obj_score_head`` -- loud rather than a silent no-op, because a
+        silently skipped initializer looks exactly like a working one.
+    """
+    head = model.sam2.mask_decoder.pred_obj_score_head.layers[-1]
+    head.bias.assign(keras.ops.full(head.bias.shape, float(bias)))
+
+
 def create_sam2_training_model(
         config: SAM2TrainingConfig,
 ) -> SAM2TrainingModel:
@@ -574,6 +627,8 @@ def create_sam2_training_model(
     model = SAM2TrainingModel(
         sam2, num_frames=config.num_frames, seed=config.seed
     )
+    model.build(None)
+    open_object_score_gate(model)
     compile_sam2_video_trainer(
         model,
         optimizer=keras.optimizers.Adam(learning_rate=config.learning_rate),

@@ -19,36 +19,84 @@ re-derived: H-17 records that a 1-channel focal is bit-identically blind to
 negatives and that raw-layout dice reduces ``(num_masks, height)`` instead of
 ``(height, width)`` and returns a plausible wrong number.
 
-Why the gate zeroes PROBABILITIES, and what it costs
-----------------------------------------------------
-The gate replaces the predicted probabilities of an absent row with zeros
-through ``ops.where``, which passes **exactly zero** gradient to the suppressed
-branch -- the same semantics as upstream's ``loss_mask * target_obj``. On such
-a row:
+The focal term is computed FROM LOGITS, and that is not a style choice
+----------------------------------------------------------------------
+``SegmentationLosses.focal_loss`` works in PROBABILITY space and opens with
+``y_pred = ops.clip(y_pred, 1e-7, 1 - 1e-7)`` (``segmentation_loss.py:255``).
+``ops.clip`` has an **exactly zero** derivative outside its range, so every
+pixel whose sigmoid saturates past ``1e-7`` receives exactly zero focal gradient
+-- permanently, and in both directions. That is not a corner case here: it is
+what killed the first SAM 2 video training run.
 
-* **dice becomes exactly 0**: ``1 - (0 + s) / (0 + 0 + s) = 0``, with no
-  residual at all. MEASURED ``0.0`` at three shapes.
-* **focal does NOT become exactly 0**. The row degenerates to the
-  perfectly-predicted all-background case, and ``SegmentationLosses.focal_loss``
-  clips its probabilities to ``[1e-7, 1 - 1e-7]`` before taking the log, so the
-  background channel still contributes
-  ``alpha * (1 - p)^gamma * -log(p)`` at ``p = 1 - 1e-7``.
+MEASURED on the 60-epoch toy checkpoint (``results/sam2_toy_overfit``), one
+batch, ``training=False``, per-loss-term gradient norms over every trainable
+variable:
 
-That residual is **MEASURED, not assumed** (plan assumption A-6, which predicted
-"negligible but not zero" and is confirmed). On this stack, float32, at
-``(1,1,16,16)``, ``(2,3,16,16)`` and ``(2,4,64,64)`` alike -- it is a per-pixel
-constant, so it does not vary with the mask grid::
+===========================  =============
+term                         ``|grad|``
+===========================  =============
+gated mask (this class)      ``3.1751e-13``
+object-score BCE             ``4.4969e+00``
+IoU regression               ``1.4062e-01``
+===========================  =============
 
-    focal residual per fully-absent batch : 4.235165241142481e-22
-    dice  residual per fully-absent batch : 0.0
-    combined at focal_weight=20           : 8.4703304822849621e-21
+Thirteen orders below the score term, while the mask loss VALUE read a healthy
+``3.937``. The mechanism: the trained model's GT-present mask logits ran
+``min -353.88 / max +67.66 / mean -71.69``, with **95.46 %** of pixels at
+``sigmoid < 1e-7`` -- i.e. inside the clip's dead zone. A loss value cannot see
+this and neither can any shape, dtype or finiteness check.
 
-Against a representative present-row loss of ``3.834`` that is ``2.2e-21``
-relative -- fifteen orders of magnitude inside the plan's own
-``> 1e-6``-of-the-ungated-term stop trigger, and far below float32's own
-accumulation quantum at a loss of order 1 (``~6e-8``). :data:`ABSENT_ROW_FOCAL_RESIDUAL`
-carries the measured number so a guard bound can be DERIVED from it rather than
-guessed, and so a future change to ``SegmentationLosses``' clipping is loud.
+Upstream is immune for exactly one reason: it never leaves logit space.
+``sigmoid_focal_loss`` (``training/loss_fns.py:77-85``) is::
+
+    prob   = inputs.sigmoid()
+    ce     = F.binary_cross_entropy_with_logits(inputs, targets)
+    p_t    = prob * targets + (1 - prob) * (1 - targets)
+    loss   = ce * ((1 - p_t) ** gamma)
+    alpha_t= alpha * targets + (1 - alpha) * (1 - targets)
+    loss   = alpha_t * loss
+
+No clip anywhere, and ``d(ce)/d(logit) = p - t`` never reaches zero. This class
+reproduces that shape with :func:`_focal_from_logits`, using the stable
+``softplus(-x) + x * (1 - t)`` form of BCE-with-logits (the textbook
+``max(x, 0) - x*t + log1p(exp(-|x|))`` was tried first and MEASURED to autodiff
+to the wrong value -- a sign flip -- at exactly ``x = 0``; see the function's
+own anchor).
+
+**It is not a re-derivation of the repository's focal semantics.** For a BINARY
+target the two-channel one-hot that ``sam_mask_loss``'s ``to_focal_layout``
+builds reduces algebraically to upstream's expression::
+
+    sum_c alpha * (1 - p_c)^gamma * (-t_c log p_c)
+        = alpha * (1 - p_t)^gamma * ce        for t in {0, 1}
+
+so on unsaturated logits the new term is the OLD term to float error -- pinned
+by ``test_a_clip_with_no_absent_row_matches_the_ungated_loss``, which still
+compares this class against plain :class:`SAMMaskLoss` by value. The clip is
+the only thing that was removed.
+
+``losses/segmentation_loss.py`` and ``losses/sam_mask_loss.py`` are NOT touched:
+both are inside SAM 1's 357-test gate. SAM 1's own mask supervision therefore
+still carries this clip; see ``decisions.md`` D-072 for why that is recorded and
+not fixed here.
+
+Why the gate zeroes PROBABILITIES for dice and the LOSS for focal
+------------------------------------------------------------------
+On a GT-absent row:
+
+* **dice**: the gate replaces the predicted probabilities with zeros through
+  ``ops.where``, so the row becomes ``1 - (0 + s) / (0 + 0 + s) = 0`` -- exactly
+  zero, no residual. MEASURED ``0.0`` at three shapes. Unchanged.
+* **focal**: probabilities are no longer the focal term's input, so the gate is
+  applied to the PER-PIXEL LOSS instead -- which is literally upstream's
+  ``loss_mask * target_obj``. ``ops.where`` again passes exactly zero gradient
+  to the suppressed branch, and now the absent row's VALUE is exactly zero too.
+
+That closes plan assumption A-6 rather than bounding it.
+:data:`ABSENT_ROW_FOCAL_RESIDUAL` is retained as a named constant (guards derive
+bounds from it) and is now **0.0**; the ``4.235165241142481e-22`` it used to
+carry was the clip's own per-pixel floor, and its disappearance is one of the
+RED proofs that the formulation actually changed.
 
 What is deliberately NOT here
 -----------------------------
@@ -73,22 +121,25 @@ from keras import ops
 
 from .sam_mask_loss import (
     DICE_CHANNELS,
-    FOCAL_CHANNELS,
     SAMMaskLoss,
     _require_channels_last,
     _static_mask_stack_shape,
     match_mask_axis,
     to_dice_layout,
-    to_focal_layout,
 )
 
-#: MEASURED focal contribution of one fully-gated (all-zero GT, all-zero
-#: probability) mask row, float32, on this Keras 3.8 / TF 2.18 stack. It is a
-#: per-pixel constant of ``SegmentationLosses.focal_loss``'s ``1e-7`` clip and
-#: is therefore INDEPENDENT of the mask grid and of the batch: the same value
-#: was measured at ``(1, 1, 16, 16)``, ``(2, 3, 16, 16)`` and ``(2, 4, 64, 64)``.
-#: The dice residual is exactly ``0.0`` and needs no constant.
-ABSENT_ROW_FOCAL_RESIDUAL = 4.235165241142481e-22
+#: Focal contribution of one fully-gated (all-zero GT) mask row. **Exactly
+#: zero** since the focal term moved to logit space: the gate is now applied to
+#: the per-pixel loss, so an absent row is removed from the numerator outright.
+#:
+#: It used to be ``4.235165241142481e-22`` -- the per-pixel floor of
+#: ``SegmentationLosses.focal_loss``'s ``ops.clip(y_pred, 1e-7, 1 - 1e-7)``,
+#: measured identically at ``(1, 1, 16, 16)``, ``(2, 3, 16, 16)`` and
+#: ``(2, 4, 64, 64)`` because it is grid-independent. The constant is KEPT
+#: rather than deleted: guards derive bounds from it, and a future change that
+#: reintroduced a clipped probability-space focal would push it off zero and be
+#: caught by name instead of silently.
+ABSENT_ROW_FOCAL_RESIDUAL = 0.0
 
 
 def mask_presence_gate(masks: Any) -> Any:
@@ -118,15 +169,83 @@ def mask_presence_gate(masks: Any) -> Any:
     return ops.max(masks, axis=(-2, -1), keepdims=True) > 0.0
 
 
+def _focal_from_logits(truth: Any, logits: Any, gamma: float, alpha: float) -> Any:
+    """Per-pixel binary focal loss computed in LOGIT space, no clipping.
+
+    Interface contract: ``truth`` and ``logits`` are broadcast-compatible
+    tensors of the same dtype carrying, respectively, values in ``{0, 1}`` and
+    unbounded real logits; the return has their broadcast shape and is NOT
+    reduced -- the caller owns the gate and the reduction. It never raises and
+    never allocates a channel axis.
+
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-072
+    # Do NOT "simplify" this back to `ops.sigmoid(logits)` fed into
+    # `SegmentationLosses.focal_loss`, and do NOT route it through
+    # `to_focal_layout`'s two-channel one-hot. That path opens with
+    # `ops.clip(y_pred, 1e-7, 1 - 1e-7)` on PROBABILITIES
+    # (`segmentation_loss.py:255`), and `ops.clip` has an exactly zero
+    # derivative outside its range. MEASURED consequence on the shipped
+    # toy checkpoint: 95.46 % of GT-present mask pixels sat at
+    # `sigmoid < 1e-7` and the whole mask term's gradient norm was
+    # 3.1751e-13 against 4.4969e+00 for the object-score BCE -- the mask
+    # head could not learn, while the loss VALUE read a healthy 3.937.
+    # Equally, do NOT reach for `ops.log(ops.sigmoid(x))`: that underflows
+    # to `-inf` at the `-1024` sentinel D-043 provably emits.
+    #
+    # The BCE-with-logits below is spelled `softplus(-x) + x*(1-t)`, NOT the
+    # textbook `max(x, 0) - x*t + log1p(exp(-|x|))`. The two have identical
+    # VALUES at every logit tested (-1024, -70, -8, +/-1e-8, 8, 70, 1024,
+    # both targets) but the textbook form's AUTODIFF is wrong at exactly
+    # `x = 0`: `abs` has no derivative there and `ops.maximum(x, 0)` breaks
+    # its tie towards `x`, giving measured `dce/dx = +1.0` at `t=0` and
+    # `0.0` at `t=1` where the true values are `+0.5` and `-0.5` -- a SIGN
+    # FLIP on the foreground branch. `softplus` is smooth, so the measured
+    # gradient is exact at all nine points. An exactly-zero logit is not
+    # hypothetical in this pipeline; `ops.where` gates emit exact zeros.
+    # See decisions.md D-072.
+
+    :param truth: Binary ground truth.
+    :type truth: Any
+    :param logits: Predicted mask logits.
+    :type logits: Any
+    :param gamma: Focusing exponent, ``LossConfig.focal_gamma``.
+    :type gamma: float
+    :param alpha: Balancing scale, ``LossConfig.focal_alpha``. Applied as a
+        SCALAR to both classes, which is what
+        ``SegmentationLosses.focal_loss`` does and therefore what SAM 1's
+        :class:`SAMMaskLoss` does; upstream instead uses
+        ``alpha_t = alpha*t + (1-alpha)*(1-t)``. That divergence is
+        pre-existing, is NOT the gradient-death mechanism, and adopting it
+        here would down-weight foreground 3x relative to background -- see
+        decisions.md D-073.
+    :type alpha: float
+    :return: Per-pixel focal loss, unreduced.
+    :rtype: Any
+    """
+    cross_entropy = ops.softplus(-logits) + logits * (1.0 - truth)
+    probabilities = ops.sigmoid(logits)
+    p_t = probabilities * truth + (1.0 - probabilities) * (1.0 - truth)
+    modulator = ops.power(1.0 - p_t, gamma)
+    return alpha * modulator * cross_entropy
+
+
 @keras.saving.register_keras_serializable()
 class SAM2GatedMaskLoss(SAMMaskLoss):
     """:class:`SAMMaskLoss` with upstream's ground-truth presence gate.
 
     Rows whose ground truth is entirely empty contribute exactly zero gradient
-    and (up to :data:`ABSENT_ROW_FOCAL_RESIDUAL`) exactly zero loss. Every other
-    row is scored exactly as :class:`SAMMaskLoss` scores it -- the gate is the
-    only difference, and it is applied to the PROBABILITIES, after the sigmoid
-    and before either layout adapter.
+    and exactly zero loss (:data:`ABSENT_ROW_FOCAL_RESIDUAL` is ``0.0``). Every
+    other row is scored as :class:`SAMMaskLoss` scores it **up to float error,
+    on unsaturated logits** -- the dice term is identical, and the focal term is
+    the same expression evaluated in LOGIT space rather than through
+    ``SegmentationLosses.focal_loss``'s ``1e-7`` probability clip. That clip is
+    what made the shipped mask head untrainable (module docstring, D-072), so
+    the two formulations DIVERGE by design once ``|logit|`` passes ~16: there
+    the parent's gradient is exactly ``0`` and this class's is not.
+
+    The gate is applied to the probabilities on the dice path and to the
+    per-pixel loss on the focal path; both are exactly upstream's
+    ``loss_* * target_obj``.
 
     :param kwargs: Everything :class:`SAMMaskLoss` accepts
         (``focal_weight``, ``dice_weight``, ``from_logits``, ``config``,
@@ -173,7 +292,20 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         pred_shape = _static_mask_stack_shape(y_pred, "SAM2GatedMaskLoss(y_pred)")
         true_shape = _static_mask_stack_shape(y_true, "SAM2GatedMaskLoss(y_true)")
 
-        probabilities = ops.sigmoid(y_pred) if self.from_logits else y_pred
+        if self.from_logits:
+            logits = y_pred
+            probabilities = ops.sigmoid(logits)
+        else:
+            # Only the `from_logits=True` path is saturation-immune. Recovering
+            # logits from probabilities needs a clip to keep `log` finite, so a
+            # caller who hands over probabilities has already destroyed the
+            # information the fix depends on. The trainer never takes this path
+            # (`compile_sam2_video_trainer` passes raw `low_res_logits`); it
+            # exists only so the inherited constructor argument stays honest.
+            probabilities = y_pred
+            safe = ops.clip(probabilities, 1e-7, 1.0 - 1e-7)
+            logits = ops.log(safe) - ops.log1p(-safe)
+
         truth = ops.cast(y_true, probabilities.dtype)
         truth = match_mask_axis(truth, true_shape, pred_shape)
 
@@ -197,20 +329,31 @@ class SAM2GatedMaskLoss(SAMMaskLoss):
         present = mask_presence_gate(truth)
         gated = ops.where(present, probabilities, ops.zeros_like(probabilities))
 
-        # The adapters and their refusals are `sam_mask_loss`'s, unchanged: a
-        # 1-channel focal is bit-identically blind to negatives and raw-layout
-        # dice reduces the wrong axes (H-17). This class adds a gate, not a
-        # second opinion about layout.
+        # DICE: unchanged. `sam_mask_loss`'s adapter and its refusal are reused,
+        # not re-derived -- raw-layout dice reduces (num_masks, height) instead
+        # of (height, width) and returns a plausible number without raising
+        # (H-17). Dice IS still saturation-limited through its own
+        # `d(sigmoid)/dx = p(1-p)` chain factor, but so is upstream's
+        # (`loss_fns.py:53` sigmoids first too), so that is faithfulness, not a
+        # divergence. Only the focal clip was a divergence.
         dice_pred = to_dice_layout(gated)
         dice_true = to_dice_layout(truth)
         _require_channels_last(dice_pred, DICE_CHANNELS, "SAM2GatedMaskLoss dice path")
 
-        focal_pred = to_focal_layout(gated)
-        focal_true = to_focal_layout(truth)
-        _require_channels_last(
-            focal_pred, FOCAL_CHANNELS, "SAM2GatedMaskLoss focal path")
+        # FOCAL: logit space, and the gate moves from the probabilities to the
+        # per-pixel loss (D-072). `to_focal_layout`'s two-channel one-hot is
+        # deliberately NOT used here -- it exists to make
+        # `SegmentationLosses.focal_loss` see negatives at all, and the binary
+        # logit form sees them natively. `_require_channels_last` on the focal
+        # path goes with it; the layout it guarded no longer exists on this
+        # side. The dice guard above is untouched, so H-17's actual trap (the
+        # silent wrong reduction) is still refused.
+        per_pixel_focal = _focal_from_logits(
+            truth, logits, self.config.focal_gamma, self.config.focal_alpha)
+        focal_term = ops.mean(
+            ops.where(present, per_pixel_focal,
+                      ops.zeros_like(per_pixel_focal)))
 
-        focal_term = self._focal(focal_true, focal_pred)
         dice_term = self._dice(dice_true, dice_pred)
         return self.focal_weight * focal_term + self.dice_weight * dice_term
 

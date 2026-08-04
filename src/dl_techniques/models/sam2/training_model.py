@@ -42,6 +42,35 @@ this wrapper -- the same graph traces and runs perfectly under a plain
 ``jit_compile=False`` to :meth:`compile`. Pinned in both directions by
 ``TestXLARefusal``.
 
+The gradient policy is TRUNCATED BPTT, with exactly one truncation point
+--------------------------------------------------------------------------
+Upstream backpropagates through the entire T-frame memory chain -- it has no
+``detach()`` or ``no_grad()`` anywhere in ``sam2/modeling/`` or
+``training/model/`` (verified at ``2b90b9f5``; the only ``@torch.no_grad()``
+decorators are on the non-parametric sin/cos position-encoding cache) -- and
+pays the memory cost with ``torch.utils.checkpoint.checkpoint``
+(``training/model/sam2.py:495``). This wrapper does not have that budget, so it
+truncates. The truncation is placed at the memory encoder's **inputs** in
+:meth:`_store`, and nowhere else:
+
+* ``features`` / ``high_res`` into ``memory_encoder``: **detached** -- this is
+  the truncation, and it is what bounds the graph.
+* ``readout.memory`` / ``readout.memory_pos`` in :meth:`_condition`: **live**.
+* the per-call :class:`SAM2MemoryBank`: ``stop_gradient=False``.
+* ``object_score_logits`` into ``_mark_occlusion``: **detached** -- it would
+  otherwise reconstruct the full recursion through the score head.
+* ``object_pointer`` into the bank: **detached** -- see the limitation below.
+
+The result is a backward pass that reaches ``memory_encoder`` and stops there:
+one extra hop per read, never a T-deep recursion, and ``memory_encoder``'s 40
+variables train.
+
+**Known limitation.** ``obj_ptr_proj`` (6 variables) still ships FROZEN. The
+object pointer bypasses the memory encoder, so leaving it live would rebuild the
+whole T-deep graph, and its only usable truncation point is its own input --
+computed inside ``SAM2._decode``, an iteration-1 file this module must leave
+byte-unchanged. This is stated rather than left looking fixed.
+
 This module makes **no accuracy claim**. It proves the multi-frame training
 path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded in
 this repository.
@@ -275,11 +304,22 @@ class SAM2TrainingModel(keras.Model):
             )
             num_ptr_tokens = 0
         else:
-            # H-4: every fed-back boundary is detached. Without this, a T-frame
-            # clip is ONE T-deep recurrent graph instead of T decodes. The bank
-            # detaches on insertion too, so the boundary is two-sided.
-            memory = ops.stop_gradient(readout.memory)
-            memory_pos = ops.stop_gradient(readout.memory_pos)
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-074
+            # The READ side is deliberately NOT detached -- this is truncated
+            # BPTT, and the truncation happens one hop upstream in `_store`
+            # (see the anchor there), never here. Do NOT "restore symmetry" by
+            # re-adding `ops.stop_gradient` around `readout.memory` /
+            # `readout.memory_pos`: combined with the bank's own detach it
+            # leaves `memory_encoder`'s 40 variables with NO path to any loss,
+            # which is exactly how this trainer shipped its first round --
+            # MEASURED 38 of 40 gradients `None`, and a green test asserting
+            # that as intended. Removing this detach costs nothing in graph
+            # depth because `_store` detaches the memory encoder's INPUTS, so
+            # the backward pass reaches memory_encoder and stops there: one
+            # extra hop per read, never a T-deep recursion.
+            # See decisions.md D-074.
+            memory = readout.memory
+            memory_pos = readout.memory_pos
             memory_pos = memory_pos + self.sam2._temporal_embedding(
                 readout, memory)
             num_ptr_tokens = readout.num_obj_ptr_tokens
@@ -328,24 +368,43 @@ class SAM2TrainingModel(keras.Model):
         high_res = ops.image.resize(
             logits, (size, size), interpolation="bilinear")
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-071
-        # H-4 detaches BOTH sides of this call: the inputs here, and the
-        # outputs again inside `SAM2MemoryBank.add_frame` (`stop_gradient=True`
-        # by default). A module whose input and output are both detached has NO
-        # path to any loss, so `memory_encoder` and `obj_ptr_proj` below ship
-        # FROZEN AT INITIALIZATION -- MEASURED under the real trainer: 38 of 40
-        # memory-encoder gradients are `None` (the other 2 at 2.0e-11) and 6 of
-        # 6 `obj_ptr_proj` gradients are `None`. Do NOT read the descending
-        # loss as evidence that this path trains; it cannot. Do NOT "fix" it by
-        # deleting these `stop_gradient` calls alone -- the bank detaches
-        # independently, so that edit changes nothing while looking like it
-        # does. See decisions.md D-071 for the two real options.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-074
+        # THIS is the truncation point of the truncated BPTT, and it is the
+        # ONLY one. `features` and `high_res` are the memory encoder's INPUTS;
+        # detaching them bounds the backward pass to a single hop, so a T-frame
+        # clip is T decodes plus T one-hop memory writes, never one T-deep
+        # recurrent graph (which is what H-4 exists to avoid, and what upstream
+        # pays for with `torch.utils.checkpoint.checkpoint`,
+        # `training/model/sam2.py:495` -- VERIFIED: upstream has NO `detach()`
+        # or `no_grad()` anywhere in `sam2/modeling/` or `training/model/`
+        # except the non-parametric sin/cos position-encoding cache).
+        #
+        # Do NOT also detach the memory encoder's OUTPUT (here, or via the
+        # bank's `stop_gradient=True` default, or on the read side in
+        # `_condition`). Detaching both sides leaves this module with no path
+        # to any loss at all: that is how the first round shipped, MEASURED as
+        # 38 of 40 `memory_encoder` gradients `None`.
+        #
+        # `object_score_logits` MUST be detached before `_mark_occlusion`. It
+        # comes from THIS frame's `_decode`, whose input is the memory-read
+        # features of this frame -- so leaving it live re-opens exactly the
+        # T-deep recursion the truncation removes, through the score head. The
+        # score head is trained by its own BCE on the `object_score_logits`
+        # output key, not through the memory.
+        #
+        # LIMITATION, stated rather than hidden: `obj_ptr` stays detached, so
+        # `obj_ptr_proj` (6 variables) STILL ships frozen. Its only usable
+        # truncation point is its own input, which is computed inside
+        # `SAM2._decode` -- a byte-frozen iteration-1 file. Leaving it live
+        # instead is not an option: the object pointer bypasses the memory
+        # encoder entirely, so it would reconstruct the full T-deep graph.
+        # See decisions.md D-074.
         memory, memory_pos = self.sam2.memory_encoder(
             [ops.stop_gradient(features), ops.stop_gradient(high_res)],
             training=training,
         )
         memory = self.sam2._mark_occlusion(
-            memory, outputs["object_score_logits"])
+            memory, ops.stop_gradient(outputs["object_score_logits"]))
         bank.add_frame(
             frame_idx,
             maskmem_features=memory,
@@ -485,6 +544,14 @@ class SAM2TrainingModel(keras.Model):
             memory_temporal_stride_for_eval=(
                 self.sam2.memory_temporal_stride_for_eval),
             max_obj_ptrs_in_encoder=self.sam2.max_obj_ptrs_in_encoder,
+            # D-074: the bank must NOT detach on insertion here. This is a
+            # plain constructor keyword the bank has always accepted
+            # (`memory_bank.py:236`), so `models/sam2/memory_bank.py` -- an
+            # iteration-1 file this iteration must leave byte-unchanged -- is
+            # not touched. The STREAMING bank built by `SAM2` keeps the
+            # `True` default, which is correct there: inference has no
+            # backward pass and the detach saves the tape.
+            stop_gradient=False,
         )
 
         coords = inputs[INPUT_POINT_COORDS] if has_coords else None

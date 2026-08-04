@@ -67,22 +67,30 @@ def gated_mask_loss_oracle(
         gamma: float = 2.0,
         alpha: float = 0.25,
         smooth: float = 1e-6,
-        clip_epsilon: float = 1e-7,
 ) -> float:
     """Hand-compute ``focal_weight * focal + dice_weight * dice`` in float64.
 
-    Transcribed from ``SegmentationLosses.dice_loss`` / ``focal_loss`` and the
-    two ``sam_mask_loss`` adapters as FORMULAE -- ``dice`` reduces the spatial
-    axes per row and averages the rows; ``focal`` averages the per-pixel sum
-    over a 2-channel one-hot; the clip is what leaves an absent row a residual
-    instead of an exact zero.
+    Transcribed as FORMULAE, not by calling the repository back. ``dice`` is
+    ``SegmentationLosses.dice_loss`` through ``to_dice_layout``: it reduces the
+    spatial axes per row and averages the rows, over GATED PROBABILITIES.
+    ``focal`` is upstream's ``sigmoid_focal_loss`` (``training/loss_fns.py``)
+    evaluated in LOGIT space and gated per pixel:
+    ``alpha * (1 - p_t)^gamma * BCEwithlogits(x, t)``.
+
+    That focal expression is not a second opinion about the repository's focal
+    semantics -- for a BINARY target it IS the two-channel one-hot form
+    ``sum_c alpha * (1 - p_c)^gamma * (-t_c log p_c)``, with the ``1e-7``
+    probability clip removed. The clip is the whole change, and
+    :class:`TestSaturatedLogits` measures that it, and only it, is what made
+    the parent's gradient vanish.
 
     :param truth: ``(B, M, h, w)`` binary ground truth.
     :type truth: numpy.ndarray
     :param logits: ``(B, M, h, w)`` predicted mask logits.
     :type logits: numpy.ndarray
     :param gate: ``(B, M)`` bool. Rows that are ``False`` have their
-        PROBABILITIES zeroed, exactly as the loss does.
+        PROBABILITIES zeroed on the dice path and their PER-PIXEL LOSS zeroed
+        on the focal path, exactly as the loss does.
     :type gate: numpy.ndarray
     :param focal_weight: Weight of the focal term.
     :type focal_weight: float
@@ -94,27 +102,29 @@ def gated_mask_loss_oracle(
     :type alpha: float
     :param smooth: ``LossConfig.smooth_factor``.
     :type smooth: float
-    :param clip_epsilon: ``focal_loss``'s probability clip.
-    :type clip_epsilon: float
     :return: The scalar loss.
     :rtype: float
     """
     true64 = truth.astype(np.float64)
-    probabilities = 1.0 / (1.0 + np.exp(-logits.astype(np.float64)))
-    probabilities = np.where(gate[..., None, None], probabilities, 0.0)
+    logits64 = logits.astype(np.float64)
+    # `0.5 * (1 + tanh(x/2))`, not `1 / (1 + exp(-x))`: the latter overflows in
+    # `exp` at the `-1024` sentinel this oracle is now used at. The two agree
+    # to float64 rounding everywhere the naive form is representable.
+    raw = 0.5 * (1.0 + np.tanh(0.5 * logits64))
+    probabilities = np.where(gate[..., None, None], raw, 0.0)
 
     numerator = 2.0 * (true64 * probabilities).sum(axis=(-2, -1))
     denominator = true64.sum(axis=(-2, -1)) + probabilities.sum(axis=(-2, -1))
     dice = 1.0 - ((numerator + smooth) / (denominator + smooth)).mean()
 
-    true_channels = np.stack([1.0 - true64, true64], axis=-1)
-    pred_channels = np.clip(
-        np.stack([1.0 - probabilities, probabilities], axis=-1),
-        clip_epsilon, 1.0 - clip_epsilon,
-    )
-    cross_entropy = -true_channels * np.log(pred_channels)
-    focal = (alpha * (1.0 - pred_channels) ** gamma * cross_entropy).sum(
-        axis=-1).mean()
+    # BCE-with-logits, stable and un-clipped. `np.logaddexp(0, -x)` IS
+    # `softplus(-x)`, computed without ever forming `exp(-x)`; the loss uses
+    # `ops.softplus`. At `x = -1024` both give exactly 1024.0, where
+    # `-log(sigmoid(x))` gives `inf`.
+    cross_entropy = np.logaddexp(0.0, -logits64) + logits64 * (1.0 - true64)
+    p_t = raw * true64 + (1.0 - raw) * (1.0 - true64)
+    per_pixel = alpha * (1.0 - p_t) ** gamma * cross_entropy
+    focal = np.where(gate[..., None, None], per_pixel, 0.0).mean()
     return float(focal_weight * focal + dice_weight * dice)
 
 
@@ -181,36 +191,55 @@ def candidate_values(
 
 
 class TestAbsentRowResidual:
-    """The absent-row residual A-6 predicted, re-measured every run."""
+    """A-6 is now CLOSED, not bounded: the absent row contributes exactly 0."""
 
     @pytest.mark.parametrize(
         "shape", [(1, 1, 16, 16), (2, 3, 16, 16), (2, 4, 64, 64)])
-    def test_a_fully_absent_batch_is_the_published_residual(
+    def test_a_fully_absent_batch_is_exactly_zero(
             self, shape: Tuple[int, ...]) -> None:
-        """A batch whose every row is absent IS the pure residual.
+        """A batch whose every row is absent contributes EXACTLY zero.
 
-        Its value is the whole of what the gate cannot remove, so it is the
-        honest measurement of A-6 -- and it must not depend on the mask grid,
-        because ``focal_loss``' clip is a per-pixel constant.
+        The focal gate moved from the probabilities to the per-pixel loss when
+        the term moved to logit space, so there is nothing left for the gate to
+        fail to remove. Grid-independence is still asserted at three shapes,
+        because the previous residual was a per-pixel constant and a
+        reintroduced clip would show up as a grid-dependent number here first.
         """
         truth = np.zeros(shape, dtype="float32")
         logits = np.full(shape, 7.5, dtype="float32")
         measured = float(SAM2GatedMaskLoss()(truth, logits))
-        assert measured == pytest.approx(
-            20.0 * ABSENT_ROW_FOCAL_RESIDUAL, rel=1e-6), (
-            f"the absent-row residual moved to {measured!r}; "
-            f"ABSENT_ROW_FOCAL_RESIDUAL and the module docstring quote "
-            f"{ABSENT_ROW_FOCAL_RESIDUAL!r} per unit focal weight")
+        assert measured == 0.0, (
+            f"the absent-row contribution is {measured!r}, not exactly 0.0; "
+            f"ABSENT_ROW_FOCAL_RESIDUAL publishes "
+            f"{ABSENT_ROW_FOCAL_RESIDUAL!r}")
+        assert ABSENT_ROW_FOCAL_RESIDUAL == 0.0
 
-    def test_the_residual_is_not_what_the_tolerance_is_for(self) -> None:
-        """A-6 is confirmed, and confirmed to be NON-binding.
+    def test_the_old_clipped_form_did_leave_a_residual(self) -> None:
+        """The two-sided arm: that zero is the FIX, not the fixture.
 
-        The plan pre-committed to STOP if the residual exceeded ``1e-6`` of the
-        ungated term. It is fourteen orders below float32's own accumulation
-        error on the same reduction, so :data:`VALUE_TOLERANCE` is a float32
-        floor, not a residual budget. Recorded as an assertion so a future
-        change to ``SegmentationLosses``' clipping cannot quietly make the
-        residual the binding term while the tolerance stays put.
+        Without this, an absent-row zero would be indistinguishable from a
+        fixture on which the clipped form also happened to give zero. Plain
+        :class:`SAMMaskLoss` is the clipped form, ungated -- so on an all-absent
+        batch whose logits are ``+7.5`` it scores a real, non-zero loss, and on
+        an all-absent batch whose PROBABILITIES were zeroed (what the old gate
+        produced) it left the ``4.235165241142481e-22`` per-pixel floor this
+        constant used to carry. The first is what is measurable through the
+        public API; assert it.
+        """
+        truth = np.zeros((2, 3, 16, 16), dtype="float32")
+        logits = np.full((2, 3, 16, 16), 7.5, dtype="float32")
+        assert float(SAMMaskLoss()(truth, logits)) > 1.0, (
+            "the ungated clipped form scores an all-absent batch at ~0 on this "
+            "fixture, so the gated zero above proves nothing about the gate")
+
+    def test_the_tolerance_is_a_float32_floor_not_a_residual_budget(
+            self) -> None:
+        """The plan's own A-6 stop trigger, re-stated as an assertion.
+
+        The plan pre-committed to STOP if the absent-row residual exceeded
+        ``1e-6`` of the ungated term. At exactly zero that trigger can never
+        fire, which is the strongest form of the answer; :data:`VALUE_TOLERANCE`
+        is therefore entirely a float32 accumulation floor.
         """
         truth, logits = discriminating_fixture()
         ungated = candidate_values(truth, logits)["ungated"]
@@ -396,6 +425,155 @@ class TestGradientOnAbsentRows:
 
 
 # ---------------------------------------------------------------------
+# G9.1 -- the defect this iteration's completion-fix round exists to close
+# ---------------------------------------------------------------------
+
+
+#: ``(logit, target)`` pairs the SHIPPED pipeline provably emits, each one a
+#: CONFIDENTLY WRONG prediction -- which is the only regime in which the clip's
+#: dead zone is a defect rather than the point of focal loss. A confidently
+#: CORRECT saturated pixel (e.g. logit ``+68`` at ``t = 1``) legitimately gets a
+#: ~zero gradient from BOTH formulations, because ``(1 - p_t)^gamma`` is what
+#: focal loss uses to stop caring about easy examples. Nothing in the 141
+#: iteration-2 tests differentiated the mask loss at any of these points; every
+#: loss fixture used hand-built moderate logits, which is the only regime in
+#: which the probability clip is invisible.
+SATURATED_LOGITS = {
+    "the D-043 NO_OBJ_SCORE sentinel, on foreground": (-1024.0, 1.0),
+    "the toy model's mean GT-present logit, on foreground": (-70.0, 1.0),
+    "the toy model's minimum GT-present logit, on foreground": (-354.0, 1.0),
+    "the toy model's maximum GT-present logit, on background": (+68.0, 0.0),
+}
+
+
+class TestSaturatedLogits:
+    """The mask loss must stay differentiable at the logits the pipeline emits.
+
+    This class is the guard the iteration did not have. The shipped trainer's
+    mask term was measured at a gradient norm of ``5.67e-06`` against
+    ``6.99e+00`` for the object-score BCE on the SAME batch -- six orders down,
+    with 99.6 % of GT-present pixels at ``sigmoid < 1e-7`` -- while its loss
+    VALUE read 6.30 and every one of the 141 tests stayed green.
+
+    RED-proven: every assertion below fires against
+    :class:`~dl_techniques.losses.sam_mask_loss.SAMMaskLoss`, which is the
+    probability-space clipped form the gated loss used to inherit.
+    """
+
+    @pytest.mark.parametrize(
+        "where,logit,target",
+        [(k, v[0], v[1]) for k, v in SATURATED_LOGITS.items()])
+    def test_the_gradient_is_alive_where_the_clipped_form_is_dead(
+            self, where: str, logit: float, target: float) -> None:
+        """One tape, both formulations, at a logit the pipeline really emits.
+
+        The fixture is always a GT-PRESENT row -- one foreground pixel is
+        forced on even when the tested target is background -- so the gate
+        keeps it and anything zero here is the loss's own dead zone rather than
+        the gate's work.
+        """
+        truth = np.full((1, 1, 16, 16), target, dtype="float32")
+        logits = np.full((1, 1, 16, 16), logit, dtype="float32")
+        truth[0, 0, 0, 0] = 1.0
+        logits[0, 0, 0, 0] = 0.0
+
+        # The forced pixel sits at logit 0 and is live under BOTH formulations,
+        # so it is excluded: including it would let the clipped form pass the
+        # separation assertion on one pixel it never had a problem with.
+        probe = np.ones(truth.shape, dtype=bool)
+        probe[0, 0, 0, 0] = False
+        live = np.abs(
+            logit_gradient(SAM2GatedMaskLoss(), truth, logits)[probe]).max()
+        dead = np.abs(
+            logit_gradient(SAMMaskLoss(), truth, logits)[probe]).max()
+
+        assert live > 1e-4, (
+            f"at {where} ({logit}) the logit-space focal's gradient is "
+            f"{live!r}; the mask head cannot learn from a row it emits")
+        assert live > 1e6 * max(dead, 1e-300), (
+            f"at {where} ({logit}) the clipped form's gradient is {dead!r} and "
+            f"the logit-space form's is {live!r} -- they are not separated, so "
+            f"this fixture does not discriminate the two formulations")
+
+    def test_the_sentinel_row_is_exactly_dead_under_the_clipped_form(
+            self) -> None:
+        """The strongest single number, asserted rather than described.
+
+        At the ``-1024`` sentinel D-043 provably emits, the probability-space
+        focal's gradient is not merely small: ``sigmoid(-1024)`` is exactly
+        ``0``, the clip pins it at ``1e-7``, and ``ops.clip``'s derivative
+        outside its range is exactly ``0``. MEASURED ``0.0``.
+        """
+        truth = np.ones((1, 1, 16, 16), dtype="float32")
+        logits = np.full((1, 1, 16, 16), -1024.0, dtype="float32")
+        assert np.abs(logit_gradient(SAMMaskLoss(), truth, logits)).max() == 0.0
+        assert np.abs(
+            logit_gradient(SAM2GatedMaskLoss(), truth, logits)).max() > 1e-4
+
+    def test_the_loss_is_finite_at_the_sentinel(self) -> None:
+        """``-log(sigmoid(-1024))`` is ``inf``; ``softplus(1024)`` is ``1024``.
+
+        The stable form is not decoration -- the naive spelling of the same
+        expression returns ``inf`` at a logit this pipeline emits at random
+        init on the majority of frames.
+        """
+        truth = np.ones((2, 2, 16, 16), dtype="float32")
+        logits = np.full((2, 2, 16, 16), -1024.0, dtype="float32")
+        value = float(SAM2GatedMaskLoss()(truth, logits))
+        assert np.isfinite(value)
+        assert value == pytest.approx(
+            gated_mask_loss_oracle(
+                truth, logits, ground_truth_gate(truth)), rel=1e-6)
+
+    def test_the_two_forms_agree_where_nothing_is_saturated(self) -> None:
+        """The fix is a REMOVED CLIP, not a new loss.
+
+        Below saturation the logit-space focal and the clipped
+        probability-space focal are the same function, and were MEASURED
+        bit-identical (``diff = 0.0``) on this fixture. Without this arm, the
+        divergence arm above would be satisfied by any loss that merely differs
+        from the parent everywhere.
+        """
+        rng = np.random.default_rng(3)
+        truth = (rng.random((2, 3, 16, 16)) > 0.6).astype("float32")
+        truth[:, :, 0, 0] = 1.0
+        logits = rng.normal(0.0, 2.0, (2, 3, 16, 16)).astype("float32")
+        assert ground_truth_gate(truth).all()
+        assert float(SAM2GatedMaskLoss()(truth, logits)) == pytest.approx(
+            float(SAMMaskLoss()(truth, logits)), abs=VALUE_TOLERANCE)
+        np.testing.assert_allclose(
+            logit_gradient(SAM2GatedMaskLoss(), truth, logits),
+            logit_gradient(SAMMaskLoss(), truth, logits),
+            atol=1e-7)
+
+    def test_the_bce_term_autodiffs_exactly_at_a_zero_logit(self) -> None:
+        """A logit of exactly ``0.0`` is reachable, and it is a trap.
+
+        The textbook stable BCE ``max(x, 0) - x*t + log1p(exp(-|x|))`` was the
+        first spelling tried. Its VALUE is right everywhere, but at exactly
+        ``x = 0`` ``abs`` has no derivative and ``ops.maximum`` breaks its tie
+        towards ``x``, so autodiff returns ``+1.0`` at ``t=0`` and ``0.0`` at
+        ``t=1`` where the true values are ``+0.5`` and ``-0.5`` -- a SIGN FLIP
+        on the foreground branch. ``ops.softplus`` is smooth and is exact.
+        ``ops.where`` gates in this pipeline emit exact zeros, so this is not a
+        measure-zero curiosity that never occurs.
+        """
+        truth = np.ones((1, 1, 4, 4), dtype="float32")
+        zeros = np.zeros((1, 1, 4, 4), dtype="float32")
+        gradient = logit_gradient(
+            SAM2GatedMaskLoss(focal_weight=1.0, dice_weight=0.0), truth, zeros)
+        # d/dx [alpha * (1-p_t)^gamma * ce] at x=0, t=1, over 16 pixels:
+        #   p = 0.5, ce = log 2, modulator = 0.25, dce/dx = -0.5,
+        #   dmod/dx = -2*0.5*0.25 = -0.25
+        #   -> 0.25 * (0.25*-0.5 + -0.25*log2) / 16
+        expected = 0.25 * (0.25 * -0.5 + -0.25 * np.log(2.0)) / 16.0
+        np.testing.assert_allclose(gradient, expected, rtol=1e-5)
+        assert gradient.min() < 0.0, (
+            "the gradient at a zero logit on a FOREGROUND pixel is not "
+            "negative; the loss is pushing the logit the wrong way")
+
+
+# ---------------------------------------------------------------------
 # G3.4 -- the adapters are `sam_mask_loss`'s, not a second opinion
 # ---------------------------------------------------------------------
 
@@ -409,35 +587,43 @@ class TestAdapterReuse:
         with pytest.raises(ValueError, match="mask stack"):
             SAM2GatedMaskLoss()(truth, truth)
 
-    def test_the_shared_adapters_are_the_ones_called(self) -> None:
-        """Not a second copy: the module-level adapters are invoked.
+    def test_the_shared_dice_adapter_is_the_one_called(self) -> None:
+        """Not a second copy: the module-level dice adapter is invoked.
 
         A future author who inlined a reshape here would keep every value
         assertion green (the layouts agree) while creating the second home
-        H-17 exists to prevent.
+        H-17 exists to prevent. Counted TWICE per call -- once for the
+        prediction, once for the truth.
+
+        ``to_focal_layout`` is deliberately NOT counted and is no longer even
+        imported by the module. Its two-channel one-hot exists to make
+        ``SegmentationLosses.focal_loss`` see negative pixels at all; the
+        logit-space focal sees them natively, so reintroducing the adapter
+        would mean reintroducing the clipped probability path with it. This
+        test asserts that absence, so "put the adapter back" cannot happen
+        quietly.
         """
         import dl_techniques.losses.sam2_video_loss as module
 
+        assert not hasattr(module, "to_focal_layout"), (
+            "sam2_video_loss imports to_focal_layout again; the focal term is "
+            "supposed to be computed from LOGITS, with no 2-channel one-hot "
+            "and no probability clip (D-072)")
+
         truth, logits = discriminating_fixture()
-        calls = {"dice": 0, "focal": 0}
-        real_dice, real_focal = module.to_dice_layout, module.to_focal_layout
+        calls = {"dice": 0}
+        real_dice = module.to_dice_layout
 
         def counting_dice(stack: Any) -> Any:
             calls["dice"] += 1
             return real_dice(stack)
 
-        def counting_focal(stack: Any) -> Any:
-            calls["focal"] += 1
-            return real_focal(stack)
-
         module.to_dice_layout = counting_dice
-        module.to_focal_layout = counting_focal
         try:
             SAM2GatedMaskLoss()(truth, logits)
         finally:
             module.to_dice_layout = real_dice
-            module.to_focal_layout = real_focal
-        assert calls == {"dice": 2, "focal": 2}
+        assert calls == {"dice": 2}
 
 
 # ---------------------------------------------------------------------
