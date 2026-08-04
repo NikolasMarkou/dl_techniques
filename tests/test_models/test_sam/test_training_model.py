@@ -1146,3 +1146,552 @@ class TestEndToEndLossWiring:
             "cannot discriminate"
         )
         assert len(with_iou) > 0, "SAMIoULoss did not move the IoU prediction head"
+
+
+# ===========================================================================
+# Plan step 4 -- the in-`call()` iterative refinement loop.
+# ===========================================================================
+def _refined(
+    rounds: int,
+    seed: int = 7,
+    cls: Any = None,
+    multimask_output: bool = False,
+) -> Tuple[SAMTrainingModel, Dict[str, Any], Dict[str, Any]]:
+    """
+    A built, seeded, compiled refining wrapper plus inputs and a dict ``y_true``.
+
+    ``y_true`` deliberately carries a SINGLE-instance GT stack whatever the
+    round count is: the data pipeline must not have to know how many rounds the
+    model runs, and ``SAMMaskLoss`` repeats the GT across the concatenated mask
+    axis itself.
+    """
+    keras.utils.set_random_seed(seed)
+    model = (cls or SAMTrainingModel)(
+        build_reduced_sam(),
+        multimask_output=multimask_output,
+        num_refinement_rounds=rounds,
+    )
+    num_masks = 3 if multimask_output else 1
+    gt = _gt_mask_stack(num_masks)
+    x = _wrapper_inputs()
+    x[INPUT_GT_MASK] = gt
+    y = {
+        LOW_RES_LOGITS: gt,
+        IOU_SUPERVISION: np.zeros(
+            (WRAPPER_BATCH, num_masks, 2), dtype="float32"
+        ),
+    }
+    model(x)
+    seed_nonzero_weights(model)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+        loss={LOW_RES_LOGITS: SAMMaskLoss(), IOU_SUPERVISION: SAMIoULoss()},
+        loss_weights={LOW_RES_LOGITS: 1.0, IOU_SUPERVISION: 1.0},
+    )
+    return model, x, y
+
+
+class ZeroFeedbackControl(SAMTrainingModel):
+    """Control: the refinement feedback carries no information at all."""
+
+    def _feedback_mask(self, low_res_logits: Any) -> Any:
+        return ops.zeros_like(low_res_logits[:, 0:1])
+
+
+class NoDetachFeedbackControl(SAMTrainingModel):
+    """Control: the same feedback WITHOUT ``ops.stop_gradient``."""
+
+    def _feedback_mask(self, low_res_logits: Any) -> Any:
+        return low_res_logits[:, 0:1]
+
+
+class RecordingFeedbackMixin:
+    """Records the feedback tensor the last ``call`` produced."""
+
+    def _feedback_mask(self, low_res_logits: Any) -> Any:
+        recorded = super()._feedback_mask(low_res_logits)
+        self.recorded_feedback = recorded
+        return recorded
+
+
+class RecordingDetachedControl(RecordingFeedbackMixin, SAMTrainingModel):
+    pass
+
+
+class RecordingAttachedControl(RecordingFeedbackMixin, NoDetachFeedbackControl):
+    pass
+
+
+class CapturingSamplerControl(SAMTrainingModel):
+    """Records everything ``_sample_error_points`` was given and returned."""
+
+    def _sample_error_points(
+        self, low_res_logits: Any, gt_mask: Any, image_size: Any
+    ) -> Any:
+        coords, labels = super()._sample_error_points(
+            low_res_logits, gt_mask, image_size
+        )
+        self.captured = (low_res_logits, gt_mask, coords, labels)
+        return coords, labels
+
+
+class TestRefinementShapes:
+    """The round count is observable in the output, not merely stored."""
+
+    @pytest.mark.parametrize("rounds", [1, 2, 3])
+    def test_the_mask_axis_is_num_masks_times_rounds(self, rounds: int) -> None:
+        model, x, _ = _refined(rounds)
+        out = model(x)
+        assert tuple(out[LOW_RES_LOGITS].shape) == (
+            WRAPPER_BATCH, rounds, LOW_RES, LOW_RES
+        )
+        assert tuple(out[IOU_PREDICTIONS].shape) == (WRAPPER_BATCH, rounds)
+        assert tuple(out[IOU_SUPERVISION].shape) == (WRAPPER_BATCH, rounds, 2)
+
+    def test_multimask_multiplies_rather_than_replaces(self) -> None:
+        """``M * R``, not ``max(M, R)`` -- a wrong reduction here would still
+        satisfy a rank assertion."""
+        model, x, _ = _refined(2, multimask_output=True)
+        assert tuple(model(x)[LOW_RES_LOGITS].shape) == (
+            WRAPPER_BATCH, 6, LOW_RES, LOW_RES
+        )
+
+    def test_the_class_default_runs_exactly_one_round(self) -> None:
+        """Refinement is opt-in. At the default the wrapper keeps the
+        inference-shaped contract every step-2 guard pins."""
+        from dl_techniques.models.sam.training_model import (
+            DEFAULT_REFINEMENT_ROUNDS,
+            TRAINING_REFINEMENT_ROUNDS,
+        )
+
+        assert DEFAULT_REFINEMENT_ROUNDS == 1
+        assert TRAINING_REFINEMENT_ROUNDS > DEFAULT_REFINEMENT_ROUNDS
+        model, x, _ = _built_wrapper()
+        assert model.num_refinement_rounds == DEFAULT_REFINEMENT_ROUNDS
+        assert tuple(model(x)[LOW_RES_LOGITS].shape)[1] == 1
+
+    def test_zero_rounds_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="num_refinement_rounds must be"):
+            SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=0)
+
+    def test_the_round_count_survives_a_config_round_trip(self) -> None:
+        model, _, _ = _refined(3)
+        restored = SAMTrainingModel.from_config(model.get_config())
+        assert restored.num_refinement_rounds == 3
+
+
+class TestRefinementIsLive:
+    """
+    SC-7. A round that changes nothing is the dead-``iou_head_depth`` defect
+    class this plan already fixed once.
+    """
+
+    def test_rounds_two_and_three_change_the_prediction(self) -> None:
+        """
+        Measured, not asserted as a constant: rounds 2 and 3 must differ from
+        round 1 both in raw logits AND after thresholding. The binary check is
+        the load-bearing half -- a feedback path that only shifted the logits by
+        a constant would move ``max|delta|`` while changing no pixel's class,
+        and softmax/sigmoid-style shift artefacts are exactly how a previous
+        plan mistook uniform garbage for a real delta.
+        """
+        model, x, _ = _refined(3)
+        logits = np.asarray(ops.convert_to_numpy(model(x)[LOW_RES_LOGITS]))
+        first_binary = logits[:, 0] > 0.0
+        for index in (1, 2):
+            delta = float(np.max(np.abs(logits[:, index] - logits[:, 0])))
+            agreement = float(np.mean((logits[:, index] > 0.0) == first_binary))
+            assert delta > 1e-3, (
+                f"round {index + 1} logits are identical to round 1 "
+                f"(max|delta|={delta}) -- the refinement is decorative"
+            )
+            assert agreement < 1.0, (
+                f"round {index + 1} thresholds to exactly the same mask as "
+                f"round 1 (agreement={agreement}); a constant logit shift would "
+                f"pass the max|delta| assertion above and change nothing real"
+            )
+
+    def test_zeroing_the_fed_back_logits_changes_the_measured_loss(self) -> None:
+        """The feedback dead-component probe (I-5)."""
+        live, x, y = _refined(3)
+        dead, x_dead, y_dead = _refined(3, cls=ZeroFeedbackControl)
+
+        def evaluate(model: keras.Model, xx: Any, yy: Any) -> float:
+            result = model.evaluate(xx, yy, verbose=0, batch_size=WRAPPER_BATCH)
+            return float(result[0] if isinstance(result, list) else result)
+
+        live_loss = evaluate(live, x, y)
+        dead_loss = evaluate(dead, x_dead, y_dead)
+        assert abs(live_loss - dead_loss) > 1e-4, (
+            f"zeroing the fed-back mask left the loss at {live_loss} vs "
+            f"{dead_loss} -- the refinement feedback contributes nothing"
+        )
+
+    def test_a_refining_model_reaches_variables_a_single_round_cannot(
+        self,
+    ) -> None:
+        """
+        The strongest liveness evidence available: refinement makes the
+        ``mask_downscaling`` stack (the dense mask-prompt path) reachable at
+        all. At one round it is 10/10 gradient-dead by construction, because
+        nothing ever supplies a mask prompt.
+        """
+        one, x1, y1 = _refined(1)
+        report_one = fit_one_step_moved_variables(
+            one, x1, y1, batch_size=WRAPPER_BATCH
+        )
+        downscaling_one = _ids(
+            one.sam.prompt_encoder.mask_downscaling.trainable_variables
+        )
+        moved_one = _ids(
+            [
+                variable
+                for label, variable in zip(
+                    variable_labels(one), one.trainable_variables
+                )
+                if label in set(report_one.moved)
+            ]
+        )
+        assert downscaling_one & moved_one == set(), (
+            "the mask-downscaling stack moved at rounds=1, where no mask prompt "
+            "is ever supplied -- the probe cannot discriminate"
+        )
+
+        three, x3, y3 = _refined(3)
+        report_three = fit_one_step_moved_variables(
+            three, x3, y3, batch_size=WRAPPER_BATCH
+        )
+        downscaling_three = _ids(
+            three.sam.prompt_encoder.mask_downscaling.trainable_variables
+        )
+        moved_three = _ids(
+            [
+                variable
+                for label, variable in zip(
+                    variable_labels(three), three.trainable_variables
+                )
+                if label in set(report_three.moved)
+            ]
+        )
+        assert downscaling_three & moved_three == downscaling_three, (
+            f"refinement did not make the whole mask-downscaling stack live: "
+            f"{len(downscaling_three & moved_three)} of "
+            f"{len(downscaling_three)} moved"
+        )
+        assert report_three.n_moved > report_one.n_moved, (
+            f"{report_three.n_moved} vs {report_one.n_moved}"
+        )
+
+    def test_the_dead_component_probe_still_turns_a_refining_model_red(
+        self,
+    ) -> None:
+        model, x, y = _refined(3)
+        with outputs_stop_gradient(model):
+            with pytest.raises(ValueError, match=NO_GRADIENTS_MESSAGE):
+                fit_one_step_moved_variables(
+                    model, x, y, batch_size=WRAPPER_BATCH
+                )
+
+
+class TestRefinementStopGradient:
+    """
+    The detach really detaches -- counted as ``max |g| == 0.0``, not as a
+    ``None`` count. ``ops.concatenate`` keeps the tensors structurally
+    connected, so gradients come back as exact zeros rather than ``None``
+    (D-036 lesson 1: a ``None``-counting assertion fails for a reason unrelated
+    to the property).
+    """
+
+    @staticmethod
+    def _feedback_gradient(cls: Any) -> Tuple[int, int, float]:
+        keras.utils.set_random_seed(7)
+        model = cls(build_reduced_sam(), num_refinement_rounds=2)
+        x = _wrapper_inputs()
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        model(x)
+        seed_nonzero_weights(model)
+        variables = list(model.sam.image_encoder.trainable_variables)
+        with tf.GradientTape() as tape:
+            model(x)
+            total = ops.sum(model.recorded_feedback)
+        grads = tape.gradient(total, variables)
+        n_none = sum(1 for g in grads if g is None)
+        largest = max(
+            [
+                float(np.max(np.abs(ops.convert_to_numpy(g))))
+                for g in grads
+                if g is not None
+            ],
+            default=0.0,
+        )
+        return n_none, len(variables), largest
+
+    def test_the_fed_back_mask_carries_no_gradient_to_the_encoder(self) -> None:
+        n_none, total, largest = self._feedback_gradient(RecordingDetachedControl)
+        assert largest == 0.0, (
+            f"the fed-back mask still carries gradient into the image encoder: "
+            f"max|g|={largest} over {total - n_none} non-None gradients"
+        )
+
+    def test_the_control_without_stop_gradient_does_carry_gradient(self) -> None:
+        """
+        RED proof for the assertion above. Without this control, a probe that
+        measured the wrong variables, or a tape that captured nothing, would
+        report ``max|g| == 0.0`` and certify a detach that was never there.
+        """
+        n_none, total, largest = self._feedback_gradient(RecordingAttachedControl)
+        assert n_none == 0, f"{n_none}/{total} gradients were None"
+        assert largest > 0.0, (
+            "removing ops.stop_gradient left max|g| at 0.0 -- this control "
+            "cannot RED-prove the guard above"
+        )
+
+
+class TestRefinementPointSampling:
+    """The sampled points must land in the regions they claim to come from."""
+
+    @staticmethod
+    def _capture(seed: int = 7) -> Tuple[np.ndarray, ...]:
+        keras.utils.set_random_seed(seed)
+        model = CapturingSamplerControl(build_reduced_sam(), num_refinement_rounds=2)
+        x = _wrapper_inputs()
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        model(x)
+        seed_nonzero_weights(model)
+        model(x)
+        return tuple(
+            np.asarray(ops.convert_to_numpy(t)) for t in model.captured
+        )
+
+    def test_the_foreground_point_lands_in_a_false_negative_pixel(
+        self,
+    ) -> None:
+        logits, gt, coords, labels = self._capture()
+        predicted = (logits[:, 0] > 0.0).astype("float32")
+        truth = (gt[:, 0] > 0.5).astype("float32")
+        false_negative = truth * (1.0 - predicted)
+        false_positive = (1.0 - truth) * predicted
+        scale = IMG_SIZE / LOW_RES
+
+        # Premise check: the probe is worthless if either region is empty --
+        # the label rule would then legitimately emit a padding point and every
+        # containment assertion below would be vacuous.
+        assert false_negative.sum() > 0 and false_positive.sum() > 0
+
+        for row in range(WRAPPER_BATCH):
+            for slot, region, expected_label in (
+                (0, false_negative, 1),
+                (1, false_positive, 0),
+            ):
+                x_coord, y_coord = coords[row, slot]
+                col = int(round((x_coord + 0.5) / scale - 0.5))
+                grid_row = int(round((y_coord + 0.5) / scale - 0.5))
+                assert region[row, grid_row, col] > 0, (
+                    f"batch {row} slot {slot}: sampled cell "
+                    f"({grid_row}, {col}) is NOT in its error region"
+                )
+                assert int(labels[row, slot]) == expected_label
+
+    def test_an_empty_error_region_is_labelled_padding_not_sampled(
+        self,
+    ) -> None:
+        """
+        The edge case the plan names explicitly. A perfect prediction leaves
+        both error regions empty; the draw then degenerates to uniform, and the
+        LABEL is what stops that pixel from being taught as object interior.
+        """
+        keras.utils.set_random_seed(7)
+        model = SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=2)
+        model(_wrapper_inputs())
+        empty = ops.zeros((WRAPPER_BATCH, LOW_RES, LOW_RES))
+        _, labels = model._sample_from_region(empty, 1, (IMG_SIZE, IMG_SIZE))
+        assert np.all(np.asarray(ops.convert_to_numpy(labels)) == -1)
+
+    def test_a_non_empty_region_is_not_labelled_padding(self) -> None:
+        """Control: without it, a sampler that labelled EVERYTHING ``-1``
+        would pass the test above."""
+        keras.utils.set_random_seed(7)
+        model = SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=2)
+        model(_wrapper_inputs())
+        region = np.zeros((WRAPPER_BATCH, LOW_RES, LOW_RES), dtype="float32")
+        region[:, 10:20, 30:40] = 1.0
+        coords, labels = model._sample_from_region(
+            ops.convert_to_tensor(region), 1, (IMG_SIZE, IMG_SIZE)
+        )
+        assert np.all(np.asarray(ops.convert_to_numpy(labels)) == 1)
+        scale = IMG_SIZE / LOW_RES
+        drawn = np.asarray(ops.convert_to_numpy(coords))
+        for row in range(WRAPPER_BATCH):
+            x_coord, y_coord = drawn[row, 0]
+            col = int(round((x_coord + 0.5) / scale - 0.5))
+            grid_row = int(round((y_coord + 0.5) / scale - 0.5))
+            assert region[row, grid_row, col] > 0
+
+    def test_the_sampler_is_not_degenerate(self) -> None:
+        """
+        A sampler that always returned the same pixel would satisfy every
+        containment assertion above. Draw many times from one region and
+        require more than one distinct cell.
+        """
+        keras.utils.set_random_seed(7)
+        model = SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=2)
+        model(_wrapper_inputs())
+        region = np.zeros((WRAPPER_BATCH, LOW_RES, LOW_RES), dtype="float32")
+        region[:, 10:30, 30:50] = 1.0
+        tensor = ops.convert_to_tensor(region)
+        seen = set()
+        for _ in range(40):
+            coords, _ = model._sample_from_region(tensor, 1, (IMG_SIZE, IMG_SIZE))
+            drawn = np.asarray(ops.convert_to_numpy(coords))
+            for row in range(WRAPPER_BATCH):
+                seen.add(tuple(drawn[row, 0].tolist()))
+        assert len(seen) > 5, f"only {len(seen)} distinct cells over 80 draws"
+
+
+class TestSeedGeneratorGotcha:
+    """
+    The plan carried this as an UNPROVEN gotcha. RED-proved here -- and the
+    inherited statement of it turned out to be wrong.
+    """
+
+    def test_creating_the_seed_generator_inside_call_raises(self) -> None:
+        """
+        The lazy spelling really does raise, and this class is exactly the shape
+        that makes it raise: it defines ``build()``, so ``super().build()`` runs
+        ``Layer._lock_state`` before ``call`` ever executes.
+        """
+
+        class LazySeedGeneratorControl(SAMTrainingModel):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                del self.seed_generator
+
+            def _sample_from_region(
+                self, region: Any, label: int, image_size: Any
+            ) -> Any:
+                if not hasattr(self, "seed_generator"):
+                    self.seed_generator = keras.random.SeedGenerator(
+                        seed=self.seed
+                    )
+                return super()._sample_from_region(region, label, image_size)
+
+        keras.utils.set_random_seed(7)
+        model = LazySeedGeneratorControl(
+            build_reduced_sam(), num_refinement_rounds=2
+        )
+        x = _wrapper_inputs()
+        x[INPUT_GT_MASK] = _gt_mask_stack(1)
+        with pytest.raises(
+            ValueError, match="cannot add new elements of state"
+        ):
+            model(x)
+
+    def test_f5_item_10_bare_keras_random_gotcha_does_not_reproduce(
+        self,
+    ) -> None:
+        """
+        **Premise falsified.** F-5 item 10 recorded that a BARE ``keras.random.*``
+        inside ``call()`` raises the same "already built" error, and the plan
+        carried it as a hard constraint. Measured on keras 3.8.0 it does not:
+        the bare call routes to the module-level global seed generator and adds
+        no state to the layer. The explicit ``SeedGenerator`` is kept for the
+        two reasons that ARE measured -- the lazy spelling above really raises,
+        and an explicit generator makes the sampling reproducible from ``seed``
+        and serializable. This test pins the falsification so the wrong
+        justification cannot be silently restored.
+        """
+
+        class BareRandomProbe(keras.Model):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.dense = keras.layers.Dense(4)
+
+            def build(self, input_shape: Any) -> None:
+                self.dense.build(input_shape)
+                super().build(input_shape)
+
+            def call(self, inputs: Any, training: bool = None) -> Any:
+                drawn = keras.random.categorical(
+                    ops.zeros((ops.shape(inputs)[0], 8)), 1
+                )
+                return self.dense(inputs) + ops.cast(drawn, "float32") * 0.0
+
+        rng = np.random.RandomState(0)
+        x = rng.uniform(size=(8, 3)).astype("float32")
+        y = rng.uniform(size=(8, 4)).astype("float32")
+        model = BareRandomProbe()
+        model(x)
+        model(x)
+        model.compile(optimizer="adam", loss="mse")
+        history = model.fit(x, y, epochs=2, verbose=0)
+        assert np.isfinite(history.history["loss"][-1])
+
+    def test_the_seed_generator_makes_the_sampling_reproducible(self) -> None:
+        """The property the explicit generator is actually kept for."""
+
+        def draw(seed: int) -> np.ndarray:
+            keras.utils.set_random_seed(11)
+            model = SAMTrainingModel(
+                build_reduced_sam(), num_refinement_rounds=2, seed=seed
+            )
+            model(_wrapper_inputs())
+            region = np.zeros(
+                (WRAPPER_BATCH, LOW_RES, LOW_RES), dtype="float32"
+            )
+            region[:, 5:60, 5:60] = 1.0
+            coords, _ = model._sample_from_region(
+                ops.convert_to_tensor(region), 1, (IMG_SIZE, IMG_SIZE)
+            )
+            return np.asarray(ops.convert_to_numpy(coords))
+
+        assert np.array_equal(draw(123), draw(123))
+        assert not np.array_equal(draw(123), draw(999))
+
+
+class TestRefinementSerialization:
+    """What the ``.keras`` round-trip does and does NOT preserve once the
+    model samples."""
+
+    def test_round_one_is_still_value_exact_after_a_round_trip(self) -> None:
+        """
+        The round-1 slice is deterministic (nothing has been sampled yet), so it
+        must reproduce exactly -- that is the part of the step-2 guarantee that
+        survives refinement.
+        """
+        model, x, _ = _refined(3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "refining.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+            reference = np.asarray(
+                ops.convert_to_numpy(model(x)[LOW_RES_LOGITS])
+            )
+            loaded = np.asarray(
+                ops.convert_to_numpy(restored(x)[LOW_RES_LOGITS])
+            )
+        assert restored.num_refinement_rounds == 3
+        assert float(np.max(np.abs(loaded[:, 0] - reference[:, 0]))) == 0.0
+
+    def test_the_later_rounds_are_NOT_value_exact_and_that_is_declared(
+        self,
+    ) -> None:
+        """
+        Declared, not hidden. Rounds 2+ depend on a random draw whose generator
+        state has advanced differently in the two processes-of-one, so the
+        step-2 "max abs diff 0.0 on low_res_logits" guarantee does NOT extend to
+        them. Asserting exactness here would be asserting something false; this
+        test pins the honest statement instead, so a future reader does not
+        "fix" a round-trip that is not broken.
+        """
+        model, x, _ = _refined(3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "refining.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+            reference = np.asarray(
+                ops.convert_to_numpy(model(x)[LOW_RES_LOGITS])
+            )
+            loaded = np.asarray(
+                ops.convert_to_numpy(restored(x)[LOW_RES_LOGITS])
+            )
+        assert float(np.max(np.abs(loaded[:, 1:] - reference[:, 1:]))) > 0.0

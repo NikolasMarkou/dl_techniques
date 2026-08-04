@@ -82,6 +82,47 @@ IOU_MASK_THRESHOLD = 0.0
 #: Added to the IoU numerator and denominator so an empty union gives 1.0.
 IOU_SMOOTH = 1e-6
 
+#: Rounds the CLASS defaults to. **1 = refinement off.** Refinement is opt-in,
+#: not opt-out, and that is a measured decision rather than timidity (D-037):
+#: at any value > 1 the output's mask axis is `M * rounds`, the wrapper stops
+#: being value-exactly equivalent to an eager `SAM.call` (the A-2 guard), and
+#: the `.keras` round-trip stops being value-exact because the sampling
+#: advances a random state. Those three properties are the wrapper's inference-
+#: shaped contract; a caller who wants refinement is training, and says so.
+DEFAULT_REFINEMENT_ROUNDS = 1
+#: Rounds the TRAINER ships. Derived here by measurement, not copied -- the
+#: paper's "11 rounds" could not be verified from any primary source (F-5 item
+#: 12), and 11 rounds is 11 decoder passes per step. Measured on the reduced
+#: fixture, one `fit()` step each:
+#:
+#:   rounds=1  170/201 moved   rounds=2  181/201   rounds=3  181/201
+#:                                                 rounds=4  181/201
+#:
+#: **Variable coverage saturates at 2**, not 3: the whole `mask_downscaling`
+#: stack (10 vars) and the background-point type embedding become reachable the
+#: moment ONE round feeds a mask back and samples an error point, and nothing
+#: further is reached after that. 3 is shipped over 2 for a different, also
+#: measured reason: round 3 is the first round whose prompt is built by
+#: concatenating onto an ALREADY-concatenated point set, so it is the first
+#: round that exercises the accumulation path rather than the initial
+#: concatenation. Per-step GPU peak across rounds 1-4 stayed in the 65-104 MiB
+#: band at this fixture size with no monotone growth, so the choice costs
+#: nothing measurable here. It is NOT a claim about `vit_b` scale.
+TRAINING_REFINEMENT_ROUNDS = 3
+#: Point label written when the error region a round wanted to sample from is
+#: EMPTY. `-1` is `PromptEncoder`'s padding label, whose positional encoding is
+#: zeroed (D-013), so an empty region contributes the not-a-point embedding
+#: rather than an arbitrary pixel dressed up as a real prompt.
+EMPTY_REGION_LABEL = -1
+#: Foreground / background labels for the two sampled refinement points.
+FOREGROUND_LABEL = 1
+BACKGROUND_LABEL = 0
+#: Logit written into pixels OUTSIDE the region being sampled from. Large and
+#: negative rather than `-inf`: `keras.random.categorical` on an all-`-inf` row
+#: returns NaN-driven garbage, while an all-`LOW` row degenerates to a uniform
+#: draw that `EMPTY_REGION_LABEL` then neutralizes.
+OUTSIDE_REGION_LOGIT = -1e9
+
 
 def achieved_mask_iou(
     mask_logits: Any,
@@ -135,10 +176,19 @@ class SAMTrainingModel(keras.Model):
             training regime; ``True`` emits ``num_multimask_outputs`` masks and
             requires a loss that reduces over the mask axis.
         seed: Seed for the ``keras.random.SeedGenerator`` created in
-            ``__init__``. The generator is created here, and never inside
-            ``call``, because ``keras.random.*`` without an explicit seed
+            ``__init__``. The generator is created there, and never lazily
+            inside ``call``: this class defines ``build()``, so the layer's
+            state tracker is locked before ``call`` runs and a lazily created
             generator raises ``ValueError: You cannot add new elements of state
-            ... to a layer that is already built`` on the second traced call.
+            (variables or sub-layers) to a layer that is already built``
+            (measured; see D-037).
+        num_refinement_rounds: How many decode rounds ``call`` runs. ``1``
+            disables refinement entirely. Each round after the first is
+            prompted by the previous round's **detached** logits (as the dense
+            mask prompt) plus two freshly sampled points: a foreground point
+            from the false-negative region and a background point from the
+            false-positive region. Sampling needs ``gt_mask``; without it the
+            rounds still run, prompted by the mask feedback alone.
         **kwargs: Forwarded to ``keras.Model``.
 
     Input dict (from the ``keras``/data pipeline):
@@ -152,10 +202,11 @@ class SAMTrainingModel(keras.Model):
         - ``gt_mask``: ``(B, M, 4*grid, 4*grid)`` binary, optional. Supplying it
           turns on the ``iou_supervision`` output.
 
-    Output dict:
-        - ``low_res_logits``: ``(B, M, 4*grid, 4*grid)`` float logits.
-        - ``iou_predictions``: ``(B, M)`` float.
-        - ``iou_supervision``: ``(B, M, 2)``, present only when ``gt_mask`` is
+    Output dict (``R = num_refinement_rounds``, rounds concatenated round-major
+    on the mask axis):
+        - ``low_res_logits``: ``(B, M*R, 4*grid, 4*grid)`` float logits.
+        - ``iou_predictions``: ``(B, M*R)`` float.
+        - ``iou_supervision``: ``(B, M*R, 2)``, present only when ``gt_mask`` is
           supplied. ``[..., 0]`` is the predicted IoU, ``[..., 1]`` the achieved
           IoU (stop-gradient). ``SAMIoULoss`` reads both from this one tensor.
 
@@ -169,6 +220,7 @@ class SAMTrainingModel(keras.Model):
         sam: SAM,
         multimask_output: bool = False,
         seed: int = 42,
+        num_refinement_rounds: int = DEFAULT_REFINEMENT_ROUNDS,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -179,15 +231,30 @@ class SAMTrainingModel(keras.Model):
         self.sam = sam
         self.multimask_output = bool(multimask_output)
         self.seed = int(seed)
-        # DECISION plan-2026-08-03T191222-1d751f81/D-035: create the
-        # SeedGenerator HERE, in `__init__`, even though nothing in this class
-        # samples yet (the refinement loop, step 4, will). Do NOT call a bare
-        # `keras.random.*` inside `call()` and do NOT lazily create the
-        # generator on first use: Keras creates the generator's state variable
-        # at first call, and a layer that is already built refuses new state
-        # with `ValueError: You cannot add new elements of state ... to a layer
-        # that is already built`. Measured (F-5 item 10) -- the failure appears
-        # on the SECOND traced call, so a single-call smoke test cannot see it.
+        if int(num_refinement_rounds) < 1:
+            raise ValueError(
+                "num_refinement_rounds must be >= 1 (1 = a single decode with "
+                f"no refinement); got {num_refinement_rounds}."
+            )
+        self.num_refinement_rounds = int(num_refinement_rounds)
+        # DECISION plan-2026-08-03T191222-1d751f81/D-037: create the
+        # SeedGenerator HERE, in `__init__`. Do NOT create it lazily inside
+        # `call()` (`if not hasattr(self, "seed_generator"): ...`), which is the
+        # spelling that looks tidier because the generator is only needed when
+        # refinement runs. That spelling raises, MEASURED on this class:
+        #   ValueError: You cannot add new elements of state (variables or
+        #   sub-layers) to a layer that is already built.
+        # ...from `Layer._lock_state`, because this class defines `build()`, so
+        # `super().build()` locks the tracker before `call` ever runs.
+        #
+        # F-5 item 10's stronger claim -- that a BARE `keras.random.*` with no
+        # seed generator raises the same error -- was RED-probed here and does
+        # NOT reproduce on keras 3.8.0: the bare call routes to the module-level
+        # global generator, adds no state to this layer, and trains fine. The
+        # generator is kept anyway on two measured grounds: the lazy spelling
+        # above really does raise, and an explicit per-model generator makes the
+        # sampling reproducible from `seed` and serializable, which the global
+        # one is not.
         self.seed_generator = keras.random.SeedGenerator(seed=self.seed)
 
     def build(self, input_shape: Optional[Any] = None) -> None:
@@ -224,20 +291,152 @@ class SAMTrainingModel(keras.Model):
         self.sam.build(None)
         super().build(input_shape)
 
+    # -----------------------------------------------------------------
+    # Refinement helpers
+    # -----------------------------------------------------------------
+    def _feedback_mask(self, low_res_logits: Any) -> Any:
+        """
+        Turn a round's logits into the next round's dense mask prompt.
+
+        Args:
+            low_res_logits: ``(B, M, h, w)`` logits from the round that just
+                decoded. Only mask ``0`` is fed back, because ``PromptEncoder``
+                accepts exactly one dense mask channel.
+
+        Returns:
+            ``(B, 1, h, w)``, detached from the graph.
+        """
+        # DECISION plan-2026-08-03T191222-1d751f81/D-037: `ops.stop_gradient` is
+        # what makes the loop N cheap decodes instead of one N-deep recurrent
+        # graph. Do NOT remove it "so the rounds can learn from each other":
+        # reference SAM detaches the fed-back mask, and without the detach every
+        # round's backward pass re-enters every earlier round's decoder, which
+        # is the memory blow-up this loop is designed not to have. Pinned by
+        # `TestRefinementStopGradient`, whose control returns this same slice
+        # WITHOUT the detach and measures max|g| 0.0 -> non-zero on the image
+        # encoder's weights. Note the gradient comes back as exact ZEROS, not
+        # `None` -- the surrounding `ops.stack`/`ops.concatenate` keep the
+        # tensor structurally connected -- so a `None`-counting assertion here
+        # would fail for a reason unrelated to the property (D-036 lesson 1).
+        return ops.stop_gradient(low_res_logits[:, 0:1])
+
+    def _sample_from_region(
+        self,
+        region: Any,
+        label: int,
+        image_size: Tuple[int, int],
+    ) -> Tuple[Any, Any]:
+        """
+        Sample one pixel per batch row from a binary region.
+
+        Args:
+            region: ``(B, h, w)`` float, non-zero inside the region.
+            label: Point label to emit when the region is non-empty.
+            image_size: ``(H, W)`` of the padded image frame the returned
+                coordinates must live in.
+
+        Returns:
+            ``(coords, labels)`` of shapes ``(B, 1, 2)`` (xy, float) and
+            ``(B, 1)`` (int32). Rows whose region is EMPTY carry
+            :data:`EMPTY_REGION_LABEL`.
+        """
+        shape = tuple(region.shape)
+        height, width = int(shape[1]), int(shape[2])
+        flat = ops.reshape(region, (-1, height * width))
+
+        # DECISION plan-2026-08-03T191222-1d751f81/D-037: an empty error region
+        # is handled by the LABEL, not by the draw. Every pixel outside the
+        # region gets `OUTSIDE_REGION_LOGIT`, so an all-empty row degenerates to
+        # a uniform draw over the whole grid -- and that draw is then labelled
+        # `-1` (padding), whose positional encoding `PromptEncoder` zeroes
+        # (D-013). Do NOT "fix" the empty case by clamping the coordinate to
+        # (0, 0) with a foreground label: that silently teaches the model that
+        # the top-left corner is object interior whenever the prediction is
+        # already perfect, and no shape assertion can see it.
+        logits = ops.where(
+            flat > 0.0,
+            ops.zeros_like(flat),
+            ops.full_like(flat, OUTSIDE_REGION_LOGIT),
+        )
+        drawn = keras.random.categorical(logits, 1, seed=self.seed_generator)
+        index = ops.cast(ops.squeeze(drawn, axis=-1), "int32")
+        row = ops.cast(index // width, "float32")
+        col = ops.cast(index - (index // width) * width, "float32")
+
+        # The region grid is `low_res_logits`-sized; the prompt frame is the
+        # padded image. Map cell (row, col) to its CENTRE in image pixels, then
+        # subtract 0.5 because `PromptEncoder._embed_points` adds its own +0.5
+        # pixel-centre offset -- so the encoder ends up at exactly the centre.
+        scale_y = float(image_size[0]) / float(height)
+        scale_x = float(image_size[1]) / float(width)
+        x = (col + 0.5) * scale_x - 0.5
+        y = (row + 0.5) * scale_y - 0.5
+        coords = ops.expand_dims(ops.stack([x, y], axis=-1), axis=1)
+
+        non_empty = ops.sum(flat, axis=-1) > 0.0
+        labels = ops.where(
+            non_empty,
+            ops.full_like(index, label),
+            ops.full_like(index, EMPTY_REGION_LABEL),
+        )
+        return coords, ops.expand_dims(labels, axis=1)
+
+    def _sample_error_points(
+        self,
+        low_res_logits: Any,
+        gt_mask: Any,
+        image_size: Tuple[int, int],
+    ) -> Tuple[Any, Any]:
+        """
+        One foreground point from the false negatives, one background point
+        from the false positives.
+
+        Args:
+            low_res_logits: ``(B, M, h, w)`` logits of the round that just ran.
+            gt_mask: ``(B, M, h, w)`` binary ground truth at the same resolution.
+            image_size: ``(H, W)`` of the padded image frame.
+
+        Returns:
+            ``(coords, labels)`` of shapes ``(B, 2, 2)`` and ``(B, 2)``.
+        """
+        predicted = ops.cast(low_res_logits[:, 0] > IOU_MASK_THRESHOLD, "float32")
+        truth = ops.cast(gt_mask[:, 0] > 0.5, "float32")
+        false_negative = truth * (1.0 - predicted)
+        false_positive = (1.0 - truth) * predicted
+
+        fg_coords, fg_labels = self._sample_from_region(
+            false_negative, FOREGROUND_LABEL, image_size
+        )
+        bg_coords, bg_labels = self._sample_from_region(
+            false_positive, BACKGROUND_LABEL, image_size
+        )
+        return (
+            ops.concatenate([fg_coords, bg_coords], axis=1),
+            ops.concatenate([fg_labels, bg_labels], axis=1),
+        )
+
     def call(
         self,
         inputs: Dict[str, Any],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Run ``preprocess -> image_encoder -> prompt_encoder -> mask_decoder``.
+        Run ``num_refinement_rounds`` decode rounds and stack their outputs.
+
+        The image encoder runs **once**, outside the loop -- that is what makes
+        multi-round refinement affordable at all. Each subsequent round re-runs
+        only ``prompt_encoder -> mask_decoder``, prompted by the previous
+        round's detached logits plus two freshly sampled error points.
 
         Args:
             inputs: The input dict described in the class docstring.
             training: Standard Keras training flag, forwarded to every submodule.
 
         Returns:
-            ``{"low_res_logits": ..., "iou_predictions": ...}``.
+            ``{"low_res_logits": (B, M*R, h, w), "iou_predictions": (B, M*R)}``
+            with ``R = num_refinement_rounds``, rounds concatenated on the mask
+            axis in round order, plus ``iou_supervision`` when ``gt_mask`` is
+            supplied.
 
         Raises:
             ValueError: if ``image`` is missing, if exactly one of
@@ -280,30 +479,68 @@ class SAMTrainingModel(keras.Model):
         # `SAM.call` and observes that exact TypeError.
         image = self.sam.preprocess(inputs[INPUT_IMAGE])
         image_embeddings = self.sam.image_encoder(image, training=training)
+        image_size = tuple(self.sam.prompt_encoder.input_image_size)
 
-        points = None
-        if has_coords:
-            points = (inputs[INPUT_POINT_COORDS], inputs[INPUT_POINT_LABELS])
+        coords = inputs[INPUT_POINT_COORDS] if has_coords else None
+        labels = inputs[INPUT_POINT_LABELS] if has_coords else None
+        gt_mask = inputs.get(INPUT_GT_MASK)
+        mask_prompt = None
 
-        sparse_embeddings, dense_embeddings = self.sam.prompt_encoder(
-            points=points,
-            boxes=boxes,
-            masks=None,
-            training=training,
-        )
+        # DECISION plan-2026-08-03T191222-1d751f81/D-037: the image encoder is
+        # called ONCE, above, and the loop below re-runs only the prompt encoder
+        # and the mask decoder. Do NOT move `image_encoder` inside the loop
+        # "for symmetry" -- the encoder is >95% of SAM's parameters and the
+        # whole feasibility of multi-round refinement on a 12 GB card rests on
+        # it running once per step. Do NOT reach for a custom `train_step` to
+        # host this loop either: it traces and trains under stock graph-mode
+        # `fit()` exactly as written (measured), and a custom `train_step` is
+        # forbidden by standing instruction.
+        round_logits = []
+        round_ious = []
+        for round_index in range(self.num_refinement_rounds):
+            points = None if coords is None else (coords, labels)
+            sparse_embeddings, dense_embeddings = self.sam.prompt_encoder(
+                points=points,
+                boxes=boxes,
+                masks=mask_prompt,
+                training=training,
+            )
+            low_res_logits, iou_predictions = self.sam.mask_decoder(
+                image_embeddings=image_embeddings,
+                image_pe=self.sam.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=self.multimask_output,
+                training=training,
+            )
+            round_logits.append(low_res_logits)
+            round_ious.append(iou_predictions)
 
-        low_res_logits, iou_predictions = self.sam.mask_decoder(
-            image_embeddings=image_embeddings,
-            image_pe=self.sam.prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=self.multimask_output,
-            training=training,
-        )
+            if round_index + 1 < self.num_refinement_rounds:
+                mask_prompt = self._feedback_mask(low_res_logits)
+                if gt_mask is not None:
+                    new_coords, new_labels = self._sample_error_points(
+                        mask_prompt, gt_mask, image_size
+                    )
+                    if coords is None:
+                        coords, labels = new_coords, new_labels
+                    else:
+                        coords = ops.concatenate(
+                            [coords, ops.cast(new_coords, coords.dtype)], axis=1
+                        )
+                        labels = ops.concatenate(
+                            [labels, ops.cast(new_labels, labels.dtype)], axis=1
+                        )
+
+        if len(round_logits) == 1:
+            all_logits, all_ious = round_logits[0], round_ious[0]
+        else:
+            all_logits = ops.concatenate(round_logits, axis=1)
+            all_ious = ops.concatenate(round_ious, axis=1)
 
         outputs = {
-            LOW_RES_LOGITS: low_res_logits,
-            IOU_PREDICTIONS: iou_predictions,
+            LOW_RES_LOGITS: all_logits,
+            IOU_PREDICTIONS: all_ious,
         }
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-036: the IoU target is
@@ -318,13 +555,25 @@ class SAMTrainingModel(keras.Model):
         # or (c) writing a custom `train_step`, which is forbidden by standing
         # instruction and unnecessary. The key is emitted only when `gt_mask` is
         # supplied, so an inference-shaped call keeps the two-key contract.
-        if INPUT_GT_MASK in inputs:
+        if gt_mask is not None:
+            # Each round predicts the SAME ground truth, so the GT stack is
+            # repeated once per round to line up with the concatenated mask
+            # axis. `ops.concatenate` matches the round-major order the logits
+            # were concatenated in -- `ops.repeat` would interleave and silently
+            # score round r against mask r's GT -- and unlike `ops.tile` it
+            # preserves the static shape under `fit()`'s trace (measured: tile
+            # returned `(None, None, None, None)` from a `(None, 1, 64, 64)`
+            # input, which then broke the loss's own shape guard).
+            if self.num_refinement_rounds > 1:
+                gt_for_iou = ops.concatenate(
+                    [gt_mask] * self.num_refinement_rounds, axis=1
+                )
+            else:
+                gt_for_iou = gt_mask
             achieved = ops.stop_gradient(
-                achieved_mask_iou(low_res_logits, inputs[INPUT_GT_MASK])
+                achieved_mask_iou(all_logits, gt_for_iou)
             )
-            outputs[IOU_SUPERVISION] = ops.stack(
-                [iou_predictions, achieved], axis=-1
-            )
+            outputs[IOU_SUPERVISION] = ops.stack([all_ious, achieved], axis=-1)
 
         return outputs
 
@@ -347,6 +596,7 @@ class SAMTrainingModel(keras.Model):
                 "sam": keras.layers.serialize(self.sam),
                 "multimask_output": self.multimask_output,
                 "seed": self.seed,
+                "num_refinement_rounds": self.num_refinement_rounds,
             }
         )
         return config

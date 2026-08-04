@@ -435,3 +435,66 @@ class TestSAMIoULoss:
         loss = SAMIoULoss(name="custom_iou")
         restored = SAMIoULoss.from_config(loss.get_config())
         assert restored.name == "custom_iou"
+
+
+class TestMaskAxisAlignmentAcrossRefinementRounds:
+    """
+    Plan step 4. ``SAMTrainingModel`` concatenates every refinement round's
+    logits on the mask axis, so ``y_pred`` is ``(B, M*R, h, w)`` while the data
+    pipeline's ``y_true`` stays ``(B, M, h, w)`` -- and must, or every data
+    source would have to know the model's round count.
+    """
+
+    @staticmethod
+    def _two_distinct_masks() -> np.ndarray:
+        """A GT stack whose two masks are DIFFERENT, so mis-ordering shows."""
+        gt = np.zeros((BATCH, 2, HEIGHT, WIDTH), dtype="float32")
+        gt[:, 0, 8:24, 8:24] = 1.0
+        gt[:, 1, 40:56, 40:56] = 1.0
+        return gt
+
+    def test_a_single_instance_gt_is_repeated_across_rounds(self) -> None:
+        gt, probs = _probe_arrays()
+        logits = _to_logits(probs)
+        rounds = 3
+        repeated_pred = np.concatenate([logits] * rounds, axis=1)
+        repeated_true = np.concatenate([gt] * rounds, axis=1)
+        loss = SAMMaskLoss()
+        broadcast = _scalar(loss(_t(gt), _t(repeated_pred)))
+        explicit = _scalar(loss(_t(repeated_true), _t(repeated_pred)))
+        assert broadcast == pytest.approx(explicit, abs=1e-6), (
+            f"repeating the GT internally gave {broadcast} but an explicitly "
+            f"repeated y_true gave {explicit}"
+        )
+
+    def test_the_repeat_is_round_major_not_interleaved(self) -> None:
+        """
+        The one alignment error that returns a plausible number. With two
+        distinct GT masks and two rounds, ``concatenate``/``tile`` order is
+        ``[m0, m1, m0, m1]`` while ``ops.repeat`` would give ``[m0, m0, m1,
+        m1]``. Feed a prediction that is PERFECT under the first ordering: the
+        loss must be near its floor, and would be far from it under the other.
+        """
+        gt = self._two_distinct_masks()
+        perfect = np.concatenate([gt, gt], axis=1) * 20.0 - 10.0
+        interleaved = np.concatenate(
+            [gt[:, 0:1], gt[:, 0:1], gt[:, 1:2], gt[:, 1:2]], axis=1
+        ) * 20.0 - 10.0
+        loss = SAMMaskLoss()
+        aligned = _scalar(loss(_t(gt), _t(perfect)))
+        misaligned = _scalar(loss(_t(gt), _t(interleaved)))
+        assert misaligned > aligned * 10.0, (
+            f"round-major alignment gave {aligned} and the interleaved "
+            f"ordering gave {misaligned} -- this test cannot tell the two apart"
+        )
+
+    def test_a_non_multiple_mask_axis_is_refused(self) -> None:
+        gt = self._two_distinct_masks()
+        pred = np.concatenate([gt, gt[:, 0:1]], axis=1)
+        with pytest.raises(ValueError, match="not a whole multiple"):
+            SAMMaskLoss()(_t(gt), _t(pred))
+
+    def test_matching_mask_axes_are_left_alone(self) -> None:
+        """Non-firing control: the pre-step-4 shape must be untouched."""
+        gt, probs = _probe_arrays()
+        assert np.isfinite(_scalar(SAMMaskLoss()(_t(gt), _t(_to_logits(probs)))))

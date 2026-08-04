@@ -108,6 +108,55 @@ def _require_channels_last(tensor: Any, channels: int, who: str) -> None:
         )
 
 
+def _match_mask_axis(
+    truth: Any,
+    true_shape: Tuple[Optional[int], ...],
+    pred_shape: Tuple[Optional[int], ...],
+) -> Any:
+    """
+    Repeat a single-instance GT stack across a multi-mask prediction stack.
+
+    ``SAMTrainingModel`` concatenates every refinement round's logits on the
+    mask axis, so ``y_pred`` is ``(B, M*R, h, w)`` while the pipeline's
+    ``y_true`` stays ``(B, M, h, w)`` -- and MUST stay that way, or every data
+    source would have to know the model's round count.
+
+    Args:
+        truth: The GT mask stack, already cast to the prediction's dtype.
+        true_shape: Static shape of ``truth``.
+        pred_shape: Static shape of the prediction.
+
+    Returns:
+        ``truth`` unchanged when the mask axes already agree, else ``truth``
+        tiled to the prediction's mask axis.
+
+    Raises:
+        ValueError: if the mask axes disagree and the prediction's is not an
+            exact multiple of the truth's. Tiling a partial multiple would score
+            some rounds against the wrong instance while every rank and spatial
+            assertion still passed.
+    """
+    true_masks, pred_masks = true_shape[1], pred_shape[1]
+    if true_masks is None or pred_masks is None or true_masks == pred_masks:
+        return truth
+    if pred_masks % true_masks != 0:
+        raise ValueError(
+            f"SAMMaskLoss cannot align y_true's mask axis ({true_masks}) with "
+            f"y_pred's ({pred_masks}): {pred_masks} is not a whole multiple of "
+            f"{true_masks}. y_pred carries num_masks * num_refinement_rounds "
+            f"masks concatenated round-major; y_true must carry either the same "
+            f"number or exactly num_masks."
+        )
+    # `concatenate`, not `repeat` and not `tile`. Not `repeat` because
+    # `SAMTrainingModel` concatenates rounds round-major ([r0 masks..., r1
+    # masks...]) and `repeat` would interleave, scoring round r against mask r's
+    # ground truth. Not `tile` because -- MEASURED -- `ops.tile` erases the
+    # static shape under `fit()`'s trace: a `(None, 1, 64, 64)` y_true came back
+    # `(None, None, None, None)` and the very next `to_dice_layout` raised
+    # `needs static spatial extents`. `concatenate` keeps them.
+    return ops.concatenate([truth] * (pred_masks // true_masks), axis=1)
+
+
 def to_dice_layout(mask_stack: Any) -> Any:
     """
     Reshape a ``(B, M, h, w)`` mask stack to dice's ``(B*M, h, w, 1)`` layout.
@@ -199,11 +248,12 @@ class SAMMaskLoss(keras.losses.Loss):
 
     def call(self, y_true: Any, y_pred: Any) -> Any:
         """Compute ``focal_weight * focal + dice_weight * dice``."""
-        _static_mask_stack_shape(y_pred, "SAMMaskLoss(y_pred)")
-        _static_mask_stack_shape(y_true, "SAMMaskLoss(y_true)")
+        pred_shape = _static_mask_stack_shape(y_pred, "SAMMaskLoss(y_pred)")
+        true_shape = _static_mask_stack_shape(y_true, "SAMMaskLoss(y_true)")
 
         probabilities = ops.sigmoid(y_pred) if self.from_logits else y_pred
         truth = ops.cast(y_true, probabilities.dtype)
+        truth = _match_mask_axis(truth, true_shape, pred_shape)
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-036: focal gets a TWO-channel
         # one-hot and dice gets a ONE-channel channels-last stack. Do NOT
