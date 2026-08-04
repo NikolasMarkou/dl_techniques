@@ -9,7 +9,7 @@ the loss, and nothing else.
 """
 
 import os
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import keras
 import numpy as np
@@ -19,6 +19,7 @@ from keras import ops
 
 from dl_techniques.models.sam import SAMTrainingModel
 from dl_techniques.models.sam.training_model import (
+    INPUT_BOXES,
     INPUT_GT_MASK,
     INPUT_IMAGE,
     INPUT_POINT_COORDS,
@@ -32,6 +33,8 @@ from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
 from train.sam.data import (
     DATA_SOURCES,
     MASK_DIVISOR,
+    MAX_JITTER_PIXELS,
+    MIN_BOX_SIDE,
     MIN_MASK_PIXELS,
     PADDING_LABEL,
     RECORD_BOX,
@@ -40,7 +43,9 @@ from train.sam.data import (
     _box_from_mask,
     build_sam_dataset,
     coco_instance_samples,
+    jitter_box,
     sample_point_in_mask,
+    sample_point_outside_mask,
     synthetic_instance_samples,
 )
 
@@ -377,6 +382,251 @@ class TestCocoSource:
             batch_size=2,
             source="coco",
             source_kwargs={"split": "val2017", "max_images": 32},
+        )
+        history = model.fit(dataset, epochs=1, verbose=0)
+        assert np.isfinite(history.history["loss"][-1])
+
+
+# ---------------------------------------------------------------------------
+# Plan step 7 -- prompt-sampling PROPERTIES over >=200 samples.
+#
+# "0 violations over N rows" is worthless if the corpus was swept rather than
+# attacked, and every containment check here is also satisfied by a CONSTANT
+# sampler -- so each property class ships a degeneracy check and a deliberately
+# broken control beside it.
+# ---------------------------------------------------------------------------
+PROPERTY_SAMPLES = 240
+
+
+def _property_masks(count: int, seed: int) -> List[np.ndarray]:
+    """Real instance masks from the synthetic source, not hand-drawn boxes."""
+    return [
+        record[RECORD_MASK]
+        for record in synthetic_instance_samples(
+            count, image_size=IMG_SIZE, max_instances=3, seed=seed
+        )
+    ]
+
+
+def _cell_of(coord: np.ndarray) -> Tuple[int, int]:
+    """Invert the pipeline's coordinate convention back to a mask cell."""
+    scale = IMG_SIZE / LOW_RES
+    x, y = float(coord[0]), float(coord[1])
+    return int(round((y + 0.5) / scale - 0.5)), int(round((x + 0.5) / scale - 0.5))
+
+
+class TestPointPromptProperties:
+    """Foreground points inside, background points outside, over 240 masks."""
+
+    def test_every_foreground_point_is_inside_its_own_mask(self) -> None:
+        masks = _property_masks(PROPERTY_SAMPLES, seed=21)
+        violations = []
+        cells = set()
+        for index, mask in enumerate(masks):
+            coords, labels = sample_point_in_mask(
+                tf.constant(mask), image_size=IMG_SIZE
+            )
+            row, col = _cell_of(np.asarray(coords)[0])
+            cells.add((row, col))
+            if mask[row, col] <= 0 or int(np.asarray(labels)[0]) != 1:
+                violations.append((index, row, col))
+        assert len(masks) == PROPERTY_SAMPLES
+        assert violations == [], f"{len(violations)} of {PROPERTY_SAMPLES}: {violations[:5]}"
+        # Degeneracy check: a sampler always returning one pixel satisfies the
+        # containment assertion above for any mask that happens to contain it.
+        assert len(cells) > PROPERTY_SAMPLES // 4, (
+            f"only {len(cells)} distinct cells over {PROPERTY_SAMPLES} masks"
+        )
+
+    def test_every_background_point_is_outside_its_own_mask(self) -> None:
+        masks = _property_masks(PROPERTY_SAMPLES, seed=22)
+        violations = []
+        cells = set()
+        for index, mask in enumerate(masks):
+            coords, labels = sample_point_outside_mask(
+                tf.constant(mask), image_size=IMG_SIZE
+            )
+            row, col = _cell_of(np.asarray(coords)[0])
+            cells.add((row, col))
+            if mask[row, col] > 0 or int(np.asarray(labels)[0]) != 0:
+                violations.append((index, row, col))
+        assert violations == [], f"{len(violations)} of {PROPERTY_SAMPLES}: {violations[:5]}"
+        assert len(cells) > PROPERTY_SAMPLES // 4
+
+    def test_a_deliberately_broken_sampler_DOES_violate(self) -> None:
+        """
+        The control that makes the two properties above mean something. A
+        sampler ignoring the mask (uniform over the whole grid) must be caught
+        by the very same check, or the check proves nothing.
+        """
+        masks = _property_masks(PROPERTY_SAMPLES, seed=23)
+        rng = np.random.default_rng(0)
+        violations = 0
+        for mask in masks:
+            row = int(rng.integers(0, LOW_RES))
+            col = int(rng.integers(0, LOW_RES))
+            if mask[row, col] <= 0:
+                violations += 1
+        assert violations > PROPERTY_SAMPLES // 2, (
+            f"the mask-ignoring sampler violated only {violations} times -- the "
+            f"masks are so large that containment is nearly free, so the "
+            f"properties above are weak evidence"
+        )
+
+    def test_a_fully_covered_mask_yields_a_padding_background_label(self) -> None:
+        """The mirror of the empty-mask edge case, on the background side."""
+        _, labels = sample_point_outside_mask(
+            tf.ones((LOW_RES, LOW_RES)), image_size=IMG_SIZE
+        )
+        assert int(np.asarray(labels)[0]) == PADDING_LABEL
+
+
+class TestBoxJitterProperties:
+    """Bounded, non-inverted, in-frame -- over 240 real instance boxes."""
+
+    @staticmethod
+    def _boxes(count: int, seed: int) -> List[np.ndarray]:
+        return [
+            record[RECORD_BOX]
+            for record in synthetic_instance_samples(
+                count, image_size=IMG_SIZE, max_instances=3, seed=seed
+            )
+        ]
+
+    def test_the_ground_truth_box_contains_its_own_mask(self) -> None:
+        """
+        Checked BEFORE jitter, because jitter deliberately breaks containment --
+        that is what makes it noise. Asserting containment on the jittered box
+        would be asserting something false.
+        """
+        records = list(
+            synthetic_instance_samples(
+                PROPERTY_SAMPLES, image_size=IMG_SIZE, max_instances=3, seed=24
+            )
+        )
+        scale = IMG_SIZE / LOW_RES
+        violations = []
+        for index, record in enumerate(records):
+            x1, y1, x2, y2 = record[RECORD_BOX]
+            rows = np.flatnonzero(record[RECORD_MASK].any(axis=1))
+            cols = np.flatnonzero(record[RECORD_MASK].any(axis=0))
+            # +/- one downsampled cell of slack: the box is measured at full
+            # resolution, the mask at `low_res_logits` resolution.
+            if not (
+                cols[0] * scale >= x1 - scale
+                and (cols[-1] + 1) * scale <= x2 + scale
+                and rows[0] * scale >= y1 - scale
+                and (rows[-1] + 1) * scale <= y2 + scale
+            ):
+                violations.append((index, record[RECORD_BOX]))
+        assert len(records) == PROPERTY_SAMPLES
+        assert violations == [], f"{len(violations)}: {violations[:3]}"
+
+    def test_jitter_stays_within_the_cap_and_never_inverts(self) -> None:
+        boxes = self._boxes(PROPERTY_SAMPLES, seed=25)
+        # Derived bound: each coordinate is offset by at most
+        # MAX_JITTER_PIXELS, then the far corner may be raised by at most
+        # MIN_BOX_SIDE more to enforce ordering.
+        cap = MAX_JITTER_PIXELS + MIN_BOX_SIDE
+        worst = 0.0
+        moved = 0
+        for box in boxes:
+            jittered = np.asarray(jitter_box(tf.constant(box), IMG_SIZE))
+            deviation = float(np.max(np.abs(jittered - box)))
+            worst = max(worst, deviation)
+            moved += int(deviation > 0.0)
+            assert deviation <= cap + 1e-4, f"{box} -> {jittered} ({deviation})"
+            assert jittered[2] > jittered[0], f"inverted in x: {jittered}"
+            assert jittered[3] > jittered[1], f"inverted in y: {jittered}"
+            assert float(jittered.min()) >= 0.0
+            assert float(jittered.max()) <= IMG_SIZE + 1e-4
+        # Non-degeneracy: a jitter that returned the box unchanged would pass
+        # every assertion above.
+        assert moved == PROPERTY_SAMPLES, f"{moved}/{PROPERTY_SAMPLES} moved"
+        assert worst > 1.0, f"largest deviation over {PROPERTY_SAMPLES} was {worst}"
+
+    def test_the_std_scales_with_the_box_side(self) -> None:
+        """
+        The 10%-of-side rule is observable, not merely written down: a large
+        box must be jittered more than a tiny one. A constant-std implementation
+        passes every bound assertion above.
+        """
+        small = np.asarray([10.0, 10.0, 14.0, 14.0], dtype="float32")
+        large = np.asarray(
+            [10.0, 10.0, 10.0 + IMG_SIZE * 0.7, 10.0 + IMG_SIZE * 0.7],
+            dtype="float32",
+        )
+
+        def spread(box: np.ndarray) -> float:
+            draws = [
+                np.asarray(jitter_box(tf.constant(box), IMG_SIZE)) - box
+                for _ in range(200)
+            ]
+            return float(np.std(np.stack(draws)))
+
+        small_spread, large_spread = spread(small), spread(large)
+        assert large_spread > 3.0 * small_spread, (
+            f"small-box spread {small_spread:.4f} vs large-box {large_spread:.4f}"
+        )
+
+    def test_the_cap_actually_binds_on_a_huge_box(self) -> None:
+        """
+        Attack the cap rather than sweep it: at 10% of a 224 px side the
+        unclipped std would be 22.4 px, so the cap must bite.
+        """
+        box = np.asarray([0.0, 0.0, float(IMG_SIZE), float(IMG_SIZE)], dtype="float32")
+        deviations = [
+            float(np.max(np.abs(np.asarray(jitter_box(tf.constant(box), IMG_SIZE)) - box)))
+            for _ in range(200)
+        ]
+        assert max(deviations) <= MAX_JITTER_PIXELS + MIN_BOX_SIDE + 1e-4
+        assert max(deviations) > 10.0, "the cap was never approached"
+
+
+class TestBoxAndBackgroundPointsReachTheModel:
+    """The pipeline options are wired through, not merely implemented."""
+
+    def test_the_dataset_emits_a_box_and_background_points_when_asked(
+        self,
+    ) -> None:
+        dataset = build_sam_dataset(
+            num_samples=4,
+            image_size=IMG_SIZE,
+            batch_size=2,
+            num_background_points=2,
+            include_box=True,
+            seed=31,
+        )
+        inputs, _ = next(iter(dataset))
+        assert tuple(inputs[INPUT_POINT_COORDS].shape) == (2, 3, 2)
+        assert tuple(inputs[INPUT_BOXES].shape) == (2, 1, 4)
+        labels = np.asarray(inputs[INPUT_POINT_LABELS])
+        assert list(labels[0]) == [1, 0, 0]
+
+    def test_the_defaults_emit_neither(self) -> None:
+        """Control: without it, the test above could pass on a pipeline that
+        always emitted them."""
+        dataset = build_sam_dataset(
+            num_samples=2, image_size=IMG_SIZE, batch_size=2, seed=31
+        )
+        inputs, _ = next(iter(dataset))
+        assert INPUT_BOXES not in inputs
+        assert tuple(inputs[INPUT_POINT_COORDS].shape) == (2, 1, 2)
+
+    def test_a_fit_step_runs_with_a_box_and_background_points(self) -> None:
+        keras.utils.set_random_seed(5)
+        model = SAMTrainingModel(build_reduced_sam(), num_refinement_rounds=1)
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss={LOW_RES_LOGITS: SAMMaskLoss(), IOU_SUPERVISION: SAMIoULoss()},
+        )
+        dataset = build_sam_dataset(
+            num_samples=4,
+            image_size=IMG_SIZE,
+            batch_size=2,
+            num_background_points=1,
+            include_box=True,
+            seed=32,
         )
         history = model.fit(dataset, epochs=1, verbose=0)
         assert np.isfinite(history.history["loss"][-1])

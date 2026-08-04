@@ -44,6 +44,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.models.sam.training_model import (
+    INPUT_BOXES,
     INPUT_GT_MASK,
     INPUT_IMAGE,
     INPUT_POINT_COORDS,
@@ -62,7 +63,15 @@ RECORD_MASK = "mask"
 RECORD_BOX = "box"
 #: Point labels, mirroring ``PromptEncoder``'s convention.
 FOREGROUND_LABEL = 1
+BACKGROUND_LABEL = 0
 PADDING_LABEL = -1
+#: Box-jitter recipe. REPORTED, not verified against a primary source (F-5 item
+#: 12): "noise with standard deviation 10% of the box side length, capped at 20
+#: pixels". Both readings of the cap are applied -- see :func:`jitter_box`.
+JITTER_STD_FRACTION = 0.1
+MAX_JITTER_PIXELS = 20.0
+#: Minimum side a jittered box is allowed to collapse to.
+MIN_BOX_SIDE = 1.0
 #: Logit written into pixels outside the mask when a point is drawn from it.
 OUTSIDE_MASK_LOGIT = -1e9
 #: A mask with fewer foreground pixels than this after downsampling is dropped:
@@ -348,24 +357,29 @@ DATA_SOURCES = {
 # ---------------------------------------------------------------------------
 # Prompt sampling (a `tf.data` map fn -- the model never does this)
 # ---------------------------------------------------------------------------
-def sample_point_in_mask(
-    mask: tf.Tensor, image_size: int
+def _sample_from_indicator(
+    indicator: tf.Tensor, image_size: int, label: int
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     """
-    Draw one foreground point uniformly from a mask's interior.
+    Draw one pixel uniformly from wherever ``indicator`` is non-zero.
+
+    Single implementation behind :func:`sample_point_in_mask` and
+    :func:`sample_point_outside_mask`, so the two can never drift into
+    disagreeing about the coordinate frame.
 
     Args:
-        mask: ``(mh, mw)`` binary float tensor at ``low_res_logits`` resolution.
-        image_size: Side of the padded image frame the coordinate must land in.
+        indicator: ``(mh, mw)`` float, non-zero inside the eligible region.
+        image_size: Side of the padded image frame.
+        label: Label emitted when the region is non-empty.
 
     Returns:
         ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
-        An EMPTY mask yields :data:`PADDING_LABEL` rather than a coordinate
+        An EMPTY region yields :data:`PADDING_LABEL` rather than a coordinate
         dressed up as a real prompt.
     """
-    shape = tf.shape(mask)
+    shape = tf.shape(indicator)
     height, width = shape[0], shape[1]
-    flat = tf.reshape(mask, (1, -1))
+    flat = tf.reshape(indicator, (1, -1))
     logits = tf.where(
         flat > 0.5, tf.zeros_like(flat), tf.fill(tf.shape(flat), OUTSIDE_MASK_LOGIT)
     )
@@ -382,16 +396,99 @@ def sample_point_in_mask(
     scale_x = tf.cast(image_size, tf.float32) / tf.cast(width, tf.float32)
     coords = tf.stack([(col + 0.5) * scale_x - 0.5, (row + 0.5) * scale_y - 0.5])
     non_empty = tf.reduce_sum(flat) > 0.0
-    label = tf.where(
+    emitted = tf.where(
         non_empty,
-        tf.constant(FOREGROUND_LABEL, tf.int32),
+        tf.constant(label, tf.int32),
         tf.constant(PADDING_LABEL, tf.int32),
     )
-    return tf.reshape(coords, (1, 2)), tf.reshape(label, (1,))
+    return tf.reshape(coords, (1, 2)), tf.reshape(emitted, (1,))
+
+
+def sample_point_in_mask(
+    mask: tf.Tensor, image_size: int
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+    Draw one FOREGROUND point uniformly from a mask's interior.
+
+    Args:
+        mask: ``(mh, mw)`` binary float tensor at ``low_res_logits`` resolution.
+        image_size: Side of the padded image frame the coordinate must land in.
+
+    Returns:
+        ``(coords, labels)`` of shapes ``(1, 2)`` float32 xy and ``(1,)`` int32.
+    """
+    return _sample_from_indicator(mask, image_size, FOREGROUND_LABEL)
+
+
+def sample_point_outside_mask(
+    mask: tf.Tensor, image_size: int
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+    Draw one BACKGROUND point uniformly from outside a mask.
+
+    Args:
+        mask: ``(mh, mw)`` binary float tensor.
+        image_size: Side of the padded image frame.
+
+    Returns:
+        ``(coords, labels)`` of shapes ``(1, 2)`` and ``(1,)``. A mask that
+        covers everything yields :data:`PADDING_LABEL`, by the same rule an
+        empty mask does for the foreground point.
+    """
+    return _sample_from_indicator(
+        tf.cast(mask <= 0.5, mask.dtype), image_size, BACKGROUND_LABEL
+    )
+
+
+def jitter_box(box: tf.Tensor, image_size: int) -> tf.Tensor:
+    """
+    Add bounded Gaussian noise to a ground-truth box, as reference SAM does.
+
+    Args:
+        box: ``(4,)`` xyxy in image pixels.
+        image_size: Side of the padded image frame.
+
+    Returns:
+        ``(4,)`` xyxy, inside ``[0, image_size]`` and never inverted.
+
+    Note:
+        The recipe -- "noise with standard deviation 10% of the box side
+        length, capped at 20 pixels" -- is REPORTED, not verified against a
+        primary source (F-5 item 12 could not reach one). Where the sourced
+        wording is ambiguous the conservative reading is taken and BOTH bounds
+        are applied: the std is capped at :data:`MAX_JITTER_PIXELS` *and* the
+        drawn offset is clipped to the same magnitude, so a per-coordinate
+        bound exists that a test can actually attack. Widening this later is a
+        deliberate change, not a bug fix.
+    """
+    limit = float(image_size)
+    width = box[2] - box[0]
+    height = box[3] - box[1]
+    sides = tf.stack([width, height, width, height])
+    std = tf.minimum(sides * JITTER_STD_FRACTION, MAX_JITTER_PIXELS)
+    offset = tf.clip_by_value(
+        tf.random.normal((4,), dtype=box.dtype) * std,
+        -MAX_JITTER_PIXELS,
+        MAX_JITTER_PIXELS,
+    )
+    noisy = tf.clip_by_value(box + offset, 0.0, limit)
+    x1, y1 = noisy[0], noisy[1]
+    # Ordering is enforced by RAISING the far corner, never by swapping the
+    # two: a swap would let a coordinate end up further from its own ground
+    # truth than the cap, so the per-coordinate bound this function advertises
+    # would quietly stop holding on narrow boxes.
+    x2 = tf.minimum(tf.maximum(noisy[2], x1 + MIN_BOX_SIDE), limit)
+    y2 = tf.minimum(tf.maximum(noisy[3], y1 + MIN_BOX_SIDE), limit)
+    x1 = tf.minimum(x1, x2 - MIN_BOX_SIDE)
+    y1 = tf.minimum(y1, y2 - MIN_BOX_SIDE)
+    return tf.stack([x1, y1, x2, y2])
 
 
 def to_training_record(
-    record: Dict[str, tf.Tensor], image_size: int
+    record: Dict[str, tf.Tensor],
+    image_size: int,
+    num_background_points: int = 0,
+    include_box: bool = False,
 ) -> Tuple[Dict[str, tf.Tensor], Dict[str, tf.Tensor]]:
     """
     Turn one source record into ``(inputs, y_true)`` for ``SAMTrainingModel``.
@@ -399,6 +496,9 @@ def to_training_record(
     Args:
         record: A source record (``image``, ``mask``, ``box``).
         image_size: Side of the padded image frame.
+        num_background_points: Background points to add beside the foreground
+            one. ``0`` reproduces the single-positive-point regime.
+        include_box: Whether to add a jittered box prompt.
 
     Returns:
         ``(inputs, y_true)``. ``y_true`` carries a SINGLE-instance GT stack
@@ -408,6 +508,12 @@ def to_training_record(
     """
     mask = record[RECORD_MASK]
     coords, labels = sample_point_in_mask(mask, image_size)
+    for _ in range(num_background_points):
+        background_coords, background_labels = sample_point_outside_mask(
+            mask, image_size
+        )
+        coords = tf.concat([coords, background_coords], axis=0)
+        labels = tf.concat([labels, background_labels], axis=0)
     gt_stack = tf.expand_dims(mask, axis=0)
     inputs = {
         INPUT_IMAGE: record[RECORD_IMAGE],
@@ -415,6 +521,10 @@ def to_training_record(
         INPUT_POINT_LABELS: labels,
         INPUT_GT_MASK: gt_stack,
     }
+    if include_box:
+        inputs[INPUT_BOXES] = tf.expand_dims(
+            jitter_box(record[RECORD_BOX], image_size), axis=0
+        )
     targets = {
         LOW_RES_LOGITS: gt_stack,
         IOU_SUPERVISION: tf.zeros((1, 2), dtype=tf.float32),
@@ -430,6 +540,8 @@ def build_sam_dataset(
     max_instances: int = 3,
     seed: int = 0,
     shuffle_buffer: int = 0,
+    num_background_points: int = 0,
+    include_box: bool = False,
     source: str = "synthetic",
     source_kwargs: Optional[Dict[str, Any]] = None,
 ) -> tf.data.Dataset:
@@ -445,6 +557,8 @@ def build_sam_dataset(
         max_instances: Objects per image (``max_instances_per_image`` for COCO).
         seed: Seed for the source generator.
         shuffle_buffer: If > 0, shuffle with this buffer before batching.
+        num_background_points: Background points added beside the foreground one.
+        include_box: Whether to add a jittered box prompt.
         source: ``"synthetic"`` or ``"coco"`` (see :data:`DATA_SOURCES`).
         source_kwargs: Extra keyword arguments for the chosen source, e.g.
             ``{"split": "val2017", "max_images": 64}`` for COCO.
@@ -486,7 +600,12 @@ def build_sam_dataset(
     if shuffle_buffer > 0:
         dataset = dataset.shuffle(shuffle_buffer, seed=seed)
     dataset = dataset.map(
-        lambda record: to_training_record(record, image_size),
+        lambda record: to_training_record(
+            record,
+            image_size,
+            num_background_points=num_background_points,
+            include_box=include_box,
+        ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
