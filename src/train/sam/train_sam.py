@@ -418,10 +418,19 @@ def parse_arguments(
         field: getattr(args, dest) for dest, field in CLI_TO_CONFIG.items()
     }
     if values.get("smoke"):
+        # DECISION plan-2026-08-03T191222-1d751f81/D-041
+        # Apply the preset HERE, in the builder, gated on PROVENANCE. Do NOT
+        # move it into `SAMTrainingConfig.__post_init__` the way
+        # `train/superpoint/train_superpoint.py:174` does: by then the argv
+        # tokens are gone, so `--smoke --epochs 50` (50 being the flag's own
+        # default) is indistinguishable from a bare `--smoke`, and the preset
+        # silently overrides a value the caller really typed. MEASURED: a
+        # value-vs-default reimplementation of `explicit_fields` fires exactly
+        # `test_an_explicitly_typed_DEFAULT_beats_the_preset` (`assert 3 == 50`).
+        # And do NOT add a field to SMOKE_PRESET that changes WHAT is measured
+        # (source, geometry, round count, loss weights, seed) -- only how much;
+        # `test_the_preset_changes_how_much_not_what` pins that list.
         for field, preset_value in SMOKE_PRESET.items():
-            # PROVENANCE, not value: a flag typed at its own parser default
-            # must still beat the preset, and an omitted flag must not. Only a
-            # token scan can tell those apart -- see train.common.args.
             if field not in explicit_fields:
                 values[field] = preset_value
     return args, SAMTrainingConfig(**values)
@@ -460,6 +469,14 @@ def resolved_output_dir(config: SAMTrainingConfig) -> Path:
         ``output_dir``, or ``<output_dir>/<experiment_name>`` for an absolute
         one.
     """
+    # DECISION plan-2026-08-03T191222-1d751f81/D-041
+    # Anchor a relative path at the REPO ROOT, never at the cwd. Do NOT
+    # "simplify" this to `Path(config.output_dir) / name`: D-034 measured that
+    # the editable install makes `python -m train.sam.train_sam` resolve from
+    # ANY working directory, so the plain form writes a stray `results/` tree
+    # wherever the user happened to be standing -- including `src/results/`,
+    # which the repo convention names explicitly as the wrong place. Pinned by
+    # `test_the_resolved_path_is_not_under_src`.
     root = Path(config.output_dir)
     if not root.is_absolute():
         root = Path(__file__).resolve().parents[3] / root

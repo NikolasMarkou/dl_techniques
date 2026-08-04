@@ -9,14 +9,17 @@ An implementation of the **Segment Anything Model (SAM)** architecture in
 ["Segment Anything"](https://arxiv.org/abs/2304.02643) by Kirillov et al.
 (2023).
 
-> **Scope, stated up front.** This package ships the **architecture and its
-> forward pass** — not weights and not a trainer.
+> **Scope, stated up front.** This package ships the **architecture, its
+> forward pass, and a trainable wrapper** — but no weights.
 > - **No pretrained checkpoint** ships here or is downloaded.
 >   `SAM.from_variant('vit_b')` builds a randomly initialized model. Any
 >   qualitative claim below ("high-quality mask", "works on any domain")
 >   describes SAM *as published*, not what these random weights produce.
-> - **No trainer ships here.** `src/train/sam/` does not exist; §11 states the
->   constraints a trainer must be built around instead of pretending to be one.
+> - **A trainer ships now** (`SAMTrainingModel` here, `src/train/sam/` for the
+>   data pipeline and CLI — §11). It is proven to RUN with live gradients on an
+>   executed `--smoke` run. It makes **no accuracy claim**: nothing in this
+>   repository has trained SAM to any quality, and `vit_l` / `vit_h` have never
+>   been forward-passed at all.
 > - Loading official Meta SAM weights is **not** demonstrated. Two known
 >   blockers were removed (cross-attention internal dim, MLP head depth), but
 >   no key-mapping layer exists and no official checkpoint was ever loaded.
@@ -1085,15 +1088,19 @@ byte-identical to reference SAM's own thresholded output contract. Either way,
 computes its loss at, and upsampling to full resolution costs memory without
 adding signal.
 
-**Standing constraint — a dict output cannot be trained with stock `fit()`.**
-On keras 3.8.0, passing a dict `y_pred` to `compile()`/`fit()` makes
-`CompileLoss.build` broadcast a single `Loss` across every leaf of the output
-structure, which then dies with a `KeyError`. This is independent of
-`binarize_masks`. Training SAM requires a thin **single-tensor wrapper model**
-that returns `low_res_logits` alone (and, if mask-quality supervision is wanted,
-a second output rather than a nested dict). No such wrapper ships in this
-package yet, and the training snippets further down this README are illustrative
-of the loss, not runnable end-to-end pipelines.
+**A dict output CAN be trained with stock `fit()` — with a dict `loss=`.**
+An earlier revision of this README stated the opposite as an unqualified
+constraint. Measured on keras 3.8.0: `CompileLoss.build` `KeyError`s in exactly
+one configuration — a **single** `Loss` object plus a bare-tensor `y_true`.
+Given `loss={<output key>: Loss, ...}` (even keying a *subset* of the output
+keys) and a matching dict `y_true`, `fit()` trains normally and emits per-key
+loss metrics. `loss_weights` carries the mixing.
+
+What actually blocks training through `SAM.call` is different and was unnamed
+until iteration 2: **`SAM.call` cannot be traced at all.** `postprocess_masks`
+runs unconditionally at the end of `call`, and its `ops.image.resize` raises
+under `fit()`'s graph mode — regardless of which output key you read. That is
+why the training path calls SAM's submodules directly; see §11.
 
 ---
 
@@ -1987,64 +1994,149 @@ print(f"Quantized size: {os.path.getsize('sam_model_quantized.tflite') / 1e6:.1f
 
 ## 11. Training and Fine-tuning
 
-### Training SAM: what ships today
+### Training SAM: the shipped path
 
-**No trainer ships in this package, and this section deliberately does not
-write one.** Authoring `src/train/sam/` — the trainer plus the per-instance
-prompt data pipeline — is scheduled work, not something to copy out of a
-README. What follows is the set of facts a trainer has to be built around.
+A trainer ships. It is stock `compile()` / `fit()` — **no custom `train_step`
+anywhere** — over a wrapper model that drives SAM's submodules directly.
 
-1. **Supervise `low_res_logits`.** It is the only differentiable mask output at
-   the default `binarize_masks=True`, and it is the resolution reference SAM
-   computes its loss at. `outputs['masks']` is a thresholded `uint8` tensor:
-   differentiating it returns `None` for **every** trainable variable, so a
-   trainer that supervises it trains nothing and reports no error. See
-   "Output contract" in §6.4.
+```
+tf.data (train.sam.data)  ->  SAMTrainingModel  ->  {SAMMaskLoss, SAMIoULoss}
+   image, point/box prompt,        preprocess ->            focal+dice on
+   gt_mask at low-res              image_encoder ->         low_res_logits;
+                                   prompt_encoder ->        MSE on the packed
+                                   mask_decoder             iou_supervision
+```
 
-2. **A dict `y_pred` cannot be trained by stock `fit()` on keras 3.8.0.**
-   `CompileLoss.build` broadcasts a single `Loss` across every leaf of the
-   output structure and then dies with a `KeyError`. `SAM.call` returns a dict,
-   so training requires a thin **single-tensor wrapper model** that returns
-   `low_res_logits` alone (plus, optionally, `iou_predictions` as a second
-   output — not a nested dict).
+Run it:
 
-3. **Reuse the repo's losses; do not hand-roll dice/focal again.**
-   `dl_techniques.losses.segmentation_loss` (`SegmentationLosses`,
-   `create_loss_function`) and
-   `dl_techniques.losses.segmentation_wrapper_loss`
-   (`SegmentationWrapperLoss`, `create_segmentation_wrapper_loss`) already
-   provide dice / focal / combined segmentation losses with serialization.
+```bash
+# Executed smoke run: 3 epochs x 16 steps, seconds on one GPU, no COCO needed
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \
+    .venv/bin/python -m train.sam.train_sam --smoke
 
-4. **Do NOT write a custom `train_step`.** This repo's convention is stock
-   `keras.Model.fit()` with any extra signal fed through the `tf.data` inputs.
-   An earlier revision of this section shipped a `SAMTrainer(keras.Model)` with
-   a hand-written `train_step`, a raw `tf.GradientTape`, a manual
-   `apply_gradients`, and four re-implemented loss functions. It was removed:
-   it violated the convention, duplicated `losses/segmentation_loss.py`, and
-   was never executed by any test.
+# Real COCO 2017 instance masks
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \
+    .venv/bin/python -m train.sam.train_sam \
+    --data-source coco --coco-max-images 200 --epochs 50
+```
 
-5. **Prompts are per-instance data, not a model concern.** The largest unknown
-   in a SAM pipeline is sampling point/box prompts per ground-truth mask each
-   epoch. There is no repo precedent for it, and it is the reason the trainer
-   is its own scheduled piece of work.
+Or wire it by hand:
 
-6. **Preprocess before the model.** `SAM.preprocess` pads only; resize with
-   `resize_longest_side` first (§3, §6.1) and rescale the prompt coordinates
-   by the same factor.
+```python
+from dl_techniques.models.sam import SAM, SAMTrainingModel
+from dl_techniques.losses.sam_mask_loss import SAMMaskLoss, SAMIoULoss
+from train.sam.data import build_sam_dataset
 
-7. **`original_size` must be a PYTHON TUPLE under `fit()`, not a tensor.**
-   Eagerly, either spelling works and the tests exercise both. Under any trace
-   (`fit`, `predict`, `tf.function`, `jit_compile`) a tensor `original_size`
-   makes `SAM.call` fail to trace at all: `postprocess_masks` slices by
-   `input_size[0]` and passes `original_size` to `ops.image.resize`, raising
-   `OperatorNotAllowedInGraphError: Iterating over a symbolic tf.Tensor is not
-   allowed`. This is a **known limitation scheduled for iteration 2**, not a
-   bug you can work around inside the model. It does not block training as
-   described here: `low_res_logits` — the target constraint 1 tells you to
-   supervise — is produced *before* `postprocess_masks` runs, so a wrapper
-   model that returns `low_res_logits` alone (constraint 2) never reaches the
-   failing code. It only bites a traced pipeline that consumes
-   `outputs['masks']`.
+model = SAMTrainingModel(
+    SAM.from_variant('vit_b'),
+    multimask_output=False,
+    num_refinement_rounds=3,     # 1 disables refinement
+)
+model.compile(
+    optimizer='adam',
+    # A DICT loss keyed to the output names. `iou_predictions` is deliberately
+    # left uncovered: its target is packed inside `iou_supervision`.
+    loss={'low_res_logits': SAMMaskLoss(), 'iou_supervision': SAMIoULoss()},
+    loss_weights={'low_res_logits': 1.0, 'iou_supervision': 1.0},
+)
+model.fit(build_sam_dataset(2048, image_size=1024, batch_size=1))
+```
+
+**What makes this work, and what it costs.**
+
+1. **The wrapper never calls `SAM.call`.** `postprocess_masks` runs
+   unconditionally at the end of `SAM.call`, and its `ops.image.resize` cannot
+   be traced under `fit()`; reading only `low_res_logits` does **not** avoid it,
+   because the postprocess runs regardless of which key you consume. A
+   Python-tuple `original_size` cannot even be passed (`Layer.__call__` rejects
+   non-tensor positional arguments). So `SAMTrainingModel.call` runs
+   `preprocess -> image_encoder -> prompt_encoder -> mask_decoder` itself. A spy
+   pins `SAM.call` at **zero** invocations during `fit()`.
+
+2. **A dict `y_pred` is fine; a dict `loss=` is what makes it fine.** See §6.4.
+   `y_true`'s keys must match the keys `loss=` **covers** — not the model's
+   output keys. Supplying an entry for an uncovered key raises
+   `ValueError: y_true and y_pred have different structures`.
+
+3. **Supervise `low_res_logits`, never `masks`.** At the default
+   `binarize_masks=True`, `masks` is a thresholded `uint8` tensor whose
+   gradient is `None` for **every** trainable variable (§6.4).
+
+4. **The repo's segmentation losses are reused, but NOT as-is — and the trap is
+   silent.** `SegmentationLosses.focal_loss` on a 1-channel binary map is
+   **bit-identically blind to negative pixels**: setting every negative pixel's
+   prediction to maximally wrong leaves the loss unchanged to six decimals.
+   `dice_loss` is sound behind a `(B*M, h, w, 1)` reshape but **silently
+   accepts the raw `(B, M, h, w)` layout and returns a plausible number** while
+   reducing `(num_masks, height)` instead of `(height, width)`. `SAMMaskLoss`
+   adapts both (2-channel one-hot for focal, channels-last single-channel for
+   dice) and **refuses** the raw layout. Do not route SAM masks through
+   `SegmentationWrapperLoss` directly.
+
+5. **The focal:dice mix was re-derived here, not pasted from the paper.**
+   Unweighted on this repo's code, dice is ~8x focal; at the paper's 20:1 focal
+   leads by ~2.4x in loss value and ~10.5:1 in gradient magnitude. 20:1 ships
+   because the two readings agree in order of magnitude, and the tests assert
+   those two structural facts rather than the constants.
+
+6. **The IoU target is packed next to the prediction, and that is forced.** The
+   achieved IoU is a function of the prediction *and* the ground truth, so it
+   only exists inside `call()`; a `tf.data` pipeline cannot produce it and
+   stock `compile(loss={...})` hands each loss only its own output key. Hence
+   the `iou_supervision` output, shape `(B, M, 2)`: `[..., 0]` predicted,
+   `[..., 1]` achieved (stop-gradient). It appears only when `gt_mask` is in
+   the inputs, so an inference-shaped call keeps the two-key contract.
+
+7. **Iterative refinement lives inside `call()`, with no custom `train_step`.**
+   Per round: decode, `stop_gradient` the logits, feed them back as the dense
+   mask prompt (already exactly `4 x` the embedding grid, so shape-native), and
+   sample one foreground point from the false-negative region plus one
+   background point from the false-positive region. Rounds are concatenated on
+   the mask axis and supervised by one loss. Measured: variable coverage
+   saturates at **2** rounds (170/201 -> 181/201 moved), and the class default
+   is **1** (refinement off) so the wrapper keeps value-exact equivalence with
+   an eager `SAM.call`; the trainer ships 3.
+
+8. **Two lifecycle gotchas, both pinned by guards.** The `keras.random`
+   `SeedGenerator` is created in `__init__`, never lazily in `call` — this class
+   defines `build()`, so the state tracker is already locked and the lazy
+   spelling raises `You cannot add new elements of state ... already built`.
+   And `build()` calls `self.sam.build(None)` first, which materializes the
+   whole SAM without a forward pass.
+
+9. **Preprocess before the model.** `SAM.preprocess` pads only; resize with
+   `resize_longest_side` first (§3, §6.1) and rescale the prompt coordinates by
+   the same factor.
+
+10. **Initial prompts are DATA; refinement prompts are not.** The point sampled
+    inside the GT mask and the jittered box come from the `tf.data` pipeline
+    (`train.sam.data`) because they need no model output. The refinement
+    prompts depend on the current prediction and therefore cannot live there.
+
+**Honest limitations of the shipped path** — none of these is fixed by this
+trainer:
+
+- **No official Meta SAM checkpoint has ever been loaded** in this repository.
+  Every reference-fidelity claim is an architectural argument, not a
+  measurement against real weights, and no key-mapping layer exists.
+- **No test ever forward-passes `vit_l` or `vit_h`** — they are constructed and
+  parameter-counted (§15), and the trainer has never been run at those widths
+  or at `vit_b`'s. The trainer's default and its only executed configuration is
+  a reduced-WIDTH `tiny` geometry at real SAM patch/window geometry.
+- **`SAM.call` cannot be traced**, so no traced pipeline can consume
+  `outputs['masks']`. This is a property of `postprocess_masks`, not a bug the
+  wrapper hides.
+- **At `num_refinement_rounds > 1` the `.keras` round-trip is value-exact only
+  on the round-1 slice.** Later rounds depend on a random draw whose generator
+  state advanced differently. Asserted in both directions rather than papered
+  over.
+- **No accuracy claim.** The executed `--smoke` run proves the path runs with
+  live gradients and a falling loss on 32 synthetic instances. It says nothing
+  about segmentation quality.
+- **`--data-source coco` is I/O-bound, not GPU-bound.** Measured on this
+  machine: a 16-step epoch costs ~1 s on the synthetic source and ~18 s on
+  COCO, i.e. the GPU is idle most of the epoch. Budget for that before reading
+  a COCO wall-clock as a model cost.
 
 
 ### Fine-tuning Strategies
@@ -2052,15 +2144,16 @@ README. What follows is the set of facts a trainer has to be built around.
 > **`SAM.from_variant(...)` builds a RANDOMLY INITIALIZED model.** It is an
 > architecture constructor, not a checkpoint loader. No pretrained SAM weights
 > ship with this repo, none are downloaded, and none of the "fine-tuning"
-> recipes below start from Meta's weights — they start from noise. Iteration 1
-> removed two known blockers to *ever* loading official SAM weights (the
-> cross-attention internal dim and the head depth); it did not demonstrate such
-> a load, and no key-mapping layer exists.
+> recipes below start from Meta's weights — they start from noise. Two known
+> blockers to *ever* loading official SAM weights were removed (the
+> cross-attention internal dim and the head depth); that load has still never
+> been demonstrated, and no key-mapping layer exists. So "fine-tuning" here
+> means the trainability mechanics, wired into the trainer above.
 
 **Strategy 1: Freeze Image Encoder**
 
-The trainability mechanics below are real; the training loop they feed is not
-written yet (see above).
+The trainability flags below are read by the shipped `fit()` path: set them on
+the `SAM` before handing it to `SAMTrainingModel`.
 
 ```python
 # Randomly initialized architecture -- NOT pretrained weights.
@@ -2077,8 +2170,8 @@ model.mask_decoder.trainable = True
 
 **Strategy 2: Progressive Unfreezing**
 
-Unfreeze in stages. Only the trainability mechanics are shown — the loop that
-would consume them is iteration-2 work.
+Unfreeze in stages, re-`compile()`-ing and re-`fit()`-ing the
+`SAMTrainingModel` between stages.
 
 ```python
 def set_trainable_stage(model, component):
@@ -2411,10 +2504,18 @@ curl -X POST http://localhost:8501/v1/models/sam:predict \
 output key, the rel-pos interpolation branch, padding-point invariance,
 weight-count + value-exact `.keras` round-trip, the tiling / mask-shape /
 oversize / degenerate-encoder refusals, and the positional-encoding
-graph-safety guards). Run it with:
+graph-safety guards) plus `test_training_model.py` (the wrapper: the `SAM.call`
+spy, the moved-variable decomposition, the dead-component probe, refinement
+liveness, the `.keras` round-trip). Three sibling gates cover the training
+path: `tests/test_losses/test_sam_mask_loss.py` (the focal-blindness and
+raw-layout traps), `tests/test_train/test_sam/` (data sources, prompt-sampling
+properties, the args->config wiring) and `tests/test_datasets/test_coco_instances.py`.
+Run them with:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_models/test_sam/ -q
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
+    tests/test_models/test_sam/ tests/test_losses/test_sam_mask_loss.py \
+    tests/test_train/test_sam/ tests/test_datasets/test_coco_instances.py -q
 ```
 
 The illustrative snippets below are a starting point, not that suite.
@@ -2864,10 +2965,13 @@ A:
 
 **Q: Can I fine-tune SAM on my domain?**
 
-A: Yes! See Section 11 for detailed training strategies. Generally:
-1. Freeze image encoder, fine-tune decoder (few samples)
+A: The mechanics ship (§11: `SAMTrainingModel` + `train.sam.train_sam`), but
+"fine-tuning" is the wrong word here — **there are no pretrained weights to
+fine-tune from**, in this repo or downloadable by it, so any run starts from
+noise. With that stated, the strategies are:
+1. Freeze image encoder, train decoder (few samples)
 2. Progressive unfreezing (moderate data)
-3. Full fine-tuning (large dataset)
+3. Full training (large dataset)
 
 ---
 
