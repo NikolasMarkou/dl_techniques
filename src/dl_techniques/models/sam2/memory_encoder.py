@@ -775,10 +775,27 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         # sigmoids the mask itself and then calls the encoder with
         # `skip_mask_sigmoid=True`. See decisions.md D-033.
 
-        Evaluated in the layer's VARIABLE dtype rather than its compute dtype:
-        under ``mixed_float16`` the post-sigmoid ``* 20`` would otherwise be
-        taken at reduced precision. The result is cast back to the compute
-        dtype.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-045
+        # Do NOT delete the `variable_dtype` cast below. Its ORIGINAL
+        # justification (float16 overflow of `20 * x`) was made false by the
+        # D-033 order fix, and an adversarial review correctly identified the
+        # guard on it as vacuous and proposed removing the machinery. The cast
+        # stays for a DIFFERENT, measured reason -- resolution, stated below --
+        # and it now has a guard that can actually go red. See decisions.md
+        # D-045.
+
+        Evaluated in the layer's VARIABLE dtype rather than its compute dtype.
+        The reason is PRECISION, not overflow: with the sigmoid taken first
+        (D-033) the product is bounded by 20 and cannot overflow float16, so an
+        overflow probe here is vacuous. What the cast buys is resolution. Under
+        ``mixed_float16`` the intermediate ``sigmoid(x) * 20`` lives near
+        ``+-10``, where float16's spacing is ``7.8e-3``; subtracting 10 then
+        leaves an output near 0 quantized at that coarse spacing rather than at
+        the ``4.9e-4`` its own magnitude would allow. MEASURED over logits in
+        ``[-1, 1]`` against a float64 oracle, with float16 INPUT in both arms:
+        max error ``2.4e-3`` computing in float32, ``1.3e-2`` computing in
+        float16 -- a 5.3x loss, on 81% of the probed logits. The result is cast
+        back to the compute dtype, so this costs the caller nothing.
 
         :param masks: Mask logits.
         :type masks: Any

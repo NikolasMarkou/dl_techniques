@@ -346,17 +346,33 @@ class TestAffineSigmoidValue:
                 f"(all distances: {distances})"
             )
 
-    def test_the_transform_stays_finite_under_mixed_float16(
+    def test_the_transform_keeps_float32_resolution_under_mixed_float16(
             self,
-            pix_feat: np.ndarray,
     ) -> None:
-        """Saturating logits must stay finite and land on the exact limits.
+        """The ``variable_dtype`` cast is guarded by PRECISION, not overflow.
 
-        Under ``mixed_float16`` the compute dtype's maximum is 65504. The
-        transform is taken in the VARIABLE dtype (float32 under this policy),
-        so a logit of 1e4 saturates the sigmoid rather than overflowing any
-        intermediate, and the result is ``scale + bias`` exactly.
+        This arm replaces an overflow probe that the D-033 order fix made
+        VACUOUS. With the sigmoid taken first the product is bounded by 20, so
+        both limits (``+10``, ``-10``) are exactly representable in float16 and
+        the old test passed byte-identically with the cast deleted -- a guard
+        that could not go red.
+
+        What the cast actually buys is resolution: the intermediate
+        ``sigmoid(x) * 20`` lands near ``+-10``, where float16's spacing is
+        ``7.8e-3``, and the subsequent ``- 10`` carries that coarse quantum
+        into an output near zero. Computing in float32 and casting ONCE at the
+        end keeps the output at its own magnitude's resolution.
+
+        Both arms take a float16 INPUT, so the input quantization is a shared
+        floor and the measured gap is attributable to the intermediate alone.
+        The naive arm is asserted to be genuinely worse BEFORE the shipped arm
+        is asserted to be good, so the probe cannot silently drift into a
+        regime where the two agree.
         """
+        logits64 = np.linspace(-1.0, 1.0, 401, dtype="float64")
+        oracle = 1.0 / (1.0 + np.exp(-logits64)) * SIGMOID_SCALE + SIGMOID_BIAS
+        logits16 = logits64.astype("float16")
+
         previous = keras.mixed_precision.global_policy()
         keras.mixed_precision.set_global_policy("mixed_float16")
         try:
@@ -365,18 +381,37 @@ class TestAffineSigmoidValue:
                 (None, FEATURE_GRID, FEATURE_GRID, IN_DIM),
                 (None, MASK_GRID, MASK_GRID, 1),
             ])
-            huge = np.full(
-                (1, MASK_GRID, MASK_GRID, 1), 1.0e4, dtype="float32")
-            transformed = ops.convert_to_numpy(layer._affine_sigmoid(huge))
+            assert layer.compute_dtype == "float16"
+            assert layer.variable_dtype == "float32"
+            shipped = ops.convert_to_numpy(
+                layer._affine_sigmoid(logits16)).astype("float64")
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-        assert np.isfinite(transformed).all(), (
-            "the mask transform produced non-finite values under "
-            "mixed_float16"
+        # The dead-component twin: the SAME expression with the intermediate
+        # taken in the compute dtype, i.e. exactly what deleting the cast does.
+        naive = ops.convert_to_numpy(
+            ops.sigmoid(ops.convert_to_tensor(logits16))
+            * np.float16(SIGMOID_SCALE) + np.float16(SIGMOID_BIAS)
+        ).astype("float64")
+
+        shipped_error = float(np.abs(shipped - oracle).max())
+        naive_error = float(np.abs(naive - oracle).max())
+
+        assert naive_error > 1.0e-2, (
+            f"the float16-intermediate twin is only {naive_error} from the "
+            f"float64 oracle over these logits, so this probe is no longer in "
+            f"a regime where the cast can matter and it must be re-sited "
+            f"(shipped error {shipped_error})"
         )
-        assert float(transformed.min()) == pytest.approx(
-            SIGMOID_SCALE + SIGMOID_BIAS, abs=1e-2)
+        assert shipped_error < 5.0e-3, (
+            f"the shipped transform is {shipped_error} from the float64 "
+            f"oracle under mixed_float16 -- the float16-intermediate twin "
+            f"scores {naive_error}, so the variable_dtype cast is not being "
+            f"taken and the output has been quantized at the intermediate's "
+            f"magnitude instead of its own"
+        )
+        assert np.isfinite(shipped).all()
 
 # ---------------------------------------------------------------------
 # G5.2 -- downsampler geometry

@@ -33,9 +33,16 @@ import tensorflow as tf
 from keras import ops
 
 import dl_techniques.models.sam2.model as model_module
+from dl_techniques.models.sam.transformer import TwoWayTransformer
 from dl_techniques.models.sam2.hiera import Hiera, hiera_block_specs
+from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
 from dl_techniques.models.sam2.memory_encoder import SAM2MemoryEncoder
-from dl_techniques.models.sam2.model import MEMORY_STRIDE, SAM2, create_sam2
+from dl_techniques.models.sam2.model import (
+    MEMORY_STRIDE,
+    NO_OBJ_SCORE,
+    SAM2,
+    create_sam2,
+)
 from dl_techniques.models.sam2.neck import SAM2FpnNeck, SAM2ImageEncoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
@@ -55,11 +62,27 @@ TINY_DIM = 32
 TINY_MEM_DIM = 8
 BATCH = 2
 
-#: Published parameter count of SAM 2.1-L. The measured figure and the full
+#: Published parameter count of SAM 2.1-L, SOURCED from the upstream repository
+#: at the pinned clone `sam2@2b90b9f5`, `README.md:170`, row
+#: `sam2.1_hiera_large | 224.4`. The measured figure and the full
 #: reconciliation live in `test_hiera_l_total_reconciles_with_the_published_figure`.
 #: Quoted to the published precision (~224.4M) and no further -- inventing
 #: digits the source does not carry would make the tolerance below meaningless.
 PUBLISHED_HIERA_L_PARAMS = 224_400_000
+
+#: Half of the published figure's own quantum. "224.4" is four significant
+#: figures, so the true upstream count lies in `224.4M +- 50,000`. This is the
+#: TIGHTEST tolerance the source supports, and stating it as the source's
+#: rounding rather than as a chosen percentage is what stops it from drifting:
+#: the superseded `< 1e-3` relative band was `+-224,400`, which still admitted
+#: the 213,888-parameter omission it was written to catch.
+PUBLISHED_FIGURE_HALF_QUANTUM = 50_000
+
+#: Built parameter count of `hiera_l` at this HEAD, MEASURED. Asserted EXACTLY,
+#: because the published figure -- however tightly its rounding is respected --
+#: cannot resolve an omission smaller than 50,000, and the smallest component
+#: this plan has already lost once is 64.
+MEASURED_HIERA_L_BUILT_PARAMS = 221_155_425
 
 #: Built size of SAM 1's ``TwoWayTransformer`` at the SAM 2 decoder shape
 #: (``depth=2, embedding_dim=256, num_heads=8, mlp_dim=2048``), MEASURED by
@@ -114,6 +137,69 @@ def max_abs_diff(a: Any, b: Any) -> float:
     """
     return float(np.max(np.abs(
         ops.convert_to_numpy(a) - ops.convert_to_numpy(b))))
+
+
+def pin_object_score(model: SAM2, value: float) -> None:
+    """Force the object-score head to emit ``value`` for every input.
+
+    The head's last ``Dense`` gets a zero kernel and a constant bias, so the
+    logit no longer depends on the image, the prompt or the weights upstream
+    of it.
+
+    This exists because several mechanisms in this file are gated on the SIGN
+    of the object score, and at random initialization that sign is arbitrary.
+    A test that drives the real forward path and merely HOPES for a negative
+    score is vacuous on roughly half of all seeds -- and passes silently when
+    it is.
+
+    :param model: A BUILT model whose decoder predicts object scores.
+    :type model: SAM2
+    :param value: The logit to pin. Strictly negative means "occluded".
+    :type value: float
+    """
+    last = model.mask_decoder.pred_obj_score_head.layers[-1]
+    last.kernel.assign(np.zeros(last.kernel.shape, dtype="float32"))
+    last.bias.assign(np.full(last.bias.shape, value, dtype="float32"))
+
+
+def model_with_default_decoder() -> SAM2:
+    """Assemble a ``tiny`` model whose decoder keeps its OWN defaults.
+
+    Every other fixture in this file goes through :meth:`SAM2.from_variant`,
+    which hardcodes ``use_multimask_token_for_obj_ptr=True``. That single fact
+    made a whole configuration -- the documented direct-construction route at
+    the decoder's own signature default -- unreachable from the entire suite,
+    which is how a hard crash on it shipped. This builder reaches it: only the
+    two settings ``SAM2`` itself REQUIRES (`use_high_res_features`,
+    `pred_obj_scores`) are passed, and everything else is left at
+    ``SAM2MaskDecoder``'s defaults.
+
+    :return: A BUILT model with ``use_multimask_token_for_obj_ptr=False``.
+    :rtype: SAM2
+    """
+    donor = SAM2.from_variant("tiny")
+    table = SAM2.MODEL_VARIANTS["tiny"]
+    model = SAM2(
+        image_encoder=donor.image_encoder,
+        prompt_encoder=donor.prompt_encoder,
+        mask_decoder=SAM2MaskDecoder(
+            transformer_dim=donor.hidden_dim,
+            transformer=TwoWayTransformer(
+                depth=table["decoder_depth"],
+                embedding_dim=donor.hidden_dim,
+                num_heads=table["decoder_num_heads"],
+                mlp_dim=table["decoder_mlp_dim"],
+            ),
+            use_high_res_features=True,
+            pred_obj_scores=True,
+        ),
+        memory_attention=donor.memory_attention,
+        memory_encoder=donor.memory_encoder,
+        num_maskmem=donor.num_maskmem,
+        image_size=donor.image_size,
+    )
+    model.build(None)
+    return model
 
 
 # ---------------------------------------------------------------------
@@ -661,12 +747,24 @@ class TestHieraLargeParameterAudit:
         for. With them built and the transformer's real size measured, the
         reconciliation closes.
 
-        **The old assertion was a +-25M band and is deliberately gone.** A
-        200M-250M band around a 221M measurement would pass with the entire
-        memory encoder (~1.4M), or the whole memory-attention stack, deleted.
-        What is asserted instead is the RECONCILIATION: the sum of the built
-        total and the separately measured lazy transformer, against the
-        published figure, to within 0.1%.
+        **Two assertions, because neither alone is enough.**
+
+        1. The built total EXACTLY equals ``MEASURED_HIERA_L_BUILT_PARAMS``.
+           This is the arm with resolution: it catches a missing 64-parameter
+           weight.
+        2. The reconciliation lands inside the published figure's OWN rounding
+           quantum -- ``|reconciled - 224.4M| < 50,000``, i.e. the reconciled
+           number rounds to "224.4M" at the precision the source quotes. This
+           is the arm that can catch a systematically wrong total that arm 1
+           would happily re-baseline to.
+
+        **Two superseded assertions are recorded here so neither comes back.**
+        The first pass asserted a +-25M band, which would pass with the entire
+        memory encoder (~1.4M) deleted. The completion-fix round replaced it
+        with ``relative < 1e-3``, i.e. +-224,400 -- and the omission it was
+        written for was 213,888, so the PRE-fix total (224,232,801) passed it
+        at 7.45e-4. A percentage tolerance chosen for how it reads is not a
+        tolerance; this one is derived from the source's own precision.
         """
         total = large.count_params()
         reconciled = total + MEASURED_LAZY_TRANSFORMER_PARAMS
@@ -676,40 +774,65 @@ class TestHieraLargeParameterAudit:
             "variables it is already inside `total` and adding "
             "MEASURED_LAZY_TRANSFORMER_PARAMS double-counts it"
         )
-        relative = abs(reconciled - PUBLISHED_HIERA_L_PARAMS) / \
-            PUBLISHED_HIERA_L_PARAMS
-        assert relative < 1e-3, (
-            f"hiera_l reconciliation is off by {relative:.4%}: built "
+        assert total == MEASURED_HIERA_L_BUILT_PARAMS, (
+            f"hiera_l built {total:,} parameters, not the measured "
+            f"{MEASURED_HIERA_L_BUILT_PARAMS:,} (difference "
+            f"{total - MEASURED_HIERA_L_BUILT_PARAMS:+,}). Do NOT re-baseline "
+            f"this number to make the test pass -- reconcile the difference "
+            f"against the per-component closed forms above first"
+        )
+        deviation = abs(reconciled - PUBLISHED_HIERA_L_PARAMS)
+        assert deviation < PUBLISHED_FIGURE_HALF_QUANTUM, (
+            f"hiera_l reconciliation is off by {deviation:,}: built "
             f"{total:,} + lazy {MEASURED_LAZY_TRANSFORMER_PARAMS:,} = "
-            f"{reconciled:,} against the published "
-            f"{PUBLISHED_HIERA_L_PARAMS:,}. A component is missing or "
-            f"mis-sized -- do NOT widen this into a band"
+            f"{reconciled:,}, which does not round to the published "
+            f"{PUBLISHED_HIERA_L_PARAMS:,} at the source's own precision. A "
+            f"component is missing or mis-sized -- do NOT widen this into a "
+            f"band"
         )
 
-    def test_the_reconciliation_assertion_is_not_vacuous(
+    def test_the_reconciliation_rejects_an_omission_at_its_own_scale(
             self, large: SAM2) -> None:
-        """The superseded +-25M band would have passed with the memory encoder
-        deleted; the reconciliation above would not.
+        """Probed at 213,888 parameters, not at 1.4M.
 
-        This executes the claim instead of asserting it in prose: it measures
-        the largest single component that can go missing while the OLD band
-        still passes, and shows the new tolerance rejects it.
+        The superseded ``relative < 1e-3`` tolerance was demonstrated
+        "non-vacuous" by deleting the whole memory encoder -- an omission ten
+        times larger than the one that actually happened, and one the tolerance
+        was never at risk from. This arm probes at the real scale: the three
+        object-pointer components that WERE missing (``obj_ptr_proj`` 197,376 +
+        ``obj_ptr_tpos_proj`` 16,448 + ``no_obj_embed_spatial`` 64 = 213,888).
+
+        It also pins, by execution, that the superseded tolerance would have
+        accepted that omission -- so the reason for the change cannot be
+        re-litigated from prose alone.
         """
-        total = large.count_params()
-        without_memory_encoder = total - large.memory_encoder.count_params()
-
-        assert 200_000_000 <= without_memory_encoder <= 250_000_000, (
-            "the superseded band no longer admits a model missing its whole "
-            "memory encoder, so this vacuity demonstration is stale"
+        omission = (
+            large.obj_ptr_proj.count_params()
+            + large.obj_ptr_tpos_proj.count_params()
+            + int(np.prod(large.no_obj_embed_spatial.shape))
         )
-        reconciled = without_memory_encoder + MEASURED_LAZY_TRANSFORMER_PARAMS
-        relative = abs(reconciled - PUBLISHED_HIERA_L_PARAMS) / \
-            PUBLISHED_HIERA_L_PARAMS
-        assert relative >= 1e-3, (
-            f"deleting the entire memory encoder "
-            f"({large.memory_encoder.count_params():,} parameters) still "
-            f"satisfies the reconciliation tolerance -- it is as vacuous as "
-            f"the band it replaced"
+        assert omission == 213_888, (
+            f"the object-pointer components now total {omission:,}, not the "
+            f"213,888 that went missing; re-derive this probe"
+        )
+
+        crippled = large.count_params() - omission
+        reconciled = crippled + MEASURED_LAZY_TRANSFORMER_PARAMS
+
+        assert abs(reconciled - PUBLISHED_HIERA_L_PARAMS) >= \
+            PUBLISHED_FIGURE_HALF_QUANTUM, (
+            f"dropping the {omission:,} object-pointer parameters still "
+            f"reconciles to the published figure; the tolerance is blind to "
+            f"the very defect it was written for"
+        )
+        assert crippled != MEASURED_HIERA_L_BUILT_PARAMS
+
+        superseded_relative = abs(
+            reconciled - PUBLISHED_HIERA_L_PARAMS) / PUBLISHED_HIERA_L_PARAMS
+        assert superseded_relative < 1e-3, (
+            f"the superseded relative-1e-3 tolerance now REJECTS this "
+            f"omission ({superseded_relative:.2e}), so the stated reason for "
+            f"replacing it is stale and this test should be re-derived"
         )
 
 
@@ -861,10 +984,19 @@ def compiled_tiny() -> SAM2:
     positional embedding uses a bicubic ``ops.image.resize``, which XLA refuses
     to convert (``tf2xla conversion failed``). Measured at this HEAD.
 
+    The object score is pinned POSITIVE (D-043). ``NO_OBJ_SCORE`` suppression
+    replaces the mask logits with a constant wherever the score is negative,
+    and ``ops.where`` passes no gradient through the replaced branch -- so on a
+    randomly initialized model the mask path would be starved for roughly half
+    of all seeds and this instrument's partition would be a coin flip. That is
+    upstream's behaviour too, not an artifact of this port: real training
+    supervises the object score as well, which this single-key loss does not.
+
     :return: The compiled model.
     :rtype: SAM2
     """
     model = tiny_model()
+    pin_object_score(model, 5.0)
     model({"image": images()})
     model.compile(
         optimizer=keras.optimizers.SGD(learning_rate=1.0),
@@ -1018,7 +1150,15 @@ class TestStreaming:
         :type other: np.ndarray
         :return: The gradient, or ``None``.
         :rtype: Any
+
+        The object score is pinned POSITIVE (D-043): under ``NO_OBJ_SCORE``
+        suppression a negative score makes ``low_res_logits`` a constant with
+        no gradient path at all, so BOTH arms of this two-sided guard --
+        including the one that asserts the gradient MUST appear -- would be
+        decided by an unseeded sign rather than by the ``stop_gradient``
+        boundary they exist to measure.
         """
+        pin_object_score(model, 5.0)
         model.stream_reset()
         with tf.GradientTape() as tape:
             model.stream_step(source, frame_idx=0, is_conditioning=True)
@@ -1050,8 +1190,13 @@ class TestStreaming:
         assert float(np.max(np.abs(ops.convert_to_numpy(gradient)))) > 0.0
 
     def test_the_single_frame_path_does_carry_gradient(self) -> None:
-        """The control for the control: one frame IS differentiable."""
+        """The control for the control: one frame IS differentiable.
+
+        Object score pinned positive for the reason recorded on
+        ``_gradient_through_the_stream``.
+        """
         model = tiny_model()
+        pin_object_score(model, 5.0)
         source = tf.Variable(images(1, seed=7))
         model.stream_reset()
         with tf.GradientTape() as tape:
@@ -1079,8 +1224,14 @@ class TestStreaming:
             assert len(calls) == 1
 
     def test_no_mem_embed_is_what_the_first_frame_adds(self) -> None:
-        """A VALUE assertion, not a branch-coverage one."""
+        """A VALUE assertion, not a branch-coverage one.
+
+        Object score pinned positive (D-043): a suppressed mask is a constant
+        that no upstream perturbation can move, so without the pin this
+        assertion is decided by an unseeded sign.
+        """
         model = tiny_model()
+        pin_object_score(model, 5.0)
         model.stream_reset()
         reference = ops.convert_to_numpy(
             model.stream_step(images(1), frame_idx=0,
@@ -1216,8 +1367,14 @@ class TestTemporalEmbedding:
         spatial-only and identical across memory frames (``repeat_k``), so if
         this weight did not reach the output there would be nothing left to
         tell frame ``t-1`` from frame ``t-6``.
+
+        Object score pinned positive (D-043): suppression would otherwise make
+        both arms the same constant, AND the perturbation itself can flip the
+        score's sign, so the observed difference would not be attributable to
+        the table.
         """
         model = tiny_model()
+        pin_object_score(model, 5.0)
 
         def two_frames() -> np.ndarray:
             model.stream_reset()
@@ -1232,8 +1389,12 @@ class TestTemporalEmbedding:
         assert float(np.max(np.abs(reference - two_frames()))) > 1e-5
 
     def test_a_different_slot_row_is_a_different_signal(self) -> None:
-        """Two rows must not be interchangeable, or the slot index is dead."""
+        """Two rows must not be interchangeable, or the slot index is dead.
+
+        Object score pinned positive, for the reason on the previous test.
+        """
         model = tiny_model()
+        pin_object_score(model, 5.0)
 
         def two_frames() -> np.ndarray:
             model.stream_reset()
@@ -1504,20 +1665,263 @@ class TestBestIouSelection:
     def test_the_multimask_pointer_follows_the_iou_head(self) -> None:
         """End-to-end: the decoded pointer changes when the IoU ranking does.
 
-        ``multimask_output=True`` is required -- on the single-mask path there
-        is exactly one candidate and this observation is vacuous, which is
-        asserted rather than assumed.
+        The previous version of this test carried this docstring and asserted
+        only two SHAPES. It never read ``object_pointer``, never moved the IoU
+        ranking and never compared anything, so a ``_decode`` that had reverted
+        to ``pointer_tokens[:, 0, :]`` passed it. This version does the
+        measurement the name promises.
+
+        The IoU head's last bias is driven so that the winning multimask token
+        moves from slice position 0 to slice position 2; nothing else changes,
+        and in particular the mask tokens themselves are untouched. So any
+        movement in ``object_pointer`` is attributable to the selection alone.
+
+        The object score is pinned POSITIVE first. Under the shipped
+        ``fixed_no_obj_ptr=True`` a negative score multiplies the selected
+        pointer by zero, which would leave ``object_pointer`` equal to
+        ``no_obj_ptr`` for BOTH rankings -- a vacuum this test would otherwise
+        fall into on roughly half of all seeds.
+        """
+        model = tiny_model()
+        pin_object_score(model, 5.0)
+        inputs = {"image": images(batch=1)}
+
+        multi = model(inputs, multimask_output=True)
+        assert int(multi["iou_predictions"].shape[1]) == 3, (
+            "the multimask path must offer three candidates, or a selection "
+            "test over it cannot discriminate"
+        )
+
+        head = model.mask_decoder.iou_prediction_head.layers[-1]
+        original = ops.convert_to_numpy(head.bias)
+
+        def pointer_when_winner_is(slice_position: int) -> np.ndarray:
+            """Force the multimask slice index that wins, return the pointer."""
+            bias = np.zeros(original.shape, dtype="float32")
+            # `iou_prediction_head` emits one score per mask token; the
+            # multimask path drops token 0, so slice position `p` is token
+            # `p + 1`.
+            bias[slice_position + 1] = 100.0
+            head.bias.assign(bias)
+            out = model(inputs, multimask_output=True)
+            winner = int(np.argmax(
+                ops.convert_to_numpy(out["iou_predictions"])[0]))
+            assert winner == slice_position, (
+                f"forcing token {slice_position + 1} did not make slice "
+                f"position {slice_position} the argmax (got {winner}); the "
+                f"probe no longer controls the ranking"
+            )
+            return ops.convert_to_numpy(out["object_pointer"])[0]
+
+        try:
+            first = pointer_when_winner_is(0)
+            third = pointer_when_winner_is(2)
+        finally:
+            head.bias.assign(original)
+
+        moved = float(np.max(np.abs(first - third)))
+        assert moved > 1e-4, (
+            f"reversing the IoU ranking moved the decoded object pointer by "
+            f"{moved} -- `_decode` is not gathering the pointer token by "
+            f"argmax(iou), it is taking a fixed position"
+        )
+
+    def test_the_pointer_gather_is_skipped_when_there_is_one_pointer_token(
+            self) -> None:
+        """The decoder's OWN default must not crash on the multimask path.
+
+        ``SAM2MaskDecoder`` defaults ``use_multimask_token_for_obj_ptr=False``,
+        at which the multimask path returns ``iou`` with M=3 and
+        ``object_pointer`` with M=1 (D-023 -- the pointer deliberately comes
+        from the SINGLE-mask token). Gathering the pointer with the IoU argmax
+        then indexes a length-1 axis with a 1 or a 2.
+
+        This combination is unreachable through ``from_variant`` (which
+        hardcodes the flag True), which is why the defect shipped with a green
+        suite. The reference guards it at ``sam2_base.py:387``
+        (``if sam_output_tokens.size(1) > 1``) and so does this port.
+
+        **Two things about this probe were MEASURED, and neither was obvious.**
+
+        1. The IoU ranking must be FORCED. The first version let it fall where
+           a random initialization put it, ran the guard-removed mutation, and
+           stayed GREEN -- ``argmax`` landed on 0, which is in range even for a
+           length-1 axis. At batch 1 over three candidates that is one time in
+           three.
+        2. The symptom is DEVICE-DEPENDENT, so this asserts a VALUE and not an
+           exception. On CPU the guard-removed mutation raises
+           ``InvalidArgumentError: indices[0,0] = 2 is not in [0, 1)
+           [Op:GatherV2]``. On GPU it does NOT raise -- TensorFlow's gather
+           clamps out-of-range indices there and returns zeros, so the model
+           silently builds its object pointer from a zero token. A
+           ``pytest.raises`` guard would therefore have been green on the very
+           device this suite runs on.
+
+        The assertion is the guard's own semantics: with exactly one pointer
+        token there is nothing to choose, so the decoded pointer must be
+        IDENTICAL under two opposite IoU rankings.
+
+        The object score is pinned POSITIVE, and that too was measured rather
+        than assumed: unpinned, a negative score plus ``fixed_no_obj_ptr=True``
+        collapses ``object_pointer`` to the zero-initialized ``no_obj_ptr``,
+        at which an out-of-range gather returning zeros is INDISTINGUISHABLE
+        from a correct one. The vacuity assertion below is what surfaced that.
+        """
+        model = model_with_default_decoder()
+        pin_object_score(model, 5.0)
+        assert model.mask_decoder.use_multimask_token_for_obj_ptr is False, (
+            "the decoder is no longer at its own default, so this test no "
+            "longer reaches the mask-axis mismatch it exists for"
+        )
+
+        head = model.mask_decoder.iou_prediction_head.layers[-1]
+        inputs = {"image": images(batch=1)}
+
+        def pointer_when_winner_is(slice_position: int) -> np.ndarray:
+            """Force the winning multimask slice, return the object pointer."""
+            bias = np.zeros(head.bias.shape, dtype="float32")
+            # Mask token `p + 1` is multimask slice position `p`.
+            bias[slice_position + 1] = 100.0
+            head.bias.assign(bias)
+            out = model(inputs, multimask_output=True)
+            winner = int(np.argmax(
+                ops.convert_to_numpy(out["iou_predictions"])[0]))
+            assert winner == slice_position, (
+                f"the IoU argmax is at slice position {winner}, not the "
+                f"forced {slice_position}; a gather at position 0 is in range "
+                f"even for a length-1 pointer axis, so this probe would be "
+                f"blind to the defect it exists for"
+            )
+            assert int(out["iou_predictions"].shape[1]) == 3
+            assert tuple(out["object_pointer"].shape) == (1, model.hidden_dim)
+            return ops.convert_to_numpy(out["object_pointer"])[0]
+
+        at_zero = pointer_when_winner_is(0)
+        at_two = pointer_when_winner_is(2)
+
+        assert np.isfinite(at_zero).all() and np.isfinite(at_two).all()
+        assert float(np.max(np.abs(at_zero))) > 0.0, (
+            "the pointer at the in-range ranking is identically zero, so an "
+            "out-of-range gather returning zeros would be indistinguishable "
+            "from it and this comparison proves nothing"
+        )
+        np.testing.assert_allclose(at_zero, at_two, atol=1e-6, err_msg=(
+            "the decoded object pointer moved when the IoU ranking moved, "
+            "even though the decoder emits exactly ONE pointer token -- the "
+            "gather is not being skipped"
+        ))
+
+
+class TestAbsentObjectMaskSuppression:
+    """``NO_OBJ_SCORE``: an absent object's mask is ERASED, not merely flagged.
+
+    This is the third member of the ``pred_obj_scores`` family, and the one
+    that was missing while the other two shipped. ``no_obj_ptr`` marks the
+    pointer stream and ``no_obj_embed_spatial`` marks the spatial stream; this
+    mechanism replaces the mask logits themselves. Without it the port stores
+    an occluded frame's REAL mask together with an occlusion flag -- a
+    contradiction the reference never writes (``sam2_base.py:358-368``).
+
+    Every arm here pins the object score rather than hoping for a sign.
+    """
+
+    def test_a_negative_object_score_erases_every_mask_logit(self) -> None:
+        """The whole mask goes to the sentinel, on the real forward path."""
+        model = tiny_model()
+        pin_object_score(model, -5.0)
+
+        logits = ops.convert_to_numpy(
+            model({"image": images()}, multimask_output=True)["low_res_logits"])
+
+        assert np.all(logits == np.float32(NO_OBJ_SCORE)), (
+            f"a negative object score left the mask logits in "
+            f"[{logits.min()}, {logits.max()}] instead of the sentinel "
+            f"{NO_OBJ_SCORE}; the memory bank will store the object's real "
+            f"mask on an occluded frame"
+        )
+
+    def test_a_positive_object_score_leaves_the_mask_untouched(self) -> None:
+        """The negative arm alone is passed by a transform that always fires.
+
+        Also asserts the suppression is STATELESS: pinning the score negative
+        in between must not change what the positive score returns.
         """
         model = tiny_model()
         inputs = {"image": images()}
 
-        multi = model(inputs, multimask_output=True)
-        assert int(multi["iou_predictions"].shape[1]) > 1, (
-            "the multimask path returned a single mask, so a selection test "
-            "over it cannot discriminate"
+        pin_object_score(model, 5.0)
+        visible = ops.convert_to_numpy(
+            model(inputs, multimask_output=True)["low_res_logits"])
+        pin_object_score(model, -5.0)
+        _ = model(inputs, multimask_output=True)
+        pin_object_score(model, 5.0)
+        again = ops.convert_to_numpy(
+            model(inputs, multimask_output=True)["low_res_logits"])
+
+        assert np.all(visible != np.float32(NO_OBJ_SCORE))
+        assert float(visible.std()) > 1e-6, (
+            "the visible mask is constant, so 'untouched' is indistinguishable "
+            "from 'suppressed to some other constant' here"
         )
-        single = model(inputs, multimask_output=False)
-        assert int(single["iou_predictions"].shape[1]) == 1
+        np.testing.assert_allclose(visible, again, atol=1e-6)
+
+    def test_the_suppression_is_per_batch_element(self) -> None:
+        """A whole-batch reduction would satisfy both arms above.
+
+        Driven through the method rather than the model because the pinning
+        helper makes the score CONSTANT across the batch by construction; a
+        mixed batch is only reachable here.
+        """
+        model = tiny_model()
+        logits = np.arange(2 * 3 * 2 * 2, dtype="float32").reshape(2, 3, 2, 2)
+        out = ops.convert_to_numpy(model._suppress_absent_object(
+            ops.convert_to_tensor(logits),
+            ops.convert_to_tensor(np.asarray([[-5.0], [5.0]], "float32"))))
+
+        assert np.all(out[0] == np.float32(NO_OBJ_SCORE))
+        np.testing.assert_array_equal(out[1], logits[1])
+
+    def test_the_suppressed_mask_is_what_the_memory_encoder_sees(self) -> None:
+        """The wiring, end to end: the memory ACTUALLY STORED is the erased one.
+
+        ``_store_memory`` reads ``outputs['low_res_logits']``, so the ordering
+        claim -- suppression BEFORE the best-IoU gather and before the memory
+        encoder -- is only true if the suppression happens inside ``_decode``.
+        This drives ``stream_step`` (the real path) and reconstructs, from the
+        SAME pixel features, the memory that a uniformly-sentinel mask would
+        give. The two must agree to the parameter.
+        """
+        model = tiny_model()
+        pin_object_score(model, -5.0)
+        image = images(batch=1)
+
+        model.stream_reset()
+        outputs = model.stream_step(image, frame_idx=0, is_conditioning=True)
+        stored = ops.convert_to_numpy(model.memory_bank.cond_frames[0].features)
+
+        assert np.all(
+            ops.convert_to_numpy(outputs["low_res_logits"])
+            == np.float32(NO_OBJ_SCORE)), (
+            "the streaming path returned an unsuppressed mask, so this "
+            "reconstruction would be comparing two different things"
+        )
+
+        features = model.image_encoder(image, training=False)["vision_features"]
+        sentinel = ops.convert_to_tensor(np.full(
+            (1, model.image_size, model.image_size, 1), NO_OBJ_SCORE,
+            dtype="float32"))
+        memory, _ = model.memory_encoder([features, sentinel])
+        expected = ops.convert_to_numpy(model._mark_occlusion(
+            memory, np.full((1, 1), -5.0, dtype="float32")))
+
+        # The bank stores memory FLATTENED over the spatial grid
+        # (`(B, h, w, mem_dim)` -> `(B, h * w, mem_dim)`), so the
+        # reconstruction is reshaped to the bank's layout rather than the
+        # comparison being loosened. Asserted, so a change in that layout is a
+        # loud failure here and not a silently reshaped one.
+        assert stored.shape == (1, TINY_GRID * TINY_GRID, TINY_MEM_DIM)
+        np.testing.assert_allclose(
+            stored, expected.reshape(stored.shape), atol=1e-4)
 
 
 class TestSpatialNoObjectEmbedding:
@@ -1564,15 +1968,26 @@ class TestSpatialNoObjectEmbedding:
         would make the observation depend on the sign an unseeded, randomly
         initialized object-score head happens to emit -- i.e. the test would
         silently become vacuous (and pass) whenever that sign came out
-        positive.
+        positive. (``pin_object_score`` now exists for exactly that problem;
+        the direct drive is kept here because the quantity measured is a
+        DIFFERENCE between two weight values, which the mask content cancels
+        out of entirely.)
+
+        The hand-built mask is deliberately NOT constant. An earlier version
+        passed all-zero logits, which is (up to a shift) the state
+        ``NO_OBJ_SCORE`` suppression itself produces -- so this test read as
+        evidence about a mechanism it never exercised. The suppression has its
+        own class, ``TestAbsentObjectMaskSuppression``; this one is about
+        ``no_obj_embed_spatial`` reaching the bank and nothing else.
         """
         model = tiny_model()
         features = ops.convert_to_tensor(np.zeros(
             (1, TINY_GRID, TINY_GRID, TINY_DIM), dtype="float32"))
         mask_edge = TINY_GRID * 4
+        rng = np.random.default_rng(11)
         outputs = {
-            "low_res_logits": ops.convert_to_tensor(np.zeros(
-                (1, 1, mask_edge, mask_edge), dtype="float32")),
+            "low_res_logits": ops.convert_to_tensor(rng.standard_normal(
+                (1, 1, mask_edge, mask_edge)).astype("float32")),
             "iou_predictions": ops.convert_to_tensor(
                 np.asarray([[0.5]], dtype="float32")),
             # Strictly negative: the frame is predicted OCCLUDED, which is the
@@ -1634,8 +2049,14 @@ class TestOutputContract:
             tiny_model()({"points": None})
 
     def test_prompts_reach_the_output(self) -> None:
-        """A box prompt must change the prediction, or the prompt path is dead."""
+        """A box prompt must change the prediction, or the prompt path is dead.
+
+        Object score pinned positive (D-043): a suppressed mask is the same
+        constant with and without the prompt, and the prompt can itself move
+        the score across zero, so both failure modes are removed by pinning.
+        """
         model = tiny_model()
+        pin_object_score(model, 5.0)
         x = images()
         plain = ops.convert_to_numpy(model({"image": x})["low_res_logits"])
         boxes = np.tile(

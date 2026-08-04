@@ -73,6 +73,16 @@ _OBJ_PTR_PROJ_DEPTH = 3
 #: Temperature of the object-pointer TEMPORAL sine encoding.
 _OBJ_PTR_TPOS_TEMPERATURE = 10000.0
 
+#: Placeholder mask logit for a frame the object-score head says holds no
+#: object. Transcribed from the reference (``sam2_base.py:19``,
+#: ``NO_OBJ_SCORE = -1024.0``) rather than chosen: it is not merely "a large
+#: negative number", it is the specific value every downstream consumer of a
+#: suppressed mask was trained against. In particular the memory encoder's
+#: ``sigmoid(x) * 20 - 10`` saturates it to exactly ``-10`` (its lower limit),
+#: and ``-1024`` is representable in float16, so the suppression survives
+#: ``mixed_float16`` unchanged.
+NO_OBJ_SCORE = -1024.0
+
 
 def _sine_positional_encoding_1d(
         positions: Any,
@@ -733,6 +743,8 @@ class SAM2(keras.Model):
                 high_res_features=[fpn[0], fpn[1]],
                 training=training,
             )
+        low_res_logits = self._suppress_absent_object(
+            low_res_logits, object_score_logits)
         # DECISION plan-2026-08-04T044628-4c240b4c/D-038
         # The pointer token is gathered by the model's OWN best-IoU estimate,
         # never by position. Do NOT "simplify" this back to
@@ -743,8 +755,23 @@ class SAM2(keras.Model):
         # judge best, with no shape error and no measurable symptom at batch 1
         # on the single-mask path (where M == 1 and the two agree exactly).
         # See decisions.md D-038.
-        selected_token = ops.squeeze(
-            _select_best_by_iou(pointer_tokens, iou), axis=1)
+        #
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-044
+        # The gather is CONDITIONAL on the pointer axis being longer than 1.
+        # Do NOT drop this branch and gather unconditionally: the pointer axis
+        # and the IoU axis are NOT the same length in general. The decoder
+        # emits one pointer token per mask token only when
+        # `use_multimask_token_for_obj_ptr` is set (its own default is False,
+        # D-023), so at `multimask_output=True` with that default the pointer
+        # axis is 1 while `iou` is 3 and an unconditional gather raises
+        # `InvalidArgumentError: indices[0,0] = 1 is not in [0, 1)`. The
+        # reference guards it the same way (`sam2_base.py:387`,
+        # `if sam_output_tokens.size(1) > 1`). See decisions.md D-044.
+        if int(pointer_tokens.shape[1]) > 1:
+            selected_token = ops.squeeze(
+                _select_best_by_iou(pointer_tokens, iou), axis=1)
+        else:
+            selected_token = pointer_tokens[:, 0, :]
         pointer = self.obj_ptr_proj(selected_token, training=training)
         return {
             "low_res_logits": low_res_logits,
@@ -753,6 +780,37 @@ class SAM2(keras.Model):
             "object_pointer": self._blend_object_pointer(
                 pointer, object_score_logits),
         }
+
+    def _suppress_absent_object(self, logits: Any, score: Any) -> Any:
+        """Replace every mask logit with :data:`NO_OBJ_SCORE` where absent.
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-043
+        # This runs BEFORE the best-IoU gather and therefore before the high-
+        # resolution resize, before the memory encoder and before the value is
+        # returned to the caller. Do NOT move it later "so the raw mask is
+        # still available", and do NOT delete it because the occlusion is
+        # already flagged two other ways (`no_obj_ptr` on the pointer stream,
+        # `no_obj_embed_spatial` on the spatial stream). Those two MARK an
+        # occluded frame; this one ERASES its mask. Without it the memory bank
+        # stores the object's real, unsuppressed mask together with an
+        # occlusion flag -- a contradictory state the reference never writes,
+        # and one with no shape, dtype or finiteness symptom. The threshold is
+        # HARD (`score > 0`) even when `soft_no_obj_ptr` is set: the reference
+        # comments that the spatial mask is "always a *hard* choice", and only
+        # the POINTER blend may be soft (`sam2_base.py:358-368`).
+        # See decisions.md D-043.
+
+        :param logits: ``(B, M, h, w)`` mask logits, straight from the decoder.
+        :type logits: Any
+        :param score: ``(B, 1)`` object-score logits.
+        :type score: Any
+        :return: ``(B, M, h, w)``; rows whose score is ``<= 0`` are uniformly
+            :data:`NO_OBJ_SCORE`, the rest are untouched.
+        :rtype: Any
+        """
+        appearing = ops.reshape(score, (-1, 1, 1, 1)) > 0
+        return ops.where(
+            appearing, logits, ops.cast(NO_OBJ_SCORE, logits.dtype))
 
     def _blend_object_pointer(self, pointer: Any, score: Any) -> Any:
         """Interpolate the predicted pointer towards the learned ``no_obj_ptr``.
@@ -1008,13 +1066,32 @@ class SAM2(keras.Model):
         :return: ``(1, num_obj_ptr_tokens, mem_dim)``.
         :rtype: Any
         """
-        # Normalized exactly as the reference does: by the largest temporal
-        # difference the pointer cap can produce, so the encoding's frequency
-        # content does not depend on how far into the video the tracker is.
-        # `max(..., 1)` only guards the degenerate cap of 1.
+        # Normalized by the largest temporal difference the pointer cap can
+        # produce, so the encoding's frequency content does not depend on how
+        # far into the video the tracker is. `max(..., 1)` only guards the
+        # degenerate cap of 1.
+        #
+        # This is NOT "exactly as the reference does", and an earlier version
+        # of this comment said it was. Two known divergences, both recorded in
+        # progress.md under Deferred:
+        #   (a) the reference clamps the cap to the video length first
+        #       (`min(num_frames, max_obj_ptrs_in_encoder)`, `sam2_base.py:588`
+        #       then `:628`), so on any video shorter than the cap its span is
+        #       SMALLER than this constant 15;
+        #   (b) this port's pointer loop is `range(1, max_obj_ptrs + 1)` where
+        #       the reference's is `range(1, max_obj_ptrs)` (memory_bank.py,
+        #       Warning 5(c)), so a saturated bank can reach `t_diff = 16` here
+        #       and produce a normalized position of 16/15 = 1.067, i.e.
+        #       OUTSIDE the [0, 1] range this span is defined over.
+        # Both are latent at every configuration this suite exercises; neither
+        # is invisible any more.
         span = float(max(self.max_obj_ptrs_in_encoder - 1, 1))
         positions = [float(diff) / span for diff in readout.obj_ptr_tpos]
         encoding = _sine_positional_encoding_1d(positions, self.hidden_dim)
+        # `training=False` is hardcoded because this method is reachable ONLY
+        # from `stream_step`, which is inference-only by construction. Inert
+        # for a plain Dense; it stops being inert if this projection ever gains
+        # dropout or normalization.
         encoding = self.obj_ptr_tpos_proj(encoding, training=False)
         return ops.expand_dims(encoding, axis=0)
 
