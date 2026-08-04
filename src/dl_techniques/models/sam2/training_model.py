@@ -328,6 +328,18 @@ class SAM2TrainingModel(keras.Model):
         high_res = ops.image.resize(
             logits, (size, size), interpolation="bilinear")
 
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-071
+        # H-4 detaches BOTH sides of this call: the inputs here, and the
+        # outputs again inside `SAM2MemoryBank.add_frame` (`stop_gradient=True`
+        # by default). A module whose input and output are both detached has NO
+        # path to any loss, so `memory_encoder` and `obj_ptr_proj` below ship
+        # FROZEN AT INITIALIZATION -- MEASURED under the real trainer: 38 of 40
+        # memory-encoder gradients are `None` (the other 2 at 2.0e-11) and 6 of
+        # 6 `obj_ptr_proj` gradients are `None`. Do NOT read the descending
+        # loss as evidence that this path trains; it cannot. Do NOT "fix" it by
+        # deleting these `stop_gradient` calls alone -- the bank detaches
+        # independently, so that edit changes nothing while looking like it
+        # does. See decisions.md D-071 for the two real options.
         memory, memory_pos = self.sam2.memory_encoder(
             [ops.stop_gradient(features), ops.stop_gradient(high_res)],
             training=training,

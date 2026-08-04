@@ -5,9 +5,16 @@ Run it::
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \\
         .venv/bin/python -m train.sam2.train_sam2 --smoke
 
-    # The control that isolates the VIDEO machinery from the SAM 2 machinery
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-069
+    # The control that isolates the VIDEO machinery from the SAM 2 machinery.
+    # `--occlusion-frames 0` is REQUIRED here and is not a stylistic choice:
+    # frame 0 carries the prompt and can never be occluded, so at T=1 the
+    # occlusion window is [0, 0] and the default `occlusion_frames=1` is
+    # REFUSED by `_occlusion_window` before a single tensor is built. MEASURED:
+    # the T=1 command without it exits 1 in 5s with that ValueError.
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \\
-        .venv/bin/python -m train.sam2.train_sam2 --smoke --num-frames 1
+        .venv/bin/python -m train.sam2.train_sam2 \\
+        --smoke --num-frames 1 --occlusion-frames 0
 
 What this trainer is, and is not
 --------------------------------
