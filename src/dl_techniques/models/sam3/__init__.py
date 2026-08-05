@@ -2,9 +2,9 @@
 SAM 3 (Segment Anything with Concepts) -- phase 1: the text-prompt-only image path.
 
 **Phase boundary.** This package is being built leaf-first. It currently exposes
-the ViTDet image trunk, the dual SimpleFPN neck and the CLIP text tower only; the
-DETR decoder, open-vocabulary scorer, MaskFormer segmentation head and the
-top-level ``Sam3Image`` assembly land in later steps of the same iteration, and
+the ViTDet image trunk, the dual SimpleFPN neck, the CLIP text tower and the
+open-vocabulary dot-product scorer only; the DETR decoder, MaskFormer
+segmentation head and the top-level ``Sam3Image`` assembly land in later steps of the same iteration, and
 the curated export surface is finalized with them.
 
 **Deliberately out of scope in phase 1**, and named here rather than left to be
@@ -26,11 +26,13 @@ rediscovered as a gap:
   grep.)
 """
 
+from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
 from .text_encoder_ve import Sam3TextEncoder
 from .vitdet import Sam3ViTDetBackbone, Sam3ViTDetBlock
 
 __all__ = [
+    "Sam3DotProductScoring",
     "Sam3DualViTDetNeck",
     "Sam3TextEncoder",
     "Sam3ViTDetBackbone",
