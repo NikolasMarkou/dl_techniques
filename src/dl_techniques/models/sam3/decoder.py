@@ -1,10 +1,10 @@
 """
 SAM 3's DETR decoder layer, with boxRPB and the presence token.
 
-This module provides the single public class :class:`Sam3DecoderLayer` -- ONE
-layer of SAM 3's detection decoder. The layer stack that repeats it, refines the
-reference boxes and reads out the per-layer presence logits is a separate class
-that lands in the next step of the same build.
+This module provides two public classes: :class:`Sam3DecoderLayer` -- ONE layer
+of SAM 3's detection decoder -- and :class:`Sam3TransformerDecoder`, the stack
+that repeats it, refines the reference boxes and reads out the per-layer
+presence logits.
 
 **Why this is not a stock transformer decoder layer.** A DETR decoder layer has
 two attention sub-blocks. This one has THREE, in this order:
@@ -658,6 +658,499 @@ class Sam3DecoderLayer(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "activation": self.activation,
             "use_text_cross_attention": self.use_text_cross_attention,
+            "norm_epsilon": self.norm_epsilon,
+        })
+        return config
+
+
+@keras.saving.register_keras_serializable()
+class Sam3TransformerDecoder(keras.layers.Layer):
+    """SAM 3's detection-decoder stack: layers, box refinement, presence.
+
+    Repeats :class:`Sam3DecoderLayer` ``num_layers`` times. Between layers it
+    refines each query's reference box, rebuilds that query's conditional
+    positional embedding and rebuilds boxRPB's additive bias from the refined
+    box, and it reads a presence logit off the presence token after every
+    layer. Every per-layer quantity is returned stacked on a LEADING
+    ``num_layers`` axis, which is what an auxiliary-loss training phase needs.
+
+    Four mechanisms carry this class's correctness, and each has its own guard:
+
+    1. **The box delta is computed on the NORMED hidden state.** ``norm`` is
+       applied first and the box head reads its output, not the raw one.
+    2. **The refinement is additive in LOGIT space**:
+       ``sigmoid(delta + inverse_sigmoid(reference))``, never
+       ``reference + delta``.
+    3. **The next layer's reference is DETACHED.** Gradients do not flow from a
+       later layer back through the reference chain into an earlier layer's box
+       head -- the reference is a per-layer anchor, not a differentiable path.
+    4. **The box head's last projection is ZERO-initialized**, so at
+       initialization layer 0 leaves its reference box exactly where it was.
+
+    DAC query doubling is deliberately NOT implemented: the reference gates it
+    on ``self.training`` at its only call site, so it is provably inert at
+    inference. It is named in the package docstring rather than left absent.
+
+    :param d_model: Model width. Default: ``256``.
+    :type d_model: int
+    :param num_heads: Attention heads per layer, and boxRPB's bias width.
+        Default: ``8``.
+    :type num_heads: int
+    :param num_layers: Number of decoder layers. Default: ``6``.
+    :type num_layers: int
+    :param num_queries: Number of object queries. Default: ``200``.
+    :type num_queries: int
+    :param feat_size: Image-memory grid ``(height, width)``. Default:
+        ``(72, 72)`` -- the settled ``resolution // stride = 1008 // 14``.
+    :type feat_size: Tuple[int, int]
+    :param dim_feedforward: Per-layer feed-forward width. Default: ``2048``.
+    :type dim_feedforward: int
+    :param dropout_rate: Per-layer dropout. Default: ``0.1``.
+    :type dropout_rate: float
+    :param activation: Per-layer feed-forward activation. Default: ``"relu"``.
+    :type activation: str
+    :param use_text_cross_attention: Whether each layer has the text
+        cross-attention sub-block. Default: ``True``.
+    :type use_text_cross_attention: bool
+    :param box_rpb: ``"log"``, ``"linear"`` or ``"none"``. Default: ``"log"``.
+    :type box_rpb: str
+    :param use_presence_token: Whether the presence token and its readout head
+        exist. Default: ``True``.
+    :type use_presence_token: bool
+    :param clamp_presence_logits: Whether presence logits are clamped.
+        Default: ``True``.
+    :type clamp_presence_logits: bool
+    :param clamp_presence_logit_max_val: The symmetric presence clamp bound.
+        Default: ``10.0`` -- deliberately NOT the scorer's ``12.0``.
+    :type clamp_presence_logit_max_val: float
+    :param use_normed_output_consistently: Whether the box delta reads the
+        NORMED hidden state. Default: ``True``.
+    :type use_normed_output_consistently: bool
+    :param norm_epsilon: Epsilon of every normalization. Default: ``1e-5``.
+    :type norm_epsilon: float
+    :raises ValueError: On a non-positive size, an unknown ``box_rpb`` mode, or
+        a ``feat_size`` that is not a pair of positive integers.
+
+    Example:
+        >>> import numpy as np
+        >>> stack = Sam3TransformerDecoder(d_model=8, num_heads=2,
+        ...                                num_layers=2, num_queries=5,
+        ...                                feat_size=(3, 4),
+        ...                                dim_feedforward=16,
+        ...                                dropout_rate=0.0)
+        >>> memory = np.zeros((2, 12, 8), dtype="float32")
+        >>> text = np.zeros((2, 4, 8), dtype="float32")
+        >>> hidden, boxes, presence, feats = stack(memory, memory_text=text)
+        >>> hidden.shape, boxes.shape, presence.shape
+        ((2, 2, 5, 8), (2, 2, 5, 4), (2, 2, 1))
+    """
+
+    def __init__(
+            self, d_model: int = 256, num_heads: int = 8, num_layers: int = 6,
+            num_queries: int = 200, feat_size: Tuple[int, int] = (72, 72),
+            dim_feedforward: int = 2048, dropout_rate: float = 0.1,
+            activation: str = "relu", use_text_cross_attention: bool = True,
+            box_rpb: str = "log", use_presence_token: bool = True,
+            clamp_presence_logits: bool = True,
+            clamp_presence_logit_max_val: float = 10.0,
+            use_normed_output_consistently: bool = True,
+            norm_epsilon: float = 1e-5, **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        for name, value in (("d_model", d_model), ("num_heads", num_heads),
+                            ("num_layers", num_layers),
+                            ("num_queries", num_queries)):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}")
+        if box_rpb not in ("none", "log", "linear"):
+            raise ValueError(f"box_rpb must be 'none', 'log' or 'linear', got "
+                             f"{box_rpb!r}")
+        if len(feat_size) != 2 or min(feat_size) <= 0:
+            raise ValueError(f"feat_size must be a pair of positive ints, got "
+                             f"{feat_size}")
+        if d_model % 2 != 0:
+            raise ValueError(f"d_model must be even (the box sine embedding "
+                             f"splits it in half), got {d_model}")
+
+        self.d_model = int(d_model)
+        self.num_heads = int(num_heads)
+        self.num_layers = int(num_layers)
+        self.num_queries = int(num_queries)
+        self.feat_size = (int(feat_size[0]), int(feat_size[1]))
+        self.dim_feedforward = int(dim_feedforward)
+        self.dropout_rate = float(dropout_rate)
+        self.activation = str(activation)
+        self.use_text_cross_attention = bool(use_text_cross_attention)
+        self.box_rpb = str(box_rpb)
+        self.use_presence_token = bool(use_presence_token)
+        self.clamp_presence_logits = bool(clamp_presence_logits)
+        self.clamp_presence_logit_max_val = float(clamp_presence_logit_max_val)
+        self.use_normed_output_consistently = bool(
+            use_normed_output_consistently)
+        self.norm_epsilon = float(norm_epsilon)
+
+        # Every sub-layer store here is FLAT. A `List[List[Layer]]` restores
+        # freshly initialized kernels on a `.keras` round trip while the weight
+        # count, every weight path and the parameter total all match -- measured
+        # in this package, see decisions.md D-098.
+        self.decoder_layers = [
+            Sam3DecoderLayer(
+                d_model=self.d_model, num_heads=self.num_heads,
+                dim_feedforward=self.dim_feedforward,
+                dropout_rate=self.dropout_rate, activation=self.activation,
+                use_text_cross_attention=self.use_text_cross_attention,
+                norm_epsilon=self.norm_epsilon, name=f"decoder_layer_{index}")
+            for index in range(self.num_layers)
+        ]
+        self.norm = create_normalization_layer(
+            "layer_norm", epsilon=self.norm_epsilon, name="norm")
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-112
+        # The LAST projection of the box head is ZERO-initialized. Do NOT
+        # "fix" this to a standard initializer: the whole refinement chain is
+        # `sigmoid(delta + inverse_sigmoid(reference))`, so a zero delta is what
+        # makes layer 0 an exact identity on its reference box at step 0. With
+        # any non-zero init the first layer displaces every reference box before
+        # a single gradient step, and boxRPB's bias -- which is built FROM the
+        # reference box -- is displaced with it. There is no shape, dtype or
+        # finiteness symptom. See decisions.md D-112.
+        self.bbox_embed = self._make_mlp(3, self.d_model, 4, "bbox_embed",
+                                         zero_init_last=True)
+        self.ref_point_head = self._make_mlp(2, self.d_model, self.d_model,
+                                             "ref_point_head")
+        self.box_rpb_embed_x = self._make_mlp(2, self.d_model, self.num_heads,
+                                              "box_rpb_embed_x")
+        self.box_rpb_embed_y = self._make_mlp(2, self.d_model, self.num_heads,
+                                              "box_rpb_embed_y")
+        self.presence_token_out_norm = create_normalization_layer(
+            "layer_norm", epsilon=self.norm_epsilon,
+            name="presence_token_out_norm")
+        self.presence_token_head = self._make_mlp(3, self.d_model, 1,
+                                                  "presence_token_head")
+
+        self.query_embed = None
+        self.reference_points = None
+        self.presence_token = None
+
+        logger.info(
+            f"Sam3TransformerDecoder: d_model={self.d_model}, "
+            f"layers={self.num_layers}, queries={self.num_queries}, "
+            f"feat_size={self.feat_size}, box_rpb={self.box_rpb}, "
+            f"presence={self.use_presence_token}"
+        )
+
+    # -----------------------------------------------------------------
+    # pure helpers
+    #
+    # These are METHODS, not module-level functions. `decoder.py` already ships
+    # exactly two module-private functions (`_box_rpb_log_compress` and
+    # `_box_rpb_bias`), and decisions.md D-109 records that a third is a
+    # stop-and-surface trigger. Both helpers below have exactly ONE owner --
+    # this class -- so they live on it, matching `Sam3DecoderLayer._with_pos`.
+    # The boxRPB pair stayed at module level because they have TWO owners.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _make_mlp(depth: int, hidden: int, out_dim: int, name: str,
+                  zero_init_last: bool = False) -> list:
+        """Build a flat ReLU MLP stack; only the last projection is linear."""
+        stack = [layers.Dense(hidden, activation="relu", name=f"{name}_{index}")
+                 for index in range(depth - 1)]
+        extra = dict(kernel_initializer="zeros", bias_initializer="zeros") \
+            if zero_init_last else {}
+        stack.append(layers.Dense(out_dim, name=f"{name}_{depth - 1}", **extra))
+        return stack
+
+    @staticmethod
+    def _build_mlp(stack: list, input_shape: Tuple) -> None:
+        """Build a flat MLP stack, threading the running shape through it."""
+        shape = tuple(input_shape)
+        for dense in stack:
+            dense.build(shape)
+            shape = shape[:-1] + (dense.units,)
+
+    @staticmethod
+    def _run_mlp(stack: list, x: Any) -> Any:
+        """Apply a flat MLP stack in order."""
+        for dense in stack:
+            x = dense(x)
+        return x
+
+    @staticmethod
+    def _inverse_sigmoid(x: Any, eps: float = 1e-3) -> Any:
+        """The reference's numerically guarded logit function."""
+        x = ops.clip(x, 0.0, 1.0)
+        return ops.log(ops.maximum(x, eps) / ops.maximum(1.0 - x, eps))
+
+    @staticmethod
+    def _sine_embed_for_boxes(boxes: Any, d_model: int) -> Any:
+        """Sine-embed a ``cxcywh`` box into ``2 * d_model`` features.
+
+        Each of the four box scalars is embedded into ``d_model // 2``
+        features, interleaved ``sin`` at even channels and ``cos`` at odd, and
+        the four are concatenated in the reference's order -- ``y, x, w, h``,
+        NOT the ``cxcywh`` order the box itself is stored in.
+
+        :param boxes: ``(batch, num_queries, 4)`` normalized ``cxcywh``.
+        :type boxes: Any
+        :param d_model: Model width; must be even.
+        :type d_model: int
+        :return: ``(batch, num_queries, 2 * d_model)``.
+        :rtype: Any
+        """
+        num_feats = d_model // 2
+        index = ops.cast(ops.arange(num_feats // 2), boxes.dtype)
+        dim_t = ops.power(10000.0, (2.0 * index) / float(num_feats))
+        parts = []
+        for axis in (1, 0, 2, 3):
+            scaled = boxes[..., axis:axis + 1] * (2.0 * math.pi) / dim_t
+            pair = ops.stack([ops.sin(scaled), ops.cos(scaled)], axis=-1)
+            shape = ops.shape(pair)
+            parts.append(ops.reshape(pair, (shape[0], shape[1], num_feats)))
+        return ops.concatenate(parts, axis=-1)
+
+    def build(
+            self, memory_shape: Tuple[Optional[int], ...],
+            memory_text_shape: Optional[Tuple] = None,
+            **kwargs: Any,
+    ) -> None:
+        """Create the stack's own weights and build every sub-layer.
+
+        :param memory_shape: ``(batch, height * width, d_model)``.
+        :type memory_shape: Tuple[Optional[int], ...]
+        :param memory_text_shape: ``(batch, num_tokens, d_model)``; required
+            when text cross-attention is enabled.
+        :type memory_text_shape: Optional[Tuple[Optional[int], ...]]
+        :param kwargs: Ignored; accepted so the layer builds from its full call
+            signature.
+        :raises ValueError: On a wrong rank, a width other than ``d_model``, or
+            a key count that is not ``feat_size[0] * feat_size[1]``.
+        """
+        if self.built:
+            return
+        memory_shape = tuple(memory_shape)
+        if len(memory_shape) != 3:
+            raise ValueError(f"memory must have shape (batch, keys, d_model), "
+                             f"got {memory_shape}")
+        if memory_shape[-1] is not None and memory_shape[-1] != self.d_model:
+            raise ValueError(f"memory width {memory_shape[-1]} != d_model "
+                             f"{self.d_model}")
+        keys = self.feat_size[0] * self.feat_size[1]
+        if memory_shape[1] is not None and memory_shape[1] != keys:
+            raise ValueError(
+                f"memory has {memory_shape[1]} keys but feat_size "
+                f"{self.feat_size} implies {keys}; boxRPB's bias is built on "
+                f"that grid, so a mismatch is a silent wrong-geometry bias")
+
+        normal = keras.initializers.RandomNormal(stddev=1.0)
+        self.query_embed = self.add_weight(
+            name="query_embed", shape=(self.num_queries, self.d_model),
+            initializer=normal, trainable=True)
+        self.reference_points = self.add_weight(
+            name="reference_points", shape=(self.num_queries, 4),
+            initializer=normal, trainable=True)
+        if self.use_presence_token:
+            self.presence_token = self.add_weight(
+                name="presence_token", shape=(1, self.d_model),
+                initializer=normal, trainable=True)
+
+        batch = memory_shape[0]
+        tgt_shape = (batch, self.num_queries, self.d_model)
+        for decoder_layer in self.decoder_layers:
+            decoder_layer.build(tgt_shape, memory_shape, memory_text_shape)
+        self.norm.build(tgt_shape)
+        self._build_mlp(self.bbox_embed, tgt_shape)
+        self._build_mlp(self.ref_point_head,
+                        (batch, self.num_queries, 2 * self.d_model))
+        for stack in (self.box_rpb_embed_x, self.box_rpb_embed_y):
+            self._build_mlp(stack, (batch, self.num_queries, None, 2))
+        if self.use_presence_token:
+            presence_shape = (batch, 1, self.d_model)
+            self.presence_token_out_norm.build(presence_shape)
+            self._build_mlp(self.presence_token_head, presence_shape)
+        super().build(memory_shape)
+
+    def call(
+            self, memory: Any,
+            memory_text: Optional[Any] = None,
+            text_padding_mask: Optional[Any] = None,
+            memory_pos: Optional[Any] = None,
+            tgt: Optional[Any] = None,
+            reference_boxes: Optional[Any] = None,
+            training: Optional[bool] = None,
+    ) -> Tuple[Any, Any, Optional[Any], Optional[Any]]:
+        """Run the layer stack with per-layer box refinement.
+
+        :param memory: Image memory ``(batch, height * width, d_model)``.
+        :type memory: Any
+        :param memory_text: Text memory ``(batch, num_tokens, d_model)``.
+        :type memory_text: Optional[Any]
+        :param text_padding_mask: ``(batch, num_tokens)``, ``True`` at PADDING.
+        :type text_padding_mask: Optional[Any]
+        :param memory_pos: Per-key positional embedding, shaped like ``memory``.
+        :type memory_pos: Optional[Any]
+        :param tgt: Object queries ``(batch, num_queries, d_model)``. Defaults
+            to this stack's own learned query embedding.
+        :type tgt: Optional[Any]
+        :param reference_boxes: Initial ``cxcywh`` boxes already in ``[0, 1]``,
+            ``(batch, num_queries, 4)``. Defaults to
+            ``sigmoid`` of this stack's learned reference points.
+        :type reference_boxes: Optional[Any]
+        :param training: Training-mode flag.
+        :type training: Optional[bool]
+        :return: ``(hidden_states, reference_boxes, presence_logits,
+            presence_features)`` with shapes ``(num_layers, batch, num_queries,
+            d_model)``, ``(num_layers, batch, num_queries, 4)``,
+            ``(num_layers, batch, 1)`` and ``(batch, 1, d_model)``. The last two
+            are ``None`` when the presence token is disabled.
+        :rtype: Tuple[Any, Any, Optional[Any], Optional[Any]]
+        """
+        batch = ops.shape(memory)[0]
+        if tgt is None:
+            tgt = ops.broadcast_to(
+                ops.expand_dims(ops.cast(self.query_embed, self.compute_dtype),
+                                0),
+                (batch, self.num_queries, self.d_model))
+        if reference_boxes is None:
+            reference_boxes = ops.sigmoid(ops.broadcast_to(
+                ops.expand_dims(
+                    ops.cast(self.reference_points, self.compute_dtype), 0),
+                (batch, self.num_queries, 4)))
+        else:
+            reference_boxes = ops.cast(reference_boxes, self.compute_dtype)
+        presence = None
+        if self.use_presence_token:
+            presence = ops.broadcast_to(
+                ops.expand_dims(
+                    ops.cast(self.presence_token, self.compute_dtype), 0),
+                (batch, 1, self.d_model))
+
+        hidden_states = []
+        # The FIRST entry is the INITIAL reference, and the LAST layer's
+        # refinement is deliberately NOT appended -- the stack therefore holds
+        # exactly `num_layers` boxes, each one the reference the layer at that
+        # index actually consumed. An off-by-one here misaligns every auxiliary
+        # box loss with the layer that produced it, with no shape symptom.
+        all_reference_boxes = [reference_boxes]
+        presence_logits = []
+        output = tgt
+
+        for index, decoder_layer in enumerate(self.decoder_layers):
+            # The conditional query position and boxRPB's bias are BOTH rebuilt
+            # from the CURRENT reference box at every layer. Hoisting either one
+            # out of the loop turns a conditional-DETR decoder into a static one.
+            query_pos = self._run_mlp(
+                self.ref_point_head,
+                self._sine_embed_for_boxes(reference_boxes, self.d_model))
+            image_cross_bias = None
+            if self.box_rpb != "none":
+                image_cross_bias = _box_rpb_bias(
+                    reference_boxes, self.feat_size,
+                    lambda t: self._run_mlp(self.box_rpb_embed_x, t),
+                    lambda t: self._run_mlp(self.box_rpb_embed_y, t),
+                    self.num_heads, self.box_rpb)
+
+            output, presence = decoder_layer(
+                output, memory, query_pos=query_pos, memory_pos=memory_pos,
+                memory_text=memory_text, text_padding_mask=text_padding_mask,
+                image_cross_bias=image_cross_bias, presence_token=presence,
+                training=training)
+
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-113
+            # The delta reads the NORMED hidden state and the next reference is
+            # DETACHED. Do NOT "simplify" either half:
+            #   * feeding the raw `output` to the box head is a silent value
+            #     defect -- same shapes, same finiteness, different boxes;
+            #   * removing `stop_gradient` re-opens a gradient path from every
+            #     later layer back through the reference chain into every
+            #     earlier layer's box head, which is the multi-layer credit
+            #     assignment iterative box refinement exists to avoid.
+            # See decisions.md D-113.
+            normed = self.norm(output)
+            delta = self._run_mlp(
+                self.bbox_embed,
+                normed if self.use_normed_output_consistently else output)
+            refined = ops.sigmoid(
+                delta + self._inverse_sigmoid(reference_boxes))
+            reference_boxes = ops.stop_gradient(refined)
+            if index != self.num_layers - 1:
+                all_reference_boxes.append(refined)
+            hidden_states.append(normed)
+
+            if presence is not None:
+                logits = ops.squeeze(
+                    self._run_mlp(self.presence_token_head,
+                                  self.presence_token_out_norm(presence)),
+                    axis=-1)
+                # DECISION plan-2026-08-04T044628-4c240b4c/D-111
+                # This bound is 10.0 and the open-vocabulary scorer's is 12.0.
+                # They are NOT the same quantity and must not be unified; only
+                # a probe inside (10, 12] can tell them apart.
+                # A DELIBERATE DIVERGENCE, recorded rather than hidden: at the
+                # pinned reference SHA this clamp is a provable NO-OP -- it
+                # calls the out-of-place `clamp` and discards the result, then
+                # appends the UNCLAMPED tensor. Both constructor parameters,
+                # the reference's own comment, and its scorer (which clamps
+                # correctly) say the intent is a live clamp, so this port makes
+                # it effective. Do NOT "restore parity" by deleting it: that
+                # would also make `clamp_presence_logits=False` unreachable by
+                # any test. See decisions.md D-111.
+                if self.clamp_presence_logits:
+                    logits = ops.clip(logits,
+                                      -self.clamp_presence_logit_max_val,
+                                      self.clamp_presence_logit_max_val)
+                presence_logits.append(logits)
+
+        return (ops.stack(hidden_states), ops.stack(all_reference_boxes),
+                ops.stack(presence_logits) if presence_logits else None,
+                presence)
+
+    def compute_output_shape(
+            self, memory_shape: Tuple[Optional[int], ...],
+            memory_text_shape: Optional[Tuple] = None,
+            **kwargs: Any,
+    ) -> Tuple:
+        """Return the four output shapes, derived from the stored config.
+
+        :param memory_shape: ``(batch, keys, d_model)``.
+        :type memory_shape: Tuple[Optional[int], ...]
+        :param memory_text_shape: Unused.
+        :type memory_text_shape: Optional[Tuple[Optional[int], ...]]
+        :param kwargs: Ignored.
+        :return: Shapes of ``(hidden_states, reference_boxes, presence_logits,
+            presence_features)``.
+        :rtype: Tuple
+        """
+        batch = tuple(memory_shape)[0]
+        return (
+            (self.num_layers, batch, self.num_queries, self.d_model),
+            (self.num_layers, batch, self.num_queries, 4),
+            (self.num_layers, batch, 1) if self.use_presence_token else None,
+            (batch, 1, self.d_model) if self.use_presence_token else None,
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every ``__init__`` parameter.
+
+        :return: Serializable configuration.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "d_model": self.d_model, "num_heads": self.num_heads,
+            "num_layers": self.num_layers, "num_queries": self.num_queries,
+            "feat_size": self.feat_size,
+            "dim_feedforward": self.dim_feedforward,
+            "dropout_rate": self.dropout_rate,
+            "activation": self.activation,
+            "use_text_cross_attention": self.use_text_cross_attention,
+            "box_rpb": self.box_rpb,
+            "use_presence_token": self.use_presence_token,
+            "clamp_presence_logits": self.clamp_presence_logits,
+            "clamp_presence_logit_max_val": self.clamp_presence_logit_max_val,
+            "use_normed_output_consistently":
+                self.use_normed_output_consistently,
             "norm_epsilon": self.norm_epsilon,
         })
         return config

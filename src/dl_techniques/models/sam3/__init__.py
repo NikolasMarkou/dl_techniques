@@ -27,7 +27,7 @@ rediscovered as a gap:
   grep.)
 """
 
-from .decoder import Sam3DecoderLayer
+from .decoder import Sam3DecoderLayer, Sam3TransformerDecoder
 from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
 from .text_encoder_ve import Sam3TextEncoder
@@ -38,6 +38,7 @@ __all__ = [
     "Sam3DotProductScoring",
     "Sam3DualViTDetNeck",
     "Sam3TextEncoder",
+    "Sam3TransformerDecoder",
     "Sam3ViTDetBackbone",
     "Sam3ViTDetBlock",
 ]

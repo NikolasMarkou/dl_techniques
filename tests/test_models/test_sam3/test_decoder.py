@@ -34,6 +34,7 @@ from keras import layers, ops
 
 from dl_techniques.models.sam3.decoder import (
     Sam3DecoderLayer,
+    Sam3TransformerDecoder,
     _Sam3DecoderAttention,
     _box_rpb_bias,
     _box_rpb_log_compress,
@@ -870,3 +871,570 @@ class TestSerialization:
         layer.norm3.gamma.assign(layer.norm3.gamma + 0.5)
         moved, _ = layer(**payload, training=False)
         assert np.max(np.abs(_np(out) - _np(moved))) > 1e-3
+
+
+# =====================================================================
+# Step 7 -- `Sam3TransformerDecoder`, the layer stack
+#
+# The oracle below re-derives the WHOLE stack in float64 -- the per-layer
+# conditional query position, boxRPB's bias, all four sub-blocks of every
+# layer, the terminal normalization, the logit-space box refinement and the
+# presence readout -- from the stack's WEIGHTS only. It never calls the stack.
+#
+# Two absence-shaped assertions live here and both are flanked by positive
+# arms, because a dead box head satisfies them by construction:
+# `test_layer_zero_leaves_its_reference_box_exactly_where_it_was` (the delta is
+# zero at init) and
+# `test_a_later_layers_hidden_state_has_no_gradient_to_the_box_head` (the
+# detach). The liveness arms are named at each assertion site.
+# =====================================================================
+
+STACK_LAYERS = 3
+STACK = dict(d_model=8, num_heads=2, num_layers=STACK_LAYERS,
+             num_queries=QUERIES, feat_size=(GRID_H, GRID_W),
+             dim_feedforward=16, dropout_rate=0.0, activation="relu",
+             use_text_cross_attention=True, box_rpb="log",
+             use_presence_token=True, clamp_presence_logits=True,
+             clamp_presence_logit_max_val=10.0,
+             use_normed_output_consistently=True, norm_epsilon=1e-5)
+
+# Re-read from the pinned clone's `_create_transformer_decoder()`: 6 layers,
+# 200 queries, d_model 256, boxRPB "log", presence token on, and
+# `resolution=1008, stride=14` -> a 72 x 72 image-memory grid.
+SHIPPED_STACK = dict(d_model=256, num_heads=8, num_layers=6, num_queries=200,
+                     feat_size=(72, 72), dim_feedforward=2048,
+                     dropout_rate=0.1, box_rpb="log")
+
+
+def _stack_inputs(seed: int = 21) -> dict:
+    """A full call payload for the stack."""
+    rng = np.random.default_rng(seed)
+    dim = STACK["d_model"]
+    padding = np.zeros((BATCH, TOKENS), dtype=bool)
+    padding[0, TOKENS - 2:] = True
+    return dict(
+        memory=rng.normal(size=(BATCH, KEYS, dim)).astype("f4"),
+        memory_text=rng.normal(size=(BATCH, TOKENS, dim)).astype("f4"),
+        memory_pos=rng.normal(size=(BATCH, KEYS, dim)).astype("f4"),
+        text_padding_mask=padding,
+    )
+
+
+def _build_stack(randomize: bool = True, seed: int = 3, **overrides):
+    """Construct, build and (optionally) give every weight a real value."""
+    config = dict(STACK)
+    config.update(overrides)
+    built = Sam3TransformerDecoder(**config)
+    built.build((BATCH, KEYS, config["d_model"]),
+                (BATCH, TOKENS, config["d_model"]))
+    if randomize:
+        rng = np.random.default_rng(seed)
+        for weight in built.weights:
+            weight.assign(
+                rng.normal(0.0, 0.4, size=weight.shape).astype("float32"))
+    return built
+
+
+@pytest.fixture()
+def stack():
+    """A stack whose box head is still ZERO-initialized (the shipped init)."""
+    return _build_stack(randomize=False)
+
+
+@pytest.fixture()
+def trained_stack():
+    """A stack whose every weight -- box head included -- is non-trivial."""
+    return _build_stack(randomize=True)
+
+
+# ---------------------------------------------------------------------
+# float64 stack oracle
+# ---------------------------------------------------------------------
+
+
+class _MlpView:
+    """Adapt a flat ``List[Dense]`` to the ``.layers`` shape `_oracle_rpb` wants."""
+
+    def __init__(self, stack_list):
+        self.layers = stack_list
+
+
+def _oracle_mlp(stack_list, x: np.ndarray) -> np.ndarray:
+    """A flat MLP stack in float64; ReLU on every projection but the last."""
+    for index, dense in enumerate(stack_list):
+        kernel, bias = _dense(dense)
+        x = x @ kernel + bias
+        if index < len(stack_list) - 1:
+            x = np.maximum(x, 0.0)
+    return x
+
+
+def _oracle_sine_embed(boxes: np.ndarray, d_model: int) -> np.ndarray:
+    """The reference's 4-scalar box sine embedding, in ``y, x, w, h`` order."""
+    num_feats = d_model // 2
+    ladder = np.arange(num_feats // 2, dtype=np.float64)
+    dim_t = 10000.0 ** (2.0 * ladder / num_feats)
+    parts = []
+    for axis in (1, 0, 2, 3):
+        scaled = boxes[..., axis:axis + 1] * (2.0 * np.pi) / dim_t
+        pair = np.stack([np.sin(scaled), np.cos(scaled)], axis=-1)
+        parts.append(pair.reshape(boxes.shape[0], boxes.shape[1], num_feats))
+    return np.concatenate(parts, axis=-1)
+
+
+def _oracle_inverse_sigmoid(x: np.ndarray, eps: float = 1e-3) -> np.ndarray:
+    x = np.clip(x, 0.0, 1.0)
+    return np.log(np.maximum(x, eps) / np.maximum(1.0 - x, eps))
+
+
+def _oracle_stack_forward(obj, payload, boxes, use_normed=True, detach=True):
+    """The whole decoder stack in float64, from the stack's WEIGHTS only.
+
+    ``detach`` has no effect on the VALUES -- it is the gradient path that the
+    detach governs -- so it is not a parameter here; the gradient guards probe
+    it directly with a tape instead.
+    """
+    boxes = np.asarray(boxes, dtype=np.float64)
+    presence = np.broadcast_to(_np(obj.presence_token)[None],
+                               (BATCH, 1, obj.d_model)).copy()
+    output = np.broadcast_to(_np(obj.query_embed)[None],
+                             (BATCH, obj.num_queries, obj.d_model)).copy()
+    hidden, refs, logits = [], [boxes], []
+    gamma, beta = _np(obj.norm.gamma), _np(obj.norm.beta)
+    pgamma = _np(obj.presence_token_out_norm.gamma)
+    pbeta = _np(obj.presence_token_out_norm.beta)
+
+    for index in range(obj.num_layers):
+        query_pos = _oracle_mlp(obj.ref_point_head,
+                                _oracle_sine_embed(boxes, obj.d_model))
+        bias = _oracle_rpb(boxes, obj.feat_size,
+                           _MlpView(obj.box_rpb_embed_x),
+                           _MlpView(obj.box_rpb_embed_y), obj.num_heads,
+                           mode=obj.box_rpb)
+        layer_payload = dict(tgt=output, query_pos=query_pos,
+                             memory=payload["memory"],
+                             memory_pos=payload["memory_pos"],
+                             memory_text=payload["memory_text"],
+                             text_padding_mask=payload["text_padding_mask"],
+                             presence_token=presence)
+        output, presence = _reference_layer_forward(
+            obj.decoder_layers[index], layer_payload, bias=bias,
+            with_presence=True)
+
+        normed = _oracle_layer_norm(output, gamma, beta, obj.norm_epsilon)
+        delta = _oracle_mlp(obj.bbox_embed, normed if use_normed else output)
+        refined = 1.0 / (1.0 + np.exp(-(delta + _oracle_inverse_sigmoid(boxes))))
+        boxes = refined
+        if index != obj.num_layers - 1:
+            refs.append(refined)
+        hidden.append(normed)
+
+        raw = _oracle_mlp(obj.presence_token_head,
+                          _oracle_layer_norm(presence, pgamma, pbeta,
+                                             obj.norm_epsilon))[..., 0]
+        if obj.clamp_presence_logits:
+            raw = np.clip(raw, -obj.clamp_presence_logit_max_val,
+                          obj.clamp_presence_logit_max_val)
+        logits.append(raw)
+
+    return np.stack(hidden), np.stack(refs), np.stack(logits)
+
+
+class TestStackConstruction:
+
+    @pytest.mark.parametrize("bad", [
+        dict(d_model=0), dict(num_heads=0), dict(num_layers=0),
+        dict(num_queries=0), dict(box_rpb="quadratic"), dict(d_model=7),
+        dict(feat_size=(3,)), dict(feat_size=(0, 4)),
+    ])
+    def test_invalid_configuration_is_refused(self, bad):
+        config = dict(STACK)
+        config.update(bad)
+        with pytest.raises(ValueError):
+            Sam3TransformerDecoder(**config)
+
+    def test_a_memory_whose_key_count_contradicts_feat_size_is_refused(self):
+        """boxRPB's bias is built on `feat_size`; a mismatch is silent."""
+        built = Sam3TransformerDecoder(**STACK)
+        with pytest.raises(ValueError, match="wrong-geometry|implies"):
+            built.build((BATCH, KEYS + 1, STACK["d_model"]),
+                        (BATCH, TOKENS, STACK["d_model"]))
+
+    def test_wrong_memory_width_is_refused(self):
+        built = Sam3TransformerDecoder(**STACK)
+        with pytest.raises(ValueError, match="d_model"):
+            built.build((BATCH, KEYS, STACK["d_model"] + 2),
+                        (BATCH, TOKENS, STACK["d_model"]))
+
+    def test_wrong_memory_rank_is_refused(self):
+        built = Sam3TransformerDecoder(**STACK)
+        with pytest.raises(ValueError, match="batch, keys, d_model"):
+            built.build((BATCH, KEYS), (BATCH, TOKENS, STACK["d_model"]))
+
+    def test_a_disabled_presence_token_costs_zero_parameters(self):
+        with_presence = _build_stack(randomize=False)
+        without = _build_stack(randomize=False, use_presence_token=False)
+        head = 2 * (8 * 8 + 8) + (8 * 1 + 1)      # 3-layer MLP, d_model 8
+        expected = head + 2 * 8 + 8               # + out-norm + the token
+        assert (with_presence.count_params()
+                - without.count_params()) == expected
+
+    def test_a_disabled_presence_token_returns_none_for_both_outputs(self):
+        built = _build_stack(use_presence_token=False)
+        _, _, logits, feats = built(**_stack_inputs(), training=False)
+        assert logits is None and feats is None
+
+    def test_compute_output_shape_is_derived_from_config(self, trained_stack):
+        payload = _stack_inputs()
+        declared = trained_stack.compute_output_shape(
+            (BATCH, KEYS, STACK["d_model"]))
+        produced = trained_stack(**payload, training=False)
+        for lhs, rhs in zip(declared, produced):
+            assert tuple(lhs) == tuple(rhs.shape)
+
+
+class TestStackForward:
+
+    def test_every_per_layer_output_is_stacked_on_a_leading_layer_axis(
+            self, trained_stack):
+        hidden, boxes, logits, feats = trained_stack(**_stack_inputs(),
+                                                     training=False)
+        dim, layers_n = STACK["d_model"], STACK_LAYERS
+        assert tuple(hidden.shape) == (layers_n, BATCH, QUERIES, dim)
+        assert tuple(boxes.shape) == (layers_n, BATCH, QUERIES, 4)
+        assert tuple(logits.shape) == (layers_n, BATCH, 1)
+        assert tuple(feats.shape) == (BATCH, 1, dim)
+
+    def test_matches_the_float64_stack_oracle(self, trained_stack):
+        """The oracle re-derives the whole stack; it never calls the stack.
+
+        This is also the guard that dies when the box head is killed: the
+        oracle computes the TRUE delta from the head's weights, so a dead head
+        disagrees with it at every layer after the first.
+        """
+        payload = _stack_inputs()
+        boxes_in = _boxes()
+        hidden, refs, logits, _ = trained_stack(
+            **payload, reference_boxes=boxes_in, training=False)
+        want_hidden, want_refs, want_logits = _oracle_stack_forward(
+            trained_stack, payload, boxes_in)
+        np.testing.assert_allclose(_np(hidden), want_hidden, atol=TOL)
+        np.testing.assert_allclose(_np(refs), want_refs, atol=TOL)
+        np.testing.assert_allclose(_np(logits), want_logits, atol=TOL)
+
+    def test_the_oracle_probes_are_unsaturated_so_the_chain_is_visible(
+            self, trained_stack):
+        """A stack whose references never move would pass a vacuous oracle."""
+        payload = _stack_inputs()
+        _, refs, _ = _oracle_stack_forward(trained_stack, payload, _boxes())
+        assert np.max(np.abs(refs[-1] - refs[0])) > 100 * TOL
+
+    def test_the_reference_stack_holds_one_box_per_layer(self, trained_stack):
+        """`num_layers` boxes: the initial one plus every refinement but the
+        last. The final layer's refinement is deliberately dropped, so entry
+        `k` is the box layer `k` actually consumed."""
+        _, refs, _, _ = trained_stack(**_stack_inputs(),
+                                      reference_boxes=_boxes(), training=False)
+        assert refs.shape[0] == STACK_LAYERS
+        np.testing.assert_allclose(_np(refs[0]), _boxes().astype(np.float64),
+                                   atol=1e-6)
+
+    def test_the_default_reference_is_the_sigmoid_of_the_learned_points(
+            self, trained_stack):
+        _, refs, _, _ = trained_stack(**_stack_inputs(), training=False)
+        want = 1.0 / (1.0 + np.exp(-_np(trained_stack.reference_points)))
+        np.testing.assert_allclose(_np(refs[0])[0], want, atol=1e-6)
+
+    def test_the_default_query_is_the_learned_query_embedding(
+            self, trained_stack):
+        """Feeding `query_embed` explicitly must reproduce the default path."""
+        payload = _stack_inputs()
+        default, _, _, _ = trained_stack(**payload, training=False)
+        explicit_tgt = np.broadcast_to(
+            _np(trained_stack.query_embed)[None],
+            (BATCH, QUERIES, STACK["d_model"])).astype("float32")
+        explicit, _, _, _ = trained_stack(**payload, tgt=explicit_tgt,
+                                          training=False)
+        assert np.max(np.abs(_np(default) - _np(explicit))) == 0.0
+
+    def test_the_reference_boxes_actually_move_across_layers(
+            self, trained_stack):
+        """POSITIVE liveness arm for the dead-box-head probe."""
+        _, refs, _, _ = trained_stack(**_stack_inputs(),
+                                      reference_boxes=_boxes(), training=False)
+        refs = _np(refs)
+        assert np.max(np.abs(refs[-1] - refs[0])) > 1e-3
+
+    def test_every_layer_sees_a_different_reference_box(self, trained_stack):
+        """POSITIVE liveness arm: a dead head makes every entry identical."""
+        _, refs, _, _ = trained_stack(**_stack_inputs(),
+                                      reference_boxes=_boxes(), training=False)
+        refs = _np(refs)
+        for index in range(1, STACK_LAYERS):
+            assert np.max(np.abs(refs[index] - refs[index - 1])) > 1e-4
+
+    def test_the_conditional_query_position_is_rebuilt_from_the_new_box(
+            self, trained_stack):
+        """POSITIVE liveness arm: two different initial boxes must give two
+        different hidden states at EVERY layer, including the last."""
+        payload = _stack_inputs()
+        first, _, _, _ = trained_stack(**payload, reference_boxes=_boxes(11),
+                                       training=False)
+        second, _, _, _ = trained_stack(**payload, reference_boxes=_boxes(19),
+                                        training=False)
+        moved = np.abs(_np(first) - _np(second)).max(axis=(1, 2, 3))
+        assert np.all(moved > 1e-3), moved
+
+
+class TestBoxRefinementIdentity:
+    """M7.2's family: the zero-initialized box head."""
+
+    def test_the_box_heads_last_projection_is_zero_initialized(self, stack):
+        assert np.max(np.abs(_np(stack.bbox_embed[-1].kernel))) == 0.0
+        assert np.max(np.abs(_np(stack.bbox_embed[-1].bias))) == 0.0
+
+    def test_layer_zero_leaves_its_reference_box_exactly_where_it_was(
+            self, stack):
+        """The layer-0 identity.
+
+        VACUITY NOTE: this assertion has an ABSENCE shape -- a box head that
+        emits zeros satisfies it by construction, and the dead-component probe
+        confirmed it survives that kill. Its liveness arm is the next test.
+        """
+        _, refs, _, _ = stack(**_stack_inputs(), reference_boxes=_boxes(),
+                              training=False)
+        refs = _np(refs)
+        np.testing.assert_allclose(refs[1], refs[0], atol=1e-6)
+
+    def test_a_non_zero_box_head_would_move_the_layer_zero_box(self):
+        """The comparator for the identity assertion, RED-proven."""
+        moved = _build_stack(randomize=False)
+        moved.bbox_embed[-1].kernel.assign(
+            np.full(moved.bbox_embed[-1].kernel.shape, 0.3, dtype="float32"))
+        _, refs, _, _ = moved(**_stack_inputs(), reference_boxes=_boxes(),
+                              training=False)
+        refs = _np(refs)
+        assert np.max(np.abs(refs[1] - refs[0])) > 1e-2
+
+
+class TestReferenceChainIsDetached:
+    """M7.1's family: the reference chain carries no gradient across layers."""
+
+    def _tape(self, built, pick):
+        import tensorflow as tf
+        payload = _stack_inputs()
+        with tf.GradientTape() as tape:
+            hidden, refs, _, _ = built(**payload,
+                                       reference_boxes=_boxes(),
+                                       training=False)
+            loss = tf.reduce_sum(pick(hidden, refs))
+        return tape.gradient(loss, built.bbox_embed[-1].trainable_weights)
+
+    def test_a_later_layers_hidden_state_has_no_gradient_to_the_box_head(
+            self, trained_stack):
+        """The box head reaches layer 2 ONLY through the reference chain, and
+        that chain is detached -- so the gradient is `None`, not merely small.
+
+        VACUITY NOTE: a dead box head also yields `None` here. The two tests
+        below are the positive arms that separate the two.
+        """
+        grads = self._tape(trained_stack, lambda hidden, refs: hidden[2])
+        assert all(g is None for g in grads), \
+            "the reference chain is NOT detached: a layer-2 loss reached the " \
+            "layer-0/1 box head"
+
+    def test_the_box_head_does_receive_gradient_from_its_own_refinement(
+            self, trained_stack):
+        """POSITIVE arm: the head is alive, it is only the CHAIN that is cut."""
+        grads = self._tape(trained_stack, lambda hidden, refs: refs[1])
+        assert all(g is not None for g in grads)
+        assert max(float(np.max(np.abs(_np(g)))) for g in grads) > 0.0
+
+    def test_the_gradient_probe_can_see_a_connected_path(self, trained_stack):
+        """POSITIVE arm: the same layer-2 loss DOES reach a decoder layer."""
+        import tensorflow as tf
+        payload = _stack_inputs()
+        target = trained_stack.decoder_layers[0].norm3.gamma
+        with tf.GradientTape() as tape:
+            hidden, _, _, _ = trained_stack(**payload,
+                                            reference_boxes=_boxes(),
+                                            training=False)
+            loss = tf.reduce_sum(hidden[2])
+        grad = tape.gradient(loss, [target])[0]
+        assert grad is not None and float(np.max(np.abs(_np(grad)))) > 0.0
+
+
+class TestDeltaReadsTheNormedState:
+    """M7.3's family."""
+
+    def test_the_delta_is_computed_on_the_normed_hidden_state(
+            self, trained_stack):
+        payload = _stack_inputs()
+        _, refs, _, _ = trained_stack(**payload, reference_boxes=_boxes(),
+                                      training=False)
+        _, want, _ = _oracle_stack_forward(trained_stack, payload, _boxes(),
+                                           use_normed=True)
+        np.testing.assert_allclose(_np(refs), want, atol=TOL)
+
+    def test_the_raw_state_candidate_is_measurably_different(
+            self, trained_stack):
+        """The wrong candidate's margin is PINNED, so `atol` cannot hide it."""
+        payload = _stack_inputs()
+        _, want_normed, _ = _oracle_stack_forward(trained_stack, payload,
+                                                  _boxes(), use_normed=True)
+        _, want_raw, _ = _oracle_stack_forward(trained_stack, payload,
+                                               _boxes(), use_normed=False)
+        assert np.max(np.abs(want_normed - want_raw)) > 100 * TOL
+
+    def test_the_raw_state_branch_reproduces_the_raw_state_oracle(self):
+        """Both branches are live; the flag is not decorative."""
+        built = _build_stack(use_normed_output_consistently=False)
+        payload = _stack_inputs()
+        _, refs, _, _ = built(**payload, reference_boxes=_boxes(),
+                              training=False)
+        _, want, _ = _oracle_stack_forward(built, payload, _boxes(),
+                                           use_normed=False)
+        np.testing.assert_allclose(_np(refs), want, atol=TOL)
+
+
+class TestPresenceClamp:
+    """M7.4's family. The probe points are what make the bound visible."""
+
+    @staticmethod
+    def _with_presence_bias(value: float, **overrides):
+        built = _build_stack(**overrides)
+        built.presence_token_head[-1].bias.assign(
+            np.array([value], dtype="float32"))
+        built.presence_token_head[-1].kernel.assign(
+            np.zeros(built.presence_token_head[-1].kernel.shape, "float32"))
+        return built
+
+    def test_a_logit_far_beyond_the_bound_is_clamped(self):
+        built = self._with_presence_bias(25.0)
+        _, _, logits, _ = built(**_stack_inputs(), training=False)
+        assert np.max(np.abs(_np(logits) - 10.0)) < 1e-6
+
+    def test_the_negative_side_is_clamped_too(self):
+        built = self._with_presence_bias(-25.0)
+        _, _, logits, _ = built(**_stack_inputs(), training=False)
+        assert np.max(np.abs(_np(logits) + 10.0)) < 1e-6
+
+    def test_this_bound_is_ten_and_not_the_scorers_twelve(self):
+        """The MANDATED (10, 12] probe.
+
+        `Sam3DotProductScoring` clamps at 12.0. Any probe whose magnitude stays
+        under 10 cannot tell the two bounds apart -- the coincidence point that
+        has eaten five guards in this build.
+        """
+        built = self._with_presence_bias(11.5)
+        _, _, logits, _ = built(**_stack_inputs(), training=False)
+        np.testing.assert_allclose(_np(logits), 10.0, atol=1e-6)
+
+    def test_a_logit_inside_the_bound_is_untouched(self):
+        built = self._with_presence_bias(4.25)
+        _, _, logits, _ = built(**_stack_inputs(), training=False)
+        np.testing.assert_allclose(_np(logits), 4.25, atol=1e-5)
+
+    def test_the_unclamped_configuration_returns_the_raw_magnitude(self):
+        """POSITIVE arm: it pins the wrong candidate's margin at 25 vs 10."""
+        built = self._with_presence_bias(25.0, clamp_presence_logits=False)
+        _, _, logits, _ = built(**_stack_inputs(), training=False)
+        assert float(np.max(_np(logits))) > 24.0
+
+
+class TestStackParameterAudit:
+
+    def test_tiny_parameter_count_matches_the_closed_form(self, stack):
+        dim, heads = STACK["d_model"], STACK["num_heads"]
+        per_layer = _params(dict(d_model=dim, dim_feedforward=16,
+                                 use_text_cross_attention=True))
+        dense = dim * dim + dim
+        expected = (
+            STACK_LAYERS * per_layer                 # the decoder layers
+            + 2 * dim                                # terminal norm
+            + 2 * dense + (dim * 4 + 4)              # bbox_embed
+            + (2 * dim * dim + dim) + dense          # ref_point_head
+            + 2 * ((2 * dim + dim) + (dim * heads + heads))   # boxRPB x and y
+            + 2 * dim                                # presence out-norm
+            + 2 * dense + (dim + 1)                  # presence head
+            + STACK["num_queries"] * dim             # query_embed
+            + STACK["num_queries"] * 4               # reference_points
+            + dim                                    # presence token
+        )
+        assert stack.count_params() == expected
+
+    def test_shipped_parameter_count_matches_the_closed_form(self):
+        """The settled 6-layer / 256-wide / 200-query stack, INSTANTIATED."""
+        built = Sam3TransformerDecoder(**SHIPPED_STACK)
+        built.build((1, 72 * 72, 256), (1, 32, 256))
+        dim, heads, queries = 256, 8, 200
+        per_layer = _params(dict(d_model=256, dim_feedforward=2048,
+                                 use_text_cross_attention=True))
+        dense = dim * dim + dim
+        expected = (
+            6 * per_layer + 2 * dim
+            + 2 * dense + (dim * 4 + 4)
+            + (2 * dim * dim + dim) + dense
+            + 2 * ((2 * dim + dim) + (dim * heads + heads))
+            + 2 * dim + 2 * dense + (dim + 1)
+            + queries * dim + queries * 4 + dim
+        )
+        assert built.count_params() == expected == 11_575_093
+
+    def test_the_audit_is_not_vacuous(self):
+        """Deleting a whole component must break the closed form."""
+        built = Sam3TransformerDecoder(**dict(STACK, num_layers=STACK_LAYERS - 1))
+        built.build((BATCH, KEYS, STACK["d_model"]),
+                    (BATCH, TOKENS, STACK["d_model"]))
+        reference = _build_stack(randomize=False)
+        assert built.count_params() != reference.count_params()
+
+
+class TestStackSerialization:
+
+    def test_config_keys_equal_init_signature(self, stack):
+        import inspect
+        expected = {name for name in
+                    inspect.signature(
+                        Sam3TransformerDecoder.__init__).parameters
+                    if name not in ("self", "kwargs")}
+        missing = expected - set(stack.get_config())
+        assert missing == set(), f"get_config() is missing {sorted(missing)}"
+
+    def test_round_trip_by_value(self, trained_stack):
+        payload = _stack_inputs()
+        produced = trained_stack(**payload, training=False)
+        clone = Sam3TransformerDecoder.from_config(trained_stack.get_config())
+        clone.build((BATCH, KEYS, STACK["d_model"]),
+                    (BATCH, TOKENS, STACK["d_model"]))
+        clone.set_weights(trained_stack.get_weights())
+        restored = clone(**payload, training=False)
+        for lhs, rhs in zip(produced, restored):
+            np.testing.assert_allclose(_np(lhs), _np(rhs), atol=1e-6)
+
+    def test_keras_model_round_trip_by_value(self, trained_stack, tmp_path):
+        """D-098: a stack of per-layer sub-layers is EXACTLY the shape that
+        loses its weights silently when stored nested. Every store here is
+        flat, and this checks VALUES, never counts."""
+        payload = _stack_inputs()
+        dim = STACK["d_model"]
+        memory_in = keras.Input(shape=(KEYS, dim))
+        text_in = keras.Input(shape=(TOKENS, dim))
+        outputs = trained_stack(memory_in, memory_text=text_in)
+        model = keras.Model([memory_in, text_in], list(outputs))
+        probe = [payload["memory"], payload["memory_text"]]
+        before = [np.asarray(t) for t in model.predict(probe, verbose=0)]
+        path = str(tmp_path / "stack.keras")
+        model.save(path)
+        after = [np.asarray(t) for t in
+                 keras.models.load_model(path).predict(probe, verbose=0)]
+        for lhs, rhs in zip(before, after):
+            assert np.max(np.abs(lhs - rhs)) == 0.0
+
+    def test_the_round_trip_guard_can_see_a_difference(self, trained_stack):
+        """The comparator is RED-proven before the exact-zero PASS is trusted."""
+        payload = _stack_inputs()
+        hidden, _, _, _ = trained_stack(**payload, training=False)
+        trained_stack.norm.gamma.assign(trained_stack.norm.gamma + 0.5)
+        moved, _, _, _ = trained_stack(**payload, training=False)
+        assert np.max(np.abs(_np(hidden) - _np(moved))) > 1e-3
