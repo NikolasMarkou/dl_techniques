@@ -4,11 +4,20 @@ SAM 3 (Segment Anything with Concepts) -- phase 1: the text-prompt-only image pa
 **Phase boundary.** The package is complete for phase 1: the ViTDet image trunk,
 the dual SimpleFPN neck, the CLIP text tower, the DETR decoder, the
 open-vocabulary dot-product scorer, the MaskFormer segmentation head, and the
-top-level ``Sam3Image`` assembly that wires all six together and applies the
-presence x localization fusion.
+top-level ``Sam3Image`` assembly that wires all six together and -- when
+``supervise_joint_box_scores=True``, which is **OFF by default** and which
+``from_variant`` never sets -- applies the presence x localization fusion.
 
 Start at :class:`Sam3Image`; ``Sam3Image.from_variant('sam3')`` builds the
 released configuration and ``from_variant('tiny')`` a small development one.
+
+**Pass ``training=False`` when you run the ``sam3`` variant for inference.**
+The released configuration carries the reference's ``drop_path_rate=0.1``, and
+this repository's shared ``StochasticDepth`` short-circuits on ``training is
+False`` ONLY -- so the ``training=None`` that a plain ``model(inputs)`` passes
+down DROPS PATHS and makes the shipped variant non-deterministic. Use
+``model(inputs, training=False)`` (or ``model.predict``). The ``tiny`` variant
+sets the rate to 0.0 and is unaffected.
 The eight component classes are exported too, because each is independently
 constructible, serializable and testable -- which is the property that let this
 package be built and gated one leaf at a time.

@@ -28,11 +28,18 @@ Architecture:
                     │              │                │
         Sam3DotProductScoring   box head        (sigmoid)
                     │              │                │
-              class logits ◀── FUSION ◀─────────────┘
+              class logits ◀── FUSION* ◀────────────┘
                     │              │
                     │         pred_boxes
                     │
              Sam3SegmentationHead ─▶ pred_masks, semantic_seg
+
+``*`` **The FUSION step is OFF by default.** It runs only when
+``supervise_joint_box_scores=True``; the constructor defaults it to ``False``
+and ``from_variant`` never sets it, so on every default path ``pred_logits`` is
+the scorer's output untouched and ``_fuse`` is not reached (D-124, traced at the
+pinned reference SHA -- ``build_sam3_image_model`` never passes the key either).
+Everything below about the fusion describes that opt-in expression.
 
 Three mechanisms carry this class's correctness, and each has its own guard:
 
@@ -41,9 +48,9 @@ Three mechanisms carry this class's correctness, and each has its own guard:
    there is exactly ONE presence signal in the model and no way to fuse the
    wrong one by accident.
 2. **The fusion multiplies PROBABILITIES and then re-logits**, it does not
-   multiply logits. The two candidates agree only along a thin curve in
-   ``(class logit, presence logit)`` space; everywhere else they differ by
-   O(1) nats.
+   multiply logits (when it runs at all -- see ``*`` above). The two candidates
+   agree only along a thin curve in ``(class logit, presence logit)`` space;
+   everywhere else they differ by O(1) nats.
 3. **The final box is produced HERE, not by the decoder.** The decoder returns
    the anchor each layer CONSUMED; the last layer's refinement is applied at
    this level, which is why the box head is re-applied to the stacked hidden
@@ -497,6 +504,13 @@ class Sam3Image(keras.Model):
             optional; omitting it treats every token as valid.
         :type inputs: Dict[str, Any]
         :param training: Keras training flag, forwarded to every component.
+            **Pass ``False`` explicitly for inference on the ``sam3`` variant.**
+            That variant carries the reference's ``drop_path_rate=0.1`` and the
+            shared ``StochasticDepth`` short-circuits on ``training is False``
+            ONLY, so the ``training=None`` a plain ``model(inputs)`` passes down
+            drops paths and the call is NOT deterministic (D-123; the trap is
+            executed by ``test_model.py::TestTrainingFlagTrap``). ``tiny`` sets
+            the rate to 0.0 and is unaffected.
         :type training: Optional[bool]
         :return: ``pred_logits`` ``(B, num_queries, 1)``, ``pred_boxes``
             ``(B, num_queries, 4)`` normalized ``cxcywh``, ``pred_masks``

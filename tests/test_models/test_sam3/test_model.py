@@ -186,12 +186,19 @@ def component_closed_forms(table):
     return counts
 
 
-#: MEASURED at the SHIPPED variant. Every one of these six was produced by the
-#: closed forms above AND independently confirmed: `backbone` matches step 2's
-#: instantiated 446,237,696; `text_encoder` matches step 4's 353,202,432;
-#: `transformer` matches step 7's 11,575,093; `neck` is exactly half of step 3's
-#: dual-neck 15,604,224; and the whole assembly was instantiated once on a
-#: 12 GB GPU at 821,708,598 parameters with a 3,270.7 MiB peak.
+#: The SHIPPED variant's six component counts.
+#:
+#: PROVENANCE, stated because it was previously implied (reviewer W-6). These
+#: literals were produced by the closed forms above, so
+#: `test_the_shipped_closed_forms_are_self_consistent` compares a closed form to
+#: a transcription of itself and is a REGRESSION guard on the arithmetic, not a
+#: measurement. The measurement is
+#: `test_the_shipped_variant_is_instantiated_and_counted`, which builds the real
+#: 821 M-parameter model and is OPT-IN (`SAM3_SHIPPED_AUDIT=1`) because it needs
+#: ~3.3 GiB of device memory. Independent cross-checks that DO execute in the
+#: default gate: `backbone` matches step 2's instantiated 446,237,696;
+#: `text_encoder` matches step 4's 353,202,432; `transformer` matches step 7's
+#: 11,575,093; `neck` is exactly half of step 3's dual-neck 15,604,224.
 SHIPPED_PARAMS = {
     "backbone": 446_237_696,
     "neck": 7_802_112,
@@ -326,7 +333,7 @@ class TestConstruction:
 
 class TestSam3ImageForward:
 
-    def test_the_four_declared_outputs_are_present_with_their_shapes(
+    def test_the_five_declared_outputs_are_present_with_their_shapes(
             self, model, batch):
         out = model(batch, training=False)
         assert set(out) == {"pred_logits", "pred_boxes", "pred_masks",
@@ -631,10 +638,37 @@ class TestParameterAudit:
             assert getattr(built, key).count_params() == expected[key], key
         assert built.count_params() == sum(expected.values())
 
-    def test_the_shipped_variant_counts_are_exact(self):
+    def test_the_shipped_closed_forms_are_self_consistent(self):
+        """NOT a measurement -- a regression guard on the closed forms.
+
+        `SHIPPED_PARAMS` was produced BY `component_closed_forms`, so this
+        comparison cannot detect a wrong closed form; it detects a closed form
+        that MOVED. The instantiating arm below is the measurement, and it is
+        opt-in. (Reviewer W-6: this was previously named as though it verified
+        the shipped variant.)
+        """
         expected = component_closed_forms(Sam3Image.MODEL_VARIANTS["sam3"])
         assert expected == SHIPPED_PARAMS
         assert sum(expected.values()) == SHIPPED_TOTAL
+
+    @pytest.mark.skipif(
+        os.environ.get("SAM3_SHIPPED_AUDIT") != "1",
+        reason="builds the 821M-parameter shipped variant (~3.3 GiB device "
+               "memory); run with SAM3_SHIPPED_AUDIT=1",
+    )
+    def test_the_shipped_variant_is_instantiated_and_counted(self):
+        """The measurement W-6 asked for: build it, then count it.
+
+        Executed 2026-08-05 on GPU 1 (RTX 4070): all six components and the
+        total match the closed forms exactly.
+        """
+        built = Sam3Image.from_variant("sam3")
+        built.build(None)
+        expected = component_closed_forms(Sam3Image.MODEL_VARIANTS["sam3"])
+        for key in COMPONENT_KEYS:
+            assert getattr(built, key).count_params() == expected[key], key
+        assert built.count_params() == SHIPPED_TOTAL
+        assert expected == SHIPPED_PARAMS
 
     def test_the_audit_is_not_vacuous_because_a_shrunk_component_fails_it(self):
         """EXECUTE the non-vacuity claim rather than asserting it.
