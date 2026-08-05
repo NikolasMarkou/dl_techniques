@@ -1,0 +1,872 @@
+"""Tests for SAM 3's decoder layer (`models/sam3/decoder.py`).
+
+Four design choices in this file are load-bearing, and every one of them exists
+because of a measurement, not a preference.
+
+**The oracles are written from the SPEC, in float64, from the layer's WEIGHTS.**
+``_reference_layer_forward`` re-derives the whole four-sub-block forward pass --
+three attentions, four normalizations, the feed-forward, the presence-token
+prepend and split -- in double precision without ever calling the layer. An
+oracle that calls the implementation is a tautology, and this plan has already
+shipped one green oracle certifying the wrong quantity.
+
+**The tolerance is 1e-3 because of TF32.** GPU 1 is an RTX 4070 and runs float32
+matmuls through TF32; the same float64-vs-float32 comparison measures ~1e-7 on
+CPU and ~1e-4 there. ``test_the_oracle_probes_are_unsaturated`` pins the wrong
+candidates' margins so a loose tolerance cannot quietly swallow a defect.
+
+**The boxRPB probe set deliberately contains ``d = 0``.** That point is a
+COINCIDENCE point for three of the four wrong candidates -- and it is the only
+point that separates the fourth (dropping the ``+ 1`` makes ``log2(0) = -inf``).
+The negative probe is what separates an unsigned form, and ``|d * 8| = 1`` is
+what separates a missing ``/ log2(8)``.
+
+**Every "is invariant" assertion is flanked by a positive liveness arm.** An
+absence assertion (``delta == 0.0``) is satisfied by construction by a dead
+component, which is exactly what a dead-component probe exposes; the presence
+token's bias-invariance and the ``memory_mask`` refusal are both that shape.
+"""
+
+import keras
+import numpy as np
+import pytest
+from keras import layers, ops
+
+from dl_techniques.models.sam3.decoder import (
+    Sam3DecoderLayer,
+    _Sam3DecoderAttention,
+    _box_rpb_bias,
+    _box_rpb_log_compress,
+)
+
+# ---------------------------------------------------------------------
+# tiny variant
+# ---------------------------------------------------------------------
+
+TINY = dict(d_model=8, num_heads=2, dim_feedforward=16, dropout_rate=0.0,
+            activation="relu", use_text_cross_attention=True,
+            norm_epsilon=1e-5)
+
+# The settled SAM 3 decoder layer, re-read from the pinned upstream clone's
+# `_create_transformer_decoder()`: activation "relu", d_model 256,
+# dim_feedforward 2048, dropout 0.1, 8 heads, text cross-attention ON.
+SHIPPED = dict(d_model=256, num_heads=8, dim_feedforward=2048,
+               dropout_rate=0.1, activation="relu",
+               use_text_cross_attention=True, norm_epsilon=1e-5)
+
+BATCH, QUERIES, GRID_H, GRID_W, TOKENS = 2, 5, 3, 4, 6
+KEYS = GRID_H * GRID_W
+TOL = 1e-3
+
+
+def _params(cfg: dict) -> int:
+    """Closed-form parameter count, written from the STRUCTURE."""
+    d, f = cfg["d_model"], cfg["dim_feedforward"]
+    dense = d * d + d
+    attention = 4 * dense                      # q, k, v, out
+    cross_text = dense + (d * 2 * d + 2 * d) + dense
+    ffn = (d * f + f) + (f * d + d)
+    norms = 4 * 2 * d if cfg["use_text_cross_attention"] else 3 * 2 * d
+    total = attention + cross_text + attention + ffn + norms
+    if not cfg["use_text_cross_attention"]:
+        total -= cross_text
+    return total
+
+
+def _randomize(layer: keras.layers.Layer, seed: int = 0) -> None:
+    """Give every weight -- kernels AND biases -- a non-trivial value."""
+    rng = np.random.default_rng(seed)
+    for weight in layer.weights:
+        weight.assign(rng.normal(0.0, 0.4, size=weight.shape).astype("float32"))
+
+
+def _inputs(seed: int = 7) -> dict:
+    """A full, non-degenerate call payload."""
+    rng = np.random.default_rng(seed)
+    padding = np.zeros((BATCH, TOKENS), dtype=bool)
+    padding[0, TOKENS - 2:] = True
+    return dict(
+        tgt=rng.normal(size=(BATCH, QUERIES, TINY["d_model"])).astype("f4"),
+        memory=rng.normal(size=(BATCH, KEYS, TINY["d_model"])).astype("f4"),
+        query_pos=rng.normal(size=(BATCH, QUERIES, TINY["d_model"])).astype("f4"),
+        memory_pos=rng.normal(size=(BATCH, KEYS, TINY["d_model"])).astype("f4"),
+        memory_text=rng.normal(size=(BATCH, TOKENS, TINY["d_model"])).astype("f4"),
+        text_padding_mask=padding,
+        presence_token=rng.normal(size=(BATCH, 1, TINY["d_model"])).astype("f4"),
+    )
+
+
+def _boxes(seed: int = 11, queries: int = QUERIES) -> np.ndarray:
+    """Reference boxes in normalized ``cxcywh``, all strictly inside the image."""
+    rng = np.random.default_rng(seed)
+    centres = rng.uniform(0.25, 0.75, size=(BATCH, queries, 2))
+    sizes = rng.uniform(0.1, 0.4, size=(BATCH, queries, 2))
+    return np.concatenate([centres, sizes], axis=-1).astype("float32")
+
+
+def _rpb_mlps(num_heads: int = 2, hidden: int = 8, seed: int = 5):
+    """The two per-axis boxRPB embedding MLPs, as the layer stack will own them.
+
+    ``Linear(2, hidden) -> ReLU -> Linear(hidden, num_heads)``, matching the
+    reference's ``MLP(n_input=2, d_model, nheads, num_layers=2)`` whose final
+    layer carries NO activation.
+    """
+    rng = np.random.default_rng(seed)
+    made = []
+    for _ in range(2):
+        mlp = keras.Sequential([layers.Dense(hidden, activation="relu"),
+                                layers.Dense(num_heads)])
+        mlp.build((None, None, None, 2))
+        for weight in mlp.weights:
+            weight.assign(
+                rng.normal(0.0, 0.6, size=weight.shape).astype("float32"))
+        made.append(mlp)
+    return made[0], made[1]
+
+
+@pytest.fixture()
+def layer() -> Sam3DecoderLayer:
+    built = Sam3DecoderLayer(**TINY)
+    built.build((BATCH, QUERIES, TINY["d_model"]),
+                (BATCH, KEYS, TINY["d_model"]),
+                (BATCH, TOKENS, TINY["d_model"]))
+    _randomize(built)
+    return built
+
+
+# ---------------------------------------------------------------------
+# float64 oracles, written from the SPEC (never from the implementation)
+# ---------------------------------------------------------------------
+
+
+def _np(x) -> np.ndarray:
+    return np.asarray(ops.convert_to_numpy(x), dtype=np.float64)
+
+
+def _oracle_log_compress(deltas: np.ndarray) -> np.ndarray:
+    scaled = deltas * 8.0
+    return np.sign(scaled) * np.log2(np.abs(scaled) + 1.0) / np.log2(8.0)
+
+
+def _oracle_softmax(scores: np.ndarray) -> np.ndarray:
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    exponent = np.exp(shifted)
+    return exponent / exponent.sum(axis=-1, keepdims=True)
+
+
+def _oracle_layer_norm(x: np.ndarray, gamma, beta, eps: float) -> np.ndarray:
+    mean = x.mean(axis=-1, keepdims=True)
+    var = x.var(axis=-1, keepdims=True)
+    return (x - mean) / np.sqrt(var + eps) * gamma + beta
+
+
+def _oracle_heads(x: np.ndarray, heads: int) -> np.ndarray:
+    batch, seq, dim = x.shape
+    return x.reshape(batch, seq, heads, dim // heads).transpose(0, 2, 1, 3)
+
+
+def _oracle_attention(query, key, value, kernels, heads, bias=None,
+                      keep=None) -> np.ndarray:
+    """Independent multi-head attention over three separate tensors."""
+    (wq, bq), (wk, bk), (wv, bv), (wo, bo) = kernels
+    q = _oracle_heads(query @ wq + bq, heads)
+    k = _oracle_heads(key @ wk + bk, heads)
+    v = _oracle_heads(value @ wv + bv, heads)
+    scores = q @ k.transpose(0, 1, 3, 2) / np.sqrt(q.shape[-1])
+    if bias is not None:
+        scores = scores + bias
+    if keep is not None:
+        scores = np.where(keep[:, None, None, :], scores, -1e9)
+    out = _oracle_softmax(scores) @ v
+    batch, _, seq, head_dim = out.shape
+    out = out.transpose(0, 2, 1, 3).reshape(batch, seq, heads * head_dim)
+    return out @ wo + bo
+
+
+def _dense(layer_obj):
+    return _np(layer_obj.kernel), _np(layer_obj.bias)
+
+
+def _reference_layer_forward(layer_obj, payload, bias=None,
+                             with_presence=True):
+    """The whole decoder layer, in float64, from the layer's WEIGHTS only."""
+    heads = layer_obj.num_heads
+    eps = layer_obj.norm_epsilon
+    tgt = _np(payload["tgt"])
+    query_pos = _np(payload["query_pos"])
+
+    if with_presence:
+        presence = _np(payload["presence_token"])
+        tgt = np.concatenate([presence, tgt], axis=1)
+        query_pos = np.concatenate([np.zeros_like(presence), query_pos], axis=1)
+        if bias is not None:
+            bias = np.concatenate([np.zeros_like(bias[:, :, :1, :]), bias],
+                                  axis=2)
+
+    # 1. self-attention: q = k = tgt + pos, v = tgt (the pos is NOT on v).
+    self_kernels = [_dense(layer_obj.self_attn.q_proj),
+                    _dense(layer_obj.self_attn.k_proj),
+                    _dense(layer_obj.self_attn.v_proj),
+                    _dense(layer_obj.self_attn.out_proj)]
+    attended = _oracle_attention(tgt + query_pos, tgt + query_pos, tgt,
+                                 self_kernels, heads)
+    gamma, beta = _np(layer_obj.norm2.gamma), _np(layer_obj.norm2.beta)
+    tgt = _oracle_layer_norm(tgt + attended, gamma, beta, eps)
+
+    # 2. text cross-attention, through the STOCK layer's q / kv / proj shape.
+    if layer_obj.use_text_cross_attention:
+        text = _np(payload["memory_text"])
+        wq, bq = _dense(layer_obj.ca_text.q_dense)
+        wkv, bkv = _dense(layer_obj.ca_text.kv_dense)
+        dim = layer_obj.d_model
+        text_kernels = [(wq, bq), (wkv[:, :dim], bkv[:dim]),
+                        (wkv[:, dim:], bkv[dim:]),
+                        _dense(layer_obj.ca_text.proj_dense)]
+        keep = None
+        if payload.get("text_padding_mask") is not None:
+            keep = ~np.asarray(payload["text_padding_mask"], dtype=bool)
+        attended = _oracle_attention(tgt + query_pos, text, text,
+                                     text_kernels, heads, keep=keep)
+        gamma, beta = (_np(layer_obj.catext_norm.gamma),
+                       _np(layer_obj.catext_norm.beta))
+        tgt = _oracle_layer_norm(tgt + attended, gamma, beta, eps)
+
+    # 3. image cross-attention: keys carry memory_pos, values do not.
+    memory = _np(payload["memory"])
+    memory_pos = _np(payload["memory_pos"])
+    cross_kernels = [_dense(layer_obj.cross_attn.q_proj),
+                     _dense(layer_obj.cross_attn.k_proj),
+                     _dense(layer_obj.cross_attn.v_proj),
+                     _dense(layer_obj.cross_attn.out_proj)]
+    attended = _oracle_attention(tgt + query_pos, memory + memory_pos, memory,
+                                 cross_kernels, heads, bias=bias)
+    gamma, beta = _np(layer_obj.norm1.gamma), _np(layer_obj.norm1.beta)
+    tgt = _oracle_layer_norm(tgt + attended, gamma, beta, eps)
+
+    # 4. feed-forward: fc1 -> relu -> fc2, residual, norm.
+    w1, b1 = _dense(layer_obj.ffn.fc1)
+    w2, b2 = _dense(layer_obj.ffn.fc2)
+    projected = np.maximum(tgt @ w1 + b1, 0.0) @ w2 + b2
+    gamma, beta = _np(layer_obj.norm3.gamma), _np(layer_obj.norm3.beta)
+    tgt = _oracle_layer_norm(tgt + projected, gamma, beta, eps)
+
+    if not with_presence:
+        return tgt, None
+    return tgt[:, 1:], tgt[:, :1]
+
+
+def _oracle_rpb(boxes: np.ndarray, grid, embed_x, embed_y, heads,
+                mode="log") -> np.ndarray:
+    """boxRPB, in float64, from the MLPs' weights only."""
+    height, width = grid
+    boxes = np.asarray(boxes, dtype=np.float64)
+    cx, cy, bw, bh = boxes[..., 0], boxes[..., 1], boxes[..., 2], boxes[..., 3]
+    edges_x = np.stack([cx - 0.5 * bw, cx + 0.5 * bw], axis=-1)
+    edges_y = np.stack([cy - 0.5 * bh, cy + 0.5 * bh], axis=-1)
+    coords_y = np.arange(height, dtype=np.float64) / height
+    coords_x = np.arange(width, dtype=np.float64) / width
+    deltas_y = coords_y[None, None, :, None] - edges_y[:, :, None, :]
+    deltas_x = coords_x[None, None, :, None] - edges_x[:, :, None, :]
+    if mode == "log":
+        deltas_y = _oracle_log_compress(deltas_y)
+        deltas_x = _oracle_log_compress(deltas_x)
+
+    def run(mlp, x):
+        w1, b1 = _np(mlp.layers[0].kernel), _np(mlp.layers[0].bias)
+        w2, b2 = _np(mlp.layers[1].kernel), _np(mlp.layers[1].bias)
+        return np.maximum(x @ w1 + b1, 0.0) @ w2 + b2
+
+    bias_y, bias_x = run(embed_y, deltas_y), run(embed_x, deltas_x)
+    bias = bias_y[:, :, :, None, :] + bias_x[:, :, None, :, :]
+    bias = bias.transpose(0, 4, 1, 2, 3)
+    return bias.reshape(bias.shape[0], heads, bias.shape[2], height * width)
+
+
+# ---------------------------------------------------------------------
+# G6.1 -- boxRPB's log formula (value oracle (a))
+# ---------------------------------------------------------------------
+
+# `d = 0` separates a missing `+ 1`; `|d * 8| = 1` separates a missing
+# `/ log2(8)`; the two negatives separate an unsigned form; every non-zero
+# point separates a linear form.
+LOG_PROBES = np.array([0.0, 0.125, -0.125, 0.5, -0.375], dtype=np.float64)
+
+
+class TestBoxRpbLogFormula:
+
+    def test_matches_the_float64_oracle_at_every_probe(self):
+        measured = _np(_box_rpb_log_compress(
+            ops.convert_to_tensor(LOG_PROBES.astype("float32"))))
+        np.testing.assert_allclose(measured, _oracle_log_compress(LOG_PROBES),
+                                   atol=TOL)
+
+    def test_zero_delta_is_exactly_zero_and_finite(self):
+        value = _np(_box_rpb_log_compress(
+            ops.convert_to_tensor(np.zeros(3, dtype="float32"))))
+        assert np.all(np.isfinite(value)), "the `+ 1` is missing: log2(0)"
+        assert np.max(np.abs(value)) == 0.0
+
+    def test_eight_scaled_unit_delta_is_exactly_one_third(self):
+        value = _np(_box_rpb_log_compress(
+            ops.convert_to_tensor(np.array([0.125], dtype="float32"))))
+        np.testing.assert_allclose(value, [1.0 / 3.0], atol=1e-6)
+
+    def test_the_form_is_sign_preserving(self):
+        pair = _np(_box_rpb_log_compress(
+            ops.convert_to_tensor(np.array([0.3, -0.3], dtype="float32"))))
+        assert pair[0] > 0.0 and pair[1] < 0.0
+        np.testing.assert_allclose(pair[0], -pair[1], atol=1e-6)
+
+    def test_the_probe_set_separates_every_wrong_candidate(self):
+        """The oracle's discriminating power, asserted rather than assumed."""
+        reference = _oracle_log_compress(LOG_PROBES)
+        scaled = LOG_PROBES * 8.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            candidates = {
+                "linear": LOG_PROBES,
+                "unsigned": np.log2(np.abs(scaled) + 1.0) / np.log2(8.0),
+                "no_normalization": np.sign(scaled) * np.log2(
+                    np.abs(scaled) + 1.0),
+                "no_plus_one": np.sign(scaled) * np.log2(
+                    np.abs(scaled)) / np.log2(8.0),
+            }
+        for name, candidate in candidates.items():
+            gap = np.abs(candidate - reference)
+            separated = np.nanmax(gap) > 0.2 or bool(
+                np.any(~np.isfinite(candidate)))
+            assert separated, f"probe set cannot separate {name}"
+
+
+# ---------------------------------------------------------------------
+# G6.2 -- the boxRPB bias tensor
+# ---------------------------------------------------------------------
+
+
+class TestBoxRpbBias:
+
+    def test_shape_is_batch_heads_queries_keys(self):
+        embed_x, embed_y = _rpb_mlps()
+        bias = _box_rpb_bias(_boxes(), (GRID_H, GRID_W), embed_x, embed_y, 2)
+        assert tuple(bias.shape) == (BATCH, 2, QUERIES, KEYS)
+
+    def test_matches_the_float64_outer_sum_oracle(self):
+        embed_x, embed_y = _rpb_mlps()
+        boxes = _boxes()
+        measured = _np(_box_rpb_bias(boxes, (GRID_H, GRID_W), embed_x,
+                                     embed_y, 2))
+        expected = _oracle_rpb(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2)
+        np.testing.assert_allclose(measured, expected, atol=TOL)
+
+    def test_a_product_combination_is_separated_by_the_oracle(self):
+        """The outer SUM is not interchangeable with an outer product."""
+        embed_x, embed_y = _rpb_mlps()
+        boxes = _boxes()
+        reference = _oracle_rpb(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2)
+        deltas = _oracle_rpb(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2)
+        # Rebuild the product candidate from the same per-axis embeddings.
+        height, width = GRID_H, GRID_W
+        cx, cy = boxes[..., 0], boxes[..., 1]
+        bw, bh = boxes[..., 2], boxes[..., 3]
+        edges_x = np.stack([cx - 0.5 * bw, cx + 0.5 * bw], axis=-1)
+        edges_y = np.stack([cy - 0.5 * bh, cy + 0.5 * bh], axis=-1)
+        cw = np.arange(width, dtype=np.float64) / width
+        ch = np.arange(height, dtype=np.float64) / height
+        dx = _oracle_log_compress(cw[None, None, :, None] - edges_x[:, :, None, :])
+        dy = _oracle_log_compress(ch[None, None, :, None] - edges_y[:, :, None, :])
+
+        def run(mlp, x):
+            w1, b1 = _np(mlp.layers[0].kernel), _np(mlp.layers[0].bias)
+            w2, b2 = _np(mlp.layers[1].kernel), _np(mlp.layers[1].bias)
+            return np.maximum(x @ w1 + b1, 0.0) @ w2 + b2
+
+        product = run(embed_y, dy)[:, :, :, None, :] * run(embed_x, dx)[:, :, None, :, :]
+        product = product.transpose(0, 4, 1, 2, 3).reshape(
+            BATCH, 2, QUERIES, KEYS)
+        assert np.max(np.abs(product - reference)) > 0.2
+        np.testing.assert_allclose(deltas, reference, atol=1e-12)
+
+    def test_linear_mode_is_measurably_different_from_log_mode(self):
+        embed_x, embed_y = _rpb_mlps()
+        boxes = _boxes()
+        log_bias = _np(_box_rpb_bias(boxes, (GRID_H, GRID_W), embed_x,
+                                     embed_y, 2, "log"))
+        linear_bias = _np(_box_rpb_bias(boxes, (GRID_H, GRID_W), embed_x,
+                                        embed_y, 2, "linear"))
+        assert np.max(np.abs(log_bias - linear_bias)) > 0.2
+        np.testing.assert_allclose(
+            linear_bias,
+            _oracle_rpb(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2,
+                        mode="linear"), atol=TOL)
+
+    def test_an_unknown_mode_is_refused(self):
+        embed_x, embed_y = _rpb_mlps()
+        with pytest.raises(ValueError, match="mode must be"):
+            _box_rpb_bias(_boxes(), (GRID_H, GRID_W), embed_x, embed_y, 2,
+                          mode="both")
+
+    def test_the_two_axis_embeddings_are_independent(self):
+        """Perturbing the x MLP must not move the y-only part of the bias."""
+        embed_x, embed_y = _rpb_mlps()
+        boxes = _boxes()
+        before = _np(_box_rpb_bias(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2))
+        weight = embed_x.layers[1].bias
+        weight.assign(weight + 3.0)
+        after = _np(_box_rpb_bias(boxes, (GRID_H, GRID_W), embed_x, embed_y, 2))
+        # An x-only bias shift is constant along every ROW of the grid.
+        delta = (after - before).reshape(BATCH, 2, QUERIES, GRID_H, GRID_W)
+        assert np.max(np.abs(delta)) > 1e-3
+        assert np.max(np.std(delta, axis=3)) < 1e-5
+
+
+# ---------------------------------------------------------------------
+# G6.3 -- the bias reaches the softmax (value oracle (b))
+# ---------------------------------------------------------------------
+
+
+class TestBiasInjection:
+
+    @staticmethod
+    def _attention(heads: int = 2, dim: int = 8) -> _Sam3DecoderAttention:
+        attn = _Sam3DecoderAttention(dim, heads)
+        attn.build((BATCH, QUERIES, dim), (BATCH, KEYS, dim),
+                   (BATCH, KEYS, dim))
+        _randomize(attn, seed=3)
+        return attn
+
+    def test_matches_the_float64_biased_attention_oracle(self):
+        attn = self._attention()
+        rng = np.random.default_rng(1)
+        q = rng.normal(size=(BATCH, QUERIES, 8)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        v = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        bias = rng.normal(size=(BATCH, 2, QUERIES, KEYS)).astype("float32")
+        measured = _np(attn(q, k, v, additive_bias=bias, training=False))
+        kernels = [_dense(attn.q_proj), _dense(attn.k_proj),
+                   _dense(attn.v_proj), _dense(attn.out_proj)]
+        expected = _oracle_attention(_np(q), _np(k), _np(v), kernels, 2,
+                                     bias=_np(bias))
+        np.testing.assert_allclose(measured, expected, atol=TOL)
+
+    def test_perturbing_one_heads_bias_moves_only_that_head(self):
+        """The liveness oracle: the bias reaches the softmax, per head."""
+        dim, heads = 8, 2
+        attn = self._attention(heads, dim)
+        # An identity output projection keeps each head in its own channels.
+        attn.out_proj.kernel.assign(np.eye(dim, dtype="float32"))
+        attn.out_proj.bias.assign(np.zeros(dim, dtype="float32"))
+        rng = np.random.default_rng(2)
+        q = rng.normal(size=(BATCH, QUERIES, dim)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, dim)).astype("float32")
+        v = rng.normal(size=(BATCH, KEYS, dim)).astype("float32")
+        bias = np.zeros((BATCH, heads, QUERIES, KEYS), dtype="float32")
+        before = _np(attn(q, k, v, additive_bias=bias, training=False))
+        # The perturbation must VARY along the key axis. A uniform shift is a
+        # provable no-op -- softmax is shift-invariant along its reduction
+        # axis -- and a first draft of this probe was blind for exactly that
+        # reason (measured movement 2.09e-07, i.e. float32 noise).
+        bias[:, 0, :, 0] += 2.5
+        after = _np(attn(q, k, v, additive_bias=bias, training=False))
+        head_dim = dim // heads
+        moved = np.max(np.abs(after - before)[..., :head_dim])
+        still = np.max(np.abs(after - before)[..., head_dim:])
+        assert moved > 1e-3, "head 0's bias never reached the softmax"
+        assert still < 1e-5, "head 1 moved under head 0's bias"
+
+    def test_a_graded_positive_bias_is_not_a_no_op(self):
+        """A binarizing mask helper leaves every positive entry untouched."""
+        attn = self._attention()
+        rng = np.random.default_rng(4)
+        q = rng.normal(size=(BATCH, QUERIES, 8)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        v = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        zero = np.zeros((BATCH, 2, QUERIES, KEYS), dtype="float32")
+        graded = np.full((BATCH, 2, QUERIES, KEYS), 0.0, dtype="float32")
+        graded[:, :, :, 0] = 1.75
+        base = _np(attn(q, k, v, additive_bias=zero, training=False))
+        biased = _np(attn(q, k, v, additive_bias=graded, training=False))
+        assert np.max(np.abs(biased - base)) > 1e-3
+
+    def test_a_small_negative_bias_is_not_a_hard_mask(self):
+        """A binarizing mask helper turns -0.5 into a full -1e9 mask."""
+        dim, heads = 8, 2
+        attn = self._attention(heads, dim)
+        attn.out_proj.kernel.assign(np.eye(dim, dtype="float32"))
+        attn.out_proj.bias.assign(np.zeros(dim, dtype="float32"))
+        rng = np.random.default_rng(6)
+        q = rng.normal(size=(BATCH, QUERIES, dim)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, dim)).astype("float32")
+        v = rng.normal(size=(BATCH, KEYS, dim)).astype("float32")
+        soft = np.full((BATCH, heads, QUERIES, KEYS), -0.5, dtype="float32")
+        hard = np.full((BATCH, heads, QUERIES, KEYS), -1e9, dtype="float32")
+        hard[:, :, :, 0] = 0.0
+        soft_out = _np(attn(q, k, v, additive_bias=soft, training=False))
+        hard_out = _np(attn(q, k, v, additive_bias=hard, training=False))
+        # A uniform additive bias is a no-op for softmax; a hard mask is not.
+        zero_out = _np(attn(q, k, v, additive_bias=np.zeros_like(soft),
+                            training=False))
+        np.testing.assert_allclose(soft_out, zero_out, atol=TOL)
+        assert np.max(np.abs(hard_out - zero_out)) > 1e-2
+
+    def test_the_bias_is_optional(self):
+        attn = self._attention()
+        rng = np.random.default_rng(9)
+        q = rng.normal(size=(BATCH, QUERIES, 8)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        out = attn(q, k, k, training=False)
+        assert tuple(out.shape) == (BATCH, QUERIES, 8)
+        assert tuple(attn.compute_output_shape((BATCH, QUERIES, 8))) == \
+               (BATCH, QUERIES, 8)
+
+    def test_keys_and_values_are_separately_projected(self):
+        """The single asymmetry that disqualifies a stock cross-attention."""
+        attn = self._attention()
+        rng = np.random.default_rng(12)
+        q = rng.normal(size=(BATCH, QUERIES, 8)).astype("float32")
+        k = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        v = rng.normal(size=(BATCH, KEYS, 8)).astype("float32")
+        assert np.max(np.abs(_np(attn(q, k, v, training=False))
+                             - _np(attn(q, v, v, training=False)))) > 1e-3
+        assert attn.k_proj is not attn.v_proj
+
+
+# ---------------------------------------------------------------------
+# G6.4 -- the whole layer against the float64 reference forward
+# ---------------------------------------------------------------------
+
+
+class TestLayerForward:
+
+    def test_output_shapes(self, layer):
+        payload = _inputs()
+        out, presence = layer(**payload, training=False)
+        assert tuple(out.shape) == (BATCH, QUERIES, TINY["d_model"])
+        assert tuple(presence.shape) == (BATCH, 1, TINY["d_model"])
+
+    def test_matches_the_float64_reference_forward(self, layer):
+        payload = _inputs()
+        embed_x, embed_y = _rpb_mlps()
+        bias = _np(_box_rpb_bias(_boxes(), (GRID_H, GRID_W), embed_x,
+                                 embed_y, 2))
+        out, presence = layer(**payload, image_cross_bias=bias.astype("f4"),
+                              training=False)
+        expected_out, expected_presence = _reference_layer_forward(
+            layer, payload, bias=bias)
+        np.testing.assert_allclose(_np(out), expected_out, atol=TOL)
+        np.testing.assert_allclose(_np(presence), expected_presence, atol=TOL)
+
+    def test_the_reference_forward_is_fed_a_non_constant_bias(self):
+        """The oracle above is only independent of the LAYER, not of boxRPB.
+
+        MEASURED: forcing the boxRPB embeddings to emit zeros leaves
+        ``test_matches_the_float64_reference_forward`` GREEN, because both
+        sides then receive the same zero bias. This guard makes that
+        degeneracy detectable instead of silent.
+        """
+        embed_x, embed_y = _rpb_mlps()
+        bias = _np(_box_rpb_bias(_boxes(), (GRID_H, GRID_W), embed_x,
+                                 embed_y, 2))
+        assert float(np.std(bias)) > 0.1
+        assert len(np.unique(np.round(bias, 6))) > 10
+
+    def test_matches_the_reference_without_a_presence_token(self, layer):
+        payload = _inputs()
+        payload.pop("presence_token")
+        out, presence = layer(**payload, training=False)
+        assert presence is None
+        expected_out, _ = _reference_layer_forward(layer, payload,
+                                                   with_presence=False)
+        np.testing.assert_allclose(_np(out), expected_out, atol=TOL)
+
+    def test_the_oracle_probes_are_unsaturated(self, layer):
+        """The oracle's discriminating power, MEASURED not assumed.
+
+        Two wrong candidates -- a bias that never reaches the scores, and a
+        shifted query position -- must each miss the reference by far more than
+        the tolerance. The margins are MEASURED (0.087 and 1.44 at this
+        fixture) and pinned here, so a future author cannot loosen ``TOL``
+        past the point where it would swallow a real defect. Note the terminal
+        LayerNorm compresses every downstream difference, which is why 0.087
+        rather than something of order 1 is the honest floor for the bias arm.
+        """
+        payload = _inputs()
+        embed_x, embed_y = _rpb_mlps()
+        bias = _np(_box_rpb_bias(_boxes(), (GRID_H, GRID_W), embed_x,
+                                 embed_y, 2))
+        reference, _ = _reference_layer_forward(layer, payload, bias=bias)
+
+        unbiased, _ = _reference_layer_forward(layer, payload, bias=None)
+        assert np.max(np.abs(unbiased - reference)) > 20 * TOL
+
+        shifted = dict(payload)
+        shifted["query_pos"] = payload["query_pos"] + 1.0
+        moved, _ = _reference_layer_forward(layer, shifted, bias=bias)
+        assert np.max(np.abs(moved - reference)) > 20 * TOL
+
+    def test_the_text_padding_mask_changes_the_output(self, layer):
+        payload = _inputs()
+        masked, _ = layer(**payload, training=False)
+        payload_open = dict(payload)
+        payload_open["text_padding_mask"] = np.zeros((BATCH, TOKENS), bool)
+        unmasked, _ = layer(**payload_open, training=False)
+        assert np.max(np.abs(_np(masked) - _np(unmasked))) > 1e-3
+
+    def test_memory_pos_is_added_to_keys_but_not_to_values(self, layer):
+        """A stock cross-attention cannot express this; the private one can."""
+        payload = _inputs()
+        base, _ = layer(**payload, training=False)
+        shifted = dict(payload)
+        shifted["memory_pos"] = payload["memory_pos"] * 0.0
+        assert np.max(np.abs(_np(base) - _np(layer(**shifted,
+                                                  training=False)[0]))) > 1e-3
+
+    def test_gradients_reach_every_sub_block(self, layer):
+        import tensorflow as tf
+        payload = _inputs()
+        with tf.GradientTape() as tape:
+            out, presence = layer(**payload, training=False)
+            loss = ops.sum(out ** 2) + ops.sum(presence ** 2)
+        grads = tape.gradient(loss, layer.trainable_weights)
+        dead = [w.path for w, g in zip(layer.trainable_weights, grads)
+                if g is None]
+        assert dead == [], f"no gradient reaches {dead}"
+
+
+# ---------------------------------------------------------------------
+# G6.5 -- the presence token
+# ---------------------------------------------------------------------
+
+
+class TestPresenceToken:
+
+    def test_presence_output_is_invariant_to_the_per_query_bias(self, layer):
+        """The zero mask row: the presence token attends everywhere."""
+        payload = _inputs()
+        embed_x, embed_y = _rpb_mlps()
+        bias_a = _np(_box_rpb_bias(_boxes(seed=11), (GRID_H, GRID_W),
+                                   embed_x, embed_y, 2)).astype("f4")
+        bias_b = _np(_box_rpb_bias(_boxes(seed=23), (GRID_H, GRID_W),
+                                   embed_x, embed_y, 2)).astype("f4")
+        _, presence_a = layer(**payload, image_cross_bias=bias_a,
+                              training=False)
+        _, presence_b = layer(**payload, image_cross_bias=bias_b,
+                              training=False)
+        assert np.max(np.abs(_np(presence_a) - _np(presence_b))) == 0.0
+
+    def test_the_real_queries_do_move_with_that_bias(self, layer):
+        """Positive liveness arm for the invariance above."""
+        payload = _inputs()
+        embed_x, embed_y = _rpb_mlps()
+        bias_a = _np(_box_rpb_bias(_boxes(seed=11), (GRID_H, GRID_W),
+                                   embed_x, embed_y, 2)).astype("f4")
+        bias_b = _np(_box_rpb_bias(_boxes(seed=23), (GRID_H, GRID_W),
+                                   embed_x, embed_y, 2)).astype("f4")
+        out_a, _ = layer(**payload, image_cross_bias=bias_a, training=False)
+        out_b, _ = layer(**payload, image_cross_bias=bias_b, training=False)
+        assert np.max(np.abs(_np(out_a) - _np(out_b))) > 1e-3
+
+    def test_presence_path_equals_a_manual_prepend_with_a_zero_pos_row(
+            self, layer):
+        """The presence token's query position is ZEROED, not learned."""
+        payload = _inputs()
+        out, presence = layer(**payload, training=False)
+
+        manual = dict(payload)
+        manual["tgt"] = np.concatenate(
+            [payload["presence_token"], payload["tgt"]], axis=1)
+        manual["query_pos"] = np.concatenate(
+            [np.zeros_like(payload["presence_token"]), payload["query_pos"]],
+            axis=1)
+        manual.pop("presence_token")
+        combined, none_token = layer(**manual, training=False)
+        assert none_token is None
+        np.testing.assert_allclose(_np(combined[:, 1:]), _np(out), atol=TOL)
+        np.testing.assert_allclose(_np(combined[:, :1]), _np(presence),
+                                   atol=TOL)
+
+    def test_a_non_zero_presence_query_pos_would_be_measurably_different(
+            self, layer):
+        """The zeroing is not vacuous: a learned row changes the output."""
+        payload = _inputs()
+        out, presence = layer(**payload, training=False)
+        manual = dict(payload)
+        manual["tgt"] = np.concatenate(
+            [payload["presence_token"], payload["tgt"]], axis=1)
+        manual["query_pos"] = np.concatenate(
+            [np.ones_like(payload["presence_token"]), payload["query_pos"]],
+            axis=1)
+        manual.pop("presence_token")
+        combined, _ = layer(**manual, training=False)
+        assert np.max(np.abs(_np(combined[:, :1]) - _np(presence))) > 1e-3
+        assert np.max(np.abs(_np(combined[:, 1:]) - _np(out))) > 1e-3
+
+    def test_the_presence_token_participates_in_self_attention(self, layer):
+        """It is not a bystander: perturbing it moves the real queries."""
+        payload = _inputs()
+        base, _ = layer(**payload, training=False)
+        moved = dict(payload)
+        moved["presence_token"] = payload["presence_token"] + 2.0
+        assert np.max(np.abs(_np(base)
+                             - _np(layer(**moved, training=False)[0]))) > 1e-3
+
+    def test_the_presence_token_is_split_off_after_the_feed_forward(self,
+                                                                    layer):
+        payload = _inputs()
+        out, presence = layer(**payload, training=False)
+        assert tuple(out.shape)[1] == QUERIES
+        assert tuple(presence.shape)[1] == 1
+
+
+# ---------------------------------------------------------------------
+# G6.6 -- I-5, construction, serialization, structure
+# ---------------------------------------------------------------------
+
+
+class TestMemoryMaskRefusal:
+
+    def test_an_external_memory_mask_is_refused(self, layer):
+        payload = _inputs()
+        with pytest.raises(ValueError, match="memory_mask"):
+            layer(**payload, memory_mask=np.ones((BATCH, KEYS), "float32"),
+                  image_cross_bias=None, training=False)
+
+    def test_the_same_call_without_the_mask_succeeds(self, layer):
+        """The refusal is about the mask, not about the rest of the payload."""
+        out, presence = layer(**_inputs(), training=False)
+        assert out is not None and presence is not None
+
+
+class TestConstruction:
+
+    @pytest.mark.parametrize("bad", [
+        dict(d_model=0), dict(num_heads=0), dict(dim_feedforward=0),
+        dict(d_model=9, num_heads=2), dict(dropout_rate=1.0),
+        dict(dropout_rate=-0.1),
+    ])
+    def test_invalid_configuration_is_refused(self, bad):
+        config = dict(TINY)
+        config.update(bad)
+        with pytest.raises(ValueError):
+            Sam3DecoderLayer(**config)
+
+    def test_missing_text_memory_is_refused(self, layer):
+        payload = _inputs()
+        payload.pop("memory_text")
+        with pytest.raises(ValueError, match="memory_text"):
+            layer(**payload, training=False)
+
+    def test_wrong_width_is_refused_at_build(self):
+        built = Sam3DecoderLayer(**TINY)
+        with pytest.raises(ValueError, match="width"):
+            built.build((BATCH, QUERIES, 9), (BATCH, KEYS, 8),
+                        (BATCH, TOKENS, 8))
+
+    def test_wrong_rank_is_refused_at_build(self):
+        built = Sam3DecoderLayer(**TINY)
+        with pytest.raises(ValueError, match="batch, seq"):
+            built.build((BATCH, 8), (BATCH, KEYS, 8), (BATCH, TOKENS, 8))
+
+    def test_text_cross_attention_requires_a_text_shape_at_build(self):
+        built = Sam3DecoderLayer(**TINY)
+        with pytest.raises(ValueError, match="memory_text_shape"):
+            built.build((BATCH, QUERIES, 8), (BATCH, KEYS, 8))
+
+    def test_tiny_parameter_count_matches_the_closed_form(self, layer):
+        assert layer.count_params() == _params(TINY)
+
+    def test_shipped_parameter_count_matches_the_closed_form(self):
+        built = Sam3DecoderLayer(**SHIPPED)
+        dim = SHIPPED["d_model"]
+        built.build((1, 200, dim), (1, 72 * 72, dim), (1, 32, dim))
+        assert built.count_params() == _params(SHIPPED)
+        # The reference's own arithmetic: three 256-wide attentions at
+        # 4 * (256*256 + 256) each for the two private ones, the stock text
+        # block at the same total, a 256 -> 2048 -> 256 FFN and four norms.
+        assert _params(SHIPPED) == 3 * 263168 + (256 * 2048 + 2048) + (
+            2048 * 256 + 256) + 4 * 512
+
+    def test_the_audit_is_not_vacuous(self):
+        """Deleting the text sub-block must move the total, by its own size."""
+        without = dict(TINY)
+        without["use_text_cross_attention"] = False
+        built = Sam3DecoderLayer(**without)
+        built.build((BATCH, QUERIES, 8), (BATCH, KEYS, 8))
+        assert built.count_params() == _params(without)
+        assert _params(TINY) - _params(without) > 0
+
+    def test_a_disabled_text_block_costs_exactly_zero_parameters(self):
+        without = dict(TINY)
+        without["use_text_cross_attention"] = False
+        built = Sam3DecoderLayer(**without)
+        built.build((BATCH, QUERIES, 8), (BATCH, KEYS, 8))
+        assert built.ca_text.weights == []
+        assert built.catext_norm.weights == []
+
+    def test_the_normalization_epsilon_is_the_reference_value(self, layer):
+        """Keras defaults LayerNormalization to 1e-3; the reference is 1e-5."""
+        for norm in (layer.norm1, layer.norm2, layer.norm3, layer.catext_norm):
+            assert norm.epsilon == 1e-5
+
+    def test_the_feed_forward_activation_is_relu_not_gelu(self, layer):
+        assert layer.ffn.activation_name == "relu"
+        assert layer.ffn.activation_fn is keras.activations.relu
+
+    def test_compute_output_shape_is_derived_from_config(self, layer):
+        shapes = layer.compute_output_shape((BATCH, QUERIES, 8))
+        assert shapes == ((BATCH, QUERIES, 8), (BATCH, 1, 8))
+
+
+class TestSerialization:
+
+    def test_config_keys_equal_init_signature(self, layer):
+        import inspect
+        expected = {name for name in
+                    inspect.signature(Sam3DecoderLayer.__init__).parameters
+                    if name not in ("self", "kwargs")}
+        missing = expected - set(layer.get_config())
+        assert missing == set(), f"get_config() is missing {sorted(missing)}"
+
+    def test_round_trip_by_value(self, layer):
+        payload = _inputs()
+        out, presence = layer(**payload, training=False)
+        clone = Sam3DecoderLayer.from_config(layer.get_config())
+        clone.build((BATCH, QUERIES, 8), (BATCH, KEYS, 8), (BATCH, TOKENS, 8))
+        clone.set_weights(layer.get_weights())
+        clone_out, clone_presence = clone(**payload, training=False)
+        np.testing.assert_allclose(_np(out), _np(clone_out), atol=1e-6)
+        np.testing.assert_allclose(_np(presence), _np(clone_presence),
+                                   atol=1e-6)
+
+    def test_keras_model_round_trip_by_value(self, layer, tmp_path):
+        """D-098: a round trip must be checked by VALUE, never by weight count.
+
+        A nested sub-layer store restores FRESHLY INITIALIZED kernels while the
+        weight count, the weight paths and the parameter total all match. This
+        layer stores its sub-layers FLAT for exactly that reason.
+        """
+        payload = _inputs()
+        dim = TINY["d_model"]
+        tgt_in = keras.Input(shape=(QUERIES, dim))
+        memory_in = keras.Input(shape=(KEYS, dim))
+        text_in = keras.Input(shape=(TOKENS, dim))
+        presence_in = keras.Input(shape=(1, dim))
+        out, presence = layer(tgt_in, memory_in, memory_text=text_in,
+                              presence_token=presence_in)
+        model = keras.Model([tgt_in, memory_in, text_in, presence_in],
+                            [out, presence])
+        probe = [payload["tgt"], payload["memory"], payload["memory_text"],
+                 payload["presence_token"]]
+        before = [np.asarray(t) for t in model.predict(probe, verbose=0)]
+        path = str(tmp_path / "decoder.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+        after = [np.asarray(t) for t in restored.predict(probe, verbose=0)]
+        for lhs, rhs in zip(before, after):
+            assert np.max(np.abs(lhs - rhs)) == 0.0
+
+    def test_the_round_trip_guard_can_see_a_difference(self, layer):
+        """The comparator is RED-proven before the exact-zero PASS is trusted."""
+        payload = _inputs()
+        out, _ = layer(**payload, training=False)
+        layer.norm3.gamma.assign(layer.norm3.gamma + 0.5)
+        moved, _ = layer(**payload, training=False)
+        assert np.max(np.abs(_np(out) - _np(moved))) > 1e-3
