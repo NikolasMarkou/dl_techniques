@@ -1,11 +1,17 @@
 """
 SAM 3 (Segment Anything with Concepts) -- phase 1: the text-prompt-only image path.
 
-**Phase boundary.** This package is being built leaf-first. It currently exposes
-the ViTDet image trunk, the dual SimpleFPN neck, the CLIP text tower, the
-open-vocabulary dot-product scorer, the DETR decoder and the MaskFormer
-segmentation head; the top-level ``Sam3Image`` assembly lands in a later step
-of the same iteration, and the curated export surface is finalized with it.
+**Phase boundary.** The package is complete for phase 1: the ViTDet image trunk,
+the dual SimpleFPN neck, the CLIP text tower, the DETR decoder, the
+open-vocabulary dot-product scorer, the MaskFormer segmentation head, and the
+top-level ``Sam3Image`` assembly that wires all six together and applies the
+presence x localization fusion.
+
+Start at :class:`Sam3Image`; ``Sam3Image.from_variant('sam3')`` builds the
+released configuration and ``from_variant('tiny')`` a small development one.
+The eight component classes are exported too, because each is independently
+constructible, serializable and testable -- which is the property that let this
+package be built and gated one leaf at a time.
 
 The segmentation head has **no presence mechanism**: the shipped reference
 configuration disables it there and drives presence from the decoder's own
@@ -20,6 +26,10 @@ rediscovered as a gap:
   therefore provably inert at inference;
 - ``Sam3TriViTDetNeck`` (the SAM 3.1 three-way neck);
 - the video / tracking path;
+- the vision-language EARLY-FUSION ENCODER that the reference runs between the
+  neck and the decoder. Phase 1 feeds the neck's image memory and the text
+  tower's prompt straight into the decoder; this is the largest single
+  structural divergence in the package and it is named, not hidden;
 - the whole training path -- no loss, matcher, or trainer is defined here, and in
   particular nothing in this package may route mask supervision through SAM 1's
   mask-loss module or the shared segmentation focal loss it calls, whose
@@ -34,6 +44,7 @@ from .decoder import Sam3DecoderLayer, Sam3TransformerDecoder
 from .maskformer_segmentation import Sam3SegmentationHead
 from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
+from .sam3_image import Sam3Image
 from .text_encoder_ve import Sam3TextEncoder
 from .vitdet import Sam3ViTDetBackbone, Sam3ViTDetBlock
 
@@ -41,6 +52,7 @@ __all__ = [
     "Sam3DecoderLayer",
     "Sam3DotProductScoring",
     "Sam3DualViTDetNeck",
+    "Sam3Image",
     "Sam3SegmentationHead",
     "Sam3TextEncoder",
     "Sam3TransformerDecoder",
