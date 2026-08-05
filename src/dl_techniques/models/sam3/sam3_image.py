@@ -178,8 +178,12 @@ class Sam3Image(keras.Model):
     #: reference's own builder. ``tiny`` is **NOT a published SAM 3 size**: it is
     #: a deliberately small development geometry that exists so this package has
     #: a runnable end-to-end gate, and it is named here rather than hidden in a
-    #: test fixture so nobody mistakes it for a released checkpoint. No other
-    #: published SAM 3 size is invented.
+    #: test fixture so nobody mistakes it for a released checkpoint. ``small``
+    #: is **also NOT a published SAM 3 size** -- it is a trainable-on-12-GB
+    #: geometry designed for this package's first learnability run, every field
+    #: of it derived from the released configuration's own RATIOS with each
+    #: deviation signed and named below. No published SAM 3 size is invented:
+    #: the reference ships exactly one, and it is ``sam3``.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "sam3": {
             "img_size": 1008, "patch_size": 14, "embed_dim": 1024, "depth": 32,
@@ -194,6 +198,116 @@ class Sam3Image(keras.Model):
             "dim_feedforward": 2048, "dropout_rate": 0.1,
             "d_proj": 256, "prompt_mlp_hidden_dim": 2048,
             "prompt_mlp_dropout": 0.1, "seg_num_heads": 8, "seg_num_groups": 8,
+        },
+        # DECISION plan-2026-08-05T124709-6c4fac48/D-017
+        # `small` is NOT a published SAM 3 size. It exists because the two
+        # variants above are both unusable for a training run: `tiny`'s 8x8
+        # trunk grid is degenerate (the decoder must invent 16x localization out
+        # of 64 tokens -- the exact confounder the SAM 2 investigation never
+        # controlled), and `sam3`'s 10,072.9 MiB FORWARD peak leaves no room for
+        # AdamW's two moment buffers on a 12 GB card.
+        #
+        # Every field is DERIVED from the released configuration's own ratios,
+        # read at the pinned reference (`sam3/model_builder.py`), and every
+        # deviation is a SIGNED NAMED divergence. The reference publishes ONE
+        # size, so the oracle is a set of ratios, not a smaller config:
+        #   R1  trunk head width  embed_dim/num_heads = 64
+        #   R3  img_size/pretrain_img_size = 3
+        #   R4  mlp_ratio = 4.625
+        #   R5  grid/window_size = 3
+        #   R6  global_att_blocks: every 8th, and the LAST block is ALWAYS
+        #       global (the trunk's single output map IS that block's output)
+        #   R7  d_model = embed_dim/4
+        #   R8  text_width = embed_dim, text head width 64, text_depth = 0.75*depth
+        #   R9  decoder head width  d_model/decoder_heads = 32
+        #   R10 dim_feedforward = 8*d_model      R11 d_proj = d_model
+        #   R12 prompt_mlp_hidden_dim = 8*d_model     R13 seg_num_groups = 8
+        #   R14 decoder_layers/depth = 0.1875    R15 context_length = 32
+        # Do NOT "simplify" a field back to a round number: five of the values
+        # here (mlp_ratio, text_width, text_heads, dim_feedforward,
+        # context_length) are the reference's EXACT numbers and were proposed as
+        # rounder ones during planning. See decisions.md D-017.
+        "small": {
+            # grid 16 = 224/14. Patch 14 is the reference's exact patch size;
+            # 224 is the smallest side giving a power-of-two grid (so every neck
+            # scale 4/2/1/0.5 lands on an integer) with >= 2 windows per side.
+            "img_size": 224, "patch_size": 14,
+            # 192/3 -> head width 64 = R1 EXACT. 192 is the smallest multiple of
+            # 64 that keeps `dim//4 = 48` integral for the neck's 4x branch.
+            "embed_dim": 192, "depth": 6, "num_heads": 3,
+            # R4 EXACT -- and 192*4.625 = 888 exactly, so nothing rounds.
+            "mlp_ratio": 4.625,
+            # DIVERGENCE -1 on R5: 2 windows per side, not 3, because 16 is not
+            # divisible by 3 and `vitdet.py` REFUSES a window that does not
+            # divide the grid (this port has no zero-padding branch, D-087).
+            "window_size": 8,
+            # R6's invariant EXACT (block 5 is the last). DIVERGENCE +1 block:
+            # the reference's 1/8 density gives 0.75 globals at depth 6, and
+            # with 2x2 windows a single global block would be the ONLY place
+            # information ever crosses a window boundary.
+            "global_att_blocks": (2, 5),
+            # DIVERGENCE -1 on R3: grid 8, i.e. ratio 2 not 3 (16/3 is not an
+            # integer). `tiny` uses the same ratio 2.
+            "pretrain_img_size": 112,
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-018
+            # 0.0 for all three rates, a DIVERGENCE -0.1 from the reference on
+            # each, taken deliberately and NOT because "a small model needs less
+            # regularization". D-123 MEASURED that the shared `StochasticDepth`
+            # short-circuits on `training is False` ONLY, so `training=None` --
+            # what a plain `model(inputs)` passes down -- DROPS PATHS, and two
+            # `.keras` round-trip outputs then differ by up to 2.22 with every
+            # weight bit-identical. `small` is the variant that gets `fit()`,
+            # round trips and a frozen-vs-joint A/B run on it, i.e. the three
+            # places where silent stochasticity corrupts a COMPARISON rather
+            # than merely adding noise. Regularization is one keyword away
+            # (`from_variant("small", drop_path_rate=0.1)`) and a caller that
+            # raises it must then pass `training=` explicitly everywhere.
+            # Do NOT "restore" the shipped variant's 0.1 here.
+            # See decisions.md D-018.
+            "drop_path_rate": 0.0, "dropout_rate": 0.0,
+            "prompt_mlp_dropout": 0.0,
+            # DIVERGENCE +16 on R7 (embed_dim/4 = 48). 48 forces either a
+            # 3-head decoder or a non-integral head width, and the segmentation
+            # head requires `d_model % num_groups == 0` at num_groups=8.
+            "d_model": 64,
+            # Unchanged from BOTH existing variants: the finest kept level is
+            # 16*4 = 64, so masks are 64x64 from a 16x16 trunk grid.
+            "scale_factors": (4.0, 2.0, 1.0, 0.5),
+            "add_sam2_neck": False, "scalp": 1,
+            # R8 EXACT on width (= embed_dim) and on head width (192/3 = 64).
+            # text_depth is a DIVERGENCE -0.5: 0.75*6 = 4.5, floored.
+            "text_width": 192, "text_depth": 4, "text_heads": 3,
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-019
+            # context_length 32 is R15 EXACT (the positional table costs 6,144
+            # params, so shrinking it buys nothing and would cap step 5's
+            # phrases). vocab_size 512 is chosen against a WORKLOAD, not against
+            # the reference's 49,408 CLIP BPE table, which is meaningless for a
+            # fixed category-name -> id map: 512 clears COCO's 80 categories by
+            # 6.4x and leaves room for reserved ids, at 512*192 = 98,304 params
+            # (1.7% of the variant). `tiny`'s 64 UNDER-FITS COCO's 80 -- that is
+            # the mistake this number exists not to repeat. KNOWN CEILING: 512
+            # does NOT cover LVIS's 1,203 categories.
+            # See decisions.md D-019.
+            "context_length": 32, "vocab_size": 512,
+            # num_queries: DIVERGENCE -168. Q must exceed the max GT instances
+            # per image with headroom; 200 is sized for LVIS-scale crowding.
+            # D-005 measured the matcher FLAT in Q, so this is not a speed
+            # choice and Q can be raised without a wall-clock penalty.
+            # decoder_layers: DIVERGENCE +1.875 on R14 (0.1875*6 = 1.125) --
+            # iterative box refinement with ONE layer degenerates, there is no
+            # chain left for D-113's stop_gradient to break.
+            # decoder_heads: DIVERGENCE -16 on R9 (head width 16, not 32); at
+            # d_model 64, R9 exactly would mean 2 heads, which is `tiny`'s
+            # degenerate count.
+            "num_queries": 32, "decoder_layers": 3, "decoder_heads": 4,
+            # R10 EXACT (8*64), R11 EXACT, R12 EXACT.
+            "dim_feedforward": 512, "d_proj": 64,
+            "prompt_mlp_hidden_dim": 512,
+            # R13 EXACT on groups (8 channels per group here vs the reference's
+            # 32 -- a consequence of d_model, not a choice). seg_num_heads is a
+            # DIVERGENCE -4: at 8 heads the mask head's per-head width would be
+            # 8; 4 makes it 16, equal to the decoder's.
+            "seg_num_heads": 4, "seg_num_groups": 8,
         },
         "tiny": {
             "img_size": 32, "patch_size": 4, "embed_dim": 16, "depth": 2,
@@ -339,7 +453,8 @@ class Sam3Image(keras.Model):
     def from_variant(cls, variant: str, **kwargs: Any) -> "Sam3Image":
         """Construct every component from one variant table entry.
 
-        :param variant: ``'sam3'`` (the released configuration) or ``'tiny'``
+        :param variant: ``'sam3'`` (the released configuration), ``'small'`` (a
+            trainable-on-12-GB geometry, NOT a published size) or ``'tiny'``
             (a development geometry that is NOT a published size).
         :type variant: str
         :param kwargs: Explicit overrides. A table key is overridden in the
@@ -353,9 +468,11 @@ class Sam3Image(keras.Model):
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown SAM 3 variant '{variant}'. Available: "
-                f"{sorted(cls.MODEL_VARIANTS)}. Only 'sam3' is a published "
-                f"size; the other published SAM 3 configurations were never "
-                f"read by this implementation and are not invented here.")
+                f"{sorted(cls.MODEL_VARIANTS)}. Only "
+                f"'sam3' is a published size; 'small' and 'tiny' are this "
+                f"package's own development geometries, and the other published "
+                f"SAM 3 configurations were never read by this implementation "
+                f"and are not invented here.")
         table = dict(cls.MODEL_VARIANTS[variant])
         overrides = {k: v for k, v in kwargs.items() if v is not None}
         table.update({k: v for k, v in overrides.items() if k in table})

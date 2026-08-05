@@ -199,6 +199,12 @@ def component_closed_forms(table):
 #: default gate: `backbone` matches step 2's instantiated 446,237,696;
 #: `text_encoder` matches step 4's 353,202,432; `transformer` matches step 7's
 #: 11,575,093; `neck` is exactly half of step 3's dual-neck 15,604,224.
+#: The `small` variant's MEASURED total (probe_small_memory.py, 2026-08-05, GPU
+#: 1): every one of the six components equalled its closed form exactly, so this
+#: literal is a measurement AND a closed-form agreement, not a transcription of
+#: either alone. `small` sits at 7.2x `tiny` and 1/139.7 of `sam3`.
+SMALL_TOTAL = 5_881_614
+
 SHIPPED_PARAMS = {
     "backbone": 446_237_696,
     "neck": 7_802_112,
@@ -301,7 +307,7 @@ class TestConstruction:
         import dl_techniques.models.sam3.sam3_image as module
         assert "NOT a published SAM 3 size" in open(module.__file__).read()
         assert Sam3Image.MODEL_VARIANTS["sam3"]["img_size"] == 1008
-        assert set(Sam3Image.MODEL_VARIANTS) == {"sam3", "tiny"}
+        assert set(Sam3Image.MODEL_VARIANTS) == {"sam3", "small", "tiny"}
 
     def test_a_width_mismatch_is_refused(self):
         from dl_techniques.models.sam3 import Sam3DotProductScoring
@@ -724,6 +730,190 @@ class TestParameterAudit:
         table = dict(Sam3Image.MODEL_VARIANTS["sam3"])
         table["depth"] = 33
         assert backbone_params(table) > SHIPPED_PARAMS["backbone"]
+
+
+# ---------------------------------------------------------------------
+# the `small` variant
+# ---------------------------------------------------------------------
+
+
+def geometry_shapes(table, batch):
+    """Every output shape, derived BY HAND from a variant table's geometry.
+
+    This function reads NOTHING from the implementation -- not
+    `compute_output_shape`, not a recorded run. It re-walks the geometry the way
+    the architecture diagram does: the trunk grid is `img_size // patch_size`,
+    the pyramid keeps `len(scale_factors) - scalp` levels, and the FINEST kept
+    level (`grid * scale_factors[0]`) is the mask resolution. A shape assertion
+    written from a run, or from the same constant the implementation reads,
+    would be satisfied by construction; `test_the_shape_oracle_goes_red_on_a_
+    wrong_geometry` proves this one is not.
+    """
+    grid = table["img_size"] // table["patch_size"]
+    finest = int(grid * table["scale_factors"][0])
+    queries = table["num_queries"]
+    return {
+        "pred_logits": (batch, queries, 1),
+        "pred_boxes": (batch, queries, 4),
+        "pred_masks": (batch, queries, finest, finest),
+        "semantic_seg": (batch, finest, finest, 1),
+        "presence_logit": (batch, 1),
+    }
+
+
+class TestSmallVariant:
+    """`small` is the trainable-on-12-GB geometry (decisions.md D-017).
+
+    It exists because BOTH other variants are unusable for a training run:
+    `tiny`'s 8x8 trunk grid is degenerate, and `sam3`'s 10,072.9 MiB forward
+    peak leaves no room for AdamW's two moment buffers on a 12 GB card. Every
+    field of it is derived from the released configuration's own ratios with
+    each deviation signed and named in the table's own source.
+    """
+
+    @pytest.fixture(scope="class")
+    def small(self):
+        built = Sam3Image.from_variant("small")
+        built.build(None)
+        return built
+
+    @pytest.fixture(scope="class")
+    def small_batch(self):
+        table = Sam3Image.MODEL_VARIANTS["small"]
+        rng = np.random.default_rng(19)
+        return {
+            "image": rng.standard_normal(
+                (2, table["img_size"], table["img_size"], 3)).astype("float32"),
+            "token_ids": rng.integers(
+                1, table["vocab_size"],
+                (2, table["context_length"])).astype("int32"),
+            "token_padding_mask": np.zeros(
+                (2, table["context_length"]), dtype=bool),
+        }
+
+    def test_it_constructs_and_forward_passes_at_the_derived_shapes(
+            self, small, small_batch):
+        expected = geometry_shapes(Sam3Image.MODEL_VARIANTS["small"], 2)
+        out = small(small_batch, training=False)
+        assert set(out) == set(expected)
+        for key, shape in expected.items():
+            assert tuple(out[key].shape) == shape, key
+
+    def test_the_shape_oracle_goes_red_on_a_wrong_geometry(self, small,
+                                                           small_batch):
+        """LIVENESS ARM (M3) for the test above, executed rather than claimed.
+
+        Two deliberately wrong geometries are fed to the SAME oracle, and the
+        SAME comparison must FAIL for both. Without this, a `geometry_shapes`
+        that returned the model's own shapes by any route would pass silently.
+        """
+        out = small(small_batch, training=False)
+        table = dict(Sam3Image.MODEL_VARIANTS["small"])
+
+        # (a) a coarser pyramid: finest kept level 32, not 64.
+        coarse = dict(table, scale_factors=(2.0, 1.0, 0.5, 0.25))
+        wrong = geometry_shapes(coarse, 2)
+        assert wrong["pred_masks"] == (2, 32, 32, 32)
+        assert tuple(out["pred_masks"].shape) != wrong["pred_masks"]
+        assert tuple(out["semantic_seg"].shape) != wrong["semantic_seg"]
+
+        # (b) a different query count.
+        fewer = dict(table, num_queries=8)
+        wrong_q = geometry_shapes(fewer, 2)
+        assert tuple(out["pred_logits"].shape) != wrong_q["pred_logits"]
+        assert tuple(out["pred_boxes"].shape) != wrong_q["pred_boxes"]
+
+    def test_the_geometry_is_not_degenerate_the_way_tiny_is(self):
+        # The REASON this variant exists, asserted rather than left in prose.
+        table = Sam3Image.MODEL_VARIANTS["small"]
+        tiny = Sam3Image.MODEL_VARIANTS["tiny"]
+        grid = table["img_size"] // table["patch_size"]
+        tiny_grid = tiny["img_size"] // tiny["patch_size"]
+        assert grid == 16 and tiny_grid == 8
+        # The trunk grid must be a whole number of attention windows, and there
+        # must be MORE THAN ONE of them per side or windowed attention is just
+        # global attention under another name.
+        assert grid % table["window_size"] == 0
+        assert grid // table["window_size"] == 2
+        # The LAST block is always global -- the trunk's single output feature
+        # map IS that block's output (reference ratio R6).
+        assert max(table["global_att_blocks"]) == table["depth"] - 1
+        # Head widths, not head counts, are what the reference fixes.
+        assert table["embed_dim"] // table["num_heads"] == 64
+        assert table["text_width"] // table["text_heads"] == 64
+
+    def test_the_parameter_count_lands_between_the_two_other_variants(self,
+                                                                      small):
+        expected = component_closed_forms(Sam3Image.MODEL_VARIANTS["small"])
+        for key in COMPONENT_KEYS:
+            assert getattr(small, key).count_params() == expected[key], key
+        assert small.count_params() == sum(expected.values()) == SMALL_TOTAL
+        tiny_total = sum(
+            component_closed_forms(Sam3Image.MODEL_VARIANTS["tiny"]).values())
+        assert tiny_total < SMALL_TOTAL < SHIPPED_TOTAL
+
+    def test_the_unknown_variant_message_lists_all_three_names(self):
+        with pytest.raises(ValueError) as raised:
+            Sam3Image.from_variant("base")
+        message = str(raised.value)
+        for name in ("sam3", "small", "tiny"):
+            assert name in message, name
+
+    def test_config_round_trips_at_small(self, small):
+        rebuilt = Sam3Image.from_config(small.get_config())
+        assert rebuilt.d_model == small.d_model
+        assert rebuilt.transformer.num_queries == 32
+        assert rebuilt.text_encoder.context_length == 32
+        rebuilt.build(None)
+        assert rebuilt.count_params() == small.count_params()
+
+    def test_small_pins_every_stochastic_rate_to_zero_deliberately(self):
+        """D-123's trap, and why this variant refuses to inherit 0.1.
+
+        The repository's shared `StochasticDepth` short-circuits on
+        `training is False` ONLY, so `training=None` -- what a plain
+        `model(inputs)` passes down -- DROPS PATHS. At a non-zero rate two
+        `.keras` round-trip outputs then differ by up to 2.22 with every weight
+        bit-identical, which is indistinguishable from a reinitialization
+        defect. `small` is the variant that gets `fit()`, round trips and a
+        frozen-vs-joint A/B run on it -- the three places where silent
+        stochasticity corrupts a COMPARISON rather than merely adding noise.
+        Do NOT "match the shipped variant" here: `sam3` keeps 0.1 because that
+        is the reference's number, and any caller who wants regularization
+        passes `drop_path_rate=0.1` explicitly AND then owes an explicit
+        `training=` at every call site (H-9). See decisions.md D-018.
+        """
+        table = Sam3Image.MODEL_VARIANTS["small"]
+        assert table["drop_path_rate"] == 0.0
+        assert table["dropout_rate"] == 0.0
+        assert table["prompt_mlp_dropout"] == 0.0
+        # The shipped variant is the contrast, and it is NOT changed.
+        assert Sam3Image.MODEL_VARIANTS["sam3"]["drop_path_rate"] == 0.1
+
+    def test_small_is_deterministic_under_a_plain_call(self, small,
+                                                       small_batch):
+        # The PAYOFF of the test above: `model(inputs)` with no `training=` is
+        # reproducible at this variant, so a round-trip or A/B delta means what
+        # it appears to mean. (Exact equality, not a tolerance: the same graph
+        # over the same weights. Verified on GPU with TF32 on and on CPU.)
+        first = np.array(small(small_batch)["pred_masks"])
+        second = np.array(small(small_batch)["pred_masks"])
+        assert np.max(np.abs(first - second)) == 0.0
+
+    def test_the_vocabulary_is_not_the_binding_constraint(self):
+        """D-019: sized against the WORKLOAD, not against CLIP's 49,408.
+
+        `tiny`'s 64 narrowly UNDER-FITS COCO's 80 categories -- a fixed
+        category-name -> id map over COCO cannot be built at `tiny` at all.
+        That is the mistake this number exists not to repeat.
+        """
+        table = Sam3Image.MODEL_VARIANTS["small"]
+        coco_categories = 80
+        assert Sam3Image.MODEL_VARIANTS["tiny"]["vocab_size"] < coco_categories
+        assert table["vocab_size"] >= 6 * coco_categories
+        # Room for reserved ids plus a multi-token phrase, at the reference's
+        # own context length rather than a shrunken one.
+        assert table["context_length"] == 32
 
 
 # ---------------------------------------------------------------------
