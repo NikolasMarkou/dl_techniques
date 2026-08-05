@@ -202,6 +202,25 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
               │                            │
         + per-scale sine PE          + per-scale sine PE
 
+    **Known divergence from the reference -- the sine positional encoding.**
+    This neck reuses the repo-wide :class:`PositionEmbeddingSine2D`, which
+    normalizes coordinates to pixel CENTRES, ``(k - 0.5) / H * 2*pi``, while the
+    reference normalizes to pixel EDGES, ``k / H * 2*pi``
+    (``sam3/model/position_encoding.py:102-116`` at the pinned SHA -- no
+    offset). The divergence is a constant angular shift of ``pi / H`` and it is
+    ACCEPTED, not fixed: the layer is shared with SAM 2 and other consumers and
+    changing it here would move them. MEASURED in float64 at the four SHIPPED
+    grids, with ``num_pos_feats = d_model // 2 = 128`` and an encoding amplitude
+    of 1: max absolute difference **0.010908 / 0.021815 / 0.043619 / 0.087156**
+    at ``H = 288 / 144 / 72 / 36`` -- i.e. exactly ``pi / H``, largest on the
+    COARSEST level. ``sam3_pos`` is LIVE on the detector's main path (it becomes
+    ``memory_pos``, the image cross-attention key embedding), so this is a real
+    input reparametrization, not a spare output. It is the same deviation
+    iteration 1 accepted for SAM 2 (D-042); D-134 carries it forward and states
+    the consequence for any future checkpoint load. The magnitude is PINNED by
+    ``tests/test_models/test_sam3/test_necks.py::TestReferencePeDivergence``, so
+    a change in it is loud rather than silent.
+
     :param dim: Trunk channel width (the neck's input width).
     :type dim: int
     :param d_model: Common output width of every scale of every branch.
@@ -273,6 +292,18 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
         self.pe_temperature = float(pe_temperature)
 
         # Sub-layers -- created UNCONDITIONALLY, built explicitly in build().
+        #
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-134
+        # This shared layer normalizes to pixel CENTRES, `(k - 0.5) / H`, where
+        # the reference normalizes to pixel EDGES, `k / H`. Do NOT "fix" it by
+        # editing `layers/embedding/positional_embedding_sine_2d.py`: that layer
+        # is byte-frozen for this plan and SAM 2 already depends on its current
+        # formula (D-042). Do NOT fork or wrap it here either -- a wrapper would
+        # hide a documented constant behind an indirection. The divergence is a
+        # constant `pi / H` angular shift, MEASURED at 0.010908 / 0.021815 /
+        # 0.043619 / 0.087156 for the four shipped grids H = 288/144/72/36, and
+        # it is ACCEPTED for a fresh-init port and BINDING on any future load of
+        # released SAM 3 weights. See decisions.md D-134 (and D-042).
         self.position_encoding = PositionEmbeddingSine2D(
             num_pos_feats=self.d_model // 2,
             temperature=self.pe_temperature,
@@ -281,14 +312,22 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
         # DECISION plan-2026-08-04T044628-4c240b4c/D-097
         # These two stacks are built by two SEPARATE calls, so every weight in
         # `sam2_convs` is independent of its `sam3_convs` twin. Do NOT
-        # "de-duplicate" this by reusing one stack for both outputs: the two
-        # necks are structurally identical BY CONSTRUCTION and numerically
-        # identical AT INITIALIZATION ONLY, so a shared-stack port produces the
-        # same shapes and the same forward values on a fresh model and diverges
-        # only after training -- there is no value-level symptom a fresh-model
-        # test could see. The guards are therefore a trainable-weight COUNT and
-        # a weight-independence probe, never an output comparison.
-        # See decisions.md D-097.
+        # "de-duplicate" this by reusing one stack for both outputs: a
+        # shared-stack port has the same shapes AND the same forward values as
+        # the reference on a fresh model and diverges only after training, so
+        # there is no value-level symptom a fresh-model test could see. The
+        # guards are therefore a trainable-weight COUNT and a weight-
+        # independence probe, never an output comparison.
+        #
+        # CORRECTED (D-134, was D-097): the two stacks of THIS port are NOT
+        # numerically identical at initialization. The reference clones with
+        # `sam2_convs = deepcopy(self.convs)`, so ITS two stacks are bit-
+        # identical at step 0; this port calls `_build_scale_stack` twice, so
+        # each draws its own weights. Measured by the existing
+        # `test_at_initialization_the_two_necks_already_differ` (min delta
+        # strictly > 0). Nothing reachable depends on it -- both shipped
+        # variants set `add_sam2_neck=False` -- but do not repeat the claim.
+        # See decisions.md D-097 and D-134.
         #
         # DECISION plan-2026-08-04T044628-4c240b4c/D-098
         # Both stacks are stored FLAT -- one list of layers per neck, with the

@@ -68,7 +68,17 @@ def tiny_trunk_map():
 
 
 # ---------------------------------------------------------------------
-# independent float64 oracles
+# float64 oracles
+#
+# NOTE ON PROVENANCE (D-134). `_oracle_sine_pe`'s DEFAULT `offset=0.5` is
+# transcribed from the repo layer `PositionEmbeddingSine2D`, NOT from the
+# reference. At that default it is a REGRESSION oracle -- it agrees with the
+# implementation by construction on exactly the quantity that diverges from the
+# reference, so on its own it can never see the offset move. The REFERENCE form
+# is `offset=0.0` (`sam3/model/position_encoding.py:102-116` at the pinned SHA),
+# and `TestReferencePeDivergence` is the class that pins the gap between them.
+# Every other oracle in this module is an independent transcription; this one is
+# labelled because it is not.
 # ---------------------------------------------------------------------
 
 
@@ -77,8 +87,13 @@ def _oracle_sine_pe(
         width: int,
         num_pos_feats: int,
         temperature: float = 10000.0,
+        offset: float = 0.5,
 ) -> np.ndarray:
-    """Channels-LAST float64 sine positional encoding, `(h, w, 2*num_pos_feats)`."""
+    """Channels-LAST float64 sine positional encoding, `(h, w, 2*num_pos_feats)`.
+
+    `offset=0.5` reproduces the REPO layer (pixel centres); `offset=0.0`
+    reproduces the REFERENCE (pixel edges). See the provenance note above.
+    """
     scale = 2.0 * math.pi
     eps = 1e-6
     rows = np.arange(1, height + 1, dtype=np.float64)[:, None] * np.ones(
@@ -87,8 +102,8 @@ def _oracle_sine_pe(
     cols = np.ones((height, 1), dtype=np.float64) * np.arange(
         1, width + 1, dtype=np.float64
     )[None, :]
-    rows = (rows - 0.5) / (height + eps) * scale
-    cols = (cols - 0.5) / (width + eps) * scale
+    rows = (rows - offset) / (height + eps) * scale
+    cols = (cols - offset) / (width + eps) * scale
 
     dim_t = temperature ** (
         2.0 * (np.arange(num_pos_feats, dtype=np.float64) // 2) / num_pos_feats
@@ -541,6 +556,153 @@ class TestPositionalEncoding:
         feat = ops.zeros((1, 4, 6, TINY_D_MODEL))
         with pytest.raises(ValueError, match="must match the feature"):
             _encode_position(wide, feat, TINY_D_MODEL)
+
+
+#: The four grids the SHIPPED variant produces (trunk 72 at scales 4/2/1/0.5),
+#: with the float64-measured max |repo - reference| encoding difference at
+#: `num_pos_feats = 128`. See D-134 / D-042.
+SHIPPED_PE_GRIDS = (
+    (288, 0.010908),
+    (144, 0.021815),
+    (72, 0.043619),
+    (36, 0.087156),
+)
+
+
+def _pe_offset_gap(got: np.ndarray, side: int, num_pos_feats: int) -> float:
+    """Max abs distance from `got` to the REFERENCE-form (offset 0) encoding."""
+    reference = _oracle_sine_pe(side, side, num_pos_feats, offset=0.0)
+    return float(np.abs(np.asarray(got, dtype=np.float64) - reference).max())
+
+
+def _expected_offset_gap(side: int, num_pos_feats: int) -> float:
+    """Float64 max abs distance between the two CONVENTIONS at this grid.
+
+    Equals `pi / side` to within 0.2 % once `side >= 36` (every SHIPPED grid);
+    below that the sine's curvature bends it away and the closed form stops
+    being the right thing to assert, so the exact float64 value is used.
+    """
+    return float(np.abs(
+        _oracle_sine_pe(side, side, num_pos_feats, offset=0.5)
+        - _oracle_sine_pe(side, side, num_pos_feats, offset=0.0)
+    ).max())
+
+
+def _assert_carries_the_half_pixel_offset(
+        got: np.ndarray, side: int, num_pos_feats: int
+) -> None:
+    """Assert `got` is the repo layer's encoding and NOT the reference's.
+
+    Two arms. (1) It must MATCH the pixel-CENTRE form. (2) Its distance to the
+    pixel-EDGE form -- the arm anchored on the REFERENCE rather than on the
+    implementation -- must be the pinned divergence for this grid. An encoding
+    that moved to the reference convention fails arm 1 and reports a gap of
+    exactly 0.0 on arm 2. The arms are not independent, and that is stated
+    rather than implied: arm 2 exists because it is the only assertion in the
+    package whose reference point is the upstream formula.
+    """
+    got = np.asarray(got, dtype=np.float64)
+    np.testing.assert_allclose(
+        got, _oracle_sine_pe(side, side, num_pos_feats, offset=0.5), atol=1e-5,
+        err_msg=(
+            f"the encoding at side {side} no longer matches the repo layer's "
+            f"pixel-CENTRE convention (D-134)"
+        ),
+    )
+    gap = _pe_offset_gap(got, side, num_pos_feats)
+    expected = _expected_offset_gap(side, num_pos_feats)
+    assert gap == pytest.approx(expected, rel=1e-3), (
+        f"the divergence from the REFERENCE encoding at side {side} is "
+        f"{gap:.6f}, not the pinned {expected:.6f} (D-134); the offset moved"
+    )
+    assert gap > 0.0
+
+
+class TestReferencePeDivergence:
+    """D-134: the reused sine PE diverges from the reference by exactly `pi/H`.
+
+    The reference (`sam3/model/position_encoding.py:102-116` at the pinned SHA)
+    normalizes `arange(1, H+1) / last * 2*pi`; the repo layer subtracts 0.5
+    first. This class is the ONLY instrument in the package that would notice
+    if that offset moved -- `_oracle_sine_pe`'s default transcribes it from the
+    implementation and therefore cannot (see the provenance note above).
+    """
+
+    @pytest.mark.parametrize("side,expected", SHIPPED_PE_GRIDS)
+    def test_the_shipped_grids_diverge_by_exactly_pi_over_h(self, side, expected):
+        """Pins the magnitude at every grid the SHIPPED variant produces."""
+        repo = _oracle_sine_pe(side, side, 128, offset=0.5)
+        reference = _oracle_sine_pe(side, side, 128, offset=0.0)
+        gap = float(np.abs(repo - reference).max())
+        assert gap == pytest.approx(expected, abs=5e-6)
+        assert gap == pytest.approx(math.pi / side, rel=2e-3)
+
+    def test_the_gap_is_largest_on_the_coarsest_level(self):
+        """`pi/H` grows as the grid shrinks -- the 0.5 scale is the worst."""
+        gaps = [
+            float(np.abs(
+                _oracle_sine_pe(s, s, 128, offset=0.5)
+                - _oracle_sine_pe(s, s, 128, offset=0.0)
+            ).max())
+            for s, _ in SHIPPED_PE_GRIDS
+        ]
+        assert gaps == sorted(gaps)
+
+    def test_the_live_neck_output_carries_the_offset(
+            self, tiny_neck, tiny_trunk_map
+    ):
+        """The LIVE path, not just the oracle: `sam3_pos` at all four scales.
+
+        `sam3_pos` becomes `memory_pos` in `Sam3Image`, i.e. the image
+        cross-attention KEY embedding -- so this is the detector's main path.
+        """
+        out = tiny_neck(tiny_trunk_map)
+        for pos, side in zip(out["sam3_pos"], TINY_LADDER):
+            _assert_carries_the_half_pixel_offset(
+                np.asarray(pos)[0], side, TINY_D_MODEL // 2
+            )
+
+    def test_the_sam2_branch_carries_the_same_offset(self, tiny_neck,
+                                                     tiny_trunk_map):
+        """Both branches share one PE layer, so both inherit the divergence."""
+        out = tiny_neck(tiny_trunk_map)
+        for pos, side in zip(out["sam2_pos"], TINY_LADDER):
+            _assert_carries_the_half_pixel_offset(
+                np.asarray(pos)[0], side, TINY_D_MODEL // 2
+            )
+
+    def test_this_guard_can_see_the_offset_move(self):
+        """RED proof: feed the REFERENCE form to the same comparator.
+
+        A guard added blind is worthless. This executes the defect -- an
+        encoding built the reference way -- through
+        `_assert_carries_the_half_pixel_offset` and requires it to FAIL, and
+        checks that the reported gap collapses to ~0 rather than `pi/H`.
+        """
+        side = TINY_LADDER[-1]
+        reference_form = _oracle_sine_pe(
+            side, side, TINY_D_MODEL // 2, offset=0.0
+        )
+        assert _pe_offset_gap(reference_form, side, TINY_D_MODEL // 2) == 0.0
+        with pytest.raises(AssertionError, match="pixel-CENTRE"):
+            _assert_carries_the_half_pixel_offset(
+                reference_form, side, TINY_D_MODEL // 2
+            )
+
+    def test_a_partially_moved_offset_is_caught_too(self):
+        """RED proof 2: the comparator is not a bare "is it nonzero" check.
+
+        An encoding built with HALF the offset is still not the reference's and
+        still not the repo layer's; both arms must reject it.
+        """
+        side = TINY_LADDER[-1]
+        half = _oracle_sine_pe(side, side, TINY_D_MODEL // 2, offset=0.25)
+        gap = _pe_offset_gap(half, side, TINY_D_MODEL // 2)
+        assert 0.0 < gap < _expected_offset_gap(side, TINY_D_MODEL // 2)
+        with pytest.raises(AssertionError):
+            _assert_carries_the_half_pixel_offset(
+                half, side, TINY_D_MODEL // 2
+            )
 
 
 class TestTrunkCoupling:
