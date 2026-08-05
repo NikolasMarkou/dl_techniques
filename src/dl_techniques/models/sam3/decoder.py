@@ -951,9 +951,23 @@ class Sam3TransformerDecoder(keras.layers.Layer):
             name="reference_points", shape=(self.num_queries, 4),
             initializer=normal, trainable=True)
         if self.use_presence_token:
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-137
+            # GLOROT, not the `normal` above, and the asymmetry is deliberate.
+            # The reference builds all three of these as `nn.Embedding` (unit-
+            # normal), and then `TransformerWrapper._reset_parameters` xavier-
+            # uniform-initializes every `dim > 1` parameter EXCEPT names holding
+            # `box_embed` / `query_embed` / `reference_points`. `query_embed`
+            # and `reference_points` are on that exclusion list and keep N(0,1);
+            # `presence_token` is NOT, so the reference ships it at xavier scale
+            # over its `(1, d_model)` weight -- limit `sqrt(6/(d_model+1))`,
+            # std 0.0882 at d_model=256 versus 1.0 here, an 11.3x divergence on
+            # the model's ONLY presence signal. Keras `GlorotUniform` computes
+            # the identical fans for this shape. Do NOT "tidy" this back to
+            # `normal` for symmetry with its two neighbours.
+            # See decisions.md D-137.
             self.presence_token = self.add_weight(
                 name="presence_token", shape=(1, self.d_model),
-                initializer=normal, trainable=True)
+                initializer=keras.initializers.GlorotUniform(), trainable=True)
 
         batch = memory_shape[0]
         tgt_shape = (batch, self.num_queries, self.d_model)

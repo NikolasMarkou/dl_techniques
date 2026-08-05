@@ -160,6 +160,18 @@ class Sam3DotProductScoring(keras.layers.Layer):
         :type prompt_padding_mask_shape: Optional[Tuple[Optional[int], ...]]
         :raises ValueError: On a wrong rank or a width other than ``d_model``.
         """
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-136
+        # Re-entry guard, matching the other seven `build` methods in this
+        # package. Do NOT delete it as "defensive style": without it a second
+        # `build()` raises `ValueError: You cannot add new elements of state ...
+        # to a layer that is already built`, which is exactly what Keras does on
+        # `.keras` LOAD when it rebuilds a component from its recorded build
+        # config before `build_from_config` runs. `Sam3Image._build_once` hides
+        # that from this package's own gate, so the defect is invisible to any
+        # composer that copies `Sam3Image`'s wiring but not its helper.
+        # See decisions.md D-136.
+        if self.built:
+            return
         if len(hs_shape) < 3:
             raise ValueError(f"queries must have rank >= 3 (..., num_queries, "
                              f"d_model), got {hs_shape}")

@@ -367,3 +367,34 @@ class TestSettledScale:
             shipped(_ids(seq=seq, vocab=SHIPPED["vocab_size"]), training=False)
         )
         assert out.shape == (2, seq, SHIPPED["d_model"])
+
+
+class TestBuildIsReEntrant:
+    """D-136 / D-126: the guard this class was recorded as missing.
+
+    D-126 resolved the symptom in the CALLER (`Sam3Image._build_once`) and left
+    the class itself without an `if self.built: return`, so the raise was
+    invisible to the package gate. It is now guarded here and executed here.
+    """
+
+    def test_a_second_build_is_a_no_op(self, tiny_encoder):
+        before = [np.asarray(w) for w in tiny_encoder.weights]
+        tiny_encoder.build((1, TINY_SEQ))
+        after = [np.asarray(w) for w in tiny_encoder.weights]
+        assert len(after) == len(before)
+        for old, new in zip(before, after):
+            assert np.abs(old - new).max() == 0.0
+
+    def test_the_guard_is_what_prevents_the_raise(self, tiny_encoder):
+        """RED proof: clear the flag and the second build DIES as before."""
+        assert tiny_encoder.built
+        object.__setattr__(tiny_encoder, "built", False)
+        with pytest.raises(ValueError, match="already built"):
+            tiny_encoder.build((1, TINY_SEQ))
+
+    def test_a_second_build_leaves_the_forward_pass_unchanged(self, tiny_encoder):
+        ids = _ids()
+        first = _forward(tiny_encoder, ids)
+        tiny_encoder.build((1, TINY_SEQ))
+        second = _forward(tiny_encoder, ids)
+        assert np.abs(first - second).max() == 0.0

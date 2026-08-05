@@ -530,3 +530,55 @@ class TestPackageSurface:
         from dl_techniques.models import sam3
         assert sam3.Sam3DotProductScoring is Sam3DotProductScoring
         assert "Sam3DotProductScoring" in sam3.__all__
+
+
+class TestBuildIsReEntrant:
+    """D-136: the guard D-126 said only ONE class was missing.
+
+    `Sam3DotProductScoring.build` had no `if self.built: return`, so a second
+    `build()` raised `ValueError: You cannot add new elements of state ...`.
+    `Sam3Image._build_once` masked it, which is why 390 tests never saw it --
+    that helper is the caller's, not this class's, so any other composer met
+    the raise. These tests execute the double build directly.
+    """
+
+    def test_a_second_build_is_a_no_op(self):
+        head = Sam3DotProductScoring(**TINY)
+        head.build((BATCH, QUERIES, TINY["d_model"]),
+                   (BATCH, SEQ, TINY["d_model"]))
+        before = [np.asarray(w) for w in head.weights]
+        head.build((BATCH, QUERIES, TINY["d_model"]),
+                   (BATCH, SEQ, TINY["d_model"]))
+        after = [np.asarray(w) for w in head.weights]
+        assert len(after) == len(before)
+        for old, new in zip(before, after):
+            assert np.abs(old - new).max() == 0.0
+
+    def test_the_guard_is_what_prevents_the_raise(self):
+        """RED proof: with the guard bypassed, the second build DIES.
+
+        The defect is executed, not asserted -- `Layer.build` is invoked with
+        the guard's flag temporarily cleared, reproducing the exact pre-fix
+        state, and the `ValueError` it raises is the one D-126 quoted.
+        """
+        head = Sam3DotProductScoring(**TINY)
+        shapes = ((BATCH, QUERIES, TINY["d_model"]),
+                  (BATCH, SEQ, TINY["d_model"]))
+        head.build(*shapes)
+        assert head.built
+        object.__setattr__(head, "built", False)
+        with pytest.raises(ValueError, match="already built"):
+            head.build(*shapes)
+
+    def test_a_second_build_still_leaves_the_forward_pass_correct(self):
+        head = Sam3DotProductScoring(**TINY)
+        shapes = ((BATCH, QUERIES, TINY["d_model"]),
+                  (BATCH, SEQ, TINY["d_model"]))
+        head.build(*shapes)
+        _randomize(head)
+        hs, prompt = _inputs()
+        pad = _pad("trailing")
+        first = _forward(head, hs, prompt, pad)
+        head.build(*shapes)
+        second = _forward(head, hs, prompt, pad)
+        assert np.abs(first - second).max() == 0.0

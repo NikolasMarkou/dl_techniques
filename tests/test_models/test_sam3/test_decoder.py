@@ -27,6 +27,8 @@ component, which is exactly what a dead-component probe exposes; the presence
 token's bias-invariance and the ``memory_mask`` refusal are both that shape.
 """
 
+import math
+
 import keras
 import numpy as np
 import pytest
@@ -1438,3 +1440,77 @@ class TestStackSerialization:
         trained_stack.norm.gamma.assign(trained_stack.norm.gamma + 0.5)
         moved, _, _, _ = trained_stack(**payload, training=False)
         assert np.max(np.abs(_np(hidden) - _np(moved))) > 1e-3
+
+
+class TestPresenceTokenInitScale:
+    """D-137: the reference's global xavier pass reaches `presence_token`.
+
+    `TransformerWrapper._reset_parameters` (`sam3/model/model_misc.py:846-854`
+    at the pinned SHA) xavier-uniform-initializes every `dim > 1` parameter
+    except names holding `box_embed` / `query_embed` / `reference_points`, and
+    the image path constructs that wrapper (`model_builder.py:528-536`).
+    `presence_token` is NOT on the exclusion list; its two neighbours ARE. The
+    port shipped all three at `RandomNormal(stddev=1.0)`, an 11.3x scale
+    divergence on the model's only presence signal.
+    """
+
+    @staticmethod
+    def _xavier_std(fan_in: int, fan_out: int) -> float:
+        return math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0)
+
+    def test_the_presence_token_is_at_xavier_scale_not_unit_normal(self):
+        """A 4,096-draw estimate, so the assertion is on the DISTRIBUTION."""
+        d_model = 64
+        draws = []
+        for seed in range(64):
+            keras.utils.set_random_seed(seed)
+            built = _build_stack(randomize=False, d_model=d_model,
+                                 dim_feedforward=32)
+            draws.append(_np(built.presence_token).ravel())
+        sample = np.concatenate(draws)
+        assert sample.size == 64 * d_model
+        expected = self._xavier_std(d_model, 1)
+        assert float(sample.std()) == pytest.approx(expected, rel=0.06)
+        # The pre-fix value is 1.0; this must be nowhere near it.
+        assert float(sample.std()) < 0.3
+
+    def test_the_unit_normal_candidate_is_measurably_different(self):
+        """RED proof: the DEFECT is constructed and fails the same assertion.
+
+        Without this arm the test above is a number staring at itself -- it
+        asserts the shipped initializer's own scale. Here the pre-fix
+        initializer is instantiated at the same shape and required to FAIL.
+        """
+        d_model = 64
+        keras.utils.set_random_seed(0)
+        defect = _np(
+            keras.initializers.RandomNormal(stddev=1.0)((64, d_model)))
+        expected = self._xavier_std(d_model, 1)
+        assert float(defect.std()) == pytest.approx(1.0, rel=0.06)
+        # 5.7x at this probe width; 11.3x at the shipped d_model=256, which
+        # the closed-form test below pins.
+        assert float(defect.std()) / expected > 5.0
+        assert not (abs(float(defect.std()) - expected) / expected < 0.06)
+
+    def test_the_two_excluded_neighbours_stay_unit_normal(self):
+        """`query_embed` and `reference_points` ARE on the exclusion list.
+
+        The reference keeps both at `nn.Embedding`'s unit normal, so the port's
+        `RandomNormal(stddev=1.0)` is correct for them and the asymmetry with
+        `presence_token` is the reference's, not a mistake.
+        """
+        d_model = 64
+        q, r = [], []
+        for seed in range(32):
+            keras.utils.set_random_seed(seed)
+            built = _build_stack(randomize=False, d_model=d_model,
+                                 dim_feedforward=32)
+            q.append(_np(built.query_embed).ravel())
+            r.append(_np(built.reference_points).ravel())
+        assert float(np.concatenate(q).std()) == pytest.approx(1.0, rel=0.06)
+        assert float(np.concatenate(r).std()) == pytest.approx(1.0, rel=0.06)
+
+    def test_the_shipped_width_scale_is_the_pinned_number(self):
+        """d_model=256: xavier std 0.088216, versus the pre-fix 1.0."""
+        assert self._xavier_std(256, 1) == pytest.approx(0.08821622, abs=1e-7)
+        assert 1.0 / self._xavier_std(256, 1) == pytest.approx(11.336, rel=1e-3)

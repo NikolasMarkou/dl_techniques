@@ -180,6 +180,16 @@ class Sam3TextEncoder(keras.layers.Layer):
         :raises ValueError: If the rank is not 2, or the static sequence length
             exceeds ``context_length``.
         """
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-136
+        # Re-entry guard. D-126 recorded this class as the ONLY one in the
+        # package missing it and resolved the symptom in the caller
+        # (`Sam3Image._build_once`); that count was WRONG -- `Sam3DotProduct
+        # Scoring.build` was missing it too, and both were masked by the same
+        # caller. The guard is added at both sites so a composer that does not
+        # copy `_build_once` is not surprised. Do NOT delete it.
+        # See decisions.md D-136 (which corrects D-126).
+        if self.built:
+            return
         if len(input_shape) != 2:
             raise ValueError(
                 f"Sam3TextEncoder expects token ids of shape (batch, seq), got "
