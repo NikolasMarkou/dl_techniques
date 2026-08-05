@@ -16,6 +16,14 @@ component, so the causality family ships with two positive arms beside it:
 ``test_the_last_position_does_see_position_zero`` (the mask must not be a
 blanket) and ``test_the_causality_guard_can_see_a_leak`` (the comparator itself
 is proven able to fire, by running the same tower with NO mask).
+
+The second load-bearing guard is ``TestEmbeddingNormDivergence`` (D-142). The
+parameter oracle here is derived from the REFERENCE (`_reference_params`) and
+the port's count is reached from it by two SIGNED, named divergence terms --
+because the previous version of ``_params`` transcribed the port's own extra
+``embed_norm`` under a docstring claiming it was written from the structure, so
+it agreed with the implementation by construction on exactly the quantity that
+diverges.
 """
 
 import keras
@@ -45,25 +53,71 @@ SHIPPED = dict(
 )
 
 
-def _params(cfg: dict) -> int:
-    """Closed-form parameter count for a `Sam3TextEncoder`.
+#: `TextTransformer`'s `output_dim` DEFAULT. `_create_text_encoder` (pinned
+#: clone, `sam3/model_builder.py:500-509`) passes only `d_model`, `width`,
+#: `heads` and `layers`, so `text_projection` is `(width, 512)` -- NOT the
+#: `(width, d_model)` a reader who assumes `output_dim == d_model` expects.
+REFERENCE_OUTPUT_DIM = 512
 
-    Written from the STRUCTURE, not read off a `count_params()` call, so that a
-    silently dropped sub-layer changes the measurement and not the oracle.
+
+def _reference_params(cfg: dict) -> int:
+    """Closed-form parameter count of the UPSTREAM tower.
+
+    Transcribed term by term from the pinned clone
+    (`sam3/model/text_encoder_ve.py` at `96914d24`) and NOT from this port:
+
+    * ``token_embedding`` + ``positional_embedding`` (`:200-201`), with
+      **nothing between them and block 0** (`forward`, `:238-245`);
+    * ``layers`` x ``ResidualAttentionBlock`` (`:15-88`) = ``ln_1`` +
+      ``nn.MultiheadAttention`` (``in_proj`` 3d x d + 3d, ``out_proj`` d x d + d)
+      + ``ln_2`` + ``mlp`` (``c_fc``, ``c_proj``); both ``LayerScale``s are
+      ``nn.Identity`` because ``ls_init_value`` is ``None``;
+    * ``ln_final`` (``use_ln_post=True``);
+    * ``text_projection`` ``(width, REFERENCE_OUTPUT_DIM)`` (`:224`) -- allocated
+      and checkpointed, never consumed by ``VETextEncoder``;
+    * ``VETextEncoder.resizer`` ``Linear(width, d_model)`` (`:290`).
+
+    This is the oracle the PORT is measured AGAINST. `_params` below is derived
+    from it by two explicit, signed divergence terms, so neither can drift into
+    agreeing with the implementation by construction (D-142).
     """
     width, depth = cfg["width"], cfg["depth"]
     hidden = int(cfg["width"] * cfg["mlp_ratio"])
     embeddings = cfg["vocab_size"] * width + cfg["context_length"] * width
-    embed_norm = 2 * width                      # scale + offset
-    attention = 4 * (width * width + width)     # q, k, v, o -- all biased
-    block_norms = 2 * (2 * width)               # pre-attn + pre-ffn
+    attention = 4 * (width * width + width)     # in_proj (3) + out_proj, biased
+    block_norms = 2 * (2 * width)               # ln_1 + ln_2
     ffn = (width * hidden + hidden) + (hidden * width + width)
-    final_norm = 2 * width                      # the 'pre' regime's terminal norm
+    ln_final = 2 * width
+    text_projection = width * REFERENCE_OUTPUT_DIM
     resizer = width * cfg["d_model"] + cfg["d_model"]
     return (
-        embeddings + embed_norm
-        + depth * (attention + block_norms + ffn)
-        + final_norm + resizer
+        embeddings + depth * (attention + block_norms + ffn)
+        + ln_final + text_projection + resizer
+    )
+
+
+def _port_only_embed_norm(cfg: dict) -> int:
+    """D-142 divergence 1: the extra embedding norm the port CANNOT remove."""
+    return 2 * cfg["width"]                     # scale + offset
+
+
+def _reference_only_text_projection(cfg: dict) -> int:
+    """D-142 divergence 2: the reference-only projection the port omits."""
+    return cfg["width"] * REFERENCE_OUTPUT_DIM
+
+
+def _params(cfg: dict) -> int:
+    """Closed-form parameter count for a `Sam3TextEncoder`.
+
+    Derived from `_reference_params` by the two SIGNED divergence terms of
+    D-142, not written from the port's own structure -- so a silently dropped
+    sub-layer changes the measurement and not the oracle, and a divergence from
+    the reference has to be named here before the count can absorb it.
+    """
+    return (
+        _reference_params(cfg)
+        + _port_only_embed_norm(cfg)
+        - _reference_only_text_projection(cfg)
     )
 
 
@@ -247,6 +301,23 @@ class TestUpstreamStructuralParity:
     def test_positional_embeddings_are_learned_absolute(self, tiny_encoder):
         assert tiny_encoder.encoder.positional_type == "learned"
 
+    def test_the_port_carries_an_embedding_norm_the_reference_does_not(
+            self, tiny_encoder
+    ):
+        """D-142: the default this class omitted, and the one that matters most.
+
+        The reference goes token-embed -> +pos -> transformer with NOTHING
+        between. The wrapped layer always builds an `embed_norm`. Asserted as
+        PRESENT, because it is an accepted divergence -- if a future change
+        removes it the port becomes MORE faithful and this arm must be updated
+        deliberately rather than silently.
+        """
+        norm = tiny_encoder.encoder.embed_norm
+        assert isinstance(norm, keras.layers.LayerNormalization)
+        assert sum(int(np.prod(w.shape)) for w in norm.weights) == (
+            _port_only_embed_norm(TINY)
+        )
+
     def test_feed_forward_width_truncates_rather_than_rounds(self):
         # int(32 * 2.55) == 81 while round(32 * 2.55) == 82 -- a probe point
         # where the two rules differ, unlike the settled 4.0.
@@ -254,10 +325,139 @@ class TestUpstreamStructuralParity:
         assert encoder.encoder.intermediate_size == 81
 
 
+class _Passthrough(keras.layers.Layer):
+    """An inert stand-in for `embed_norm`, i.e. the REFERENCE's structure."""
+
+    def call(self, inputs, training=None):
+        return inputs
+
+
+def _forward_with_embed_norm_replaced(encoder, ids, replacement=None):
+    """Forward `encoder` with `embed_norm` swapped out, then restore it.
+
+    `object.__setattr__` is required on a BUILT layer: Keras' tracker refuses a
+    plain sub-layer assignment ("You cannot add new elements of state ... to a
+    layer that is already built"). Nothing is left mutated; the restore is in a
+    `finally` and is itself asserted by
+    `test_the_probe_leaves_the_encoder_untouched`.
+    """
+    inner = encoder.encoder
+    original = inner.embed_norm
+    object.__setattr__(inner, "embed_norm", replacement or _Passthrough())
+    try:
+        return ops.convert_to_numpy(encoder(ids, training=False))
+    finally:
+        object.__setattr__(inner, "embed_norm", original)
+
+
+def _assert_carries_the_extra_embedding_norm(encoder, ids, expected_delta):
+    """Assert this tower normalizes its embeddings where the reference does not.
+
+    Two arms. (1) The output must MOVE by the pinned amount when `embed_norm`
+    is replaced by a passthrough -- the reference's structure. (2) The move must
+    be a large fraction of the output's own amplitude, so "it diverges" cannot
+    degrade into "it diverges by a rounding error". A port that matched the
+    reference reports a delta of exactly 0.0 and fails arm 1.
+    """
+    base = _forward(encoder, ids)
+    reference_order = _forward_with_embed_norm_replaced(encoder, ids)
+    delta = float(np.abs(base - reference_order).max())
+    amplitude = float(np.abs(base).max())
+    assert delta == pytest.approx(expected_delta, rel=2e-3), (
+        f"the extra embedding normalization now moves the output by {delta:.6f}"
+        f", not the pinned {expected_delta:.6f} (D-142)"
+    )
+    assert delta > 0.4 * amplitude, (
+        f"delta {delta:.6f} is no longer a large fraction of the output "
+        f"amplitude {amplitude:.6f}"
+    )
+
+
+class TestEmbeddingNormDivergence:
+    """D-142: the port normalizes its embeddings; the reference does not.
+
+    `sam3/model/text_encoder_ve.py:238-245` at the pinned SHA is
+    `token_embedding -> + positional_embedding -> transformer`, with nothing
+    between. `layers/transformers/text_encoder.py:775` inserts a LayerNorm and
+    offers no way to turn it off. MEASURED, not asserted from a docstring.
+    """
+
+    def test_the_reference_order_output_differs_at_the_tiny_width(
+            self, tiny_encoder
+    ):
+        _assert_carries_the_extra_embedding_norm(
+            tiny_encoder, _ids(), 1.805329
+        )
+
+    def test_the_substitution_mechanism_alone_changes_nothing(
+            self, tiny_encoder
+    ):
+        """Control: an EQUIVALENT norm swapped in gives exactly 0.0.
+
+        Without this, arm 1 above could be measuring the swap rather than the
+        normalization. A freshly built `LayerNormalization` at the same epsilon
+        is bit-identical to the shipped one at initialization (gamma 1, beta 0),
+        so the harness itself must contribute nothing.
+        """
+        ids = _ids()
+        equivalent = keras.layers.LayerNormalization(
+            epsilon=tiny_encoder.encoder.embed_norm.epsilon
+        )
+        moved = _forward_with_embed_norm_replaced(
+            tiny_encoder, ids, replacement=equivalent
+        )
+        assert np.abs(_forward(tiny_encoder, ids) - moved).max() == 0.0
+
+    def test_the_probe_leaves_the_encoder_untouched(self, tiny_encoder):
+        ids = _ids()
+        before = _forward(tiny_encoder, ids)
+        _forward_with_embed_norm_replaced(tiny_encoder, ids)
+        assert isinstance(
+            tiny_encoder.encoder.embed_norm, keras.layers.LayerNormalization
+        )
+        assert np.abs(_forward(tiny_encoder, ids) - before).max() == 0.0
+
+    def test_this_guard_can_see_the_divergence_close(self):
+        """RED proof: a REFERENCE-shaped port is required to FAIL the guard.
+
+        The substitution is done BEFORE `build`, which is the one route that
+        would actually remove the norm from this port (D-142 records it as the
+        remedy for the weight-transfer phase and declines to apply it now). The
+        resulting layer has 64 fewer parameters, reports a delta of exactly 0.0,
+        and `_assert_carries_the_extra_embedding_norm` raises on it -- so the
+        guard is not a fact about `LayerNormalization`, it is a fact about this
+        encoder.
+        """
+        keras.utils.set_random_seed(7)
+        reference_shaped = Sam3TextEncoder(**TINY)
+        reference_shaped.encoder.embed_norm = _Passthrough()
+        reference_shaped.build((None, TINY_SEQ))
+        assert reference_shaped.count_params() == (
+            _params(TINY) - _port_only_embed_norm(TINY)
+        )
+        with pytest.raises(AssertionError, match="D-142"):
+            _assert_carries_the_extra_embedding_norm(
+                reference_shaped, _ids(), 1.805329
+            )
+
+
 class TestParameterAudit:
 
     def test_tiny_count_matches_the_closed_form_exactly(self, tiny_encoder):
         assert tiny_encoder.count_params() == _params(TINY)
+
+    def test_the_port_and_the_reference_differ_by_two_named_terms(self):
+        """D-142: the settled tower against the UPSTREAM closed form.
+
+        `text_projection` is `(1024, 512)` because `_create_text_encoder` never
+        passes `output_dim` -- 524,288 parameters, twice the 1024x256 that
+        assuming `output_dim == d_model` would give.
+        """
+        assert _port_only_embed_norm(SHIPPED) == 2_048
+        assert _reference_only_text_projection(SHIPPED) == 524_288
+        assert _reference_params(SHIPPED) == 353_724_672
+        assert _params(SHIPPED) == 353_202_432
+        assert _reference_params(SHIPPED) - _params(SHIPPED) == 522_240
 
     def test_the_resizer_is_a_biased_projection_to_d_model(self, tiny_encoder):
         kernel, bias = tiny_encoder.resizer.weights
@@ -360,6 +560,21 @@ class TestSettledScale:
             - ops.convert_to_numpy(inner(bumped, training=False))[:, 0]
         ).max()
         assert leak > 1e-2
+
+    def test_the_extra_embedding_norm_moves_the_settled_output(self, shipped):
+        """D-142 pinned AT THE SETTLED WIDTH, where it is worst.
+
+        5.917600 against an output amplitude of 5.536552 -- **106.9 %**, i.e.
+        the divergence exceeds the signal, and 2.2x the 48.5 % the same probe
+        reports at this file's tiny width. The tiny figure must not be quoted
+        as the magnitude of this defect.
+        """
+        seq = SHIPPED["context_length"]
+        ids = _ids(seq=seq, vocab=SHIPPED["vocab_size"], seed=0)
+        _assert_carries_the_extra_embedding_norm(shipped, ids, 5.917600)
+        base = ops.convert_to_numpy(shipped(ids, training=False))
+        moved = _forward_with_embed_norm_replaced(shipped, ids)
+        assert float(np.abs(base - moved).max()) > float(np.abs(base).max())
 
     def test_shipped_forward_shape(self, shipped):
         seq = SHIPPED["context_length"]

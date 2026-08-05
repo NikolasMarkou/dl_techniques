@@ -1458,39 +1458,62 @@ class TestPresenceTokenInitScale:
     def _xavier_std(fan_in: int, fan_out: int) -> float:
         return math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0)
 
-    def test_the_presence_token_is_at_xavier_scale_not_unit_normal(self):
-        """A 4,096-draw estimate, so the assertion is on the DISTRIBUTION."""
-        d_model = 64
+    @staticmethod
+    def _presence_draws(d_model: int, stacks: int, defect: bool = False):
+        """Collect `presence_token` from `stacks` freshly BUILT stacks.
+
+        `defect=True` overwrites each built weight with the pre-fix
+        `RandomNormal(stddev=1.0)` draw, so the RED arm below runs through
+        `Sam3TransformerDecoder` rather than through a bare initializer.
+        """
         draws = []
-        for seed in range(64):
+        for seed in range(stacks):
             keras.utils.set_random_seed(seed)
             built = _build_stack(randomize=False, d_model=d_model,
                                  dim_feedforward=32)
+            if defect:
+                built.presence_token.assign(
+                    keras.initializers.RandomNormal(stddev=1.0)(
+                        built.presence_token.shape)
+                )
             draws.append(_np(built.presence_token).ravel())
-        sample = np.concatenate(draws)
-        assert sample.size == 64 * d_model
+        return np.concatenate(draws)
+
+    def _assert_at_xavier_scale(self, sample, d_model: int) -> None:
+        """The load-bearing assertion, shared by the GREEN and RED arms."""
         expected = self._xavier_std(d_model, 1)
         assert float(sample.std()) == pytest.approx(expected, rel=0.06)
         # The pre-fix value is 1.0; this must be nowhere near it.
         assert float(sample.std()) < 0.3
 
-    def test_the_unit_normal_candidate_is_measurably_different(self):
-        """RED proof: the DEFECT is constructed and fails the same assertion.
+    def test_the_presence_token_is_at_xavier_scale_not_unit_normal(self):
+        """A 4,096-draw estimate, so the assertion is on the DISTRIBUTION."""
+        d_model = 64
+        sample = self._presence_draws(d_model, 64)
+        assert sample.size == 64 * d_model
+        self._assert_at_xavier_scale(sample, d_model)
 
-        Without this arm the test above is a number staring at itself -- it
-        asserts the shipped initializer's own scale. Here the pre-fix
-        initializer is instantiated at the same shape and required to FAIL.
+    def test_the_unit_normal_candidate_is_measurably_different(self):
+        """RED proof: the DEFECT is constructed IN THE LAYER and fails.
+
+        Earlier this arm drew from `RandomNormal(stddev=1.0)` directly, which
+        proved a fact about the initializer rather than about
+        `Sam3TransformerDecoder` -- it never re-entered `build`, so it could not
+        notice the weight's shape moving (which moves the fans and the expected
+        std together). Now 16 real stacks are built and each built
+        `presence_token` is overwritten with the pre-fix draw, and the SAME
+        assertion the green arm uses is required to raise.
         """
         d_model = 64
-        keras.utils.set_random_seed(0)
-        defect = _np(
-            keras.initializers.RandomNormal(stddev=1.0)((64, d_model)))
+        defect = self._presence_draws(d_model, 16, defect=True)
+        assert defect.size == 16 * d_model
         expected = self._xavier_std(d_model, 1)
         assert float(defect.std()) == pytest.approx(1.0, rel=0.06)
         # 5.7x at this probe width; 11.3x at the shipped d_model=256, which
         # the closed-form test below pins.
         assert float(defect.std()) / expected > 5.0
-        assert not (abs(float(defect.std()) - expected) / expected < 0.06)
+        with pytest.raises(AssertionError):
+            self._assert_at_xavier_scale(defect, d_model)
 
     def test_the_two_excluded_neighbours_stay_unit_normal(self):
         """`query_embed` and `reference_points` ARE on the exclusion list.

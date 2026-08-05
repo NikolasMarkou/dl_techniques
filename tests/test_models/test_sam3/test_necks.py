@@ -671,6 +671,36 @@ class TestReferencePeDivergence:
                 np.asarray(pos)[0], side, TINY_D_MODEL // 2
             )
 
+    def test_a_live_neck_at_a_shipped_grid_carries_pi_over_h(self):
+        """Closes the seam between the two families in this class.
+
+        The live-path arms above run at TINY grids, where `pi/H` is NOT the
+        right closed form (the sine's curvature bends it away below H ~ 36), so
+        they compare oracle to oracle; and `test_the_shipped_grids_diverge_by_
+        exactly_pi_over_h` asserts the reference-anchored arithmetic without
+        instantiating anything. This arm does both at once: a real
+        `Sam3DualViTDetNeck` fed a 72x72 trunk map at `scale_factors=(0.5,)`
+        emits H = 36 -- the WORST-CASE shipped level -- and its `sam3_pos` is
+        required to sit `pi/36` away from the reference encoding. Width is kept
+        tiny deliberately: the gap is set by the lowest `dim_t` (= 1), so it is
+        0.087156 at `num_pos_feats` 4 and at 128 alike (measured).
+        """
+        side = SHIPPED_LADDER[-1]
+        assert side == 36
+        neck = Sam3DualViTDetNeck(
+            dim=TINY_DIM, d_model=TINY_D_MODEL, scale_factors=(0.5,)
+        )
+        neck.build((None, 2 * side, 2 * side, TINY_DIM))
+        trunk = np.random.RandomState(3).randn(
+            1, 2 * side, 2 * side, TINY_DIM
+        ).astype("float32")
+        pos = np.asarray(neck(trunk)["sam3_pos"][0])[0]
+        assert pos.shape[:2] == (side, side)
+        gap = _pe_offset_gap(pos, side, TINY_D_MODEL // 2)
+        assert gap == pytest.approx(SHIPPED_PE_GRIDS[-1][1], abs=5e-6)
+        assert gap == pytest.approx(math.pi / side, rel=2e-3)
+        _assert_carries_the_half_pixel_offset(pos, side, TINY_D_MODEL // 2)
+
     def test_this_guard_can_see_the_offset_move(self):
         """RED proof: feed the REFERENCE form to the same comparator.
 

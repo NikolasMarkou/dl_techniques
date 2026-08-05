@@ -36,6 +36,34 @@ What this wrapper adds, and why each piece exists:
     length, and rebuilding the same triangle from ``arange`` is the identical
     quantity with no state to keep consistent.
 
+Two ACCEPTED structural divergences from the reference (D-142), both measured:
+    1. **An extra normalization on the embeddings.** The reference goes
+       ``token_embedding -> + positional_embedding -> transformer`` with
+       **nothing between** (`sam3/model/text_encoder_ve.py:238-245` at the
+       pinned SHA). The wrapped repo layer creates an ``embed_norm`` and applies
+       it unconditionally on the live path
+       (`layers/transformers/text_encoder.py:429-433,775`), and there is no
+       constructor argument that removes it -- ``normalization_type`` governs
+       ``embed_norm``, every block norm and ``final_norm`` jointly. MEASURED at
+       the SETTLED width by replacing it with a passthrough: max abs output
+       delta **5.917600** against a max output amplitude of **5.536552**
+       (**106.9 %**, and 460 % of the output RMS); **1.805329** against
+       **3.722330** (48.5 %) at this package's tiny width. This is NOT a
+       reparametrization -- a normalization on the residual stream destroys the
+       per-token mean and scale of the embedding irreversibly.
+    2. **No ``text_projection``.** The reference's ``TextTransformer`` carries a
+       ``(width, output_dim)`` parameter (`:224`) that ``VETextEncoder``
+       **never consumes** -- it keeps only the per-token memory -- but that
+       exists in any released checkpoint. ``_create_text_encoder`` does not pass
+       ``output_dim``, so it is ``(1024, 512)`` = **524,288** parameters, not
+       the 1024x256 a reader who assumes ``output_dim == d_model`` would expect.
+
+    Net: this tower is the reference's **plus 2,048** unmatched and **minus
+    524,288** missing parameters -- 353,202,432 here against 353,724,672
+    upstream. Phase 1 loads no pretrained weights, so nothing is wrong today;
+    both are BINDING on any future weight transfer, and both are recorded in
+    ``progress.md`` § Deferred D-6.
+
 No pooling of any kind happens here:
     The reference computes a pooled sentence vector inside its text transformer
     and its own wrapper then **discards** it, keeping only the per-token
@@ -69,6 +97,14 @@ from dl_techniques.layers.transformers.text_encoder import TextEncoder
 @keras.saving.register_keras_serializable()
 class Sam3TextEncoder(keras.layers.Layer):
     """SAM 3's CLIP text tower, emitting the full per-token sequence.
+
+    **This is not a bit-faithful port of the upstream tower**, and the two
+    accepted divergences are stated in the module docstring above rather than
+    left to be rediscovered: the wrapped layer applies an ``embed_norm`` the
+    reference does not have (MEASURED **106.9 %** of the output amplitude at
+    the settled width), and the reference's unconsumed 524,288-parameter
+    ``text_projection`` has no counterpart here. Both are inert while phase 1
+    trains from scratch and both are BINDING on any weight transfer (D-142).
 
     :param d_model: Width of the resizer's output, i.e. the detector's model
         width. Default: ``256``.
@@ -156,6 +192,30 @@ class Sam3TextEncoder(keras.layers.Layer):
         # disappears, and non-zero dropout makes `training=True` stochastic so
         # that any cross-call value oracle stops being reproducible. Pinned by
         # `test_text_encoder.py::TestUpstreamStructuralParity`. See D-102.
+        #
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-142
+        # This construction call ACCEPTS an extra normalization the reference
+        # does not have. `TextEncoder` builds an `embed_norm` and applies it
+        # between the embeddings and block 0 (`text_encoder.py:775`); the
+        # reference goes token-embed -> +pos -> transformer with nothing
+        # between. MEASURED at the settled width: max abs output delta
+        # **5.917600** against an amplitude of 5.536552 -- 106.9 %, the largest
+        # divergence in this package. There is NO kwarg that removes it:
+        # `normalization_type` governs `embed_norm`, every block norm and
+        # `final_norm` together. Do NOT "fix" it by editing
+        # `layers/transformers/text_encoder.py` -- that file is byte-frozen
+        # under I-1 and has other consumers. The ONE working remedy, measured
+        # feasible and RED-proven in
+        # `test_text_encoder.py::TestEmbeddingNormDivergence`, is a PRE-BUILD
+        # per-instance substitution here:
+        #     self.encoder.embed_norm = keras.layers.Identity()
+        # It is deliberately NOT applied: it moves this tower's count to
+        # 353,200,384 and the assembly's to 821,706,550, invalidating pinned
+        # figures across an already-gated iteration for a divergence that is
+        # inert while phase 1 loads no pretrained weights. Apply it -- together
+        # with the missing 524,288-parameter `text_projection` -- at the
+        # weight-transfer phase. See decisions.md D-142 and progress.md
+        # § Deferred D-6.
         self.encoder = TextEncoder(
             vocab_size=self.vocab_size, embed_dim=self.width, depth=self.depth,
             num_heads=self.num_heads, mlp_ratio=self.mlp_ratio,
