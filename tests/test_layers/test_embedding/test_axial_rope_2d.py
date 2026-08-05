@@ -722,4 +722,354 @@ class TestPackageSurface:
         for key in matches:
             assert keras.saving.get_registered_object(key) is AxialRoPE2D
 
+
+# ---------------------------------------------------------------------
+# G1.6 -- `scale_pos` (plan-2026-08-04T044628-4c240b4c iter-3 step 1)
+# ---------------------------------------------------------------------
+
+SCALE_ONE_THIRD = 1.0 / 3.0
+"""SAM 3's global-ViTDet ratio `rope_pt_size / input_size = 24 / 72`.
+
+Every `scale_pos` value oracle probes OFF the identity deliberately: at
+`scale_pos == 1.0` a coordinate scale and a frequency scale are the same
+function, so an on-identity probe cannot separate them.
+"""
+
+
+def _oracle_rotate_scaled(
+        x: np.ndarray,
+        height: int,
+        width: int,
+        scale_pos: float,
+        theta: float = THETA,
+) -> np.ndarray:
+    """Independent float64 complex oracle for 2D axial RoPE WITH a position scale.
+
+    Derived from the published `use_interp_rope` semantics — the position indices
+    are interpolated onto the pre-training grid by `rope_pt_size / input_size`
+    while the frequency ladder is computed at the target `head_dim` — and NOT read
+    off the implementation under test. Both axial halves take the same scale,
+    because both halves share one frequency ladder.
+
+    :param x: Array of shape ``(..., H * W, head_dim)`` in float64.
+    :param height: Grid height ``H``.
+    :param width: Grid width ``W``.
+    :param scale_pos: Multiplier on the ``(t_x, t_y)`` coordinates.
+    :param theta: Frequency-ladder base.
+    :return: Rotated array of the same shape and dtype.
+    """
+    head_dim = x.shape[-1]
+    num_tokens = height * width
+    assert x.shape[-2] == num_tokens
+
+    flat = np.arange(num_tokens, dtype=np.float64)
+    t_x = (flat % width) * scale_pos
+    t_y = (flat // width) * scale_pos
+    bands = np.arange(0, head_dim, 4, dtype=np.float64)[: head_dim // 4]
+    freqs = 1.0 / (theta ** (bands / head_dim))
+    angles = np.concatenate([np.outer(t_x, freqs), np.outer(t_y, freqs)], axis=-1)
+
+    cis = np.exp(1j * angles)
+    x_complex = x[..., 0::2] + 1j * x[..., 1::2]
+    rotated = x_complex * cis
+
+    out = np.empty_like(x)
+    out[..., 0::2] = rotated.real
+    out[..., 1::2] = rotated.imag
+    return out
+
+
+class _ScalePosDeadRoPE(AxialRoPE2D):
+    """Dead component C: `scale_pos` is forced to a constant 1.0 before the table.
+
+    Measures which of the G1.6 guards are structurally blind to the whole
+    `scale_pos` mechanism being absent.
+    """
+
+    def build(self, query_shape, key_shape=None):
+        self.scale_pos = 1.0
+        super().build(query_shape, key_shape)
+
+
+class TestScalePos:
+    """`scale_pos` scales the COORDINATES, on BOTH axes, and round-trips."""
+
+    def test_default_scale_pos_is_one(self) -> None:
+        """The parameter is optional and defaults to the unscaled case."""
+        assert AxialRoPE2D(head_dim=8, feat_shape=(2, 3)).scale_pos == 1.0
+
+    def test_explicit_scale_pos_one_is_bit_identical_to_default(self) -> None:
+        """`scale_pos=1.0` must be EXACTLY the unscaled output, and the
+        comparator that says so must be able to see a 1-ulp change.
+
+        The second half of this test is the comparator's own liveness arm: an
+        exact-0.0 gate over the wrong quantity exits green while comparing
+        nothing.
+        """
+        rng = np.random.default_rng(20260805)
+        q = (rng.standard_normal((2, 3, 15, 12)) + 1.7).astype(np.float64)
+
+        base = AxialRoPE2D(head_dim=12, feat_shape=(3, 5), dtype="float64")(q)
+        explicit = AxialRoPE2D(
+            head_dim=12, feat_shape=(3, 5), scale_pos=1.0, dtype="float64"
+        )(q)
+        base_np = ops.convert_to_numpy(base)
+        explicit_np = ops.convert_to_numpy(explicit)
+
+        assert np.max(np.abs(base_np - explicit_np)) == 0.0, (
+            "scale_pos=1.0 is not bit-identical to the unscaled default"
+        )
+
+        perturbed = explicit_np.copy()
+        idx = (0, 0, 7, 3)
+        perturbed[idx] = np.nextafter(perturbed[idx], np.inf)
+        assert np.max(np.abs(base_np - perturbed)) > 0.0, (
+            "COMPARATOR IS BLIND: a 1-ulp perturbation produced a 0.0 difference"
+        )
+
+    def test_scale_pos_matches_float64_oracle(self) -> None:
+        """Layer output equals the independent scaled complex oracle at 1/3.
+
+        This is the M1.2-family value oracle and it probes OFF the identity on
+        purpose.
+        """
+        height, width, head_dim = 4, 4, 12
+        rng = np.random.default_rng(20260805)
+        q = rng.standard_normal((2, 3, height * width, head_dim)).astype(np.float64)
+
+        rope = AxialRoPE2D(
+            head_dim=head_dim,
+            feat_shape=(height, width),
+            theta=THETA,
+            scale_pos=SCALE_ONE_THIRD,
+            dtype="float64",
+        )
+        got = ops.convert_to_numpy(rope(q))
+        expected = _oracle_rotate_scaled(q, height, width, SCALE_ONE_THIRD)
+
+        np.testing.assert_allclose(
+            got, expected, atol=1e-12, rtol=0.0,
+            err_msg="AxialRoPE2D(scale_pos=1/3) disagrees with the scaled oracle",
+        )
+
+    def test_scale_pos_oracle_separates_the_exponent_candidate(self) -> None:
+        """The oracle must REJECT a scale folded into the frequency EXPONENT.
+
+        `outer(s * t, f)` and `outer(t, s * f)` are the same function, so the
+        literal "scale the frequencies" candidate is a mathematical no-op and
+        cannot be separated by any probe. The candidate that IS distinguishable
+        rescales the ladder EXPONENT (`theta ** (bands / D * s)`), which is what
+        an NTK-style reading of "interpolate RoPE" would do. This test proves the
+        oracle is not blind to it.
+        """
+        height, width, head_dim = 4, 4, 12
+        rng = np.random.default_rng(7)
+        q = rng.standard_normal((1, 1, height * width, head_dim)).astype(np.float64)
+
+        bands = np.arange(0, head_dim, 4, dtype=np.float64)[: head_dim // 4]
+        flat = np.arange(height * width, dtype=np.float64)
+        exp_freqs = 1.0 / (THETA ** (bands / head_dim * SCALE_ONE_THIRD))
+        angles = np.concatenate(
+            [np.outer(flat % width, exp_freqs), np.outer(flat // width, exp_freqs)],
+            axis=-1,
+        )
+        cis = np.exp(1j * angles)
+        rotated = (q[..., 0::2] + 1j * q[..., 1::2]) * cis
+        wrong = np.empty_like(q)
+        wrong[..., 0::2] = rotated.real
+        wrong[..., 1::2] = rotated.imag
+
+        correct = _oracle_rotate_scaled(q, height, width, SCALE_ONE_THIRD)
+        assert np.max(np.abs(correct - wrong)) > 1e-2, (
+            "the scale_pos oracle cannot separate the exponent-scaled candidate"
+        )
+
+    def test_scale_pos_applies_to_both_axes(self) -> None:
+        """AXIS SYMMETRY: a per-axis scale must not be asymmetric.
+
+        On a SQUARE grid, feed a constant query whose two axial halves are
+        IDENTICAL. Then the first half of the output at token ``(x=a, y=b)`` and
+        the second half at token ``(x=b, y=a)`` are the same rotation of the same
+        vector by the same angle — but ONLY if both axes carry the same
+        coordinate scale. Scaling ``t_x`` alone breaks it with no shape error.
+        """
+        side, head_dim = 4, 12
+        half = head_dim // 2
+        rng = np.random.default_rng(11)
+        u = rng.standard_normal(half)
+        vec = np.concatenate([u, u])
+        q = np.broadcast_to(vec, (1, 1, side * side, head_dim)).astype(np.float64).copy()
+
+        rope = AxialRoPE2D(
+            head_dim=head_dim,
+            feat_shape=(side, side),
+            scale_pos=SCALE_ONE_THIRD,
+            dtype="float64",
+        )
+        out = ops.convert_to_numpy(rope(q))[0, 0]
+
+        a, b = 1, 3
+        assert a != b, "the probe must be OFF the diagonal or it is vacuous"
+        tok_ab = b * side + a   # (x=a, y=b)
+        tok_ba = a * side + b   # (x=b, y=a)
+
+        np.testing.assert_allclose(
+            out[tok_ab, :half], out[tok_ba, half:], atol=1e-12, rtol=0.0,
+            err_msg="scale_pos is not applied symmetrically to t_x and t_y",
+        )
+        # Liveness: the probed angle must be non-trivial, otherwise the symmetry
+        # above holds for a dead rotation too.
+        assert np.max(np.abs(out[tok_ab, :half] - u)) > 1e-6, (
+            "the axis-symmetry probe sits at a zero angle and is vacuous"
+        )
+
+    def test_scale_pos_changes_the_output(self) -> None:
+        """LIVENESS: `scale_pos != 1` must measurably move the output."""
+        rng = np.random.default_rng(3)
+        q = rng.standard_normal((1, 1, 16, 12)).astype(np.float64)
+        unscaled = ops.convert_to_numpy(
+            AxialRoPE2D(head_dim=12, feat_shape=(4, 4), dtype="float64")(q)
+        )
+        scaled = ops.convert_to_numpy(
+            AxialRoPE2D(
+                head_dim=12, feat_shape=(4, 4), scale_pos=SCALE_ONE_THIRD,
+                dtype="float64",
+            )(q)
+        )
+        assert np.max(np.abs(unscaled - scaled)) > 1e-2, (
+            "scale_pos=1/3 produced (near-)identical output to scale_pos=1.0"
+        )
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, -0.5])
+    def test_non_positive_scale_pos_raises(self, bad: float) -> None:
+        """A zero or negative position scale is rejected at construction."""
+        with pytest.raises(ValueError, match="scale_pos must be positive"):
+            AxialRoPE2D(head_dim=8, feat_shape=(2, 3), scale_pos=bad)
+
+    def test_config_keys_equal_init_signature(self) -> None:
+        """`get_config()` covers EVERY `__init__` parameter, derived from the
+        signature rather than from a hand-maintained list.
+
+        A hand-listed key tuple is the thing that silently rots when a parameter
+        is added, which is exactly the defect this test class was added for.
+        """
+        import inspect
+
+        expected = {
+            name for name, p in
+            inspect.signature(AxialRoPE2D.__init__).parameters.items()
+            if name not in ("self", "kwargs")
+        }
+        config = AxialRoPE2D(
+            head_dim=12, feat_shape=(3, 5), theta=5000.0,
+            scale_pos=SCALE_ONE_THIRD, repeat_k=True,
+        ).get_config()
+        missing = expected - set(config)
+        assert not missing, f"get_config() is missing __init__ params: {sorted(missing)}"
+        assert config["scale_pos"] == SCALE_ONE_THIRD
+
+    def test_scale_pos_round_trip_by_value(self) -> None:
+        """A `from_config` clone reproduces a SCALED layer bit-identically."""
+        rng = np.random.default_rng(123)
+        q = rng.standard_normal((2, 2, 16, 12)).astype(np.float64)
+        k = rng.standard_normal((2, 2, 35, 12)).astype(np.float64)
+
+        original = AxialRoPE2D(
+            head_dim=12, feat_shape=(4, 4), theta=5000.0,
+            scale_pos=SCALE_ONE_THIRD, repeat_k=True, dtype="float64",
+        )
+        q0, k0 = original(q, k, num_k_exclude=3)
+        clone = AxialRoPE2D.from_config(original.get_config())
+        assert clone.scale_pos == SCALE_ONE_THIRD
+        q1, k1 = clone(q, k, num_k_exclude=3)
+
+        assert np.max(np.abs(ops.convert_to_numpy(q0) - ops.convert_to_numpy(q1))) == 0.0
+        assert np.max(np.abs(ops.convert_to_numpy(k0) - ops.convert_to_numpy(k1))) == 0.0
+
+    def test_scale_pos_keras_save_load_by_value(self, tmp_path) -> None:
+        """A `.keras` round-trip preserves `scale_pos` by VALUE, not just by key."""
+        head_dim = 12
+        q_in = keras.Input(shape=(2, 16, head_dim))
+        q_out = AxialRoPE2D(
+            head_dim=head_dim, feat_shape=(4, 4), scale_pos=SCALE_ONE_THIRD
+        )(q_in)
+        model = keras.Model(q_in, q_out)
+
+        rng = np.random.default_rng(555)
+        q = rng.standard_normal((3, 2, 16, head_dim)).astype("float32")
+        before = ops.convert_to_numpy(model(q))
+
+        path = tmp_path / "axial_rope_2d_scaled.keras"
+        model.save(path)
+        restored = keras.models.load_model(path)
+        after = ops.convert_to_numpy(restored(q))
+
+        assert np.max(np.abs(before - after)) == 0.0
+        layer = [ly for ly in restored.layers if isinstance(ly, AxialRoPE2D)]
+        assert len(layer) == 1
+        assert layer[0].scale_pos == SCALE_ONE_THIRD
+
+    def test_scale_pos_composes_with_repeat_k(self) -> None:
+        """`scale_pos` and `repeat_k` are independent mechanisms.
+
+        `repeat_k` tiles a FINISHED table, so every repeated key block must carry
+        the same scaled angles as the query grid.
+        """
+        head_dim, side = 12, 4
+        n = side * side
+        rng = np.random.default_rng(31)
+        q = rng.standard_normal((1, 1, n, head_dim)).astype(np.float64)
+        k_block = rng.standard_normal((1, 1, n, head_dim)).astype(np.float64)
+        k = np.concatenate([k_block, k_block, k_block], axis=-2)
+
+        rope = AxialRoPE2D(
+            head_dim=head_dim, feat_shape=(side, side),
+            scale_pos=SCALE_ONE_THIRD, repeat_k=True, dtype="float64",
+        )
+        _, k_rot = rope(q, k)
+        k_rot = ops.convert_to_numpy(k_rot)
+        expected_block = _oracle_rotate_scaled(k_block, side, side, SCALE_ONE_THIRD)
+        for block in range(3):
+            np.testing.assert_allclose(
+                k_rot[..., block * n:(block + 1) * n, :], expected_block,
+                atol=1e-12, rtol=0.0,
+                err_msg=f"repeat_k block {block} does not carry the scaled angles",
+            )
+
+
+class TestScalePosDeadComponentProbe:
+    """G1.6's own dead-component probe: `scale_pos` forced to 1.0 in `build()`."""
+
+    def test_oracle_guard_dies(self) -> None:
+        """The scaled value oracle must NOT survive a dead `scale_pos`."""
+        height, width, head_dim = 4, 4, 12
+        rng = np.random.default_rng(20260805)
+        q = rng.standard_normal((2, 3, height * width, head_dim)).astype(np.float64)
+        rope = _ScalePosDeadRoPE(
+            head_dim=head_dim, feat_shape=(height, width), theta=THETA,
+            scale_pos=SCALE_ONE_THIRD, dtype="float64",
+        )
+        got = ops.convert_to_numpy(rope(q))
+        expected = _oracle_rotate_scaled(q, height, width, SCALE_ONE_THIRD)
+        assert np.max(np.abs(got - expected)) > 1e-2, (
+            "the scaled value oracle is GREEN with scale_pos dead"
+        )
+
+    def test_liveness_guard_dies(self) -> None:
+        """The liveness guard must NOT survive a dead `scale_pos`."""
+        rng = np.random.default_rng(3)
+        q = rng.standard_normal((1, 1, 16, 12)).astype(np.float64)
+        unscaled = ops.convert_to_numpy(
+            AxialRoPE2D(head_dim=12, feat_shape=(4, 4), dtype="float64")(q)
+        )
+        dead = ops.convert_to_numpy(
+            _ScalePosDeadRoPE(
+                head_dim=12, feat_shape=(4, 4), scale_pos=SCALE_ONE_THIRD,
+                dtype="float64",
+            )(q)
+        )
+        assert np.max(np.abs(unscaled - dead)) == 0.0, (
+            "the liveness guard would still fire with scale_pos dead"
+        )
+
 # ---------------------------------------------------------------------

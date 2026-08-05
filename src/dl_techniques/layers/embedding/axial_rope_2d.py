@@ -74,7 +74,8 @@ class AxialRoPE2D(keras.layers.Layer):
     as a row-major flattening of the configured ``(H, W)`` grid.
 
     The layer owns no weights. Its cos/sin table is a pure function of
-    ``(head_dim, feat_shape, theta)`` and is materialized in :meth:`build` as a
+    ``(head_dim, feat_shape, theta, scale_pos)`` and is materialized in
+    :meth:`build` as a
     float64 NumPy constant, then cast per call. It is deliberately NOT an
     ``add_weight`` variable: under a mixed-precision policy Keras autocasts
     variables to the compute dtype, which would silently narrow the angle table
@@ -111,6 +112,18 @@ class AxialRoPE2D(keras.layers.Layer):
     :param theta: Base of the geometric frequency ladder. Defaults to
         ``10000.0``.
     :type theta: float
+    :param scale_pos: Multiplier applied to the ``(t_x, t_y)`` COORDINATES
+        before the frequency outer product, i.e. ``angles =
+        concat([outer(scale_pos * t_x, f), outer(scale_pos * t_y, f)])``.
+        Defaults to ``1.0``, which is bit-identical to the unscaled table. Use
+        it when a model computes its frequency ladder at one grid size but wants
+        the positions interpolated onto another: SAM 3's global ViTDet blocks
+        run a ``72x72`` token grid through a RoPE pre-training grid of
+        ``24x24``, i.e. ``scale_pos = 24 / 72 = 1/3``. This is a DISTINCT
+        mechanism from ``repeat_k``: ``scale_pos`` compresses the coordinate
+        ladder within one grid, ``repeat_k`` broadcasts a finished table across
+        extra key blocks.
+    :type scale_pos: float
     :param repeat_k: When ``True``, a key sequence may be an integer multiple
         ``r`` of the query grid; the SAME angle table is broadcast across all
         ``r`` blocks. This is spatial-only repetition — it deliberately does NOT
@@ -121,7 +134,8 @@ class AxialRoPE2D(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``head_dim`` is not a positive multiple of 4, if
-        ``feat_shape`` is not a pair of positive ints, or if ``theta <= 0``.
+        ``feat_shape`` is not a pair of positive ints, if ``theta <= 0``, or if
+        ``scale_pos <= 0``.
 
     Example:
         >>> import numpy as np
@@ -137,6 +151,7 @@ class AxialRoPE2D(keras.layers.Layer):
             head_dim: int,
             feat_shape: Tuple[int, int] = (64, 64),
             theta: float = 10000.0,
+            scale_pos: float = 1.0,
             repeat_k: bool = False,
             **kwargs: Any
     ) -> None:
@@ -164,11 +179,14 @@ class AxialRoPE2D(keras.layers.Layer):
             )
         if theta <= 0:
             raise ValueError(f"theta must be positive, got {theta}")
+        if scale_pos <= 0:
+            raise ValueError(f"scale_pos must be positive, got {scale_pos}")
 
         # Store ALL configuration parameters.
         self.head_dim = head_dim
         self.feat_shape = (int(feat_shape[0]), int(feat_shape[1]))
         self.theta = float(theta)
+        self.scale_pos = float(scale_pos)
         self.repeat_k = bool(repeat_k)
 
         # Derived, non-config.
@@ -196,6 +214,23 @@ class AxialRoPE2D(keras.layers.Layer):
         flat = np.arange(num_tokens, dtype=np.float64)
         t_x = np.mod(flat, width)
         t_y = np.floor_divide(flat, width)
+
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-083
+        # `scale_pos` scales the COORDINATES, applied to BOTH axes, here -- before
+        # the frequency outer product. Do NOT "simplify" this by folding it into
+        # `freqs` below (`freqs * scale_pos`) even though the products
+        # `outer(s*t, f)` and `outer(t, s*f)` are algebraically identical for the
+        # single-table case: the two forms diverge the moment either axis gains a
+        # per-axis scale or a non-linear coordinate map (NTK/YaRN-style band-wise
+        # rescaling touches `freqs` and would then compose wrongly with a
+        # frequency-folded position scale). Keeping the scale on the coordinate is
+        # also what makes `scale_pos = rope_pt_size / input_size` readable as the
+        # grid-interpolation ratio it is. Do NOT apply it to `t_x` only -- the
+        # axial halves share one frequency ladder, so an asymmetric scale silently
+        # anisotropizes the embedding with no shape error. See decisions.md D-083.
+        if self.scale_pos != 1.0:
+            t_x = t_x * self.scale_pos
+            t_y = t_y * self.scale_pos
 
         # `head_dim // 4` bands, shared by BOTH axes. This is not a typo and not
         # a simplification: the x and y halves use the identical frequency
@@ -258,9 +293,9 @@ class AxialRoPE2D(keras.layers.Layer):
 
         self._cos_table, self._sin_table = self._build_angle_tables()
         logger.debug(
-            "AxialRoPE2D built: head_dim=%d feat_shape=%s theta=%.1f repeat_k=%s "
-            "table=%s", self.head_dim, self.feat_shape, self.theta,
-            self.repeat_k, self._cos_table.shape,
+            "AxialRoPE2D built: head_dim=%d feat_shape=%s theta=%.1f "
+            "scale_pos=%s repeat_k=%s table=%s", self.head_dim, self.feat_shape,
+            self.theta, self.scale_pos, self.repeat_k, self._cos_table.shape,
         )
 
         super().build(query_shape)
@@ -508,6 +543,7 @@ class AxialRoPE2D(keras.layers.Layer):
             "head_dim": self.head_dim,
             "feat_shape": self.feat_shape,
             "theta": self.theta,
+            "scale_pos": self.scale_pos,
             "repeat_k": self.repeat_k,
         })
         return config
