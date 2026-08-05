@@ -39,9 +39,13 @@ rediscovered as a gap:
   neck and the decoder. Phase 1 feeds the neck's image memory and the text
   tower's prompt straight into the decoder; this is the largest single
   structural divergence in the package and it is named, not hidden;
-- the whole training path -- no loss, matcher, or trainer is defined here, and in
-  particular nothing in this package may route mask supervision through SAM 1's
-  mask-loss module or the shared segmentation focal loss it calls, whose
+- the loss and the matcher, which live in the losses package, not here. What
+  this package now ships of the training path is :class:`Sam3TrainingModel`,
+  a wrapper that emits ONE packed supervision tensor so a single joint loss can
+  split it (the layout itself is defined by that loss module, not by this one),
+  plus its single ``compile`` site. Nothing in this package may route mask
+  supervision through SAM 1's mask-loss module or the shared segmentation focal
+  loss it calls, whose
   probability clip has an exactly-zero derivative outside its range. (The two
   module names are deliberately NOT spelled here: the close-out gate for that
   constraint is a grep, and a prose mention erodes the instrument -- the same
@@ -55,6 +59,8 @@ from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
 from .sam3_image import Sam3Image
 from .text_encoder_ve import Sam3TextEncoder
+from .training_model import (
+    Sam3TrainingModel, compile_sam3_trainer, pack_predictions, pack_targets)
 from .vitdet import Sam3ViTDetBackbone, Sam3ViTDetBlock
 
 __all__ = [
@@ -64,7 +70,11 @@ __all__ = [
     "Sam3Image",
     "Sam3SegmentationHead",
     "Sam3TextEncoder",
+    "Sam3TrainingModel",
     "Sam3TransformerDecoder",
     "Sam3ViTDetBackbone",
     "Sam3ViTDetBlock",
+    "compile_sam3_trainer",
+    "pack_predictions",
+    "pack_targets",
 ]

@@ -257,10 +257,22 @@ class TestConstruction:
         for key in COMPONENT_KEYS:
             assert isinstance(getattr(model, key), keras.layers.Layer)
 
-    def test_the_class_is_the_ninth_and_last_public_class(self):
+    def test_the_public_class_surface_is_exactly_the_declared_ten(self):
+        """Phase 1 shipped NINE public classes. Phase 2 adds exactly ONE,
+        ``Sam3TrainingModel`` -- the packed-tensor training wrapper -- and
+        three module-level FUNCTIONS. The counts are split so that adding a
+        class and adding a helper are not interchangeable here: an unannounced
+        tenth-plus class still fires even if the total happens to match."""
         import dl_techniques.models.sam3 as package
         assert "Sam3Image" in package.__all__
-        assert len(package.__all__) == 9
+        exported = {name: getattr(package, name) for name in package.__all__}
+        classes = sorted(k for k, v in exported.items() if isinstance(v, type))
+        functions = sorted(
+            k for k, v in exported.items() if not isinstance(v, type))
+        assert len(classes) == 10, classes
+        assert "Sam3TrainingModel" in classes
+        assert functions == [
+            "compile_sam3_trainer", "pack_predictions", "pack_targets"]
 
     def test_unknown_variant_is_refused(self):
         with pytest.raises(ValueError, match="Unknown SAM 3 variant"):
@@ -827,13 +839,36 @@ class TestPackageSurface:
     def test_the_curated_exports_all_resolve(self):
         import dl_techniques.models.sam3 as package
         for name in package.__all__:
-            assert isinstance(getattr(package, name), type)
+            resolved = getattr(package, name)
+            # Phase 2 added three FUNCTIONS to a list that was classes-only,
+            # so this checks resolvability and callability rather than type-ness
+            # -- an `__all__` entry that resolves to a string or a stray
+            # constant still fires.
+            assert isinstance(resolved, type) or callable(resolved), name
 
     def test_the_module_is_keras_ops_pure(self):
         import dl_techniques.models.sam3.sam3_image as module
         source = open(module.__file__).read()
         assert "import tensorflow" not in source
         assert "\ntf." not in source and " tf." not in source
+
+    def test_every_module_in_the_package_is_keras_ops_pure(self):
+        """SC-14 as a TEST, not only as a close-out grep.
+
+        The grep instrument has been eroded by PROSE four times in this
+        repository -- a `# DECISION` comment or a docstring that merely names
+        one of these tokens turns a 0-hit gate into a hit somebody then has to
+        classify by hand. Scanning the whole package here means the erosion
+        fires at the moment it is introduced instead of at close-out.
+        """
+        import dl_techniques.models.sam3 as package
+        directory = os.path.dirname(package.__file__)
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".py"):
+                continue
+            source = open(os.path.join(directory, name)).read()
+            assert "import tensorflow" not in source, name
+            assert "\ntf." not in source and " tf." not in source, name
 
     def test_no_defective_loss_module_is_referenced(self):
         import dl_techniques.models.sam3 as package
