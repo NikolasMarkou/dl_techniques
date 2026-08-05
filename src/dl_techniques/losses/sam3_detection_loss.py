@@ -113,6 +113,21 @@ PACKED_MASK_START: int = 5
 #: per-image scalars that have no natural home on any GT row.
 META_KEEP_LOSS: int = 0
 META_NUM_BOXES: int = 1
+# DECISION plan-2026-08-05T124709-6c4fac48/D-010
+# `plan.md` step 3 specified the meta row as
+# `[keep_loss, num_boxes_this_image, 0, 0, ...]`; channel 2 is a RESERVED ZERO
+# that this port SPENDS on `is_exhaustive`. That is the plan's one recorded
+# LAYOUT DEPARTURE. Do NOT hardcode this to 1 and delete the channel: without a
+# real per-image `is_exhaustive` signal, divisor #5 (`weak_loss=True`) collapses
+# into divisor #4's plain-mean sub-path -- nothing is ever dropped, the retained
+# count is identically `B * Q`, and "both `loss_ce` paths implemented" would be
+# true only on paper.
+# THE FOOTGUN, named because it cannot fail loudly: a producer that leaves this
+# channel at 0.0 while running `weak_loss=True` is declaring EVERY image
+# NON-exhaustive, which nulls all negative supervision. The channel is UNREAD at
+# the shipped default (`weak_loss=False`), so the footgun is armed only by an
+# explicit opt-in; `pack_targets` defaults it to ones and `train/sam3/data.py`
+# writes 1. See decisions.md D-010.
 META_IS_EXHAUSTIVE: int = 2
 
 
@@ -840,9 +855,22 @@ class Sam3DetectionLoss(keras.losses.Loss):
       all-reduced across ranks (``sam3_loss.py:75``). Single-process here, where
       ``normalization="global"`` and ``"local"`` coincide exactly; the min-1
       clamp, which is the part that matters, is kept.
-    * ``- REFERENCE_ONLY(pad_scale_pos)``. A scale on the positive term when
-      ``Q < pad_n_queries``; the shipped config sets it to ``1.0``, so porting
-      it would add a switch with one measured setting and no consumer.
+    * ``- REFERENCE_ONLY(pad_scale_pos)``. A scale on the positive term applied
+      exactly when ``Q < pad_n_queries`` (``loss_fns.py:392-397``). It is
+      dropped because that branch is **UNREACHABLE in every shipped reference
+      config**, not merely because the value is ``1.0``: both config families
+      set ``pad_n_queries`` to the model's own query count -- literally
+      (``roboflow_*.yaml:100`` writes ``200`` beside ``num_queries=200``) and
+      symbolically (``odinw_text_only_train.yaml:102`` writes
+      ``${scratch.num_queries}``) -- so ``Q >= pad_n_queries`` always holds
+      there and ``pad_scale_pos`` never multiplies anything. **The binding
+      obligation is therefore on the CALLER: ``pad_n_queries`` is a
+      VARIANT-DERIVED quantity, not a constant.** Leaving it at the reference's
+      ``200`` while a variant emits ``Q = 32`` divides the whole classification
+      term by exactly ``6.25`` -- MEASURED on a real ``small`` batch, raw
+      ``loss_ce`` 0.043937 at 200 against 0.274605 at 32, and a weighted share
+      of the total that moves 9.1 % -> 38.4 % over a 64-image split
+      (decisions.md D-040).
     * ``- REFERENCE_ONLY(aux_outputs / first_stage deep supervision)``. The
       reference runs every loss on every intermediate decoder layer. The port's
       packed layout carries the final layer only; deep supervision is a packing
@@ -885,7 +913,11 @@ class Sam3DetectionLoss(keras.losses.Loss):
         ``True``.
     :type weak_loss: bool
     :param pad_n_queries: Divisor #4's query budget. ``None`` means a plain
-        mean. Shipped ``200``.
+        mean. The default ``200`` is the RELEASED VARIANT's ``num_queries``, and
+        it is a variant-derived quantity: **a caller running a variant with a
+        different ``Q`` must pass that ``Q`` here**, exactly as the reference's
+        own ``odinw`` config does (``pad_n_queries: ${scratch.num_queries}``).
+        See the ``pad_scale_pos`` divergence above and decisions.md D-040.
     :type pad_n_queries: Optional[int]
     :param presence_alpha: Alpha for ``presence_loss``. Shipped ``0.5``.
     :type presence_alpha: float
@@ -1052,7 +1084,19 @@ class Sam3DetectionLoss(keras.losses.Loss):
         # numerical nicety, it is the only thing standing between a legitimate
         # training batch and a NaN.
         if self.normalize_by_valid_object_num:
-            raw_num_boxes = ops.sum(ops.cast(target_valid > 0.0, "float32"))
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-042
+            # The predicate is GEOMETRIC (`w > 0 AND h > 0`), transcribed from
+            # `sam3_loss.py::_get_num_boxes:70-71`
+            # (`(boxes_hw[:, 2:] > 0).all(dim=-1).sum()`). Do NOT "simplify" it
+            # back to the packed validity FLAG (`target_valid > 0`): the two
+            # disagree on the reference's own INVISIBLE-OBJECT row -- a valid id
+            # carrying a zero-area box -- and this module's `derive_keep_loss`
+            # already ports the geometric test, so the flag spelling made one
+            # module disagree with itself. It was also an UNNAMED divergence in
+            # a class whose whole thesis is signed named divergences. See
+            # decisions.md D-042.
+            raw_num_boxes = ops.sum(ops.cast(
+                ops.all(target_boxes[..., 2:] > 0.0, axis=-1), "float32"))
         else:
             raw_num_boxes = ops.sum(targets["num_boxes"])
         num_boxes = ops.maximum(raw_num_boxes, 1.0)

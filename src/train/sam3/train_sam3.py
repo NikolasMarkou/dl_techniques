@@ -74,7 +74,7 @@ import time
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import keras
 import numpy as np
@@ -122,11 +122,26 @@ LR_SCHEDULES: Tuple[str, ...] = ("cosine", "exponential", "constant")
 #: first epoch it sees: a metric that appears at epoch 3 is silently dropped
 #: from every row. An unevaluated metric is therefore written as ``nan``, never
 #: omitted (decisions.md D-028).
+#:
+#: The four ``*_std_*`` keys are the DEGENERACY GUARD FOR THE SUPERVISED HEADS.
+#: Until iteration 1's review the only guard was ``pred_mask_unique_values``,
+#: which watches ``pred_masks`` -- the one head that is OFF by default and was
+#: off in five of six step-7 arms. MEASURED on the saved step-7 checkpoints:
+#: ``box_std_across_images`` 0.00048 against ``box_std_across_queries`` 0.13951
+#: (a 290x ratio on seed 1, 4363x on seed 3) and a ``presence_logit`` spread of
+#: 1.4e-04, i.e. the box and presence heads had converged to constants that do
+#: not read the image at all, while every shipped guard read green. An IoU
+#: reported without these numbers beside it cannot distinguish "learned the
+#: task" from "learned the dataset's mean box" (decisions.md D-039).
 EVAL_METRIC_KEYS: Tuple[str, ...] = (
     "box_iou",
     "mask_iou",
     "presence_accuracy",
     "pred_mask_unique_values",
+    "box_std_across_images",
+    "box_std_across_queries",
+    "logit_std_across_images",
+    "presence_logit_std_across_images",
     "num_matched_pairs",
     "loss_ce",
     "presence_loss",
@@ -135,6 +150,12 @@ EVAL_METRIC_KEYS: Tuple[str, ...] = (
     "loss_mask",
     "loss_dice",
 )
+
+#: The log key `EarlyStopping` and `ModelCheckpoint` select on. It is an
+#: ACHIEVED metric, maximized, and it must be a `val_`-prefixed member of
+#: :data:`EVAL_METRIC_KEYS` -- pinned by a test, because a typo here degrades
+#: silently into "select epoch 1" rather than raising.
+SELECTION_METRIC: str = "val_box_iou"
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +586,20 @@ def create_training_model(
     compile_sam3_trainer(
         model,
         optimizer=create_optimizer(config),
-        loss=Sam3DetectionLoss(include_masks=config.include_masks),
+        # DECISION plan-2026-08-05T124709-6c4fac48/D-040
+        # `pad_n_queries` is DERIVED from the variant's own Q, never left at the
+        # loss's reference default of 200. Do NOT "restore fidelity" by pinning
+        # 200 here: BOTH shipped reference configs set it to the model's own
+        # query count (`roboflow_*.yaml:100` writes 200 literally beside
+        # `num_queries=200`; `odinw_text_only_train.yaml:102` writes
+        # `${scratch.num_queries}` outright), so 200 is the reference's Q, not a
+        # constant. Carried into a Q=32 variant it divides the ENTIRE
+        # classification term by exactly 6.25 -- MEASURED on a real `small`
+        # batch, raw `loss_ce` 0.043937 at 200 vs 0.274605 at 32 (ratio
+        # 6.2500), and over the whole 64-image split its weighted share of the
+        # total moves 9.1% -> 38.4%. See decisions.md D-040.
+        loss=Sam3DetectionLoss(include_masks=config.include_masks,
+                               pad_n_queries=model.num_queries),
     )
     return model
 
@@ -636,6 +670,16 @@ def evaluate_sam3(
     exactly when the mask head has collapsed to a constant, which is the
     degenerate output a stable loss cannot distinguish from a result.
 
+    The ``*_std_*`` keys answer a question no other metric here can: **does the
+    head read the image at all?** ``box_std_across_images`` is the standard
+    deviation over the IMAGE axis, taken per (query, coordinate) and then
+    averaged; ``box_std_across_queries`` is the same statistic over the QUERY
+    axis. A head that has learned a fixed dataset prior has the first near zero
+    and the second large -- and the Hungarian matcher will still score it a
+    non-zero IoU, because it assigns the best-of-Q constant boxes to whatever
+    ground truth is present. The two are reported together on purpose: neither
+    is interpretable alone, and their RATIO is the diagnosis.
+
     :param model: A built :class:`Sam3TrainingModel`.
     :type model: Sam3TrainingModel
     :param dataset: A dataset of ``(inputs, packed_target)``.
@@ -658,6 +702,12 @@ def evaluate_sam3(
     presence_total = 0.0
     unique_minimum: Optional[int] = None
     batches = 0
+    # Kept per IMAGE, not per batch: an across-image statistic computed inside
+    # a batch of 4 and then averaged is not the same number as one computed
+    # over the whole split, and the split is what the claim is made on.
+    head_boxes: List[np.ndarray] = []
+    head_logits: List[np.ndarray] = []
+    head_presence: List[np.ndarray] = []
 
     for index, (inputs, y_true) in enumerate(dataset):
         if max_batches is not None and index >= max_batches:
@@ -682,8 +732,17 @@ def evaluate_sam3(
         iou, _ = iou_and_generalized_iou(
             box_cxcywh_to_xyxy(pred_boxes),
             box_cxcywh_to_xyxy(gathered))
-        box_iou_sum += float(ops.sum(iou * is_matched))
+        # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
+        # propagates `nan * 0.0 = nan`, so ONE both-degenerate pair in a padded
+        # column poisons the whole split's mean (review-iter-1 NOTE 10).
+        box_iou_sum += float(ops.sum(ops.where(is_matched > 0.0, iou,
+                                               ops.zeros_like(iou))))
         matched_total += float(ops.sum(is_matched))
+        head_boxes.append(np.asarray(pred_boxes))
+        head_logits.append(
+            np.asarray(ops.cast(outputs["pred_logits"], "float32")))
+        head_presence.append(np.asarray(
+            ops.cast(outputs["presence_logit"], "float32")).reshape(-1))
 
         if model.include_masks and targets["target_masks"] is not None:
             flat = ops.reshape(
@@ -728,6 +787,13 @@ def evaluate_sam3(
                                     if presence_total > 0.0 else nan)
     metrics["pred_mask_unique_values"] = float(unique_minimum or 0)
     metrics["num_matched_pairs"] = matched_total / batches
+    boxes = np.concatenate(head_boxes)
+    logits = np.concatenate(head_logits)
+    presence = np.concatenate(head_presence)
+    metrics["box_std_across_images"] = float(boxes.std(axis=0).mean())
+    metrics["box_std_across_queries"] = float(boxes.std(axis=1).mean())
+    metrics["logit_std_across_images"] = float(logits.std(axis=0).mean())
+    metrics["presence_logit_std_across_images"] = float(presence.std())
     return metrics
 
 
@@ -816,6 +882,26 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
         include_terminate_on_nan=True,
         include_analyzer=False,
     )
+    # DECISION plan-2026-08-05T124709-6c4fac48/D-041
+    # Select checkpoints on ACHIEVED box IoU, never on `val_loss`. Do NOT revert
+    # to `monitor="val_loss"`: MEASURED at iteration 1, `presence_loss` is
+    # **61.7%** of `val_loss` while its own head's logit spread is 1.4e-04, i.e.
+    # the majority of the selection scalar is a provably constant term. On seed
+    # 3 that selected epoch 6 over epoch 29 on a **0.07%** val_loss margin and
+    # cost box IoU 0.2360 vs 0.2724 -- and 0.2360 became the headline. The two
+    # callbacks are REBUILT rather than re-configured because
+    # `train.common.create_callbacks` derives `mode` as
+    # `'max' if 'accuracy' in monitor else 'min'`, so passing `val_box_iou`
+    # through it would silently select the WORST epoch. See decisions.md D-041.
+    callbacks = [callback for callback in callbacks
+                 if not isinstance(callback, (keras.callbacks.EarlyStopping,
+                                              keras.callbacks.ModelCheckpoint))]
+    callbacks.append(keras.callbacks.EarlyStopping(
+        monitor=SELECTION_METRIC, mode="max", verbose=1,
+        patience=config.early_stopping_patience, restore_best_weights=True))
+    callbacks.append(keras.callbacks.ModelCheckpoint(
+        filepath=str(output_dir / "best_model.keras"), monitor=SELECTION_METRIC,
+        mode="max", save_best_only=True, verbose=1))
     # Inserted at the FRONT so it runs before `CSVLogger` (D-028) and before
     # `EarlyStopping`/`ModelCheckpoint`, which read the same `logs` dict. A
     # callback APPENDED here would write into a dict `CSVLogger` has already
@@ -854,11 +940,25 @@ def train_sam3(config: Sam3TrainingConfig
     logger.info("Training finished in %.2f s", time.time() - start)
 
     metrics = evaluate_sam3(model, val_dataset)
+    # BOTH numbers, always. `restore_best_weights=True` means `metrics` is the
+    # SELECTED epoch, not the last one; reporting only one of the two is how a
+    # selection rule silently picks the worse checkpoint (decisions.md D-041).
+    curve = history.history.get(SELECTION_METRIC, [])
+    last_epoch = float(curve[-1]) if curve else float("nan")
     logger.info(
-        "ACHIEVED (not a loss): box IoU %.4f, mask IoU %.4f, presence acc "
-        "%.4f, pred_masks distinct values %.0f",
-        metrics["box_iou"], metrics["mask_iou"],
+        "ACHIEVED (not a loss): box IoU %.4f SELECTED / %.4f last epoch, mask "
+        "IoU %.4f, presence acc %.4f, pred_masks distinct values %.0f",
+        metrics["box_iou"], last_epoch, metrics["mask_iou"],
         metrics["presence_accuracy"], metrics["pred_mask_unique_values"])
+    logger.info(
+        "IMAGE DEPENDENCE (does the head read the image?): box std across "
+        "images %.5f vs across queries %.5f (ratio %.1f), pred_logits std "
+        "across images %.5f, presence_logit std %.3e",
+        metrics["box_std_across_images"], metrics["box_std_across_queries"],
+        metrics["box_std_across_queries"]
+        / max(metrics["box_std_across_images"], 1e-12),
+        metrics["logit_std_across_images"],
+        metrics["presence_logit_std_across_images"])
 
     # IN-PROCESS peak, never `nvidia-smi` polling: TF pre-allocates ~85 % of the
     # card, so an external reading measures the allocator, not this run.
@@ -876,6 +976,8 @@ def train_sam3(config: Sam3TrainingConfig
             "history": {key: [float(v) for v in values]
                         for key, values in history.history.items()},
             "final_metrics": metrics,
+            "selection_metric": SELECTION_METRIC,
+            "last_epoch_selection_metric": last_epoch,
         }
         with open(output_dir / "training_history.json", "w") as handle:
             json.dump(payload, handle, indent=2)

@@ -43,6 +43,7 @@ from train.sam3.train_sam3 import (
     EVAL_METRIC_KEYS,
     LR_SCHEDULES,
     NON_CONFIG_DESTS,
+    SELECTION_METRIC,
     SMOKE_PRESET,
     VARIANTS,
     Sam3TrainingConfig,
@@ -516,6 +517,29 @@ class TestTheCompiledTrainer:
         assert isinstance(tiny_model.optimizer, keras.optimizers.AdamW)
         assert tiny_model.optimizer.global_clipnorm == pytest.approx(0.1)
 
+    def test_pad_n_queries_is_the_VARIANTS_own_Q_not_the_references_200(
+            self, tiny_model: Any) -> None:
+        """A reference constant tied to the reference's geometry is a
+        VARIANT-DERIVED quantity.
+
+        ``Sam3DetectionLoss`` defaults ``pad_n_queries=200`` because that is the
+        RELEASED variant's ``num_queries`` -- and both shipped reference configs
+        set the two together (``roboflow_*.yaml:100`` literally,
+        ``odinw_text_only_train.yaml:102`` as ``${scratch.num_queries}``).
+        Carrying the 200 into a variant that emits Q=32 puts divisor #4 on
+        ``200 * B`` instead of ``32 * B`` and divides the ENTIRE classification
+        term by exactly 6.25 -- MEASURED on a real ``small`` batch, raw
+        ``loss_ce`` 0.043937 at 200 against 0.274605 at 32, and a weighted share
+        of the total that moves 9.1 % -> 38.4 % over a 64-image split.
+
+        Non-vacuous by construction: ``tiny`` has Q=5 and ``small`` Q=32, so
+        both differ from 200 and from each other, and the assertion cannot be
+        satisfied by the default.
+        """
+        assert tiny_model.loss.pad_n_queries == tiny_model.num_queries
+        assert tiny_model.loss.pad_n_queries != 200, (
+            "this fixture's Q is 200, so the assertion above is vacuous")
+
     def test_include_masks_reaches_the_model_and_the_loss_together(
             self) -> None:
         model = create_training_model(
@@ -730,6 +754,183 @@ class TestEvaluation:
 
         measured = evaluate_sam3(tiny_model, val_dataset, max_batches=1)
         assert measured["box_iou"] == pytest.approx(expected, abs=1e-5)
+
+    def test_a_constant_head_drives_the_across_image_metrics_to_zero(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """The guard that would have caught iteration 1's real failure mode.
+
+        MEASURED on the saved step-7 checkpoints: ``box_std_across_images``
+        0.00048 against ``box_std_across_queries`` 0.13951 -- every supervised
+        head had converged to an image-INDEPENDENT constant while box IoU read a
+        respectable 0.29, because the Hungarian matcher scores the best of Q
+        constant boxes against whatever ground truth is present. No shipped
+        guard could see it: ``pred_mask_unique_values`` watches ``pred_masks``,
+        the one head that is OFF by default and was off in five of six arms.
+
+        **M3 -- THE LIVENESS ARM IS THE POINT.** An across-image statistic
+        measured on a model that is already constant reads ~0 whether the
+        statistic is computed correctly or not, so this test runs BOTH arms
+        against the same real dataset: a stub that forces the heads constant
+        across the batch (the metric must collapse) and a stub that forces them
+        strongly image-dependent (the metric must read large). Without the
+        second arm a metric hardwired to ``0.0`` would pass.
+        """
+
+        class _HeadStub:
+            """A real model with its head outputs rewritten, nothing else."""
+
+            def __init__(self, model: Any, rewrite: Any) -> None:
+                self._model = model
+                self._rewrite = rewrite
+                self.include_masks = model.include_masks
+                self.loss = model.loss
+
+            def sam3(self, inputs: Any, training: bool = False) -> Any:
+                return self._rewrite(
+                    self._model.sam3(inputs, training=training))
+
+        heads = ("pred_boxes", "pred_logits", "presence_logit")
+
+        # The cache is load-bearing: a stub that only flattens WITHIN a batch
+        # leaves the batch-to-batch variation intact, and the whole-split
+        # statistic this metric computes would still read non-zero. Measured
+        # while writing this test: 0.1616 for `pred_logits`.
+        frozen: Dict[str, Any] = {}
+
+        def constant(outputs: Dict[str, Any]) -> Dict[str, Any]:
+            out = dict(outputs)
+            for key in heads:
+                value = keras.ops.convert_to_tensor(out[key])
+                frozen.setdefault(key, value[:1])
+                out[key] = keras.ops.repeat(
+                    frozen[key], int(value.shape[0]), axis=0)
+            return out
+
+        def image_dependent(outputs: Dict[str, Any]) -> Dict[str, Any]:
+            out = dict(outputs)
+            count = int(keras.ops.convert_to_tensor(
+                out["pred_boxes"]).shape[0])
+            ramp = keras.ops.arange(count, dtype="float32") / max(count, 1)
+            out["pred_boxes"] = keras.ops.clip(
+                keras.ops.cast(out["pred_boxes"], "float32")
+                + keras.ops.reshape(ramp, (count, 1, 1)), 0.01, 0.99)
+            out["pred_logits"] = (
+                keras.ops.cast(out["pred_logits"], "float32")
+                + keras.ops.reshape(ramp, (count, 1, 1)) * 5.0)
+            out["presence_logit"] = (
+                keras.ops.cast(out["presence_logit"], "float32")
+                + keras.ops.reshape(ramp, (count, 1)) * 5.0)
+            return out
+
+        wide = Sam3TrainingConfig(**{**TINY_KWARGS, "num_val_samples": 8})
+        _, val_dataset = create_datasets(wide, tiny_model)
+
+        dead = evaluate_sam3(_HeadStub(tiny_model, constant), val_dataset)
+        live = evaluate_sam3(_HeadStub(tiny_model, image_dependent),
+                             val_dataset)
+
+        # RED arm: a head that ignores the image.
+        assert dead["box_std_across_images"] == pytest.approx(0.0, abs=1e-6)
+        assert dead["logit_std_across_images"] == pytest.approx(0.0, abs=1e-6)
+        assert dead["presence_logit_std_across_images"] == pytest.approx(
+            0.0, abs=1e-6)
+        # ... while the ACROSS-QUERY spread survives untouched, which is why
+        # the pair must be reported together: a head can be perfectly varied
+        # over queries and perfectly blind to the image.
+        assert dead["box_std_across_queries"] > 1e-3
+
+        # LIVENESS arm: a head that reads the image, on the same data.
+        assert live["box_std_across_images"] > 1e-2
+        assert live["logit_std_across_images"] > 1e-1
+        assert live["presence_logit_std_across_images"] > 1e-1
+
+    def test_one_degenerate_UNMATCHED_pair_does_not_poison_the_whole_mean(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """``nan * 0.0 = nan``: masking by multiplication is not masking.
+
+        Every UNMATCHED query gathers a padded, all-zero target row. If the
+        prediction is also degenerate, ``iou_and_generalized_iou`` returns
+        ``0/0 = nan`` for that pair -- and the old spelling ``iou * is_matched``
+        propagates it through the ``0.0`` mask, so ONE such pair turns the whole
+        split's box IoU into ``nan``. It first appeared for real in step 7's own
+        calibration harness, whose ORACLE arm (predictions == ground truth,
+        i.e. the arm that must score 1.0) returned ``nan`` on its first run.
+
+        Reaching the corner needs BOTH sides degenerate, and MEASURED while
+        writing this test, a zero ``pred_boxes`` alone is NOT enough: on an
+        image that has ground truth, the assignment hands every unmatched query
+        a REAL target row, so the gathered width is never zero. The padded
+        all-zero row is only ever gathered on a ZERO-GT image. So the split is
+        drawn at ``zero_instance_rate=0.5`` -- a mixture, which is also the
+        shipped configuration's shape -- and the second assertion is the
+        liveness half: some pair must still be matched, or ``box_iou`` would be
+        ``nan`` through the empty-split branch instead and the test would pass
+        for the wrong reason.
+        """
+
+        class _ZeroBoxStub:
+            def __init__(self, model: Any) -> None:
+                self._model = model
+                self.include_masks = model.include_masks
+                self.loss = model.loss
+
+            def sam3(self, inputs: Any, training: bool = False) -> Any:
+                out = dict(self._model.sam3(inputs, training=training))
+                out["pred_boxes"] = keras.ops.zeros_like(
+                    keras.ops.cast(out["pred_boxes"], "float32"))
+                return out
+
+        mixed = Sam3TrainingConfig(**{**TINY_KWARGS, "num_val_samples": 16,
+                                      "zero_instance_rate": 0.5})
+        _, val_dataset = create_datasets(mixed, tiny_model)
+        metrics = evaluate_sam3(_ZeroBoxStub(tiny_model), val_dataset)
+        assert not math.isnan(metrics["box_iou"]), (
+            "a padded, both-degenerate UNMATCHED pair poisoned the mean")
+        assert metrics["num_matched_pairs"] > 0.0, (
+            "no pair was matched, so the assertion above is vacuous")
+
+    def test_the_selection_metric_is_an_achieved_metric_and_is_MAXIMIZED(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any,
+            tmp_path) -> None:
+        """CRITICAL 2: never select checkpoints on ``val_loss``.
+
+        MEASURED at iteration 1: ``presence_loss`` is **61.7%** of ``val_loss``
+        while its head's logit spread is 1.4e-04, so the majority of the
+        selection scalar was a provably constant term. On seed 3 that picked
+        epoch 6 over epoch 29 on a **0.07%** margin and cost box IoU 0.2360 vs
+        0.2724 -- the number the whole verdict was quoted against.
+
+        Two things are pinned, because either alone is insufficient:
+        the monitored key must be an ACHIEVED metric this module computes, and
+        the mode must be ``max``. ``train.common.create_callbacks`` derives
+        ``mode`` as ``'max' if 'accuracy' in monitor else 'min'``, so routing
+        ``val_box_iou`` through it unchanged would select the WORST epoch --
+        silently, and in the direction that looks like a result.
+        """
+        from train.sam3.train_sam3 import build_callbacks
+
+        assert SELECTION_METRIC == f"val_{SELECTION_METRIC[4:]}"
+        assert SELECTION_METRIC[4:] in EVAL_METRIC_KEYS, (
+            f"{SELECTION_METRIC} is not produced by evaluate_sam3; the "
+            f"callbacks would silently select epoch 1 forever")
+
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callbacks = build_callbacks(tiny_config, tmp_path, val_dataset)
+        selectors = [callback for callback in callbacks
+                     if isinstance(callback, (keras.callbacks.EarlyStopping,
+                                              keras.callbacks.ModelCheckpoint))]
+        assert len(selectors) == 2, "the two selecting callbacks are not wired"
+        for callback in selectors:
+            assert callback.monitor == SELECTION_METRIC
+            # Assert on `monitor_op` -- the comparison that actually EXECUTES
+            # -- not on a `mode` string: `ModelCheckpoint` does not even keep
+            # `mode` as an attribute, and `EarlyStopping` resolves `monitor_op`
+            # lazily in `on_train_begin`, so resolve it here.
+            if getattr(callback, "monitor_op", None) is None:
+                callback._set_monitor_op()
+            assert callback.monitor_op(1.0, 0.0), (
+                f"{type(callback).__name__}'s monitor_op prefers the SMALLER "
+                f"{SELECTION_METRIC}")
 
     def test_the_eval_callback_writes_every_key_including_the_nan_ones(
             self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:

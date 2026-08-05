@@ -662,7 +662,15 @@ def _ref_terms(packed, weak_loss=False, pad_n_queries=13, pos_weight=10.0,
     pairs = _ref_match(logits, pred_boxes, tgt_boxes, valid)
 
     # `_get_num_boxes`, `normalize_by_valid_object_num=True`, clamp min 1.
-    num_boxes = max(float((valid > 0).sum()), 1.0)
+    # THE PREDICATE IS THE REFERENCE'S, NOT THE PORT'S. `sam3_loss.py:70-71`
+    # reads `(boxes_hw[:, 2:] > 0).all(dim=-1).sum()` -- pure GEOMETRY, `w > 0
+    # AND h > 0` -- and it is written that way here on purpose. Writing it as
+    # `(valid > 0).sum()` (the port's original spelling) made this oracle agree
+    # with the port BY CONSTRUCTION at the one row where the two disagree: the
+    # reference's "invisible object", a valid id carrying a zero-area box. An
+    # oracle can be independent everywhere except the line the port diverges on,
+    # and that is the only line it needed to be independent on.
+    num_boxes = max(float((tgt_boxes[..., 2:] > 0).all(axis=-1).sum()), 1.0)
 
     target_classes = np.zeros((batch, num_queries), dtype=np.float64)
     positive_target = np.zeros((batch, num_queries), dtype=np.float64)
@@ -1202,6 +1210,46 @@ class TestTheFiveDivisors:
         for key in ("loss_bbox", "loss_giou", "loss_dice"):
             self._assert_only(actual[key], expected[f"{key}_numerator"],
                               DIVISOR_NUM_BOXES, wrong)
+
+    def test_divisor_1_uses_the_REFERENCE_geometric_predicate_not_the_flag(
+            self):
+        """The one line where this oracle used to agree BY CONSTRUCTION.
+
+        `sam3_loss.py:70-71` counts `(boxes_hw[:, 2:] > 0).all(dim=-1)` -- pure
+        GEOMETRY, `w > 0 AND h > 0`. The port originally counted the packed
+        VALIDITY FLAG instead, and this file's `_ref_terms` was written with the
+        PORT's rule, so divisor #1's fidelity was untestable at exactly the
+        point the two disagree: the reference's INVISIBLE OBJECT -- a valid id
+        whose box has zero area. (The same module's `derive_keep_loss` already
+        ported the geometric test, so the port disagreed with itself.)
+
+        The arm is proven non-INERT before it asserts anything: the two
+        predicates must give DIFFERENT counts on this input, or the test is
+        measuring nothing.
+        """
+        fields = _make_packed()
+        fields["tgt_boxes"] = fields["tgt_boxes"].copy()
+        # Image 0, row 2: the flag stays 1, the EXTENTS go to zero.
+        fields["tgt_boxes"][0, 2, 2:] = 0.0
+        fields["keep"] = np.asarray(
+            ops.convert_to_numpy(derive_keep_loss(fields["tgt_boxes"],
+                                                  fields["valid"])),
+            dtype="float32").reshape(fields["valid"].shape[0], 1)
+        geometric = float((fields["tgt_boxes"][..., 2:] > 0).all(-1).sum())
+        flag = float((fields["valid"] > 0).sum())
+        assert (geometric, flag) == (5.0, 6.0), (
+            f"INERT arm: the reference predicate ({geometric}) and the flag "
+            f"predicate ({flag}) must disagree here or nothing is measured")
+
+        y_true, y_pred = _pack(fields)
+        actual = _terms(_loss(), y_true, y_pred)
+        expected = _ref_terms(fields)
+        assert expected["num_boxes"] == geometric
+        assert actual["num_boxes"] == geometric, (
+            "the port is still counting the validity FLAG, not the geometry")
+        for key in ("loss_bbox", "loss_giou"):
+            self._assert_only(actual[key], expected[f"{key}_numerator"],
+                              geometric, [flag])
 
     def test_divisor_2_the_mask_focal_divides_by_num_boxes_TIMES_pixels(self):
         """The fourth divisor the prior plan never flagged.
