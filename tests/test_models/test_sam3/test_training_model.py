@@ -857,6 +857,104 @@ class TestDeepSupervisionOnTheRealModel:
         assert restored.num_aux_layers == deep_model.num_aux_layers
 
 
+class TestDeepSupervisionSerialization:
+    """The `.keras` round trip at ``deep_supervision=True``, compared by VALUE.
+
+    `TestSerialization` above covers the `deep_supervision=False` layout only,
+    so before this class NOTHING save/load-tested the packed AUXILIARY blocks --
+    i.e. exactly the `call_per_layer` -> aux-block path. That is the package's
+    own recorded trap: a nested sub-layer store can restore FRESH kernels while
+    the sub-layer count, the weight PATHS and the total parameter count all
+    still match, and only a VALUE diff sees it.
+
+    `training=False` is explicit on BOTH sides: the shared `StochasticDepth`
+    short-circuits on `training is False` only, so at `None` a CORRECT restore
+    reads deltas that look exactly like reinitialized weights (D-123).
+    """
+
+    @pytest.fixture(scope="class")
+    def round_trip(self):
+        """One save/load pair, shared -- `tiny` construction dominates here.
+
+        Returns ``(original_model, restored_model, inputs, original_output)``.
+        """
+        keras.utils.set_random_seed(77)
+        model = Sam3TrainingModel(
+            Sam3Image.from_variant("tiny"), deep_supervision=True)
+        inputs = tiny_inputs(np.random.default_rng(20260806), batch=2)
+        original = np.array(model(inputs, training=False))
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sam3_deep_trainer.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        return model, restored, inputs, original
+
+    def test_the_auxiliary_block_being_compared_is_not_vacuous(
+            self, round_trip):
+        """Anti-vacuity, asserted BEFORE the equality claim below is trusted.
+
+        An exact-equality assertion over an all-zero block, or over a block
+        that merely repeats the main block, would pass on a packer that never
+        wrote the auxiliary layer's outputs at all.
+        """
+        model, _, _, original = round_trip
+        rows = model.num_queries + 1
+        assert model.num_aux_layers >= 1, (
+            "`tiny` has 2 decoder layers, so this arm must exercise at least "
+            "one auxiliary block")
+        assert original.shape[1] == rows * (1 + model.num_aux_layers)
+        aux_block = original[:, rows:2 * rows, :]
+        assert np.abs(aux_block).max() > 0.0
+        assert not np.array_equal(aux_block, original[:, :rows, :])
+
+    def test_the_restored_deep_model_declares_the_same_layout(
+            self, round_trip):
+        model, restored, _, _ = round_trip
+        assert restored.deep_supervision is True
+        assert restored.num_aux_layers == model.num_aux_layers
+        assert restored.packed_channels == model.packed_channels
+        assert len(restored.trainable_variables) == len(
+            model.trainable_variables)
+
+    def test_keras_round_trip_is_value_identical_with_deep_supervision(
+            self, round_trip):
+        """MEASURED exactly 0.0 over every block, main and auxiliary.
+
+        RED-proven by perturbing a single restored kernel: this assertion --
+        and only this one -- fires. The companion test below keeps that proof
+        live in the suite rather than leaving it in a one-off scratch run.
+        """
+        _, restored, inputs, original = round_trip
+        reloaded = np.array(restored(inputs, training=False))
+        assert reloaded.shape == original.shape
+        delta = float(np.abs(original - reloaded).max())
+        assert delta == 0.0, (
+            f"deep-supervised round-trip max |delta| = {delta}; a nested "
+            "sub-layer weight loss restores FRESH kernels while every count "
+            "and path still matches")
+
+    def test_the_delta_reader_sees_a_single_perturbed_restored_weight(
+            self, round_trip):
+        """Liveness for the assertion above: it compares VALUES, not shapes.
+
+        A count/shape/path-only assertion passes on a model that restored zero
+        weights. Perturbing ONE restored kernel by 0.1 must move the very
+        quantity the guard reads; the perturbation is undone afterwards so the
+        shared fixture is left as found.
+        """
+        _, restored, inputs, original = round_trip
+        victim = restored.sam3.transformer.trainable_variables[0]
+        before = np.array(victim)
+        try:
+            victim.assign(before + 0.1)
+            perturbed = np.array(restored(inputs, training=False))
+            assert float(np.abs(original - perturbed).max()) > 0.0
+        finally:
+            victim.assign(before)
+        assert float(np.abs(
+            original - np.array(restored(inputs, training=False))).max()) == 0.0
+
+
 class TestNumAuxLayersAgreement:
     """The model-vs-loss agreement leg, on the ROW axis this time."""
 
