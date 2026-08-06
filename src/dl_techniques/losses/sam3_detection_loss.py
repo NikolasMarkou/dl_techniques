@@ -1184,11 +1184,25 @@ class Sam3DetectionLoss(keras.losses.Loss):
             # --- Divisor #4, sub-path A: a plain mean over `B * Q`. ---
             loss_ce = ops.mean(loss_bce)
         else:
-            # --- Divisor #4, sub-path B: the SHIPPED path. ---
+            # --- Divisor #4, sub-path B: NOT reachable at shipped defaults. ---
             # `loss_fns.py:507`. The denominator is the query budget the model
             # is PRETENDED to have (`pad_n_queries`), not the number it
             # actually emitted, so that the CE scale is comparable across
             # datasets whose heads emit different query counts.
+            #
+            # DO NOT read this branch as "the shipped path" -- an earlier
+            # revision of this comment said exactly that, and it was FALSE.
+            # `compile_sam3_trainer` sets `pad_n_queries = model.num_queries`,
+            # which sends every shipped run to sub-path A above. Reaching this
+            # branch requires `pad_n_queries > num_queries`, and that regime is
+            # MEASURED HARMFUL here: at the reference's literal 200 against the
+            # `small` variant's Q=32 it attenuates the ENTIRE classification
+            # term by exactly 6.25x (raw `loss_ce` 0.043937 vs 0.274605;
+            # weighted share 9.1% -> 38.4%). Both shipped reference configs
+            # avoid it the same way we do -- `odinw_text_only_train.yaml:102`
+            # is `pad_n_queries: ${scratch.num_queries}` -- which is why the
+            # reference's own `pad_scale_pos` compensator (`loss_fns.py:395`,
+            # fires only on `<`) is unreachable in every config it ships.
             loss_ce = (ops.sum(loss_bce)
                        / (float(self.pad_n_queries) * batch_size))
 
