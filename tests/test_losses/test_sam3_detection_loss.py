@@ -1758,3 +1758,211 @@ class TestLossPrecisionRegimes:
                                            err_msg=f"{key} @ tf32={tf32}")
         finally:
             tf.config.experimental.enable_tensor_float_32_execution(previous)
+
+
+# --------------------------------------------------------------------------
+# Deep supervision -- guards G3, G4, G5 and the `num_aux_layers=0` identity.
+#
+# The layout under test: `y_pred` is `1 + n` consecutive `(Q + 1)`-row blocks,
+# the MAIN block FIRST, each scored against the SAME `y_true`. Every guard below
+# is RED-proven by its own distinct mutation (plan step 5); the mutation and the
+# assertion it fires are recorded in the plan's progress notes.
+# --------------------------------------------------------------------------
+
+
+def _aux_stack(num_aux, include_masks=False):
+    """Build ``(y_true, [main_block, aux_block, ...])`` with DISTINCT blocks.
+
+    The blocks come from different seeds on purpose: three copies of one block
+    would make "the gradient reached layer 1" true by aliasing, and would make a
+    stride error invisible because every stride reads the same numbers.
+    """
+    fields = _make_packed(seed=SEED)
+    y_true, main = _pack(fields, include_masks=include_masks)
+    blocks = [main]
+    for index in range(num_aux):
+        _, aux = _pack(_make_packed(seed=SEED + 1 + index),
+                       include_masks=include_masks)
+        blocks.append(aux)
+    return y_true, blocks
+
+
+class TestDeepSupervisionIdentityAtZeroAux:
+    """The whole pre-change world is `num_aux_layers=0`, and stays exact."""
+
+    def test_num_aux_layers_zero_is_bit_identical_to_the_default_loss(self):
+        """The default constructor and an explicit `num_aux_layers=0` must be
+        the SAME computation, bit for bit -- not merely close. Every other test
+        in this file exercises the default; this is what carries their
+        guarantee over to the explicit spelling."""
+        fields = _make_packed()
+        y_true, y_pred = _pack(fields)
+        default = float(ops.convert_to_numpy(_loss()(y_true, y_pred)))
+        explicit = float(ops.convert_to_numpy(
+            _loss(num_aux_layers=0)(y_true, y_pred)))
+        assert default == explicit
+
+    def test_unpack_at_zero_aux_reports_no_aux_blocks_and_the_same_fields(
+            self):
+        fields = _make_packed()
+        _, y_pred = _pack(fields, include_masks=True)
+        out = unpack_predictions(ops.convert_to_tensor(y_pred), True, 0)
+        assert out["aux"] == []
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(out["pred_logits"]), fields["logits"])
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(out["pred_boxes"]), fields["pred_boxes"])
+
+    def test_num_aux_layers_must_be_a_non_negative_int(self):
+        with pytest.raises(ValueError, match="num_aux_layers"):
+            Sam3DetectionLoss(num_aux_layers=-1)
+        with pytest.raises(ValueError, match="num_aux_layers"):
+            Sam3DetectionLoss(num_aux_layers=1.5)
+
+    def test_num_aux_layers_round_trips_through_get_config(self):
+        loss = _loss(num_aux_layers=3)
+        restored = Sam3DetectionLoss.from_config(loss.get_config())
+        assert restored.num_aux_layers == 3
+
+
+class TestG3AuxiliarySupervisionReachesEveryLayer:
+    """G3 -- the MANDATED guard. Deep supervision must actually supervise."""
+
+    def test_each_auxiliary_block_box_tensor_gets_a_nonzero_gradient(self):
+        """For EACH auxiliary index `j` INDEPENDENTLY, the gradient of the
+        TOTAL loss with respect to that block's own box channels is non-`None`
+        and has a non-zero norm.
+
+        Per-`j`, not aggregated: a single "some aux gradient is non-zero"
+        assertion passes when only the FIRST auxiliary block is supervised,
+        which is exactly the off-by-one this layout can produce.
+        """
+        num_aux = 2
+        y_true, blocks = _aux_stack(num_aux)
+        tensors = [tf.constant(block) for block in blocks]
+        loss = _loss(include_masks=False, num_aux_layers=num_aux)
+
+        with tf.GradientTape() as tape:
+            for tensor in tensors:
+                tape.watch(tensor)
+            value = loss(y_true, tf.concat(tensors, axis=1))
+        grads = tape.gradient(value, tensors)
+
+        # Liveness FIRST: the main block must be supervised, or a green aux
+        # assertion would be measuring a loss that supervises nothing.
+        assert grads[0] is not None, "main block gradient is None"
+        main_box_grad = ops.convert_to_numpy(
+            grads[0])[:, :QUERIES, PACKED_BOX_START:PACKED_MASK_START]
+        assert np.abs(main_box_grad).max() > 0.0
+
+        for index in range(1, num_aux + 1):
+            assert grads[index] is not None, (
+                f"auxiliary block {index - 1} got a None gradient")
+            box_grad = ops.convert_to_numpy(
+                grads[index])[:, :QUERIES,
+                              PACKED_BOX_START:PACKED_MASK_START]
+            assert np.abs(box_grad).max() > 0.0, (
+                f"auxiliary block {index - 1} got an all-zero box gradient")
+
+    def test_compute_terms_reports_the_main_block_only_under_deep_supervision(
+            self):
+        """The stride is honoured: with `n` auxiliary blocks appended, every
+        logged term is the term of the STANDALONE main block.
+
+        This is the guard against the vacuity mode where the loss is handed
+        auxiliary rows and reads them as extra QUERIES of one giant block --
+        which produces a finite loss and live gradients, so the gradient guard
+        above cannot see it.
+        """
+        num_aux = 2
+        y_true, blocks = _aux_stack(num_aux, include_masks=True)
+        packed = np.concatenate(blocks, axis=1)
+
+        deep = _terms(_loss(include_masks=True, num_aux_layers=num_aux),
+                      y_true, packed)
+        alone = _terms(_loss(include_masks=True), y_true, blocks[0])
+        for key in ("loss_ce", "presence_loss", "loss_bbox", "loss_giou",
+                    "loss_mask", "loss_dice", "num_boxes", "num_matched"):
+            assert deep[key] == alone[key], f"term {key} is not the main block's"
+
+        # Non-vacuity: a WRONG stride really does report something different,
+        # so the equality above is a measurement and not a tautology.
+        wrong = _terms(_loss(include_masks=True, num_aux_layers=0),
+                       y_true, packed)
+        # `num_matched` is deliberately NOT the discriminator here: the matcher
+        # still produces `min(Q', num_valid) = 6` pairs when it reads all
+        # `3Q + 2` rows as one block, so that quantity is BLIND to the stride.
+        # `loss_ce`'s divisor is not.
+        assert wrong["loss_ce"] != alone["loss_ce"]
+
+
+class TestG4AuxiliaryBlocksAreWeightedEqually:
+    """G4 -- A-2: a plain sum, no per-layer coefficient and no depth decay."""
+
+    def test_three_identical_blocks_give_exactly_three_times_the_total(self):
+        """Reference oracle (A-2): `Sam3LossWrapper.compute_loss` sums over
+        `output_list` with the same `weight_dict` and the same `num_boxes`
+        divisor, so three copies of one block cost exactly three times one.
+
+        The tolerance is float32 associativity only (`t + t + t` versus
+        `3 * t`): a per-layer coefficient of 0.5 lands at a ratio of 2.0, six
+        orders of magnitude away from anything rounding can explain.
+        """
+        fields = _make_packed()
+        y_true, block = _pack(fields, include_masks=False)
+        single = float(ops.convert_to_numpy(
+            _loss(include_masks=False)(y_true, block)))
+        triple = float(ops.convert_to_numpy(
+            _loss(include_masks=False, num_aux_layers=2)(
+                y_true, np.concatenate([block, block, block], axis=1))))
+
+        assert single > 0.0
+        np.testing.assert_allclose(triple, 3.0 * single, rtol=1e-6, atol=0.0)
+        assert abs(triple / single - 3.0) < 1e-5
+
+    def test_the_total_decomposes_into_the_sum_over_blocks(self):
+        """The same rule on DISTINCT blocks, which a `3x` test cannot see: the
+        deep-supervised total equals the sum of each block scored alone."""
+        num_aux = 2
+        y_true, blocks = _aux_stack(num_aux)
+        total = float(ops.convert_to_numpy(
+            _loss(include_masks=False, num_aux_layers=num_aux)(
+                y_true, np.concatenate(blocks, axis=1))))
+        parts = [float(ops.convert_to_numpy(
+            _loss(include_masks=False)(y_true, block))) for block in blocks]
+        assert len(set(parts)) == len(parts), "the blocks are not distinct"
+        np.testing.assert_allclose(total, sum(parts), rtol=1e-6, atol=0.0)
+
+
+class TestG5AuxiliaryBlocksCarryNoMaskSupervision:
+    """G5 -- A-3: the reference's `Masks` loss ships `compute_aux=False`."""
+
+    def test_perturbing_an_auxiliary_blocks_mask_channels_does_not_move_it(
+            self):
+        """At `include_masks=True`, the mask channels of EVERY auxiliary block
+        are unread -- perturbing them changes the loss by exactly nothing --
+        while the SAME perturbation on the MAIN block does move it.
+
+        The control is what makes this a measurement: without it, a loss that
+        ignored every mask channel everywhere would pass.
+        """
+        num_aux = 2
+        y_true, blocks = _aux_stack(num_aux, include_masks=True)
+        packed = np.concatenate(blocks, axis=1)
+        loss = _loss(include_masks=True, num_aux_layers=num_aux)
+        base = float(ops.convert_to_numpy(loss(y_true, packed)))
+        rows = QUERIES + 1
+
+        for index in range(1, num_aux + 1):
+            perturbed = packed.copy()
+            perturbed[:, index * rows:index * rows + QUERIES,
+                      PACKED_MASK_START:] += 17.0
+            moved = float(ops.convert_to_numpy(loss(y_true, perturbed)))
+            assert moved == base, (
+                f"auxiliary block {index - 1}'s mask channels moved the loss "
+                f"by {moved - base}")
+
+        # Control: the MAIN block's mask channels ARE supervised.
+        control = packed.copy()
+        control[:, :QUERIES, PACKED_MASK_START:] += 17.0
+        assert float(ops.convert_to_numpy(loss(y_true, control))) != base

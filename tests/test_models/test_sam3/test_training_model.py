@@ -686,3 +686,199 @@ class TestOutputContract:
     def test_a_non_sam3_argument_raises(self):
         with pytest.raises(ValueError, match="must be a Sam3Image"):
             Sam3TrainingModel(keras.layers.Dense(3))
+
+
+# ---------------------------------------------------------------------
+# Deep supervision -- guards G1 and G2, plus the model-vs-loss agreement leg.
+#
+# The layout: `[Q query rows | 1 presence row]` repeated `1 + n` times, the MAIN
+# block FIRST, `y_true` untouched. G1 pins that the `deep_supervision=False`
+# tensor did not move and that it is exactly the deep-supervised tensor's first
+# block; G2 pins that every auxiliary block round-trips value-exactly. Each is
+# RED-proven by its own mutation (a block reorder for G1, an off-by-one stride
+# for G2).
+# ---------------------------------------------------------------------
+
+
+def shifted_outputs(outputs, shift):
+    """A DISTINCT stand-in layer: every field moved by ``shift``.
+
+    Distinct on purpose -- three copies of one block would make a stride error
+    invisible, because every stride would read the same numbers.
+    """
+    return {key: (np.asarray(value) + shift).astype("float32")
+            for key, value in outputs.items()}
+
+
+class TestDeepSupervisionPacking:
+    """G1/G2 -- the packed block layout, by VALUE."""
+
+    @pytest.mark.parametrize("include_masks", [False, True])
+    def test_the_main_block_is_bit_identical_to_the_no_aux_packing(
+            self, synthetic_outputs, include_masks):
+        """G1. The first ``Q + 1`` rows of the deep-supervised tensor are
+        byte-for-byte the tensor this packer has always produced -- which is
+        itself pinned against the hand-written NumPy oracle here, so the
+        comparison is not the implementation agreeing with itself.
+
+        A block REORDER (auxiliary blocks first) fails this and nothing else.
+        """
+        aux = [shifted_outputs(synthetic_outputs, 1000.0),
+               shifted_outputs(synthetic_outputs, 2000.0)]
+        plain = np.array(pack_predictions(synthetic_outputs, include_masks))
+        deep = np.array(pack_predictions(synthetic_outputs, include_masks,
+                                         aux_outputs=aux))
+
+        oracle = np_pack_predictions(
+            synthetic_outputs["pred_logits"], synthetic_outputs["pred_boxes"],
+            synthetic_outputs["presence_logit"],
+            synthetic_outputs["pred_masks"] if include_masks else None)
+        np.testing.assert_allclose(plain, oracle, rtol=0.0, atol=0.0)
+
+        rows = plain.shape[1]
+        assert deep.shape == (plain.shape[0], rows * 3, plain.shape[2])
+        np.testing.assert_array_equal(deep[:, :rows, :], plain)
+        # Non-vacuity: the auxiliary blocks are NOT the main block, so the
+        # equality above is a statement about ORDER and not a tautology.
+        assert not np.array_equal(deep[:, rows:2 * rows, :], plain)
+
+    @pytest.mark.parametrize("include_masks", [False, True])
+    def test_unpack_round_trips_every_auxiliary_block_value_exactly(
+            self, synthetic_outputs, include_masks):
+        """G2. Every block, main and auxiliary, comes back with the values it
+        went in with. An off-by-one block STRIDE fails this and nothing else."""
+        aux = [shifted_outputs(synthetic_outputs, 1000.0),
+               shifted_outputs(synthetic_outputs, 2000.0)]
+        packed = pack_predictions(synthetic_outputs, include_masks,
+                                  aux_outputs=aux)
+        back = unpack_predictions(packed, include_masks, num_aux_layers=2)
+
+        assert len(back["aux"]) == 2
+        for block, expected in zip([back] + back["aux"],
+                                   [synthetic_outputs] + aux):
+            np.testing.assert_array_equal(
+                np.array(block["pred_logits"]),
+                np.array(expected["pred_logits"])[..., 0])
+            np.testing.assert_array_equal(
+                np.array(block["pred_boxes"]),
+                np.array(expected["pred_boxes"]))
+            np.testing.assert_array_equal(
+                np.array(block["presence_logit"]),
+                np.array(expected["presence_logit"]))
+
+    def test_an_auxiliary_blocks_mask_channels_are_zero_filled(
+            self, synthetic_outputs):
+        """D-005: the auxiliary blocks carry NO masks, because the loss
+        computes no mask term for them. The main block's are non-zero in the
+        same tensor, so this is not measuring an all-zero mask block."""
+        aux = [shifted_outputs(synthetic_outputs, 1000.0)]
+        packed = np.array(pack_predictions(synthetic_outputs, True,
+                                           aux_outputs=aux))
+        rows = packed.shape[1] // 2
+        queries = rows - 1
+        assert np.all(packed[:, rows:rows + queries, PACKED_MASK_START:] == 0.0)
+        assert np.abs(packed[:, :queries, PACKED_MASK_START:]).min() > 0.0
+
+    def test_the_presence_row_of_every_block_is_zero_outside_its_score(
+            self, synthetic_outputs):
+        aux = [shifted_outputs(synthetic_outputs, 1000.0)]
+        packed = np.array(pack_predictions(synthetic_outputs, True,
+                                           aux_outputs=aux))
+        rows = packed.shape[1] // 2
+        for block in range(2):
+            presence_row = packed[:, (block + 1) * rows - 1, :]
+            assert np.all(presence_row[:, PACKED_BOX_START:] == 0.0)
+            assert np.all(np.abs(presence_row[:, PACKED_SCORE_CHANNEL]) > 1.0)
+
+
+class TestDeepSupervisionOnTheRealModel:
+    """The wrapper end to end: same weights, one flag, two layouts."""
+
+    @pytest.fixture(scope="class")
+    def deep_model(self, tiny_model):
+        """The SAME `Sam3Image`, wrapped with deep supervision on.
+
+        Sharing the wrapped model is what makes the bit-equality below a
+        statement about the LAYOUT rather than about two random inits.
+        """
+        model = Sam3TrainingModel(tiny_model.sam3, deep_supervision=True)
+        model.build(None)
+        return model
+
+    def test_the_aux_count_is_derived_from_the_decoder_depth(
+            self, tiny_model, deep_model):
+        assert tiny_model.num_aux_layers == 0
+        assert deep_model.num_aux_layers == (
+            tiny_model.sam3.transformer.num_layers - 1)
+        assert deep_model.num_aux_layers >= 1
+
+    def test_compute_output_shape_counts_every_block(self, deep_model):
+        expected_rows = ((deep_model.num_queries + 1)
+                         * (1 + deep_model.num_aux_layers))
+        assert deep_model.compute_output_shape() == (
+            None, expected_rows, deep_model.packed_channels)
+
+    def test_the_main_block_is_bit_identical_to_the_flag_off_output(
+            self, tiny_model, deep_model, rng):
+        """G1 on the real wrapper: turning the flag on APPENDS, it does not
+        perturb. `training=False` is explicit -- at `None` this stack drops
+        paths and a bit-equality claim would be comparing two draws (D-123)."""
+        inputs = tiny_inputs(rng, batch=2)
+        plain = np.array(tiny_model(inputs, training=False))
+        deep = np.array(deep_model(inputs, training=False))
+        rows = plain.shape[1]
+        assert deep.shape[1] == rows * (1 + deep_model.num_aux_layers)
+        np.testing.assert_array_equal(deep[:, :rows, :], plain)
+        assert not np.array_equal(deep[:, rows:2 * rows, :], plain)
+
+    def test_a_deep_supervised_step_runs_and_moves_weights(
+            self, deep_model, synthetic_targets, rng):
+        """A finite loss alone cannot see a step that moves nothing."""
+        boxes, valid, _ = synthetic_targets
+        boxes, valid = boxes[:2], valid[:2]
+        inputs = tiny_inputs(rng, batch=2)
+        y_true = np.array(pack_targets(boxes, valid))
+
+        compile_sam3_trainer(
+            deep_model, optimizer=keras.optimizers.SGD(learning_rate=1.0))
+        before = [np.array(w) for w in deep_model.sam3.transformer.weights]
+        history = deep_model.fit(inputs, y_true, epochs=1, batch_size=2,
+                                 verbose=0)
+        after = [np.array(w) for w in deep_model.sam3.transformer.weights]
+
+        assert np.isfinite(history.history["loss"][0])
+        assert any(not np.array_equal(a, b) for a, b in zip(before, after))
+
+    def test_deep_supervision_round_trips_through_get_config(self, deep_model):
+        config = deep_model.get_config()
+        assert config["deep_supervision"] is True
+        restored = Sam3TrainingModel.from_config(config)
+        assert restored.deep_supervision is True
+        assert restored.num_aux_layers == deep_model.num_aux_layers
+
+
+class TestNumAuxLayersAgreement:
+    """The model-vs-loss agreement leg, on the ROW axis this time."""
+
+    @pytest.fixture(scope="class")
+    def deep_model(self, tiny_model):
+        model = Sam3TrainingModel(tiny_model.sam3, deep_supervision=True)
+        model.build(None)
+        return model
+
+    def test_compile_raises_when_the_loss_disagrees_on_num_aux_layers(
+            self, deep_model):
+        with pytest.raises(ValueError, match="num_aux_layers"):
+            compile_sam3_trainer(deep_model, loss=Sam3DetectionLoss())
+
+    def test_compile_raises_when_the_loss_expects_aux_and_the_model_does_not(
+            self, tiny_model):
+        with pytest.raises(ValueError, match="num_aux_layers"):
+            compile_sam3_trainer(
+                tiny_model, loss=Sam3DetectionLoss(num_aux_layers=2))
+
+    def test_a_default_constructed_loss_inherits_the_models_aux_count(
+            self, deep_model):
+        compile_sam3_trainer(deep_model)
+        assert deep_model.loss.num_aux_layers == deep_model.num_aux_layers
+        assert deep_model.jit_compile is False

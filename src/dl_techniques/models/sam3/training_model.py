@@ -201,31 +201,79 @@ def _pack_meta_row(keep_loss: Any, num_boxes: Any, is_exhaustive: Any,
     return ops.expand_dims(row, axis=1)
 
 
+def _pack_prediction_block(outputs: Dict[str, Any], masks: Optional[Any],
+                           mask_size: int) -> Any:
+    """Pack ONE decoder layer's outputs into a ``(B, Q + 1, C)`` block.
+
+    Interface contract: ``outputs`` supplies ``pred_logits`` ``(B, Q, 1)``,
+    ``pred_boxes`` ``(B, Q, 4)`` and ``presence_logit`` ``(B, 1)``; ``masks`` is
+    the ALREADY-FLATTENED ``(B, Q, mask_size)`` block or ``None`` to zero-fill
+    it. The return is ``(B, Q + 1, C)``: rows ``0..Q-1`` are the queries, row
+    ``Q`` is the presence row whose non-score channels are exactly zero.
+
+    :param outputs: One layer's prediction dict.
+    :type outputs: Dict[str, Any]
+    :param masks: Flattened mask logits, or ``None`` to zero-fill.
+    :type masks: Optional[Any]
+    :param mask_size: Flattened mask length ``P``; ``0`` when masks are off.
+    :type mask_size: int
+    :return: The packed block.
+    :rtype: Any
+    :raises KeyError: If a required output key is absent.
+    """
+    queries = _pack_rows(
+        outputs["pred_logits"][..., PACKED_SCORE_CHANNEL],
+        outputs["pred_boxes"], masks, mask_size)
+    presence_row = _pack_rows(
+        outputs["presence_logit"], None, None, mask_size)
+    return ops.concatenate([queries, presence_row], axis=1)
+
+
 def pack_predictions(outputs: Dict[str, Any],
-                     include_masks: bool = False) -> Any:
+                     include_masks: bool = False,
+                     aux_outputs: Optional[Any] = None) -> Any:
     """Pack :class:`Sam3Image`'s five-key output dict into ONE tensor.
 
     Interface contract: ``outputs`` is exactly what ``Sam3Image.call`` returns
     (``pred_logits`` ``(B, Q, 1)``, ``pred_boxes`` ``(B, Q, 4)``,
     ``pred_masks`` ``(B, Q, H, W)``, ``presence_logit`` ``(B, 1)``,
     ``semantic_seg`` -- the last DELIBERATELY unpacked, phase 2 leaves it
-    unsupervised). The return is ``(B, Q + 1, C)``: rows ``0..Q-1`` are the
-    queries, row ``Q`` is the presence row whose non-score channels are exactly
-    zero. This is the exact inverse of ``unpack_predictions``, pinned
-    value-exactly by test. Raises only on a missing required key.
+    unsupervised). ``aux_outputs`` is an optional sequence of ``n`` further
+    dicts of the same shape, one per auxiliary decoder layer, as
+    ``Sam3Image.call_per_layer()[1:]`` returns them. The return is
+    ``(B, (Q + 1) * (1 + n), C)``: the main block FIRST -- rows ``0..Q-1`` the
+    queries and row ``Q`` the presence row, whose non-score channels are exactly
+    zero -- then one identically shaped block per auxiliary layer, in order. At
+    the default ``aux_outputs=None`` the return is EXACTLY the ``(B, Q + 1, C)``
+    tensor this function has always produced, built by the same expression. This
+    is the exact inverse of ``unpack_predictions``, pinned value-exactly by
+    test. Raises only on a missing required key.
 
-    :param outputs: ``Sam3Image``'s output dict.
+    # DECISION plan-2026-08-06T055747-1e650383/D-005
+    # An auxiliary block's mask channels are ZERO-FILLED, never filled with the
+    # segmentation head's masks -- note the `None` passed for `masks` below. Do
+    # NOT "fix" that to pack the real masks: the loss deliberately computes NO
+    # mask term for an auxiliary block (the reference's `Masks` loss defaults
+    # `compute_aux=False`, warns if set True, and its one shipped config writes
+    # it false explicitly), so packing them would ship `(L-1) * (Q+1) * P`
+    # channels of supervision nobody reads while making guard G5 -- "perturbing
+    # an auxiliary block's mask channels does not move the loss" -- pass for the
+    # wrong reason. The segmentation head has no layer axis anyway: it consumes
+    # the whole hidden stack and emits ONE set of masks, so there is no
+    # per-layer mask that packing them here could even mean.
+    # See decisions.md D-005.
+
+    :param outputs: ``Sam3Image``'s output dict for the MAIN (last) layer.
     :type outputs: Dict[str, Any]
     :param include_masks: Whether to pack the flattened mask block.
     :type include_masks: bool
+    :param aux_outputs: Auxiliary layers' output dicts, or ``None`` for the
+        single-block layout.
+    :type aux_outputs: Optional[Any]
     :return: The packed prediction tensor.
     :rtype: Any
     :raises KeyError: If a required output key is absent.
     """
-    logits = outputs["pred_logits"]
-    boxes = outputs["pred_boxes"]
-    presence = outputs["presence_logit"]
-
     masks = None
     mask_size = 0
     if include_masks:
@@ -235,10 +283,13 @@ def pack_predictions(outputs: Dict[str, Any],
         masks = ops.reshape(
             raw, (-1, int(raw.shape[1]), mask_size))
 
-    queries = _pack_rows(
-        logits[..., PACKED_SCORE_CHANNEL], boxes, masks, mask_size)
-    presence_row = _pack_rows(presence, None, None, mask_size)
-    return ops.concatenate([queries, presence_row], axis=1)
+    packed = _pack_prediction_block(outputs, masks, mask_size)
+    if not aux_outputs:
+        return packed
+    return ops.concatenate(
+        [packed] + [_pack_prediction_block(aux, None, mask_size)
+                    for aux in aux_outputs],
+        axis=1)
 
 
 def pack_targets(target_boxes: Any,
@@ -328,8 +379,10 @@ class Sam3TrainingModel(keras.Model):
 
     Interface contract: ``call(inputs, training=...)`` takes exactly the input
     dict :class:`Sam3Image` takes (``image`` / ``token_ids`` /
-    optional ``token_padding_mask``) and returns a single ``(B, Q + 1, C)``
-    tensor in the packed layout, ready for a single
+    optional ``token_padding_mask``) and returns a single
+    ``(B, (Q + 1) * (1 + num_aux_layers), C)`` tensor in the packed layout
+    (``(B, Q + 1, C)`` at the default ``deep_supervision=False``), ready for a
+    single
     :class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss` under
     stock ``fit()``. It adds no parameters of its own -- every trainable
     variable belongs to the wrapped model -- and it neither reduces nor rescales
@@ -361,13 +414,20 @@ class Sam3TrainingModel(keras.Model):
         :class:`Sam3DetectionLoss`'s own default and the reference's one
         shipped training config (decisions.md D-009).
     :type include_masks: bool
+    :param deep_supervision: Whether to pack one AUXILIARY block per earlier
+        decoder layer after the main block, so the loss supervises every layer
+        (the reference's ``aux_outputs``). Default ``False``, which packs
+        exactly the tensor this wrapper has always packed. The derived
+        :attr:`num_aux_layers` is ``L - 1`` for an ``L``-layer decoder, hence
+        ``0`` for a single-layer decoder even when this is ``True``.
+    :type deep_supervision: bool
     :param kwargs: Forwarded to :class:`keras.Model`.
     :raises ValueError: If ``sam3`` is neither a :class:`Sam3Image` nor a
         deserializable config.
     """
 
     def __init__(self, sam3: Any, include_masks: bool = False,
-                 **kwargs: Any) -> None:
+                 deep_supervision: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         if isinstance(sam3, dict):
             sam3 = keras.saving.deserialize_keras_object(sam3)
@@ -377,6 +437,12 @@ class Sam3TrainingModel(keras.Model):
                 f"serialized config), got {type(sam3).__name__}.")
         self.sam3 = sam3
         self.include_masks = bool(include_masks)
+        self.deep_supervision = bool(deep_supervision)
+        #: Number of AUXILIARY blocks packed after the main one. Derived from
+        #: the decoder's own layer count, never restated.
+        self.num_aux_layers = (
+            max(int(self.sam3.transformer.num_layers) - 1, 0)
+            if self.deep_supervision else 0)
 
         shapes = self.sam3.compute_output_shape()
         self.num_queries = int(shapes["pred_logits"][1])
@@ -389,8 +455,9 @@ class Sam3TrainingModel(keras.Model):
         self.packed_channels = packed_channel_count(self.mask_size)
 
         logger.info(
-            "Sam3TrainingModel: Q=%d, masks=%s, packed width C=%d",
-            self.num_queries, self.include_masks, self.packed_channels)
+            "Sam3TrainingModel: Q=%d, masks=%s, packed width C=%d, "
+            "aux blocks=%d", self.num_queries, self.include_masks,
+            self.packed_channels, self.num_aux_layers)
 
     # -----------------------------------------------------------------
     # build / forward
@@ -435,11 +502,16 @@ class Sam3TrainingModel(keras.Model):
             non-zero ``drop_path_rate`` the default ``None`` drops paths and is
             NOT inference (D-123).
         :type training: Optional[bool]
-        :return: ``(B, Q + 1, C)`` packed predictions.
+        :return: ``(B, (Q + 1) * (1 + num_aux_layers), C)`` packed predictions.
         :rtype: Any
         """
-        outputs = self.sam3(inputs, training=training)
-        return pack_predictions(outputs, include_masks=self.include_masks)
+        if not self.num_aux_layers:
+            outputs = self.sam3(inputs, training=training)
+            return pack_predictions(outputs, include_masks=self.include_masks)
+        per_layer = self.sam3.call_per_layer(inputs, training=training)
+        return pack_predictions(
+            per_layer[0], include_masks=self.include_masks,
+            aux_outputs=per_layer[1:])
 
     # -----------------------------------------------------------------
     # shapes / config
@@ -466,11 +538,13 @@ class Sam3TrainingModel(keras.Model):
 
         :param input_shape: Ignored; the batch axis is reported as ``None``.
         :type input_shape: Optional[Any]
-        :return: ``(None, Q + 1, C)``.
+        :return: ``(None, (Q + 1) * (1 + num_aux_layers), C)``.
         :rtype: Tuple[Optional[int], int, int]
         """
         del input_shape
-        return (None, self.num_queries + 1, self.packed_channels)
+        return (None,
+                (self.num_queries + 1) * (1 + self.num_aux_layers),
+                self.packed_channels)
 
     def get_config(self) -> Dict[str, Any]:
         """Serialize the wrapper, including the whole wrapped SAM 3.
@@ -482,6 +556,7 @@ class Sam3TrainingModel(keras.Model):
         config.update({
             "sam3": keras.saving.serialize_keras_object(self.sam3),
             "include_masks": self.include_masks,
+            "deep_supervision": self.deep_supervision,
         })
         return config
 
@@ -517,6 +592,10 @@ def compile_sam3_trainer(model: Sam3TrainingModel,
       too-narrow tensor is sliced to garbage and trains on it. This is the
       model-vs-loss leg of the three-way width contract, and it is checked here
       because this is the one place that sees both objects.
+    * ``model.num_aux_layers == loss.num_aux_layers``, for exactly the same
+      reason on the ROW axis: the loss derives ``Q`` as
+      ``rows // (1 + num_aux_layers) - 1``, so a disagreement mis-slices every
+      block silently instead of raising.
 
     :param model: The wrapper to compile.
     :type model: Sam3TrainingModel
@@ -530,7 +609,8 @@ def compile_sam3_trainer(model: Sam3TrainingModel,
         ``jit_compile`` here overrides the mandatory ``False`` and WILL make
         the first ``fit()`` step raise.
     :type compile_kwargs: Any
-    :raises ValueError: If ``loss.include_masks`` disagrees with the model's.
+    :raises ValueError: If ``loss.include_masks`` or ``loss.num_aux_layers``
+        disagrees with the model's.
     """
     # DECISION plan-2026-08-05T124709-6c4fac48/D-015
     # ONE compile site, and the width check lives here. Do NOT inline
@@ -545,16 +625,28 @@ def compile_sam3_trainer(model: Sam3TrainingModel,
     # hides the pipeline's own disagreement, which is the leg this check cannot
     # see. See decisions.md D-015.
     if loss is None:
-        loss = Sam3DetectionLoss(include_masks=model.include_masks)
-    elif bool(getattr(loss, "include_masks", False)) != model.include_masks:
-        expected = ("{}+P".format(packed_channel_count(0))
-                    if loss.include_masks else str(packed_channel_count(0)))
-        raise ValueError(
-            "compile_sam3_trainer: include_masks disagrees between the "
-            f"training model ({model.include_masks}, packing C="
-            f"{model.packed_channels}) and the loss ({loss.include_masks}, "
-            f"slicing C={expected}). A width mismatch slices garbage rather "
-            "than raising.")
+        loss = Sam3DetectionLoss(include_masks=model.include_masks,
+                                 num_aux_layers=model.num_aux_layers)
+    else:
+        if bool(getattr(loss, "include_masks", False)) != model.include_masks:
+            expected = ("{}+P".format(packed_channel_count(0))
+                        if loss.include_masks else str(packed_channel_count(0)))
+            raise ValueError(
+                "compile_sam3_trainer: include_masks disagrees between the "
+                f"training model ({model.include_masks}, packing C="
+                f"{model.packed_channels}) and the loss ({loss.include_masks}, "
+                f"slicing C={expected}). A width mismatch slices garbage rather "
+                "than raising.")
+        loss_aux = int(getattr(loss, "num_aux_layers", 0))
+        if loss_aux != model.num_aux_layers:
+            rows = (model.num_queries + 1) * (1 + model.num_aux_layers)
+            raise ValueError(
+                "compile_sam3_trainer: num_aux_layers disagrees between the "
+                f"training model ({model.num_aux_layers}, packing "
+                f"{rows} rows) and the loss ({loss_aux}, deriving Q="
+                f"{rows // (1 + loss_aux) - 1} from them against the model's "
+                f"Q={model.num_queries}). A stride mismatch slices garbage "
+                "rather than raising.")
     compile_kwargs.setdefault("jit_compile", False)
     model.compile(optimizer=optimizer, loss=loss, **compile_kwargs)
 

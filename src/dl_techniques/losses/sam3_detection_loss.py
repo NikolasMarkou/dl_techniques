@@ -76,6 +76,15 @@ of putting the layout in one module is that there is nothing to keep in step.
   ``N_max`` is the meta row: ``[keep_loss, num_boxes_this_image,
   is_exhaustive, 0, ...]``.
 * ``C = 5 + P`` with masks on (``P`` = flattened mask size) and ``C = 5`` off.
+* **Deep supervision appends BLOCKS, never rows or channels.** At
+  ``num_aux_layers = n > 0``, ``y_pred`` is
+  ``(B, (Q + 1) * (1 + n), C)``: the SAME ``[Q query rows | 1 presence row]``
+  block repeated ``1 + n`` times, the MAIN (last decoder layer) block FIRST and
+  one auxiliary block per earlier decoder layer after it, in decoder order.
+  The first ``Q + 1`` rows are therefore byte-for-byte the ``n = 0`` tensor, and
+  ``Q`` is derived as ``rows // (1 + n) - 1``. ``y_true`` is UNCHANGED -- every
+  auxiliary block is scored against the same targets -- so ``pack_targets``, the
+  target spec and the data pipeline are untouched by deep supervision.
 * ``semantic_seg`` is deliberately NOT packed. The head exists and emits logits,
   but phase 2 leaves it unsupervised; it is named here so its absence is a
   stated scope boundary rather than a silent drop.
@@ -148,31 +157,25 @@ def packed_channel_count(mask_size: int = 0) -> int:
     return PACKED_MASK_START + mask_size
 
 
-def unpack_predictions(y_pred: Any,
-                       include_masks: bool = False) -> Dict[str, Any]:
-    """Split the packed ``(B, Q + 1, C)`` prediction tensor.
+def _unpack_prediction_block(block: Any,
+                             include_masks: bool = False) -> Dict[str, Any]:
+    """Split ONE ``(B, Q + 1, C)`` prediction block into its four fields.
 
-    Interface contract: ``y_pred`` is a float tensor whose SECOND-to-last axis
-    is ``Q + 1`` (the last row being the presence row) and whose last axis is
-    :func:`packed_channel_count`. The return is a dict with ``pred_logits``
-    ``(B, Q)``, ``pred_boxes`` ``(B, Q, 4)``, ``presence_logit`` ``(B, 1)`` and
-    ``pred_masks`` ``(B, Q, P)`` -- the last being ``None`` when
-    ``include_masks`` is ``False``. Nothing is reduced, nothing is cast beyond
-    the input dtype, and it never raises: a width mismatch produces a slice of
-    the wrong size rather than an error, which is exactly why the training
-    model, the loss and the data pipeline share one ``include_masks`` flag and a
-    test pins that they agree.
+    Interface contract: ``block`` is a float tensor whose second-to-last axis is
+    ``Q + 1`` (the last row being the presence row); the return is the four-key
+    dict :func:`unpack_predictions` documents. Nothing is reduced, nothing is
+    cast, and it never raises.
 
-    :param y_pred: Packed predictions, ``(B, Q + 1, C)``.
-    :type y_pred: Any
+    :param block: One packed prediction block, ``(B, Q + 1, C)``.
+    :type block: Any
     :param include_masks: Whether channels ``5:`` carry mask logits.
     :type include_masks: bool
     :return: ``pred_logits`` / ``pred_boxes`` / ``pred_masks`` /
         ``presence_logit``.
     :rtype: Dict[str, Any]
     """
-    queries = y_pred[:, :-1, :]
-    presence_row = y_pred[:, -1, :]
+    queries = block[:, :-1, :]
+    presence_row = block[:, -1, :]
     return {
         "pred_logits": queries[..., PACKED_SCORE_CHANNEL],
         "pred_boxes": queries[..., PACKED_BOX_START:PACKED_MASK_START],
@@ -181,6 +184,62 @@ def unpack_predictions(y_pred: Any,
         "presence_logit": presence_row[..., PACKED_SCORE_CHANNEL:
                                        PACKED_SCORE_CHANNEL + 1],
     }
+
+
+def unpack_predictions(y_pred: Any,
+                       include_masks: bool = False,
+                       num_aux_layers: int = 0) -> Dict[str, Any]:
+    """Split the packed ``(B, (Q + 1) * (1 + num_aux_layers), C)`` predictions.
+
+    Interface contract: ``y_pred`` is a float tensor whose SECOND-to-last axis
+    carries ``1 + num_aux_layers`` consecutive blocks of ``Q + 1`` rows each
+    (the last row of every block being that block's presence row) and whose last
+    axis is :func:`packed_channel_count`. The return is a dict with
+    ``pred_logits`` ``(B, Q)``, ``pred_boxes`` ``(B, Q, 4)``, ``presence_logit``
+    ``(B, 1)`` and ``pred_masks`` ``(B, Q, P)`` -- the last being ``None`` when
+    ``include_masks`` is ``False`` -- for the MAIN block, plus ``aux``: a list of
+    ``num_aux_layers`` dicts of the SAME four keys, one per auxiliary block, in
+    packed order. At the default ``num_aux_layers=0`` that list is empty and
+    every other value is arithmetically identical to the pre-deep-supervision
+    slicing. Nothing is reduced, nothing is cast beyond the input dtype, and it
+    never raises: a width mismatch produces a slice of the wrong size rather
+    than an error, which is exactly why the training model, the loss and the
+    data pipeline share one ``include_masks`` flag, why they now also share one
+    ``num_aux_layers``, and why a test pins that they agree.
+
+    # DECISION plan-2026-08-06T055747-1e650383/D-001
+    # `Q` is DERIVED from the row count -- `rows // (1 + num_aux_layers) - 1` --
+    # and NOT taken from a stored constant or from negative-index slicing of the
+    # whole tensor. Do NOT "simplify" the main block back to `y_pred[:, :-1, :]`
+    # / `y_pred[:, -1, :]`: those expressions are correct ONLY at
+    # `num_aux_layers=0`; with auxiliary blocks appended they would read the LAST
+    # auxiliary block's presence row as the main one and treat every auxiliary
+    # row as an extra query, which mis-slices SILENTLY (this function validates
+    # nothing, by design). The block layout -- main block FIRST, then one block
+    # per auxiliary decoder layer, `y_true` untouched -- is decisions.md D-001.
+
+    :param y_pred: Packed predictions,
+        ``(B, (Q + 1) * (1 + num_aux_layers), C)``.
+    :type y_pred: Any
+    :param include_masks: Whether channels ``5:`` carry mask logits.
+    :type include_masks: bool
+    :param num_aux_layers: Number of auxiliary blocks appended after the main
+        block. ``0`` (the default) is the pre-deep-supervision layout.
+    :type num_aux_layers: int
+    :return: The main block's four fields plus ``aux``, a list of per-auxiliary
+        -block dicts of the same four fields.
+    :rtype: Dict[str, Any]
+    """
+    blocks = 1 + int(num_aux_layers)
+    stride = int(y_pred.shape[1]) // blocks
+    unpacked = _unpack_prediction_block(y_pred[:, :stride, :], include_masks)
+    unpacked["aux"] = [
+        _unpack_prediction_block(
+            y_pred[:, (index + 1) * stride:(index + 2) * stride, :],
+            include_masks)
+        for index in range(int(num_aux_layers))
+    ]
+    return unpacked
 
 
 def unpack_targets(y_true: Any,
@@ -871,10 +930,14 @@ class Sam3DetectionLoss(keras.losses.Loss):
       ``loss_ce`` 0.043937 at 200 against 0.274605 at 32, and a weighted share
       of the total that moves 9.1 % -> 38.4 % over a 64-image split
       (decisions.md D-040).
-    * ``- REFERENCE_ONLY(aux_outputs / first_stage deep supervision)``. The
-      reference runs every loss on every intermediate decoder layer. The port's
-      packed layout carries the final layer only; deep supervision is a packing
-      question, deferred with the training model rather than half-built here.
+    * ``- REFERENCE_ONLY(first_stage deep supervision)``. ``aux_outputs`` deep
+      supervision over the DECODER layers IS shipped, off by default:
+      ``num_aux_layers > 0`` scores one extra packed block per earlier decoder
+      layer against the same targets, at the same weights as the main term
+      (A-2), with the mask terms excluded (A-3). What is NOT shipped, and is
+      named here so its absence is stated rather than silent: the reference's
+      ``first_stage`` (encoder-side proposal) outputs, the o2m / DAC branch, the
+      ``pred_boxes_xyxy`` variant of the box terms, and the semantic-seg loss.
     * ``- REFERENCE_ONLY(o2m / DAC branch, video association, semantic seg)``.
       Deferred wholesale, with their matchers.
     * ``- REFERENCE_ONLY(is_video_grounding / Q_det splits)``. Image-only path.
@@ -883,6 +946,18 @@ class Sam3DetectionLoss(keras.losses.Loss):
         block. Default ``False`` -- the reference's ONE shipped training config
         disables segmentation entirely (decisions.md D-009).
     :type include_masks: bool
+    :param num_aux_layers: (Keyword-position LAST in the signature, so no
+        existing positional call site shifts.) Number of auxiliary
+        decoder-layer blocks appended to
+        ``y_pred`` after the main block. Default ``0``, which is exactly the
+        pre-deep-supervision computation. Each auxiliary block is matched
+        INDEPENDENTLY by the same matcher and added to the total at the SAME
+        weights as the main term, with the mask terms excluded (decisions.md
+        D-004 and D-005). It must agree with the training model's own count --
+        :func:`~dl_techniques.models.sam3.training_model.compile_sam3_trainer`
+        raises on a disagreement, because a mismatch mis-slices instead of
+        raising.
+    :type num_aux_layers: int
     :param weight_ce: Weight on ``loss_ce``. Shipped ``20.0``.
     :type weight_ce: float
     :param weight_presence: Weight on ``presence_loss``. Shipped ``20.0``.
@@ -942,9 +1017,10 @@ class Sam3DetectionLoss(keras.losses.Loss):
     :param cost_giou: Matcher weight on the GIoU cost. Shipped ``2.0``.
     :type cost_giou: float
     :param kwargs: Forwarded to :class:`keras.losses.Loss`.
-    :raises ValueError: If ``pad_n_queries`` is not a positive integer, or if a
-        mask weight is non-zero while ``include_masks`` is ``False`` -- a
-        combination that would silently supervise nothing.
+    :raises ValueError: If ``pad_n_queries`` is not a positive integer, if
+        ``num_aux_layers`` is not a non-negative integer, or if a mask weight is
+        non-zero while ``include_masks`` is ``False`` -- a combination that would
+        silently supervise nothing.
     """
 
     def __init__(
@@ -971,6 +1047,7 @@ class Sam3DetectionLoss(keras.losses.Loss):
             cost_class: float = 2.0,
             cost_bbox: float = 5.0,
             cost_giou: float = 2.0,
+            num_aux_layers: int = 0,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -979,7 +1056,13 @@ class Sam3DetectionLoss(keras.losses.Loss):
             raise ValueError(
                 "Sam3DetectionLoss: pad_n_queries must be a positive int or "
                 f"None, got {pad_n_queries!r}.")
+        if not isinstance(num_aux_layers, int) or num_aux_layers < 0:
+            raise ValueError(
+                "Sam3DetectionLoss: num_aux_layers must be a non-negative int, "
+                f"got {num_aux_layers!r}. It is the number of AUXILIARY blocks, "
+                "not the decoder's layer count.")
         self.include_masks = bool(include_masks)
+        self.num_aux_layers = int(num_aux_layers)
         self.weight_ce = float(weight_ce)
         self.weight_presence = float(weight_presence)
         self.weight_bbox = float(weight_bbox)
@@ -1036,6 +1119,7 @@ class Sam3DetectionLoss(keras.losses.Loss):
             "cost_class": self.cost_class,
             "cost_bbox": self.cost_bbox,
             "cost_giou": self.cost_giou,
+            "num_aux_layers": self.num_aux_layers,
         })
         return config
 
@@ -1050,22 +1134,53 @@ class Sam3DetectionLoss(keras.losses.Loss):
         has to branch. Every value is finite for every input this layout can
         express, including an all-negative batch. It never raises.
 
-        This is the method a trainer should log. :meth:`call` is the weighted
-        sum of exactly these numbers, so a falling total that hides a dead term
-        is visible here and invisible there.
+        This is the method a trainer should log. At ``num_aux_layers > 0`` it
+        reports the MAIN block only, which keeps every logged term comparable
+        across a deep-supervision A/B; :meth:`call` is the weighted sum of
+        exactly these numbers PLUS one equally-weighted, mask-free copy per
+        auxiliary block, so a falling total that hides a dead term is visible
+        here and invisible there.
 
         :param y_true: Packed targets, ``(B, N_max + 1, C)``.
         :type y_true: Any
-        :param y_pred: Packed predictions, ``(B, Q + 1, C)``.
+        :param y_pred: Packed predictions,
+            ``(B, (Q + 1) * (1 + num_aux_layers), C)``.
         :type y_pred: Any
         :return: The six terms plus two diagnostics, all scalars.
         :rtype: Dict[str, Any]
         """
         predictions = unpack_predictions(
-            ops.cast(y_pred, "float32"), self.include_masks)
+            ops.cast(y_pred, "float32"), self.include_masks,
+            self.num_aux_layers)
         targets = unpack_targets(
             ops.cast(y_true, "float32"), self.include_masks)
+        return self._block_terms(predictions, targets, self.include_masks)
 
+    def _block_terms(self, predictions: Dict[str, Any],
+                     targets: Dict[str, Any],
+                     include_mask_terms: bool) -> Dict[str, Any]:
+        """Compute the six terms for ONE unpacked prediction block.
+
+        Interface contract: ``predictions`` is one dict from
+        :func:`unpack_predictions` (the main block or one ``aux`` entry) and
+        ``targets`` is :func:`unpack_targets`' output; ``include_mask_terms``
+        selects whether the two mask terms are computed or returned as exact
+        zeros. The return is :meth:`compute_terms`' dict. This runs its OWN
+        Hungarian assignment, which is what the reference does per auxiliary
+        output (``aux_out["indices"] = self.matcher(aux_out, targets)``) -- an
+        auxiliary layer's boxes are different boxes and inherit no assignment.
+        It never raises.
+
+        :param predictions: One unpacked prediction block.
+        :type predictions: Dict[str, Any]
+        :param targets: The unpacked targets, shared by every block.
+        :type targets: Dict[str, Any]
+        :param include_mask_terms: Whether to compute ``loss_mask`` /
+            ``loss_dice``.
+        :type include_mask_terms: bool
+        :return: The six terms plus two diagnostics, all scalars.
+        :rtype: Dict[str, Any]
+        """
         src_logits = predictions["pred_logits"]
         pred_boxes = predictions["pred_boxes"]
         target_boxes = targets["target_boxes"]
@@ -1224,8 +1339,8 @@ class Sam3DetectionLoss(keras.losses.Loss):
         loss_giou = ops.sum((1.0 - giou) * target_classes) / num_boxes
 
         loss_mask, loss_dice = self._mask_terms(
-            predictions["pred_masks"], targets["target_masks"], assignment,
-            target_classes, num_boxes)
+            predictions["pred_masks"] if include_mask_terms else None,
+            targets["target_masks"], assignment, target_classes, num_boxes)
 
         return {
             "loss_ce": loss_ce,
@@ -1294,24 +1409,79 @@ class Sam3DetectionLoss(keras.losses.Loss):
         loss_dice = ops.sum(dice * target_classes) / num_boxes
         return loss_mask, loss_dice
 
-    def call(self, y_true: Any, y_pred: Any) -> Any:
-        """Return the weighted sum of the six terms as a scalar.
+    def _weighted_total(self, terms: Dict[str, Any],
+                        include_mask_terms: bool) -> Any:
+        """Weight one block's terms into a scalar.
 
-        :param y_true: Packed targets, ``(B, N_max + 1, C)``.
-        :type y_true: Any
-        :param y_pred: Packed predictions, ``(B, Q + 1, C)``.
-        :type y_pred: Any
-        :return: A scalar loss.
+        Interface contract: ``terms`` is a :meth:`_block_terms` dict and
+        ``include_mask_terms`` says whether the two mask weights participate.
+        The return is a scalar in ``terms``' dtype. It never raises.
+
+        :param terms: One block's unweighted terms.
+        :type terms: Dict[str, Any]
+        :param include_mask_terms: Whether to add the weighted mask terms.
+        :type include_mask_terms: bool
+        :return: The weighted sum for this block.
         :rtype: Any
         """
-        terms = self.compute_terms(y_true, y_pred)
         total = (self.weight_ce * terms["loss_ce"]
                  + self.weight_presence * terms["presence_loss"]
                  + self.weight_bbox * terms["loss_bbox"]
                  + self.weight_giou * terms["loss_giou"])
-        if self.include_masks:
+        if include_mask_terms:
             total = total + (self.weight_mask * terms["loss_mask"]
                              + self.weight_dice * terms["loss_dice"])
+        return total
+
+    def call(self, y_true: Any, y_pred: Any) -> Any:
+        """Return the weighted sum of the six terms as a scalar.
+
+        At ``num_aux_layers > 0`` this is the main block's weighted sum PLUS one
+        weighted sum per auxiliary block, each scored against the same targets.
+
+        :param y_true: Packed targets, ``(B, N_max + 1, C)``.
+        :type y_true: Any
+        :param y_pred: Packed predictions,
+            ``(B, (Q + 1) * (1 + num_aux_layers), C)``.
+        :type y_pred: Any
+        :return: A scalar loss.
+        :rtype: Any
+        """
+        predictions = unpack_predictions(
+            ops.cast(y_pred, "float32"), self.include_masks,
+            self.num_aux_layers)
+        targets = unpack_targets(
+            ops.cast(y_true, "float32"), self.include_masks)
+        total = self._weighted_total(
+            self._block_terms(predictions, targets, self.include_masks),
+            self.include_masks)
+
+        # DECISION plan-2026-08-06T055747-1e650383/D-004
+        # Auxiliary blocks are added at the SAME weights as the main term --
+        # a PLAIN SUM, no per-layer coefficient and no depth decay. Do NOT add
+        # one: the oracle is the reference, not intuition.
+        # `Sam3LossWrapper.compute_loss` builds `output_list` as the main output
+        # plus one entry per `aux_outputs` element and accumulates
+        # `total_core_loss` over it with the SAME `loss_fns_find`, the SAME
+        # `weight_dict` and the SAME `num_boxes` divisor; the only extra factor
+        # anywhere on that path, `o2m_weight`, belongs to the one-to-many branch
+        # this port does not have. A `0.5 ** depth`-style schedule is the
+        # obvious-looking "improvement" and it is a silent divergence.
+        # DECISION plan-2026-08-06T055747-1e650383/D-005
+        # ...and the mask terms are EXCLUDED from every auxiliary block
+        # (`include_mask_terms=False` below), which is why the packer is free to
+        # zero-fill those channels. The reference's `Masks` loss defaults
+        # `compute_aux=False` and warns if anyone sets it True, and its one
+        # shipped config writes `compute_aux: false` explicitly, while `Boxes`
+        # and `IABCEMdetr` both default True and are not overridden. This is
+        # moot at the shipped `include_masks=False` and encoded anyway: a
+        # constant transcribed out of the regime that made it correct is this
+        # package's recorded port-fidelity defect class.
+        # See decisions.md D-004 and D-005.
+        for aux_predictions in predictions["aux"]:
+            total = total + self._weighted_total(
+                self._block_terms(aux_predictions, targets, False), False)
+
         if self.scale_by_find_batch_size:
             # DECISION plan-2026-08-05T124709-6c4fac48/D-007
             # `sam3_loss.py:192-195`. Default OFF. This multiplier exists to

@@ -647,6 +647,52 @@ class Sam3Image(keras.Model):
             "presence_logit": presence_logits[-1],
         }
 
+    def call_per_layer(
+            self, inputs: Dict[str, Any], training: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return one prediction dict PER decoder layer, MAIN layer FIRST.
+
+        Interface contract: the input is exactly :meth:`call`'s. The return is a
+        list of ``num_layers`` dicts, each carrying the same five keys
+        :meth:`call` returns. **Element 0 is the LAST decoder layer** -- the one
+        :meth:`call` reports -- and is bit-equal to :meth:`call`'s output field
+        by field; elements ``1..L-1`` are decoder layers ``0..L-2`` in order,
+        which is the reference's ``aux_outputs`` order. The list is therefore in
+        SUPERVISION order, not in depth order, so a consumer that packs it
+        front-to-back gets the main block first by construction rather than by
+        remembering to reverse. It raises exactly what :meth:`call` raises.
+
+        ``pred_masks`` and ``semantic_seg`` are the SAME tensors in every
+        element: the segmentation head consumes the whole hidden stack and emits
+        one set of masks, so there is no per-layer mask to report. They are
+        repeated rather than dropped so every element has one shape, and the
+        consumer decides what to do with them (the training wrapper zero-fills
+        the auxiliary blocks' mask channels -- see decisions.md D-005).
+
+        The only production consumer is
+        :meth:`~dl_techniques.models.sam3.training_model.Sam3TrainingModel.call`
+        at ``deep_supervision=True``.
+
+        :param inputs: As :meth:`call`.
+        :type inputs: Dict[str, Any]
+        :param training: As :meth:`call`.
+        :type training: Optional[bool]
+        :return: ``num_layers`` output dicts, last decoder layer first.
+        :rtype: List[Dict[str, Any]]
+        :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
+        """
+        outputs_class, outputs_coord, presence_logits, seg = (
+            self._forward_stacks(inputs, training=training))
+        num_layers = int(outputs_class.shape[0])
+        order = [num_layers - 1] + list(range(num_layers - 1))
+        return [{
+            "pred_logits": outputs_class[index],
+            "pred_boxes": outputs_coord[index],
+            "pred_masks": seg["pred_masks"],
+            "semantic_seg": seg["semantic_seg"],
+            "presence_logit": presence_logits[index],
+        } for index in order]
+
     def _forward_stacks(
             self, inputs: Dict[str, Any], training: Optional[bool] = None,
     ) -> Tuple[Any, Any, Any, Dict[str, Any]]:

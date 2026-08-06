@@ -726,6 +726,66 @@ class TestForwardStackExtraction:
                                   training=False)
 
 
+class TestPerLayerAccessor:
+    """`call_per_layer` is the public per-layer view the aux-loss wrapper uses.
+
+    Its contract has one load-bearing surprise: the list is in SUPERVISION
+    order, not depth order -- element 0 is the LAST decoder layer (what `call`
+    reports) and elements 1.. are layers 0..L-2. The same vacuity traps as the
+    class above apply, so the box head is randomized and `training=False` is
+    passed explicitly everywhere.
+    """
+
+    def test_element_zero_is_bit_equal_to_call_field_by_field(
+            self, model, batch):
+        randomize(model.transformer.bbox_embed[-1], seed=17)
+        out = model(batch, training=False)
+        main = model.call_per_layer(batch, training=False)[0]
+        assert set(main) == OUTPUT_KEYS
+        for key in OUTPUT_KEYS:
+            assert np.array_equal(np.array(main[key]), np.array(out[key])), (
+                f"{key} is not bit-equal to `call`'s own output (max abs delta "
+                f"{float(np.max(np.abs(np.array(main[key]) - np.array(out[key]))))})")
+
+    def test_the_remaining_elements_are_layers_zero_upward_in_order(
+            self, model, batch):
+        randomize(model.transformer.bbox_embed[-1], seed=17)
+        classes, coords, presence, _ = model._forward_stacks(
+            batch, training=False)
+        per_layer = model.call_per_layer(batch, training=False)
+        assert len(per_layer) == model.transformer.num_layers
+        for offset, entry in enumerate(per_layer[1:]):
+            for key, stack in (("pred_logits", classes),
+                               ("pred_boxes", coords),
+                               ("presence_logit", presence)):
+                assert np.array_equal(np.array(entry[key]),
+                                      np.array(stack[offset])), (
+                    f"element {offset + 1}'s {key} is not decoder layer "
+                    f"{offset}")
+
+    def test_the_order_check_is_not_vacuous_because_the_layers_differ(
+            self, model, batch):
+        """Element 0 must NOT equal element 1, or "main first" is unmeasured."""
+        randomize(model.transformer.bbox_embed[-1], seed=17)
+        per_layer = model.call_per_layer(batch, training=False)
+        assert len(per_layer) > 1
+        for key in ("pred_logits", "pred_boxes", "presence_logit"):
+            assert not np.array_equal(np.array(per_layer[0][key]),
+                                      np.array(per_layer[1][key])), (
+                f"{key} is identical in elements 0 and 1")
+
+    def test_the_segmentation_outputs_are_shared_by_every_element(
+            self, model, batch):
+        """The segmentation head has no layer axis: it consumes the whole
+        hidden stack and emits ONE set of masks. The accessor repeats them so
+        every element has one shape; that is documented, so it is guarded."""
+        per_layer = model.call_per_layer(batch, training=False)
+        for entry in per_layer[1:]:
+            for key in ("pred_masks", "semantic_seg"):
+                assert np.array_equal(np.array(entry[key]),
+                                      np.array(per_layer[0][key]))
+
+
 # ---------------------------------------------------------------------
 # SC-3: the parameter audit
 # ---------------------------------------------------------------------
