@@ -73,7 +73,7 @@ compares values at ``training=False`` -- at ``training=None`` a correct round
 trip measures deltas of 0.2-2.2 that look exactly like reinitialized weights.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import keras
 from keras import ops
@@ -294,6 +294,78 @@ def pack_predictions(outputs: Dict[str, Any],
         axis=1)
 
 
+def select_prediction_blocks(
+        blocks: Sequence[Dict[str, Any]],
+        deep_supervision: bool,
+        query_selection: bool,
+        expected_aux: Optional[int] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Choose which of ``call_per_layer``'s blocks are packed. ONE home.
+
+    Interface contract: ``blocks`` is exactly
+    :meth:`Sam3Image.call_per_layer`'s return, called with
+    ``include_proposals=query_selection`` -- i.e. ``[main] + (L - 1)`` decoder
+    auxiliary blocks, plus the encoder query selection block appended LAST when
+    ``query_selection`` is on. The return is ``(main_block, aux_blocks)`` where
+    ``aux_blocks`` is the decoder auxiliary blocks (only when
+    ``deep_supervision``) FOLLOWED BY the encoder block (only when
+    ``query_selection``), which is the packed order. ``len(aux_blocks)`` is
+    always ``(L - 1 if deep_supervision else 0) + (1 if query_selection else 0)``
+    -- invariant I-5. It reduces nothing, copies no tensor, and raises only when
+    ``expected_aux`` is supplied and disagrees.
+
+    Two consumers pack the SAME blocks and must never drift: this module's
+    :meth:`Sam3TrainingModel.call` and ``train.sam3.train_sam3.evaluate_sam3``.
+    They drifted once already -- D-006 of ``plan-2026-08-06T055747-1e650383``
+    is exactly the case where the eval path packed a different block count from
+    the one the compiled loss slices -- so the selection rule lives here, in one
+    place, rather than being spelled twice.
+
+    # DECISION plan-2026-08-06T185813-fd80240f/D-007
+    # Do NOT "simplify" this to `blocks[1:]`. That spelling is correct at
+    # `{deep_supervision=True, query_selection=True}` and at
+    # `{True, False}` and silently WRONG at `{False, True}`: with deep
+    # supervision off and query selection on, `call_per_layer` still returns all
+    # `L` decoder blocks with the encoder block after them, so `blocks[1:]`
+    # yields `L` auxiliary blocks where `num_aux_layers` says `1`. The loss then
+    # derives `Q = rows // (1 + 1) - 1` from a tensor carrying `1 + L` blocks
+    # and slices GARBAGE -- six finite, plausible, fabricated per-term losses
+    # every epoch, with no exception and no shape symptom, because
+    # `unpack_predictions` validates nothing by design. The encoder block is
+    # taken from the END (`blocks[-1]`) and the decoder auxiliaries from the
+    # middle, so neither is identified by an index that assumes the other is
+    # present. See decisions.md D-007.
+    :param blocks: ``call_per_layer``'s output, main block first.
+    :type blocks: Sequence[Dict[str, Any]]
+    :param deep_supervision: Whether the decoder's earlier layers are packed.
+    :type deep_supervision: bool
+    :param query_selection: Whether the encoder proposal block is packed. Must
+        match the ``include_proposals`` the blocks were produced with.
+    :type query_selection: bool
+    :param expected_aux: When given, the auxiliary count this selection must
+        produce -- the caller's own ``num_aux_layers``. Supplying it converts
+        the one defect this layout cannot otherwise show into a loud failure.
+    :type expected_aux: Optional[int]
+    :return: ``(main_block, aux_blocks)`` in packed order.
+    :rtype: Tuple[Dict[str, Any], List[Dict[str, Any]]]
+    :raises ValueError: If ``expected_aux`` is supplied and disagrees with the
+        number of auxiliary blocks selected.
+    """
+    blocks = list(blocks)
+    encoder = [blocks[-1]] if query_selection else []
+    decoder_aux = blocks[1:len(blocks) - len(encoder)]
+    aux = (decoder_aux if deep_supervision else []) + encoder
+    if expected_aux is not None and len(aux) != int(expected_aux):
+        raise ValueError(
+            "select_prediction_blocks: selected {} auxiliary blocks from {} "
+            "returned blocks at deep_supervision={}, query_selection={}, but "
+            "the caller expects {}. Packing a different block count from the "
+            "one the loss slices mis-slices SILENTLY rather than raising."
+            .format(len(aux), len(blocks), bool(deep_supervision),
+                    bool(query_selection), int(expected_aux)))
+    return blocks[0], aux
+
+
 def pack_targets(target_boxes: Any,
                  target_valid: Any,
                  target_masks: Optional[Any] = None,
@@ -423,13 +495,25 @@ class Sam3TrainingModel(keras.Model):
         :attr:`num_aux_layers` is ``L - 1`` for an ``L``-layer decoder, hence
         ``0`` for a single-layer decoder even when this is ``True``.
     :type deep_supervision: bool
+    :param query_selection: Whether to pack ONE further auxiliary block for the
+        wrapped model's encoder query selection head, after the decoder's. It
+        supervises the head's own proposals through exactly the same per-block
+        class/box/giou/presence terms (invariant I-4: the loss needs no change
+        for it), which is the ONLY gradient that head receives -- its proposals
+        enter the decoder ``stop_gradient``-ed (D-006). Requires the wrapped
+        :class:`Sam3Image` to have been built with ``query_selection=True``;
+        otherwise there are no proposals to pack and the constructor raises
+        rather than let :attr:`num_aux_layers` over-count. Default ``False``.
+    :type query_selection: bool
     :param kwargs: Forwarded to :class:`keras.Model`.
     :raises ValueError: If ``sam3`` is neither a :class:`Sam3Image` nor a
-        deserializable config.
+        deserializable config, or if ``query_selection`` is set on a wrapped
+        model that has no query selection head.
     """
 
     def __init__(self, sam3: Any, include_masks: bool = False,
-                 deep_supervision: bool = False, **kwargs: Any) -> None:
+                 deep_supervision: bool = False,
+                 query_selection: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         if isinstance(sam3, dict):
             sam3 = keras.saving.deserialize_keras_object(sam3)
@@ -440,11 +524,27 @@ class Sam3TrainingModel(keras.Model):
         self.sam3 = sam3
         self.include_masks = bool(include_masks)
         self.deep_supervision = bool(deep_supervision)
-        #: Number of AUXILIARY blocks packed after the main one. Derived from
-        #: the decoder's own layer count, never restated.
+        self.query_selection = bool(query_selection)
+        if self.query_selection and not bool(
+                getattr(self.sam3, "query_selection", False)):
+            raise ValueError(
+                "Sam3TrainingModel: query_selection=True requires a Sam3Image "
+                "built with query_selection=True -- the wrapped model has no "
+                "proposal head, so `call_per_layer(include_proposals=True)` "
+                "would append NO encoder block while num_aux_layers counted "
+                "one, and the loss would slice a stride that does not exist. "
+                "Build the model with `Sam3Image.from_variant(..., "
+                "query_selection=True)`.")
+        #: Number of AUXILIARY blocks packed after the main one -- invariant
+        #: I-5, `(L - 1 if deep_supervision else 0) + (1 if query_selection
+        #: else 0)`. The decoder term is derived from the decoder's own layer
+        #: count, never restated, so it is 0 for a single-layer decoder even at
+        #: `deep_supervision=True`; the encoder term is exactly one block and
+        #: is INDEPENDENT of the decoder's depth.
         self.num_aux_layers = (
-            max(int(self.sam3.transformer.num_layers) - 1, 0)
-            if self.deep_supervision else 0)
+            (max(int(self.sam3.transformer.num_layers) - 1, 0)
+             if self.deep_supervision else 0)
+            + (1 if self.query_selection else 0))
 
         shapes = self.sam3.compute_output_shape()
         self.num_queries = int(shapes["pred_logits"][1])
@@ -458,8 +558,9 @@ class Sam3TrainingModel(keras.Model):
 
         logger.info(
             "Sam3TrainingModel: Q=%d, masks=%s, packed width C=%d, "
-            "aux blocks=%d", self.num_queries, self.include_masks,
-            self.packed_channels, self.num_aux_layers)
+            "aux blocks=%d (deep_supervision=%s, query_selection=%s)",
+            self.num_queries, self.include_masks, self.packed_channels,
+            self.num_aux_layers, self.deep_supervision, self.query_selection)
 
     # -----------------------------------------------------------------
     # build / forward
@@ -506,14 +607,19 @@ class Sam3TrainingModel(keras.Model):
         :type training: Optional[bool]
         :return: ``(B, (Q + 1) * (1 + num_aux_layers), C)`` packed predictions.
         :rtype: Any
+        :raises ValueError: If the blocks selected disagree with
+            :attr:`num_aux_layers` -- see :func:`select_prediction_blocks`.
         """
         if not self.num_aux_layers:
             outputs = self.sam3(inputs, training=training)
             return pack_predictions(outputs, include_masks=self.include_masks)
-        per_layer = self.sam3.call_per_layer(inputs, training=training)
+        per_layer = self.sam3.call_per_layer(
+            inputs, training=training, include_proposals=self.query_selection)
+        main, aux = select_prediction_blocks(
+            per_layer, self.deep_supervision, self.query_selection,
+            expected_aux=self.num_aux_layers)
         return pack_predictions(
-            per_layer[0], include_masks=self.include_masks,
-            aux_outputs=per_layer[1:])
+            main, include_masks=self.include_masks, aux_outputs=aux)
 
     # -----------------------------------------------------------------
     # shapes / config
@@ -559,6 +665,7 @@ class Sam3TrainingModel(keras.Model):
             "sam3": keras.saving.serialize_keras_object(self.sam3),
             "include_masks": self.include_masks,
             "deep_supervision": self.deep_supervision,
+            "query_selection": self.query_selection,
         })
         return config
 
@@ -658,4 +765,5 @@ __all__ = [
     "compile_sam3_trainer",
     "pack_predictions",
     "pack_targets",
+    "select_prediction_blocks",
 ]

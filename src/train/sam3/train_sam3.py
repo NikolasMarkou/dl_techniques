@@ -112,6 +112,7 @@ from dl_techniques.models.sam3.training_model import (
     Sam3TrainingModel,
     compile_sam3_trainer,
     pack_predictions,
+    select_prediction_blocks,
 )
 from dl_techniques.utils.logger import logger
 
@@ -805,13 +806,28 @@ def evaluate_sam3(
         # pass either way: at `num_aux_layers > 0` the main-layer dict is
         # element 0 of `call_per_layer`'s list and is bit-equal to `call`'s
         # output, so this branch does not double the eval cost.
-        # See decisions.md D-006.
+        #
+        # DECISION plan-2026-08-06T185813-fd80240f/D-007
+        # EXTENDED to the encoder query selection block: `include_proposals`
+        # and the block SELECTION are both
+        # taken from the model's own flags and run through the SAME
+        # `select_prediction_blocks` helper `Sam3TrainingModel.call` uses, so
+        # the two spellings cannot drift the way they drifted here once. The
+        # `getattr` defaults reproduce the pre-flag behaviour exactly, for the
+        # duck-typed stubs this function's own tests hand it.
+        # See decisions.md D-006, D-007.
         if model.num_aux_layers:
-            per_layer = model.sam3.call_per_layer(inputs, training=False)
-            outputs = per_layer[0]
+            query_selection = bool(getattr(model, "query_selection", False))
+            per_layer = model.sam3.call_per_layer(
+                inputs, training=False, include_proposals=query_selection)
+            outputs, aux_outputs = select_prediction_blocks(
+                per_layer,
+                bool(getattr(model, "deep_supervision", True)),
+                query_selection,
+                expected_aux=model.num_aux_layers)
             packed = pack_predictions(outputs,
                                       include_masks=model.include_masks,
-                                      aux_outputs=per_layer[1:])
+                                      aux_outputs=aux_outputs)
         else:
             outputs = model.sam3(inputs, training=False)
             packed = pack_predictions(outputs,

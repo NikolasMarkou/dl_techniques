@@ -36,7 +36,11 @@ from dl_techniques.losses.sam3_detection_loss import (
     unpack_targets,
 )
 from dl_techniques.models.sam3.sam3_image import Sam3Image
-from dl_techniques.models.sam3.training_model import pack_predictions
+from dl_techniques.models.sam3.training_model import (
+    Sam3TrainingModel,
+    compile_sam3_trainer,
+    pack_predictions,
+)
 from train.common.args import explicitly_set_flags
 from train.sam3.train_sam3 import (
     CLI_TO_CONFIG,
@@ -1219,3 +1223,91 @@ class TestEvaluation:
             assert math.isfinite(metrics[term]), f"{term} is not finite"
         # Masks are off in this fixture, so both mask terms must be exactly 0.
         assert metrics["loss_mask"] == 0.0 and metrics["loss_dice"] == 0.0
+
+
+class _RowCountSpyLoss(Sam3DetectionLoss):
+    """A real loss that RECORDS the row count of every tensor it is handed.
+
+    Interface contract: identical to :class:`Sam3DetectionLoss` in every
+    computation -- it overrides nothing but the recording -- and exposes
+    ``observed_rows``, the ``y_pred.shape[1]`` of each ``compute_terms`` call in
+    order. It exists because the packed tensor ``evaluate_sam3`` builds is a
+    LOCAL: the only place a test can observe it is the object the function hands
+    it to.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.observed_rows: List[int] = []
+
+    def compute_terms(self, y_true: Any, y_pred: Any) -> Any:
+        self.observed_rows.append(int(y_pred.shape[1]))
+        return super().compute_terms(y_true, y_pred)
+
+
+class TestEvaluateSam3PacksTheRowsTheLossSlices:
+    """D-006's repair, extended to the encoder query selection block.
+
+    ``evaluate_sam3`` packs its OWN copy of the prediction tensor, and it is the
+    consumer that was BITTEN once already: a stride mismatch there does not
+    raise -- ``unpack_predictions`` validates nothing by design -- it reports six
+    finite, plausible, FABRICATED per-term losses every epoch. The oracle is the
+    packed-layout arithmetic ``(Q + 1) * (1 + num_aux_layers)``, and
+    ``num_aux_layers`` is itself re-derived here from the two flags rather than
+    read off the model, so a model that composed it wrongly cannot make this
+    test agree with itself.
+    """
+
+    @pytest.mark.parametrize("deep,query", [(False, False), (True, False),
+                                            (False, True), (True, True)])
+    def test_the_packed_row_count_matches_the_composition_oracle(
+            self, deep: bool, query: bool) -> None:
+        config = Sam3TrainingConfig(**TINY_KWARGS)
+        keras.utils.set_random_seed(2468)
+        sam3 = Sam3Image.from_variant("tiny", query_selection=True)
+        model = Sam3TrainingModel(sam3, include_masks=config.include_masks,
+                                  deep_supervision=deep, query_selection=query)
+        model.build(None)
+
+        layers = int(sam3.transformer.num_layers)
+        expected_aux = (layers - 1 if deep else 0) + (1 if query else 0)
+        assert model.num_aux_layers == expected_aux
+
+        spy = _RowCountSpyLoss(include_masks=config.include_masks,
+                               pad_n_queries=model.num_queries,
+                               num_aux_layers=model.num_aux_layers)
+        compile_sam3_trainer(model, loss=spy)
+        _, val_dataset = create_datasets(config, model)
+
+        metrics = evaluate_sam3(model, val_dataset)
+
+        expected_rows = (model.num_queries + 1) * (1 + expected_aux)
+        assert spy.observed_rows, "evaluate_sam3 scored no batch"
+        assert set(spy.observed_rows) == {expected_rows}, (
+            f"evaluate_sam3 packed {sorted(set(spy.observed_rows))} rows at "
+            f"deep_supervision={deep}, query_selection={query}; the compiled "
+            f"loss slices {expected_rows}")
+        # Liveness: the run produced real numbers, so the row count above was
+        # observed on a path that actually scored something.
+        assert math.isfinite(metrics["loss_ce"])
+        assert math.isfinite(metrics["box_iou"])
+
+    def test_the_four_combinations_do_not_all_pack_the_same_row_count(
+            self) -> None:
+        """Non-vacuity for the parametrized test above.
+
+        If every combination happened to produce the same row count, the oracle
+        would be satisfied by a function that ignored the flags entirely. On
+        `tiny` (2 decoder layers) the four combinations are 0/1/1/2 auxiliary
+        blocks, i.e. three distinct row counts.
+        """
+        keras.utils.set_random_seed(2468)
+        sam3 = Sam3Image.from_variant("tiny", query_selection=True)
+        counts = set()
+        for deep, query in ((False, False), (True, False), (False, True),
+                            (True, True)):
+            model = Sam3TrainingModel(sam3, deep_supervision=deep,
+                                      query_selection=query)
+            model.build(None)
+            counts.add(model.compute_output_shape()[1])
+        assert len(counts) >= 3

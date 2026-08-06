@@ -51,6 +51,7 @@ from dl_techniques.models.sam3.training_model import (
     compile_sam3_trainer,
     pack_predictions,
     pack_targets,
+    select_prediction_blocks,
 )
 
 # ---------------------------------------------------------------------
@@ -1020,3 +1021,534 @@ class TestNumAuxLayersAgreement:
         compile_sam3_trainer(deep_model)
         assert deep_model.loss.num_aux_layers == deep_model.num_aux_layers
         assert deep_model.jit_compile is False
+
+
+# ---------------------------------------------------------------------
+# Encoder query selection -- the packed-block ARITHMETIC (invariant I-5) and
+# the block ORDER.
+#
+# `num_aux_layers = (L - 1 if deep_supervision else 0) + (1 if query_selection
+# else 0)`. The dangerous combination is `{deep_supervision=False,
+# query_selection=True}`: `call_per_layer(include_proposals=True)` returns all
+# `L` decoder blocks with the encoder block after them, so a packer that spells
+# the auxiliary blocks `per_layer[1:]` yields `L` blocks where `num_aux_layers`
+# says `1` -- and `unpack_predictions` validates NOTHING, so the loss then
+# slices garbage and reports six finite, plausible, fabricated per-term losses
+# instead of raising. Every assertion below is on a MEASURED row count or a
+# MEASURED value, never on the flag.
+# ---------------------------------------------------------------------
+
+#: The four flag combinations and their `num_aux_layers` at an L-layer decoder,
+#: written as the ARITHMETIC rather than as numbers, so the table cannot quietly
+#: be re-fitted to whatever the implementation happens to return. The literal
+#: `L=3` numbers `0 / 2 / 1 / 3` are asserted separately below.
+COMPOSITION_TABLE = (
+    (False, False, lambda layers: 0),
+    (True, False, lambda layers: max(layers - 1, 0)),
+    (False, True, lambda layers: 1),
+    (True, True, lambda layers: max(layers - 1, 0) + 1),
+)
+
+
+def query_selection_sam3(decoder_layers=3):
+    """A `tiny` model WITH the proposal head, at a chosen decoder depth.
+
+    `tiny` ships 2 decoder layers; the plan's composition table is stated at
+    `L = 3`, and `L = 1` is a named edge case, so the depth is a parameter.
+    """
+    keras.utils.set_random_seed(4242)
+    return Sam3Image.from_variant(
+        "tiny", decoder_layers=decoder_layers, query_selection=True)
+
+
+def built_wrapper(sam3, deep_supervision, query_selection):
+    model = Sam3TrainingModel(sam3, deep_supervision=deep_supervision,
+                              query_selection=query_selection)
+    model.build(None)
+    return model
+
+
+class TestNumAuxLayersComposition:
+    """I-5, asserted at all four flag combinations plus the `L = 1` edge."""
+
+    @pytest.fixture(scope="class")
+    def sam3_three(self):
+        return query_selection_sam3(decoder_layers=3)
+
+    def test_the_fixture_really_has_three_decoder_layers(self, sam3_three):
+        """The premise of every literal in the table below."""
+        assert int(sam3_three.transformer.num_layers) == 3
+        assert sam3_three.query_selection is True
+        assert sam3_three.query_selection_head is not None
+
+    def test_the_four_combination_table_at_three_decoder_layers(
+            self, sam3_three):
+        """`{F,F} -> 0`, `{T,F} -> 2`, `{F,T} -> 1`, `{T,T} -> 3`.
+
+        RED-proven by dropping the `+ (1 if query_selection else 0)` term from
+        the composition: the `{F,T}` and `{T,T}` rows fire.
+        """
+        expected = {(False, False): 0, (True, False): 2,
+                    (False, True): 1, (True, True): 3}
+        measured = {}
+        for deep, query in expected:
+            model = built_wrapper(sam3_three, deep, query)
+            measured[(deep, query)] = model.num_aux_layers
+        assert measured == expected
+
+    def test_the_table_is_the_arithmetic_and_not_three_hardcoded_numbers(
+            self, sam3_three):
+        layers = int(sam3_three.transformer.num_layers)
+        for deep, query, rule in COMPOSITION_TABLE:
+            model = built_wrapper(sam3_three, deep, query)
+            assert model.num_aux_layers == rule(layers), (
+                f"deep_supervision={deep}, query_selection={query}")
+
+    def test_a_single_layer_decoder_still_gets_the_encoder_block(self):
+        """`L = 1`: deep supervision contributes 0, query selection still 1.
+
+        The named edge case. A composition spelled `L - 1 + qs` with the deep
+        supervision term NOT gated by its own flag reads the same here, which is
+        why the `{F,T}` row is asserted beside the `{T,T}` one.
+        """
+        sam3 = query_selection_sam3(decoder_layers=1)
+        assert int(sam3.transformer.num_layers) == 1
+        assert built_wrapper(sam3, True, False).num_aux_layers == 0
+        assert built_wrapper(sam3, False, True).num_aux_layers == 1
+        assert built_wrapper(sam3, True, True).num_aux_layers == 1
+
+    def test_query_selection_without_a_proposal_head_raises(self, tiny_model):
+        """The wrapper flag cannot out-run the wrapped model.
+
+        Without this raise, `call_per_layer(include_proposals=True)` would
+        append NO block (there are no proposals) while `num_aux_layers` counted
+        one, and the loss would slice a stride that does not exist.
+        """
+        assert tiny_model.sam3.query_selection is False
+        with pytest.raises(ValueError, match="query_selection"):
+            Sam3TrainingModel(tiny_model.sam3, query_selection=True)
+
+
+class TestComputeOutputShapeFollowsTheComposition:
+    """`compute_output_shape` is VERIFIED against the real forward pass."""
+
+    @pytest.fixture(scope="class")
+    def sam3_three(self):
+        return query_selection_sam3(decoder_layers=3)
+
+    @pytest.mark.parametrize("deep,query", [(False, False), (True, False),
+                                            (False, True), (True, True)])
+    def test_the_declared_shape_equals_the_measured_one(
+            self, sam3_three, rng, deep, query):
+        """Declared and MEASURED, at every combination.
+
+        A declared shape that merely restates `num_aux_layers` proves nothing
+        about what `call` packs; the forward pass is what closes that gap, and
+        it is the quantity `unpack_predictions` divides by.
+        """
+        model = built_wrapper(sam3_three, deep, query)
+        rows = (model.num_queries + 1) * (1 + model.num_aux_layers)
+        assert model.compute_output_shape() == (
+            None, rows, model.packed_channels)
+
+        packed = np.array(model(tiny_inputs(rng, batch=2), training=False))
+        assert packed.shape == (2, rows, model.packed_channels)
+
+
+class TestEncoderBlockIsPackedLast:
+    """The ORDER, pinned by VALUE -- the loss weights every block equally."""
+
+    @pytest.fixture(scope="class")
+    def sam3_three(self):
+        return query_selection_sam3(decoder_layers=3)
+
+    def test_the_last_packed_block_is_the_encoder_one_at_both_flags_on(
+            self, sam3_three):
+        """`{T,T}`: blocks are `[main, dec_0, dec_1, ENCODER]`, in that order.
+
+        The loss applies the SAME per-block terms at the SAME weight to every
+        block (D-004 of `plan-2026-08-06T055747-1e650383`), so a wrong ORDER is
+        INVISIBLE in the loss value and wrong in every per-block diagnostic.
+        Only a value comparison per block position can see it.
+        """
+        model = built_wrapper(sam3_three, True, True)
+        inputs = tiny_inputs(np.random.default_rng(31337), batch=2)
+        blocks = model.sam3.call_per_layer(
+            inputs, training=False, include_proposals=True)
+        assert len(blocks) == 4, "3 decoder blocks + 1 encoder block"
+
+        packed = np.array(model(inputs, training=False))
+        rows = model.num_queries + 1
+        assert packed.shape[1] == rows * 4
+
+        boxes = slice(PACKED_BOX_START, PACKED_MASK_START)
+        for index, block in enumerate(blocks):
+            np.testing.assert_array_equal(
+                packed[:, index * rows:index * rows + model.num_queries,
+                       boxes],
+                np.array(block["pred_boxes"]),
+                err_msg=f"block {index} is not the one packed at that offset")
+
+        # Non-vacuity: the four blocks are DISTINCT, so the per-position
+        # equalities above are statements about order and not tautologies.
+        packed_boxes = [packed[:, i * rows:i * rows + model.num_queries, boxes]
+                        for i in range(4)]
+        for index in range(3):
+            assert not np.array_equal(packed_boxes[index], packed_boxes[3]), (
+                f"decoder block {index} equals the encoder block; the order "
+                "assertion above cannot discriminate")
+
+    def test_at_query_selection_only_the_single_aux_block_is_the_encoder_one(
+            self, sam3_three):
+        """`{F,T}` -- the combination no prior run has produced.
+
+        This is the mis-slice trap in the flesh: `call_per_layer` still returns
+        all 3 decoder blocks, and the ONE auxiliary block packed must be the
+        ENCODER's, not decoder layer 0's.
+        """
+        model = built_wrapper(sam3_three, False, True)
+        assert model.num_aux_layers == 1
+        inputs = tiny_inputs(np.random.default_rng(31338), batch=2)
+        blocks = model.sam3.call_per_layer(
+            inputs, training=False, include_proposals=True)
+
+        packed = np.array(model(inputs, training=False))
+        rows = model.num_queries + 1
+        assert packed.shape[1] == rows * 2
+        boxes = slice(PACKED_BOX_START, PACKED_MASK_START)
+        aux = packed[:, rows:rows + model.num_queries, boxes]
+
+        np.testing.assert_array_equal(aux, np.array(blocks[-1]["pred_boxes"]))
+        for index in (1, 2):
+            assert not np.array_equal(
+                aux, np.array(blocks[index]["pred_boxes"])), (
+                f"the single auxiliary block is decoder block {index}, not the "
+                "encoder's")
+
+    def test_the_encoder_block_carries_the_heads_own_selected_boxes(
+            self, sam3_three):
+        """One more link back: the last block IS the proposal head's output.
+
+        `call_per_layer` is the intermediary; this asserts the packed rows
+        against the HEAD's `selected_boxes` directly, so a block that merely
+        looked encoder-shaped cannot pass.
+        """
+        model = built_wrapper(sam3_three, True, True)
+        inputs = tiny_inputs(np.random.default_rng(31339), batch=2)
+        proposals = model.sam3._forward_all(inputs, training=False)[4]
+        packed = np.array(model(inputs, training=False))
+        rows = model.num_queries + 1
+        np.testing.assert_array_equal(
+            packed[:, -rows:-1, PACKED_BOX_START:PACKED_MASK_START],
+            np.array(proposals["selected_boxes"]))
+        np.testing.assert_array_equal(
+            packed[:, -rows:-1, PACKED_SCORE_CHANNEL],
+            np.array(proposals["selected_objectness"])[..., 0])
+
+
+class TestSelectPredictionBlocks:
+    """The selection helper itself, on hand-built stand-ins.
+
+    One home for "which blocks get packed" -- `Sam3TrainingModel.call` and
+    `train.sam3.train_sam3.evaluate_sam3` both call it, and they drifted once
+    (D-006). Testing it directly is what makes both call sites cheap to trust.
+    """
+
+    @staticmethod
+    def _blocks(count):
+        return [{"tag": index} for index in range(count)]
+
+    def test_it_reproduces_the_composition_table(self):
+        # 3 decoder blocks + 1 encoder block.
+        with_encoder = self._blocks(4)
+        without = self._blocks(3)
+        assert select_prediction_blocks(without, False, False)[1] == []
+        assert select_prediction_blocks(without, True, False)[1] == without[1:]
+        assert select_prediction_blocks(
+            with_encoder, False, True)[1] == [with_encoder[3]]
+        assert select_prediction_blocks(
+            with_encoder, True, True)[1] == with_encoder[1:]
+
+    def test_the_main_block_is_always_element_zero(self):
+        blocks = self._blocks(4)
+        for deep, query in ((False, False), (True, False), (False, True),
+                            (True, True)):
+            source = blocks if query else blocks[:3]
+            assert select_prediction_blocks(
+                source, deep, query)[0] is source[0]
+
+    def test_the_encoder_block_is_never_taken_as_a_decoder_auxiliary(self):
+        """`{F,T}` must select exactly one block and it must be the LAST."""
+        blocks = self._blocks(4)
+        main, aux = select_prediction_blocks(blocks, False, True)
+        assert main == {"tag": 0}
+        assert aux == [{"tag": 3}]
+
+    def test_a_disagreeing_expected_count_raises(self):
+        with pytest.raises(ValueError, match="mis-slice"):
+            select_prediction_blocks(self._blocks(4), False, True,
+                                     expected_aux=3)
+        # ...and the agreeing count does not.
+        select_prediction_blocks(self._blocks(4), True, True, expected_aux=3)
+
+
+class TestTheLossReadsTheEncoderBlock:
+    """The MANDATED two-mutation guard (the G3-A / G3-B lesson).
+
+    "The loss reads the encoder block" is ONE guard with TWO assertions, each
+    with its own mutation, because the prior plan MEASURED that the gradient
+    assertion alone stays GREEN under the second mutation's condition:
+
+    * A (`test_the_proposal_head_receives_gradient_only_through_its_own_block`)
+      is RED when `pack_predictions` receives a `stop_gradient`-ed encoder
+      block -- the head's weights then have no route to the loss at all.
+    * B (`test_the_compiled_loss_slices_the_encoder_block_as_the_last_aux`) is
+      RED when the LOSS's `num_aux_layers` excludes the encoder block while the
+      model still packs it: the stride moves, and the block the loss reads last
+      is no longer the encoder's rows.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        return built_wrapper(query_selection_sam3(decoder_layers=3),
+                             True, True)
+
+    def test_the_proposal_head_receives_gradient_only_through_its_own_block(
+            self, model, synthetic_targets):
+        """A: the packed encoder block is the head's ONLY gradient route.
+
+        The proposals enter the decoder `stop_gradient`-ed (D-006), so if the
+        encoder block were dropped from the packing -- or packed detached --
+        every one of these weights would be dead while the loss stayed finite
+        and every shape stayed right.
+
+        MEASURED, and NOT asserted as "all twelve weights move": at
+        INITIALIZATION exactly 8 of the head's 12 weights get a non-zero
+        gradient. `box_head_2`'s kernel is ZERO-initialized (D-112's
+        precedent, so every proposal starts exactly at its grid anchor), and a
+        zero last kernel back-propagates exactly zero into the stack behind it
+        -- `box_head_0` and `box_head_1` are dead until `box_head_2` itself
+        moves. That is a property of the initialization, not of the packing,
+        and the companion `fit()` test below shows those four waking up on the
+        second step. Asserting "all twelve" here would have been a wrong
+        expectation dressed as a guard.
+        """
+        boxes, valid, _ = synthetic_targets
+        inputs = tiny_inputs(np.random.default_rng(555), batch=2)
+        y_true = ops.convert_to_tensor(
+            np.array(pack_targets(boxes[:2], valid[:2])))
+        loss = Sam3DetectionLoss(num_aux_layers=model.num_aux_layers)
+        head = model.sam3.query_selection_head
+        assert head.trainable_variables, "the head owns no weights"
+
+        with tf.GradientTape() as tape:
+            value = loss(y_true, model(inputs, training=True))
+        grads = tape.gradient(value, head.trainable_variables)
+
+        assert np.isfinite(float(ops.convert_to_numpy(value)))
+        norms = {}
+        for grad, weight in zip(grads, head.trainable_variables):
+            assert grad is not None, f"{weight.path} got a None gradient"
+            norms[weight.path.split("/")[-2] + "/"
+                  + weight.path.split("/")[-1]] = float(
+                      np.abs(as_dense(grad)).max())
+
+        # The objectness stack is live end to end -- it is what SELECTS, and a
+        # dead objectness head is this mechanism's named vacuity mode.
+        for index in range(3):
+            for field in ("kernel", "bias"):
+                key = f"objectness_head_{index}/{field}"
+                assert norms[key] > 0.0, f"{key} got an all-zero gradient"
+        # ...and the box stack is live at its last projection, which is the
+        # only place it CAN be live at initialization.
+        assert norms["box_head_2/kernel"] > 0.0
+        assert norms["box_head_2/bias"] > 0.0
+        # The zero-init consequence, pinned as the measurement it is rather
+        # than left as an unexplained gap in the assertion above.
+        assert norms["box_head_0/kernel"] == 0.0
+        assert norms["box_head_1/kernel"] == 0.0
+
+    def test_the_compiled_loss_slices_the_encoder_block_as_the_last_aux(
+            self, model):
+        """B: the rows the loss reads LAST are the head's own selected boxes.
+
+        `compile_sam3_trainer` constructs the loss, so this measures the number
+        the trainer actually ships -- not one the test chose. It then unpacks
+        the model's real packed tensor AT THAT STRIDE and compares the last
+        auxiliary block against the proposal head's output value-exactly.
+        """
+        compile_sam3_trainer(model)
+        inputs = tiny_inputs(np.random.default_rng(556), batch=2)
+        proposals = model.sam3._forward_all(inputs, training=False)[4]
+        packed = model(inputs, training=False)
+        # Unpacked at the LOSS's OWN stride, not the model's: that is the
+        # number the compiled trainer actually slices with, and the two
+        # disagreeing is the whole failure mode.
+        back = unpack_predictions(packed, model.include_masks,
+                                  model.loss.num_aux_layers)
+
+        np.testing.assert_array_equal(
+            np.array(back["aux"][-1]["pred_boxes"]),
+            np.array(proposals["selected_boxes"]))
+        # Non-vacuity: the last auxiliary block is not the main block, so the
+        # equality above is a statement about the STRIDE.
+        assert not np.array_equal(
+            np.array(back["aux"][-1]["pred_boxes"]),
+            np.array(back["pred_boxes"]))
+
+
+class TestNumAuxLayersAgreementAtEveryCombination:
+    """`compile_sam3_trainer`'s raise must keep passing at all four."""
+
+    @pytest.fixture(scope="class")
+    def sam3_three(self):
+        return query_selection_sam3(decoder_layers=3)
+
+    @pytest.mark.parametrize("deep,query", [(False, False), (True, False),
+                                            (False, True), (True, True)])
+    def test_the_default_loss_inherits_the_composed_count(
+            self, sam3_three, deep, query):
+        model = built_wrapper(sam3_three, deep, query)
+        compile_sam3_trainer(model)
+        assert model.loss.num_aux_layers == model.num_aux_layers
+        assert model.jit_compile is False
+
+    @pytest.mark.parametrize("deep,query", [(False, False), (True, False),
+                                            (False, True), (True, True)])
+    def test_a_loss_that_disagrees_by_one_still_raises(
+            self, sam3_three, deep, query):
+        """Off by one in EITHER direction, at every combination."""
+        model = built_wrapper(sam3_three, deep, query)
+        with pytest.raises(ValueError, match="num_aux_layers"):
+            compile_sam3_trainer(
+                model,
+                loss=Sam3DetectionLoss(
+                    num_aux_layers=model.num_aux_layers + 1))
+        if model.num_aux_layers:
+            with pytest.raises(ValueError, match="num_aux_layers"):
+                compile_sam3_trainer(
+                    model,
+                    loss=Sam3DetectionLoss(
+                        num_aux_layers=model.num_aux_layers - 1))
+
+
+class TestQuerySelectionSerialization:
+    """The `.keras` round trip with the encoder block in the layout.
+
+    `training=False` on BOTH sides: at `None` a CORRECT restore reads deltas
+    that look exactly like reinitialized weights (D-123). Quoted from a CPU run
+    -- GPU 1 is not bit-reproducible run to run (~5e-6 on a `pred_boxes` sum,
+    measured on a pristine tree in step 5), so an exact-delta claim taken there
+    would be a coin flip.
+    """
+
+    @pytest.fixture(scope="class", params=[(False, True), (True, True)],
+                    ids=["query_only", "both_flags"])
+    def round_trip(self, request):
+        deep, query = request.param
+        keras.utils.set_random_seed(88)
+        model = Sam3TrainingModel(
+            Sam3Image.from_variant("tiny", decoder_layers=3,
+                                   query_selection=True),
+            deep_supervision=deep, query_selection=query)
+        model.build(None)
+        inputs = tiny_inputs(np.random.default_rng(20260807), batch=2)
+        original = np.array(model(inputs, training=False))
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sam3_qsel_trainer.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        return model, restored, inputs, original
+
+    def test_the_encoder_block_being_compared_is_not_vacuous(self, round_trip):
+        model, _, _, original = round_trip
+        rows = model.num_queries + 1
+        assert original.shape[1] == rows * (1 + model.num_aux_layers)
+        encoder_block = original[:, -rows:, :]
+        assert np.abs(encoder_block).max() > 0.0
+        assert not np.array_equal(encoder_block, original[:, :rows, :])
+
+    def test_the_restored_model_declares_the_same_layout(self, round_trip):
+        model, restored, _, _ = round_trip
+        assert restored.query_selection is True
+        assert restored.deep_supervision is model.deep_supervision
+        assert restored.num_aux_layers == model.num_aux_layers
+        assert restored.sam3.query_selection is True
+        assert len(restored.trainable_variables) == len(
+            model.trainable_variables)
+
+    def test_the_round_trip_is_value_identical(self, round_trip):
+        _, restored, inputs, original = round_trip
+        reloaded = np.array(restored(inputs, training=False))
+        assert reloaded.shape == original.shape
+        delta = float(np.abs(original - reloaded).max())
+        assert delta == 0.0, (
+            f"query-selection round-trip max |delta| = {delta}; a nested "
+            "sub-layer weight loss restores FRESH kernels while every count "
+            "and path still matches")
+
+    def test_the_delta_reader_sees_a_perturbed_proposal_head_weight(
+            self, round_trip):
+        """Liveness, on the PROPOSAL HEAD specifically.
+
+        The generic round-trip liveness arm perturbs a decoder weight, which
+        would still pass on a restore that dropped the proposal head entirely.
+        """
+        _, restored, inputs, original = round_trip
+        victim = restored.sam3.query_selection_head.trainable_variables[0]
+        before = np.array(victim)
+        try:
+            victim.assign(before + 0.5)
+            perturbed = np.array(restored(inputs, training=False))
+            assert float(np.abs(original - perturbed).max()) > 0.0
+        finally:
+            victim.assign(before)
+        assert float(np.abs(
+            original - np.array(restored(inputs, training=False))).max()) == 0.0
+
+    def test_query_selection_round_trips_through_get_config(self, round_trip):
+        model, _, _, _ = round_trip
+        config = model.get_config()
+        assert config["query_selection"] is True
+        restored = Sam3TrainingModel.from_config(config)
+        assert restored.query_selection is True
+        assert restored.num_aux_layers == model.num_aux_layers
+
+
+class TestAStepRunsWithTheEncoderBlockPacked:
+    """A real `fit()` step at `{T,T}`, asserting the HEAD's weights moved."""
+
+    def test_a_few_steps_move_every_proposal_head_weight(self,
+                                                         synthetic_targets):
+        """A finite loss alone cannot see a step that moves nothing.
+
+        THREE epochs, deliberately: `box_head_2`'s kernel is zero-initialized,
+        so on the FIRST step it back-propagates exactly zero into `box_head_0`
+        and `box_head_1` (measured in the gradient guard above). They move only
+        once `box_head_2` is no longer zero. A one-epoch version of this test
+        would have to exempt four weights and would then be blind to a genuinely
+        dead box stack.
+
+        `learning_rate=0.05`, not the `1.0` the deep-supervision step test uses:
+        at `1.0` this model diverges within two steps and the matcher then
+        raises `matrix contains invalid numeric entries` on a NaN cost -- a real
+        failure of the test's own setup, not of the code under test.
+        """
+        model = built_wrapper(query_selection_sam3(decoder_layers=3),
+                              True, True)
+        boxes, valid, _ = synthetic_targets
+        inputs = tiny_inputs(np.random.default_rng(999), batch=2)
+        y_true = np.array(pack_targets(boxes[:2], valid[:2]))
+
+        compile_sam3_trainer(
+            model, optimizer=keras.optimizers.SGD(learning_rate=0.05))
+        head = model.sam3.query_selection_head
+        before = [np.array(w) for w in head.trainable_variables]
+        history = model.fit(inputs, y_true, epochs=3, batch_size=2, verbose=0)
+        after = [np.array(w) for w in head.trainable_variables]
+
+        assert np.isfinite(history.history["loss"][0])
+        for weight, first, second in zip(head.trainable_variables, before,
+                                         after):
+            assert not np.array_equal(first, second), (
+                f"{weight.path} did not move in three real fit() steps")

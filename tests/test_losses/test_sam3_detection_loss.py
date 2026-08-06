@@ -1966,3 +1966,84 @@ class TestG5AuxiliaryBlocksCarryNoMaskSupervision:
         control = packed.copy()
         control[:, :QUERIES, PACKED_MASK_START:] += 17.0
         assert float(ops.convert_to_numpy(loss(y_true, control))) != base
+
+
+class TestFourBlocksAreSupervisedIndependently:
+    """`num_aux_layers=3` -- the layout encoder query selection produces.
+
+    `plan-2026-08-06T185813-fd80240f` packs ONE further uniform block for the
+    encoder proposal head, after the decoder's, so at `L=3` with both flags on
+    the loss sees `1 + 3` blocks. Invariant I-4 says this file needs NO change
+    for that (`unpack_predictions` loops over `range(num_aux_layers)` and
+    `Sam3DetectionLoss.call` iterates `predictions["aux"]` with no block index
+    anywhere) -- and an empty diff on this file is a success criterion of that
+    plan. This class is what turns "needs no change" from a reading into an
+    executed measurement: the block count nothing had exercised is exercised
+    here, and the LAST block -- the one the encoder head owns -- is checked
+    independently of the two before it.
+    """
+
+    def test_the_last_of_three_auxiliary_blocks_gets_its_own_gradient(self):
+        """Per-index, and the LAST index especially.
+
+        An off-by-one that supervised only blocks 1 and 2 would leave the
+        encoder head with no gradient at all while the loss stayed finite and
+        every shape stayed right.
+        """
+        num_aux = 3
+        y_true, blocks = _aux_stack(num_aux)
+        tensors = [tf.constant(block) for block in blocks]
+        loss = _loss(include_masks=False, num_aux_layers=num_aux)
+
+        with tf.GradientTape() as tape:
+            for tensor in tensors:
+                tape.watch(tensor)
+            value = loss(y_true, tf.concat(tensors, axis=1))
+        grads = tape.gradient(value, tensors)
+
+        for index in range(num_aux + 1):
+            assert grads[index] is not None, f"block {index} gradient is None"
+            box_grad = ops.convert_to_numpy(
+                grads[index])[:, :QUERIES,
+                              PACKED_BOX_START:PACKED_MASK_START]
+            assert np.abs(box_grad).max() > 0.0, (
+                f"block {index} got an all-zero box gradient")
+
+    def test_four_blocks_decompose_into_the_sum_of_four_standalone_blocks(
+            self):
+        """G4's rule at the new block count: still a plain equal-weight sum.
+
+        This is what makes the ORDER of the packed blocks invisible in the LOSS
+        VALUE -- and therefore what makes the packing-order guard on the model
+        side load-bearing rather than decorative.
+        """
+        num_aux = 3
+        y_true, blocks = _aux_stack(num_aux)
+        total = float(ops.convert_to_numpy(
+            _loss(include_masks=False, num_aux_layers=num_aux)(
+                y_true, np.concatenate(blocks, axis=1))))
+        parts = [float(ops.convert_to_numpy(
+            _loss(include_masks=False)(y_true, block))) for block in blocks]
+        assert len(set(parts)) == len(parts), "the blocks are not distinct"
+        np.testing.assert_allclose(total, sum(parts), rtol=1e-6, atol=0.0)
+
+    def test_a_stride_short_by_one_block_reports_different_main_terms(self):
+        """The mis-slice, MEASURED at this block count.
+
+        Handing a 4-block tensor to a loss at `num_aux_layers=2` does not raise
+        -- `unpack_predictions` validates nothing by design. It reports a
+        DIFFERENT main block, which is the only symptom that exists.
+        """
+        num_aux = 3
+        y_true, blocks = _aux_stack(num_aux, include_masks=True)
+        packed = np.concatenate(blocks, axis=1)
+
+        right = _terms(_loss(include_masks=True, num_aux_layers=num_aux),
+                       y_true, packed)
+        alone = _terms(_loss(include_masks=True), y_true, blocks[0])
+        for key in ("loss_ce", "presence_loss", "loss_bbox", "loss_giou"):
+            assert right[key] == alone[key], f"term {key} is not the main block's"
+
+        wrong = _terms(_loss(include_masks=True, num_aux_layers=num_aux - 1),
+                       y_true, packed)
+        assert wrong["loss_ce"] != alone["loss_ce"]
