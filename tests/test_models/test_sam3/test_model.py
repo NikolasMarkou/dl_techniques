@@ -45,6 +45,13 @@ INVERSE_SIGMOID_CEILING = float(np.log(1.0 / INVERSE_SIGMOID_EPS))
 #: wrong-candidate margins are pinned separately so it cannot swallow a defect.
 ORACLE_TOL = 5e-3
 
+#: `Sam3Image.call`'s fixed output contract, in ONE place. D-125 makes the key
+#: set independent of the configuration on purpose, so every test that asserts
+#: it asserts the SAME set -- and a key added to `call` fails every one of them
+#: at once instead of only the test whose literal somebody remembered to edit.
+OUTPUT_KEYS = {"pred_logits", "pred_boxes", "pred_masks", "semantic_seg",
+               "presence_logit"}
+
 
 # ---------------------------------------------------------------------
 # float64 oracles -- written from the reference expression, never from the
@@ -354,8 +361,7 @@ class TestSam3ImageForward:
     def test_the_five_declared_outputs_are_present_with_their_shapes(
             self, model, batch):
         out = model(batch, training=False)
-        assert set(out) == {"pred_logits", "pred_boxes", "pred_masks",
-                            "semantic_seg", "presence_logit"}
+        assert set(out) == OUTPUT_KEYS
         assert tuple(out["pred_logits"].shape) == (2, 5, 1)
         assert tuple(out["pred_boxes"].shape) == (2, 5, 4)
         assert tuple(out["pred_masks"].shape) == (2, 5, 32, 32)
@@ -639,6 +645,85 @@ class TestBoxRefinement:
             atol=1e-5)
         assert np.max(np.abs(expected - np.array(ops.sigmoid(
             model.transformer.reference_points)))) > 1e-4
+
+
+# ---------------------------------------------------------------------
+# the forward-tail extraction: `call` is `_forward_stacks` plus a `[-1]`
+# ---------------------------------------------------------------------
+
+
+class TestForwardStackExtraction:
+    """`call`'s reported outputs are ROWS of the per-layer stacks.
+
+    The whole forward body lives in `_forward_stacks`, which keeps every
+    decoder layer's predictions; `call` slices the last layer out of them. The
+    guards below pin that the slice is the LAST row and nothing else moved.
+
+    Two vacuity traps this class avoids, both real at this variant:
+
+    - A fresh model's box head is zero-initialized ON PURPOSE (D-112), so
+      `outputs_coord` is bit-identical across layers and a `[0]`-vs-`[-1]`
+      confusion would be INVISIBLE in `pred_boxes`. Every test here randomizes
+      the head first, and `test_the_row_check_is_not_vacuous_...` executes the
+      per-layer difference rather than assuming it.
+    - `training=None` is NOT inference on this stack (D-123). Every call below
+      passes `training=False` explicitly, so a bit-equality assertion cannot be
+      reading two different stochastic draws.
+
+    The `.keras` round-trip max-abs-delta-`0.0` floor is NOT re-asserted here:
+    `TestSerialization::test_full_keras_roundtrip_preserves_output_VALUES`
+    already measures exactly that, at `training=False`, over all five outputs.
+    """
+
+    def test_call_returns_exactly_the_five_keys_not_a_superset(self, model,
+                                                               batch):
+        assert set(model(batch, training=False)) == OUTPUT_KEYS
+
+    def test_every_reported_output_is_the_last_row_of_its_stack_bit_exactly(
+            self, model, batch):
+        randomize(model.transformer.bbox_embed[-1], seed=17)
+        classes, coords, presence, seg = model._forward_stacks(
+            batch, training=False)
+        expected = {
+            "pred_logits": np.array(classes[-1]),
+            "pred_boxes": np.array(coords[-1]),
+            "presence_logit": np.array(presence[-1]),
+            "pred_masks": np.array(seg["pred_masks"]),
+            "semantic_seg": np.array(seg["semantic_seg"]),
+        }
+        assert set(expected) == OUTPUT_KEYS
+        out = model(batch, training=False)
+        for key, value in expected.items():
+            assert np.array_equal(np.array(out[key]), value), (
+                f"{key} is not bit-equal to the last row of the stack "
+                f"(max abs delta "
+                f"{float(np.max(np.abs(np.array(out[key]) - value)))})")
+
+    def test_the_row_check_is_not_vacuous_because_the_layers_differ(
+            self, model, batch):
+        # If any stack were constant across its layer axis, the test above
+        # would pass for `[0]` too and would be guarding nothing.
+        randomize(model.transformer.bbox_embed[-1], seed=17)
+        classes, coords, presence, _ = model._forward_stacks(
+            batch, training=False)
+        for name, stack in (("outputs_class", classes),
+                            ("outputs_coord", coords),
+                            ("presence_logits", presence)):
+            assert not np.array_equal(np.array(stack[0]), np.array(stack[-1])), (
+                f"{name} is identical at layer 0 and layer -1")
+
+    def test_the_stacks_carry_one_row_per_decoder_layer(self, model, batch):
+        layers = model.transformer.num_layers
+        classes, coords, presence, _ = model._forward_stacks(
+            batch, training=False)
+        assert tuple(classes.shape) == (layers, 2, 5, 1)
+        assert tuple(coords.shape) == (layers, 2, 5, 4)
+        assert tuple(presence.shape) == (layers, 2, 1)
+
+    def test_the_helper_raises_on_a_missing_input_key(self, model, batch):
+        with pytest.raises(ValueError, match="requires inputs"):
+            model._forward_stacks({"token_ids": batch["token_ids"]},
+                                  training=False)
 
 
 # ---------------------------------------------------------------------

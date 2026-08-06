@@ -637,6 +637,41 @@ class Sam3Image(keras.Model):
         :rtype: Dict[str, Any]
         :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
         """
+        outputs_class, outputs_coord, presence_logits, seg = (
+            self._forward_stacks(inputs, training=training))
+        return {
+            "pred_logits": outputs_class[-1],
+            "pred_boxes": outputs_coord[-1],
+            "pred_masks": seg["pred_masks"],
+            "semantic_seg": seg["semantic_seg"],
+            "presence_logit": presence_logits[-1],
+        }
+
+    def _forward_stacks(
+            self, inputs: Dict[str, Any], training: Optional[bool] = None,
+    ) -> Tuple[Any, Any, Any, Dict[str, Any]]:
+        """Run the whole forward pass and keep every layer's predictions.
+
+        The entire body of :meth:`call` except its final ``[-1]`` slicing lives
+        here, so the per-layer quantities an auxiliary-loss training phase needs
+        are produced exactly once and the reported last-layer quantities are
+        rows of the SAME tensors -- not a second, separately computed forward
+        pass that could drift from it.
+
+        :param inputs: As :meth:`call`.
+        :type inputs: Dict[str, Any]
+        :param training: As :meth:`call`.
+        :type training: Optional[bool]
+        :return: ``(outputs_class, outputs_coord, presence_logits, seg)``. The
+            first three are stacked over decoder layers with the layer axis
+            FIRST: ``(num_layers, B, num_queries, 1)``,
+            ``(num_layers, B, num_queries, 4)`` and ``(num_layers, B, 1)``. The
+            fourth is the segmentation head's own output dict, which has no
+            layer axis -- that head consumes the whole hidden stack and emits
+            one set of masks.
+        :rtype: Tuple[Any, Any, Any, Dict[str, Any]]
+        :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
+        """
         for key in ("image", "token_ids"):
             if key not in inputs:
                 raise ValueError(f"Sam3Image.call requires inputs['{key}']")
@@ -673,13 +708,7 @@ class Sam3Image(keras.Model):
         seg = self.segmentation_head(
             pyramid, hidden, memory, prompt=prompt,
             prompt_padding_mask=padding_mask, training=training)
-        return {
-            "pred_logits": outputs_class[-1],
-            "pred_boxes": outputs_coord[-1],
-            "pred_masks": seg["pred_masks"],
-            "semantic_seg": seg["semantic_seg"],
-            "presence_logit": presence_logits[-1],
-        }
+        return outputs_class, outputs_coord, presence_logits, seg
 
     @staticmethod
     def _fuse(
