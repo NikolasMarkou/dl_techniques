@@ -289,7 +289,7 @@ class TestSmokePreset:
         be comparable on (decisions.md D-030).
         """
         shaping = {"variant", "include_masks", "freeze_trunk",
-                   "deep_supervision", "seed",
+                   "deep_supervision", "query_selection", "seed",
                    "learning_rate", "weight_decay", "gradient_clip_norm",
                    "warmup_steps", "lr_schedule", "batch_size",
                    "zero_instance_rate", "max_instances", "max_per_category"}
@@ -736,6 +736,161 @@ class TestDeepSupervision:
         assert model.jit_compile is False
         loss_value = float(history.history["loss"][-1])
         assert math.isfinite(loss_value)
+
+
+class TestQuerySelectionCli:
+    """``--query-selection`` through the FULL ``argv -> config -> factory``.
+
+    Modelled on :class:`TestDeepSupervision`, which is this repository's shipped
+    precedent for wiring a layout-changing boolean. The defect class these tests
+    exist for is the documented one: a config field that is set correctly and
+    never reaches the factory, so the run trains the OLD model while the config
+    it writes to disk claims the new one. Asserting ``config.query_selection``
+    alone cannot see that; every assertion below therefore terminates on
+    ``model.num_aux_layers`` or on the model's own proposal head.
+    """
+
+    @staticmethod
+    def _expected_aux(model: Any, deep: bool, query: bool) -> int:
+        """The composition oracle (I-5), re-derived from the FLAGS.
+
+        Interface contract: computed from ``deep`` / ``query`` and the decoder's
+        own layer count, never read off ``model.num_aux_layers`` -- a model that
+        composed the sum wrongly must not be able to make this test agree with
+        itself.
+
+        :param model: The built wrapper, read only for its decoder depth.
+        :type model: Any
+        :param deep: The deep-supervision arm under test.
+        :type deep: bool
+        :param query: The query-selection arm under test.
+        :type query: bool
+        :return: The expected auxiliary block count.
+        :rtype: int
+        """
+        layers = int(model.sam3.transformer.num_layers)
+        return (layers - 1 if deep else 0) + (1 if query else 0)
+
+    @pytest.mark.parametrize("deep,query", [(False, False), (True, False),
+                                            (False, True), (True, True)])
+    def test_the_flag_reaches_the_model_at_all_four_combinations(
+            self, deep: bool, query: bool) -> None:
+        """argv -> parse_args -> config -> factory -> ``num_aux_layers``.
+
+        All four combinations are driven through the REAL parser and the REAL
+        factory, and the assertion lands on the composed row arithmetic, not on
+        the config field. On ``tiny`` (2 decoder layers) the four combinations
+        are 0/1/1/2 auxiliary blocks, so the ON arms are distinguishable from
+        the OFF ones -- non-vacuity is proved separately below.
+        """
+        extra = []
+        if deep:
+            extra.append("--deep-supervision")
+        if query:
+            extra.append("--query-selection")
+        config = config_from_argv(_tiny_argv(*extra))
+        assert config.deep_supervision is deep
+        assert config.query_selection is query
+
+        keras.utils.set_random_seed(1357)
+        model = create_training_model(config)
+
+        expected = self._expected_aux(model, deep, query)
+        assert model.num_aux_layers == expected, (
+            f"--deep-supervision={deep} --query-selection={query} reached the "
+            f"config but not the model: num_aux_layers={model.num_aux_layers}, "
+            f"expected {expected} = (L-1)*deep + query")
+        # The wrapper's flag and the loss's row stride must both follow, or
+        # `unpack_predictions` mis-slices in silence.
+        assert model.query_selection is query
+        assert model.loss.num_aux_layers == expected
+        assert model.compute_output_shape()[1] == (
+            (model.num_queries + 1) * (1 + expected))
+        # And the head itself must exist exactly when the flag says so: the
+        # row arithmetic alone would be satisfied by a wrapper that counted a
+        # block no head ever produces.
+        assert bool(model.sam3.query_selection) is query
+        assert (getattr(model.sam3, "query_selection_head", None)
+                is not None) is query
+
+    def test_the_four_combinations_are_not_all_the_same_model(self) -> None:
+        """Non-vacuity for the parametrized test above.
+
+        If every combination produced the same ``num_aux_layers``, the oracle
+        would be satisfied by a factory that ignored both flags.
+        """
+        counts = set()
+        for extra in ([], ["--deep-supervision"], ["--query-selection"],
+                      ["--deep-supervision", "--query-selection"]):
+            keras.utils.set_random_seed(1357)
+            model = create_training_model(config_from_argv(_tiny_argv(*extra)))
+            counts.add(model.num_aux_layers)
+        assert counts == {0, 1, 2}, (
+            f"the four flag combinations produced {sorted(counts)} auxiliary "
+            f"block counts; expected 0/1/1/2 on a 2-layer decoder")
+
+    def test_the_config_default_is_off(self) -> None:
+        """The pre-change world is what a bare command line still gets."""
+        assert Sam3TrainingConfig().query_selection is False
+        assert config_from_argv([]).query_selection is False
+
+    def test_query_selection_is_absent_from_the_smoke_preset(self) -> None:
+        """A preset may change HOW MUCH is measured, never WHAT (D-030).
+
+        Query selection changes the MODEL: it adds a weighted proposal head to
+        the forward path and replaces the decoder's initial reference boxes. A
+        smoke run that silently enabled it would be a wiring proof for a
+        different architecture from the one the real run trains.
+        """
+        assert "query_selection" not in SMOKE_PRESET
+        assert config_from_argv(["--smoke"]).query_selection is (
+            config_from_argv([]).query_selection)
+
+    def test_the_flag_survives_the_preset_in_both_directions(self) -> None:
+        """``--smoke`` must neither enable nor disable an explicit flag.
+
+        The provenance path (`explicitly_set_flags`) is what makes this hold:
+        the preset is applied only to fields the caller did NOT type.
+        """
+        assert config_from_argv(["--smoke", "--query-selection"]
+                                ).query_selection is True
+        assert config_from_argv(["--smoke", "--no-query-selection"]
+                                ).query_selection is False
+        # And the preset still does its own job in the same command line, so
+        # the assertions above are not passing because `--smoke` was ignored.
+        smoke = config_from_argv(["--smoke", "--query-selection"])
+        assert smoke.smoke is True
+        assert smoke.epochs == SMOKE_PRESET["epochs"]
+
+    def test_the_two_flags_are_independent_through_the_preset(self) -> None:
+        """`--smoke --deep-supervision --query-selection` is the smoke command.
+
+        It is the exact argv this step runs on the GPU, so it is pinned here at
+        no GPU cost: both flags survive, and the preset still shrinks the run.
+        """
+        config = config_from_argv(
+            ["--smoke", "--deep-supervision", "--query-selection"])
+        assert config.deep_supervision is True
+        assert config.query_selection is True
+        for field, value in SMOKE_PRESET.items():
+            assert getattr(config, field) == value
+
+    def test_a_query_selection_model_takes_a_real_training_step(self) -> None:
+        """End to end through the trainer's own factory, one step.
+
+        `compile_sam3_trainer` checks the row-stride agreement at compile time,
+        but nothing there executes a forward or a backward pass through the new
+        proposal head. One `fit` step over the trainer's own dataset does.
+        """
+        config = config_from_argv(
+            _tiny_argv("--deep-supervision", "--query-selection"))
+        keras.utils.set_random_seed(4321)
+        model = create_training_model(config)
+        assert model.num_aux_layers == 2, "the arm under test is not composed"
+        train_dataset, _ = create_datasets(config, model)
+        history = model.fit(train_dataset, epochs=1, verbose=0)
+        assert model.jit_compile is False
+        assert math.isfinite(float(history.history["loss"][-1]))
 
 
 # ---------------------------------------------------------------------------

@@ -192,6 +192,7 @@ class Sam3TrainingConfig:
     include_masks: bool = False
     freeze_trunk: bool = False
     deep_supervision: bool = False
+    query_selection: bool = False
 
     # Optimizer. Reference-derived; see `create_optimizer` for the SIGNED,
     # NAMED divergences from the reference's own recipe.
@@ -293,6 +294,7 @@ CLI_TO_CONFIG: Dict[str, str] = {
     "include_masks": "include_masks",
     "freeze_trunk": "freeze_trunk",
     "deep_supervision": "deep_supervision",
+    "query_selection": "query_selection",
     "learning_rate": "learning_rate",
     "weight_decay": "weight_decay",
     "gradient_clip_norm": "gradient_clip_norm",
@@ -404,6 +406,31 @@ def build_parser() -> argparse.ArgumentParser:
                             "deltas was measured. The direction over the "
                             "no-flag arm is real on 3 of 3 seeds; the arm does "
                             "not clear a predictor that reads nothing.")
+    model.add_argument("--query-selection",
+                       action=argparse.BooleanOptionalAction,
+                       default=defaults.query_selection,
+                       help="DINO-style MIXED encoder query selection. A "
+                            "proposal head reads the decoder's `memory`, emits "
+                            "a per-position objectness logit and a cxcywh "
+                            "offset from that position's own grid anchor, and "
+                            "the top-Q boxes REPLACE the decoder's learned, "
+                            "image-independent `reference_points` table as its "
+                            "INITIAL reference_boxes (entering detached, as "
+                            "the decoder already detaches every later "
+                            "reference). Query CONTENT stays the learned "
+                            "table -- mixed, not pure. The proposals are "
+                            "supervised by ONE additional packed block, so "
+                            "this adds 1 to num_aux_layers on top of whatever "
+                            "--deep-supervision contributes, and runs the "
+                            "Hungarian matcher once more per step. Its purpose "
+                            "is structural: it is the only route by which "
+                            "pred_boxes can depend on the image at step 0. "
+                            "MEASURED OUTCOME: [PENDING -- to be filled in "
+                            "from the seed-1/2/3 arms; until then this flag "
+                            "carries NO accuracy or box-variance claim, and "
+                            "any number quoted for it must be quoted against "
+                            "the committed baseline family in "
+                            "train.sam3.baselines, not against zero].")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,
@@ -479,7 +506,7 @@ def parse_arguments(
         # silently overrides a value the caller really typed. And do NOT add a
         # field to SMOKE_PRESET that changes WHAT is measured (variant, seed,
         # learning rate, batch size, mask switch, DEEP-SUPERVISION switch,
-        # zero-instance rate) -- only
+        # zero-instance rate, QUERY-SELECTION switch) -- only
         # how much; `test_the_preset_changes_how_much_not_what` pins that list.
         for field, preset_value in SMOKE_PRESET.items():
             if field not in explicit_fields:
@@ -603,10 +630,19 @@ def create_training_model(
     :return: The compiled wrapper.
     :rtype: Sam3TrainingModel
     """
+    # `query_selection` is forwarded TWICE on purpose, to two different objects
+    # that each need it for a different reason: `Sam3Image` needs it to CREATE
+    # the proposal head at all (with the flag off, no head and no weights
+    # exist, which is what makes the off path byte-identical), and
+    # `Sam3TrainingModel` needs it to COUNT the extra packed block. They are
+    # not redundant, and they cannot silently disagree: the wrapper RAISES when
+    # asked to count a block its `Sam3Image` will never produce.
     model = Sam3TrainingModel(
-        Sam3Image.from_variant(config.variant),
+        Sam3Image.from_variant(config.variant,
+                               query_selection=config.query_selection),
         include_masks=config.include_masks,
         deep_supervision=config.deep_supervision,
+        query_selection=config.query_selection,
     )
     model.build(None)
 
