@@ -381,7 +381,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Supervise EVERY decoder layer, not just the last "
                             "(the reference's aux_outputs). Adds L-1 packed "
                             "blocks and runs the Hungarian matcher once per "
-                            "block, so a step costs more.")
+                            "block, so a step costs more. MEASURED at "
+                            "small/60ep/synthetic, 3 seeds, this flag the only "
+                            "changed variable: box IoU rose on 3 of 3 seeds "
+                            "(+0.110..+0.140), box_std_across_images improved "
+                            "on 0 of 3. It buys accuracy, not image "
+                            "dependence.")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,

@@ -66,11 +66,23 @@ rediscovered as a gap:
 - the exemplar / geometry prompt path (points and boxes), which needs bilinear
   ``grid_sample`` and ``roi_align`` primitives ``keras.ops`` does not have;
 - DAC query doubling, provably inert at inference;
-- the per-layer auxiliary output stacks an auxiliary-loss training phase would
-  consume -- this class returns the LAST layer's quantities only. The stacks
-  themselves are still produced and are reachable by calling the decoder
-  directly;
+- the reference's ``first_stage`` (encoder-side proposal) auxiliary outputs.
+  The DECODER-side per-layer stacks are no longer absent: :meth:`call_per_layer`
+  is public on this class, returns every decoder layer's five quantities with
+  the shared box head re-applied exactly as :meth:`call` does, and is consumed
+  by ``Sam3TrainingModel``'s deep-supervision path and by
+  ``train.sam3.train_sam3.evaluate_sam3``. Calling the decoder directly is NOT
+  the supported route to them -- it skips that re-application. :meth:`call`
+  itself still returns the LAST layer's quantities only, unchanged;
 - the ``cxcywh -> xyxy`` box conversion, which is a consumer-side utility.
+
+**What deep supervision was MEASURED to do**, so the flag is not read as a fix
+for something it did not fix: on a like-for-like 3-seed x 60-epoch synthetic
+re-run with ``--deep-supervision`` as the only changed variable, box IoU rose on
+3 of 3 seeds (+0.110 .. +0.140, mean 0.2505 -> 0.3794) while
+``box_std_across_images`` improved on 0 of those 3 seeds. It buys accuracy; it
+did not make the box head read the image. See the plan's
+``findings/step8-verdict.md``.
 
 References:
     - Meta AI (2025). "SAM 3: Segment Anything with Concepts."
