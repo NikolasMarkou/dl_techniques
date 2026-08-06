@@ -849,6 +849,46 @@ class TestDeepSupervisionOnTheRealModel:
         assert np.isfinite(history.history["loss"][0])
         assert any(not np.array_equal(a, b) for a, b in zip(before, after))
 
+    def test_masks_on_AND_deep_supervision_on_zero_fills_only_the_aux_masks(
+            self, tiny_model, rng):
+        """D-005's PACKER half at the one combination nothing else builds.
+
+        `test_an_auxiliary_blocks_mask_channels_are_zero_filled` above pins the
+        same rule on `pack_predictions` fed SYNTHETIC dicts, and the loss side
+        is pinned at `include_masks=True` with a synthetic aux stack -- but
+        before this test no test constructed
+        `Sam3TrainingModel(include_masks=True, deep_supervision=True)`, so the
+        packer's `masks=None` on the auxiliary block was reviewed once and
+        never executed by the suite (review-iter-1 NOTE 10).
+
+        Three assertions, and the last two are what stop the first from being
+        vacuous: a packer that zero-filled EVERY mask channel, or emitted
+        constant auxiliary blocks, would satisfy assertion 1 alone.
+        """
+        model = Sam3TrainingModel(tiny_model.sam3, include_masks=True,
+                                  deep_supervision=True)
+        model.build(None)
+        assert model.num_aux_layers >= 1
+
+        packed = np.array(model(tiny_inputs(rng, batch=2), training=False))
+        rows = model.num_queries + 1
+        assert packed.shape[1] == rows * (1 + model.num_aux_layers)
+        assert packed.shape[2] > PACKED_MASK_START
+
+        main = packed[:, :rows, :]
+        aux = packed[:, rows:, :]
+        # 1. every auxiliary block's mask channels are EXACTLY zero.
+        np.testing.assert_array_equal(
+            aux[:, :, PACKED_MASK_START:],
+            np.zeros_like(aux[:, :, PACKED_MASK_START:]))
+        # 2. the MAIN block's mask channels are not (so "all zero" is a
+        #    property of the auxiliary blocks, not of the mask block).
+        assert np.max(np.abs(main[:, :, PACKED_MASK_START:])) > 0.0
+        # 3. the auxiliary blocks' BOX channels are not zero either (so the
+        #    auxiliary blocks carry real per-layer predictions).
+        assert np.max(np.abs(
+            aux[:, :, PACKED_BOX_START:PACKED_MASK_START])) > 0.0
+
     def test_deep_supervision_round_trips_through_get_config(self, deep_model):
         config = deep_model.get_config()
         assert config["deep_supervision"] is True

@@ -80,9 +80,12 @@ rediscovered as a gap:
 for something it did not fix: on a like-for-like 3-seed x 60-epoch synthetic
 re-run with ``--deep-supervision`` as the only changed variable, box IoU rose on
 3 of 3 seeds (+0.110 .. +0.140, mean 0.2505 -> 0.3794) while
-``box_std_across_images`` improved on 0 of those 3 seeds. It buys accuracy; it
-did not make the box head read the image. See the plan's
-``findings/step8-verdict.md``.
+``box_std_across_images`` improved on 0 of those 3 seeds. It did not make the
+box head read the image. The accuracy half is real on 3 of 3 seeds and SMALL in
+absolute terms: on the same 3 splits an untrained, image-independent 5x5 grid of
+fixed boxes scores 0.357/0.331/0.343, so the deep-supervision arm clears a
+predictor that reads nothing by only 0.025..0.044 IoU. See the plan's
+``findings/step8-verdict.md`` and ``findings/chance-floor-and-instrument.md``.
 
 References:
     - Meta AI (2025). "SAM 3: Segment Anything with Concepts."

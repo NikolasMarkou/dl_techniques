@@ -254,8 +254,10 @@ def pack_predictions(outputs: Dict[str, Any],
     # segmentation head's masks -- note the `None` passed for `masks` below. Do
     # NOT "fix" that to pack the real masks: the loss deliberately computes NO
     # mask term for an auxiliary block (the reference's `Masks` loss defaults
-    # `compute_aux=False`, warns if set True, and its one shipped config writes
-    # it false explicitly), so packing them would ship `(L-1) * (Q+1) * P`
+    # `compute_aux=False` and warns if set True, while `Boxes` and `IABCEMdetr`
+    # both default True; its shipped detection config ships NO mask loss at all
+    # and the commented segmentation variant beside it writes
+    # `compute_aux: false`), so packing them would ship `(L-1) * (Q+1) * P`
     # channels of supervision nobody reads while making guard G5 -- "perturbing
     # an auxiliary block's mask channels does not move the loss" -- pass for the
     # wrong reason. The segmentation head has no layer axis anyway: it consumes

@@ -1471,9 +1471,13 @@ class Sam3DetectionLoss(keras.losses.Loss):
         # ...and the mask terms are EXCLUDED from every auxiliary block
         # (`include_mask_terms=False` below), which is why the packer is free to
         # zero-fill those channels. The reference's `Masks` loss defaults
-        # `compute_aux=False` and warns if anyone sets it True, and its one
-        # shipped config writes `compute_aux: false` explicitly, while `Boxes`
-        # and `IABCEMdetr` both default True and are not overridden. This is
+        # `compute_aux=False` and warns if anyone sets it True, while `Boxes`
+        # and `IABCEMdetr` both default True and are not overridden. The
+        # citation is the DEFAULT, not the config: the shipped
+        # `roboflow_v100_full_ft_100_images.yaml` detection loss block ships no
+        # `Masks` entry at all, and the `compute_aux: false` line in that file
+        # sits inside the COMMENTED-OUT segmentation variant beside it
+        # (review-iter-1 WARNING 3, re-verified at the pinned clone). This is
         # moot at the shipped `include_masks=False` and encoded anyway: a
         # constant transcribed out of the regime that made it correct is this
         # package's recorded port-fidelity defect class.
