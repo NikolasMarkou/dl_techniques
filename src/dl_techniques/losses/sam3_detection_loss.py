@@ -1084,19 +1084,25 @@ class Sam3DetectionLoss(keras.losses.Loss):
         # numerical nicety, it is the only thing standing between a legitimate
         # training batch and a NaN.
         if self.normalize_by_valid_object_num:
-            # DECISION plan-2026-08-05T124709-6c4fac48/D-042
-            # The predicate is GEOMETRIC (`w > 0 AND h > 0`), transcribed from
-            # `sam3_loss.py::_get_num_boxes:70-71`
-            # (`(boxes_hw[:, 2:] > 0).all(dim=-1).sum()`). Do NOT "simplify" it
-            # back to the packed validity FLAG (`target_valid > 0`): the two
-            # disagree on the reference's own INVISIBLE-OBJECT row -- a valid id
-            # carrying a zero-area box -- and this module's `derive_keep_loss`
-            # already ports the geometric test, so the flag spelling made one
-            # module disagree with itself. It was also an UNNAMED divergence in
-            # a class whose whole thesis is signed named divergences. See
-            # decisions.md D-042.
-            raw_num_boxes = ops.sum(ops.cast(
-                ops.all(target_boxes[..., 2:] > 0.0, axis=-1), "float32"))
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-047
+            # The predicate is the CONJUNCTION `valid AND w > 0 AND h > 0`.
+            # Do NOT reduce it to EITHER conjunct alone. The flag alone
+            # over-counts the reference's INVISIBLE-OBJECT row (a valid id
+            # carrying a zero-area box); the GEOMETRY alone over-counts a
+            # PADDING row that happens to carry extents, which `pack_targets`
+            # does NOT zero -- measured, one such row moves `num_boxes`
+            # 6.0 -> 7.0 and `loss_bbox` -14 %. `sam3_loss.py::_get_num_boxes:
+            # 70-71` is geometry-only because its `targets["boxes"]` is a truly
+            # PACKED tensor with no padding rows at all (`collator.py:286`
+            # `extend`s real boxes; the padded form is the SEPARATE
+            # `boxes_padded` key) -- that precondition does not hold here, so
+            # copying its expression alone is a SIGNED NAMED DIVERGENCE
+            # `+ valid`. This module's `derive_keep_loss` uses exactly this
+            # conjunction. See decisions.md D-047 (which supersedes D-042).
+            raw_num_boxes = ops.sum(
+                ops.cast(ops.cast(target_valid, "float32") > 0.0, "float32")
+                * ops.cast(
+                    ops.all(target_boxes[..., 2:] > 0.0, axis=-1), "float32"))
         else:
             raw_num_boxes = ops.sum(targets["num_boxes"])
         num_boxes = ops.maximum(raw_num_boxes, 1.0)

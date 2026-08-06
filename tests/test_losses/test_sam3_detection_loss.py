@@ -662,15 +662,17 @@ def _ref_terms(packed, weak_loss=False, pad_n_queries=13, pos_weight=10.0,
     pairs = _ref_match(logits, pred_boxes, tgt_boxes, valid)
 
     # `_get_num_boxes`, `normalize_by_valid_object_num=True`, clamp min 1.
-    # THE PREDICATE IS THE REFERENCE'S, NOT THE PORT'S. `sam3_loss.py:70-71`
-    # reads `(boxes_hw[:, 2:] > 0).all(dim=-1).sum()` -- pure GEOMETRY, `w > 0
-    # AND h > 0` -- and it is written that way here on purpose. Writing it as
-    # `(valid > 0).sum()` (the port's original spelling) made this oracle agree
-    # with the port BY CONSTRUCTION at the one row where the two disagree: the
-    # reference's "invisible object", a valid id carrying a zero-area box. An
-    # oracle can be independent everywhere except the line the port diverges on,
-    # and that is the only line it needed to be independent on.
-    num_boxes = max(float((tgt_boxes[..., 2:] > 0).all(axis=-1).sum()), 1.0)
+    # THE CONJUNCTION `valid AND w > 0 AND h > 0`, written from the reference's
+    # PRECONDITION rather than from its expression. `sam3_loss.py:70-71` reads
+    # `(boxes_hw[:, 2:] > 0).all(dim=-1).sum()` -- geometry only -- because its
+    # `targets["boxes"]` is a truly PACKED tensor with no padding rows; this
+    # layout is PADDED, so geometry alone counts a padding row that carries
+    # extents. Neither single conjunct is the reference's quantity here:
+    # `(valid > 0).sum()` is the PORT's old spelling (it over-counts the
+    # invisible object) and the bare geometry over-counts padding.
+    num_boxes = max(float(((valid > 0)
+                           & (tgt_boxes[..., 2:] > 0).all(axis=-1)).sum()),
+                    1.0)
 
     target_classes = np.zeros((batch, num_queries), dtype=np.float64)
     positive_target = np.zeros((batch, num_queries), dtype=np.float64)
@@ -1211,21 +1213,18 @@ class TestTheFiveDivisors:
             self._assert_only(actual[key], expected[f"{key}_numerator"],
                               DIVISOR_NUM_BOXES, wrong)
 
-    def test_divisor_1_uses_the_REFERENCE_geometric_predicate_not_the_flag(
-            self):
-        """The one line where this oracle used to agree BY CONSTRUCTION.
+    def test_divisor_1_excludes_a_VALID_row_whose_box_has_ZERO_AREA(self):
+        """Direction 1 of the conjunction: the reference's INVISIBLE OBJECT.
 
-        `sam3_loss.py:70-71` counts `(boxes_hw[:, 2:] > 0).all(dim=-1)` -- pure
-        GEOMETRY, `w > 0 AND h > 0`. The port originally counted the packed
-        VALIDITY FLAG instead, and this file's `_ref_terms` was written with the
-        PORT's rule, so divisor #1's fidelity was untestable at exactly the
-        point the two disagree: the reference's INVISIBLE OBJECT -- a valid id
-        whose box has zero area. (The same module's `derive_keep_loss` already
-        ported the geometric test, so the port disagreed with itself.)
+        `sam3_loss.py:70-71` counts `(boxes_hw[:, 2:] > 0).all(dim=-1)`, so a
+        valid id carrying a zero-area box does NOT count. The port originally
+        counted the packed VALIDITY FLAG instead, and this file's `_ref_terms`
+        was written with the PORT's rule, so divisor #1's fidelity was
+        untestable at exactly the point the two disagree.
 
         The arm is proven non-INERT before it asserts anything: the two
         predicates must give DIFFERENT counts on this input, or the test is
-        measuring nothing.
+        measuring nothing. See the mirror test below for direction 2.
         """
         fields = _make_packed()
         fields["tgt_boxes"] = fields["tgt_boxes"].copy()
@@ -1235,21 +1234,65 @@ class TestTheFiveDivisors:
             ops.convert_to_numpy(derive_keep_loss(fields["tgt_boxes"],
                                                   fields["valid"])),
             dtype="float32").reshape(fields["valid"].shape[0], 1)
-        geometric = float((fields["tgt_boxes"][..., 2:] > 0).all(-1).sum())
+        conjunction = float(((fields["valid"] > 0)
+                             & (fields["tgt_boxes"][..., 2:] > 0).all(-1)
+                             ).sum())
         flag = float((fields["valid"] > 0).sum())
-        assert (geometric, flag) == (5.0, 6.0), (
-            f"INERT arm: the reference predicate ({geometric}) and the flag "
+        assert (conjunction, flag) == (5.0, 6.0), (
+            f"INERT arm: the conjunction ({conjunction}) and the flag "
             f"predicate ({flag}) must disagree here or nothing is measured")
 
         y_true, y_pred = _pack(fields)
         actual = _terms(_loss(), y_true, y_pred)
         expected = _ref_terms(fields)
-        assert expected["num_boxes"] == geometric
-        assert actual["num_boxes"] == geometric, (
+        assert expected["num_boxes"] == conjunction
+        assert actual["num_boxes"] == conjunction, (
             "the port is still counting the validity FLAG, not the geometry")
         for key in ("loss_bbox", "loss_giou"):
             self._assert_only(actual[key], expected[f"{key}_numerator"],
-                              geometric, [flag])
+                              conjunction, [flag])
+
+    def test_divisor_1_excludes_an_INVALID_row_whose_box_has_NONZERO_AREA(self):
+        """Direction 2 -- the MIRROR of the test above, and the direction the
+        first fix of this predicate got WRONG.
+
+        Porting `sam3_loss.py:70-71`'s geometry-only expression on its own drops
+        the validity flag entirely. That is safe in the reference, whose
+        `targets["boxes"]` is a truly PACKED tensor with no padding rows at all
+        (`collator.py:286` `extend`s only real boxes; the padded form is the
+        separate `boxes_padded` key). This layout is PADDED and `pack_targets`
+        does not zero the boxes of invalid rows, so geometry alone counts a
+        padding row that carries extents: MEASURED at 6.0 -> 7.0 on `num_boxes`
+        and 0.4417 -> 0.3786 (-14 %) on `loss_bbox`. Only the CONJUNCTION
+        `valid AND w > 0 AND h > 0` is the reference's quantity here.
+
+        Non-INERT before it asserts: the geometry-only and conjunction
+        predicates must disagree on this input.
+        """
+        fields = _make_packed()
+        fields["tgt_boxes"] = fields["tgt_boxes"].copy()
+        # Image 0, row 3: the flag STAYS 0, the extents become nonzero.
+        assert fields["valid"][0, 3] == 0.0
+        fields["tgt_boxes"][0, 3, 2:] = 0.3
+        geometry_only = float(
+            (fields["tgt_boxes"][..., 2:] > 0).all(-1).sum())
+        conjunction = float(((fields["valid"] > 0)
+                             & (fields["tgt_boxes"][..., 2:] > 0).all(-1)
+                             ).sum())
+        assert (geometry_only, conjunction) == (7.0, 6.0), (
+            f"INERT arm: geometry-only ({geometry_only}) and the conjunction "
+            f"({conjunction}) must disagree here or nothing is measured")
+
+        y_true, y_pred = _pack(fields)
+        actual = _terms(_loss(), y_true, y_pred)
+        expected = _ref_terms(fields)
+        assert expected["num_boxes"] == conjunction
+        assert actual["num_boxes"] == conjunction, (
+            "the port dropped the validity flag: a PADDING row carrying "
+            "extents is inflating divisor #1")
+        for key in ("loss_bbox", "loss_giou"):
+            self._assert_only(actual[key], expected[f"{key}_numerator"],
+                              conjunction, [geometry_only])
 
     def test_divisor_2_the_mask_focal_divides_by_num_boxes_TIMES_pixels(self):
         """The fourth divisor the prior plan never flagged.

@@ -704,7 +704,19 @@ def evaluate_sam3(
     batches = 0
     # Kept per IMAGE, not per batch: an across-image statistic computed inside
     # a batch of 4 and then averaged is not the same number as one computed
-    # over the whole split, and the split is what the claim is made on.
+    # over the whole split, and the split is what the claim is made on. That
+    # difference is pinned by
+    # `test_the_across_image_std_is_over_the_WHOLE_SPLIT_not_per_batch`, whose
+    # heads are constant WITHIN a batch and varying BETWEEN batches -- the only
+    # arm the two spellings score differently. MEASURED on
+    # `results/step71_joint_seed1/final_model.keras`: 2.0135e-05 whole-split vs
+    # 1.4989e-05 per-batch (-26 %).
+    # KNOWN COST, named rather than fixed: this retains every batch's boxes,
+    # logits and presence for the WHOLE split, so host memory is linear in
+    # split size. Trivial at 64 images x 32 queries and it is called once per
+    # epoch by `_Sam3EvalCallback` with no `max_batches`. A running Welford
+    # accumulator gives the same number without the retention and is the fix
+    # the first real validation set will require.
     head_boxes: List[np.ndarray] = []
     head_logits: List[np.ndarray] = []
     head_presence: List[np.ndarray] = []
@@ -876,8 +888,13 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
         model_name=str(config.experiment_name),
         results_dir_prefix="sam3",
         run_dir=str(output_dir),
-        monitor="val_loss",
-        patience=config.early_stopping_patience,
+        # NEITHER `monitor` NOR `patience` is passed, deliberately. Both are
+        # read ONLY by the `EarlyStopping` / `ModelCheckpoint` that the next
+        # statement filters out, and `use_lr_schedule=True` suppresses the one
+        # other reader (`ReduceLROnPlateau`, which hardcodes `val_loss`
+        # anyway). Passing `monitor="val_loss"` here was dead but READ, at a
+        # glance, as if `val_loss` were still the selection scalar -- the exact
+        # opposite of what D-041 decided. The real values are set below.
         use_lr_schedule=True,
         include_terminate_on_nan=True,
         include_analyzer=False,

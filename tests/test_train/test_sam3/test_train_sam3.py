@@ -844,6 +844,75 @@ class TestEvaluation:
         assert live["logit_std_across_images"] > 1e-1
         assert live["presence_logit_std_across_images"] > 1e-1
 
+    def test_the_across_image_std_is_over_the_WHOLE_SPLIT_not_per_batch(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """The reduction AXIS the source comment argues for, pinned.
+
+        ``evaluate_sam3`` concatenates every batch before reducing, and the
+        comment beside it argues that "an across-image statistic computed inside
+        a batch of 4 and then averaged is not the same number as one computed
+        over the whole split". That property was INERT: replacing all four
+        reductions with per-batch-then-average left the whole train suite at
+        102 passed / 0 failed, because the RED arm above is constant across ALL
+        batches (reads ~0 either way) and its liveness ramp restarts inside each
+        batch (reads large either way). The gap is real -- MEASURED on
+        ``results/step71_joint_seed1/final_model.keras``: whole-split
+        ``box_std_across_images`` 2.0135e-05 against per-batch 1.4989e-05.
+
+        This arm is the only one the two spellings score differently: the heads
+        are held CONSTANT WITHIN each batch and made to vary BETWEEN batches, so
+        the per-batch statistic is exactly 0 and the whole-split one is large.
+        Non-INERT by construction, and the test asserts BOTH halves.
+        """
+
+        class _PerBatchStub:
+            """Rewrites the heads to a per-batch constant, batch index k."""
+
+            def __init__(self, model: Any) -> None:
+                self._model = model
+                self.include_masks = model.include_masks
+                self.loss = model.loss
+                self.calls = 0
+                self.seen: List[Dict[str, Any]] = []
+
+            def sam3(self, inputs: Any, training: bool = False) -> Any:
+                out = dict(self._model.sam3(inputs, training=training))
+                step = float(self.calls)
+                self.calls += 1
+                for key, scale in (("pred_boxes", 0.05), ("pred_logits", 2.0),
+                                   ("presence_logit", 2.0)):
+                    value = keras.ops.cast(
+                        keras.ops.convert_to_tensor(out[key]), "float32")
+                    count = int(value.shape[0])
+                    # One row, repeated: identical for every image in THIS
+                    # batch. The offset makes batch k differ from batch k+1.
+                    row = keras.ops.repeat(value[:1], count, axis=0)
+                    out[key] = keras.ops.clip(
+                        row * 0.0 + 0.2 + step * scale, 0.01, 0.99
+                    ) if key == "pred_boxes" else row * 0.0 + step * scale
+                self.seen.append({k: np.asarray(out[k]) for k in
+                                  ("pred_boxes", "pred_logits",
+                                   "presence_logit")})
+                return out
+
+        wide = Sam3TrainingConfig(**{**TINY_KWARGS, "num_val_samples": 8})
+        _, val_dataset = create_datasets(wide, tiny_model)
+        stub = _PerBatchStub(tiny_model)
+        measured = evaluate_sam3(stub, val_dataset)
+
+        assert stub.calls >= 2, (
+            "INERT arm: a single batch cannot distinguish the two reductions")
+        # Half 1 -- the PER-BATCH reduction reads exactly 0 on this input.
+        per_batch = float(np.mean(
+            [b["pred_boxes"].std(axis=0).mean() for b in stub.seen]))
+        assert per_batch == pytest.approx(0.0, abs=1e-7), (
+            f"INERT arm: the heads are not constant within a batch "
+            f"({per_batch})")
+        # Half 2 -- the WHOLE-SPLIT reduction, which is what ships, reads large.
+        assert measured["box_std_across_images"] > 1e-2
+        assert measured["logit_std_across_images"] > 1e-1
+        assert measured["presence_logit_std_across_images"] > 1e-1
+
     def test_one_degenerate_UNMATCHED_pair_does_not_poison_the_whole_mean(
             self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
         """``nan * 0.0 = nan``: masking by multiplication is not masking.
