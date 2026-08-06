@@ -386,14 +386,23 @@ def build_parser() -> argparse.ArgumentParser:
                             "changed variable: box IoU rose on 3 of 3 seeds "
                             "(+0.110..+0.140), box_std_across_images improved "
                             "on 0 of 3. Read that gain against a TRIVIAL "
-                            "baseline, not against zero: on those same 3 "
-                            "splits an UNTRAINED, image-independent 5x5 grid "
-                            "of fixed boxes scores 0.357/0.331/0.343, above "
-                            "the no-flag arm on 3 of 3 and within "
-                            "0.025..0.044 of this flag's own "
-                            "0.401/0.369/0.368. The direction is real on 3 of "
-                            "3 seeds; the margin over a predictor that reads "
-                            "nothing is small.")
+                            "baseline, not against zero, and NAME the "
+                            "baseline -- the answer flips with it. A "
+                            "hand-written image-independent 5x5 grid of fixed "
+                            "boxes scores 0.357/0.331/0.343 on those same "
+                            "splits: above the no-flag arm on 3 of 3, and "
+                            "within 0.025..0.044 of this flag's own "
+                            "0.401/0.369/0.368. A 32-box prior fitted by "
+                            "k-means on the TRAINING split's ground-truth "
+                            "boxes -- no network, no gradient, no image read "
+                            "-- scores 0.415/0.389/0.411 (0.399/0.396/0.373 "
+                            "under review pass 2's independent fit), i.e. it "
+                            "BEATS this flag's arm on 2 of 3 seeds in both "
+                            "fits, with the third seed's sign disagreeing "
+                            "between them. No variance estimate on those "
+                            "deltas was measured. The direction over the "
+                            "no-flag arm is real on 3 of 3 seeds; the arm does "
+                            "not clear a predictor that reads nothing.")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,
@@ -722,12 +731,17 @@ def evaluate_sam3(
     measured rather than argued: on the step-8 validation split a hand-written
     predictor that reads NOTHING -- a fixed 5x5 box grid plus pure
     ``N(0, 0.05)`` noise -- scores ``box_std_across_images`` 4.91e-02, and a
-    uniform-random-center predictor scores 1.42e-01, ABOVE the 7.02e-02 of an
-    ORACLE head fed each image's own ground-truth boxes (seed 1; the other two
-    seeds agree, see the plan's ``findings/chance-floor-and-instrument.md``).
-    So a LOW reading convicts -- the shipped runs read 6.9e-06, four orders
-    below every one of those -- while a high reading acquits nothing on its
-    own. ``box_std_across_images`` is the standard
+    uniform-random-center predictor scores 1.42e-01, which is 0.73x..2.0x what
+    an ORACLE head fed each image's own ground-truth boxes reads. That oracle
+    is a RANGE and not a number, because the reading depends on how the oracle
+    packs the ground truth into the Q query slots: tiling the PADDED target
+    block gives 6.6e-02..7.0e-02 (the constant padding rows damp the very
+    statistic being calibrated), while cycling only each image's VALID boxes
+    gives 1.39e-01..1.96e-01 (3 seeds, two population choices; see the plan's
+    ``findings/chance-floor-and-instrument.md``, which tabulates both
+    constructions side by side). So a LOW reading convicts -- the shipped runs
+    read 6.9e-06, four orders below BOTH constructions -- while a high reading
+    acquits nothing on its own. ``box_std_across_images`` is the standard
     deviation over the IMAGE axis, taken per (query, coordinate) and then
     averaged; ``box_std_across_queries`` is the same statistic over the QUERY
     axis. A head that has learned a fixed dataset prior has the first near zero
