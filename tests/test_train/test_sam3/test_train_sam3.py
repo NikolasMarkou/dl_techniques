@@ -36,6 +36,7 @@ from dl_techniques.losses.sam3_detection_loss import (
     unpack_targets,
 )
 from dl_techniques.models.sam3.sam3_image import Sam3Image
+from dl_techniques.models.sam3.training_model import pack_predictions
 from train.common.args import explicitly_set_flags
 from train.sam3.train_sam3 import (
     CLI_TO_CONFIG,
@@ -283,7 +284,8 @@ class TestSmokePreset:
         divisor, so moving it would rescale a loss the smoke run is supposed to
         be comparable on (decisions.md D-030).
         """
-        shaping = {"variant", "include_masks", "freeze_trunk", "seed",
+        shaping = {"variant", "include_masks", "freeze_trunk",
+                   "deep_supervision", "seed",
                    "learning_rate", "weight_decay", "gradient_clip_norm",
                    "warmup_steps", "lr_schedule", "batch_size",
                    "zero_instance_rate", "max_instances", "max_per_category"}
@@ -588,6 +590,150 @@ class TestFreezeTrunk:
                 f"TRUNK only, or the A/B compares two unrelated things")
 
 
+def _tiny_argv(*extra: str) -> List[str]:
+    """Spell :data:`TINY_KWARGS` as CLI tokens, plus ``extra``.
+
+    Interface contract: the returned argv resolves through the REAL parser to a
+    config equal to ``Sam3TrainingConfig(**TINY_KWARGS)`` on every field
+    ``TINY_KWARGS`` names. Derived from that dict rather than hand-written, so
+    the two cannot drift.
+
+    :param extra: Additional tokens appended verbatim.
+    :type extra: str
+    :return: The argv token list.
+    :rtype: List[str]
+    """
+    argv: List[str] = []
+    for key, value in TINY_KWARGS.items():
+        argv += ["--" + key.replace("_", "-"), str(value)]
+    return argv + list(extra)
+
+
+class TestDeepSupervision:
+    """``--deep-supervision`` through the FULL ``argv -> config -> factory``.
+
+    The wiring table guards above already drive this flag with a sentinel and
+    read the CONFIG field back, which is the silent-no-op guard. What this class
+    adds is the half no table can express: that the field then reaches the
+    MODEL and the LOSS, that the two agree on the row stride, and that the
+    ``--smoke`` preset does not touch it.
+    """
+
+    def test_the_flag_reaches_the_model_and_the_loss_together(self) -> None:
+        """One argv, resolved by the real parser, driven into the real factory.
+
+        Non-vacuous by construction: ``tiny`` has a 2-layer decoder, so
+        ``num_aux_layers`` is 1 with the flag and 0 without, and the packed row
+        count differs between the two arms. Both arms are asserted -- an
+        assertion on the ON arm alone would be satisfied by a factory that
+        turned deep supervision on unconditionally.
+        """
+        on = create_training_model(config_from_argv(
+            _tiny_argv("--deep-supervision")))
+        off = create_training_model(config_from_argv(_tiny_argv()))
+
+        assert on.deep_supervision is True and off.deep_supervision is False
+        expected_aux = int(on.sam3.transformer.num_layers) - 1
+        assert expected_aux > 0, (
+            "this fixture's decoder has one layer, so `num_aux_layers` is 0 "
+            "either way and every assertion below is vacuous")
+        assert on.num_aux_layers == expected_aux and off.num_aux_layers == 0
+        # The loss must agree, or `unpack_predictions` mis-slices in silence.
+        assert on.loss.num_aux_layers == on.num_aux_layers
+        assert off.loss.num_aux_layers == 0
+        # And the agreement must be visible in the packed geometry itself.
+        rows_on = on.compute_output_shape()[1]
+        rows_off = off.compute_output_shape()[1]
+        assert rows_off == on.num_queries + 1
+        assert rows_on == (on.num_queries + 1) * (1 + expected_aux)
+        assert rows_on != rows_off
+
+    def test_the_config_default_is_off(self) -> None:
+        """The pre-change world is what a bare command line still gets."""
+        assert Sam3TrainingConfig().deep_supervision is False
+        assert config_from_argv([]).deep_supervision is False
+
+    def test_deep_supervision_is_absent_from_the_smoke_preset(self) -> None:
+        """A preset may change HOW MUCH is measured, never WHAT (D-030).
+
+        Deep supervision changes the SUPERVISION SIGNAL: the total the optimizer
+        sees gains one equally-weighted term per earlier decoder layer. A smoke
+        run that silently enabled it would be measuring a different objective
+        from the real run it is supposed to be a wiring proof for.
+        """
+        assert "deep_supervision" not in SMOKE_PRESET
+        assert config_from_argv(["--smoke"]).deep_supervision is (
+            config_from_argv([]).deep_supervision)
+
+    def test_the_flag_survives_the_preset_in_both_directions(self) -> None:
+        """``--smoke`` must neither enable nor disable it."""
+        assert config_from_argv(["--smoke", "--deep-supervision"]
+                                ).deep_supervision is True
+        assert config_from_argv(["--smoke", "--no-deep-supervision"]
+                                ).deep_supervision is False
+
+    def test_the_per_term_losses_are_computed_on_the_rows_the_loss_slices(
+            self) -> None:
+        """The eval path's packing stride, against an INDEPENDENT oracle.
+
+        ``unpack_predictions`` derives ``Q`` as ``rows // (1 + num_aux_layers)
+        - 1`` and validates nothing, so handing a deep-supervision loss a
+        main-block-only tensor does NOT raise -- on ``tiny`` it reads Q=2
+        instead of Q=5 and returns six finite, plausible, fabricated numbers.
+
+        The oracle is a SEPARATE ``Sam3DetectionLoss`` at ``num_aux_layers=0``
+        fed a main-block-only pack of the same batches: it is derived from the
+        contract (``compute_terms`` reports the MAIN block only), not
+        transcribed from ``evaluate_sam3``. RED when the eval path drops the
+        auxiliary blocks (decisions.md D-006).
+        """
+        config = config_from_argv(_tiny_argv("--deep-supervision"))
+        keras.utils.set_random_seed(4321)
+        model = create_training_model(config)
+        assert model.num_aux_layers > 0, "the arm under test is not on"
+        _, val_dataset = create_datasets(config, model)
+
+        measured = evaluate_sam3(model, val_dataset)
+
+        oracle_loss = Sam3DetectionLoss(include_masks=config.include_masks,
+                                        pad_n_queries=model.num_queries)
+        assert oracle_loss.num_aux_layers == 0
+        term_keys = ("loss_ce", "presence_loss", "loss_bbox", "loss_giou")
+        totals = {key: 0.0 for key in term_keys}
+        batches = 0
+        for inputs, y_true in val_dataset:
+            outputs = model.sam3(inputs, training=False)
+            terms = oracle_loss.compute_terms(
+                y_true,
+                pack_predictions(outputs, include_masks=config.include_masks))
+            for key in term_keys:
+                totals[key] += float(terms[key])
+            batches += 1
+        assert batches > 0
+
+        for key in term_keys:
+            assert measured[key] == pytest.approx(totals[key] / batches,
+                                                  rel=1e-5, abs=1e-6), (
+                f"{key} disagrees with the main-block oracle: the eval path is "
+                f"packing a row count the compiled loss does not slice")
+
+    def test_a_deep_supervision_model_takes_a_real_training_step(self) -> None:
+        """End to end through the trainer's own factory, one step.
+
+        The row-stride agreement is checked at compile time by
+        ``compile_sam3_trainer``, but nothing there executes the forward or the
+        backward pass. A single ``fit`` step over the trainer's own dataset does.
+        """
+        config = config_from_argv(_tiny_argv("--deep-supervision"))
+        keras.utils.set_random_seed(4321)
+        model = create_training_model(config)
+        train_dataset, _ = create_datasets(config, model)
+        history = model.fit(train_dataset, epochs=1, verbose=0)
+        assert model.jit_compile is False
+        loss_value = float(history.history["loss"][-1])
+        assert math.isfinite(loss_value)
+
+
 # ---------------------------------------------------------------------------
 # The data path
 # ---------------------------------------------------------------------------
@@ -784,6 +930,11 @@ class TestEvaluation:
                 self._rewrite = rewrite
                 self.include_masks = model.include_masks
                 self.loss = model.loss
+                # Mirrored, not pinned to 0: `evaluate_sam3` reads it to
+                # decide how many packed blocks the compiled loss slices
+                # (decisions.md D-006), so a stub that hardcoded it would
+                # stop standing in for the real wrapper.
+                self.num_aux_layers = model.num_aux_layers
 
             def sam3(self, inputs: Any, training: bool = False) -> Any:
                 return self._rewrite(
@@ -872,6 +1023,11 @@ class TestEvaluation:
                 self._model = model
                 self.include_masks = model.include_masks
                 self.loss = model.loss
+                # Mirrored, not pinned to 0: `evaluate_sam3` reads it to
+                # decide how many packed blocks the compiled loss slices
+                # (decisions.md D-006), so a stub that hardcoded it would
+                # stop standing in for the real wrapper.
+                self.num_aux_layers = model.num_aux_layers
                 self.calls = 0
                 self.seen: List[Dict[str, Any]] = []
 
@@ -942,6 +1098,11 @@ class TestEvaluation:
                 self._model = model
                 self.include_masks = model.include_masks
                 self.loss = model.loss
+                # Mirrored, not pinned to 0: `evaluate_sam3` reads it to
+                # decide how many packed blocks the compiled loss slices
+                # (decisions.md D-006), so a stub that hardcoded it would
+                # stop standing in for the real wrapper.
+                self.num_aux_layers = model.num_aux_layers
 
             def sam3(self, inputs: Any, training: bool = False) -> Any:
                 out = dict(self._model.sam3(inputs, training=training))

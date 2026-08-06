@@ -20,6 +20,15 @@ steps::
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \\
         .venv/bin/python -m train.sam3.train_sam3 --smoke --include-masks
 
+    # Every decoder layer supervised, not just the last. Exit 0 in 2 m 12 s
+    # against 2 m 05 s for the same command WITHOUT the flag, measured back to
+    # back on the same card in the same minute -- a 1.05x wall-clock ratio, and
+    # the log reports "aux blocks=2" instead of "aux blocks=0". The ratio is
+    # DILUTED by import, build and save: a 2-epoch smoke run is 16 training
+    # steps, so it is a floor on the per-step cost, not an estimate of it.
+    MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 \\
+        .venv/bin/python -m train.sam3.train_sam3 --smoke --deep-supervision
+
 A full-length run is the same command with a larger ``--epochs`` and
 ``--num-train-samples`` and a pinned ``--seed``. No such run has been executed
 as of this file's authorship, so no wall time, loss or IoU for one is quoted
@@ -181,6 +190,7 @@ class Sam3TrainingConfig:
     variant: str = "small"
     include_masks: bool = False
     freeze_trunk: bool = False
+    deep_supervision: bool = False
 
     # Optimizer. Reference-derived; see `create_optimizer` for the SIGNED,
     # NAMED divergences from the reference's own recipe.
@@ -281,6 +291,7 @@ CLI_TO_CONFIG: Dict[str, str] = {
     "variant": "variant",
     "include_masks": "include_masks",
     "freeze_trunk": "freeze_trunk",
+    "deep_supervision": "deep_supervision",
     "learning_rate": "learning_rate",
     "weight_decay": "weight_decay",
     "gradient_clip_norm": "gradient_clip_norm",
@@ -364,6 +375,13 @@ def build_parser() -> argparse.ArgumentParser:
                        default=defaults.freeze_trunk,
                        help="Freeze the image trunk. The frozen arm of the "
                             "frozen-vs-joint A/B.")
+    model.add_argument("--deep-supervision",
+                       action=argparse.BooleanOptionalAction,
+                       default=defaults.deep_supervision,
+                       help="Supervise EVERY decoder layer, not just the last "
+                            "(the reference's aux_outputs). Adds L-1 packed "
+                            "blocks and runs the Hungarian matcher once per "
+                            "block, so a step costs more.")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,
@@ -438,7 +456,8 @@ def parse_arguments(
         # default) is indistinguishable from a bare `--smoke`, and the preset
         # silently overrides a value the caller really typed. And do NOT add a
         # field to SMOKE_PRESET that changes WHAT is measured (variant, seed,
-        # learning rate, batch size, mask switch, zero-instance rate) -- only
+        # learning rate, batch size, mask switch, DEEP-SUPERVISION switch,
+        # zero-instance rate) -- only
         # how much; `test_the_preset_changes_how_much_not_what` pins that list.
         for field, preset_value in SMOKE_PRESET.items():
             if field not in explicit_fields:
@@ -552,7 +571,10 @@ def create_training_model(
 
     Interface contract: returns a BUILT, COMPILED :class:`Sam3TrainingModel` at
     ``config.variant``, with ``jit_compile=False`` and, when
-    ``config.freeze_trunk`` is set, a non-trainable image trunk.
+    ``config.freeze_trunk`` is set, a non-trainable image trunk. The model and
+    the loss agree on BOTH packed-layout axes -- ``include_masks`` (the channel
+    width) and ``num_aux_layers`` (the row stride) -- because
+    :func:`compile_sam3_trainer` raises on either disagreement.
 
     :param config: The run's config.
     :type config: Sam3TrainingConfig
@@ -562,6 +584,7 @@ def create_training_model(
     model = Sam3TrainingModel(
         Sam3Image.from_variant(config.variant),
         include_masks=config.include_masks,
+        deep_supervision=config.deep_supervision,
     )
     model.build(None)
 
@@ -598,8 +621,15 @@ def create_training_model(
         # batch, raw `loss_ce` 0.043937 at 200 vs 0.274605 at 32 (ratio
         # 6.2500), and over the whole 64-image split its weighted share of the
         # total moves 9.1% -> 38.4%. See decisions.md D-040.
+        # `num_aux_layers` is read off the MODEL, never re-derived from
+        # `config.deep_supervision` here: the model derives it from its own
+        # decoder depth (`L - 1`, hence 0 for a single-layer decoder even at
+        # `deep_supervision=True`), and a second derivation is a second home for
+        # the same fact. `compile_sam3_trainer` raises on a disagreement, so a
+        # dropped argument here fails loudly rather than mis-slicing.
         loss=Sam3DetectionLoss(include_masks=config.include_masks,
-                               pad_n_queries=model.num_queries),
+                               pad_n_queries=model.num_queries,
+                               num_aux_layers=model.num_aux_layers),
     )
     return model
 
@@ -661,7 +691,11 @@ def evaluate_sam3(
     every one a Python float, with ``nan`` for a metric this configuration
     cannot measure (``mask_iou`` when ``include_masks`` is off, any metric on an
     empty dataset). It runs the model at ``training=False`` EXPLICITLY (H-9),
-    performs ONE forward pass per batch and never raises.
+    performs ONE forward pass per batch and never raises. The six per-term
+    losses are the MAIN (last) decoder layer's, at either setting of
+    ``deep_supervision`` -- :meth:`Sam3DetectionLoss.compute_terms` reports the
+    main block only -- so every logged term stays comparable across a
+    deep-supervision A/B while the TOTAL the optimizer sees does not.
 
     ``box_iou`` and ``mask_iou`` are averaged over MATCHED PAIRS ONLY, using the
     same Hungarian assignment the loss uses -- an unmatched query has no ground
@@ -724,8 +758,28 @@ def evaluate_sam3(
     for index, (inputs, y_true) in enumerate(dataset):
         if max_batches is not None and index >= max_batches:
             break
-        outputs = model.sam3(inputs, training=False)
-        packed = pack_predictions(outputs, include_masks=model.include_masks)
+        # DECISION plan-2026-08-06T055747-1e650383/D-006
+        # Pack the SAME number of blocks the compiled loss slices. Do NOT
+        # "simplify" this back to the single `pack_predictions(outputs, ...)`
+        # call: `unpack_predictions` derives `Q` as
+        # `rows // (1 + num_aux_layers) - 1` and validates NOTHING, so handing a
+        # deep-supervision loss a main-block-only tensor does not raise -- it
+        # reads a smaller Q and reports six per-term losses computed on a
+        # fabricated slice (MEASURED on `tiny`: Q=5 read as Q=2). One forward
+        # pass either way: at `num_aux_layers > 0` the main-layer dict is
+        # element 0 of `call_per_layer`'s list and is bit-equal to `call`'s
+        # output, so this branch does not double the eval cost.
+        # See decisions.md D-006.
+        if model.num_aux_layers:
+            per_layer = model.sam3.call_per_layer(inputs, training=False)
+            outputs = per_layer[0]
+            packed = pack_predictions(outputs,
+                                      include_masks=model.include_masks,
+                                      aux_outputs=per_layer[1:])
+        else:
+            outputs = model.sam3(inputs, training=False)
+            packed = pack_predictions(outputs,
+                                      include_masks=model.include_masks)
         terms = loss.compute_terms(y_true, packed)
         targets = unpack_targets(ops.cast(y_true, "float32"),
                                  model.include_masks)

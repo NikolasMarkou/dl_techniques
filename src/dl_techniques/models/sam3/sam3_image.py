@@ -669,9 +669,10 @@ class Sam3Image(keras.Model):
         consumer decides what to do with them (the training wrapper zero-fills
         the auxiliary blocks' mask channels -- see decisions.md D-005).
 
-        The only production consumer is
-        :meth:`~dl_techniques.models.sam3.training_model.Sam3TrainingModel.call`
-        at ``deep_supervision=True``.
+        Both production consumers run only at ``deep_supervision=True``:
+        :meth:`~dl_techniques.models.sam3.training_model.Sam3TrainingModel.call`,
+        and ``train.sam3.train_sam3.evaluate_sam3``, which packs the same blocks
+        so the compiled loss's row stride agrees with the tensor it is handed.
 
         :param inputs: As :meth:`call`.
         :type inputs: Dict[str, Any]
