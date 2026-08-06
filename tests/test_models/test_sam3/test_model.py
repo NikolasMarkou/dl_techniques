@@ -270,20 +270,25 @@ class TestConstruction:
         for key in COMPONENT_KEYS:
             assert isinstance(getattr(model, key), keras.layers.Layer)
 
-    def test_the_public_class_surface_is_exactly_the_declared_ten(self):
-        """Phase 1 shipped NINE public classes. Phase 2 adds exactly ONE,
+    def test_the_public_class_surface_is_exactly_the_declared_eleven(self):
+        """Phase 1 shipped NINE public classes. Phase 2 added exactly ONE,
         ``Sam3TrainingModel`` -- the packed-tensor training wrapper -- and
-        three module-level FUNCTIONS. The counts are split so that adding a
+        three module-level FUNCTIONS. Phase 3 adds exactly ONE more,
+        ``Sam3EncoderQuerySelection``, the opt-in mixed proposal head reached
+        through ``Sam3Image(..., query_selection=True)``; it is NOT a component
+        of the released reference, and it is exported because it owns weights
+        and round-trips independently. The counts are split so that adding a
         class and adding a helper are not interchangeable here: an unannounced
-        tenth-plus class still fires even if the total happens to match."""
+        twelfth-plus class still fires even if the total happens to match."""
         import dl_techniques.models.sam3 as package
         assert "Sam3Image" in package.__all__
         exported = {name: getattr(package, name) for name in package.__all__}
         classes = sorted(k for k, v in exported.items() if isinstance(v, type))
         functions = sorted(
             k for k, v in exported.items() if not isinstance(v, type))
-        assert len(classes) == 10, classes
+        assert len(classes) == 11, classes
         assert "Sam3TrainingModel" in classes
+        assert "Sam3EncoderQuerySelection" in classes
         assert functions == [
             "compile_sam3_trainer", "pack_predictions", "pack_targets"]
 
@@ -1162,6 +1167,320 @@ class TestTrainingFlagTrap:
                   for _ in range(3)]
         assert max(float(np.max(np.abs(pinned[0] - other)))
                    for other in pinned[1:]) == 0.0
+
+
+# ---------------------------------------------------------------------
+# encoder query selection -- the structural guarantee
+# ---------------------------------------------------------------------
+
+
+def across_image_spread(boxes):
+    """Largest per-(query, coordinate) standard deviation ACROSS the batch.
+
+    This is the quantity the whole mechanism exists to move: with the flag off
+    and a zero-initialized box head, `pred_boxes` is a broadcast of one learned
+    table and this reads EXACTLY 0.0 for any batch of any images.
+    """
+    return float(np.max(np.std(np.array(boxes), axis=0)))
+
+
+@pytest.fixture
+def qs_model():
+    built = Sam3Image.from_variant(
+        "tiny", supervise_joint_box_scores=True, query_selection=True)
+    built.build(None)
+    return built
+
+
+@pytest.fixture
+def decoder_calls(monkeypatch):
+    """Record every keyword the decoder is invoked with.
+
+    A spy rather than an output comparison, because the two facts under test --
+    "no reference override reaches the decoder when the flag is off" and "`tgt`
+    is never passed at either flag value" -- are properties of the CALL, and an
+    output comparison cannot distinguish "was not passed" from "was passed and
+    happened not to matter".
+    """
+    from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
+
+    recorded = []
+    original = Sam3TransformerDecoder.call
+
+    def spy(self, *args, **kwargs):
+        recorded.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Sam3TransformerDecoder, "call", spy)
+    return recorded
+
+
+class TestQuerySelectionWiring:
+    """`query_selection` is the plan's structural guarantee, and it is OFF.
+
+    Two independent obligations are guarded here and they pull in opposite
+    directions:
+
+    - **Off is off.** No head, no weight, no reference override -- the decoder
+      is called with `reference_boxes=None`, which is the value its own default
+      branch consumes, so the flag-off model is the model that shipped before
+      the flag existed. (The bit-equality of `call`'s five outputs against the
+      pre-change tree was measured separately against a pristine `git worktree`
+      at `6d0453a80`, on CPU: max abs delta exactly 0.0 on all five, at an
+      identical 217-weight / 24,818-parameter signature. On GPU that comparison
+      is NOT a valid instrument -- the pre-change tree disagrees with ITSELF
+      run-to-run at ~5e-6 on `pred_boxes`.)
+    - **On is live.** The selected proposals must actually reach `pred_boxes`,
+      and they must reach it DETACHED. The liveness half is the one that goes
+      RED under a dead objectness head, which is the vacuity mode `top_k`'s
+      ascending-index tie-break makes plausible: a dead head still selects
+      `k` positions, still has the right shapes, and is image-INDEPENDENT.
+    """
+
+    # -- off is off ---------------------------------------------------
+
+    def test_the_flag_is_off_by_default(self, model):
+        assert model.query_selection is False
+        assert model.query_selection_head is None
+
+    def test_the_flag_off_model_owns_no_query_selection_weight(self, model,
+                                                               qs_model):
+        assert qs_model.query_selection_head is not None
+        assert qs_model.count_params() > model.count_params()
+        assert not any("query_selection" in weight.path
+                       for weight in model.weights)
+        assert any("query_selection" in weight.path
+                   for weight in qs_model.weights)
+
+    def test_the_decoder_gets_no_reference_override_when_the_flag_is_off(
+            self, model, batch, decoder_calls):
+        model(batch, training=False)
+        assert len(decoder_calls) == 1
+        assert decoder_calls[0]["reference_boxes"] is None, (
+            "the flag-off path handed the decoder a reference override -- it "
+            "must take the decoder's own learned default branch")
+
+    def test_the_flag_off_boxes_are_image_independent_exactly(self, model,
+                                                              batch):
+        # The control the mechanism is measured against, executed rather than
+        # quoted: this is EXACTLY 0.0, not merely small.
+        assert across_image_spread(model(batch, training=False)["pred_boxes"]
+                                   ) == 0.0
+
+    def test_include_proposals_is_inert_when_the_flag_is_off(self, model,
+                                                             batch):
+        without = model.call_per_layer(batch, training=False)
+        with_flag = model.call_per_layer(batch, training=False,
+                                         include_proposals=True)
+        assert len(with_flag) == len(without) == model.transformer.num_layers
+        for left, right in zip(without, with_flag):
+            for key in OUTPUT_KEYS:
+                assert np.array_equal(np.array(left[key]), np.array(right[key]))
+
+    # -- on is live ---------------------------------------------------
+
+    def test_the_decoder_gets_the_detached_selected_boxes_when_on(
+            self, qs_model, batch, decoder_calls):
+        qs_model(batch, training=False)
+        assert len(decoder_calls) == 1
+        handed = decoder_calls[0]["reference_boxes"]
+        assert handed is not None
+        proposals = qs_model.query_selection_head(
+            qs_model._flatten(qs_model._scalped(qs_model.neck(
+                qs_model.backbone(batch["image"], training=False),
+                training=False)["sam3_features"])[-1]), training=False)
+        assert np.array_equal(np.array(handed),
+                              np.array(proposals["selected_boxes"]))
+
+    def test_query_content_is_untouched_no_tgt_is_ever_passed(
+            self, model, qs_model, batch, decoder_calls):
+        """I-2: this is MIXED query selection -- positional only.
+
+        A future edit that also conditions the query CONTENT on the image would
+        silently change what "query selection" means in this package, with no
+        shape, dtype or finiteness symptom. `tgt=None` is what makes the decoder
+        fall back to its learned `query_embed` table.
+        """
+        model(batch, training=False)
+        qs_model(batch, training=False)
+        assert len(decoder_calls) == 2
+        for recorded in decoder_calls:
+            assert recorded.get("tgt") is None, (
+                "the decoder was handed object queries: query selection in "
+                "this package is MIXED (positional only) by design")
+
+    def test_query_selection_makes_the_boxes_image_dependent(self, qs_model,
+                                                             batch):
+        """The guard the whole plan turns on, and the one a DEAD objectness
+        head takes RED: `top_k` breaks ties by ascending index, so a head that
+        reads nothing selects positions `0..k-1` for every image and this
+        spread collapses back to 0.0 with every shape still correct."""
+        spread = across_image_spread(qs_model(batch, training=False)
+                                     ["pred_boxes"])
+        assert spread > 1e-3, (
+            f"pred_boxes across-image spread is {spread}: the selection is not "
+            f"reading the image (a dead objectness head selects positions "
+            f"0..k-1 for every image)")
+
+    def test_the_selected_indices_differ_between_the_two_images(self, qs_model,
+                                                               batch):
+        # The discriminator named in the plan's pre-mortem: a selection that is
+        # image-independent has an index overlap of 1.0.
+        memory = qs_model._flatten(qs_model._scalped(qs_model.neck(
+            qs_model.backbone(batch["image"], training=False),
+            training=False)["sam3_features"])[-1])
+        indices = np.array(
+            qs_model.query_selection_head(memory, training=False)["indices"])
+        assert not np.array_equal(indices[0], indices[1])
+
+    def test_the_proposals_are_the_boxes_at_a_zero_init_box_head(self,
+                                                                 qs_model,
+                                                                 batch):
+        """At a fresh model BOTH box heads are zero-initialized (D-112), so the
+        decoder's refinement is the identity and `pred_boxes` IS the proposal
+        set -- the cleanest possible statement that the proposals reached the
+        output rather than merely being computed."""
+        memory = qs_model._flatten(qs_model._scalped(qs_model.neck(
+            qs_model.backbone(batch["image"], training=False),
+            training=False)["sam3_features"])[-1])
+        selected = np.array(qs_model.query_selection_head(
+            memory, training=False)["selected_boxes"])
+        boxes = np.array(qs_model(batch, training=False)["pred_boxes"])
+        assert float(np.max(np.abs(boxes - selected))) < 1e-5
+
+    def test_the_proposals_enter_the_decoder_detached(self, qs_model, batch):
+        """I-3, executed: no gradient may flow from the decoder's outputs back
+        into the proposal head. The head is supervised by its OWN packed block,
+        never through the decoder -- see the D-006 anchor in `sam3_image.py`."""
+        import tensorflow as tf
+
+        weights = qs_model.query_selection_head.trainable_weights
+        assert weights
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(
+                qs_model(batch, training=False)["pred_boxes"])
+        grads = tape.gradient(loss, weights)
+        for weight, grad in zip(weights, grads):
+            assert grad is None or float(tf.reduce_max(tf.abs(grad))) == 0.0, (
+                f"{weight.path} receives gradient through the decoder: the "
+                f"stop_gradient on the selected boxes was removed")
+
+    def test_the_detach_probe_is_not_vacuous_the_head_is_differentiable(
+            self, qs_model, batch):
+        # Without this, the test above would pass for a head whose weights are
+        # unreachable from ANY loss -- including a head that never ran.
+        import tensorflow as tf
+
+        weights = qs_model.query_selection_head.trainable_weights
+        memory = qs_model._flatten(qs_model._scalped(qs_model.neck(
+            qs_model.backbone(batch["image"], training=False),
+            training=False)["sam3_features"])[-1])
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(qs_model.query_selection_head(
+                memory, training=False)["objectness"])
+        grads = tape.gradient(loss, weights)
+        assert any(grad is not None and float(tf.reduce_max(tf.abs(grad))) > 0.0
+                   for grad in grads)
+
+    # -- the encoder block -------------------------------------------
+
+    def test_the_encoder_block_is_appended_last_and_only_when_asked(
+            self, qs_model, batch):
+        layers = qs_model.transformer.num_layers
+        assert len(qs_model.call_per_layer(batch, training=False)) == layers
+        blocks = qs_model.call_per_layer(batch, training=False,
+                                         include_proposals=True)
+        assert len(blocks) == layers + 1
+        # The decoder blocks keep the positions they had, so a packed tensor
+        # built with the flag on is the flag-off tensor plus one block.
+        plain = qs_model.call_per_layer(batch, training=False)
+        for left, right in zip(plain, blocks[:layers]):
+            for key in OUTPUT_KEYS:
+                assert np.array_equal(np.array(left[key]), np.array(right[key]))
+
+    def test_the_block_count_table_at_all_four_flag_combinations(self, batch):
+        for deep, flag, expected in ((False, False, 2), (True, False, 2),
+                                     (False, True, 2), (True, True, 3)):
+            # `deep` is the CALLER's choice of `include_proposals`; the model
+            # flag is `flag`. At `tiny` the decoder has 2 layers.
+            built = Sam3Image.from_variant("tiny", query_selection=flag)
+            built.build(None)
+            blocks = built.call_per_layer(batch, training=False,
+                                          include_proposals=deep)
+            assert len(blocks) == expected, (deep, flag)
+
+    def test_the_encoder_block_is_key_and_shape_compatible_with_a_decoder_one(
+            self, qs_model, batch):
+        """Step 6 feeds this block through the SAME packer as a decoder aux
+        block, so it must carry the same keys at the same shapes."""
+        blocks = qs_model.call_per_layer(batch, training=False,
+                                         include_proposals=True)
+        encoder, decoder_block = blocks[-1], blocks[1]
+        assert set(encoder) == OUTPUT_KEYS
+        for key in OUTPUT_KEYS:
+            assert tuple(encoder[key].shape) == tuple(decoder_block[key].shape), key
+
+    def test_the_encoder_block_carries_the_selected_quantities(self, qs_model,
+                                                               batch):
+        memory = qs_model._flatten(qs_model._scalped(qs_model.neck(
+            qs_model.backbone(batch["image"], training=False),
+            training=False)["sam3_features"])[-1])
+        proposals = qs_model.query_selection_head(memory, training=False)
+        block = qs_model.call_per_layer(
+            batch, training=False, include_proposals=True)[-1]
+        assert np.array_equal(np.array(block["pred_logits"]),
+                              np.array(proposals["selected_objectness"]))
+        assert np.array_equal(np.array(block["pred_boxes"]),
+                              np.array(proposals["selected_boxes"]))
+        assert np.array_equal(
+            np.array(block["presence_logit"]),
+            np.max(np.array(proposals["selected_objectness"]), axis=1))
+
+    def test_the_encoder_blocks_masks_are_the_shared_segmentation_tensors(
+            self, qs_model, batch):
+        blocks = qs_model.call_per_layer(batch, training=False,
+                                         include_proposals=True)
+        for key in ("pred_masks", "semantic_seg"):
+            assert np.array_equal(np.array(blocks[-1][key]),
+                                  np.array(blocks[0][key]))
+
+    # -- serialization ------------------------------------------------
+
+    def test_get_config_carries_the_flag_at_both_values(self, model, qs_model):
+        assert model.get_config()["query_selection"] is False
+        assert qs_model.get_config()["query_selection"] is True
+        assert Sam3Image.from_config(
+            qs_model.get_config()).query_selection is True
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_full_keras_roundtrip_preserves_output_VALUES(self, batch, flag):
+        """SC-C1 at BOTH flag values, at `training=False` (D-123).
+
+        Compared by VALUE, never by count: a nested sub-layer store restores
+        freshly initialized kernels while the weight count, every weight path
+        and the parameter total all match (D-098).
+        """
+        built = Sam3Image.from_variant(
+            "tiny", supervise_joint_box_scores=True, query_selection=flag)
+        built.build(None)
+        randomize(built.transformer.bbox_embed[-1], seed=11)
+        if flag:
+            randomize(built.query_selection_head.box_head[-1], seed=13)
+        before = built(batch, training=False)
+        path = os.path.join(tempfile.mkdtemp(), "sam3_qs.keras")
+        built.save(path)
+        restored = keras.models.load_model(path)
+        after = restored(batch, training=False)
+        assert restored.count_params() == built.count_params()
+        assert restored.query_selection is flag
+        assert (restored.query_selection_head is None) is (not flag)
+        for key in before:
+            delta = float(np.max(np.abs(np.array(before[key])
+                                        - np.array(after[key]))))
+            assert delta == 0.0, f"{key} moved by {delta} across the round trip"
+        for key, value in before.items():
+            assert len(np.unique(np.array(value))) > 1, (
+                f"{key} is degenerate, so the comparison above is vacuous")
 
 
 # ---------------------------------------------------------------------

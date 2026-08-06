@@ -22,6 +22,12 @@ The eight component classes are exported too, because each is independently
 constructible, serializable and testable -- which is the property that let this
 package be built and gated one leaf at a time.
 
+:class:`Sam3EncoderQuerySelection` is the ninth and NOT a component of the
+released reference: it is this package's own opt-in DINO-style *mixed* proposal
+head, reached through ``Sam3Image(..., query_selection=True)``, which is OFF by
+default and behaviourally inert when off. It is exported on the same terms as
+the rest -- it owns weights and round-trips independently.
+
 The segmentation head has **no presence mechanism**: the shipped reference
 configuration disables it there and drives presence from the decoder's own
 presence token, so only ONE presence signal exists in this package.
@@ -57,6 +63,7 @@ from .decoder import Sam3DecoderLayer, Sam3TransformerDecoder
 from .maskformer_segmentation import Sam3SegmentationHead
 from .model_misc import Sam3DotProductScoring
 from .necks import Sam3DualViTDetNeck
+from .query_selection import Sam3EncoderQuerySelection
 from .sam3_image import Sam3Image
 from .text_encoder_ve import Sam3TextEncoder
 from .training_model import (
@@ -67,6 +74,7 @@ __all__ = [
     "Sam3DecoderLayer",
     "Sam3DotProductScoring",
     "Sam3DualViTDetNeck",
+    "Sam3EncoderQuerySelection",
     "Sam3Image",
     "Sam3SegmentationHead",
     "Sam3TextEncoder",

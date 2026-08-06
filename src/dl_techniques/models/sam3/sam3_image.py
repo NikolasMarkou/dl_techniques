@@ -66,7 +66,12 @@ rediscovered as a gap:
 - the exemplar / geometry prompt path (points and boxes), which needs bilinear
   ``grid_sample`` and ``roi_align`` primitives ``keras.ops`` does not have;
 - DAC query doubling, provably inert at inference;
-- the reference's ``first_stage`` (encoder-side proposal) auxiliary outputs.
+- the reference's ``first_stage`` (encoder-side proposal) auxiliary outputs are
+  no longer absent either, but what ships is NOT a port of them: it is
+  ``query_selection``, an opt-in DINO-style *mixed* proposal head
+  (:class:`~dl_techniques.models.sam3.query_selection.Sam3EncoderQuerySelection`)
+  that this package added to give the box output an image-conditioned route,
+  default OFF and behaviourally inert when off.
   The DECODER-side per-layer stacks are no longer absent: :meth:`call_per_layer`
   is public on this class, returns every decoder layer's five quantities with
   the shared box head re-applied exactly as :meth:`call` does, and is consumed
@@ -114,6 +119,7 @@ from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
 from dl_techniques.models.sam3.maskformer_segmentation import Sam3SegmentationHead
 from dl_techniques.models.sam3.model_misc import Sam3DotProductScoring
 from dl_techniques.models.sam3.necks import Sam3DualViTDetNeck
+from dl_techniques.models.sam3.query_selection import Sam3EncoderQuerySelection
 from dl_techniques.models.sam3.text_encoder_ve import Sam3TextEncoder
 from dl_techniques.models.sam3.vitdet import Sam3ViTDetBackbone
 
@@ -169,6 +175,16 @@ class Sam3Image(keras.Model):
         re-logit. ``10.0`` at the settled configuration -- and MEASURED to be
         non-binding, see the anchor at the fusion.
     :type joint_score_clamp: float
+    :param query_selection: Whether DINO-style **mixed** encoder query selection
+        is active. Default ``False``, at which value this model is behaviourally
+        identical to the one that shipped before the flag existed: no head is
+        created, no weight is added, and the decoder is called by the same
+        expression with ``reference_boxes=None``. At ``True`` a
+        :class:`~dl_techniques.models.sam3.query_selection.Sam3EncoderQuerySelection`
+        head scores every image-memory position and its top ``num_queries``
+        boxes become the decoder's INITIAL ``reference_boxes``, detached. Query
+        CONTENT is untouched -- that is what makes it *mixed*.
+    :type query_selection: bool
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If any component's width disagrees with another's, if
@@ -376,6 +392,7 @@ class Sam3Image(keras.Model):
             supervise_joint_box_scores: bool = False,
             detach_presence_in_joint_score: bool = False,
             joint_score_clamp: float = 10.0,
+            query_selection: bool = False,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -401,6 +418,7 @@ class Sam3Image(keras.Model):
         self.detach_presence_in_joint_score = bool(
             detach_presence_in_joint_score)
         self.joint_score_clamp = float(joint_score_clamp)
+        self.query_selection = bool(query_selection)
 
         levels = len(self.neck.scale_factors) - self.scalp
         if levels < 1:
@@ -460,11 +478,27 @@ class Sam3Image(keras.Model):
                 f"built on that grid, so a mismatch is a silent wrong-geometry "
                 f"bias rather than a shape error")
 
+        # The head is created HERE, in `__init__`, and never on first call. A
+        # subclassed `keras.Model` whose sub-layers materialize lazily restores
+        # an INCOMPLETE weight set from a `.keras` file with no exception and no
+        # shape symptom -- the same reason `build()` below builds every
+        # component explicitly. At `query_selection=False` the attribute is
+        # `None`, so the flag-off model owns exactly the weights it owned before
+        # this flag existed.
+        self.query_selection_head = None
+        if self.query_selection:
+            self.query_selection_head = Sam3EncoderQuerySelection(
+                d_model=self.d_model,
+                num_queries=self.transformer.num_queries,
+                feat_size=self.memory_grid,
+                name="query_selection_head")
+
         logger.info(
             f"Sam3Image: trunk {grid}x{grid}x{self.backbone.embed_dim}, "
             f"pyramid {levels} of {len(self.neck.scale_factors)} levels, "
             f"memory {self.memory_grid}, d_model={self.d_model}, "
-            f"joint_scores={self.supervise_joint_box_scores}")
+            f"joint_scores={self.supervise_joint_box_scores}, "
+            f"query_selection={self.query_selection}")
 
     # -----------------------------------------------------------------
     # variants
@@ -613,6 +647,8 @@ class Sam3Image(keras.Model):
                          token_shape)
         self._build_once(self.segmentation_head, pyramid, hidden_shape,
                          memory_shape, prompt_shape)
+        if self.query_selection_head is not None:
+            self._build_once(self.query_selection_head, memory_shape)
         super().build(input_shape)
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
@@ -670,6 +706,7 @@ class Sam3Image(keras.Model):
 
     def call_per_layer(
             self, inputs: Dict[str, Any], training: Optional[bool] = None,
+            include_proposals: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return one prediction dict PER decoder layer, MAIN layer FIRST.
 
@@ -695,25 +732,54 @@ class Sam3Image(keras.Model):
         and ``train.sam3.train_sam3.evaluate_sam3``, which packs the same blocks
         so the compiled loss's row stride agrees with the tensor it is handed.
 
+        When ``include_proposals`` is ``True`` AND ``query_selection`` is on,
+        ONE further element is appended **LAST**: the encoder query selection
+        head's own block, in the same five-key shape, with ``pred_logits`` the
+        selected objectness ``(B, Q, 1)``, ``pred_boxes`` the selected boxes
+        ``(B, Q, 4)``, and ``presence_logit`` the ``max`` over the selected
+        objectness ``(B, 1)``. Its ``pred_masks`` / ``semantic_seg`` are the
+        same shared segmentation tensors every other element carries -- the
+        packer zero-fills an auxiliary block's mask channels regardless (see
+        ``pack_predictions``' D-005 anchor), so they are repeated for shape
+        uniformity, not to be supervised. LAST is the position, not first: the
+        decoder blocks keep the row offsets they have today, so a packed tensor
+        built with the flag on is the flag-off tensor with one block appended.
+        With either the argument or the flag off, the returned list is exactly
+        what it has always been.
+
         :param inputs: As :meth:`call`.
         :type inputs: Dict[str, Any]
         :param training: As :meth:`call`.
         :type training: Optional[bool]
-        :return: ``num_layers`` output dicts, last decoder layer first.
+        :param include_proposals: Whether to append the encoder block. Ignored
+            when ``query_selection`` is off -- there are no proposals to append.
+        :type include_proposals: bool
+        :return: ``num_layers`` output dicts, last decoder layer first, plus the
+            encoder block when both the argument and the flag are on.
         :rtype: List[Dict[str, Any]]
         :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
         """
-        outputs_class, outputs_coord, presence_logits, seg = (
-            self._forward_stacks(inputs, training=training))
+        outputs_class, outputs_coord, presence_logits, seg, proposals = (
+            self._forward_all(inputs, training=training))
         num_layers = int(outputs_class.shape[0])
         order = [num_layers - 1] + list(range(num_layers - 1))
-        return [{
+        blocks = [{
             "pred_logits": outputs_class[index],
             "pred_boxes": outputs_coord[index],
             "pred_masks": seg["pred_masks"],
             "semantic_seg": seg["semantic_seg"],
             "presence_logit": presence_logits[index],
         } for index in order]
+        if include_proposals and proposals is not None:
+            blocks.append({
+                "pred_logits": proposals["selected_objectness"],
+                "pred_boxes": proposals["selected_boxes"],
+                "pred_masks": seg["pred_masks"],
+                "semantic_seg": seg["semantic_seg"],
+                "presence_logit": ops.max(
+                    proposals["selected_objectness"], axis=1),
+            })
+        return blocks
 
     def _forward_stacks(
             self, inputs: Dict[str, Any], training: Optional[bool] = None,
@@ -721,10 +787,15 @@ class Sam3Image(keras.Model):
         """Run the whole forward pass and keep every layer's predictions.
 
         The entire body of :meth:`call` except its final ``[-1]`` slicing lives
-        here, so the per-layer quantities an auxiliary-loss training phase needs
-        are produced exactly once and the reported last-layer quantities are
-        rows of the SAME tensors -- not a second, separately computed forward
-        pass that could drift from it.
+        in :meth:`_forward_all`, so the per-layer quantities an auxiliary-loss
+        training phase needs are produced exactly once and the reported
+        last-layer quantities are rows of the SAME tensors -- not a second,
+        separately computed forward pass that could drift from it.
+
+        This is the four-value view of :meth:`_forward_all`, kept as its own
+        name because its four-tuple contract predates encoder query selection
+        and every consumer of it is indifferent to the proposals. There is no
+        second forward pass and no duplicated body: it is one delegation.
 
         :param inputs: As :meth:`call`.
         :type inputs: Dict[str, Any]
@@ -740,6 +811,31 @@ class Sam3Image(keras.Model):
         :rtype: Tuple[Any, Any, Any, Dict[str, Any]]
         :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
         """
+        return self._forward_all(inputs, training=training)[:4]
+
+    def _forward_all(
+            self, inputs: Dict[str, Any], training: Optional[bool] = None,
+    ) -> Tuple[Any, Any, Any, Dict[str, Any], Optional[Dict[str, Any]]]:
+        """Run the whole forward pass, proposals included.
+
+        Interface contract: the input is exactly :meth:`call`'s. The return is
+        :meth:`_forward_stacks`'s four values followed by the encoder query
+        selection head's own output dict -- or ``None`` when
+        ``query_selection`` is off, which is the value that also makes the
+        decoder call below take its default (learned, image-independent)
+        reference path. It raises exactly what :meth:`call` raises.
+
+        :param inputs: As :meth:`call`.
+        :type inputs: Dict[str, Any]
+        :param training: As :meth:`call`.
+        :type training: Optional[bool]
+        :return: ``(outputs_class, outputs_coord, presence_logits, seg,
+            proposals)``; see :meth:`_forward_stacks` for the first four and
+            :meth:`~dl_techniques.models.sam3.query_selection.Sam3EncoderQuerySelection.call`
+            for the fifth.
+        :rtype: Tuple[Any, Any, Any, Dict[str, Any], Optional[Dict[str, Any]]]
+        :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.
+        """
         for key in ("image", "token_ids"):
             if key not in inputs:
                 raise ValueError(f"Sam3Image.call requires inputs['{key}']")
@@ -752,9 +848,42 @@ class Sam3Image(keras.Model):
         memory_pos = self._flatten(self._scalped(neck_out["sam3_pos"])[-1])
         prompt = self.text_encoder(inputs["token_ids"], training=training)
 
+        # ONE reference expression, computed once, so the flag-off path cannot
+        # drift from the flag-on one: `None` is exactly what the decoder's own
+        # `if reference_boxes is None` default branch consumes, so with the flag
+        # off the call below is the call that shipped before this flag existed.
+        proposals = None
+        reference_boxes = None
+        if self.query_selection_head is not None:
+            proposals = self.query_selection_head(memory, training=training)
+
+            # DECISION plan-2026-08-06T185813-fd80240f/D-006
+            # The selected proposals enter the decoder DETACHED, and that is not
+            # defensive style -- it is the design. Do NOT remove the
+            # `stop_gradient` "so the encoder head can learn from the detection
+            # loss": the head is supervised by its OWN packed block (invariant
+            # I-3), an ordinary uniform block on the packed prediction tensor
+            # carrying the same class/box/giou/presence terms. Removing it
+            # re-opens a credit-assignment path from every decoder layer back
+            # through the initial reference into the proposal head -- exactly
+            # the path `decoder.py:1090`'s own `stop_gradient` on every LATER
+            # reference exists to avoid (D-113 of
+            # plan-2026-08-04T044628-4c240b4c, reference-faithful, and a GHOST
+            # constraint G-2 of this plan: it was already refuted as a defect).
+            # Doing so has NO shape, dtype or finiteness symptom -- only the
+            # gradients change, silently and everywhere.
+            # See decisions.md D-006.
+            reference_boxes = ops.stop_gradient(proposals["selected_boxes"])
+
+        # `tgt` is deliberately NOT passed: query CONTENT stays the decoder's
+        # learned `query_embed` table and only the POSITIONAL part comes from
+        # the image. That is DINO's *mixed* query selection, and it is what
+        # "query selection" means in this package (invariant I-2). Passing `tgt`
+        # here would silently redefine the term.
         hidden, anchors, presence_logits, _ = self.transformer(
             memory, memory_text=prompt, text_padding_mask=padding_mask,
-            memory_pos=memory_pos, training=training)
+            memory_pos=memory_pos, reference_boxes=reference_boxes,
+            training=training)
 
         outputs_class = self.dot_prod_scoring(
             hidden, prompt, padding_mask, training=training)
@@ -776,7 +905,7 @@ class Sam3Image(keras.Model):
         seg = self.segmentation_head(
             pyramid, hidden, memory, prompt=prompt,
             prompt_padding_mask=padding_mask, training=training)
-        return outputs_class, outputs_coord, presence_logits, seg
+        return outputs_class, outputs_coord, presence_logits, seg, proposals
 
     @staticmethod
     def _fuse(
@@ -867,6 +996,7 @@ class Sam3Image(keras.Model):
             "detach_presence_in_joint_score":
                 self.detach_presence_in_joint_score,
             "joint_score_clamp": self.joint_score_clamp,
+            "query_selection": self.query_selection,
         })
         return config
 
