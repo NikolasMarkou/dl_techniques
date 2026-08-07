@@ -31,10 +31,28 @@ Three things are being protected, in descending order of how quietly they fail.
    ``image`` argument and returns the grid). ``TestTheDetectorIsNotAFamilyMember``
    pins that ``family_max`` never quotes it as the bar.
 
-Device: CPU-cheap. Only ``TestTheFamilyEndToEnd`` and the oracle guards build a
-model, and they build the ``tiny`` variant with a 4-sample split.
+5. **The distractor gap's ability to SEPARATE.** ``distractor_gap`` scores the
+   same boxes against the prompted category's GT and against every other
+   category's, and the whole claim is that a category-blind detector cannot win
+   it. Both ends are pinned on the REAL 64-image split, at values known before
+   the instrument runs: the GT oracle reads ``1.0 / 0.0 / gap 1.0`` BY
+   CONSTRUCTION (the generator places instances NON-OVERLAPPING, so a box that
+   is a prompted instance has zero IoU with every other category's), and the
+   connected-components detector -- which BEATS the trained checkpoint on raw
+   ``box_iou`` -- reads a gap of ~0. ``TestTheDistractorGapIsRedProven`` fires
+   both ends with dead-component injections, one of which (feeding the SAME
+   target dict twice) is the sharpest guard in this file: it is the only check
+   that proves the two ``_matched_iou`` calls really do receive DIFFERENT
+   target sets.
+
+Device: CPU-cheap. ``TestTheFamilyEndToEnd`` and the oracle guards build the
+``tiny`` variant with a 4-sample split; the distractor-gap liveness classes
+build the ``small`` variant on the REAL 64-image split (~10 s), because a
+near-zero statistic measured on 4 images is not a measurement -- and because
+the 0.02 ceiling the detector must sit under was fixed on that split.
 """
 
+import hashlib
 from typing import Any, Dict, List, Tuple
 
 import keras
@@ -49,6 +67,7 @@ from train.sam3.baselines import (
     CC_THRESHOLD,
     CONNECTED_COMPONENTS_ARM,
     DEGENERATE_ARM,
+    DISTRACTOR_GAP_ARM,
     GRID_ARM,
     ORACLE_ARM,
     KMEANS_N_INIT,
@@ -88,6 +107,141 @@ TINY_SPLIT: Dict[str, Any] = {
 #: `k` for the tiny end-to-end family: the 4-sample train pool holds only a
 #: handful of boxes, and `fit_kmeans_prior` refuses `k > len(pool)` on purpose.
 TINY_K: int = 2
+
+#: The ceiling a CATEGORY-BLIND arm's distractor gap must sit under, on the
+#: real split. Pre-registered as SC-C before it was measured; the connected-
+#: components detector reads -0.0029 and the one-box degenerate prior -0.0085,
+#: both an order of magnitude below it, against the oracle's 1.0. The bound is
+#: on the ABSOLUTE gap: a blind arm can land on either side of zero (it does --
+#: both blind arms here score the distractor set slightly HIGHER than the
+#: prompted one), and a one-sided `gap <= 0.02` would be satisfied by an arm
+#: that had collapsed to a large NEGATIVE gap, which is not "cannot win" but a
+#: different defect.
+CATEGORY_BLIND_GAP_CEILING: float = 0.02
+
+
+def _image_key(images: Any) -> str:
+    """A content hash of one batch's images.
+
+    Used to hand a baseline predictor the ground truth of the image it is
+    currently being asked about, since :func:`distractor_gap` passes its
+    stand-in checkpoint only the model INPUTS. Hashing rather than relying on
+    iteration order means a dataset that replayed its batches in a different
+    order would raise instead of silently scoring the wrong labels.
+
+    Args:
+        images: ``(B, S, S, 3)`` image tensor or array.
+
+    Returns:
+        The sha256 hex digest of the batch's float32 bytes.
+    """
+    array = np.ascontiguousarray(np.asarray(images, dtype=np.float32))
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _degenerate_as_predictor(target_boxes: np.ndarray,
+                             target_valid: np.ndarray,
+                             num_queries: int) -> np.ndarray:
+    """:data:`baselines.Predictor` view of the one-centered-box prior.
+
+    ``distractor_gap`` scores a CHECKPOINT, not a prior, so the array-shaped
+    arms of the family reach it through the same predictor signature the GT
+    oracle uses.
+
+    Args:
+        target_boxes: ``(B, N_max, 4)`` -- read for the batch size only.
+        target_valid: Unused.
+        num_queries: The model's ``Q``.
+
+    Returns:
+        ``(B, num_queries, 4)`` float32, identical for every image.
+    """
+    del target_valid
+    tiled = tile_to_queries(degenerate_prior(), num_queries)
+    return np.tile(tiled[None], (target_boxes.shape[0], 1, 1))
+
+
+class _PredictorAsCheckpoint:
+    """A stand-in checkpoint whose ``pred_boxes`` come from a baseline arm.
+
+    ``distractor_gap`` takes a MODEL -- it calls ``model.sam3(inputs,
+    training=False)`` -- but the two arms whose readings are known IN ADVANCE
+    (the GT oracle at 1.0, the category-blind detector at ~0) are PREDICTORS,
+    scored elsewhere in this module through :func:`baselines._score`. This
+    adapter is what lets the same two arms run through the diagnostic under
+    test, so its liveness is pinned against values that were not read off its
+    own output.
+
+    It is deliberately thin: it forwards the batch to the predictor and emits
+    ZEROED ``pred_logits`` exactly as :func:`baselines._score` does (a prior
+    makes no class claim, so the matcher's class cost is constant). That the
+    adapter is faithful is not asserted by inspection -- it is proven by value,
+    in ``test_the_detector_arm_agrees_with_score_prior_digit_for_digit``.
+
+    Attributes:
+        include_masks: Copied from the real model, for ``unpack_targets``.
+        num_queries: Copied from the real model.
+    """
+
+    def __init__(self, model: Any, predictor: Any, dataset: Any) -> None:
+        """Prime the image-hash -> ground-truth table by one pass over ``dataset``.
+
+        Args:
+            model: A built ``Sam3TrainingModel`` -- supplies the two geometry
+                attributes only; its weights are never read.
+            predictor: A :data:`baselines.Predictor`, or an
+                :data:`baselines.ImagePredictor` carrying ``reads_image``.
+            dataset: The scoring split, built with
+                ``include_all_instances=True``.
+        """
+        self.include_masks = model.include_masks
+        self.num_queries = int(model.num_queries)
+        self._predictor = predictor
+        self._reads_image = bool(getattr(predictor, "reads_image", False))
+        self._ground_truth: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        for inputs, y_true, _all_instances in dataset:
+            targets = baselines.unpack_targets(
+                baselines.ops.cast(y_true, "float32"), self.include_masks)
+            self._ground_truth[_image_key(inputs["image"])] = (
+                np.asarray(baselines.ops.convert_to_numpy(baselines.ops.cast(
+                    targets["target_boxes"], "float32")), dtype=np.float32),
+                np.asarray(baselines.ops.convert_to_numpy(baselines.ops.cast(
+                    targets["target_valid"], "float32")), dtype=np.float32))
+
+    def sam3(self, inputs: Dict[str, Any], training: bool = False
+             ) -> Dict[str, Any]:
+        """Emit the predictor's boxes for this batch.
+
+        Args:
+            inputs: One batch of the dataset's input dict.
+            training: Accepted for signature compatibility; ignored.
+
+        Returns:
+            ``{"pred_boxes": (B, Q, 4), "pred_logits": (B, Q, 1)}``.
+
+        Raises:
+            AssertionError: If the batch's images were not seen while priming,
+                i.e. the adapter is being asked about ground truth it does not
+                hold.
+        """
+        del training
+        images = np.asarray(inputs["image"], dtype=np.float32)
+        key = _image_key(images)
+        assert key in self._ground_truth, (
+            "the stand-in checkpoint was handed a batch of images it never "
+            "saw while priming, so it has no ground truth for them; any "
+            "number derived from this batch would describe other images.")
+        target_boxes, target_valid = self._ground_truth[key]
+        boxes = (self._predictor(images, target_boxes, target_valid,
+                                 self.num_queries) if self._reads_image
+                 else self._predictor(target_boxes, target_valid,
+                                      self.num_queries))
+        boxes = np.asarray(boxes, dtype=np.float32)
+        return {
+            "pred_boxes": baselines.ops.convert_to_tensor(boxes),
+            "pred_logits": baselines.ops.zeros(
+                (boxes.shape[0], self.num_queries, 1), dtype="float32"),
+        }
 
 
 def _assert_oracle_reads_exactly_one(value: float) -> None:
@@ -180,6 +334,84 @@ def _assert_the_prompt_swap_is_live(changed_fraction: float,
         f"measured through a dead text path says nothing about the boxes.")
 
 
+def _assert_the_oracle_separates_the_two_target_sets(
+        result: Dict[str, float]) -> None:
+    """THE liveness assertion for ``distractor_gap``, in ONE place.
+
+    All three readings are known BEFORE the instrument runs, from the
+    STRUCTURE of the metric rather than from any run of it. A predictor that
+    emits exactly the prompted category's ground-truth boxes must score the
+    prompted target set 1.0 (the matcher is free to pick any query per target
+    and every target is present among the queries); and it must score the
+    distractor target set 0.0, because ``data.py``'s generator places every
+    instance NON-OVERLAPPING -- so a box that IS a prompted instance has zero
+    intersection with every other category's instance in that image. The gap
+    is their difference, so it is 1.0.
+
+    The three are asserted separately, with distinct messages, so a RED proof
+    can name WHICH one fired: the two mutations this file ships fire different
+    ones (a broken matcher fires the prompted assertion; scoring the same
+    target set twice fires the distractor assertion while the prompted one
+    stays green).
+
+    Args:
+        result: A :func:`distractor_gap` result computed for the GT-oracle arm.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If any of the three known readings is wrong.
+    """
+    assert result["box_iou_prompted"] == pytest.approx(1.0, abs=1e-6), (
+        f"the oracle's prompted arm read {result['box_iou_prompted']!r}, not "
+        f"1.0. The oracle emits the prompted category's own GT boxes, so "
+        f"anything else means the matched-IoU reduction under the prompted "
+        f"target set is broken and no gap derived from it may be believed.")
+    assert result["box_iou_distractor"] == pytest.approx(0.0, abs=1e-6), (
+        f"the oracle's distractor arm read {result['box_iou_distractor']!r}, "
+        f"not 0.0. The generator places instances NON-OVERLAPPING, so the "
+        f"prompted category's own boxes cannot overlap another category's. A "
+        f"non-zero reading means the distractor arm is not being handed a "
+        f"DIFFERENT target set -- the failure mode that makes every gap "
+        f"number in this module a plausible-looking lie.")
+    assert result["gap"] == pytest.approx(1.0, abs=1e-6), (
+        f"the oracle's gap read {result['gap']!r}, not 1.0. The instrument's "
+        f"ceiling is not where it is claimed to be, so no arm's distance from "
+        f"it is interpretable.")
+
+
+def _assert_a_category_blind_arm_cannot_win_the_gap(
+        name: str, result: Dict[str, float]) -> None:
+    """THE liveness assertion for the metric's FLOOR, in ONE place.
+
+    This is the whole point of the diagnostic: an arm that cannot read the
+    text prompt at all -- because it has no text input -- must read ~0 here NO
+    MATTER HOW HIGH its raw ``box_iou`` is. The connected-components detector
+    scores 0.937 prompted, ABOVE the trained checkpoint, and still reads a gap
+    of -0.003. An instrument on which a blind arm posts a real gap is
+    measuring something other than category selectivity.
+
+    Args:
+        name: The arm's name, for the failure message.
+        result: That arm's :func:`distractor_gap` result.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If the blind arm's absolute gap clears the ceiling.
+    """
+    assert abs(result["gap"]) <= CATEGORY_BLIND_GAP_CEILING, (
+        f"{name} -- an arm with NO text input at all -- read a distractor gap "
+        f"of {result['gap']:.4f}, outside the pre-registered "
+        f"+/-{CATEGORY_BLIND_GAP_CEILING} band (prompted "
+        f"{result['box_iou_prompted']:.4f}, distractor "
+        f"{result['box_iou_distractor']:.4f}). A category-BLIND arm posting a "
+        f"gap means the gap is not measuring category selectivity, and every "
+        f"trained arm's reading on it is uninterpretable.")
+
+
 def _canvas_with_rectangles(size: int, boxes: List[Tuple[int, int, int, int]],
                             ) -> np.ndarray:
     """A synthetic ``[0, 255]`` canvas: dark background, bright rectangles.
@@ -246,6 +478,67 @@ def tiny_all_instance_dataset(tiny_context: Tuple[Any, Any]) -> Any:
     model, _loss = tiny_context
     return build_split_dataset(model, seed=7, train=False, split=TINY_SPLIT,
                                include_all_instances=True)
+
+
+@pytest.fixture(scope="module")
+def real_context() -> Tuple[Any, Any]:
+    """The REAL run geometry -- ``baselines.SPLIT``, ``small``, 64 val images.
+
+    The near-zero readings this file pins for the blind arms are statistics
+    over ~200 matched pairs; measured on the 4-image ``tiny`` split they would
+    be noise quoted to four decimals. Cheap despite the name: no arm here runs
+    the model's forward pass, so only the build (~1.6 s) is paid.
+    """
+    keras.utils.set_random_seed(1234)
+    return build_context(seed=7)
+
+
+@pytest.fixture(scope="module")
+def real_val_dataset(real_context: Tuple[Any, Any]) -> Any:
+    """The real scoring split in its ordinary 2-tuple form."""
+    model, _loss = real_context
+    return build_split_dataset(model, seed=7, train=False)
+
+
+@pytest.fixture(scope="module")
+def real_all_instance_dataset(real_context: Tuple[Any, Any]) -> Any:
+    """The SAME real scoring split, carrying the all-category geometry."""
+    model, _loss = real_context
+    return build_split_dataset(model, seed=7, train=False,
+                               include_all_instances=True)
+
+
+@pytest.fixture(scope="module")
+def oracle_gap(real_context: Tuple[Any, Any],
+               real_all_instance_dataset: Any) -> Dict[str, float]:
+    """``distractor_gap`` of the GT-oracle arm on the real split."""
+    model, loss = real_context
+    return distractor_gap(
+        _PredictorAsCheckpoint(model, gt_oracle_predictor,
+                               real_all_instance_dataset),
+        loss, real_all_instance_dataset)
+
+
+@pytest.fixture(scope="module")
+def detector_gap(real_context: Tuple[Any, Any],
+                 real_all_instance_dataset: Any) -> Dict[str, float]:
+    """``distractor_gap`` of the connected-components detector."""
+    model, loss = real_context
+    return distractor_gap(
+        _PredictorAsCheckpoint(model, connected_components_predictor,
+                               real_all_instance_dataset),
+        loss, real_all_instance_dataset)
+
+
+@pytest.fixture(scope="module")
+def degenerate_gap(real_context: Tuple[Any, Any],
+                   real_all_instance_dataset: Any) -> Dict[str, float]:
+    """``distractor_gap`` of the one-centered-box prior."""
+    model, loss = real_context
+    return distractor_gap(
+        _PredictorAsCheckpoint(model, _degenerate_as_predictor,
+                               real_all_instance_dataset),
+        loss, real_all_instance_dataset)
 
 
 class TestTheFixedGridPrior:
@@ -1180,6 +1473,308 @@ class TestTheDistractorGapCli:
             ["--distractor-gap", "results/x_seed{seed}/final_model.keras"])
         assert typed.distractor_gap.format(seed=2) == (
             "results/x_seed2/final_model.keras")
+
+
+class TestTheDistractorGapSeparatesTheOracleFromABlindArm:
+    """SC-C: the instrument's CEILING and FLOOR, on the REAL 64-image split.
+
+    ``box_iou`` alone settles nothing on this generator -- the zero-parameter
+    connected-components detector scores ABOVE the trained checkpoint. The
+    claim ``distractor_gap`` makes is that the SAME arm cannot win the gap. It
+    is pinned at both ends here, at values fixed before the instrument ran:
+    the oracle at exactly ``1.0 / 0.0 / 1.0`` by construction, the blind arms
+    inside +/-0.02.
+
+    The degenerate arm is here for a specific reason: it is blind AND bad
+    (0.025 prompted). Together with the detector (blind and EXCELLENT, 0.937
+    prompted) it separates "the gap is near zero" from "the prompted IoU is
+    near zero", so nobody can read this metric as a quality score.
+    """
+
+    def test_the_oracle_reads_one_zero_and_a_gap_of_one(
+            self, oracle_gap: Dict[str, float]) -> None:
+        _assert_the_oracle_separates_the_two_target_sets(oracle_gap)
+
+    def test_the_oracle_arm_is_not_vacuous(
+            self, oracle_gap: Dict[str, float]) -> None:
+        """A ceiling of 1.0 read over zero pairs, or with no distractor row on
+        any image, would be an arithmetic artifact rather than a measurement."""
+        assert oracle_gap["matched_pairs_prompted"] > 0.0
+        assert oracle_gap["matched_pairs_distractor"] > 0.0
+        assert oracle_gap["images_with_distractor"] > 0.0
+
+    def test_the_detector_wins_box_iou_and_still_loses_the_gap(
+            self, detector_gap: Dict[str, float]) -> None:
+        """The plan's whole thesis in one assertion pair.
+
+        Both halves are load-bearing. Without the first, a detector that had
+        collapsed to boxing nothing would satisfy the second and look like a
+        pass; without the second, the arm is just another ``box_iou`` row.
+        """
+        prompted = detector_gap["box_iou_prompted"]
+        assert prompted >= 0.9, (
+            f"the category-blind detector read {prompted:.4f} on the prompted "
+            f"target set. Its near-zero GAP is only meaningful while its raw "
+            f"box_iou is HIGH -- a detector scoring ~0 everywhere would post "
+            f"a near-zero gap too, and prove nothing.")
+        _assert_a_category_blind_arm_cannot_win_the_gap(
+            CONNECTED_COMPONENTS_ARM, detector_gap)
+
+    def test_the_degenerate_arm_is_blind_and_bad_and_still_reads_no_gap(
+            self, degenerate_gap: Dict[str, float]) -> None:
+        """Stops the gap being read as a quality metric: this arm is terrible
+        at the task and reads the same near-zero gap as the excellent one."""
+        assert degenerate_gap["box_iou_prompted"] < 0.05
+        _assert_a_category_blind_arm_cannot_win_the_gap(
+            DEGENERATE_ARM, degenerate_gap)
+
+    def test_the_oracle_beats_both_blind_arms_by_two_orders_of_magnitude(
+            self, oracle_gap: Dict[str, float],
+            detector_gap: Dict[str, float],
+            degenerate_gap: Dict[str, float]) -> None:
+        """The separation itself, stated as one comparison."""
+        assert oracle_gap["gap"] > 50.0 * max(
+            abs(detector_gap["gap"]), abs(degenerate_gap["gap"]))
+
+    def test_the_detector_arm_agrees_with_score_prior_digit_for_digit(
+            self, real_context: Tuple[Any, Any], real_val_dataset: Any,
+            detector_gap: Dict[str, float]) -> None:
+        """Proves the stand-in checkpoint is FAITHFUL rather than convenient.
+
+        ``_PredictorAsCheckpoint`` is test-side machinery, and a wrong one
+        would produce entirely plausible numbers. Its prompted arm must
+        reproduce :func:`score_prior`'s published reduction -- the same number
+        every other detector row in this file quotes -- to full float
+        precision, through a completely different call path.
+        """
+        model, loss = real_context
+        assert detector_gap["box_iou_prompted"] == pytest.approx(
+            score_prior(connected_components_predictor, model, loss,
+                        real_val_dataset), abs=1e-12)
+
+    def test_every_arm_shares_both_denominators(
+            self, oracle_gap: Dict[str, float],
+            detector_gap: Dict[str, float],
+            degenerate_gap: Dict[str, float]) -> None:
+        """``is_matched`` depends only on ``target_valid``, so no arm can win
+        the gap by matching fewer pairs on one of the two target sets."""
+        for key in ("matched_pairs_prompted", "matched_pairs_distractor",
+                    "images_with_distractor"):
+            assert len({oracle_gap[key], detector_gap[key],
+                        degenerate_gap[key]}) == 1, key
+
+    def test_the_two_denominators_differ_and_that_is_the_design(
+            self, oracle_gap: Dict[str, float]) -> None:
+        """``zero_instance_rate`` gives ~25% of images an ABSENT prompted
+        category: zero prompted pairs, non-zero distractor pairs. This is why
+        ``prompt_swap_retention``'s equal-denominator raise is NOT copied."""
+        assert (oracle_gap["matched_pairs_distractor"]
+                > oracle_gap["matched_pairs_prompted"])
+
+
+class TestTheZeroInstanceImagesAreScoredNotRefused:
+    """The edge case that would make an inherited raise fire on real input.
+
+    ``prompt_swap_retention`` RAISES on unequal denominators. Copying that
+    into ``distractor_gap`` would make it refuse the split it is built for --
+    so the SPLIT is first shown to actually contain such an image, and only
+    then is the non-refusal asserted. Without the first half the second is
+    vacuous.
+    """
+
+    def test_the_split_really_contains_an_absent_prompted_category(
+            self, real_context: Tuple[Any, Any],
+            real_all_instance_dataset: Any) -> None:
+        model, _loss = real_context
+        empty_prompted = 0
+        with_distractor = 0
+        for _inputs, y_true, all_instances in real_all_instance_dataset:
+            prompted = baselines.unpack_targets(
+                baselines.ops.cast(y_true, "float32"), model.include_masks)
+            targets = baselines._distractor_targets(all_instances, prompted)
+            prompted_rows = np.asarray(baselines.ops.convert_to_numpy(
+                baselines.ops.cast(prompted["target_valid"], "float32"))
+            ).sum(axis=-1)
+            distractor_rows = np.asarray(baselines.ops.convert_to_numpy(
+                targets["target_valid"])).sum(axis=-1)
+            empty_prompted += int(np.sum(
+                (prompted_rows == 0.0) & (distractor_rows > 0.0)))
+            with_distractor += int(np.sum(distractor_rows > 0.0))
+        assert empty_prompted > 0, (
+            "no image on this split has an absent prompted category, so the "
+            "unequal-denominator edge case is NOT exercised and the test "
+            "below proves nothing.")
+        assert with_distractor > empty_prompted
+
+    def test_the_diagnostic_reports_both_denominators_without_raising(
+            self, oracle_gap: Dict[str, float]) -> None:
+        """The result exists at all -- the fixture would have raised."""
+        assert oracle_gap["matched_pairs_prompted"] > 0.0
+        assert (oracle_gap["images_with_distractor"]
+                == pytest.approx(float(baselines.SPLIT["num_val_samples"])))
+
+
+class TestTheDistractorGapIsRedProven:
+    """SC-C's RED half: TWO dead-component injections, on the real split.
+
+    * **M-A -- the no-op ASSIGNMENT.** ``loss.matcher`` still computes the real
+      ``is_matched`` (both denominators stay live and correct) but returns a
+      constant assignment mapping every query to target slot 0. Same shapes,
+      same dtypes, no raise, and a finite plausible reading -- prompted 0.4808,
+      distractor 0.2075, gap 0.2732. This is the same injection
+      ``TestTheOracleGuardIsRedProven`` uses on ``score_prior``, applied to the
+      new reduction, and it fires the PROMPTED assertion.
+    * **M-B -- the SAME target dict twice.** ``_distractor_targets`` is
+      replaced by one that hands back the PROMPTED targets. This is the
+      sharpest guard in the file: it is the only check that can tell whether
+      the two ``_matched_iou`` calls really receive DIFFERENT target sets.
+      Under it the prompted assertion stays GREEN (1.0, still correct) and the
+      DISTRACTOR one fires at 1.0 instead of 0.0, driving the gap to exactly
+      0.0 -- which is precisely what a checkpoint with no category selectivity
+      would be reported as, so the failure is invisible to every other test
+      here.
+    """
+
+    @staticmethod
+    def _no_op_assignment(loss: Any) -> Any:
+        """M-A: keep the real ``is_matched``, kill only the assignment."""
+        live = loss.matcher
+
+        def mutant(pred_logits: Any, pred_boxes: Any, target_boxes: Any,
+                   target_valid: Any) -> Any:
+            from keras import ops
+
+            assignment, is_matched = live(pred_logits, pred_boxes,
+                                          target_boxes, target_valid)
+            return ops.zeros_like(assignment), is_matched
+
+        return mutant
+
+    @staticmethod
+    def _the_prompted_targets_again(all_instances: Dict[str, Any],
+                                    prompted: Dict[str, Any]
+                                    ) -> Dict[str, Any]:
+        """M-B: the distractor set IS the prompted set."""
+        del all_instances
+        return {"target_boxes": prompted["target_boxes"],
+                "target_valid": prompted["target_valid"]}
+
+    def test_m_a_a_no_op_assignment_fires_the_prompted_assertion(
+            self, real_context: Tuple[Any, Any],
+            real_all_instance_dataset: Any,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        model, loss = real_context
+        stand_in = _PredictorAsCheckpoint(model, gt_oracle_predictor,
+                                          real_all_instance_dataset)
+        monkeypatch.setattr(loss, "matcher", self._no_op_assignment(loss))
+        result = distractor_gap(stand_in, loss, real_all_instance_dataset)
+        assert all(np.isfinite(value) for value in result.values()), (
+            "M-A must produce a PLAUSIBLE reading, not an obviously broken "
+            f"one; got {result!r}. A mutation caught by arithmetic does not "
+            "prove the guard is what catches it.")
+        assert 0.0 < result["gap"] < 1.0, (
+            f"M-A read a gap of {result['gap']!r} -- a value no reader would "
+            f"question. That is exactly why the guard, not the eye, has to "
+            f"catch it.")
+        with pytest.raises(AssertionError, match="prompted arm read"):
+            _assert_the_oracle_separates_the_two_target_sets(result)
+
+    def test_m_b_the_same_target_dict_twice_fires_the_distractor_assertion(
+            self, real_context: Tuple[Any, Any],
+            real_all_instance_dataset: Any,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        model, loss = real_context
+        monkeypatch.setattr(baselines, "_distractor_targets",
+                            self._the_prompted_targets_again)
+        result = distractor_gap(
+            _PredictorAsCheckpoint(model, gt_oracle_predictor,
+                                   real_all_instance_dataset),
+            loss, real_all_instance_dataset)
+        assert result["gap"] == 0.0, (
+            f"scoring the prompted targets twice must drive the gap to "
+            f"EXACTLY 0.0; got {result['gap']!r}. If it does not, this "
+            f"mutation is not the one it claims to be.")
+        assert result["box_iou_prompted"] == pytest.approx(1.0, abs=1e-6), (
+            "M-B must leave the PROMPTED arm correct -- that is what makes it "
+            "sharper than M-A: only the distractor half is wrong.")
+        with pytest.raises(AssertionError, match="distractor arm read"):
+            _assert_the_oracle_separates_the_two_target_sets(result)
+
+    def test_m_b_also_collapses_the_second_denominator_onto_the_first(
+            self, real_context: Tuple[Any, Any],
+            real_all_instance_dataset: Any, oracle_gap: Dict[str, float],
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        """An independent structural signature of the same defect, so the RED
+        does not rest on the IoU value alone: the two denominators DIFFER by
+        construction on this split and become equal the moment one target set
+        is scored twice."""
+        model, loss = real_context
+        monkeypatch.setattr(baselines, "_distractor_targets",
+                            self._the_prompted_targets_again)
+        result = distractor_gap(
+            _PredictorAsCheckpoint(model, gt_oracle_predictor,
+                                   real_all_instance_dataset),
+            loss, real_all_instance_dataset)
+        assert (result["matched_pairs_distractor"]
+                == result["matched_pairs_prompted"])
+        assert (oracle_gap["matched_pairs_distractor"]
+                != oracle_gap["matched_pairs_prompted"])
+
+    def test_the_guard_is_green_again_once_both_are_restored(
+            self, real_context: Tuple[Any, Any],
+            real_all_instance_dataset: Any) -> None:
+        """The control beside the two mutations -- otherwise the RED readings
+        could be an artifact of the fixture rather than of the injections."""
+        model, loss = real_context
+        _assert_the_oracle_separates_the_two_target_sets(distractor_gap(
+            _PredictorAsCheckpoint(model, gt_oracle_predictor,
+                                   real_all_instance_dataset),
+            loss, real_all_instance_dataset))
+
+
+class TestTheDistractorGapIsNotAFamilyMember:
+    """SC-D. `plans/SYSTEM.md:220` names the family; this diagnostic is not it.
+
+    A gap is not a ``box_iou`` and must never be quotable as the bar an
+    accuracy claim clears. Two independent locks are pinned: the arm never
+    enters ``evaluate_family``'s results at all, and even if it were injected
+    there its NAME cannot pass ``family_max``'s allowlist filter.
+    """
+
+    @pytest.fixture(scope="class")
+    def tiny_family(self) -> Dict[str, Dict[str, float]]:
+        keras.utils.set_random_seed(1234)
+        return evaluate_family(seed=7, ks=(TINY_K,), split=TINY_SPLIT)
+
+    def test_it_never_enters_the_family_results_at_all(
+            self, tiny_family: Dict[str, Dict[str, float]]) -> None:
+        assert DISTRACTOR_GAP_ARM not in tiny_family
+        assert not any("gap" in row for row in tiny_family.values())
+
+    def test_its_name_cannot_be_picked_up_by_the_family_filter(self) -> None:
+        assert not DISTRACTOR_GAP_ARM.startswith(
+            ("FIXED-GRID", "KMEANS-PRIOR"))
+
+    def test_family_max_ignores_it_even_when_it_would_win(
+            self, tiny_family: Dict[str, Dict[str, float]]) -> None:
+        """The GT oracle's gap is 1.0 -- higher than any family member's
+        ``box_iou`` can ever be. Filing it under the family would silently
+        replace the pre-registered bar with an unreachable one."""
+        before = family_max(tiny_family)
+        injected = dict(tiny_family)
+        injected[DISTRACTOR_GAP_ARM] = {"box_iou": 1.0}
+        after = family_max(injected)
+        assert after == before
+        assert after[0] != DISTRACTOR_GAP_ARM
+
+    def test_the_allowlist_filter_itself_is_unchanged(self) -> None:
+        """I-6, read off the source rather than off behaviour: the two
+        prefixes are the whole allowlist, and this plan widened neither."""
+        import inspect
+
+        source = inspect.getsource(family_max)
+        assert 'startswith(("FIXED-GRID", "KMEANS-PRIOR"))' in source
+        assert source.count("startswith") == 1
 
 
 class TestThisParserSHelpDoesNotCrash:
