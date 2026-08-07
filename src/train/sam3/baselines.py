@@ -16,14 +16,30 @@ every number.
 
 What it measures, and what it does not
 --------------------------------------
-Every arm here is a predictor that reads NO image: one fixed set of ``Q`` boxes
-emitted unchanged for every image of the scoring split. That is the point --
-SAM 3's boxes were MEASURED to be image-independent
-(``val_box_std_across_images`` 6.9e-06), so the honest comparator is the best
-image-independent predictor available, not an untrained network. Nothing here
-is a chance level on any dataset other than this generator at ``small`` /
-``Q=32``; the grid's score is a property of the target-size distribution it
-happens to sit near.
+Every arm of the NAMED FAMILY (``{5x5 fixed grid} u {k-means prior}``) is a
+predictor that reads NO image: one fixed set of ``Q`` boxes emitted unchanged
+for every image of the scoring split. That is the point -- SAM 3's boxes were
+MEASURED to be image-independent (``val_box_std_across_images`` 6.9e-06), so
+the honest comparator is the best image-independent predictor available, not an
+untrained network. Nothing here is a chance level on any dataset other than
+this generator at ``small`` / ``Q=32``; the grid's score is a property of the
+target-size distribution it happens to sit near.
+
+The family is NOT the whole bar -- see the connected-components detector
+-----------------------------------------------------------------------
+:func:`connected_components_predictor` is deliberately NOT a member of that
+family and is deliberately NOT a "prior": it is a zero-parameter, zero-training
+PER-IMAGE PREDICTOR that thresholds the canvas and emits its bright blobs'
+bounding boxes. It exists because a family with no image-reading member cannot
+distinguish "the model learned detection" from "this generator's box task is
+solvable by any rule that looks at the pixels" -- and on this generator the
+detector reads ~0.94 box IoU, ABOVE the trained query-selection arm's
+0.8450 / 0.8296 / 0.8191 on 3 of 3 seeds. Adversarial review of
+``plan-2026-08-06T185813-fd80240f`` raised exactly this (CRITICAL 1) and the
+measurement is the answer to it: any accuracy claim on this generator is a
+WIRING / LEARNABILITY result, not a capability result. :func:`family_max`
+excludes the detector on purpose -- ``plans/SYSTEM.md:220`` names the family --
+so the two bars stay separately quotable.
 
 The scoring path is ``evaluate_sam3``'s, expression for expression
 --------------------------------------------------------------------
@@ -119,6 +135,18 @@ ORACLE_ARM: str = "ORACLE (per-image GT tiled to Q)"
 DEGENERATE_ARM: str = "DEGENERATE (one centered box)"
 GRID_ARM: str = f"FIXED-GRID {GRID_SIDE}x{GRID_SIDE} wh{GRID_BOX_SIZE}"
 
+#: The image-reading predictor. Named so that :func:`family_max`'s
+#: ``startswith(("FIXED-GRID", "KMEANS-PRIOR"))`` filter CANNOT pick it up: it
+#: is not a member of the `SYSTEM.md:220` family and must never silently become
+#: one. It is reported in its own CLI section.
+CONNECTED_COMPONENTS_ARM: str = "CONNECTED-COMPONENTS (reads pixels, 0 params)"
+
+#: Intensity threshold, on the generator's own ``[0, 255]`` image scale, above
+#: which a pixel is foreground. NOT tuned: `data.py` draws shapes at
+#: ``uniform(0.55, 1.0)`` (140..255) on a canvas at ``uniform(0.05, 0.25)``
+#: (13..64), so any cut inside (64, 140) separates them and 100 is its middle.
+CC_THRESHOLD: float = 100.0
+
 
 def kmeans_arm(k: int) -> str:
     """The arm key of the k-means prior at ``k``.
@@ -148,6 +176,15 @@ SPLIT: Dict[str, Any] = {
 #: that lets an IMAGE-DEPENDENT liveness arm (the GT oracle) run through the
 #: same scorer as the image-independent priors.
 Predictor = Callable[[np.ndarray, np.ndarray, int], np.ndarray]
+
+#: `(images, target_boxes, target_valid, num_queries) -> (B, Q, 4)`. Same shape
+#: contract as :data:`Predictor` with the batch's IMAGES prepended. A callable
+#: is dispatched onto this signature by :func:`_score` iff it carries a truthy
+#: ``reads_image`` attribute -- an explicit opt-in marker rather than an arity
+#: guess, so a predictor whose signature is mistyped fails loudly instead of
+#: being scored blind to the pixels.
+ImagePredictor = Callable[
+    [np.ndarray, np.ndarray, np.ndarray, int], np.ndarray]
 
 
 def _emit(line: str = "") -> None:
@@ -271,6 +308,97 @@ def gt_oracle_predictor(target_boxes: np.ndarray,
     reps = int(np.ceil(num_queries / target_boxes.shape[1]))
     return np.tile(target_boxes, (1, reps, 1))[:, :num_queries, :].astype(
         np.float32)
+
+
+def connected_components_boxes(image: np.ndarray,
+                               num_queries: int,
+                               threshold: float = CC_THRESHOLD) -> np.ndarray:
+    """Bounding boxes of ONE image's brightest connected components.
+
+    Interface contract: a pure function of ``(image, num_queries, threshold)``.
+    It reads NO label, NO dataset and NO network -- it is a hand-written
+    detector, not a prior, and it is the only thing in this module that looks
+    at pixels. It is also category-BLIND: the generator's prompt names one of
+    four shape categories and this function cannot tell them apart, so it emits
+    every blob it finds. Best-of-Q Hungarian matching is what makes that
+    unpenalised, which is itself part of the finding.
+
+    Components are ranked by PIXEL COUNT, descending, and the top
+    ``num_queries`` are emitted; if fewer are found the list is tiled (the same
+    treatment :func:`tile_to_queries` gives a short prior). An image with no
+    foreground at all falls back to one centered box, so the returned shape is
+    always ``(num_queries, 4)``.
+
+    Args:
+        image: ``(S, S, 3)`` float32 on the generator's ``[0, 255]`` scale.
+        num_queries: The model's ``Q``.
+        threshold: Foreground cut on that same scale. See :data:`CC_THRESHOLD`.
+
+    Returns:
+        ``(num_queries, 4)`` float32 cxcywh in [0, 1].
+
+    Raises:
+        ValueError: If ``image`` is not ``(S, S, C)``.
+    """
+    # `scipy.ndimage`, not `cv2`: scipy is a DECLARED dependency of this repo
+    # (`pyproject.toml`), OpenCV is not -- it happens to be installed in this
+    # environment, which is not the same thing as being available to a user.
+    from scipy import ndimage
+
+    pixels = np.asarray(image, dtype=np.float32)
+    if pixels.ndim != 3:
+        raise ValueError(
+            f"connected_components_boxes: image must be (S, S, C); got "
+            f"{pixels.shape}")
+    height, width = pixels.shape[0], pixels.shape[1]
+    labels, count = ndimage.label(pixels.max(axis=-1) > threshold)
+    if count < 1:
+        return tile_to_queries(degenerate_prior(), num_queries)
+    # `find_objects` returns the per-label bounding SLICES -- the same quantity
+    # `cv2.connectedComponentsWithStats` returns as `CC_STAT_*`.
+    extents = ndimage.find_objects(labels)
+    areas = np.bincount(labels.ravel(), minlength=count + 1)[1:]
+    boxes: List[List[float]] = []
+    for index in np.argsort(-areas)[:num_queries]:
+        rows, cols = extents[int(index)][0], extents[int(index)][1]
+        boxes.append([
+            0.5 * (cols.start + cols.stop) / float(width),
+            0.5 * (rows.start + rows.stop) / float(height),
+            (cols.stop - cols.start) / float(width),
+            (rows.stop - rows.start) / float(height),
+        ])
+    return tile_to_queries(np.asarray(boxes, dtype=np.float32), num_queries)
+
+
+def connected_components_predictor(images: np.ndarray,
+                                   target_boxes: np.ndarray,
+                                   target_valid: np.ndarray,
+                                   num_queries: int) -> np.ndarray:
+    """:data:`ImagePredictor` wrapper around :func:`connected_components_boxes`.
+
+    Interface contract: reads ONLY ``images``. ``target_boxes`` and
+    ``target_valid`` are accepted for signature uniformity and are deleted on
+    the first line -- this arm cannot leak the labels it is scored against, and
+    that is enforced by the code rather than promised in a comment.
+
+    Args:
+        images: ``(B, S, S, 3)`` float32 on the ``[0, 255]`` scale.
+        target_boxes: Unused. Deleted.
+        target_valid: Unused. Deleted.
+        num_queries: The model's ``Q``.
+
+    Returns:
+        ``(B, num_queries, 4)`` float32 cxcywh.
+    """
+    del target_boxes, target_valid
+    return np.stack([connected_components_boxes(image, num_queries)
+                     for image in np.asarray(images)]).astype(np.float32)
+
+
+#: The opt-in marker :func:`_score` dispatches on. Set here rather than
+#: inferred, so a predictor that forgets it is scored WITHOUT the image and
+#: reads ~0.03, not silently ~0.94.
+connected_components_predictor.reads_image = True
 
 
 def build_context(seed: int, split: Optional[Dict[str, Any]] = None,
@@ -429,7 +557,8 @@ def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
     only on ``target_valid``, so every arm on a split MUST share it.
 
     Args:
-        prior: ``(P, 4)`` boxes, or a :data:`Predictor`.
+        prior: ``(P, 4)`` boxes, a :data:`Predictor`, or an
+            :data:`ImagePredictor` (a callable carrying ``reads_image = True``).
         model: A built ``Sam3TrainingModel``.
         loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
         dataset: The SCORING split.
@@ -438,23 +567,34 @@ def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
         ``(box_iou over matched pairs, total matched pairs)``.
     """
     num_queries = int(model.num_queries)
-    if callable(prior):
+    reads_image = bool(getattr(prior, "reads_image", False))
+    if callable(prior) and reads_image:
         predictor: Predictor = prior
+    elif callable(prior):
+        def predictor(images, target_boxes, target_valid, count, _p=prior):
+            del images
+            return _p(target_boxes, target_valid, count)
     else:
         tiled = tile_to_queries(prior, num_queries)
 
-        def predictor(target_boxes, _target_valid, _num_queries):
+        def predictor(images, target_boxes, _target_valid, _count):
+            del images
             return np.tile(tiled[None], (target_boxes.shape[0], 1, 1))
 
     box_iou_sum = 0.0
     matched_total = 0.0
-    for _inputs, y_true in dataset:
+    for inputs, y_true in dataset:
         targets = unpack_targets(ops.cast(y_true, "float32"),
                                  model.include_masks)
         tgt_boxes = np.asarray(ops.cast(targets["target_boxes"], "float32"))
         tgt_valid = np.asarray(ops.cast(targets["target_valid"], "float32"))
+        # The images are materialized ONLY for an `ImagePredictor`; every
+        # image-independent arm never sees them, so no arm can quietly start
+        # reading pixels without flipping `reads_image`.
+        images = (np.asarray(inputs["image"], dtype=np.float32)
+                  if reads_image else np.zeros((tgt_boxes.shape[0], 0)))
         pred_boxes = ops.convert_to_tensor(
-            np.asarray(predictor(tgt_boxes, tgt_valid, num_queries),
+            np.asarray(predictor(images, tgt_boxes, tgt_valid, num_queries),
                        dtype=np.float32))
         # Zeroed logits: the family is a BOX prior and makes no class claim, so
         # every query is equally (un)confident and the matcher's class cost is
@@ -494,7 +634,8 @@ def score_prior(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
     Args:
         prior: Either ``(P, 4)`` cxcywh boxes -- tiled to ``Q`` and emitted
             unchanged for EVERY image, i.e. image-independent by construction
-            -- or a :data:`Predictor` callable (the GT-oracle liveness arm).
+            -- or a :data:`Predictor` callable (the GT-oracle liveness arm), or
+            an :data:`ImagePredictor` (the connected-components detector).
         model: A built ``Sam3TrainingModel``; supplies ``num_queries`` and
             ``include_masks``.
         loss: The compiled ``Sam3DetectionLoss``.
@@ -536,6 +677,7 @@ def evaluate_family(seed: int, ks: Sequence[int] = FAMILY_KS,
     arms: Dict[str, Union[np.ndarray, Predictor]] = {
         ORACLE_ARM: gt_oracle_predictor,
         DEGENERATE_ARM: degenerate_prior(),
+        CONNECTED_COMPONENTS_ARM: connected_components_predictor,
         GRID_ARM: fixed_grid_prior(),
     }
     for k in ks:
@@ -669,6 +811,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for seed in seeds:
         best, value = family_max(per_seed[seed])
         _emit(f"  seed {seed}: max = {value:.4f}  ({best})")
+
+    _emit("")
+    _emit("THE IMAGE-READING PREDICTOR -- NOT a member of the family above "
+          "(SYSTEM.md:220 names the family), reported separately because a "
+          "family with no image-reading member cannot tell 'the model learned "
+          "detection' from 'this generator's box task is solvable by any rule "
+          "that looks at the pixels'. Zero parameters, zero training, "
+          "category-BLIND:")
+    for seed in seeds:
+        cc = per_seed[seed][CONNECTED_COMPONENTS_ARM]["box_iou"]
+        best, value = family_max(per_seed[seed])
+        _emit(f"  seed {seed}: connected components = {cc:.6f}   "
+              f"(family max {value:.4f}; the trained query-selection arm read "
+              f"0.8450 / 0.8296 / 0.8191 on seeds 1 / 2 / 3)")
 
     if args.json:
         payload = {str(seed): per_seed[seed] for seed in seeds}

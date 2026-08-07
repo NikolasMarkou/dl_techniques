@@ -66,6 +66,54 @@ config-field wiring lives in ONE table, :data:`CLI_TO_CONFIG`, and
 driven with a sentinel through the FULL ``argv -> parse -> config`` path and the
 resulting field is read back.
 
+``--query-selection``: MEASURED OUTCOME
+---------------------------------------
+This block lives here, not in the flag's ``help=`` string, so ``--help`` stays
+readable; the flag's help points at it by name. Every number below was measured
+on THIS repository's synthetic generator at ``variant='small'``, seeds 1/2/3,
+60 epochs, ``--deep-supervision`` on BOTH sides, each run read at its OWN
+max-``val_box_iou`` epoch -- the same selection rule on both sides.
+
+**What moved.** ``val_box_iou`` 0.8450 / 0.8296 / 0.8191, against the committed
+non-model baseline FAMILY max (max over ``{5x5 fixed grid} u {k-means prior,
+k in 8/16/32}``, train-split-fitted, scored through the same IoU path by
+``train.sam3.baselines``) of 0.4150 / 0.3890 / 0.4111 at the same seeds. Over
+the same runs ``val_box_std_across_images`` reads 1.51e-01 / 1.47e-01 /
+1.43e-01 against the otherwise-identical deep-supervision-only control's ~7e-06
+(one significant figure on purpose: below ~1e-5 that statistic is
+DEVICE-DEPENDENT -- the same weights, split and code read 6.94e-06 on GPU and
+1.84e-06 on CPU, a factor of 3.8. The arm's reading is stable to 0.07%). So the
+boxes became image-dependent (a rise of order ~2e4x) and ``box_iou`` rose above
+the fixed-prior family max on 3 of 3 seeds.
+
+**What that is NOT.** A hand-written connected-components detector -- 20 lines,
+ZERO parameters, no training, category-BLIND: threshold the canvas, emit the
+bounding boxes of the brightest blobs -- scores 0.9413 / 0.9370 / 0.9397 on the
+same splits through the same IoU path with the same 93/88/98 matched-pair
+denominators (``train.sam3.baselines.connected_components_predictor``, run it
+yourself with ``python -m train.sam3.baselines``). It BEATS the trained arm on
+3 of 3 seeds. This generator's box task is therefore solvable without a model,
+and these numbers are a **WIRING / LEARNABILITY** result -- the mechanism is
+connected and it trains -- not a capability result. Nothing here licenses a
+published-benchmark comparison: one synthetic generator, one repo-invented
+'small' variant.
+
+**KNOWN COST, measured.** Under this flag the decoder's box branch is inert.
+On ``results/step9_qsel_seed1``, over the whole val split, ``max |pred_boxes -
+selected_boxes| = 9.73e-04`` and ``mean = 4.27e-04`` at a mean box coordinate
+of 0.33; scored like for like (only the boxes swapped, the matcher's class cost
+held at the decoder's), the encoder's own proposals read 0.844700 against the
+shipped 0.844996 -- the entire 3-layer decoder contributes **+0.0003** IoU to
+the box output. Decomposed: selection alone (the grid anchor at each selected
+position, ZERO box regression) = 0.5829, + the proposal head's regression =
+0.8447, + the decoder = 0.8450. The pre-registered bar of 0.4150 is cleared by
+top-k SELECTION with no box regression at all. So both the learned
+``reference_points`` table (fully replaced, no gradient, Keras logs a
+no-gradient warning) and the decoder's ``bbox_embed`` refinement are effectively
+dead weight for boxes under this flag, and ``decisions.md`` D-006's stated cost
+-- "the encoder head is blind to whether its proposals helped the decoder" --
+is now measured to be total.
+
 The ``--smoke`` preset and provenance
 -------------------------------------
 ``--smoke`` is applied in the config BUILDER, gated on
@@ -425,30 +473,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "Hungarian matcher once more per step. Its purpose "
                             "is structural: it is the only route by which "
                             "pred_boxes can depend on the image at step 0. "
-                            "MEASURED OUTCOME (this repo's synthetic "
-                            "generator, variant 'small', seeds 1/2/3, 60 "
-                            "epochs, --deep-supervision on BOTH sides, each "
-                            "run read at its OWN max-val_box_iou epoch -- the "
-                            "same selection rule on both sides): val_box_iou "
-                            "0.8450 / 0.8296 / 0.8191, against the committed "
-                            "non-model baseline FAMILY max -- max over {5x5 "
-                            "fixed grid} u {k-means prior, k in 8/16/32}, "
-                            "train-split-fitted, scored through the same IoU "
-                            "path by train.sam3.baselines -- of 0.4150 / "
-                            "0.3890 / 0.4111 at the same seeds. Over the same "
-                            "runs val_box_std_across_images reads 1.51e-01 / "
-                            "1.47e-01 / 1.43e-01 against the otherwise "
-                            "identical deep-supervision-only control's "
-                            "6.94e-06 / 5.87e-06 / 6.84e-06. So: the boxes "
-                            "became image-dependent, and box_iou rose above "
-                            "the family max, on 3 of 3 seeds. This is one "
-                            "synthetic generator and one repo-invented "
-                            "'small' variant; it licenses no published-"
-                            "benchmark comparison. KNOWN COST: the decoder's "
-                            "learned `reference_points` table becomes a DEAD "
-                            "weight under this flag -- it is fully replaced "
-                            "as the initial reference -- so Keras logs a "
-                            "no-gradient warning for it (measured).")
+                            "MEASURED OUTCOME and KNOWN COST -- box_iou "
+                            "0.8450/0.8296/0.8191 vs the fixed-prior family "
+                            "max 0.4150/0.3890/0.4111 BUT a 0-parameter "
+                            "connected-components detector reads ~0.94, and "
+                            "the decoder contributes +0.0003 -- are in this "
+                            "module's docstring, section "
+                            "'--query-selection: MEASURED OUTCOME'. Read it "
+                            "before quoting any of these numbers.")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,
@@ -869,7 +901,12 @@ def evaluate_sam3(
         # the two spellings cannot drift the way they drifted here once. The
         # `getattr` defaults reproduce the pre-flag behaviour exactly, for the
         # duck-typed stubs this function's own tests hand it.
-        # See decisions.md D-006, D-007.
+        # Two different D-006s are in scope in this one function and the
+        # unqualified spelling was ambiguous (review-iter-1 NOTE 6): see
+        # plan-2026-08-06T055747-1e650383's D-006 (the eval mis-slice above)
+        # and THIS plan's D-007 (plan-2026-08-06T185813-fd80240f, the block
+        # selection). plan-2026-08-06T185813-fd80240f's OWN D-006 is the
+        # `stop_gradient` detach in `sam3_image.py` and is NOT this site.
         if model.num_aux_layers:
             query_selection = bool(getattr(model, "query_selection", False))
             per_layer = model.sam3.call_per_layer(

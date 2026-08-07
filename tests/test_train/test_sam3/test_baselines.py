@@ -21,6 +21,16 @@ Three things are being protected, in descending order of how quietly they fail.
    constructed with those two values spelled out at the call site, so a change
    of default fails by value.
 
+4. **The image-reading arm's liveness.** ``connected_components_predictor`` is
+   NOT a family member -- it is a zero-parameter detector that reads the pixels
+   and, on this generator, BEATS the trained model. A detector that quietly
+   stopped reading the image would still return finite, plausible boxes, so
+   ``_assert_the_detector_reads_the_pixels`` pins both an across-image spread
+   and "it must beat the fixed grid", and ``TestTheDetectorGuardIsRedProven``
+   fires it with a dead-component injection (a detector that ignores its
+   ``image`` argument and returns the grid). ``TestTheDetectorIsNotAFamilyMember``
+   pins that ``family_max`` never quotes it as the bar.
+
 Device: CPU-cheap. Only ``TestTheFamilyEndToEnd`` and the oracle guards build a
 model, and they build the ``tiny`` variant with a 4-sample split.
 """
@@ -33,6 +43,8 @@ import pytest
 
 from train.sam3 import baselines
 from train.sam3.baselines import (
+    CC_THRESHOLD,
+    CONNECTED_COMPONENTS_ARM,
     DEGENERATE_ARM,
     GRID_ARM,
     ORACLE_ARM,
@@ -40,6 +52,8 @@ from train.sam3.baselines import (
     VAL_SEED_OFFSET,
     build_context,
     build_split_dataset,
+    connected_components_boxes,
+    connected_components_predictor,
     degenerate_prior,
     evaluate_family,
     family_max,
@@ -88,6 +102,82 @@ def _assert_oracle_reads_exactly_one(value: float) -> None:
         f"valid GT box of its own image and the matcher may pick any query "
         f"per target, so anything but 1.0 means the IoU instrument is broken "
         f"and no other number it produces may be believed.")
+
+
+def _assert_the_detector_reads_the_pixels(spread: float, detector: float,
+                                          grid: float) -> None:
+    """THE liveness assertion for the image-reading arm, in ONE place.
+
+    Both the live guard and ``TestTheDetectorGuardIsRedProven`` call it, so a
+    mutation record can name WHICH assertion fired. A detector that has stopped
+    reading the pixels still returns ``(B, Q, 4)`` of finite boxes and still
+    scores a plausible number -- only these two facts separate it from a fixed
+    prior.
+
+    Args:
+        spread: Across-IMAGE std of the emitted boxes.
+        detector: The detector's box IoU on the scoring split.
+        grid: The fixed 5x5 grid's box IoU on the SAME split.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If the boxes are image-independent, or if an
+            image-reading detector fails to beat a predictor that reads
+            nothing.
+    """
+    assert spread > 1e-3, (
+        f"the detector's across-image box spread is {spread:.3e}: it is "
+        f"emitting (nearly) the same boxes for every image, i.e. it is a "
+        f"fixed prior wearing a detector's name.")
+    assert detector > grid, (
+        f"the detector read {detector:.4f} against the fixed 5x5 grid's "
+        f"{grid:.4f}. A predictor that looks at the pixels of a generator "
+        f"which draws bright non-overlapping shapes on a dark canvas cannot "
+        f"lose to one that looks at nothing; this reading means it is not "
+        f"reading them.")
+
+
+def _canvas_with_rectangles(size: int, boxes: List[Tuple[int, int, int, int]],
+                            ) -> np.ndarray:
+    """A synthetic ``[0, 255]`` canvas: dark background, bright rectangles.
+
+    Args:
+        size: Side of the square image.
+        boxes: ``(row0, row1, col0, col1)`` half-open pixel extents.
+
+    Returns:
+        ``(size, size, 3)`` float32.
+    """
+    image = np.full((size, size, 3), 30.0, dtype=np.float32)
+    for row0, row1, col0, col1 in boxes:
+        image[row0:row1, col0:col1] = 200.0
+    return image
+
+
+def _detector_spread(model: Any, dataset: Any) -> float:
+    """Across-IMAGE std of the detector's emitted boxes on ``dataset``.
+
+    Goes through ``baselines.connected_components_predictor``, so a
+    monkeypatched detector is measured rather than bypassed.
+
+    Args:
+        model: A built ``Sam3TrainingModel`` -- supplies ``num_queries``.
+        dataset: The scoring split.
+
+    Returns:
+        Mean over ``(query, coordinate)`` of the std over the IMAGE axis,
+        pooled over the whole split.
+    """
+    emitted = []
+    for inputs, _y_true in dataset:
+        images = np.asarray(inputs["image"], dtype=np.float32)
+        emitted.append(baselines.connected_components_predictor(
+            images, np.zeros((images.shape[0], 1, 4), np.float32),
+            np.ones((images.shape[0], 1), np.float32),
+            int(model.num_queries)))
+    return float(np.concatenate(emitted).std(axis=0).mean())
 
 
 @pytest.fixture(scope="module")
@@ -492,3 +582,192 @@ class TestTheFamilyEndToEnd:
     def test_family_max_refuses_an_empty_family(self) -> None:
         with pytest.raises(ValueError, match="not the family"):
             family_max({ORACLE_ARM: {"box_iou": 1.0, "matched": 1.0}})
+
+
+class TestTheConnectedComponentsDetector:
+    """The image-reading arm: geometry oracle, blindness to labels, edges.
+
+    This arm exists because the pre-registered family had NO image-reading
+    member, so "the model beats the family" could not distinguish "the model
+    learned detection" from "this generator's box task is solvable by any rule
+    that looks at the pixels". It reads ~0.94 where the trained arm reads
+    ~0.84, which is the finding, not a bug.
+    """
+
+    def test_one_rectangle_gives_its_exact_normalized_box(self) -> None:
+        """A hand-computed value oracle, not a self-consistency check."""
+        image = _canvas_with_rectangles(64, [(10, 20, 5, 25)])
+        boxes = connected_components_boxes(image, num_queries=1)
+        assert boxes.shape == (1, 4)
+        np.testing.assert_allclose(
+            boxes[0], [15.0 / 64.0, 15.0 / 64.0, 20.0 / 64.0, 10.0 / 64.0],
+            atol=1e-6)
+
+    def test_components_are_ranked_by_pixel_count_descending(self) -> None:
+        small = (2, 6, 2, 6)          # 16 px
+        large = (30, 50, 30, 60)      # 600 px
+        image = _canvas_with_rectangles(64, [small, large])
+        boxes = connected_components_boxes(image, num_queries=2)
+        # Row 0 must be the LARGE component: its width is 30/64, the small
+        # one's is 4/64.
+        assert boxes[0][2] == pytest.approx(30.0 / 64.0)
+        assert boxes[1][2] == pytest.approx(4.0 / 64.0)
+
+    def test_fewer_components_than_queries_are_tiled(self) -> None:
+        image = _canvas_with_rectangles(32, [(4, 8, 4, 8)])
+        boxes = connected_components_boxes(image, num_queries=5)
+        assert boxes.shape == (5, 4)
+        for slot in range(5):
+            np.testing.assert_allclose(boxes[slot], boxes[0])
+
+    def test_an_empty_canvas_falls_back_to_one_centered_box(self) -> None:
+        """A zero-instance image is 25% of this generator's prompts."""
+        image = np.full((16, 16, 3), 10.0, dtype=np.float32)
+        boxes = connected_components_boxes(image, num_queries=3)
+        assert boxes.shape == (3, 4)
+        np.testing.assert_allclose(boxes[0], degenerate_prior()[0])
+
+    def test_the_threshold_is_what_separates_shapes_from_the_canvas(
+            self) -> None:
+        """`data.py` draws shapes at 140..255 on a canvas at 13..64, so the
+        cut must sit strictly between them."""
+        assert 64.0 < CC_THRESHOLD < 140.0
+        below = np.full((16, 16, 3), CC_THRESHOLD - 1.0, dtype=np.float32)
+        assert connected_components_boxes(below, 1)[0][2] == pytest.approx(0.2)
+
+    def test_a_non_image_input_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"must be \(S, S, C\)"):
+            connected_components_boxes(np.zeros((8, 8), np.float32), 1)
+
+    def test_the_predictor_is_blind_to_the_labels_it_is_scored_against(
+            self) -> None:
+        """Not a comment, a measurement: the targets are deleted, so garbage
+        targets and real targets give bit-identical boxes."""
+        images = np.stack([_canvas_with_rectangles(32, [(4, 12, 4, 12)]),
+                           _canvas_with_rectangles(32, [(16, 28, 16, 30)])])
+        real = connected_components_predictor(
+            images, np.zeros((2, 3, 4), np.float32),
+            np.ones((2, 3), np.float32), 4)
+        garbage = connected_components_predictor(
+            images, np.full((2, 3, 4), 9.9, np.float32),
+            np.zeros((2, 3), np.float32), 4)
+        np.testing.assert_array_equal(real, garbage)
+        assert real.shape == (2, 4, 4)
+
+    def test_the_predictor_is_image_dependent(self) -> None:
+        images = np.stack([_canvas_with_rectangles(32, [(2, 10, 2, 10)]),
+                           _canvas_with_rectangles(32, [(18, 30, 18, 30)])])
+        emitted = connected_components_predictor(
+            images, np.zeros((2, 1, 4), np.float32),
+            np.ones((2, 1), np.float32), 3)
+        assert float(emitted.std(axis=0).mean()) > 1e-2
+
+    def test_it_carries_the_reads_image_marker(self) -> None:
+        """`_score` dispatches on this attribute. Without it the arm is called
+        with the label signature and scored blind to the pixels."""
+        assert getattr(connected_components_predictor, "reads_image", False)
+        assert not getattr(gt_oracle_predictor, "reads_image", False)
+        assert not getattr(fixed_grid_prior, "reads_image", False)
+
+
+class TestTheDetectorOnARealSplit:
+    """The detector scored through the SAME `score_prior` path as the family."""
+
+    def test_it_beats_the_fixed_grid_and_is_image_dependent(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        model, loss = tiny_context
+        detector = score_prior(connected_components_predictor, model, loss,
+                               tiny_val_dataset)
+        grid = score_prior(fixed_grid_prior(), model, loss, tiny_val_dataset)
+        spread = _detector_spread(model, tiny_val_dataset)
+        _assert_the_detector_reads_the_pixels(spread, detector, grid)
+
+    def test_it_shares_the_family_s_matched_denominator(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """It cannot win by matching fewer pairs: `is_matched` depends only on
+        `target_valid`."""
+        model, loss = tiny_context
+        totals = {
+            baselines._score(prior, model, loss, tiny_val_dataset)[1]
+            for prior in (connected_components_predictor, fixed_grid_prior(),
+                          gt_oracle_predictor)}
+        assert len(totals) == 1, totals
+
+    def test_it_stays_below_the_gt_oracle(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """A detector reading 1.0 would mean it is somehow seeing the labels."""
+        model, loss = tiny_context
+        detector = score_prior(connected_components_predictor, model, loss,
+                               tiny_val_dataset)
+        assert detector < 1.0
+
+
+class TestTheDetectorGuardIsRedProven:
+    """SC-D: a DEAD-COMPONENT injection must make the detector guard FAIL.
+
+    The injection replaces :func:`connected_components_boxes` with one that
+    ignores its ``image`` argument and returns the fixed 5x5 grid instead. Same
+    shape, same dtype, finite, plausible -- and the ONLY thing that separates
+    it from the live detector is that its boxes stop depending on the image.
+    """
+
+    @staticmethod
+    def _blind_detector(image, num_queries, threshold=CC_THRESHOLD):
+        del image, threshold
+        return tile_to_queries(fixed_grid_prior(), num_queries)
+
+    def test_a_blind_detector_fires_the_liveness_assertion(
+            self, monkeypatch: pytest.MonkeyPatch,
+            tiny_context: Tuple[Any, Any], tiny_val_dataset: Any) -> None:
+        model, loss = tiny_context
+        monkeypatch.setattr(baselines, "connected_components_boxes",
+                            self._blind_detector)
+        detector = score_prior(connected_components_predictor, model, loss,
+                               tiny_val_dataset)
+        grid = score_prior(fixed_grid_prior(), model, loss, tiny_val_dataset)
+        spread = _detector_spread(model, tiny_val_dataset)
+        with pytest.raises(AssertionError,
+                           match="fixed prior wearing a detector's name"):
+            _assert_the_detector_reads_the_pixels(spread, detector, grid)
+
+    def test_the_live_detector_passes_the_same_assertion(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """The control beside the mutation: without the injection the SAME
+        call passes, so the RED above is the injection's doing."""
+        model, loss = tiny_context
+        detector = score_prior(connected_components_predictor, model, loss,
+                               tiny_val_dataset)
+        grid = score_prior(fixed_grid_prior(), model, loss, tiny_val_dataset)
+        _assert_the_detector_reads_the_pixels(
+            _detector_spread(model, tiny_val_dataset), detector, grid)
+
+
+class TestTheDetectorIsNotAFamilyMember:
+    """`plans/SYSTEM.md:220` names the family. The detector is not in it."""
+
+    @pytest.fixture(scope="class")
+    def tiny_family(self) -> Dict[str, Dict[str, float]]:
+        keras.utils.set_random_seed(1234)
+        return evaluate_family(seed=7, ks=(TINY_K,), split=TINY_SPLIT)
+
+    def test_the_detector_arm_is_reported(
+            self, tiny_family: Dict[str, Dict[str, float]]) -> None:
+        assert CONNECTED_COMPONENTS_ARM in tiny_family
+
+    def test_family_max_excludes_it_even_when_it_wins(
+            self, tiny_family: Dict[str, Dict[str, float]]) -> None:
+        """The whole point of the separation: the detector normally SCORES
+        HIGHEST, and quoting it as the family max would silently redefine the
+        bar `SYSTEM.md:220` fixes."""
+        name, value = family_max(tiny_family)
+        assert name != CONNECTED_COMPONENTS_ARM
+        assert value == max(tiny_family[GRID_ARM]["box_iou"],
+                            tiny_family[kmeans_arm(TINY_K)]["box_iou"])
+
+    def test_its_name_cannot_be_picked_up_by_the_family_filter(self) -> None:
+        assert not CONNECTED_COMPONENTS_ARM.startswith(
+            ("FIXED-GRID", "KMEANS-PRIOR"))
