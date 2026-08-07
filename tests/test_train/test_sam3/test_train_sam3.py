@@ -41,6 +41,9 @@ from dl_techniques.models.sam3.training_model import (
     compile_sam3_trainer,
     pack_predictions,
 )
+from tests.test_train.test_sam3.parser_help_guard import (
+    assert_no_bare_percent_help,
+)
 from train.common.args import explicitly_set_flags
 from train.sam3.train_sam3 import (
     CLI_TO_CONFIG,
@@ -219,18 +222,11 @@ class TestHelpDoesNotTrain:
         A lone ``%`` (as in "85% of the card") therefore raises
         ``ValueError: unsupported format character`` at ``--help`` time -- a
         crash that only the help path can reach and that no other test would
-        see. ``%%`` and ``%(default)s`` are legal and are excluded here.
+        see. The check itself lives in ``parser_help_guard`` and is called from
+        ``test_baselines.py`` too: this plan shipped the same defect in the
+        OTHER SAM 3 parser, which a copy of the loop here could not have seen.
         """
-        offenders = []
-        for action in build_parser()._actions:
-            text = action.help or ""
-            stripped = text.replace("%%", "").replace("%(default)s", "")
-            stripped = stripped.replace("%(prog)s", "")
-            if "%" in stripped:
-                offenders.append(f"{action.option_strings}: {text!r}")
-        assert not offenders, (
-            "help strings with a bare '%', which argparse formats and would "
-            f"crash --help on: {offenders}")
+        assert_no_bare_percent_help(build_parser(), "train_sam3.build_parser")
 
     def test_the_parser_carries_no_short_option_but_h(self) -> None:
         """``explicitly_set_flags`` REFUSES any other short option.

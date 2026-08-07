@@ -84,7 +84,10 @@ the same runs ``val_box_std_across_images`` reads 1.51e-01 / 1.47e-01 /
 DEVICE-DEPENDENT -- the same weights, split and code read 6.94e-06 on GPU and
 1.84e-06 on CPU, a factor of 3.8. The arm's reading is stable to 0.07%). So the
 boxes became image-dependent (a rise of order ~2e4x) and ``box_iou`` rose above
-the fixed-prior family max on 3 of 3 seeds.
+the fixed-prior family max on 3 of 3 seeds. **Do not quote that pair without
+both qualifiers below**: a 0-parameter, category-blind detector reads ~0.94 on
+these same splits -- ABOVE the arm -- and this metric does not read the text
+prompt at all (100.00% retained under a WRONG prompt, in BOTH arms).
 
 **What that is NOT, (1): the task needs no model.** A hand-written
 connected-components detector -- 20 lines, ZERO parameters, no training,
@@ -115,8 +118,10 @@ and 2.5e+00 / 2.5e+00 / 2.4e+00 (control).
 
 **So what these numbers mean.** ``val_box_iou`` on this generator measures
 **"find any bright shape"**, not "find the NAMED shape" -- the boxes are
-invariant to the prompt on BOTH sides of the comparison, which is exactly the
-capability the category-blind detector achieves at ~0.94. The 0.8450-vs-0.4013
+invariant to the prompt on BOTH sides of the comparison. That is the capability
+the 20-line, zero-parameter, category-blind detector does BETTER: ~0.94 against
+the arm's 0.8450, on 3 of 3 seeds, so the arm FALLS SHORT of it rather than
+matching it. The 0.8450-vs-0.4013
 improvement over the control is REAL and MEASURED, and it is a **WIRING /
 LEARNABILITY** result about image-conditioning -- the mechanism is connected, it
 trains, and the boxes became image-dependent. It is **NOT** evidence of

@@ -745,10 +745,21 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
 
     Returns:
         ``box_iou_true``, ``box_iou_worst_wrong_prompt``, ``retained``
-        (= worst / true), ``prompt_changed_fraction``, and
-        ``rel_delta_pred_boxes`` / ``rel_delta_pred_logits`` -- each the max
-        absolute change of that output under any shift, divided by that
-        output's own std over the split.
+        (= worst / true), ``prompt_changed_fraction``, ``matched_pairs`` (the
+        matched-pair DENOMINATOR, equal across every arm by assertion -- see
+        below), and ``rel_delta_pred_boxes`` / ``rel_delta_pred_logits`` --
+        each the max absolute change of that output under any shift, divided by
+        that output's own std over the split.
+
+    Raises:
+        ValueError: if the TRUE and swapped arms matched DIFFERENT numbers of
+            pairs. ``retained`` divides two independently pooled ratios, and
+            the matcher keeps a pair only where its cost clears
+            ``VALID_COST_THRESHOLD`` -- a cost that INCLUDES a class term
+            computed from ``pred_logits``, which do move under a swap. The
+            denominators are therefore not equal by construction, only equal in
+            fact; this raise is what keeps the ratio from silently becoming a
+            comparison of two different populations.
     """
     sums: Dict[Any, List[float]] = {key: [0.0, 0.0]
                                     for key in ("TRUE",) + tuple(shifts)}
@@ -784,6 +795,12 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
             changed += float(np.sum(np.any(original != rolled, axis=-1)))
             seen += float(original.shape[0])
 
+    denominators = {key: sums[key][1] for key in sums}
+    if len(set(denominators.values())) != 1:
+        raise ValueError(
+            "the TRUE and wrong-prompt arms matched DIFFERENT numbers of "
+            f"pairs {denominators}: `retained` would divide ratios taken over "
+            "two different populations, so it is not a retention")
     true_iou = sums["TRUE"][0] / max(sums["TRUE"][1], 1.0)
     worst = min(sums[shift][0] / max(sums[shift][1], 1.0) for shift in shifts)
     result = {
@@ -791,6 +808,7 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
         "box_iou_worst_wrong_prompt": worst,
         "retained": worst / true_iou if true_iou else float("nan"),
         "prompt_changed_fraction": changed / max(seen, 1.0),
+        "matched_pairs": sums["TRUE"][1],
     }
     for key in gaps:
         spread = float(np.concatenate(pooled[key]).std())
@@ -1016,7 +1034,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _emit(f"  seed {seed} ({path}): true = "
                   f"{swap['box_iou_true']:.6f}, worst wrong prompt = "
                   f"{swap['box_iou_worst_wrong_prompt']:.6f}, RETAINED = "
-                  f"{swap['retained']:.4f}   [prompts actually changed on "
+                  f"{swap['retained']:.4f}   [both arms matched the same "
+                  f"{swap['matched_pairs']:.0f} pairs; prompts actually "
+                  f"changed on "
                   f"{swap['prompt_changed_fraction']:.2f} of images; relative "
                   f"delta pred_boxes {swap['rel_delta_pred_boxes']:.2e}, "
                   f"pred_logits {swap['rel_delta_pred_logits']:.2e}]")

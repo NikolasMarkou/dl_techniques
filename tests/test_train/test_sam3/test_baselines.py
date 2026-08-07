@@ -41,6 +41,9 @@ import keras
 import numpy as np
 import pytest
 
+from tests.test_train.test_sam3.parser_help_guard import (
+    assert_no_bare_percent_help,
+)
 from train.sam3 import baselines
 from train.sam3.baselines import (
     CC_THRESHOLD,
@@ -875,9 +878,50 @@ class TestPromptSwapRetentionOnARealSplit:
             self, swap: Dict[str, float]) -> None:
         assert set(swap) == {
             "box_iou_true", "box_iou_worst_wrong_prompt", "retained",
-            "prompt_changed_fraction", "rel_delta_pred_boxes",
+            "prompt_changed_fraction", "matched_pairs", "rel_delta_pred_boxes",
             "rel_delta_pred_logits"}
         assert all(isinstance(value, float) for value in swap.values())
+
+    def test_it_reports_the_denominator_the_family_is_scored_over(
+            self, swap: Dict[str, float], tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """`retained` divides two independently pooled ratios.
+
+        The matcher keeps a pair only where its cost clears
+        `VALID_COST_THRESHOLD`, and that cost includes a class term computed
+        from `pred_logits` -- which DO move under a swap. So an equal
+        denominator is a fact to be checked, not a construction. Here it is
+        also checked to be the SAME denominator every prior arm is scored
+        over, so the model's number and the family's are like for like.
+        """
+        model, loss = tiny_context
+        assert swap["matched_pairs"] > 0.0
+        assert swap["matched_pairs"] == pytest.approx(
+            baselines._score(gt_oracle_predictor, model, loss,
+                             tiny_val_dataset)[1])
+
+    def test_the_unequal_denominator_raise_is_red_proven(
+            self, monkeypatch: pytest.MonkeyPatch,
+            tiny_context: Tuple[Any, Any], tiny_val_dataset: Any) -> None:
+        """Make ONE swapped arm match fewer pairs and the ratio must REFUSE.
+
+        The injection wraps `_matched_iou` and drops one matched pair from the
+        first wrong-prompt call only -- exactly what a future change to the
+        class cost could do silently, since `retained` would keep returning a
+        finite, plausible number.
+        """
+        model, loss = tiny_context
+        real = baselines._matched_iou
+        seen: List[int] = []
+
+        def _one_arm_short(boxes, logits, targets, loss_):
+            total, pairs = real(boxes, logits, targets, loss_)
+            seen.append(1)
+            return (total, pairs - 1.0) if len(seen) == 2 else (total, pairs)
+
+        monkeypatch.setattr(baselines, "_matched_iou", _one_arm_short)
+        with pytest.raises(ValueError, match="DIFFERENT numbers of"):
+            prompt_swap_retention(model, loss, tiny_val_dataset)
 
     def test_the_instrument_is_live(self, swap: Dict[str, float]) -> None:
         """The GREEN half of the RED proof below: on a real split the swap
@@ -969,3 +1013,25 @@ class TestThePromptSwapIsNotAFamilyMember:
             ["--prompt-swap", "results/x_seed{seed}/best_model.keras"])
         assert typed.prompt_swap.format(seed=2) == (
             "results/x_seed2/best_model.keras")
+
+
+class TestThisParserSHelpDoesNotCrash:
+    """``--help`` is the ONLY path that formats a ``help=`` string.
+
+    A bare ``%`` in one of them makes ``python -m train.sam3.baselines --help``
+    exit 1 (``TypeError: %o format: an integer is required, not dict``) while
+    every other test in this file passes -- measured, on this very parser. The
+    check is the same one ``test_train_sam3.py`` runs on the trainer's parser;
+    it lives in ``parser_help_guard`` so there is ONE implementation and each
+    parser's own test file calls it, rather than a copy per file that a new
+    parser can be added without.
+    """
+
+    def test_no_help_string_carries_a_bare_percent(self) -> None:
+        assert_no_bare_percent_help(build_parser(), "baselines.build_parser")
+
+    def test_help_exits_zero(self) -> None:
+        """The end-to-end proof: argparse actually FORMATS every help string."""
+        with pytest.raises(SystemExit) as exit_info:
+            build_parser().parse_args(["--help"])
+        assert exit_info.value.code == 0
