@@ -47,11 +47,16 @@ The detector above is the reason ``box_iou`` alone settles nothing on this
 generator, and :func:`distractor_gap` is the answer to it: the SAME predicted
 boxes are scored twice, against the prompted category's ground truth and
 against the pooled ground truth of every OTHER category in the SAME image. A
-predictor that boxes every bright blob matches both sets about equally and
-reads ~0.005; a ground-truth oracle reads 1.0. MEASURED, seed 1: the trained
-query-selection arm reads 0.0158 (1.9% relative) -- above the detector's floor,
-but only just, which is itself the finding. Unlike every arm above, this one
-needs the eval-only all-category export of ``train.sam3.data``
+ground-truth oracle reads 1.0. A predictor that boxes every bright blob matches
+both sets about equally, so its gap is NOISE AROUND ZERO whose SIGN is
+seed-dependent, not a small positive number: MEASURED on seeds 1/2/3, the
+connected-components detector reads +0.004954 / -0.004813 / -0.000371 while
+reading ~0.94 raw box_iou. That magnitude is NOT a general ceiling for blind
+arms -- the wider category-blind band, including the FIXED-GRID and
+KMEANS-PRIOR family priors, reaches an absolute gap of 0.0358 (KMEANS k=8,
+seed 3), so 0.02 is not a category-blind ceiling and a small gap of either
+sign is not on its own evidence of category selectivity. Unlike every arm
+above, this one needs the eval-only all-category export of ``train.sam3.data``
 (``include_all_instances``), and it is NOT a member of the family: it never
 enters :func:`evaluate_family`'s results, so :func:`family_max` cannot see it.
 
@@ -1153,8 +1158,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "prompted category's ground truth, and against "
                              "the pooled ground truth of every OTHER category "
                              "present in the same image -- and prints the "
-                             "gap. A category-blind predictor reads near zero "
-                             "here however high its raw box_iou is.")
+                             "gap. A category-blind predictor's gap here is "
+                             "noise around zero whose sign is seed-dependent, "
+                             "however high its raw box_iou is.")
     return parser
 
 
@@ -1269,9 +1275,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _emit(f"{DISTRACTOR_GAP_ARM} -- a CHECKPOINT's same predicted boxes "
               "scored twice: against the PROMPTED category's ground truth, "
               "and against the pooled ground truth of every OTHER category in "
-              "the SAME image. This is the number a category-blind predictor "
-              "cannot win: the connected-components detector reads ~0.005 "
-              "here while reading ~0.94 raw box_iou. The two denominators "
+              "the SAME image. A category-blind arm's gap is noise around "
+              "zero with a SEED-DEPENDENT SIGN: the connected-components "
+              "detector reads +0.004954 / -0.004813 / -0.000371 on seeds "
+              "1/2/3 while reading ~0.94 raw box_iou, and the wider blind "
+              "band (FIXED-GRID and KMEANS-PRIOR included) reaches 0.0358 "
+              "absolute (KMEANS k=8, seed 3), so 0.02 is NOT a general "
+              "category-blind ceiling. The two denominators "
               "DIFFER on purpose -- an image whose prompted category is "
               "absent contributes zero prompted pairs and non-zero distractor "
               "pairs -- so both are printed and neither is asserted equal:")
