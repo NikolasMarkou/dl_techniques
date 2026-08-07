@@ -49,8 +49,11 @@ from train.sam3.baselines import (
     GRID_ARM,
     ORACLE_ARM,
     KMEANS_N_INIT,
+    PROMPT_KEYS,
+    PROMPT_SWAP_SHIFTS,
     VAL_SEED_OFFSET,
     build_context,
+    build_parser,
     build_split_dataset,
     connected_components_boxes,
     connected_components_predictor,
@@ -62,7 +65,9 @@ from train.sam3.baselines import (
     gt_oracle_predictor,
     kmeans_arm,
     pool_train_gt,
+    prompt_swap_retention,
     score_prior,
+    swap_batch_prompts,
     tile_to_queries,
 )
 
@@ -137,6 +142,38 @@ def _assert_the_detector_reads_the_pixels(spread: float, detector: float,
         f"which draws bright non-overlapping shapes on a dark canvas cannot "
         f"lose to one that looks at nothing; this reading means it is not "
         f"reading them.")
+
+
+def _assert_the_prompt_swap_is_live(changed_fraction: float,
+                                    rel_delta_logits: float) -> None:
+    """THE liveness assertion for the prompt-swap diagnostic, in ONE place.
+
+    A ``retained`` of 1.00 has TWO possible causes and they are opposite in
+    meaning: the model's boxes really do ignore the text prompt, or the
+    instrument never swapped anything. Only these two numbers separate them, so
+    no retention figure may be quoted without them.
+
+    Args:
+        changed_fraction: Fraction of images whose ``token_ids`` actually
+            differ after the rotation.
+        rel_delta_logits: Max change in ``pred_logits`` under the swap, over
+            that tensor's own std across the split.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If no prompt changed, or if the swap moved no model
+            output at all.
+    """
+    assert changed_fraction > 0.0, (
+        f"the prompt swap changed the prompt on {changed_fraction:.4f} of "
+        f"images: NOTHING was swapped, so any retention it reports is a "
+        f"property of the instrument and not of the model.")
+    assert rel_delta_logits > 0.0, (
+        f"the swap moved pred_logits by a relative {rel_delta_logits:.3e}, "
+        f"i.e. the swapped prompt reached NO model output at all. A retention "
+        f"measured through a dead text path says nothing about the boxes.")
 
 
 def _canvas_with_rectangles(size: int, boxes: List[Tuple[int, int, int, int]],
@@ -771,3 +808,164 @@ class TestTheDetectorIsNotAFamilyMember:
     def test_its_name_cannot_be_picked_up_by_the_family_filter(self) -> None:
         assert not CONNECTED_COMPONENTS_ARM.startswith(
             ("FIXED-GRID", "KMEANS-PRIOR"))
+
+
+class TestTheSwapTouchesOnlyThePrompt:
+    """`swap_batch_prompts` is the diagnostic's one moving part."""
+
+    @staticmethod
+    def _batch() -> Dict[str, Any]:
+        return {
+            "image": np.arange(3 * 2 * 2 * 3, dtype=np.float32).reshape(
+                3, 2, 2, 3),
+            "token_ids": np.array([[1, 1], [2, 2], [3, 3]], dtype=np.int32),
+            "token_padding_mask": np.array(
+                [[1, 0], [1, 1], [0, 0]], dtype=np.int32),
+        }
+
+    def test_it_rotates_both_prompt_tensors_by_the_shift(self) -> None:
+        """A hand-computed value oracle: shift 1 moves row i to row i+1."""
+        swapped = swap_batch_prompts(self._batch(), 1)
+        np.testing.assert_array_equal(
+            np.asarray(swapped["token_ids"]),
+            np.array([[3, 3], [1, 1], [2, 2]], dtype=np.int32))
+        np.testing.assert_array_equal(
+            np.asarray(swapped["token_padding_mask"]),
+            np.array([[0, 0], [1, 0], [1, 1]], dtype=np.int32))
+
+    def test_the_mask_travels_with_the_ids(self) -> None:
+        """Rotating the ids alone would feed a prompt under ANOTHER prompt's
+        mask -- a third thing, not a swap. The four category phrases have
+        different word counts, so the masks genuinely differ."""
+        batch = self._batch()
+        swapped = swap_batch_prompts(batch, 2)
+        for index in range(3):
+            source = (index - 2) % 3
+            np.testing.assert_array_equal(
+                np.asarray(swapped["token_ids"])[index],
+                batch["token_ids"][source])
+            np.testing.assert_array_equal(
+                np.asarray(swapped["token_padding_mask"])[index],
+                batch["token_padding_mask"][source])
+
+    def test_the_image_is_the_callers_object_untouched(self) -> None:
+        batch = self._batch()
+        swapped = swap_batch_prompts(batch, 1)
+        assert swapped["image"] is batch["image"]
+        assert set(swapped) == set(batch)
+
+    def test_shift_zero_is_a_no_op_and_is_therefore_vacuous(self) -> None:
+        """The vacuity mode the liveness assertion exists to catch."""
+        batch = self._batch()
+        np.testing.assert_array_equal(
+            np.asarray(swap_batch_prompts(batch, 0)["token_ids"]),
+            batch["token_ids"])
+
+
+class TestPromptSwapRetentionOnARealSplit:
+    """The diagnostic run end to end against a real model and split."""
+
+    @pytest.fixture(scope="class")
+    def swap(self, tiny_context: Tuple[Any, Any],
+             tiny_val_dataset: Any) -> Dict[str, float]:
+        model, loss = tiny_context
+        return prompt_swap_retention(model, loss, tiny_val_dataset)
+
+    def test_it_returns_the_declared_keys_as_floats(
+            self, swap: Dict[str, float]) -> None:
+        assert set(swap) == {
+            "box_iou_true", "box_iou_worst_wrong_prompt", "retained",
+            "prompt_changed_fraction", "rel_delta_pred_boxes",
+            "rel_delta_pred_logits"}
+        assert all(isinstance(value, float) for value in swap.values())
+
+    def test_the_instrument_is_live(self, swap: Dict[str, float]) -> None:
+        """The GREEN half of the RED proof below: on a real split the swap
+        really does change prompts and really does reach an output."""
+        _assert_the_prompt_swap_is_live(swap["prompt_changed_fraction"],
+                                        swap["rel_delta_pred_logits"])
+
+    def test_the_wrong_prompt_arm_is_the_worst_of_the_shifts(
+            self, swap: Dict[str, float]) -> None:
+        assert swap["box_iou_worst_wrong_prompt"] <= swap["box_iou_true"] or (
+            swap["retained"] >= 1.0)
+        assert swap["retained"] == pytest.approx(
+            swap["box_iou_worst_wrong_prompt"] / swap["box_iou_true"])
+
+    def test_the_true_arm_reproduces_score_prior_s_reduction(
+            self, tiny_context: Tuple[Any, Any], tiny_val_dataset: Any,
+            swap: Dict[str, float]) -> None:
+        """`_matched_iou` has ONE home: the oracle scored through the prior
+        path still reads exactly 1.0, so the shared reduction did not drift."""
+        model, loss = tiny_context
+        _assert_oracle_reads_exactly_one(
+            score_prior(gt_oracle_predictor, model, loss, tiny_val_dataset))
+        assert 0.0 <= swap["box_iou_true"] <= 1.0
+
+    def test_the_targets_are_never_swapped(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """Every arm is scored against each image's OWN ground truth, so the
+        matched-pair denominator cannot move between arms."""
+        model, loss = tiny_context
+        totals = {baselines._score(prior, model, loss, tiny_val_dataset)[1]
+                  for prior in (gt_oracle_predictor, fixed_grid_prior())}
+        assert len(totals) == 1, totals
+
+
+class TestThePromptSwapGuardIsRedProven:
+    """SC-D: a DEAD-SWAP injection must make the liveness assertion FAIL.
+
+    The injection replaces :func:`swap_batch_prompts` with one that returns the
+    caller's inputs unchanged. The diagnostic still runs, still returns six
+    finite floats, and still reports ``retained == 1.0000`` -- which is exactly
+    the headline number. The ONLY thing separating that vacuous 1.0000 from the
+    real measurement is ``prompt_changed_fraction``.
+    """
+
+    @staticmethod
+    def _dead_swap(inputs, shift):
+        del shift
+        return dict(inputs)
+
+    def test_a_dead_swap_fires_the_liveness_assertion(
+            self, monkeypatch: pytest.MonkeyPatch,
+            tiny_context: Tuple[Any, Any], tiny_val_dataset: Any) -> None:
+        model, loss = tiny_context
+        monkeypatch.setattr(baselines, "swap_batch_prompts", self._dead_swap)
+        swap = prompt_swap_retention(model, loss, tiny_val_dataset)
+        assert swap["retained"] == pytest.approx(1.0), (
+            "the dead swap must still LOOK like the finding")
+        with pytest.raises(AssertionError, match="NOTHING was swapped"):
+            _assert_the_prompt_swap_is_live(swap["prompt_changed_fraction"],
+                                            swap["rel_delta_pred_logits"])
+
+    def test_the_live_swap_passes_the_same_assertion(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """The control beside the mutation."""
+        model, loss = tiny_context
+        swap = prompt_swap_retention(model, loss, tiny_val_dataset)
+        _assert_the_prompt_swap_is_live(swap["prompt_changed_fraction"],
+                                        swap["rel_delta_pred_logits"])
+
+
+class TestThePromptSwapIsNotAFamilyMember:
+    """It is a QUALIFIER on the model's number, not a bar the model clears."""
+
+    def test_the_shift_set_is_pinned_and_excludes_the_vacuous_zero(
+            self) -> None:
+        assert 0 not in PROMPT_SWAP_SHIFTS
+        assert len(PROMPT_SWAP_SHIFTS) >= 2, (
+            "one rotation can land on the same category by chance")
+
+    def test_only_the_two_prompt_keys_are_named(self) -> None:
+        assert PROMPT_KEYS == ("token_ids", "token_padding_mask")
+
+    def test_the_cli_exposes_it_and_it_is_off_by_default(self) -> None:
+        args = build_parser().parse_args([])
+        assert args.prompt_swap is None
+        typed = build_parser().parse_args(
+            ["--prompt-swap", "results/x_seed{seed}/best_model.keras"])
+        assert typed.prompt_swap.format(seed=2) == (
+            "results/x_seed2/best_model.keras")

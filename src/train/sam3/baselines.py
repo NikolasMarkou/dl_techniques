@@ -94,6 +94,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
+import keras
 import numpy as np
 from keras import ops
 
@@ -146,6 +147,19 @@ CONNECTED_COMPONENTS_ARM: str = "CONNECTED-COMPONENTS (reads pixels, 0 params)"
 #: ``uniform(0.55, 1.0)`` (140..255) on a canvas at ``uniform(0.05, 0.25)``
 #: (13..64), so any cut inside (64, 140) separates them and 100 is its middle.
 CC_THRESHOLD: float = 100.0
+
+#: The two input keys that carry the TEXT PROMPT and nothing else -- `data.py`
+#: emits exactly these beside ``image`` and the targets. Swapping BOTH together
+#: is not optional: ``token_padding_mask`` is per-prompt (the four category
+#: phrases have different word counts), so swapping the ids alone would feed a
+#: prompt under another prompt's mask, which is a third thing and not a swap.
+PROMPT_KEYS: Tuple[str, str] = ("token_ids", "token_padding_mask")
+
+#: Batch-axis rotations used to hand every image ANOTHER image's prompt. Three
+#: of them, because ONE rotation can land on an image of the same category by
+#: chance; :func:`prompt_swap_retention` reports the fraction of images whose
+#: prompt tokens actually changed rather than assuming they all did.
+PROMPT_SWAP_SHIFTS: Tuple[int, ...] = (1, 2, 3)
 
 
 def kmeans_arm(k: int) -> str:
@@ -547,6 +561,46 @@ def fit_kmeans_prior(train_boxes: np.ndarray, k: int, seed: int,
     return np.asarray(fit.cluster_centers_, dtype=np.float32)
 
 
+def _matched_iou(pred_boxes: Any, pred_logits: Any, targets: Dict[str, Any],
+                 loss: Any) -> Tuple[float, float]:
+    """``(summed IoU over matched pairs, matched pair count)`` for ONE batch.
+
+    Interface contract: THE single home for ``evaluate_sam3``'s box-IoU
+    expression in this module. Both the baseline scorer (:func:`_score`, whose
+    boxes come from a prior) and the model-scoring diagnostic
+    (:func:`prompt_swap_retention`, whose boxes come from a checkpoint) call it,
+    so a prior's number and a model's number cannot drift apart by one of them
+    quietly growing a different reduction. The caller supplies the class cost:
+    the priors pass zeros (they make no class claim), the model passes its own
+    ``pred_logits``.
+
+    Args:
+        pred_boxes: ``(B, Q, 4)`` cxcywh float32 tensor.
+        pred_logits: ``(B, Q, C)`` float32 tensor -- the matcher's class cost.
+        targets: :func:`unpack_targets` output for the same batch.
+        loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
+
+    Returns:
+        ``(iou_sum, matched_total)``. Divide the first by the second, pooled
+        over the split, to get ``box_iou``.
+    """
+    assignment, is_matched = loss.matcher(
+        pred_logits, pred_boxes,
+        targets["target_boxes"], targets["target_valid"])
+    gathered = ops.take_along_axis(
+        targets["target_boxes"], assignment[:, :, None], axis=1)
+    # `iou_and_generalized_iou` reads **xyxy**; every box here is normalized
+    # cxcywh. Feeding it cxcywh does not raise -- it silently scores two
+    # rectangles that are not the boxes.
+    iou, _giou = iou_and_generalized_iou(
+        box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gathered))
+    # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
+    # propagates `nan * 0.0 = nan` from a both-degenerate padded pair.
+    return (float(ops.sum(
+        ops.where(is_matched > 0.0, iou, ops.zeros_like(iou)))),
+        float(ops.sum(is_matched)))
+
+
 def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
            dataset: Any) -> Tuple[float, float]:
     """``(box_iou, matched_total)`` -- :func:`score_prior` plus the denominator.
@@ -601,21 +655,9 @@ def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
         # constant. `evaluate_sam3` feeds the model's real logits here.
         pred_logits = ops.zeros(
             (pred_boxes.shape[0], num_queries, 1), dtype="float32")
-        assignment, is_matched = loss.matcher(
-            pred_logits, pred_boxes,
-            targets["target_boxes"], targets["target_valid"])
-        gathered = ops.take_along_axis(
-            targets["target_boxes"], assignment[:, :, None], axis=1)
-        # `iou_and_generalized_iou` reads **xyxy**; every box here is
-        # normalized cxcywh. Feeding it cxcywh does not raise -- it silently
-        # scores two rectangles that are not the boxes.
-        iou, _giou = iou_and_generalized_iou(
-            box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gathered))
-        # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
-        # propagates `nan * 0.0 = nan` from a both-degenerate padded pair.
-        box_iou_sum += float(ops.sum(
-            ops.where(is_matched > 0.0, iou, ops.zeros_like(iou))))
-        matched_total += float(ops.sum(is_matched))
+        total, pairs = _matched_iou(pred_boxes, pred_logits, targets, loss)
+        box_iou_sum += total
+        matched_total += pairs
     return (box_iou_sum / max(matched_total, 1.0), matched_total)
 
 
@@ -646,6 +688,116 @@ def score_prior(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
     """
     box_iou, _matched = _score(prior, model, loss, dataset)
     return box_iou
+
+
+def swap_batch_prompts(inputs: Dict[str, Any], shift: int) -> Dict[str, Any]:
+    """Give every image of a batch ANOTHER image's text prompt.
+
+    Interface contract: returns a NEW dict in which exactly
+    :data:`PROMPT_KEYS` are rotated by ``shift`` along the BATCH axis and every
+    other key -- ``image`` above all -- is the caller's object unchanged. The
+    targets are not touched here and must not be touched by the caller either:
+    the point of the diagnostic is to score the SAME image against the SAME
+    ground truth under a DIFFERENT prompt.
+
+    Args:
+        inputs: One batch of the dataset's input dict.
+        shift: Batch-axis rotation. ``0`` is a no-op and makes the diagnostic
+            vacuous, which is why :func:`prompt_swap_retention` reports the
+            fraction of prompts that actually changed.
+
+    Returns:
+        A shallow copy with the two prompt tensors rotated.
+    """
+    swapped = dict(inputs)
+    for key in PROMPT_KEYS:
+        swapped[key] = ops.roll(inputs[key], shift, axis=0)
+    return swapped
+
+
+def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
+                          shifts: Sequence[int] = PROMPT_SWAP_SHIFTS,
+                          ) -> Dict[str, float]:
+    """How much ``box_iou`` a checkpoint KEEPS when the prompt is wrong.
+
+    Interface contract: this is the one MODEL-scoring arm in a module of
+    non-model baselines, and it lives here on purpose -- it is a QUALIFIER on
+    the same number the family bars, so it must be quotable in the same table
+    and computed through the same :func:`_matched_iou` reduction. It runs the
+    model at ``training=False``, never touches the targets, and returns a flat
+    ``Dict[str, float]``.
+
+    Reading the result. ``retained`` near ``1.0`` means the box metric is
+    INVARIANT to the text prompt: on that generator ``box_iou`` measures "find
+    any bright shape", not "find the NAMED shape", and no text-grounded
+    detection claim may be made from it. That verdict is only meaningful
+    alongside the other two keys: ``prompt_changed_fraction`` (a rotation can
+    land on an image of the same category, so this is measured, not assumed)
+    and ``rel_delta_pred_logits`` (if the swap moves NOTHING anywhere, the
+    instrument is dead and ``retained == 1.0`` says nothing about the model).
+
+    Args:
+        model: A built or loaded ``Sam3TrainingModel``.
+        loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
+        dataset: The SCORING split, ``(inputs, packed_target)`` batches.
+        shifts: Batch-axis rotations to try. The reported wrong-prompt IoU is
+            the WORST (lowest) over them.
+
+    Returns:
+        ``box_iou_true``, ``box_iou_worst_wrong_prompt``, ``retained``
+        (= worst / true), ``prompt_changed_fraction``, and
+        ``rel_delta_pred_boxes`` / ``rel_delta_pred_logits`` -- each the max
+        absolute change of that output under any shift, divided by that
+        output's own std over the split.
+    """
+    sums: Dict[Any, List[float]] = {key: [0.0, 0.0]
+                                    for key in ("TRUE",) + tuple(shifts)}
+    changed = seen = 0.0
+    gaps = {"pred_boxes": 0.0, "pred_logits": 0.0}
+    pooled: Dict[str, List[np.ndarray]] = {key: [] for key in gaps}
+    for inputs, y_true in dataset:
+        targets = unpack_targets(ops.cast(y_true, "float32"),
+                                 model.include_masks)
+        true_out = model.sam3(inputs, training=False)
+        total, pairs = _matched_iou(
+            ops.cast(true_out["pred_boxes"], "float32"),
+            ops.cast(true_out["pred_logits"], "float32"), targets, loss)
+        sums["TRUE"][0] += total
+        sums["TRUE"][1] += pairs
+        for key in gaps:
+            pooled[key].append(np.asarray(
+                ops.convert_to_numpy(true_out[key]), dtype=np.float64))
+        original = np.asarray(ops.convert_to_numpy(inputs["token_ids"]))
+        for shift in shifts:
+            swapped = swap_batch_prompts(inputs, shift)
+            out = model.sam3(swapped, training=False)
+            total, pairs = _matched_iou(
+                ops.cast(out["pred_boxes"], "float32"),
+                ops.cast(out["pred_logits"], "float32"), targets, loss)
+            sums[shift][0] += total
+            sums[shift][1] += pairs
+            for key in gaps:
+                delta = np.abs(np.asarray(ops.convert_to_numpy(out[key]),
+                                          dtype=np.float64) - pooled[key][-1])
+                gaps[key] = max(gaps[key], float(delta.max()))
+            rolled = np.asarray(ops.convert_to_numpy(swapped["token_ids"]))
+            changed += float(np.sum(np.any(original != rolled, axis=-1)))
+            seen += float(original.shape[0])
+
+    true_iou = sums["TRUE"][0] / max(sums["TRUE"][1], 1.0)
+    worst = min(sums[shift][0] / max(sums[shift][1], 1.0) for shift in shifts)
+    result = {
+        "box_iou_true": true_iou,
+        "box_iou_worst_wrong_prompt": worst,
+        "retained": worst / true_iou if true_iou else float("nan"),
+        "prompt_changed_fraction": changed / max(seen, 1.0),
+    }
+    for key in gaps:
+        spread = float(np.concatenate(pooled[key]).std())
+        result[f"rel_delta_{key}"] = (gaps[key] / spread if spread
+                                      else float("nan"))
+    logger.info("prompt_swap_retention: %s", result)
+    return result
 
 
 def evaluate_family(seed: int, ks: Sequence[int] = FAMILY_KS,
@@ -718,6 +870,16 @@ def family_max(results: Dict[str, Dict[str, float]]) -> Tuple[str, float]:
     Raises:
         ValueError: If no family arm is present.
     """
+    # DECISION plan-2026-08-06T185813-fd80240f/D-009
+    # This filter is an ALLOWLIST, and that is the whole mechanism keeping the
+    # pre-registered SC-B bar where it was pre-registered. Do NOT add
+    # `connected_components_predictor` (or `prompt_swap_retention`, or any
+    # future image-reading arm) to it, and do NOT rename such an arm to start
+    # with "FIXED-GRID" / "KMEANS-PRIOR": either move would retroactively raise
+    # a bar that was fixed BEFORE the runs, turning a pre-registered comparison
+    # into a post-hoc one. The image-reading numbers are reported in their own
+    # CLI sections precisely so both bars stay separately quotable. See
+    # decisions.md D-009.
     family = {name: row["box_iou"] for name, row in results.items()
               if name.startswith(("FIXED-GRID", "KMEANS-PRIOR"))}
     if not family:
@@ -744,6 +906,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="k values for the k-means prior.")
     parser.add_argument("--json", type=str, default=None,
                         help="Write the full result table to this path.")
+    parser.add_argument("--prompt-swap", type=str, default=None,
+                        metavar="TEMPLATE",
+                        help="A checkpoint path template containing '{seed}', "
+                             "e.g. 'results/step9_qsel_seed{seed}/"
+                             "best_model.keras'. Scores that checkpoint's "
+                             "box_iou under the TRUE prompt and under another "
+                             "image's prompt, and prints the retention. Quote "
+                             "it beside any accuracy claim on this generator.")
     return parser
 
 
@@ -825,6 +995,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _emit(f"  seed {seed}: connected components = {cc:.6f}   "
               f"(family max {value:.4f}; the trained query-selection arm read "
               f"0.8450 / 0.8296 / 0.8191 on seeds 1 / 2 / 3)")
+
+    if args.prompt_swap:
+        _emit("")
+        _emit("PROMPT-SWAP RETENTION -- the fraction of a CHECKPOINT's box_iou "
+              "that survives replacing every image's text prompt with another "
+              "image's. `retained` near 1.00 means the box metric is invariant "
+              "to the prompt, i.e. it measures 'find any bright shape' and not "
+              "'find the NAMED shape'; no text-grounded detection claim may be "
+              "made from a number with that qualifier beside it:")
+        for seed in seeds:
+            path = Path(args.prompt_swap.format(seed=seed))
+            if not path.exists():
+                _emit(f"  seed {seed}: {path} ABSENT -- skipped")
+                continue
+            ctx_model, ctx_loss = build_context(seed)
+            swap = prompt_swap_retention(
+                keras.models.load_model(path, compile=False), ctx_loss,
+                build_split_dataset(ctx_model, seed, train=False))
+            _emit(f"  seed {seed} ({path}): true = "
+                  f"{swap['box_iou_true']:.6f}, worst wrong prompt = "
+                  f"{swap['box_iou_worst_wrong_prompt']:.6f}, RETAINED = "
+                  f"{swap['retained']:.4f}   [prompts actually changed on "
+                  f"{swap['prompt_changed_fraction']:.2f} of images; relative "
+                  f"delta pred_boxes {swap['rel_delta_pred_boxes']:.2e}, "
+                  f"pred_logits {swap['rel_delta_pred_logits']:.2e}]")
 
     if args.json:
         payload = {str(seed): per_seed[seed] for seed in seeds}

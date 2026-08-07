@@ -86,17 +86,43 @@ DEVICE-DEPENDENT -- the same weights, split and code read 6.94e-06 on GPU and
 boxes became image-dependent (a rise of order ~2e4x) and ``box_iou`` rose above
 the fixed-prior family max on 3 of 3 seeds.
 
-**What that is NOT.** A hand-written connected-components detector -- 20 lines,
-ZERO parameters, no training, category-BLIND: threshold the canvas, emit the
-bounding boxes of the brightest blobs -- scores 0.9413 / 0.9370 / 0.9397 on the
-same splits through the same IoU path with the same 93/88/98 matched-pair
-denominators (``train.sam3.baselines.connected_components_predictor``, run it
-yourself with ``python -m train.sam3.baselines``). It BEATS the trained arm on
-3 of 3 seeds. This generator's box task is therefore solvable without a model,
-and these numbers are a **WIRING / LEARNABILITY** result -- the mechanism is
-connected and it trains -- not a capability result. Nothing here licenses a
-published-benchmark comparison: one synthetic generator, one repo-invented
-'small' variant.
+**What that is NOT, (1): the task needs no model.** A hand-written
+connected-components detector -- 20 lines, ZERO parameters, no training,
+category-BLIND: threshold the canvas, emit the bounding boxes of the brightest
+blobs -- scores 0.9413 / 0.9370 / 0.9397 on the same splits through the same IoU
+path with the same 93/88/98 matched-pair denominators
+(``train.sam3.baselines.connected_components_predictor``, run it yourself with
+``python -m train.sam3.baselines``). It BEATS the trained arm on 3 of 3 seeds.
+
+**What that is NOT, (2): the box metric does not read the text prompt.**
+Replace every image's prompt with ANOTHER image's and score the SAME checkpoint
+against the SAME ground truth: ``box_iou`` is **100.00% retained**, on 3 of 3
+seeds, in the arm AND in the deep-supervision control.
+
+    seed 1  arm 0.844996 -> 0.844996   control 0.401335 -> 0.401329
+    seed 2  arm 0.829564 -> 0.829562   control 0.369245 -> 0.369245
+    seed 3  arm 0.819134 -> 0.819134   control 0.367486 -> 0.367486
+
+(``train.sam3.baselines.prompt_swap_retention``; run it yourself with
+``python -m train.sam3.baselines --prompt-swap
+'results/<run>_seed{seed}/best_model.keras'``. Three batch-axis rotations, worst
+arm reported, prompts genuinely changed on 0.72 / 0.75 / 0.76 of images, targets
+never touched.) The boxes themselves barely move: ``max |pred_boxes|`` change
+over that tensor's own std is 1.5e-05 in the arm and 5.4e-04 in the control --
+float noise. The text path is NOT dead, it just does not reach the boxes: the
+SAME swap moves ``pred_logits`` by a relative 3.9e-01 / 3.0e-02 / 5.7e-01 (arm)
+and 2.5e+00 / 2.5e+00 / 2.4e+00 (control).
+
+**So what these numbers mean.** ``val_box_iou`` on this generator measures
+**"find any bright shape"**, not "find the NAMED shape" -- the boxes are
+invariant to the prompt on BOTH sides of the comparison, which is exactly the
+capability the category-blind detector achieves at ~0.94. The 0.8450-vs-0.4013
+improvement over the control is REAL and MEASURED, and it is a **WIRING /
+LEARNABILITY** result about image-conditioning -- the mechanism is connected, it
+trains, and the boxes became image-dependent. It is **NOT** evidence of
+text-grounded detection, and it is not a capability result. Nothing here
+licenses a published-benchmark comparison: one synthetic generator, one
+repo-invented 'small' variant.
 
 **KNOWN COST, measured.** Under this flag the decoder's box branch is inert.
 On ``results/step9_qsel_seed1``, over the whole val split, ``max |pred_boxes -
@@ -476,8 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "MEASURED OUTCOME and KNOWN COST -- box_iou "
                             "0.8450/0.8296/0.8191 vs the fixed-prior family "
                             "max 0.4150/0.3890/0.4111 BUT a 0-parameter "
-                            "connected-components detector reads ~0.94, and "
-                            "the decoder contributes +0.0003 -- are in this "
+                            "connected-components detector reads ~0.94, that "
+                            "box_iou is fully RETAINED under a WRONG text "
+                            "prompt in both arms, and the decoder contributes "
+                            "+0.0003 -- are in this "
                             "module's docstring, section "
                             "'--query-selection: MEASURED OUTCOME'. Read it "
                             "before quoting any of these numbers.")
