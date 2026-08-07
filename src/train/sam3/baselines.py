@@ -33,8 +33,11 @@ PER-IMAGE PREDICTOR that thresholds the canvas and emits its bright blobs'
 bounding boxes. It exists because a family with no image-reading member cannot
 distinguish "the model learned detection" from "this generator's box task is
 solvable by any rule that looks at the pixels" -- and on this generator the
-detector reads ~0.94 box IoU, ABOVE the trained query-selection arm's
-0.8450 / 0.8296 / 0.8191 on 3 of 3 seeds. Adversarial review of
+detector reads ~0.94 box IoU, ABOVE the ``step9_qsel`` checkpoint -- deep
+supervision + query selection, WITHOUT prompt conditioning -- which reads
+0.8450 / 0.8296 / 0.8191 on 3 of 3 seeds. Name the CHECKPOINT and not the
+flag: ``step10_pcq`` is also a query-selection arm and reads a different
+0.8494 / 0.8223 / 0.8299. Adversarial review of
 ``plan-2026-08-06T185813-fd80240f`` raised exactly this (CRITICAL 1) and the
 measurement is the answer to it: any accuracy claim on this generator is a
 WIRING / LEARNABILITY result, not a capability result. :func:`family_max`

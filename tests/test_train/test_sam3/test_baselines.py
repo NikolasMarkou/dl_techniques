@@ -1246,8 +1246,21 @@ class TestPromptSwapRetentionOnARealSplit:
     def test_the_true_arm_reproduces_score_prior_s_reduction(
             self, tiny_context: Tuple[Any, Any], tiny_val_dataset: Any,
             swap: Dict[str, float]) -> None:
-        """`matched_box_iou` has ONE home: the oracle scored through the prior
-        path still reads exactly 1.0, so the shared reduction did not drift."""
+        """The oracle scored through the prior path still reads exactly 1.0,
+        so the reduction this file's arms share did not drift.
+
+        Scope, read off the import graph rather than assumed. `matched_box_iou`
+        is DEFINED once, in `train_sam3.py` -- but `baselines.py` binds it a
+        SECOND time with `from train.sam3.train_sam3 import ...`, into its own
+        module namespace. Every call site this file exercises (`_score`, and
+        through it `score_prior`; `prompt_swap_retention`; `distractor_gap`)
+        resolves the bare name through `baselines.__dict__`, and so does the
+        `monkeypatch.setattr(baselines, "matched_box_iou", ...)` RED proof
+        above. `train_sam3.evaluate_sam3` resolves the same name through
+        `train_sam3.__dict__`, which that injection never touches -- so neither
+        it nor this assertion reaches, or can claim anything about,
+        `evaluate_sam3`'s own call site.
+        """
         model, loss = tiny_context
         _assert_oracle_reads_exactly_one(
             score_prior(gt_oracle_predictor, model, loss, tiny_val_dataset))

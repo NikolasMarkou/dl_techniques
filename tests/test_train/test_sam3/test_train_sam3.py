@@ -1092,14 +1092,21 @@ class TestEvaluation:
         """
         truth = np.array([[[0.5, 0.5, 0.2, 0.2]]], dtype="float32")
         shifted = np.array([[[0.9, 0.9, 0.2, 0.2]]], dtype="float32")
+        # `iou_and_generalized_iou` returns the broadcast shape MINUS the last
+        # axis, so for a (1, 1, 4) input the `iou` half is shape (1, 1) -- NOT
+        # a scalar. `float()` on it WARNS at the installed NumPy 2.0.2
+        # ("Conversion of an array with ndim > 0 to a scalar is deprecated...
+        # (Deprecated NumPy 1.25.)"), which is a warning today and not an
+        # error; the single element is indexed out explicitly so the cast is
+        # spelled the way the deprecation asks for, at whatever NumPy ships.
         exact = float(iou_and_generalized_iou(
-            box_cxcywh_to_xyxy(truth), box_cxcywh_to_xyxy(truth))[0])
+            box_cxcywh_to_xyxy(truth), box_cxcywh_to_xyxy(truth))[0][0, 0])
         assert exact == pytest.approx(1.0, abs=1e-5)
         assert float(iou_and_generalized_iou(
             box_cxcywh_to_xyxy(shifted),
-            box_cxcywh_to_xyxy(truth))[0]) == pytest.approx(0.0, abs=1e-6)
+            box_cxcywh_to_xyxy(truth))[0][0, 0]) == pytest.approx(0.0, abs=1e-6)
         # The RED arm: the same identical pair, WITHOUT the conversion.
-        assert float(iou_and_generalized_iou(truth, truth)[0]) != (
+        assert float(iou_and_generalized_iou(truth, truth)[0][0, 0]) != (
             pytest.approx(1.0, abs=1e-5))
 
     def test_pred_masks_are_not_a_constant(

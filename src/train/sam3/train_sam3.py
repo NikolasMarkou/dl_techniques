@@ -72,11 +72,17 @@ This block lives here, not in the flag's ``help=`` string, so ``--help`` stays
 readable; the flag's help points at it by name. Every number below was measured
 on THIS repository's synthetic generator at ``variant='small'``, seeds 1/2/3,
 60 epochs, ``--deep-supervision`` on BOTH sides, each run read at its OWN
-max-``val_box_iou`` epoch -- the same selection rule on both sides.
+max-``val_box_iou`` epoch -- the same selection rule on both sides. The ARM
+throughout this section is the ``step9_qsel`` checkpoint -- deep supervision +
+query selection, WITHOUT prompt conditioning. Name the CHECKPOINT and not the
+flag: ``step10_pcq`` is also a query-selection arm and reads a different
+0.8494 / 0.8223 / 0.8299, so a number below is quotable only beside the
+checkpoint name it belongs to.
 
-**What moved.** ``val_box_iou`` 0.8450 / 0.8296 / 0.8191, against the committed
-non-model baseline FAMILY max (max over ``{5x5 fixed grid} u {k-means prior,
-k in 8/16/32}``, train-split-fitted, scored through the same IoU path by
+**What moved.** ``step9_qsel``'s ``val_box_iou`` 0.8450 / 0.8296 / 0.8191,
+against the committed non-model baseline FAMILY max (max over
+``{5x5 fixed grid} u {k-means prior, k in 8/16/32}``,
+train-split-fitted, scored through the same IoU path by
 ``train.sam3.baselines``) of 0.4150 / 0.3890 / 0.4111 at the same seeds. Over
 the same runs ``val_box_std_across_images`` reads 1.51e-01 / 1.47e-01 /
 1.43e-01 against the otherwise-identical deep-supervision-only control's ~7e-06
