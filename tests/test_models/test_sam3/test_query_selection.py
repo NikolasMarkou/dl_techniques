@@ -34,11 +34,12 @@ degenerate sequence, and the across-image box spread is non-trivial), and
 ``TestSelectionGuardIsRedProven`` fires it with a dead-component injection.
 """
 
+import contextlib
 import keras
 import numpy as np
 import pytest
 from keras import ops
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
 from dl_techniques.models.sam3.model_misc import Sam3DotProductScoring
@@ -1156,3 +1157,387 @@ class TestPromptLivenessIsRedProven:
         memory = _memory()
         live, null = self._sweeps(conditioned, memory)
         _assert_the_prompt_reaches_the_selection(live, null)
+
+
+# ---------------------------------------------------------------------
+# G6: `mixed_float16` on the FiLM head, at the SHIPPED geometry
+#
+# Everything above this line runs at `TINY` -- an 8-wide, 16-position toy that
+# exists to make a transposed anchor grid visible. NOTHING below it does. A
+# reduction measured at a toy size is exactly how this repo last missed an
+# fp16 failure that only appeared at the settled width, so every number in
+# this section is DERIVED from `Sam3Image.MODEL_VARIANTS["small"]` -- the one
+# variant that actually gets `fit()` -- and `test_the_shipped_geometry_is_
+# what_this_section_claims` pins the derivation against the table.
+# ---------------------------------------------------------------------
+
+_SMALL: Dict[str, Any] = Sam3Image.MODEL_VARIANTS["small"]
+
+#: The trunk grid and the memory grid, re-derived here the way
+#: `Sam3Image.__init__` derives them (`sam3_image.py`, just above the
+#: `query_selection_head` construction): the trunk grid is
+#: `img_size // patch_size`, `scalp` levels are dropped off the pyramid, and
+#: the memory grid is the finest KEPT level's scale factor times that grid.
+_SMALL_GRID = _SMALL["img_size"] // _SMALL["patch_size"]
+_SMALL_LEVELS = len(_SMALL["scale_factors"]) - _SMALL["scalp"]
+_SMALL_SCALE = _SMALL["scale_factors"][_SMALL_LEVELS - 1]
+
+#: The head's own three constructor arguments AS `Sam3Image` passes them:
+#: `d_model=64`, `num_queries=32`, `feat_size=(16, 16)` -> 256 memory
+#: positions. `mlp_depth` is left at its default 3 because `Sam3Image` leaves
+#: it there too.
+SHIPPED: Dict[str, Any] = dict(
+    d_model=_SMALL["d_model"],
+    num_queries=_SMALL["num_queries"],
+    feat_size=(int(_SMALL_GRID * _SMALL_SCALE), int(_SMALL_GRID * _SMALL_SCALE)),
+)
+
+#: The SHIPPED prompt length: the text encoder's `context_length`, 32 tokens.
+#: The FiLM branch pools over exactly this axis, so a shorter one would be a
+#: reduction tested at a toy size.
+SHIPPED_PROMPT_LEN = _SMALL["context_length"]
+
+SHIPPED_POSITIONS = SHIPPED["feat_size"][0] * SHIPPED["feat_size"][1]
+
+#: Batch 2 -- the geometry that must not be reduced is the prompt length, the
+#: width and the position count, none of which the batch axis touches.
+FP16_BATCH = 2
+
+#: `float16`'s largest finite magnitude.
+FLOAT16_MAX = 65504.0
+
+#: A FiLM `scale` magnitude that is itself REPRESENTABLE in float16
+#: (30000 < 65504, so the cast to the compute dtype is lossless-ish and NOT
+#: itself the overflow) but whose PRODUCT with memory is not: the memory below
+#: reaches |4.2338634|, and 65504 / 30001 = 2.183, so every memory entry above
+#: that magnitude overflows in `memory * (1 + scale)`. Choosing a scale ABOVE
+#: 65504 would have overflowed on the cast instead and proven a different
+#: thing.
+FILM_OVERFLOW_SCALE = 3.0e4
+
+
+@contextlib.contextmanager
+def _under_policy(name: str) -> Iterator[None]:
+    """Run a block under a global mixed-precision policy, then restore it.
+
+    The idiom is `tests/test_models/test_sam2/test_neck.py`'s
+    (`test_encoding_is_cast_to_the_feature_dtype`): capture whatever policy is
+    ACTUALLY in force -- never assume the default -- set the new one, restore
+    in `finally`. The restoration is additionally ASSERTED here, because the
+    global policy is a process-wide switch and a test that leaks it corrupts
+    every file collected after it in the same session rather than failing
+    itself. `TestFilmHeadUnderMixedFloat16` is co-collected with the whole
+    `tests/test_models/test_sam3/` directory for exactly that reason.
+
+    Args:
+        name: The policy to install for the duration of the block.
+
+    Yields:
+        None.
+
+    Raises:
+        AssertionError: If the previous policy was not restored on exit.
+    """
+    previous = keras.mixed_precision.global_policy()
+    try:
+        keras.mixed_precision.set_global_policy(name)
+        yield
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+        restored = keras.mixed_precision.global_policy()
+        assert restored.name == previous.name, (
+            f"the global mixed-precision policy was NOT restored: it is "
+            f"{restored.name!r}, it was {previous.name!r} on entry; this is a "
+            f"process-wide switch, so the leak fails OTHER files, not this one")
+
+
+def _shipped_conditioned_head(seed: int = 3) -> Sam3EncoderQuerySelection:
+    """A prompt-conditioned head at the SHIPPED `small` geometry.
+
+    Built INSIDE whatever policy is in force, so the layer's own compute dtype
+    is the policy's -- constructing it outside and running it inside would
+    measure a float32 layer being handed float16 inputs, which is a different
+    question.
+
+    `skip_zero_init=False`: the box stack's last projection is randomized too.
+    At the shipped zero init `delta` is identically zero whatever memory does,
+    so `boxes` would be finite through an overflowing memory purely by
+    arithmetic accident and the finiteness reading would be vacuous on 2 of the
+    4 float outputs.
+
+    Args:
+        seed: Weight RNG seed.
+
+    Returns:
+        A built, randomized, prompt-conditioned head.
+    """
+    layer = Sam3EncoderQuerySelection(prompt_conditioned=True, **SHIPPED)
+    layer.build((FP16_BATCH, SHIPPED_POSITIONS, SHIPPED["d_model"]))
+    _randomize(layer, seed=seed, skip_zero_init=False)
+    return layer
+
+
+def _shipped_inputs(seed: int = 7):
+    """Memory, prompt and padding mask at the SHIPPED geometry.
+
+    Args:
+        seed: Input RNG seed.
+
+    Returns:
+        `(memory, prompt, prompt_padding_mask)`, float32/float32/bool. The mask
+        is all-False, i.e. every one of the 32 prompt positions is real -- the
+        polarity `masked_mean_pool` documents.
+    """
+    rng = np.random.default_rng(seed)
+    memory = rng.normal(
+        size=(FP16_BATCH, SHIPPED_POSITIONS, SHIPPED["d_model"])
+    ).astype("float32")
+    prompt = rng.normal(
+        size=(FP16_BATCH, SHIPPED_PROMPT_LEN, SHIPPED["d_model"])
+    ).astype("float32")
+    mask = np.zeros((FP16_BATCH, SHIPPED_PROMPT_LEN), dtype="bool")
+    return memory, prompt, mask
+
+
+def _forward_shipped(head: Sam3EncoderQuerySelection,
+                     memory: np.ndarray, prompt: np.ndarray,
+                     mask: np.ndarray) -> Dict[str, np.ndarray]:
+    """One prompt-conditioned forward pass, materialized to numpy."""
+    return {key: np.asarray(value) for key, value in
+            head(memory, prompt=prompt, prompt_padding_mask=mask,
+                 training=False).items()}
+
+
+def _inject_overflow_film_scale(head: Sam3EncoderQuerySelection) -> None:
+    """Drive the FiLM `scale` to an overflow-PRODUCT magnitude.
+
+    `call()` does `scale, shift = ops.split(film, 2, axis=-1)`, so the FIRST
+    `d_model` outputs of the projection are `scale`. Zeroing the kernel and
+    biasing that half makes `scale` a prompt-independent constant, which is
+    what makes the reading attributable to the MAGNITUDE rather than to some
+    prompt-dependent accident.
+
+    Args:
+        head: A built, prompt-conditioned head.
+
+    Returns:
+        None.
+    """
+    last = head.prompt_film[-1]
+    last.kernel.assign(np.zeros(last.kernel.shape, dtype="float32"))
+    bias = np.zeros(last.bias.shape, dtype="float32")
+    bias[:head.d_model] = FILM_OVERFLOW_SCALE
+    last.bias.assign(bias)
+
+
+def _assert_every_float_output_is_float16(out: Dict[str, np.ndarray]) -> None:
+    """THE dtype assertion of G6.
+
+    Args:
+        out: The head's output dict, numpy-materialized.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If any float output is not float16, or if `indices`
+            stopped being int32.
+    """
+    for key in sorted(out):
+        dtype = np.asarray(out[key]).dtype.name
+        if key == "indices":
+            assert dtype == "int32", (
+                f"'indices' is {dtype}, not int32: the selected memory "
+                f"positions are an INDEX, and a policy must not move them")
+            continue
+        assert dtype == "float16", (
+            f"output '{key}' is not float16 under the mixed_float16 policy: "
+            f"it is {dtype}. A float32 output here means the head silently "
+            f"upcast and the consumer's addition against a float16 tensor "
+            f"either upcasts too or raises")
+
+
+def _assert_every_float_output_is_finite(out: Dict[str, np.ndarray]) -> None:
+    """THE finiteness assertion of G6.
+
+    Args:
+        out: The head's output dict, numpy-materialized.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If any output holds a NaN or an inf.
+    """
+    for key in sorted(out):
+        value = np.asarray(out[key]).astype("float64")
+        n_nan = int(np.sum(np.isnan(value)))
+        n_inf = int(np.sum(np.isinf(value)))
+        assert n_nan == 0 and n_inf == 0, (
+            f"output '{key}' is non-finite under mixed_float16: {n_nan} NaN "
+            f"and {n_inf} inf of {value.size} values. The FiLM branch's only "
+            f"unbounded op is `memory * (1 + scale)`, whose float16 ceiling is "
+            f"{FLOAT16_MAX:g}")
+
+
+class TestFilmHeadUnderMixedFloat16:
+    """G6. The prompt-conditioned FiLM head under `mixed_float16`, at the
+    SHIPPED `small` geometry -- and NO XLA test, deliberately.
+
+    **Why there is no XLA test here.** `jit_compile=False` is a shipped
+    invariant of this model's trainer, asserted at three sites in
+    `tests/test_models/test_sam3/test_training_model.py`:
+    `TestStockFit::test_one_fit_step_is_finite_and_moves_weights`,
+    `TestNumAuxLayersAgreement::
+    test_a_default_constructed_loss_inherits_the_models_aux_count`, and
+    `TestNumAuxLayersAgreementAtEveryCombination::
+    test_the_default_loss_inherits_the_composed_count`. An XLA probe would
+    therefore exercise a configuration those three assertions forbid: it would
+    pass forever while proving nothing about any path this repo actually runs,
+    which is the vacuous-guard failure this file's other RED proofs exist
+    against. If a caller ever opts into `jit_compile=True`, this is the note
+    that says the gap is known and unfilled, not overlooked.
+
+    **What the overflow arm PREDICTED and what it MEASURED.** The prediction
+    (plan findings, "fp16/XLA risk assessment") was saturation: a large FiLM
+    `scale` pushing `memory * (1 + scale)` past float16's 65504 and producing
+    `inf`. The failure CLASS is right and the MODE is not. Measured on GPU 1 at
+    `FILM_OVERFLOW_SCALE`: **zero `inf` anywhere, and every float output
+    entirely NaN** -- objectness 512/512, boxes 2048/2048, selected_boxes
+    256/256, selected_objectness 64/64. The `inf` exists for one op only: it is
+    born in `memory * (1 + scale)` and dies in the very next `Dense`, whose
+    mixed-sign kernel sums `+inf` and `-inf` over the 64 channels into NaN. So
+    the whole grid is poisoned, not merely the positions that overflowed.
+
+    **And `indices` survives, looking ordinary.** It stays int32 and finite,
+    and it collapses to `0 .. num_queries - 1` -- `ops.top_k`'s ascending-index
+    tie-break over an all-NaN objectness field, the exact degenerate mode
+    `_assert_selection_is_image_dependent` was written for. A consumer reading
+    only `indices` would see a plausible selection with no symptom at all.
+    """
+
+    def test_the_shipped_geometry_is_what_this_section_claims(self):
+        """The derivation above, pinned against the variant table.
+
+        Every docstring in this section quotes these numbers. If the `small`
+        variant moves, this fires first and the prose is corrected with it,
+        rather than the section quietly describing a geometry that no longer
+        ships.
+        """
+        assert SHIPPED == dict(d_model=64, num_queries=32, feat_size=(16, 16))
+        assert SHIPPED_PROMPT_LEN == 32
+        assert SHIPPED_POSITIONS == 256
+        assert SHIPPED["d_model"] != TINY["d_model"], (
+            "the fp16 section is running at the toy width the rest of this "
+            "file uses, which is the reduction it exists not to be")
+
+    def test_the_head_emits_float16_and_finite_outputs(self):
+        """G6, GREEN. d_model 64, 32 prompt tokens, 256 memory positions."""
+        with _under_policy("mixed_float16"):
+            head = _shipped_conditioned_head()
+            out = _forward_shipped(head, *_shipped_inputs())
+            _assert_every_float_output_is_float16(out)
+            _assert_every_float_output_is_finite(out)
+
+    def test_the_dtype_assertion_goes_red_under_the_float32_policy(self):
+        """RED ARM A -- and it must fire at the DTYPE assertion, by name.
+
+        The finiteness assertion is called FIRST and must PASS here, so the
+        RED reading cannot be a general breakage wearing the dtype
+        assertion's name.
+        """
+        with _under_policy("float32"):
+            head = _shipped_conditioned_head()
+            out = _forward_shipped(head, *_shipped_inputs())
+            _assert_every_float_output_is_finite(out)
+            assert np.asarray(out["boxes"]).dtype.name == "float32"
+            with pytest.raises(AssertionError, match="is not float16"):
+                _assert_every_float_output_is_float16(out)
+
+    def test_an_overflow_film_scale_makes_the_finiteness_assertion_fire(self):
+        """RED ARM B -- and it must fire at the FINITENESS assertion, by name.
+
+        The dtype assertion is called FIRST and must PASS: a NaN is still a
+        float16, so the injection is separable and the RED reading below
+        belongs to finiteness alone.
+
+        The measured behaviour is PINNED here rather than merely asserted
+        away, because the prediction was `inf` and the measurement is NaN (see
+        the class docstring).
+        """
+        with _under_policy("mixed_float16"):
+            head = _shipped_conditioned_head()
+            _inject_overflow_film_scale(head)
+            memory, prompt, mask = _shipped_inputs()
+            out = _forward_shipped(head, memory, prompt, mask)
+
+            # The injection is only meaningful if the product it drives really
+            # does cross the ceiling.
+            reach = float(np.max(np.abs(memory))) * (1.0 + FILM_OVERFLOW_SCALE)
+            assert reach > FLOAT16_MAX, (
+                f"the injected scale does not overflow: the largest product is "
+                f"{reach:.4g}, under float16's {FLOAT16_MAX:g}")
+
+            _assert_every_float_output_is_float16(out)
+
+            # PINNED: NaN everywhere, inf nowhere, on every float output.
+            for key in ("boxes", "objectness", "selected_boxes",
+                        "selected_objectness"):
+                value = np.asarray(out[key]).astype("float64")
+                assert int(np.sum(np.isinf(value))) == 0, (
+                    f"'{key}' holds inf; the measured mode was NaN-only and "
+                    f"this pin has drifted")
+                assert bool(np.all(np.isnan(value))), (
+                    f"'{key}' is not entirely NaN; the measured mode poisoned "
+                    f"the whole grid via the first Dense's mixed-sign sum")
+
+            # PINNED: `indices` survives int32, finite, and DEGENERATE.
+            indices = np.asarray(out["indices"])
+            assert indices.dtype.name == "int32"
+            assert np.array_equal(
+                indices,
+                np.tile(np.arange(SHIPPED["num_queries"]), (FP16_BATCH, 1))), (
+                "`indices` did not collapse to ops.top_k's ascending-index "
+                "tie-break over an all-NaN field")
+
+            with pytest.raises(AssertionError,
+                               match="is non-finite under mixed_float16"):
+                _assert_every_float_output_is_finite(out)
+
+    def test_the_same_overflow_weights_stay_finite_at_float32(self):
+        """The injection's separability control.
+
+        Without this, RED ARM B could be a broken injection rather than a
+        float16 property. The SAME weights and the SAME inputs at the float32
+        policy stay entirely finite, and objectness reaches a magnitude that is
+        itself past float16's ceiling -- which is the mechanism, measured, not
+        assumed.
+        """
+        with _under_policy("float32"):
+            head = _shipped_conditioned_head()
+            _inject_overflow_film_scale(head)
+            out = _forward_shipped(head, *_shipped_inputs())
+            _assert_every_float_output_is_finite(out)
+            reach = float(np.max(np.abs(
+                np.asarray(out["objectness"]).astype("float64"))))
+            assert reach > FLOAT16_MAX, (
+                f"objectness only reaches {reach:.4g} at float32, which is "
+                f"inside float16's {FLOAT16_MAX:g}: the float16 arm's NaN "
+                f"would then need a different explanation")
+
+    def test_the_policy_is_restored_by_the_context_manager(self):
+        """The leak guard, fired both ways.
+
+        A test that flips a process-global switch and forgets to flip it back
+        fails OTHER files, so the restoration is proven here rather than
+        inferred from the `finally`.
+        """
+        before = keras.mixed_precision.global_policy().name
+        with _under_policy("mixed_float16"):
+            assert keras.mixed_precision.global_policy().name == "mixed_float16"
+        assert keras.mixed_precision.global_policy().name == before
+
+        with pytest.raises(ValueError):
+            with _under_policy("mixed_float16"):
+                raise ValueError("body blew up")
+        assert keras.mixed_precision.global_policy().name == before
