@@ -476,12 +476,26 @@ def build_context(seed: int, split: Optional[Dict[str, Any]] = None,
     return model, model.loss
 
 
+# DECISION plan-2026-08-07-3b8002c3/D-001
+# The val-seed offset is a PARAMETER whose default equals the previously
+# hardcoded `VAL_SEED_OFFSET` constant, so no published number moves unless a
+# caller explicitly passes something else. Do NOT re-hardcode `VAL_SEED_OFFSET`
+# at the `seed=` expression below, and do NOT fork a second split-building
+# function: `baselines.py` OWNS the comparator family and every addition to it
+# is a defaulted optional parameter (I-4).
+# Do NOT give `pool_train_gt`, or any train-side caller, this parameter. The
+# TRAIN split is the split the k-means priors are FITTED on; offsetting it
+# would silently refit every published prior on different data while the
+# scoring numbers still looked comparable. The offset applies to the SCORING
+# split only, which is why it is consumed solely by the `train=False` branch.
+# See decisions.md D-001.
 def build_split_dataset(model: Any, seed: int, train: bool,
                         split: Optional[Dict[str, Any]] = None,
-                        include_all_instances: bool = False) -> Any:
+                        include_all_instances: bool = False,
+                        val_seed_offset: int = VAL_SEED_OFFSET) -> Any:
     """Build the TRAIN or VAL split for ``seed``.
 
-    Interface contract: the VAL split's seed is ``seed + VAL_SEED_OFFSET``,
+    Interface contract: the VAL split's seed is ``seed + val_seed_offset``,
     derived HERE and nowhere else, so the fit split and the scoring split
     cannot drift apart. Never shuffles: the k-means fit is order-sensitive
     through ``random_state``, and the published figures were produced on the
@@ -492,6 +506,14 @@ def build_split_dataset(model: Any, seed: int, train: bool,
         seed: The run seed (the TRAIN seed).
         train: ``True`` for the train split, ``False`` for the val split.
         split: Overrides for :data:`SPLIT`.
+        val_seed_offset: The offset added to ``seed`` to derive the VAL split's
+            seed. The DEFAULT, :data:`VAL_SEED_OFFSET`, reproduces every
+            published number byte-identically -- it is the same constant the
+            expression carried literally before this became a parameter. Any
+            NON-default value builds an INDEPENDENT split, whose numbers are
+            therefore not comparable to a published figure unless the
+            comparison is stated as cross-split. Ignored entirely when
+            ``train`` is ``True``.
         include_all_instances: Forwarded verbatim to
             :func:`train.sam3.data.build_sam3_dataset`. ``True`` makes the
             elements 3-tuples carrying the eval-only all-category geometry
@@ -514,7 +536,7 @@ def build_split_dataset(model: Any, seed: int, train: bool,
         max_instances=resolved["max_instances"],
         zero_instance_rate=resolved["zero_instance_rate"],
         max_per_category=resolved["max_per_category"],
-        seed=seed if train else seed + VAL_SEED_OFFSET,
+        seed=seed if train else seed + val_seed_offset,
         include_all_instances=include_all_instances,
     )
 
@@ -542,6 +564,9 @@ def pool_train_gt(seed: int, model: Optional[Any] = None,
     """
     if model is None:
         model, _loss = build_context(seed, split)
+    # NO `val_seed_offset` here, deliberately (D-001). This reads the TRAIN
+    # split, which is what every k-means prior is FITTED on; a train-side
+    # offset would silently change the fit data of every published prior.
     dataset = build_split_dataset(model, seed, train=True, split=split)
     pool: List[np.ndarray] = []
     for _inputs, y_true in dataset:
@@ -921,29 +946,37 @@ def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
 
 def evaluate_family(seed: int, ks: Sequence[int] = FAMILY_KS,
                     split: Optional[Dict[str, Any]] = None,
+                    val_seed_offset: int = VAL_SEED_OFFSET,
                     ) -> Dict[str, Dict[str, float]]:
     """Score every arm of the baseline family at one seed.
 
     Interface contract: fits on the TRAIN split of ``seed`` and scores on the
-    VAL split of ``seed + VAL_SEED_OFFSET``; both seeds are logged AND returned
-    under ``"_meta"`` so a leak is visible in the artifact. The two liveness
-    arms (``ORACLE``, ``DEGENERATE``) are always present -- they are not
-    optional and are not gated by a flag.
+    VAL split of ``seed + val_seed_offset``; both seeds are logged AND returned
+    under ``"_meta"``, along with the offset actually used, so a leak -- or a
+    non-default split -- is visible in the artifact rather than only implied.
+    The two liveness arms (``ORACLE``, ``DEGENERATE``) are always present --
+    they are not optional and are not gated by a flag.
 
     Args:
         seed: The run seed.
         ks: k values to fit.
         split: Overrides for :data:`SPLIT`.
+        val_seed_offset: Forwarded verbatim to :func:`build_split_dataset` for
+            the SCORING split. The default reproduces every published number
+            byte-identically; a non-default value scores on an INDEPENDENT
+            split. The FIT split (:func:`pool_train_gt`) never sees it.
 
     Returns:
         ``{arm_name: {"box_iou": float, "matched": float}}`` plus a ``"_meta"``
-        entry carrying ``fit_seed``, ``score_seed``, ``pool_size``, ``k_init``
-        and ``num_queries``.
+        entry carrying ``fit_seed``, ``score_seed``, ``val_seed_offset``,
+        ``pool_size``, ``k_init`` and ``num_queries``.
     """
     model, loss = build_context(seed, split)
     num_queries = int(model.num_queries)
+    # `pool_train_gt` gets NO offset: it reads the TRAIN split (D-001).
     pool = pool_train_gt(seed, model=model, split=split)
-    val_dataset = build_split_dataset(model, seed, train=False, split=split)
+    val_dataset = build_split_dataset(model, seed, train=False, split=split,
+                                      val_seed_offset=val_seed_offset)
 
     arms: Dict[str, Union[np.ndarray, Predictor]] = {
         ORACLE_ARM: gt_oracle_predictor,
@@ -957,7 +990,8 @@ def evaluate_family(seed: int, ks: Sequence[int] = FAMILY_KS,
     results: Dict[str, Dict[str, float]] = {
         "_meta": {
             "fit_seed": float(seed),
-            "score_seed": float(seed + VAL_SEED_OFFSET),
+            "score_seed": float(seed + val_seed_offset),
+            "val_seed_offset": float(val_seed_offset),
             "pool_size": float(pool.shape[0]),
             "kmeans_n_init": float(KMEANS_N_INIT),
             "kmeans_random_state": float(seed),
@@ -1023,6 +1057,20 @@ def build_parser() -> argparse.ArgumentParser:
                              "split is seed + %d." % VAL_SEED_OFFSET)
     parser.add_argument("--k", type=int, nargs="+", default=list(FAMILY_KS),
                         help="k values for the k-means prior.")
+    # NOTE: no bare '%' anywhere in this help string -- argparse runs every
+    # help= through `help % params` at --help time, so a lone '%' crashes
+    # --help and ONLY --help (see tests/.../parser_help_guard.py).
+    parser.add_argument("--val-seed-offset", type=int,
+                        default=VAL_SEED_OFFSET,
+                        help="Offset added to each run seed to derive the "
+                             "SCORING (val) split's seed. The default, "
+                             + str(VAL_SEED_OFFSET) + ", is the offset every "
+                             "published number was produced with and "
+                             "reproduces them exactly. Any other value scores "
+                             "on an INDEPENDENT split, so its numbers are not "
+                             "comparable to a published figure unless the "
+                             "comparison is stated as cross-split. The FIT "
+                             "(train) split is never offset.")
     parser.add_argument("--json", type=str, default=None,
                         help="Write the full result table to this path.")
     parser.add_argument("--prompt-swap", type=str, default=None,
@@ -1064,9 +1112,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     per_seed: Dict[int, Dict[str, Dict[str, float]]] = {}
     for seed in seeds:
         _emit(f"# seed {seed}: FIT SPLIT seed={seed} (train)  ->  "
-              f"SCORING SPLIT seed={seed + VAL_SEED_OFFSET} (val). "
+              f"SCORING SPLIT seed={seed + args.val_seed_offset} (val, "
+              f"offset {args.val_seed_offset}). "
               f"The fit never reads the scoring split.")
-        per_seed[seed] = evaluate_family(seed, ks=args.k)
+        per_seed[seed] = evaluate_family(seed, ks=args.k,
+                                         val_seed_offset=args.val_seed_offset)
         meta = per_seed[seed]["_meta"]
         _emit(f"# seed {seed}: pool={int(meta['pool_size'])} boxes, "
               f"Q={int(meta['num_queries'])}, "
@@ -1149,7 +1199,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ctx_model, ctx_loss = build_context(seed)
             swap = prompt_swap_retention(
                 keras.models.load_model(path, compile=False), ctx_loss,
-                build_split_dataset(ctx_model, seed, train=False))
+                build_split_dataset(ctx_model, seed, train=False,
+                                    val_seed_offset=args.val_seed_offset))
             swap_by_seed[seed] = swap
             _emit(f"  seed {seed} ({path}): true = "
                   f"{swap['box_iou_true']:.6f}, worst wrong prompt = "
@@ -1185,7 +1236,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gap = distractor_gap(
                 keras.models.load_model(path, compile=False), ctx_loss,
                 build_split_dataset(ctx_model, seed, train=False,
-                                    include_all_instances=True))
+                                    include_all_instances=True,
+                                    val_seed_offset=args.val_seed_offset))
             gap_by_seed[seed] = gap
             _emit(f"  seed {seed} ({path}): prompted = "
                   f"{gap['box_iou_prompted']:.6f}, distractor = "

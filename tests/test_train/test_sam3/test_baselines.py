@@ -1868,13 +1868,14 @@ class TestTheJsonPayloadCarriesTheDiagnosticsAndNotOnlyTheFamily:
         }
         monkeypatch.setattr(
             baselines, "evaluate_family",
-            lambda seed, ks: {k: dict(v) for k, v in family.items()})
+            lambda seed, ks, val_seed_offset=VAL_SEED_OFFSET: {
+                k: dict(v) for k, v in family.items()})
         monkeypatch.setattr(
             baselines, "build_context", lambda seed: (object(), object()))
         monkeypatch.setattr(
             baselines, "build_split_dataset",
-            lambda model, seed, train=False, include_all_instances=False:
-            object())
+            lambda model, seed, train=False, include_all_instances=False,
+            val_seed_offset=VAL_SEED_OFFSET: object())
         monkeypatch.setattr(baselines.keras.models, "load_model",
                             lambda path, compile=False: object())
         monkeypatch.setattr(baselines, "distractor_gap",
@@ -1943,7 +1944,7 @@ class TestTheJsonPayloadCarriesTheDiagnosticsAndNotOnlyTheFamily:
 
         monkeypatch.setattr(
             baselines, "evaluate_family",
-            lambda seed, ks: {
+            lambda seed, ks, val_seed_offset=VAL_SEED_OFFSET: {
                 "_meta": {"pool_size": 10.0, "num_queries": 4.0},
                 ORACLE_ARM: {"box_iou": 1.0, "matched": 5.0},
                 DEGENERATE_ARM: {"box_iou": 0.01, "matched": 5.0},
@@ -1954,3 +1955,326 @@ class TestTheJsonPayloadCarriesTheDiagnosticsAndNotOnlyTheFamily:
         payload = json_module.loads(out.read_text())
         assert "distractor_gap" not in payload["1"]
         assert "prompt_swap" not in payload["1"]
+
+
+#: A val-seed offset that is NOT the default, used by G1/G3 as the "independent
+#: split" arm. 20_000 leaves a 10,000-wide margin above `VAL_SEED_OFFSET`, so no
+#: seed below 9999 can collide with another seed's DEFAULT split -- offset
+#: 10_001 would make seed 1's second split seed 10002, which IS seed 2's first
+#: split. See decisions.md D-001.
+INDEPENDENT_VAL_SEED_OFFSET: int = 20_000
+
+
+def _split_gt_digest(model: Any, seed: int, **kwargs: Any) -> str:
+    """sha256 over the WHOLE split's packed ground truth, batches concatenated.
+
+    Not a single batch: two splits can agree on their first batch and diverge
+    later, and a per-batch comparison would report that as identity. The packed
+    `y_true` tensor is hashed directly -- it is exactly what every arm in this
+    module unpacks its targets from, so a digest match is a ground-truth match
+    at the byte level rather than at the level of some derived summary.
+
+    Args:
+        model: A built training model, for the split geometry.
+        seed: The run seed (the TRAIN seed; the val seed is derived).
+        **kwargs: Forwarded verbatim to :func:`build_split_dataset`.
+
+    Returns:
+        The hex digest.
+    """
+    digest = hashlib.sha256()
+    for _inputs, y_true in build_split_dataset(model, seed, train=False,
+                                               **kwargs):
+        digest.update(np.ascontiguousarray(
+            np.asarray(y_true, dtype=np.float32)).tobytes())
+    return digest.hexdigest()
+
+
+class TestTheValSeedOffsetDefaultPathIsUnmoved:
+    """G1 -- the new `val_seed_offset` parameter is DEFAULT-EQUAL.
+
+    The whole point of threading an offset through `build_split_dataset` is
+    that no published number may move unless the flag is passed. That claim has
+    exactly one honest form: the split built with NO `val_seed_offset` argument
+    is BYTE-IDENTICAL to the split built with `val_seed_offset=VAL_SEED_OFFSET`
+    spelled out, and BOTH differ from a split built at a genuinely different
+    offset. The third clause is what stops this passing vacuously: without it, a
+    parameter that was silently ignored -- or one whose default had been changed
+    to something else and then applied uniformly -- would still make the first
+    two digests agree.
+
+    TWO RED-proofs, both EXECUTED before this was committed, and they fire
+    DIFFERENT assertions -- which is the point of running both:
+
+    1. "the default moved": change `build_split_dataset`'s parameter default
+       from `VAL_SEED_OFFSET` to `20_000`. Fires
+       `test_the_implicit_default_is_the_explicit_default` (implicit digest
+       a13e9e35... vs explicit 5329554825eb8fd4...) AND
+       `test_the_default_split_is_the_independent_offset_s_split_by_a_different_name`
+       (implicit now byte-identical to the offset-20_000 split). 2 failed.
+    2. "the parameter is dead": restore the default and instead re-hardcode the
+       `seed=` expression back to `seed + VAL_SEED_OFFSET`, so the parameter is
+       accepted and ignored. Fires ONLY the two anti-vacuity clauses --
+       `..._by_a_different_name` and
+       `test_the_explicit_default_also_differs_from_the_independent_split` --
+       while `test_the_implicit_default_is_the_explicit_default` stays GREEN.
+       2 failed, 9 passed.
+
+    Injection 2 is why the anti-vacuity clauses exist: a default-equality test
+    alone is satisfied by a parameter nothing reads.
+
+    Device: CPU-cheap -- the `tiny` split, no forward pass, labels only.
+    """
+
+    @pytest.fixture(scope="class")
+    def digests(self, tiny_context: Tuple[Any, Any]) -> Dict[str, str]:
+        model, _loss = tiny_context
+        return {
+            "implicit": _split_gt_digest(model, seed=7, split=TINY_SPLIT),
+            "explicit": _split_gt_digest(model, seed=7, split=TINY_SPLIT,
+                                         val_seed_offset=VAL_SEED_OFFSET),
+            "independent": _split_gt_digest(
+                model, seed=7, split=TINY_SPLIT,
+                val_seed_offset=INDEPENDENT_VAL_SEED_OFFSET),
+        }
+
+    def test_the_implicit_default_is_the_explicit_default(
+            self, digests: Dict[str, str]) -> None:
+        """Omitting the argument and spelling out today's constant must be the
+        SAME split, byte for byte, across the whole thing."""
+        assert digests["implicit"] == digests["explicit"], (
+            "build_split_dataset's default val_seed_offset no longer equals "
+            f"VAL_SEED_OFFSET={VAL_SEED_OFFSET}: the implicit-default split "
+            f"digest {digests['implicit'][:16]} differs from the explicit "
+            f"{digests['explicit'][:16]}. Every published number was produced "
+            "on the implicit-default path.")
+
+    def test_the_default_split_is_the_independent_offset_s_split_by_a_different_name(
+            self, digests: Dict[str, str]) -> None:
+        """THE anti-vacuity clause, and the assertion the RED proof fires: a
+        different offset must produce a DIFFERENT split, or the first test is
+        satisfied by a parameter nothing reads."""
+        assert digests["implicit"] != digests["independent"], (
+            f"the split at val_seed_offset={INDEPENDENT_VAL_SEED_OFFSET} is "
+            f"byte-identical to the DEFAULT split (digest "
+            f"{digests['implicit'][:16]}). Either the parameter is not "
+            "reaching build_sam3_dataset's seed, or the default is no longer "
+            f"VAL_SEED_OFFSET={VAL_SEED_OFFSET}.")
+
+    def test_the_explicit_default_also_differs_from_the_independent_split(
+            self, digests: Dict[str, str]) -> None:
+        """The same clause through the explicit spelling, so a RED proof can
+        tell 'the default moved' from 'the parameter is dead'."""
+        assert digests["explicit"] != digests["independent"]
+
+    def test_the_train_split_ignores_the_offset_entirely(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """D-001's non-adoption clause, asserted rather than commented: the FIT
+        split is what every k-means prior is fitted on, so no offset may reach
+        it."""
+        seen: List[int] = []
+
+        def fake(**kwargs: Any) -> List[Any]:
+            seen.append(int(kwargs["seed"]))
+            return []
+
+        monkeypatch.setattr(baselines, "build_sam3_dataset", fake)
+        build_split_dataset(object(), seed=5, train=True, split=TINY_SPLIT,
+                            val_seed_offset=INDEPENDENT_VAL_SEED_OFFSET)
+        assert seen == [5], (
+            f"the TRAIN split was built at seed(s) {seen}; train=True must "
+            "ignore val_seed_offset completely (D-001).")
+
+    def test_pool_train_gt_does_not_accept_the_offset_at_all(self) -> None:
+        """The strongest form of the non-adoption: the parameter is not merely
+        unused on the train side, it is absent from the signature, so no caller
+        can pass one and believe it did something."""
+        import inspect
+
+        assert "val_seed_offset" not in inspect.signature(
+            pool_train_gt).parameters, (
+            "pool_train_gt gained a val_seed_offset parameter. It reads the "
+            "TRAIN split -- the split every published k-means prior is FITTED "
+            "on -- and offsetting it would silently refit them (D-001).")
+
+    def test_evaluate_family_records_the_offset_it_actually_used(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`_meta` must carry the offset USED, not the module constant: an
+        artifact that only implies its split cannot be audited after the fact.
+        """
+        recorded: Dict[str, Any] = {}
+
+        def fake_build_split_dataset(model: Any, seed: int, train: bool,
+                                     split: Any = None,
+                                     include_all_instances: bool = False,
+                                     val_seed_offset: int = VAL_SEED_OFFSET,
+                                     ) -> List[Any]:
+            if not train:
+                recorded["offset"] = val_seed_offset
+            return []
+
+        monkeypatch.setattr(baselines, "build_split_dataset",
+                            fake_build_split_dataset)
+        monkeypatch.setattr(baselines, "pool_train_gt",
+                            lambda seed, model=None, split=None:
+                            np.zeros((0, 4), np.float32))
+        monkeypatch.setattr(baselines, "fit_kmeans_prior",
+                            lambda pool, k, seed: np.zeros((k, 4), np.float32))
+        results = evaluate_family(
+            seed=7, ks=(TINY_K,), split=TINY_SPLIT,
+            val_seed_offset=INDEPENDENT_VAL_SEED_OFFSET)
+        meta = results["_meta"]
+        assert recorded["offset"] == INDEPENDENT_VAL_SEED_OFFSET
+        assert meta["val_seed_offset"] == float(
+            INDEPENDENT_VAL_SEED_OFFSET), meta
+        assert meta["score_seed"] == float(
+            7 + INDEPENDENT_VAL_SEED_OFFSET), (
+            f"_meta['score_seed'] reads {meta['score_seed']}, which is the "
+            f"MODULE CONSTANT's answer, not the offset actually used "
+            f"({INDEPENDENT_VAL_SEED_OFFSET}).")
+
+
+class TestTheValSeedOffsetFlagReachesTheDatasetBuilder:
+    """G3 -- `--val-seed-offset` is threaded, not merely parsed.
+
+    The repo's logged lesson is that a flag can parse cleanly and never reach
+    its consumer: a Namespace assertion would have passed for a `main` that
+    dropped the kwarg at every call site. So this drives the REAL
+    `build_parser()` through the REAL `main()` dispatch and asserts on what the
+    dataset builder RECEIVED, at all three call sites `main` owns -- the family
+    evaluation, the `--prompt-swap` block and the `--distractor-gap` block.
+
+    THREE RED-proofs, one per call site, each EXECUTED before this was
+    committed. Each severs the threading at exactly one site (drops
+    `val_seed_offset=args.val_seed_offset` so it silently falls back to the
+    default) and each fired EXACTLY ONE assertion -- 1 failed, 4-5 passed --
+    naming the site that was cut:
+
+    - `--distractor-gap` site ->
+      `test_the_distractor_gap_block_scores_on_the_requested_split`
+      ("built its split at offset 10000, not the requested 20000").
+    - `evaluate_family(...)` site ->
+      `test_the_family_evaluation_scores_on_the_requested_split`
+      ("main scored the family at offset 10000").
+    - `--prompt-swap` site ->
+      `test_the_prompt_swap_block_scores_on_the_requested_split`.
+
+    `test_the_parser_exposes_the_flag_with_today_s_default` stayed GREEN under
+    all three -- which is the whole reason it is not the only test here, and is
+    the repo's logged lesson that a flag can parse and never reach its
+    consumer.
+
+    Device: CPU-only, nothing heavy runs; every expensive call is replaced.
+    """
+
+    @pytest.fixture
+    def offsets_seen(self, tmp_path: Any,
+                     monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
+        """Run `main` with `--val-seed-offset 20000` and return, per call site,
+        the offset the SPY on `build_split_dataset` was handed."""
+        seen: Dict[str, int] = {}
+
+        class _StubModel:
+            """The only attribute `evaluate_family` reads off the model here."""
+
+            num_queries = 4
+
+        def spy(model: Any, seed: int, train: bool, split: Any = None,
+                include_all_instances: bool = False,
+                val_seed_offset: int = VAL_SEED_OFFSET) -> List[Any]:
+            if train:
+                seen["train"] = val_seed_offset
+            elif include_all_instances:
+                # ONLY the --distractor-gap block passes this.
+                seen["distractor_gap"] = val_seed_offset
+            elif "family" not in seen:
+                # `main`'s seed loop evaluates the family BEFORE it reaches
+                # either diagnostic block, so the first plain val split is the
+                # family's and the second is --prompt-swap's.
+                seen["family"] = val_seed_offset
+            else:
+                seen["prompt_swap"] = val_seed_offset
+            return []
+
+        # `evaluate_family` is REAL -- it is one of the three call sites under
+        # test -- but everything it does other than build the scoring split is
+        # replaced, so this stays a wiring test and not a forward pass.
+        monkeypatch.setattr(baselines, "build_split_dataset", spy)
+        monkeypatch.setattr(
+            baselines, "build_context", lambda seed, split=None:
+            (_StubModel(), object()))
+        monkeypatch.setattr(baselines, "pool_train_gt",
+                            lambda seed, model=None, split=None:
+                            np.zeros((0, 4), np.float32))
+        monkeypatch.setattr(baselines, "fit_kmeans_prior",
+                            lambda pool, k, seed: np.zeros((k, 4), np.float32))
+        monkeypatch.setattr(baselines, "_score",
+                            lambda prior, model, loss, dataset: (1.0, 5.0))
+        monkeypatch.setattr(baselines.keras.models, "load_model",
+                            lambda path, compile=False: object())
+        monkeypatch.setattr(baselines, "distractor_gap",
+                            lambda *a, **kw: dict(_GAP_SENTINEL))
+        monkeypatch.setattr(baselines, "prompt_swap_retention",
+                            lambda *a, **kw: dict(_SWAP_SENTINEL))
+
+        checkpoint = tmp_path / "ckpt_seed1.keras"
+        checkpoint.write_text("not a real checkpoint -- never opened")
+        template = str(tmp_path / "ckpt_seed{seed}.keras")
+        baselines.main([
+            "--seeds", "1",
+            "--k", str(TINY_K),
+            "--val-seed-offset", str(INDEPENDENT_VAL_SEED_OFFSET),
+            "--distractor-gap", template,
+            "--prompt-swap", template])
+        return seen
+
+    def test_the_parser_exposes_the_flag_with_today_s_default(self) -> None:
+        """Parsing alone. Deliberately NOT the only assertion in this class --
+        it is GREEN under both severing injections."""
+        assert build_parser().parse_args([]).val_seed_offset == VAL_SEED_OFFSET
+        assert build_parser().parse_args(
+            ["--val-seed-offset", "20000"]).val_seed_offset == 20_000
+
+    def test_the_help_string_has_no_bare_percent(self) -> None:
+        """argparse formats every help= through `help % params` at --help time,
+        so a lone '%' crashes --help and ONLY --help."""
+        assert_no_bare_percent_help(build_parser(), "baselines.build_parser")
+
+    def test_the_family_evaluation_scores_on_the_requested_split(
+            self, offsets_seen: Dict[str, int]) -> None:
+        """Firing assertion of the RED proof for the `evaluate_family` call
+        site."""
+        assert offsets_seen["family"] == INDEPENDENT_VAL_SEED_OFFSET, (
+            f"main scored the family at offset "
+            f"{offsets_seen.get('family')}, not the requested "
+            f"{INDEPENDENT_VAL_SEED_OFFSET}: --val-seed-offset parsed but did "
+            "not reach build_split_dataset.")
+
+    def test_the_prompt_swap_block_scores_on_the_requested_split(
+            self, offsets_seen: Dict[str, int]) -> None:
+        """Firing assertion of the RED proof for the `--prompt-swap` call site
+        -- the third and last of `main`'s three."""
+        assert offsets_seen["prompt_swap"] == INDEPENDENT_VAL_SEED_OFFSET, (
+            f"the --prompt-swap block built its split at offset "
+            f"{offsets_seen.get('prompt_swap')}, not the requested "
+            f"{INDEPENDENT_VAL_SEED_OFFSET}.")
+
+    def test_the_distractor_gap_block_scores_on_the_requested_split(
+            self, offsets_seen: Dict[str, int]) -> None:
+        """Firing assertion of the RED proof for the `--distractor-gap` call
+        site. Identified by `include_all_instances=True`, which only that block
+        passes."""
+        assert offsets_seen["distractor_gap"] == INDEPENDENT_VAL_SEED_OFFSET, (
+            f"the --distractor-gap block built its split at offset "
+            f"{offsets_seen.get('distractor_gap')}, not the requested "
+            f"{INDEPENDENT_VAL_SEED_OFFSET}.")
+
+    def test_the_train_side_is_never_offset_even_through_the_cli(
+            self, offsets_seen: Dict[str, int]) -> None:
+        """D-001 end to end: whatever the CLI says, the FIT split stays put.
+        `pool_train_gt` is replaced here, so `train` is absent from the spy's
+        record -- which is itself the assertion."""
+        assert "train" not in offsets_seen, (
+            f"a TRAIN split was built during a --val-seed-offset run "
+            f"(offset seen: {offsets_seen.get('train')}). The fit split must "
+            "never be offset (D-001).")
