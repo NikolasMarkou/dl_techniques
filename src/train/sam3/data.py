@@ -158,6 +158,50 @@ RECORD_MASKS = "target_masks"
 RECORD_EXHAUSTIVE = "is_exhaustive"
 RECORD_CATEGORY = "prompt_category"
 
+#: EVAL-ONLY record keys. These carry the geometry of EVERY drawn instance of
+#: EVERY drawn category -- the prompted ones AND the distractors -- so a
+#: distractor-aware diagnostic can score the same predicted boxes against a
+#: non-prompted target set. They are ADDITIVE: they never enter
+#: :func:`build_sam3_dataset`'s default ``signature``, never reach
+#: ``pack_targets``, and never reach the model's input dict. See
+#: :func:`build_sam3_dataset`'s ``include_all_instances``.
+RECORD_ALL_BOXES = "all_boxes"
+RECORD_ALL_VALID = "all_valid"
+RECORD_ALL_CATEGORY_IDS = "all_category_ids"
+RECORD_PROMPT_ID = "prompt_category_id"
+
+#: Padding value of :data:`RECORD_ALL_CATEGORY_IDS`. Deliberately NOT 0, which
+#: is a real category index.
+CATEGORY_ID_PAD: int = -1
+
+
+def all_instance_capacity(max_per_category: int) -> int:
+    """Slots needed to hold every drawn instance of every drawn category.
+
+    Interface contract: returns the exact, DERIVED upper bound on
+    ``len(placed)`` in :func:`synthetic_prompt_samples` -- never a guessed
+    constant. ``count = rng.integers(2, len(CATEGORIES))`` is upper-EXCLUSIVE,
+    so at most ``len(CATEGORIES) - 1`` categories are ever drawn, and each
+    contributes at most ``max_per_category`` instances. Placement abandonment
+    can only lower the count, never raise it. At the shipped settings this is
+    ``(4 - 1) * 3 = 9`` -- larger than the default ``max_instances`` of 8,
+    which is exactly why it is derived rather than reused.
+
+    Args:
+        max_per_category: The generator's ``max_per_category``.
+
+    Returns:
+        The capacity, in instances.
+
+    Raises:
+        ValueError: If ``max_per_category`` is not positive.
+    """
+    if max_per_category < 1:
+        raise ValueError(
+            f"all_instance_capacity: max_per_category={max_per_category} "
+            f"must be >= 1.")
+    return (len(CATEGORIES) - 1) * int(max_per_category)
+
 
 # ---------------------------------------------------------------------------
 # Tokenization
@@ -263,6 +307,30 @@ def _rasterize(category: str, extent: np.ndarray,
     return canvas
 
 
+def _normalized_box(extent: np.ndarray, image_size: int) -> np.ndarray:
+    """Normalized ``cxcywh`` from an ``[x1, y1, x2, y2]`` pixel extent.
+
+    Interface contract: the box is ANALYTIC -- computed from the sampled extent,
+    never read back off the raster, which is what lets the oracle in
+    ``test_data.py`` derive an independent box from the mask. Returns float64;
+    the caller casts. This lives in ONE place because the prompted target boxes
+    and the eval-only all-instance boxes must not be able to drift apart.
+
+    Args:
+        extent: ``[x1, y1, x2, y2]`` in float pixels.
+        image_size: Side of the square image.
+
+    Returns:
+        ``(4,)`` float64 ``[cx, cy, w, h]``, normalized by ``image_size``.
+    """
+    return np.asarray([
+        (extent[0] + extent[2]) * 0.5 / image_size,
+        (extent[1] + extent[3]) * 0.5 / image_size,
+        (extent[2] - extent[0]) / image_size,
+        (extent[3] - extent[1]) / image_size,
+    ], dtype="float64")
+
+
 def _downsample(mask: np.ndarray, rows: int, cols: int) -> np.ndarray:
     """Binarize a full-resolution instance mask onto the model's mask grid."""
     low = cv2.resize(mask.astype("float32"), (cols, rows),
@@ -294,6 +362,19 @@ def synthetic_prompt_samples(
     string, for tests and per-category evaluation -- :func:`build_sam3_dataset`
     drops it). Nothing is written to disk.
 
+    Four further EVAL-ONLY keys carry the geometry of EVERY drawn instance of
+    EVERY drawn category, prompted and distractor alike: ``all_boxes``
+    ``(C, 4)`` float32 normalized ``cxcywh``, ``all_valid`` ``(C,)``,
+    ``all_category_ids`` ``(C,)`` int32 indexing :data:`CATEGORIES` with
+    :data:`CATEGORY_ID_PAD` at padding, and ``prompt_category_id`` an int32
+    scalar, where ``C == all_instance_capacity(max_per_category)``. The
+    distractor set is ``all_valid > 0`` AND ``all_category_ids !=
+    prompt_category_id``. These are boxes ONLY -- no masks -- and they are NOT
+    filtered by the mask-grid emptiness test that ``target_boxes`` applies, so
+    the prompted rows of ``all_boxes`` are a superset of ``target_boxes`` up to
+    that filter and to ``max_instances`` truncation.
+    :func:`build_sam3_dataset` drops them unless ``include_all_instances``.
+
     Args:
         num_samples: Records in one epoch.
         image_size: Side of the square image.
@@ -323,6 +404,7 @@ def synthetic_prompt_samples(
     rng = np.random.default_rng(seed)
     rows, cols = int(mask_grid[0]), int(mask_grid[1])
     tokens = {name: encode_phrase(name, context_length) for name in CATEGORIES}
+    capacity = all_instance_capacity(max_per_category)
     abandoned = 0
 
     for _ in range(num_samples):
@@ -366,8 +448,35 @@ def synthetic_prompt_samples(
         boxes = np.zeros((max_instances, 4), dtype="float32")
         valid = np.zeros((max_instances,), dtype="float32")
         masks = np.zeros((max_instances, rows, cols), dtype="float32")
+        all_boxes = np.zeros((capacity, 4), dtype="float32")
+        all_valid = np.zeros((capacity,), dtype="float32")
+        all_ids = np.full((capacity,), CATEGORY_ID_PAD, dtype="int32")
         slot = 0
-        for category, extent, full in placed:
+        for all_slot, (category, extent, full) in enumerate(placed):
+            # DECISION plan-2026-08-07T065516-6add49a9/D-003
+            # The all-instance arrays SUPPLEMENT the `continue` below; do NOT
+            # relax that filter to get non-prompted geometry into
+            # `target_boxes`. Doing so would silently change what every
+            # training run's targets MEAN and destroy comparability with every
+            # published `box_iou` -- and it goes RED on
+            # `test_data.py::test_targets_are_the_prompted_category_and_none_of_the_distractors`.
+            # This block also consumes ZERO `rng` draws: every draw for a
+            # record is upstream (`rng.integers`/`rng.uniform`/`rng.random`
+            # above), `_downsample` and `_normalized_box` are deterministic, so
+            # the RNG stream is bit-identical to the pre-change generator.
+            # Deliberately NOT filtered by the mask-grid emptiness test below:
+            # these are box-only, so an instance that vanishes at the mask grid
+            # still has a real box, and the image-side oracle that verifies
+            # them has no mask-grid notion either. See decisions.md D-003.
+            if all_slot >= capacity:
+                raise RuntimeError(
+                    f"synthetic_prompt_samples: {len(placed)} instance(s) "
+                    f"placed but all_instance_capacity({max_per_category}) is "
+                    f"{capacity}. The capacity derivation is wrong -- refusing "
+                    f"to truncate the all-instance export silently.")
+            all_boxes[all_slot] = _normalized_box(extent, image_size)
+            all_valid[all_slot] = 1.0
+            all_ids[all_slot] = CATEGORIES.index(category)
             if category != prompt or slot >= max_instances:
                 continue
             low = _downsample(full, rows, cols)
@@ -379,12 +488,7 @@ def synthetic_prompt_samples(
                 continue
             # The box is ANALYTIC -- from the sampled extent, not read back off
             # the raster. The oracle in test_data.py derives it from the mask.
-            boxes[slot] = [
-                (extent[0] + extent[2]) * 0.5 / image_size,
-                (extent[1] + extent[3]) * 0.5 / image_size,
-                (extent[2] - extent[0]) / image_size,
-                (extent[3] - extent[1]) / image_size,
-            ]
+            boxes[slot] = _normalized_box(extent, image_size)
             valid[slot] = 1.0
             masks[slot] = low
             slot += 1
@@ -402,6 +506,10 @@ def synthetic_prompt_samples(
             # so the annotation is exhaustive by construction (D-010).
             RECORD_EXHAUSTIVE: np.float32(1.0),
             RECORD_CATEGORY: prompt,
+            RECORD_ALL_BOXES: all_boxes,
+            RECORD_ALL_VALID: all_valid,
+            RECORD_ALL_CATEGORY_IDS: all_ids,
+            RECORD_PROMPT_ID: np.int32(CATEGORIES.index(prompt)),
         }
 
     if abandoned:
@@ -423,6 +531,7 @@ def build_sam3_dataset(
         max_per_category: int = 3,
         seed: int = 0,
         shuffle_buffer: int = 0,
+        include_all_instances: bool = False,
 ) -> tf.data.Dataset:
     """Assemble a ``fit()``-consumable ``(inputs, packed_target)`` dataset.
 
@@ -444,10 +553,23 @@ def build_sam3_dataset(
         max_per_category: Upper bound on instances per present category.
         seed: Seed for the source generator and the shuffle.
         shuffle_buffer: If > 0, shuffle with this buffer before batching.
+        include_all_instances: EVAL-ONLY opt-in. When ``True`` the four
+            all-instance record keys are added to the generator ``signature``
+            and the elements become 3-tuples (see Returns). Default ``False``
+            keeps every existing caller -- and every ``fit()`` path -- exactly
+            as it was; the training path must never set this.
 
     Returns:
-        A batched ``tf.data.Dataset`` of ``(inputs, packed_target)``. The batch
-        axis is STATIC.
+        A batched ``tf.data.Dataset``. At the default this is
+        ``(inputs, packed_target)``; with ``include_all_instances=True`` it is
+        ``(inputs, packed_target, all_instances)``, where ``all_instances`` is
+        a dict of ``all_boxes`` / ``all_valid`` / ``all_category_ids`` /
+        ``prompt_category_id``. The extra element is a THIRD tuple slot rather
+        than an entry in ``inputs`` on purpose: ``inputs`` is the model's input
+        contract and a stray key there would reach ``Sam3Image.call``. A
+        3-element dataset is not ``fit()``-consumable, which is the intended
+        guard rail -- this arm is for evaluation only. The batch axis is
+        STATIC in both cases.
 
     Raises:
         ValueError: If the vocabulary overflows the text tower's ``vocab_size``,
@@ -476,6 +598,13 @@ def build_sam3_dataset(
         RECORD_MASKS: tf.TensorSpec((max_instances, rows, cols), tf.float32),
         RECORD_EXHAUSTIVE: tf.TensorSpec((), tf.float32),
     }
+    if include_all_instances:
+        capacity = all_instance_capacity(max_per_category)
+        signature[RECORD_ALL_BOXES] = tf.TensorSpec((capacity, 4), tf.float32)
+        signature[RECORD_ALL_VALID] = tf.TensorSpec((capacity,), tf.float32)
+        signature[RECORD_ALL_CATEGORY_IDS] = tf.TensorSpec(
+            (capacity,), tf.int32)
+        signature[RECORD_PROMPT_ID] = tf.TensorSpec((), tf.int32)
 
     def _source() -> Iterator[Dict[str, Any]]:
         for record in synthetic_prompt_samples(
@@ -489,7 +618,7 @@ def build_sam3_dataset(
             yield {key: record[key] for key in signature}
 
     def _to_training_record(
-            record: Dict[str, tf.Tensor]) -> Tuple[Dict[str, tf.Tensor], Any]:
+            record: Dict[str, tf.Tensor]) -> Tuple[Any, ...]:
         inputs = {
             "image": record[RECORD_IMAGE],
             "token_ids": record[RECORD_TOKENS],
@@ -503,7 +632,14 @@ def build_sam3_dataset(
             target_masks=record[RECORD_MASKS] if include_masks else None,
             is_exhaustive=record[RECORD_EXHAUSTIVE],
             include_masks=include_masks)
-        return inputs, packed
+        if not include_all_instances:
+            return inputs, packed
+        return inputs, packed, {
+            RECORD_ALL_BOXES: record[RECORD_ALL_BOXES],
+            RECORD_ALL_VALID: record[RECORD_ALL_VALID],
+            RECORD_ALL_CATEGORY_IDS: record[RECORD_ALL_CATEGORY_IDS],
+            RECORD_PROMPT_ID: record[RECORD_PROMPT_ID],
+        }
 
     dataset = tf.data.Dataset.from_generator(
         _source, output_signature=signature)

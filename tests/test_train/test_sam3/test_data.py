@@ -22,6 +22,7 @@ none of them can pass by construction:
 """
 
 import hashlib
+import inspect
 import os
 import tempfile
 
@@ -42,12 +43,14 @@ from dl_techniques.models.sam3.training_model import (
 )
 from train.sam3.data import (
     CATEGORIES,
+    CATEGORY_ID_PAD,
     CATEGORY_PHRASES,
     PAD_ID,
     WORD_TO_ID,
     _downsample,
     _rasterize,
     _sample_extent,
+    all_instance_capacity,
     build_sam3_dataset,
     encode_phrase,
     synthetic_prompt_samples,
@@ -84,6 +87,71 @@ ASPECT_BAR_MIN = 1.60
 #: ``test_the_first_batch_is_bit_reproducible_across_processes``.
 PINNED_FIRST_BATCH_SHA256 = (
     "36c573f038bbf43d48be67869d1178bca8c1c3c766ba10d055467f1ba87e0f76")
+
+#: The SEVEN keys of ``build_sam3_dataset``'s default ``signature``. The
+#: eval-only all-instance keys are deliberately absent.
+SIGNATURE_KEYS = (
+    "image", "token_ids", "token_padding_mask",
+    "target_boxes", "target_valid", "target_masks", "is_exhaustive")
+
+#: **The before/after evidence for the all-instance export (plan SC-A / I-1).**
+#: Per-key sha256 over 64 records at the shipped geometry, at two seeds,
+#: computed by running the generator AS IT STOOD AT COMMIT ``fde3d6395`` --
+#: BEFORE the all-instance arrays existed. They are therefore a genuine
+#: pre-change reference and not a transcription of the current implementation's
+#: own output. Any single differing byte in any of the seven keys moves a
+#: digest. The property pinned is RNG NEUTRALITY: the export loop consumes no
+#: ``rng`` draw, so adding the all-instance arrays cannot perturb the stream by
+#: one draw and every published ``box_iou`` stays comparable.
+PINNED_PRE_CHANGE_KEY_SHA256 = {
+    7: {
+        "image":
+            "fe593609203c1b879f2f0b24f8d382f7186fe3c5fdf4eee45737aa1d0f378d6c",
+        "token_ids":
+            "01d8dd0e6c04706d594b2c97508cdfdd3998e434939ea27a1321f8ecbf58b2c6",
+        "token_padding_mask":
+            "562e7ee236adc0ac5e8656c529cc9a4986bdfca23544d897bed1f9678b654207",
+        "target_boxes":
+            "30dd70c5ca49b28a2cb13e9c4c55b525c8fbec6e6333cdba3bb9f840e84f9422",
+        "target_valid":
+            "64621e020f130a913940e9870252185268b0db67de268a8ccbf31079960c17a7",
+        "target_masks":
+            "64e3a7a3f3debf72771d25de46f1d8204885e932e47e4be7ecf1fd4459eb5f13",
+        "is_exhaustive":
+            "2f20cd03c9cd392a406c56232b0ff93a15f6d6d7da79086bfa14f55d4a4031b0",
+    },
+    21: {
+        "image":
+            "25b600a4e4f756b873b7d5527b5e6a7cf24eaee4dd8fcc81eb38480277b9299b",
+        "token_ids":
+            "1a3fa32698aecaa69fb4f3168583319c801ff320da003b13ed0ef7d92c3e3d66",
+        "token_padding_mask":
+            "736cf8f98f03a46495551258387e79423cc4dc33122550b63505df9f68a37a14",
+        "target_boxes":
+            "9d70fb3b6d7ce8502ceb24c6a009d5bc316302308e5241d1b1aa2baac84dc70e",
+        "target_valid":
+            "d23d9d2d965db1842a79632f57696351b6f46b63790151eb260266d7a9964035",
+        "target_masks":
+            "33413a89c2587cc6fa20b8badd7d43a29ecf024cb9257ae8319242ca643365af",
+        "is_exhaustive":
+            "2f20cd03c9cd392a406c56232b0ff93a15f6d6d7da79086bfa14f55d4a4031b0",
+    },
+}
+#: Records per seed behind the digests above. Asserted, so a comparison that
+#: silently covered zero records cannot pass.
+PINNED_RECORD_COUNT = 64
+
+#: Box tolerance for the all-instance oracle, at the IMAGE resolution (224 px),
+#: in PIXELS, converted to the normalized frame. The oracle reads each 224 px
+#: connected component's own extents; the pipeline computes the box
+#: analytically from the float extent it sampled, and `cv2` rounds to integer
+#: pixels, so each edge can move by about one pixel and a width by two.
+#: MEASURED over 814 instances at four seeds: worst component deviation 1.97
+#: px. Pinned at 3.0 px (1.53x margin), which still leaves a placement bug
+#: (tens of px) and a width/height swap on a `bar` (>= 20 px) far outside; the
+#: liveness arm below displaces by 5 px and must go RED.
+ALL_BOX_TOLERANCE_PX = 3.0
+ALL_BOX_TOLERANCE = ALL_BOX_TOLERANCE_PX / IMAGE_SIZE
 
 
 # ---------------------------------------------------------------------
@@ -556,3 +624,310 @@ class TestEndToEnd:
         history = model.fit(dataset, epochs=1, verbose=0)
         assert np.isfinite(history.history["loss"][0])
         assert model.jit_compile is False
+
+
+# ---------------------------------------------------------------------
+# The eval-only all-instance export (plan step 2: SC-A / SC-B, I-1..I-3)
+# ---------------------------------------------------------------------
+def key_digests(seed: int, count: int) -> dict:
+    """Per-key sha256 over ``count`` records of the SEVEN signature keys."""
+    digests = {name: hashlib.sha256() for name in SIGNATURE_KEYS}
+    seen = 0
+    for record in synthetic_prompt_samples(
+            num_samples=count, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+            context_length=CONTEXT, max_instances=N_MAX,
+            zero_instance_rate=0.25, seed=seed):
+        for name in SIGNATURE_KEYS:
+            digests[name].update(np.asarray(record[name]).tobytes())
+        seen += 1
+    return {"count": seen,
+            **{name: digest.hexdigest() for name, digest in digests.items()}}
+
+
+def all_instances_of(record: dict) -> list:
+    """``[(category name, box)]`` read off the eval-only arrays."""
+    keep = np.flatnonzero(record["all_valid"] > 0.0)
+    return [(CATEGORIES[int(record["all_category_ids"][index])],
+             record["all_boxes"][index].astype("float64"))
+            for index in keep]
+
+
+def image_side_instances(image: np.ndarray) -> list:
+    """``[(category name, box)]`` derived FROM THE IMAGE, not from the record.
+
+    The structural oracle for the all-instance export: connected components of
+    the composited 224 px image, each classified by its shape statistics and
+    boxed from its own extents. It never reads any target array, so it cannot
+    agree with the pipeline by construction -- a pipeline that filled
+    ``all_boxes`` from ``target_boxes`` disagrees on the COUNT.
+    """
+    return [(classify_component(component), box_from_mask(component))
+            for component in components_of(image)]
+
+
+def pair_by_centre(emitted: list, oracle: list) -> list:
+    """Pair two instance lists by nearest centre; assert it is a bijection."""
+    assert len(emitted) == len(oracle)
+    taken = set()
+    pairs = []
+    for name, box in oracle:
+        order = sorted(
+            range(len(emitted)),
+            key=lambda index: float(np.hypot(*(emitted[index][1][:2] - box[:2])))
+        )
+        choice = next(index for index in order if index not in taken)
+        taken.add(choice)
+        pairs.append((emitted[choice], (name, box)))
+    assert len(taken) == len(oracle), "centre pairing was not a bijection"
+    return pairs
+
+
+class TestTheAllInstanceExportIsRngNeutral:
+    """SC-A. What these pin: adding the all-instance arrays changed NOTHING
+    about the seven keys the training path consumes, byte for byte."""
+
+    @pytest.mark.parametrize("seed", sorted(PINNED_PRE_CHANGE_KEY_SHA256))
+    def test_the_seven_keys_match_their_PRE_CHANGE_digests(self, seed):
+        observed = key_digests(seed, PINNED_RECORD_COUNT)
+        # A comparison over zero records must be impossible.
+        assert observed["count"] == PINNED_RECORD_COUNT
+        expected = PINNED_PRE_CHANGE_KEY_SHA256[seed]
+        differing = [name for name in SIGNATURE_KEYS
+                     if observed[name] != expected[name]]
+        assert not differing, (
+            f"seed {seed}: {differing} differ from the pre-change generator "
+            f"over {observed['count']} records -- RNG neutrality is BROKEN")
+
+    def test_the_digests_discriminate(self):
+        # Liveness for the pin above: a different seed must not match, or the
+        # digests would be satisfiable by any stream at all.
+        observed = key_digests(3, PINNED_RECORD_COUNT)
+        assert observed["target_boxes"] != (
+            PINNED_PRE_CHANGE_KEY_SHA256[7]["target_boxes"])
+
+    def test_the_export_loop_contains_no_rng_reference(self):
+        # The STRUCTURAL half of the RNG-neutrality argument (finding F-10):
+        # every draw for a record happens above the export loop, so the loop
+        # cannot perturb the stream however much it computes. This goes RED the
+        # moment anyone puts a draw in it.
+        source = inspect.getsource(synthetic_prompt_samples)
+        start = source.index("boxes = np.zeros((max_instances, 4)")
+        end = source.index("token_ids, padding_mask = tokens[prompt]")
+        assert start < end, "the export-loop markers moved"
+        # Comments are stripped: the claim is about EXECUTED code, and the
+        # block's own explanatory comment names `rng` on purpose.
+        code = "\n".join(line for line in source[start:end].splitlines()
+                         if not line.strip().startswith("#"))
+        assert "rng" not in code, (
+            "the export loop now references `rng` -- every published box_iou "
+            "loses comparability")
+
+    @pytest.mark.parametrize("include_all_instances", [False, True])
+    def test_the_pinned_first_batch_digest_holds_at_both_arms(
+            self, include_all_instances):
+        # The cross-process pin, re-run through the opt-in. The digest covers
+        # image + tokens + mask + the packed boxes/valid/masks/exhaustive.
+        model = Sam3TrainingModel(
+            Sam3Image.from_variant("tiny"), include_masks=True)
+        dataset = build_sam3_dataset(
+            model, num_samples=8, batch_size=4, max_instances=N_MAX,
+            seed=99, include_all_instances=include_all_instances)
+        element = next(iter(dataset))
+        inputs, packed = element[0], element[1]
+        digest = hashlib.sha256()
+        for tensor in (inputs["image"], inputs["token_ids"],
+                       inputs["token_padding_mask"], packed):
+            digest.update(np.asarray(tensor).tobytes())
+        assert digest.hexdigest() == PINNED_FIRST_BATCH_SHA256
+
+
+class TestTheAllInstanceOptInIsAdditive:
+    """SC-A / I-3. What these pin: the opt-in is OFF by default and, when on,
+    nothing new reaches the model's inputs or the packed target."""
+
+    def test_the_default_element_spec_is_unchanged(self, tiny_model):
+        dataset = build_sam3_dataset(
+            tiny_model, num_samples=8, batch_size=4, max_instances=N_MAX,
+            seed=1)
+        assert len(dataset.element_spec) == 2
+        assert set(dataset.element_spec[0]) == {
+            "image", "token_ids", "token_padding_mask"}
+
+    def test_the_opt_in_adds_a_THIRD_element_and_touches_nothing_else(
+            self, tiny_model):
+        plain = build_sam3_dataset(
+            tiny_model, num_samples=8, batch_size=4, max_instances=N_MAX,
+            seed=1)
+        extended = build_sam3_dataset(
+            tiny_model, num_samples=8, batch_size=4, max_instances=N_MAX,
+            seed=1, include_all_instances=True)
+        assert len(extended.element_spec) == 3
+        # The model input contract and the packed target width are IDENTICAL.
+        assert extended.element_spec[0] == plain.element_spec[0]
+        assert extended.element_spec[1] == plain.element_spec[1]
+        assert extended.element_spec[1].shape[1:] == tuple(
+            tiny_model.packed_target_spec(N_MAX))
+        capacity = all_instance_capacity(3)
+        extras = extended.element_spec[2]
+        assert set(extras) == {"all_boxes", "all_valid", "all_category_ids",
+                               "prompt_category_id"}
+        assert tuple(extras["all_boxes"].shape) == (4, capacity, 4)
+        assert tuple(extras["all_valid"].shape) == (4, capacity)
+        assert tuple(extras["all_category_ids"].shape) == (4, capacity)
+        assert extras["all_category_ids"].dtype == tf.int32
+
+    def test_the_batches_are_byte_identical_across_the_two_arms(
+            self, tiny_model):
+        plain = build_sam3_dataset(
+            tiny_model, num_samples=64, batch_size=8, max_instances=N_MAX,
+            seed=5)
+        extended = build_sam3_dataset(
+            tiny_model, num_samples=64, batch_size=8, max_instances=N_MAX,
+            seed=5, include_all_instances=True)
+        compared = 0
+        for left, right in zip(plain, extended):
+            for name in ("image", "token_ids", "token_padding_mask"):
+                assert (np.asarray(left[0][name]).tobytes()
+                        == np.asarray(right[0][name]).tobytes()), name
+            assert (np.asarray(left[1]).tobytes()
+                    == np.asarray(right[1]).tobytes()), "packed target"
+            compared += int(np.asarray(left[1]).shape[0])
+        assert compared == 64, f"compared {compared} records, expected 64"
+
+    def test_the_capacity_is_derived_from_the_generators_own_limits(self):
+        # Written FROM THE STRUCTURE: at most `len(CATEGORIES) - 1` categories
+        # are drawn (the count draw is upper-exclusive), each contributing at
+        # most `max_per_category`.
+        for max_per_category in (1, 2, 3, 5):
+            assert all_instance_capacity(max_per_category) == (
+                (len(CATEGORIES) - 1) * max_per_category)
+        with pytest.raises(ValueError, match="must be >= 1"):
+            all_instance_capacity(0)
+
+    @pytest.mark.parametrize("max_per_category", [1, 2, 3])
+    def test_the_derived_capacity_is_never_exceeded_in_practice(
+            self, max_per_category):
+        capacity = all_instance_capacity(max_per_category)
+        worst = 0
+        for record in synthetic_prompt_samples(
+                num_samples=120, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25,
+                max_per_category=max_per_category, seed=41):
+            assert record["all_valid"].shape == (capacity,)
+            worst = max(worst, int(record["all_valid"].sum()))
+        assert worst <= capacity
+        # And the capacity is not absurdly slack -- otherwise "never exceeded"
+        # would be uninformative.
+        assert worst >= capacity - max_per_category
+
+
+class TestTheAllInstanceGeometryMatchesTheIMAGE:
+    """SC-B. The oracle is the rendered image, never the record's own arrays."""
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 11])
+    def test_every_all_instance_box_and_category_matches_the_image(self, seed):
+        checked = 0
+        deviations = []
+        for record in synthetic_prompt_samples(
+                num_samples=40, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25, seed=seed):
+            emitted = all_instances_of(record)
+            oracle = image_side_instances(record["image"])
+            # THE discriminating assertion on the count: a pipeline that filled
+            # `all_boxes` from `target_boxes` emits only the prompted subset.
+            assert len(emitted) == len(oracle), (
+                f"seed {seed}: image holds {[n for n, _ in oracle]}, the "
+                f"all-instance arrays hold {[n for n, _ in emitted]}")
+            for (got_name, got_box), (want_name, want_box) in pair_by_centre(
+                    emitted, oracle):
+                assert got_name == want_name, (
+                    f"seed {seed}: box at {got_box[:2]} is {got_name!r} in the "
+                    f"record and {want_name!r} in the image")
+                deviations.append(np.abs(got_box - want_box))
+                checked += 1
+        assert checked > 100, "not enough instances to be a gate"
+        worst = float(np.max(np.stack(deviations)))
+        assert worst < ALL_BOX_TOLERANCE, (
+            f"worst all-instance box deviation {worst:.5f} exceeds "
+            f"{ALL_BOX_TOLERANCE:.5f} ({worst * IMAGE_SIZE:.2f} px)")
+
+    def test_that_oracle_goes_red_on_a_displaced_box(self):
+        # Liveness arm for the tolerance: four pixels must not fit inside it.
+        displaced = []
+        for record in synthetic_prompt_samples(
+                num_samples=40, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25, seed=0):
+            oracle = image_side_instances(record["image"])
+            emitted = all_instances_of(record)
+            for (_, got_box), (_, want_box) in pair_by_centre(emitted, oracle):
+                wrong = got_box.copy()
+                wrong[0] += 5.0 / IMAGE_SIZE
+                displaced.append(float(np.max(np.abs(wrong - want_box))))
+        assert displaced and min(displaced) > ALL_BOX_TOLERANCE
+
+    def test_the_all_instance_set_is_a_STRICT_superset_of_the_targets(self):
+        # The single assertion that would fire if `all_boxes` were a copy of
+        # `target_boxes`, or empty, or all-zeros.
+        strictly_larger = 0
+        total = 0
+        for record in synthetic_prompt_samples(
+                num_samples=120, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25, seed=13):
+            prompted = int(record["target_valid"].sum())
+            everything = int(record["all_valid"].sum())
+            assert everything >= prompted, (
+                f"{everything} all-instance rows < {prompted} target rows")
+            strictly_larger += int(everything > prompted)
+            total += 1
+        assert total == 120
+        # At least ONE category is always absent and 2-3 are drawn, so a
+        # distractor exists on nearly every image.
+        assert strictly_larger >= 100, (
+            f"only {strictly_larger}/120 images carry a distractor -- the "
+            f"all-instance arrays are not carrying non-prompted geometry")
+
+    def test_the_distractor_subset_is_non_empty_and_excludes_the_prompt(self):
+        distractors = 0
+        for record in synthetic_prompt_samples(
+                num_samples=120, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25, seed=13):
+            prompt_id = int(record["prompt_category_id"])
+            assert CATEGORIES[prompt_id] == record["prompt_category"]
+            keep = record["all_valid"] > 0.0
+            ids = record["all_category_ids"]
+            mask = keep & (ids != prompt_id)
+            distractors += int(mask.sum())
+            boxes = record["all_boxes"][mask]
+            if boxes.size:
+                # Real geometry, not zeros.
+                assert np.all(boxes[:, 2:] > 0.0)
+            # Padding carries the sentinel id and a zero box.
+            assert np.all(ids[~keep] == CATEGORY_ID_PAD)
+            assert np.all(record["all_boxes"][~keep] == 0.0)
+        assert distractors > 200, (
+            f"only {distractors} distractor instance(s) over 120 images")
+
+    def test_the_prompted_subset_agrees_with_target_boxes(self):
+        # I-2 from the other side: the `:371` filter is SUPPLEMENTED, so the
+        # prompted rows of the all-instance arrays reproduce `target_boxes`.
+        compared = 0
+        for record in synthetic_prompt_samples(
+                num_samples=80, image_size=IMAGE_SIZE, mask_grid=MASK_GRID,
+                context_length=CONTEXT, max_instances=N_MAX,
+                zero_instance_rate=0.25, seed=29):
+            prompt_id = int(record["prompt_category_id"])
+            keep = (record["all_valid"] > 0.0) & (
+                record["all_category_ids"] == prompt_id)
+            mine = record["all_boxes"][keep]
+            theirs = record["target_boxes"][record["target_valid"] > 0.0]
+            assert len(mine) == len(theirs)
+            if len(mine):
+                np.testing.assert_array_equal(
+                    mine[np.lexsort(mine.T)], theirs[np.lexsort(theirs.T)])
+                compared += len(mine)
+        assert compared > 100
