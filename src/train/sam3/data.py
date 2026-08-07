@@ -80,6 +80,7 @@ from typing import Any, Dict, Iterator, List, Sequence, Tuple
 import cv2
 import numpy as np
 import tensorflow as tf
+from keras import ops
 
 from dl_techniques.models.sam3.training_model import pack_targets
 from dl_techniques.utils.logger import logger
@@ -174,6 +175,15 @@ RECORD_PROMPT_ID = "prompt_category_id"
 #: is a real category index.
 CATEGORY_ID_PAD: int = -1
 
+#: Absolute tolerance of the alignment assertion in :func:`distractor_targets`.
+#: Both box sets come from this module's single ``_normalized_box`` helper and
+#: are float32 all the way through ``pack_targets``/``unpack_targets`` (which
+#: slice and concatenate, never arithmetic), so agreement is expected to be
+#: EXACT; this is a float-safety margin, not a fuzzy match. It is ~1e-3 of the
+#: smallest box side the generator draws, so it cannot make two different
+#: instances look like the same one.
+ALIGNMENT_TOLERANCE: float = 1e-5
+
 
 def all_instance_capacity(max_per_category: int) -> int:
     """Slots needed to hold every drawn instance of every drawn category.
@@ -201,6 +211,93 @@ def all_instance_capacity(max_per_category: int) -> int:
             f"all_instance_capacity: max_per_category={max_per_category} "
             f"must be >= 1.")
     return (len(CATEGORIES) - 1) * int(max_per_category)
+
+
+# DECISION plan-2026-08-07T065516-6add49a9/D-023
+# Do NOT move this back to `train.sam3.baselines`, where it was first written.
+# `baselines` imports `train_sam3`, and `train_sam3.evaluate_sam3` now needs
+# this function, so hosting it there means either a CIRCULAR import or a second
+# copy -- and a second copy of the target-selection rule is the exact defect
+# this metric exists to detect (two spellings of "the other categories" that
+# drift, while both read plausible). This module OWNS the RECORD_ALL_* keys the
+# function reads, so it is the acyclic home: data.py <- train_sam3.py <-
+# baselines.py. See decisions.md D-023.
+def distractor_targets(all_instances: Dict[str, Any],
+                       prompted: Dict[str, Any]) -> Dict[str, Any]:
+    """The NON-prompted categories' ground truth, in a targets-dict shape.
+
+    Interface contract: returns a dict carrying exactly ``target_boxes``
+    ``(B, C, 4)`` and ``target_valid`` ``(B, C)`` -- the two keys a matched-IoU
+    reduction reads -- so the distractor set goes through the SAME reduction as
+    the prompted one with no second IoU implementation and no change to the
+    matcher. The boxes are every drawn instance's; only ``target_valid``
+    differs, selecting the rows whose category is NOT the prompted one. An
+    image with a single drawn category yields an all-zero valid row, which the
+    matcher already handles (``zero_instance_rate`` produces empty prompted
+    rows on ~25% of images).
+
+    It lives HERE, in the module that OWNS the all-instance record keys, and
+    not in ``train.sam3.baselines`` where it was first written: both
+    ``baselines.distractor_gap`` and ``train_sam3.evaluate_sam3`` need it, and
+    ``baselines`` already imports ``train_sam3``, so keeping it there would
+    have forced a circular import or a second copy of this function.
+
+    The alignment assertion runs FIRST, before any number is derived. The
+    all-instance arrays and the packed targets arrive in the same tuple from
+    the same record, so they describe the same image by construction -- but
+    "by construction" is what this function refuses to take on trust, since a
+    silently misaligned pair would make every gap number garbage while looking
+    entirely plausible. Every VALID prompted target box must be present among
+    the all-instance rows carrying the prompted category id.
+
+    Args:
+        all_instances: A dataset element's third slot -- the eval-only
+            all-category export built by ``include_all_instances=True``.
+        prompted: ``unpack_targets`` output for the SAME batch.
+
+    Returns:
+        A targets dict for the distractor arm.
+
+    Raises:
+        ValueError: If any valid prompted target box has no counterpart in the
+            all-instance rows of the prompted category -- i.e. the two target
+            sets do not describe the same image.
+    """
+    boxes = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_BOXES]),
+                       dtype=np.float32)
+    valid = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_VALID]),
+                       dtype=np.float32)
+    ids = np.asarray(
+        ops.convert_to_numpy(all_instances[RECORD_ALL_CATEGORY_IDS])
+    ).astype(np.int32)
+    prompt_id = np.asarray(
+        ops.convert_to_numpy(all_instances[RECORD_PROMPT_ID])).astype(np.int32)
+    gt_boxes = np.asarray(ops.convert_to_numpy(
+        ops.cast(prompted["target_boxes"], "float32")), dtype=np.float32)
+    gt_valid = np.asarray(ops.convert_to_numpy(
+        ops.cast(prompted["target_valid"], "float32")), dtype=np.float32)
+
+    is_prompted_row = (valid > 0.0) & (ids == prompt_id[:, None])
+    for index in range(boxes.shape[0]):
+        pool = boxes[index][is_prompted_row[index]]
+        for box in gt_boxes[index][gt_valid[index] > 0.0]:
+            hit = pool.shape[0] and bool(np.any(np.all(
+                np.abs(pool - box) <= ALIGNMENT_TOLERANCE, axis=-1)))
+            if not hit:
+                raise ValueError(
+                    f"distractor_targets: image {index} of this batch has a "
+                    f"valid prompted target box {box.tolist()} with no "
+                    f"counterpart among the {pool.shape[0]} all-instance "
+                    f"row(s) of its prompted category "
+                    f"(id {int(prompt_id[index])}). The two target sets do "
+                    "not describe the same image, so every distractor number "
+                    "derived from them would be garbage.")
+
+    return {
+        "target_boxes": ops.convert_to_tensor(boxes),
+        "target_valid": ops.convert_to_tensor(
+            ((valid > 0.0) & (ids != prompt_id[:, None])).astype(np.float32)),
+    }
 
 
 # ---------------------------------------------------------------------------

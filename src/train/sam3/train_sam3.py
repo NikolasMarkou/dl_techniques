@@ -195,7 +195,7 @@ from dl_techniques.models.sam3.training_model import (
 )
 from dl_techniques.utils.logger import logger
 
-from train.sam3.data import build_sam3_dataset
+from train.sam3.data import build_sam3_dataset, distractor_targets
 
 #: Variants this trainer accepts. Read from the model's own table so the two
 #: cannot drift; `sam3` (821,708,598 params, 10 GiB forward peak) is excluded
@@ -222,6 +222,20 @@ LR_SCHEDULES: Tuple[str, ...] = ("cosine", "exponential", "constant")
 #: not read the image at all, while every shipped guard read green. An IoU
 #: reported without these numbers beside it cannot distinguish "learned the
 #: task" from "learned the dataset's mean box" (decisions.md D-039).
+#:
+#: ``box_distractor_gap`` is the CATEGORY-SELECTIVITY guard, and it is the one
+#: key here that can be ``nan`` on a perfectly healthy run: it needs the
+#: eval-only all-category export (``build_sam3_dataset(...,
+#: include_all_instances=True)``), so a caller that hands
+#: :func:`evaluate_sam3` a plain ``(inputs, packed)`` dataset gets ``nan``
+#: rather than a fabricated 0.0. It is ``box_iou`` MINUS the same boxes scored
+#: against the pooled ground truth of every OTHER category in the SAME image.
+#: MEASURED across 11 arms x 3 seeds: a GT oracle reads 1.0, and EVERY
+#: category-blind predictor -- including a connected-components detector that
+#: BEATS every trained arm on raw ``box_iou`` -- reads inside a band of
+#: |gap| <= 0.0358 whose SIGN is seed-dependent. So ``box_iou`` rising while
+#: this stays inside that band is "learned to box bright shapes", not "learned
+#: to find the NAMED shape", and the two are indistinguishable without it.
 EVAL_METRIC_KEYS: Tuple[str, ...] = (
     "box_iou",
     "mask_iou",
@@ -238,6 +252,7 @@ EVAL_METRIC_KEYS: Tuple[str, ...] = (
     "loss_giou",
     "loss_mask",
     "loss_dice",
+    "box_distractor_gap",
 )
 
 #: The log key `EarlyStopping` and `ModelCheckpoint` select on. It is an
@@ -813,6 +828,7 @@ def create_training_model(
 def create_datasets(
         config: Sam3TrainingConfig,
         model: Sam3TrainingModel,
+        include_all_instances: bool = False,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """Build the training and validation datasets.
 
@@ -821,10 +837,24 @@ def create_datasets(
     ``model``. The two are drawn from DIFFERENT seeds, so validation is
     genuinely unseen; neither is a benchmark protocol.
 
+    ``include_all_instances`` affects the VALIDATION dataset ONLY, and the
+    training dataset's 7-key record signature is not reachable from this
+    argument at all. It makes the val elements 3-tuples whose third slot is
+    the eval-only all-category ground truth :func:`evaluate_sam3` needs for
+    ``box_distractor_gap``. It is RNG-NEUTRAL by construction (the export adds
+    no draw and happens strictly after every draw for a record), so the
+    ``(inputs, packed_target)`` prefix is byte-identical to the default build
+    at the same seed -- which is what lets a run measure the gap without
+    perturbing a single published number. A 3-tuple dataset must NOT be handed
+    to ``model.fit``; build it as a SECOND object beside the one that trains.
+
     :param config: The run's config.
     :type config: Sam3TrainingConfig
     :param model: The wrapper whose geometry the pipeline derives from.
     :type model: Sam3TrainingModel
+    :param include_all_instances: Extend the VAL record with the all-category
+        export.
+    :type include_all_instances: bool
     :return: ``(train_dataset, val_dataset)``.
     :rtype: Tuple[tf.data.Dataset, tf.data.Dataset]
     """
@@ -844,6 +874,7 @@ def create_datasets(
     val_dataset = build_sam3_dataset(
         num_samples=config.num_val_samples,
         seed=config.seed + 10_000,
+        include_all_instances=include_all_instances,
         **common,
     )
     return train_dataset, val_dataset
@@ -852,6 +883,62 @@ def create_datasets(
 # ---------------------------------------------------------------------------
 # EVALUATION -- the numbers a learnability claim is made of
 # ---------------------------------------------------------------------------
+# DECISION plan-2026-08-07T065516-6add49a9/D-023
+# Do NOT move this back to `train.sam3.baselines` (it was `_matched_iou`
+# there). `baselines` imports THIS module, so a shared reduction living there
+# forces a circular import on any consumer here; and re-inlining the expression
+# for the distractor arm below would make a THIRD copy of a reduction whose
+# whole purpose is that a prior's number and a model's number cannot drift.
+# The one copy left is `evaluate_sam3`'s PROMPTED arm, which is inline only
+# because it also needs `assignment` for the mask IoU. See decisions.md D-023.
+def matched_box_iou(pred_boxes: Any, pred_logits: Any,
+                    targets: Dict[str, Any], loss: Any) -> Tuple[float, float]:
+    """``(summed IoU over matched pairs, matched pair count)`` for ONE batch.
+
+    Interface contract: THE single shared home for the box-IoU reduction. The
+    caller supplies the class cost -- a prior passes zeros (it makes no class
+    claim), a model passes its own ``pred_logits`` -- and gets back the two
+    POOLABLE quantities, never a ratio: divide the first by the second AFTER
+    summing both over the whole split, or the per-batch means are averaged with
+    equal weight and the number is not ``box_iou``.
+
+    It lives HERE, in the module that owns ``evaluate_sam3``, and not in
+    ``train.sam3.baselines`` where it was first written: ``baselines`` already
+    imports this module, so a shared helper living there would force either a
+    circular import or a THIRD copy of the same reduction. Its callers are
+    ``baselines._score`` / ``prompt_swap_retention`` / ``distractor_gap`` and
+    :func:`evaluate_sam3`'s distractor arm, so a prior's number and a model's
+    number cannot drift apart by one of them quietly growing its own.
+
+    :param pred_boxes: ``(B, Q, 4)`` cxcywh float32 tensor.
+    :type pred_boxes: Any
+    :param pred_logits: ``(B, Q, C)`` float32 tensor -- the matcher's class
+        cost.
+    :type pred_logits: Any
+    :param targets: ``unpack_targets`` output for the same batch.
+    :type targets: Dict[str, Any]
+    :param loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
+    :type loss: Any
+    :return: ``(iou_sum, matched_total)``.
+    :rtype: Tuple[float, float]
+    """
+    assignment, is_matched = loss.matcher(
+        pred_logits, pred_boxes,
+        targets["target_boxes"], targets["target_valid"])
+    gathered = ops.take_along_axis(
+        targets["target_boxes"], assignment[:, :, None], axis=1)
+    # `iou_and_generalized_iou` reads **xyxy**; every box here is normalized
+    # cxcywh. Feeding it cxcywh does not raise -- it silently scores two
+    # rectangles that are not the boxes.
+    iou, _giou = iou_and_generalized_iou(
+        box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gathered))
+    # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
+    # propagates `nan * 0.0 = nan` from a both-degenerate padded pair.
+    return (float(ops.sum(
+        ops.where(is_matched > 0.0, iou, ops.zeros_like(iou)))),
+        float(ops.sum(is_matched)))
+
+
 def evaluate_sam3(
         model: Sam3TrainingModel,
         dataset: tf.data.Dataset,
@@ -942,10 +1029,19 @@ def evaluate_sam3(
     head_boxes: List[np.ndarray] = []
     head_logits: List[np.ndarray] = []
     head_presence: List[np.ndarray] = []
+    distractor_sum = 0.0
+    distractor_pairs = 0.0
 
-    for index, (inputs, y_true) in enumerate(dataset):
+    for index, element in enumerate(dataset):
         if max_batches is not None and index >= max_batches:
             break
+        # A 2-tuple `(inputs, packed)` is the TRAINING contract and stays the
+        # default; a 3-tuple carries `train.sam3.data`'s eval-only
+        # all-category export in slot 2 and is what makes
+        # `box_distractor_gap` measurable. Read positionally rather than
+        # destructured, so ONE call signature serves both and no caller has to
+        # know which shape it holds.
+        inputs, y_true = element[0], element[1]
         # DECISION plan-2026-08-06T055747-1e650383/D-006
         # Pack the SAME number of blocks the compiled loss slices. Do NOT
         # "simplify" this back to the single `pack_predictions(outputs, ...)`
@@ -1012,6 +1108,16 @@ def evaluate_sam3(
         box_iou_sum += float(ops.sum(ops.where(is_matched > 0.0, iou,
                                                ops.zeros_like(iou))))
         matched_total += float(ops.sum(is_matched))
+        # ZERO extra forward passes: the SAME `pred_boxes`/`pred_logits` are
+        # scored a second time against the NON-prompted categories' ground
+        # truth. The cost is one extra `loss.matcher` call per batch. The
+        # matcher itself is UNTOUCHED -- the supplement is at the metric level.
+        if len(element) > 2:
+            other = distractor_targets(element[2], targets)
+            iou_sum, pairs = matched_box_iou(
+                pred_boxes, outputs["pred_logits"], other, loss)
+            distractor_sum += iou_sum
+            distractor_pairs += pairs
         head_boxes.append(np.asarray(pred_boxes))
         head_logits.append(
             np.asarray(ops.cast(outputs["pred_logits"], "float32")))
@@ -1060,6 +1166,15 @@ def evaluate_sam3(
     metrics["presence_accuracy"] = (presence_correct / presence_total
                                     if presence_total > 0.0 else nan)
     metrics["pred_mask_unique_values"] = float(unique_minimum or 0)
+    # `nan`, never 0.0, when the split carried no distractor ground truth: a
+    # 0.0 here is a REAL and damning reading (a category-blind head), so
+    # spelling "not measured" as 0.0 would be a lie in the worst direction.
+    # The two arms have DIFFERENT denominators by construction --
+    # `zero_instance_rate` gives ~25% of images an absent prompted category --
+    # so each is pooled over the split and divided separately.
+    metrics["box_distractor_gap"] = (
+        metrics["box_iou"] - distractor_sum / distractor_pairs
+        if distractor_pairs > 0.0 and matched_total > 0.0 else nan)
     metrics["num_matched_pairs"] = matched_total / batches
     boxes = np.concatenate(head_boxes)
     logits = np.concatenate(head_logits)
@@ -1205,8 +1320,16 @@ def train_sam3(config: Sam3TrainingConfig
 
     model = create_training_model(config)
     train_dataset, val_dataset = create_datasets(config, model)
+    # A SECOND val object over the SAME seed and geometry, carrying the
+    # all-category export. `fit` gets the 2-tuple one (its element shape is a
+    # contract); everything that MEASURES gets this one, so `box_distractor_gap`
+    # is populated rather than `nan`. Not free of I/O -- it regenerates the
+    # split -- but free of MODEL cost: the scorer runs one forward pass either
+    # way, and this replaces the dataset the scorer was already iterating.
+    _, scoring_dataset = create_datasets(config, model,
+                                         include_all_instances=True)
 
-    callbacks = build_callbacks(config, output_dir, val_dataset)
+    callbacks = build_callbacks(config, output_dir, scoring_dataset)
 
     start = time.time()
     history = model.fit(
@@ -1218,7 +1341,7 @@ def train_sam3(config: Sam3TrainingConfig
     )
     logger.info("Training finished in %.2f s", time.time() - start)
 
-    metrics = evaluate_sam3(model, val_dataset)
+    metrics = evaluate_sam3(model, scoring_dataset)
     # BOTH numbers, always. `restore_best_weights=True` means `metrics` is the
     # SELECTED epoch, not the last one; reporting only one of the two is how a
     # selection rule silently picks the worse checkpoint (decisions.md D-041).

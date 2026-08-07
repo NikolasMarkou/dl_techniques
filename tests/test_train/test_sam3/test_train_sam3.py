@@ -45,6 +45,7 @@ from tests.test_train.test_sam3.parser_help_guard import (
     assert_no_bare_percent_help,
 )
 from train.common.args import explicitly_set_flags
+import train.sam3.train_sam3 as train_sam3_module
 from train.sam3.train_sam3 import (
     CLI_TO_CONFIG,
     DERIVED_FIELDS,
@@ -1560,3 +1561,200 @@ class TestEvaluateSam3PacksTheRowsTheLossSlices:
             model.build(None)
             counts.add(model.compute_output_shape()[1])
         assert len(counts) >= 3
+
+
+class TestTheDistractorGapReachesTheCsvSchema:
+    """SC-N: ``box_distractor_gap`` is a CSV column, from epoch 0, or it is not
+    a per-epoch diagnostic at all.
+
+    ``box_iou`` cannot distinguish "learned to find the NAMED shape" from
+    "learned to box every bright blob" -- a zero-parameter connected-components
+    detector BEATS every trained arm on it. ``box_distractor_gap`` scores the
+    SAME predicted boxes against the pooled ground truth of every OTHER
+    category in the same image; a GT oracle reads 1.0 and every measured
+    category-blind arm reads inside |gap| <= 0.0358 with a seed-dependent sign.
+
+    Three things have to hold together for that to survive into
+    ``training_log.csv``, and each is a separate failure this class pins:
+
+    * the key is in :data:`EVAL_METRIC_KEYS` (``CSVLogger`` freezes its column
+      set on epoch 0, so a key that first appears later never reaches the file);
+    * the callback WRITES it on every epoch, ``nan`` included;
+    * the dataset the callback holds actually carries the all-category ground
+      truth -- otherwise the column exists and is ``nan`` forever, which reads
+      exactly like a healthy run of a broken instrument.
+    """
+
+    def test_the_key_is_in_the_frozen_schema(self) -> None:
+        assert "box_distractor_gap" in EVAL_METRIC_KEYS
+
+    def test_the_training_split_is_never_given_the_extra_slot(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """I-3: the opt-in reaches the VAL builder and nothing else.
+
+        The training record's 7-key signature is what every published
+        ``box_iou`` was produced under. A 3-tuple training element would also
+        break ``model.fit``, but silently changing what the training targets
+        MEAN is the worse of the two failures and the one this pins.
+        """
+        train_dataset, val_dataset = create_datasets(
+            tiny_config, tiny_model, include_all_instances=True)
+        assert len(train_dataset.element_spec) == 2
+        assert len(val_dataset.element_spec) == 3
+
+    def test_the_extra_slot_does_not_perturb_the_inputs_or_the_targets(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """RNG neutrality, executed rather than argued (I-1).
+
+        The whole reason the gap can be measured on a real run without
+        invalidating that run's ``box_iou`` is that the export adds no RNG draw
+        and happens strictly after every draw for a record. That is a claim
+        about the generator, so it is checked BYTE-WISE here on the object the
+        trainer actually builds -- not inferred from the diff.
+        """
+        _, plain = create_datasets(tiny_config, tiny_model)
+        _, extended = create_datasets(tiny_config, tiny_model,
+                                      include_all_instances=True)
+        pairs = list(zip(plain, extended))
+        assert pairs, "the fixture produced no batches; this test is vacuous"
+        for (plain_inputs, plain_target), extended_element in pairs:
+            assert len(extended_element) == 3
+            for key, value in plain_inputs.items():
+                assert np.array_equal(
+                    np.asarray(value),
+                    np.asarray(extended_element[0][key])), (
+                    f"input '{key}' moved when include_all_instances was "
+                    f"switched on: every published box_iou loses comparability")
+            assert np.array_equal(np.asarray(plain_target),
+                                  np.asarray(extended_element[1]))
+
+    def test_it_is_nan_and_not_zero_without_the_all_category_ground_truth(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """A 0.0 gap is a REAL and damning reading -- a category-blind head.
+
+        Spelling "not measured" as 0.0 would therefore be a lie in the worst
+        possible direction: it is the value a broken model produces.
+        """
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        metrics = evaluate_sam3(tiny_model, val_dataset)
+        assert set(metrics) == set(EVAL_METRIC_KEYS)
+        assert math.isnan(metrics["box_distractor_gap"])
+
+    def test_it_is_a_finite_number_with_the_all_category_ground_truth(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """Non-vacuity for the test above: the nan is the ABSENCE of data."""
+        _, val_dataset = create_datasets(tiny_config, tiny_model,
+                                         include_all_instances=True)
+        metrics = evaluate_sam3(tiny_model, val_dataset)
+        assert set(metrics) == set(EVAL_METRIC_KEYS)
+        gap = metrics["box_distractor_gap"]
+        assert math.isfinite(gap), "the extra slot did not reach the metric"
+        assert -1.0 <= gap <= 1.0
+
+    def test_the_two_arms_receive_different_targets_red_proven(
+            self, monkeypatch, tiny_config: Sam3TrainingConfig,
+            tiny_model: Any) -> None:
+        """The injection that makes this instrument's only real lie visible.
+
+        If the distractor arm were handed the PROMPTED targets -- the exact
+        shape of a wiring slip, since both dicts have identical keys and
+        shapes -- the gap would be exactly 0.0 for every checkpoint forever,
+        and 0.0 is a plausible-looking reading. Injecting that here must move
+        the number to exactly 0.0; the assertion below is the one that fires.
+        """
+        _, val_dataset = create_datasets(tiny_config, tiny_model,
+                                         include_all_instances=True)
+        honest = evaluate_sam3(tiny_model, val_dataset)["box_distractor_gap"]
+
+        monkeypatch.setattr(
+            train_sam3_module, "distractor_targets",
+            lambda all_instances, prompted: prompted)
+        injected = evaluate_sam3(tiny_model, val_dataset)[
+            "box_distractor_gap"]
+        assert injected == pytest.approx(0.0, abs=1e-9), (
+            "feeding the prompted targets to BOTH arms did not collapse the "
+            "gap to 0.0, so this metric is not scoring two different target "
+            "sets and every gap number it has ever produced is unfounded")
+        assert honest != pytest.approx(injected, abs=1e-9), (
+            "the honest reading is already 0.0, so the injection above proves "
+            "nothing about this fixture")
+
+    def test_it_agrees_with_the_baselines_cli_s_own_diagnostic(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """One reduction, two callers -- checked, not asserted in a docstring.
+
+        ``train.sam3.baselines.distractor_gap`` is the offline CLI arm and
+        this is the per-epoch arm. They are two call sites of ONE
+        ``matched_box_iou`` and ONE ``distractor_targets``; if they ever
+        disagree, one of them has grown its own reduction and the published
+        table and the training log stop describing the same quantity.
+        """
+        from train.sam3.baselines import distractor_gap
+
+        _, val_dataset = create_datasets(tiny_config, tiny_model,
+                                         include_all_instances=True)
+        offline = distractor_gap(tiny_model, tiny_model.loss, val_dataset)
+        online = evaluate_sam3(tiny_model, val_dataset)
+        assert online["box_iou"] == pytest.approx(
+            offline["box_iou_prompted"], abs=1e-6)
+        assert online["box_distractor_gap"] == pytest.approx(
+            offline["gap"], abs=1e-6)
+
+    def test_the_callback_writes_the_column_on_epoch_zero(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """The CSVLogger contract, on the key that is new."""
+        from train.sam3.train_sam3 import _Sam3EvalCallback
+
+        _, val_dataset = create_datasets(tiny_config, tiny_model,
+                                         include_all_instances=True)
+        callback = _Sam3EvalCallback(val_dataset)
+        callback.set_model(tiny_model)
+        logs: Dict[str, Any] = {"loss": 1.0}
+        callback.on_epoch_end(0, logs)
+        assert "val_box_distractor_gap" in logs
+        assert math.isfinite(logs["val_box_distractor_gap"]), (
+            "the callback wrote the column but as nan: the dataset it holds "
+            "is the 2-tuple one, so the column would be nan on every row")
+
+    def test_the_real_trainer_hands_the_callback_the_scoring_split(
+            self, monkeypatch, tiny_config: Sam3TrainingConfig,
+            tiny_model: Any) -> None:
+        """The wiring `train_sam3` itself does -- the silent-no-op guard.
+
+        Everything above passes with a callback constructed BY THE TEST. The
+        defect this pins is the production path building the 2-tuple val split
+        and handing THAT to the callback, which yields a column of ``nan`` on
+        every row of every run while every test here stays green.
+        """
+        from train.sam3.train_sam3 import _Sam3EvalCallback
+
+        seen: List[Any] = []
+        real = train_sam3_module.build_callbacks
+
+        def _record(config: Any, output_dir: Any, dataset: Any) -> Any:
+            seen.append(dataset)
+            return real(config, output_dir, dataset)
+
+        monkeypatch.setattr(train_sam3_module, "build_callbacks", _record)
+        monkeypatch.setattr(
+            train_sam3_module.Sam3TrainingModel, "fit",
+            lambda self, *args, **kwargs: _StubHistory())
+        monkeypatch.setattr(train_sam3_module, "create_training_model",
+                            lambda config: tiny_model)
+        train_sam3_module.train_sam3(tiny_config)
+
+        assert len(seen) == 1
+        assert len(seen[0].element_spec) == 3, (
+            "train_sam3 handed build_callbacks the 2-tuple validation split, "
+            "so val_box_distractor_gap would be nan on every row")
+        callback = _Sam3EvalCallback(seen[0])
+        callback.set_model(tiny_model)
+        logs: Dict[str, Any] = {}
+        callback.on_epoch_end(0, logs)
+        assert math.isfinite(logs["val_box_distractor_gap"])
+
+
+class _StubHistory:
+    """The two attributes ``train_sam3`` reads off ``fit``'s return value."""
+
+    history: Dict[str, List[float]] = {}

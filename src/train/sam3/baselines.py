@@ -130,8 +130,10 @@ from train.sam3.data import (
     RECORD_ALL_VALID,
     RECORD_PROMPT_ID,
     build_sam3_dataset,
+    distractor_targets,
 )
-from train.sam3.train_sam3 import Sam3TrainingConfig, create_training_model
+from train.sam3.train_sam3 import (
+    Sam3TrainingConfig, create_training_model, matched_box_iou)
 
 #: The offset between a run's TRAIN seed and its VAL seed. Mirrors
 #: ``create_datasets`` (`train_sam3.py`), which is what makes the split scored
@@ -193,15 +195,6 @@ PROMPT_SWAP_SHIFTS: Tuple[int, ...] = (1, 2, 3)
 #: ``SYSTEM.md:220`` family, it never enters :func:`evaluate_family`'s results,
 #: and it is reported in its own CLI section.
 DISTRACTOR_GAP_ARM: str = "DISTRACTOR-GAP (same boxes, other categories' GT)"
-
-#: Absolute tolerance of the alignment assertion in :func:`_distractor_targets`.
-#: Both box sets come from ``data.py``'s single ``_normalized_box`` helper and
-#: are float32 all the way through ``pack_targets``/``unpack_targets`` (which
-#: slice and concatenate, never arithmetic), so agreement is expected to be
-#: EXACT; this is a float-safety margin, not a fuzzy match. It is ~1e-3 of the
-#: smallest box side the generator draws, so it cannot make two different
-#: instances look like the same one.
-ALIGNMENT_TOLERANCE: float = 1e-5
 
 
 def kmeans_arm(k: int) -> str:
@@ -613,46 +606,6 @@ def fit_kmeans_prior(train_boxes: np.ndarray, k: int, seed: int,
     return np.asarray(fit.cluster_centers_, dtype=np.float32)
 
 
-def _matched_iou(pred_boxes: Any, pred_logits: Any, targets: Dict[str, Any],
-                 loss: Any) -> Tuple[float, float]:
-    """``(summed IoU over matched pairs, matched pair count)`` for ONE batch.
-
-    Interface contract: THE single home for ``evaluate_sam3``'s box-IoU
-    expression in this module. Both the baseline scorer (:func:`_score`, whose
-    boxes come from a prior) and the model-scoring diagnostic
-    (:func:`prompt_swap_retention`, whose boxes come from a checkpoint) call it,
-    so a prior's number and a model's number cannot drift apart by one of them
-    quietly growing a different reduction. The caller supplies the class cost:
-    the priors pass zeros (they make no class claim), the model passes its own
-    ``pred_logits``.
-
-    Args:
-        pred_boxes: ``(B, Q, 4)`` cxcywh float32 tensor.
-        pred_logits: ``(B, Q, C)`` float32 tensor -- the matcher's class cost.
-        targets: :func:`unpack_targets` output for the same batch.
-        loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
-
-    Returns:
-        ``(iou_sum, matched_total)``. Divide the first by the second, pooled
-        over the split, to get ``box_iou``.
-    """
-    assignment, is_matched = loss.matcher(
-        pred_logits, pred_boxes,
-        targets["target_boxes"], targets["target_valid"])
-    gathered = ops.take_along_axis(
-        targets["target_boxes"], assignment[:, :, None], axis=1)
-    # `iou_and_generalized_iou` reads **xyxy**; every box here is normalized
-    # cxcywh. Feeding it cxcywh does not raise -- it silently scores two
-    # rectangles that are not the boxes.
-    iou, _giou = iou_and_generalized_iou(
-        box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gathered))
-    # `ops.where`, NOT `iou * is_matched`: the multiplicative spelling
-    # propagates `nan * 0.0 = nan` from a both-degenerate padded pair.
-    return (float(ops.sum(
-        ops.where(is_matched > 0.0, iou, ops.zeros_like(iou)))),
-        float(ops.sum(is_matched)))
-
-
 def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
            dataset: Any) -> Tuple[float, float]:
     """``(box_iou, matched_total)`` -- :func:`score_prior` plus the denominator.
@@ -707,7 +660,7 @@ def _score(prior: Union[np.ndarray, Predictor], model: Any, loss: Any,
         # constant. `evaluate_sam3` feeds the model's real logits here.
         pred_logits = ops.zeros(
             (pred_boxes.shape[0], num_queries, 1), dtype="float32")
-        total, pairs = _matched_iou(pred_boxes, pred_logits, targets, loss)
+        total, pairs = matched_box_iou(pred_boxes, pred_logits, targets, loss)
         box_iou_sum += total
         matched_total += pairs
     return (box_iou_sum / max(matched_total, 1.0), matched_total)
@@ -775,7 +728,8 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
     Interface contract: this is the one MODEL-scoring arm in a module of
     non-model baselines, and it lives here on purpose -- it is a QUALIFIER on
     the same number the family bars, so it must be quotable in the same table
-    and computed through the same :func:`_matched_iou` reduction. It runs the
+    and computed through the same
+    :func:`~train.sam3.train_sam3.matched_box_iou` reduction. It runs the
     model at ``training=False``, never touches the targets, and returns a flat
     ``Dict[str, float]``.
 
@@ -822,7 +776,7 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
         targets = unpack_targets(ops.cast(y_true, "float32"),
                                  model.include_masks)
         true_out = model.sam3(inputs, training=False)
-        total, pairs = _matched_iou(
+        total, pairs = matched_box_iou(
             ops.cast(true_out["pred_boxes"], "float32"),
             ops.cast(true_out["pred_logits"], "float32"), targets, loss)
         sums["TRUE"][0] += total
@@ -834,7 +788,7 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
         for shift in shifts:
             swapped = swap_batch_prompts(inputs, shift)
             out = model.sam3(swapped, training=False)
-            total, pairs = _matched_iou(
+            total, pairs = matched_box_iou(
                 ops.cast(out["pred_boxes"], "float32"),
                 ops.cast(out["pred_logits"], "float32"), targets, loss)
             sums[shift][0] += total
@@ -870,87 +824,16 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
     return result
 
 
-def _distractor_targets(all_instances: Dict[str, Any],
-                        prompted: Dict[str, Any]) -> Dict[str, Any]:
-    """The NON-prompted categories' ground truth, in ``_matched_iou``'s shape.
-
-    Interface contract: returns a dict carrying exactly ``target_boxes``
-    ``(B, C, 4)`` and ``target_valid`` ``(B, C)`` -- the two keys
-    :func:`_matched_iou` reads -- so the distractor set goes through the SAME
-    reduction as the prompted one with no second IoU implementation and no
-    change to the matcher. The boxes are every drawn instance's; only
-    ``target_valid`` differs, selecting the rows whose category is NOT the
-    prompted one. An image with a single drawn category yields an all-zero
-    valid row, which the matcher already handles (the generator's
-    ``zero_instance_rate`` produces empty prompted rows on ~25% of images).
-
-    The alignment assertion runs FIRST, before any number is derived. The
-    all-instance arrays and the packed targets arrive in the same tuple from
-    the same record, so they describe the same image by construction -- but
-    "by construction" is what this function refuses to take on trust, since a
-    silently misaligned pair would make every gap number garbage while looking
-    entirely plausible. Every VALID prompted target box must be present among
-    the all-instance rows carrying the prompted category id.
-
-    Args:
-        all_instances: The dataset element's third slot -- the eval-only
-            all-category export of ``train.sam3.data``.
-        prompted: :func:`unpack_targets` output for the SAME batch.
-
-    Returns:
-        A targets dict for the distractor arm.
-
-    Raises:
-        ValueError: If any valid prompted target box has no counterpart in the
-            all-instance rows of the prompted category -- i.e. the two target
-            sets do not describe the same image.
-    """
-    boxes = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_BOXES]),
-                       dtype=np.float32)
-    valid = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_VALID]),
-                       dtype=np.float32)
-    ids = np.asarray(
-        ops.convert_to_numpy(all_instances[RECORD_ALL_CATEGORY_IDS])
-    ).astype(np.int32)
-    prompt_id = np.asarray(
-        ops.convert_to_numpy(all_instances[RECORD_PROMPT_ID])).astype(np.int32)
-    gt_boxes = np.asarray(ops.convert_to_numpy(
-        ops.cast(prompted["target_boxes"], "float32")), dtype=np.float32)
-    gt_valid = np.asarray(ops.convert_to_numpy(
-        ops.cast(prompted["target_valid"], "float32")), dtype=np.float32)
-
-    is_prompted_row = (valid > 0.0) & (ids == prompt_id[:, None])
-    for index in range(boxes.shape[0]):
-        pool = boxes[index][is_prompted_row[index]]
-        for box in gt_boxes[index][gt_valid[index] > 0.0]:
-            hit = pool.shape[0] and bool(np.any(np.all(
-                np.abs(pool - box) <= ALIGNMENT_TOLERANCE, axis=-1)))
-            if not hit:
-                raise ValueError(
-                    f"_distractor_targets: image {index} of this batch has a "
-                    f"valid prompted target box {box.tolist()} with no "
-                    f"counterpart among the {pool.shape[0]} all-instance "
-                    f"row(s) of its prompted category "
-                    f"(id {int(prompt_id[index])}). The two target sets do "
-                    "not describe the same image, so every distractor number "
-                    "derived from them would be garbage.")
-
-    return {
-        "target_boxes": ops.convert_to_tensor(boxes),
-        "target_valid": ops.convert_to_tensor(
-            ((valid > 0.0) & (ids != prompt_id[:, None])).astype(np.float32)),
-    }
-
-
 def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
     """How much better a checkpoint's boxes fit the PROMPTED category's GT.
 
     Interface contract: the second MODEL-scoring arm in a module of non-model
     baselines, built exactly like :func:`prompt_swap_retention` -- one forward
     pass at ``training=False``, a flat ``Dict[str, float]``, scored through
-    :func:`_matched_iou` so it cannot drift from any published ``box_iou``. It
-    takes ONE dataset and reads BOTH target sets out of it (the third tuple
-    slot), rather than zipping two datasets: two datasets would have to be
+    :func:`~train.sam3.train_sam3.matched_box_iou` so it cannot drift from any
+    published ``box_iou``. It takes ONE dataset and reads BOTH target sets out
+    of it (the third tuple slot), rather than zipping two datasets: two
+    datasets would have to be
     proven aligned batch-for-batch, and this way there is nothing to align.
 
     Reading the result. ``box_iou`` alone cannot tell "the model learned to
@@ -988,7 +871,7 @@ def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
     Raises:
         ValueError: If the dataset does not yield 3-tuples (it was built
             without ``include_all_instances``), or if the alignment assertion
-            of :func:`_distractor_targets` fails.
+            of :func:`~train.sam3.data.distractor_targets` fails.
     """
     sums: Dict[str, List[float]] = {"prompted": [0.0, 0.0],
                                     "distractor": [0.0, 0.0]}
@@ -1006,7 +889,7 @@ def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
                                   model.include_masks)
         # The alignment assertion runs BEFORE the forward pass, so a
         # misaligned batch cannot even produce a number to quote.
-        distractor = _distractor_targets(all_instances, prompted)
+        distractor = distractor_targets(all_instances, prompted)
         with_distractor += float(np.sum(np.asarray(ops.convert_to_numpy(
             distractor["target_valid"])).sum(axis=-1) > 0.0))
 
@@ -1015,7 +898,8 @@ def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
         pred_logits = ops.cast(out["pred_logits"], "float32")
         for name, targets in (("prompted", prompted),
                               ("distractor", distractor)):
-            total, pairs = _matched_iou(pred_boxes, pred_logits, targets, loss)
+            total, pairs = matched_box_iou(pred_boxes, pred_logits, targets,
+                                           loss)
             sums[name][0] += total
             sums[name][1] += pairs
 

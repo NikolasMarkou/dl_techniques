@@ -42,7 +42,7 @@ Three things are being protected, in descending order of how quietly they fail.
    ``box_iou`` -- reads a gap of ~0. ``TestTheDistractorGapIsRedProven`` fires
    both ends with dead-component injections, one of which (feeding the SAME
    target dict twice) is the sharpest guard in this file: it is the only check
-   that proves the two ``_matched_iou`` calls really do receive DIFFERENT
+   that proves the two ``matched_box_iou`` calls really do receive DIFFERENT
    target sets.
 
 Device: CPU-cheap. ``TestTheFamilyEndToEnd`` and the oracle guards build the
@@ -1212,13 +1212,13 @@ class TestPromptSwapRetentionOnARealSplit:
             tiny_context: Tuple[Any, Any], tiny_val_dataset: Any) -> None:
         """Make ONE swapped arm match fewer pairs and the ratio must REFUSE.
 
-        The injection wraps `_matched_iou` and drops one matched pair from the
-        first wrong-prompt call only -- exactly what a future change to the
+        The injection wraps `matched_box_iou` and drops one matched pair from
+        the first wrong-prompt call only -- exactly what a future change to the
         class cost could do silently, since `retained` would keep returning a
         finite, plausible number.
         """
         model, loss = tiny_context
-        real = baselines._matched_iou
+        real = baselines.matched_box_iou
         seen: List[int] = []
 
         def _one_arm_short(boxes, logits, targets, loss_):
@@ -1226,7 +1226,7 @@ class TestPromptSwapRetentionOnARealSplit:
             seen.append(1)
             return (total, pairs - 1.0) if len(seen) == 2 else (total, pairs)
 
-        monkeypatch.setattr(baselines, "_matched_iou", _one_arm_short)
+        monkeypatch.setattr(baselines, "matched_box_iou", _one_arm_short)
         with pytest.raises(ValueError, match="DIFFERENT numbers of"):
             prompt_swap_retention(model, loss, tiny_val_dataset)
 
@@ -1246,7 +1246,7 @@ class TestPromptSwapRetentionOnARealSplit:
     def test_the_true_arm_reproduces_score_prior_s_reduction(
             self, tiny_context: Tuple[Any, Any], tiny_val_dataset: Any,
             swap: Dict[str, float]) -> None:
-        """`_matched_iou` has ONE home: the oracle scored through the prior
+        """`matched_box_iou` has ONE home: the oracle scored through the prior
         path still reads exactly 1.0, so the shared reduction did not drift."""
         model, loss = tiny_context
         _assert_oracle_reads_exactly_one(
@@ -1420,7 +1420,7 @@ class TestTheDistractorTargetsAreTheSameImageSTargets:
         model, _loss = tiny_context
         all_instances, prompted = self._one_batch(tiny_all_instance_dataset,
                                                   model)
-        targets = baselines._distractor_targets(all_instances, prompted)
+        targets = baselines.distractor_targets(all_instances, prompted)
         assert set(targets) == {"target_boxes", "target_valid"}
 
     def test_a_displaced_box_fires_the_alignment_assertion(
@@ -1430,7 +1430,7 @@ class TestTheDistractorTargetsAreTheSameImageSTargets:
         from and the assertion must REFUSE before any IoU is computed.
 
         The firing assertion is the ``ValueError`` in
-        ``_distractor_targets``: 'has a valid prompted target box ... with no
+        ``distractor_targets``: 'has a valid prompted target box ... with no
         counterpart among the ... all-instance row(s) of its prompted
         category'.
         """
@@ -1442,7 +1442,7 @@ class TestTheDistractorTargetsAreTheSameImageSTargets:
         displaced[..., 0] += 0.25
         all_instances[baselines.RECORD_ALL_BOXES] = displaced
         with pytest.raises(ValueError, match="no counterpart"):
-            baselines._distractor_targets(all_instances, prompted)
+            baselines.distractor_targets(all_instances, prompted)
 
     def test_the_distractor_rows_exclude_the_prompted_category(
             self, tiny_context: Tuple[Any, Any],
@@ -1452,7 +1452,7 @@ class TestTheDistractorTargetsAreTheSameImageSTargets:
         model, _loss = tiny_context
         all_instances, prompted = self._one_batch(tiny_all_instance_dataset,
                                                   model)
-        targets = baselines._distractor_targets(all_instances, prompted)
+        targets = baselines.distractor_targets(all_instances, prompted)
         ids = np.asarray(baselines.ops.convert_to_numpy(
             all_instances[baselines.RECORD_ALL_CATEGORY_IDS]))
         prompt_id = np.asarray(baselines.ops.convert_to_numpy(
@@ -1591,7 +1591,7 @@ class TestTheZeroInstanceImagesAreScoredNotRefused:
         for _inputs, y_true, all_instances in real_all_instance_dataset:
             prompted = baselines.unpack_targets(
                 baselines.ops.cast(y_true, "float32"), model.include_masks)
-            targets = baselines._distractor_targets(all_instances, prompted)
+            targets = baselines.distractor_targets(all_instances, prompted)
             prompted_rows = np.asarray(baselines.ops.convert_to_numpy(
                 baselines.ops.cast(prompted["target_valid"], "float32"))
             ).sum(axis=-1)
@@ -1624,10 +1624,10 @@ class TestTheDistractorGapIsRedProven:
       distractor 0.2075, gap 0.2732. This is the same injection
       ``TestTheOracleGuardIsRedProven`` uses on ``score_prior``, applied to the
       new reduction, and it fires the PROMPTED assertion.
-    * **M-B -- the SAME target dict twice.** ``_distractor_targets`` is
+    * **M-B -- the SAME target dict twice.** ``distractor_targets`` is
       replaced by one that hands back the PROMPTED targets. This is the
       sharpest guard in the file: it is the only check that can tell whether
-      the two ``_matched_iou`` calls really receive DIFFERENT target sets.
+      the two ``matched_box_iou`` calls really receive DIFFERENT target sets.
       Under it the prompted assertion stays GREEN (1.0, still correct) and the
       DISTRACTOR one fires at 1.0 instead of 0.0, driving the gap to exactly
       0.0 -- which is precisely what a checkpoint with no category selectivity
@@ -1684,7 +1684,7 @@ class TestTheDistractorGapIsRedProven:
             real_all_instance_dataset: Any,
             monkeypatch: pytest.MonkeyPatch) -> None:
         model, loss = real_context
-        monkeypatch.setattr(baselines, "_distractor_targets",
+        monkeypatch.setattr(baselines, "distractor_targets",
                             self._the_prompted_targets_again)
         result = distractor_gap(
             _PredictorAsCheckpoint(model, gt_oracle_predictor,
@@ -1709,7 +1709,7 @@ class TestTheDistractorGapIsRedProven:
         construction on this split and become equal the moment one target set
         is scored twice."""
         model, loss = real_context
-        monkeypatch.setattr(baselines, "_distractor_targets",
+        monkeypatch.setattr(baselines, "distractor_targets",
                             self._the_prompted_targets_again)
         result = distractor_gap(
             _PredictorAsCheckpoint(model, gt_oracle_predictor,
