@@ -50,6 +50,7 @@ from train.sam3.train_sam3 import (
     CLI_TO_CONFIG,
     DERIVED_FIELDS,
     EVAL_METRIC_KEYS,
+    GAP_SELECTION_METRIC,
     LR_SCHEDULES,
     NON_CONFIG_DESTS,
     SELECTION_METRIC,
@@ -1407,10 +1408,16 @@ class TestEvaluation:
 
         _, val_dataset = create_datasets(tiny_config, tiny_model)
         callbacks = build_callbacks(tiny_config, tmp_path, val_dataset)
+        # Filtered by MONITOR, not by type: an additive observer checkpoint on
+        # a different key (`GAP_SELECTION_METRIC`, D-003) shares both types and
+        # is deliberately NOT this test's subject. G4
+        # (:class:`TestTheAdditiveGapCheckpoint`) pins that one.
         selectors = [callback for callback in callbacks
                      if isinstance(callback, (keras.callbacks.EarlyStopping,
-                                              keras.callbacks.ModelCheckpoint))]
-        assert len(selectors) == 2, "the two selecting callbacks are not wired"
+                                              keras.callbacks.ModelCheckpoint))
+                     and callback.monitor == SELECTION_METRIC]
+        assert len(selectors) == 2, (
+            f"the two callbacks selecting on {SELECTION_METRIC} are not wired")
         for callback in selectors:
             assert callback.monitor == SELECTION_METRIC
             # Assert on `monitor_op` -- the comparison that actually EXECUTES
@@ -1480,6 +1487,241 @@ class TestEvaluation:
             assert math.isfinite(metrics[term]), f"{term} is not finite"
         # Masks are off in this fixture, so both mask terms must be exactly 0.
         assert metrics["loss_mask"] == 0.0 and metrics["loss_dice"] == 0.0
+
+
+class TestModelCheckpointAgainstANan:
+    """G5: what ``ModelCheckpoint(mode="max", save_best_only=True)`` DOES when
+    the monitored key is ``nan``.
+
+    This is a measurement, not a restatement of a docstring. ``box_distractor_gap``
+    is ``nan`` by design whenever the scored dataset lacks the all-category
+    export (D-028), so an additive checkpoint monitoring
+    ``val_box_distractor_gap`` is only sound if a ``nan`` epoch is never
+    treated as an improvement. MEASURED at keras 3.8.0 by
+    ``{plan-dir}/probes/nan_checkpoint_probe.py`` and pinned here: initial
+    ``best`` is ``-inf``, ``nan`` never wins (no save, ``best`` unmoved), no
+    exception is raised, and a later real value still saves normally.
+
+    "Did it save" is measured by DELETING the file after each observation, so
+    existence is an unambiguous per-epoch signal rather than an mtime guess.
+
+    The monitored key is spelled literally here on purpose: this guard was
+    written and run BEFORE ``GAP_SELECTION_METRIC`` existed, and G4
+    (:class:`TestTheAdditiveGapCheckpoint`) is what pins the constant to this
+    same string.
+    """
+
+    #: ``(epoch, monitored value, must the file exist afterwards)``.
+    #: Epochs 0 and 3 are the ``nan`` arms -- 3 specifically checks a ``nan``
+    #: arriving AFTER a real best, which is the sequence a real run produces if
+    #: the scoring dataset ever degrades. Epoch 2 is the DIRECTION arm (a worse
+    #: value under ``max``) and epoch 4 proves the callback is still live after
+    #: two ``nan``s, so the ``nan`` assertions are not passing by deadness.
+    SEQUENCE: Tuple[Tuple[int, float, bool], ...] = (
+        (0, float("nan"), False),
+        (1, 0.5, True),
+        (2, 0.1, False),
+        (3, float("nan"), False),
+        (4, 0.9, True),
+    )
+
+    @staticmethod
+    def _tiny_saveable_model() -> keras.Model:
+        """A real, saveable model -- the behaviour under test is the callback's."""
+        model = keras.Sequential([keras.Input(shape=(3,)),
+                                  keras.layers.Dense(2)])
+        model.compile(optimizer="sgd", loss="mse")
+        return model
+
+    def test_mode_max_starts_from_negative_infinity(self, tmp_path) -> None:
+        """Kept SEPARATE from the sequence test on purpose.
+
+        Folding this into the sequence test made a ``mode`` mutation fire HERE
+        -- at a setup assertion -- instead of at the direction assertion that
+        is the sequence test's actual point, which is the "RED for the wrong
+        reason" failure this plan's pre-mortem names.
+        """
+        checkpoint = keras.callbacks.ModelCheckpoint(
+            filepath=str(tmp_path / "best_gap_model.keras"),
+            monitor="val_box_distractor_gap", mode="max",
+            save_best_only=True, verbose=0)
+        checkpoint.set_model(self._tiny_saveable_model())
+        checkpoint.on_train_begin()
+        assert checkpoint.best == -np.inf, (
+            "mode='max' did not start from -inf; every other assertion in this "
+            "class reads a different callback than the one shipped")
+
+    def test_a_nan_never_wins_and_a_real_value_still_saves(
+            self, tmp_path) -> None:
+        monitor = "val_box_distractor_gap"
+        path = tmp_path / "best_gap_model.keras"
+        checkpoint = keras.callbacks.ModelCheckpoint(
+            filepath=str(path), monitor=monitor, mode="max",
+            save_best_only=True, verbose=0)
+        checkpoint.set_model(self._tiny_saveable_model())
+        checkpoint.on_train_begin()
+
+        for epoch, value, must_exist in self.SEQUENCE:
+            checkpoint.on_epoch_end(epoch, {monitor: value})
+            saved = path.exists()
+            if math.isnan(value):
+                assert not saved, (
+                    f"epoch {epoch}: a nan {monitor} WROTE a checkpoint -- the "
+                    f"additive best_gap_model.keras would select an epoch at "
+                    f"which the metric was not measured at all")
+            else:
+                assert saved is must_exist, (
+                    f"epoch {epoch}: value {value} saved={saved}, expected "
+                    f"{must_exist}; mode='max' is not selecting the LARGER gap")
+            if saved:
+                path.unlink()
+
+        assert checkpoint.best == 0.9, (
+            "the surviving best is not the largest real value in the sequence")
+
+    def test_a_nan_does_not_raise_and_does_not_move_the_best(
+            self, tmp_path) -> None:
+        """The other two ways Keras could have behaved, pinned as NOT happening.
+
+        A raise would kill a 60-epoch run at epoch 0; a ``best`` moved to
+        ``nan`` would poison every later comparison (``nan`` compares False
+        against everything, so NOTHING would ever save again).
+        """
+        monitor = "val_box_distractor_gap"
+        checkpoint = keras.callbacks.ModelCheckpoint(
+            filepath=str(tmp_path / "best_gap_model.keras"), monitor=monitor,
+            mode="max", save_best_only=True, verbose=0)
+        checkpoint.set_model(self._tiny_saveable_model())
+        checkpoint.on_train_begin()
+        checkpoint.on_epoch_end(0, {monitor: 0.5})
+        checkpoint.on_epoch_end(1, {monitor: float("nan")})
+        assert checkpoint.best == 0.5, (
+            "a nan moved `best`; every subsequent epoch's comparison is now "
+            "against nan and no checkpoint would ever be written again")
+
+
+class TestTheAdditiveGapCheckpoint:
+    """G4: the second checkpoint is an OBSERVER, and the first selection is
+    byte-for-byte the one every published number was produced under.
+
+    Two halves, and the second is the load-bearing one. The extra
+    ``ModelCheckpoint`` on ``GAP_SELECTION_METRIC`` lets ONE run answer "do the
+    two monitors disagree" (D-003). But the failure that would matter is the
+    silent one: the gap metric quietly becoming what ``EarlyStopping``
+    ``restore_best_weights=True`` restores, which changes the weights ``fit``
+    returns and therefore every downstream number, while every structural test
+    still reads green. So the unchanged ``EarlyStopping`` is pinned HERE, in
+    the same test as the addition.
+
+    The monitored key is also DERIVED, not retyped: a constant that does not
+    match what :class:`_Sam3EvalCallback` writes into ``logs`` yields a
+    callback that never fires and never saves -- a defect no structural
+    assertion about ``monitor``/``mode``/``filepath`` can see.
+    """
+
+    @staticmethod
+    def _built(config: Sam3TrainingConfig, output_dir, val_dataset) -> Any:
+        from train.sam3.train_sam3 import build_callbacks
+        return build_callbacks(config, output_dir, val_dataset)
+
+    def test_the_gap_metric_is_the_key_the_eval_callback_actually_writes(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any) -> None:
+        """The log-key spelling, derived from the writer rather than retyped.
+
+        ``_Sam3EvalCallback`` writes ``f"{prefix}{key}"`` for every key of
+        :data:`EVAL_METRIC_KEYS`; a ``GAP_SELECTION_METRIC`` off by a prefix or
+        a character is a callback that silently never fires.
+        """
+        from train.sam3.train_sam3 import _Sam3EvalCallback
+
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callback = _Sam3EvalCallback(val_dataset)
+        callback.set_model(tiny_model)
+        logs: Dict[str, Any] = {"loss": 1.0}
+        callback.on_epoch_end(0, logs)
+        assert GAP_SELECTION_METRIC in logs, (
+            f"{GAP_SELECTION_METRIC} is not a key the eval callback writes; "
+            f"the extra ModelCheckpoint would never fire on any epoch")
+        assert GAP_SELECTION_METRIC[4:] in EVAL_METRIC_KEYS
+        assert GAP_SELECTION_METRIC != SELECTION_METRIC, (
+            "the two checkpoints would select on the same key, so the whole "
+            "monitor comparison this callback exists for is vacuous")
+
+    def test_the_extra_checkpoint_is_wired_as_a_maximizing_observer(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any,
+            tmp_path) -> None:
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callbacks = self._built(tiny_config, tmp_path, val_dataset)
+
+        gap = [callback for callback in callbacks
+               if isinstance(callback, keras.callbacks.ModelCheckpoint)
+               and callback.monitor == GAP_SELECTION_METRIC]
+        assert len(gap) == 1, (
+            f"expected exactly one ModelCheckpoint on {GAP_SELECTION_METRIC}, "
+            f"found {len(gap)}")
+        checkpoint = gap[0]
+        assert checkpoint.save_best_only is True, (
+            "save_best_only is off, so best_gap_model.keras is the LAST epoch, "
+            "not the best-gap one")
+        assert checkpoint.filepath == str(tmp_path / "best_gap_model.keras"), (
+            f"the gap checkpoint writes {checkpoint.filepath}; it must be a "
+            f"SEPARATE file in the run dir, never best_model.keras")
+        # `mode` is not retained as an attribute -- assert on the comparison
+        # that actually EXECUTES, resolving it the way `on_train_begin` does.
+        if getattr(checkpoint, "monitor_op", None) is None:
+            checkpoint._set_monitor_op()
+        assert checkpoint.monitor_op(1.0, 0.0), (
+            f"the gap checkpoint's monitor_op prefers the SMALLER "
+            f"{GAP_SELECTION_METRIC}: it would save the LEAST "
+            f"category-selective epoch")
+
+    def test_the_gap_metric_never_becomes_what_early_stopping_restores(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any,
+            tmp_path) -> None:
+        """The unchanged half. ``restore_best_weights=True`` is the ONLY
+        callback state in this list that mutates the model, so it is the only
+        way an "additive" change could move a published number."""
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callbacks = self._built(tiny_config, tmp_path, val_dataset)
+
+        stoppers = [callback for callback in callbacks
+                    if isinstance(callback, keras.callbacks.EarlyStopping)]
+        assert len(stoppers) == 1, "more than one EarlyStopping is wired"
+        stopper = stoppers[0]
+        assert stopper.monitor == SELECTION_METRIC, (
+            f"EarlyStopping now monitors {stopper.monitor}; the weights fit() "
+            f"RESTORES are selected by a different metric than every "
+            f"published number was")
+        assert stopper.restore_best_weights is True
+        assert stopper.patience == tiny_config.early_stopping_patience
+        if getattr(stopper, "monitor_op", None) is None:
+            stopper._set_monitor_op()
+        assert stopper.monitor_op(1.0, 0.0), (
+            f"EarlyStopping's monitor_op prefers the SMALLER "
+            f"{SELECTION_METRIC}")
+
+        best = [callback for callback in callbacks
+                if isinstance(callback, keras.callbacks.ModelCheckpoint)
+                and callback.filepath.endswith("best_model.keras")]
+        assert len(best) == 1 and best[0].monitor == SELECTION_METRIC, (
+            "best_model.keras was repointed at another metric")
+
+    def test_the_eval_callback_still_runs_before_the_new_checkpoint(
+            self, tiny_config: Sam3TrainingConfig, tiny_model: Any,
+            tmp_path) -> None:
+        """The gap checkpoint reads the same ``logs`` dict the eval callback
+        fills, so appending it anywhere ahead of index 0 would monitor a key
+        that does not exist yet -- and Keras only WARNS about that."""
+        from train.sam3.train_sam3 import _Sam3EvalCallback
+
+        _, val_dataset = create_datasets(tiny_config, tiny_model)
+        callbacks = self._built(tiny_config, tmp_path, val_dataset)
+        positions = [index for index, callback in enumerate(callbacks)
+                     if isinstance(callback, keras.callbacks.ModelCheckpoint)
+                     and callback.monitor == GAP_SELECTION_METRIC]
+        assert positions, "the gap checkpoint is not in the list at all"
+        assert isinstance(callbacks[0], _Sam3EvalCallback)
+        assert min(positions) > 0
 
 
 class _RowCountSpyLoss(Sam3DetectionLoss):

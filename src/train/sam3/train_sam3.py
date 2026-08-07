@@ -267,6 +267,16 @@ EVAL_METRIC_KEYS: Tuple[str, ...] = (
 #: silently into "select epoch 1" rather than raising.
 SELECTION_METRIC: str = "val_box_iou"
 
+#: The log key the ADDITIVE second `ModelCheckpoint` selects on. It is an
+#: OBSERVER: nothing early-stops on it, nothing restores weights from it, and
+#: :data:`SELECTION_METRIC` above is unchanged. Same shape as
+#: :data:`SELECTION_METRIC` -- a `val_`-prefixed member of
+#: :data:`EVAL_METRIC_KEYS`, maximized -- and it is `nan` on any run whose
+#: scored dataset lacks the all-category export. MEASURED at keras 3.8.0: a
+#: `nan` never wins a `mode="max"` comparison, does not raise, and does not
+#: move `best` (guard `TestModelCheckpointAgainstANan`).
+GAP_SELECTION_METRIC: str = "val_box_distractor_gap"
+
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -1302,6 +1312,24 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     callbacks.append(keras.callbacks.ModelCheckpoint(
         filepath=str(output_dir / "best_model.keras"), monitor=SELECTION_METRIC,
         mode="max", save_best_only=True, verbose=1))
+    # DECISION plan-2026-08-07-3b8002c3/D-003
+    # An ADDITIVE OBSERVER, so ONE run yields BOTH selections and "should we
+    # select on the gap" becomes a measurement instead of a second 3.25-GPU-hour
+    # arm. `SELECTION_METRIC` is DELIBERATELY unchanged: this callback writes a
+    # separate file and nothing reads it during training. Do NOT make
+    # `GAP_SELECTION_METRIC` the `EarlyStopping` monitor and do NOT repoint
+    # `best_model.keras` at it -- that changes which weights `fit` RESTORES
+    # (`restore_best_weights=True`), i.e. a new variable that needs its own
+    # control arm, not a config tweak. `mode="max"` is HARDCODED for the same
+    # reason D-041 rebuilds the two callbacks above: `create_callbacks` derives
+    # `mode` as `'max' if 'accuracy' in monitor else 'min'`, which would select
+    # the WORST epoch here. `nan` is expected on any run without the
+    # all-category export and is MEASURED-safe (see GAP_SELECTION_METRIC).
+    # See decisions.md D-003.
+    callbacks.append(keras.callbacks.ModelCheckpoint(
+        filepath=str(output_dir / "best_gap_model.keras"),
+        monitor=GAP_SELECTION_METRIC, mode="max", save_best_only=True,
+        verbose=1))
     # Inserted at the FRONT so it runs before `CSVLogger` (D-028) and before
     # `EarlyStopping`/`ModelCheckpoint`, which read the same `logs` dict. A
     # callback APPENDED here would write into a dict `CSVLogger` has already
