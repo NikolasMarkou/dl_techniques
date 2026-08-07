@@ -272,6 +272,7 @@ class Sam3TrainingConfig:
     freeze_trunk: bool = False
     deep_supervision: bool = False
     query_selection: bool = False
+    prompt_conditioned_queries: bool = False
 
     # Optimizer. Reference-derived; see `create_optimizer` for the SIGNED,
     # NAMED divergences from the reference's own recipe.
@@ -303,6 +304,14 @@ class Sam3TrainingConfig:
                 f"{list(VARIANTS)}. The released 'sam3' geometry is refused on "
                 f"purpose: 821,708,598 parameters at a 10,072.9 MiB forward "
                 f"peak leaves no room for AdamW moments on a 12 GB card.")
+        # `prompt_conditioned_queries` WITHOUT `query_selection` is refused --
+        # but by `Sam3Image.__init__`, not here. This validator runs inside
+        # `config_from_argv`, and the load-bearing wiring guard
+        # (`test_every_cli_flag_reaches_the_config_field_it_names`) drives every
+        # flag through that path ONE AT A TIME with a sentinel; a cross-flag
+        # raise here would make that guard unable to test this flag at all.
+        # The refusal is not lost, only relocated to `create_training_model`'s
+        # first act, which is still long before `fit` sees a batch.
         if self.lr_schedule not in LR_SCHEDULES:
             raise ValueError(
                 f"unknown lr_schedule {self.lr_schedule!r}; known schedules "
@@ -374,6 +383,7 @@ CLI_TO_CONFIG: Dict[str, str] = {
     "freeze_trunk": "freeze_trunk",
     "deep_supervision": "deep_supervision",
     "query_selection": "query_selection",
+    "prompt_conditioned_queries": "prompt_conditioned_queries",
     "learning_rate": "learning_rate",
     "weight_decay": "weight_decay",
     "gradient_clip_norm": "gradient_clip_norm",
@@ -514,6 +524,27 @@ def build_parser() -> argparse.ArgumentParser:
                             "module's docstring, section "
                             "'--query-selection: MEASURED OUTCOME'. Read it "
                             "before quoting any of these numbers.")
+    model.add_argument("--prompt-conditioned-queries",
+                       action=argparse.BooleanOptionalAction,
+                       default=defaults.prompt_conditioned_queries,
+                       help="Let the query-selection proposal head READ the "
+                            "text prompt. REQUIRES --query-selection; without "
+                            "it the model REFUSES to build rather than "
+                            "training the control under this arm's name. "
+                            "The pooled, padding-masked prompt drives a "
+                            "per-channel affine (FiLM) on the image memory "
+                            "before the head scores it, so the top-Q "
+                            "SELECTION itself becomes prompt-dependent -- a "
+                            "term added to the objectness logits alone could "
+                            "not change the ordering at all. Adds one "
+                            "d_model -> 2 * d_model projection and nothing "
+                            "else. NOT YET MEASURED: this flag exists because "
+                            "the box output of BOTH shipped arms is fully "
+                            "retained under a WRONG text prompt, and no "
+                            "trained arm's distractor gap is separable from a "
+                            "category-BLIND prior; whether reading the prompt "
+                            "here changes either is an open question, not a "
+                            "claim.")
 
     optimizer = parser.add_argument_group("optimizer")
     optimizer.add_argument("--learning-rate", type=float,
@@ -721,8 +752,9 @@ def create_training_model(
     # not redundant, and they cannot silently disagree: the wrapper RAISES when
     # asked to count a block its `Sam3Image` will never produce.
     model = Sam3TrainingModel(
-        Sam3Image.from_variant(config.variant,
-                               query_selection=config.query_selection),
+        Sam3Image.from_variant(
+            config.variant, query_selection=config.query_selection,
+            prompt_conditioned_queries=config.prompt_conditioned_queries),
         include_masks=config.include_masks,
         deep_supervision=config.deep_supervision,
         query_selection=config.query_selection,

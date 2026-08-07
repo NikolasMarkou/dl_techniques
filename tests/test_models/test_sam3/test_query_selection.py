@@ -716,3 +716,175 @@ class TestSerialization:
         assert [w.shape for w in saved] == [w.shape for w in loaded]
         for a, b in zip(saved, loaded):
             assert float(np.max(np.abs(a - b))) == 0.0
+
+
+# ---------------------------------------------------------------------
+# the prompt-conditioned proposal head (default OFF)
+#
+# STEP-6 SCOPE. These guards cover construction, the flag-OFF inertness that
+# keeps the on-disk checkpoints loadable, and the `get_config` round trip. The
+# RED-PROVEN prompt-liveness test (dead-component injection, with the firing
+# assertion named) and the model-level three-combination byte-identity gate are
+# step 7's, and are deliberately NOT weakened versions of themselves here.
+# ---------------------------------------------------------------------
+
+
+def _prompt(seed: int = 11, batch: int = BATCH, seq: int = 5) -> np.ndarray:
+    """Per-image-DIFFERENT prompt features, width `d_model`."""
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(batch, seq, TINY["d_model"])).astype("float32")
+
+
+def _conditioned_head(seed: int = 3) -> Sam3EncoderQuerySelection:
+    layer = Sam3EncoderQuerySelection(prompt_conditioned=True, **TINY)
+    layer.build((BATCH, POSITIONS, TINY["d_model"]))
+    _randomize(layer, seed=seed)
+    return layer
+
+
+class TestPromptConditionedFlag:
+    """The flag that lets the proposal head read the text prompt."""
+
+    def test_the_default_is_off_and_creates_no_sub_layer(self, head):
+        """A-4: the default-OFF gate is what keeps 21 checkpoints loadable."""
+        assert head.prompt_conditioned is False
+        assert head.prompt_film is None
+
+    def test_the_parameter_count_at_defaults_is_unmoved(self, head):
+        """The exact structure-derived oracle above must still hold at
+        defaults, or the on-disk checkpoints' weight sets disagree."""
+        width = TINY["d_model"]
+        stack = 2 * (width * width + width)
+        assert head.count_params() == (stack + width * 1 + 1) + (
+            stack + width * 4 + 4)
+
+    def test_the_flag_adds_exactly_the_structure_derived_parameters(self):
+        """Written FROM THE STRUCTURE: one `d_model -> 2 * d_model` affine.
+
+        Enumerated, not transcribed and not read off the layer: the FiLM
+        projection consumes the POOLED prompt (width `d_model`) and emits a
+        scale and a shift (width `d_model` each), so it is one kernel of
+        `d_model x 2 * d_model` plus `2 * d_model` biases.
+        """
+        width = TINY["d_model"]
+        expected = width * (2 * width) + 2 * width
+        on = _conditioned_head()
+        off = Sam3EncoderQuerySelection(**TINY)
+        off.build((BATCH, POSITIONS, TINY["d_model"]))
+        assert on.count_params() - off.count_params() == expected
+
+    def test_the_film_projection_is_not_zero_initialized(self):
+        """A zero init makes the modulation the EXACT identity at step 0, i.e.
+        an untrained flag-on model that is bit-identical to the flag-off one
+        on every prompt -- born degenerate on the one axis the flag opens."""
+        fresh = Sam3EncoderQuerySelection(prompt_conditioned=True, **TINY)
+        fresh.build((BATCH, POSITIONS, TINY["d_model"]))
+        kernel = np.asarray(fresh.prompt_film[-1].weights[0])
+        assert float(np.max(np.abs(kernel))) > 0.0
+
+    def test_the_film_store_is_flat(self):
+        """D-098: a `List[List[Layer]]` loses weights on a `.keras` round trip
+        while the count, the paths and the parameter total all still match."""
+        stack = _conditioned_head().prompt_film
+        assert stack
+        assert all(isinstance(l, keras.layers.Layer) for l in stack)
+        assert not any(isinstance(l, (list, tuple)) for l in stack)
+
+    def test_the_flag_off_head_ignores_the_prompt_bit_for_bit(self, head):
+        """The prompt is passed at `Sam3Image`'s ONE call site whatever the
+        flag says, so the flag-off head must be provably inert to it."""
+        memory = _memory()
+        blind = head(memory, training=False)
+        prompted = head(memory, prompt=_prompt(),
+                        prompt_padding_mask=np.zeros((BATCH, 5), dtype="bool"),
+                        training=False)
+        for key in blind:
+            delta = float(np.max(np.abs(
+                np.asarray(blind[key]).astype("float64")
+                - np.asarray(prompted[key]).astype("float64"))))
+            assert delta == 0.0, f"{key} moved by {delta!r} with the flag OFF"
+
+    def test_the_flag_on_head_refuses_a_missing_prompt(self):
+        """Falling back to prompt-BLIND proposals is the defect, not a
+        graceful default: it has no shape, dtype or finiteness symptom."""
+        with pytest.raises(ValueError, match="prompt_conditioned=True"):
+            _conditioned_head()(_memory(), training=False)
+
+    def test_the_prompt_moves_the_selection_not_just_the_output(self):
+        """The point of the change: the top-k SELECTION is prompt-dependent.
+
+        A modulation that shifted every position equally could not change an
+        argsort, so "the output moved" is not the assertion -- the selected
+        INDICES are.
+        """
+        conditioned = _conditioned_head()
+        memory = _memory()
+        mask = np.zeros((BATCH, 5), dtype="bool")
+        first = conditioned(memory, prompt=_prompt(seed=11),
+                            prompt_padding_mask=mask, training=False)
+        second = conditioned(memory, prompt=_prompt(seed=12),
+                             prompt_padding_mask=mask, training=False)
+        moved = int(np.sum(np.asarray(first["indices"])
+                           != np.asarray(second["indices"])))
+        assert moved > 0, (
+            "the selected memory positions are identical under two different "
+            "prompts: the head reads the prompt but the SELECTION does not")
+
+    def test_the_pool_respects_the_padding_mask(self):
+        """It pools through `Sam3DotProductScoring.masked_mean_pool`, so a
+        padded position must not reach the proposals. Driven by CHANGING the
+        content of a masked-out position, which a mask-blind pool would see."""
+        conditioned = _conditioned_head()
+        memory = _memory()
+        prompt = _prompt(seed=21)
+        mask = np.zeros((BATCH, prompt.shape[1]), dtype="bool")
+        mask[:, -2:] = True
+        polluted = prompt.copy()
+        polluted[:, -2:, :] = 25.0
+        a = conditioned(memory, prompt=prompt, prompt_padding_mask=mask,
+                        training=False)
+        b = conditioned(memory, prompt=polluted, prompt_padding_mask=mask,
+                        training=False)
+        delta = float(np.max(np.abs(np.asarray(a["boxes"]).astype("float64")
+                                    - np.asarray(b["boxes"]).astype("float64"))))
+        assert delta == 0.0, (
+            f"masked-out prompt positions changed the proposals by {delta!r}: "
+            f"the pool is not honouring the padding mask")
+
+    def test_config_roundtrip_carries_the_flag_at_both_values(self):
+        for value in (False, True):
+            head = Sam3EncoderQuerySelection(prompt_conditioned=value, **TINY)
+            config = head.get_config()
+            assert config["prompt_conditioned"] is value
+            clone = Sam3EncoderQuerySelection.from_config(config)
+            assert clone.prompt_conditioned is value
+            assert (clone.prompt_film is None) is (not value)
+
+    def test_full_keras_roundtrip_with_the_flag_on_is_bit_identical(
+            self, tmp_path):
+        """The flag-ON path is serialization-pinned too, from its first commit.
+
+        Built through the functional API with TWO inputs, which is also what
+        proves `call`'s new keyword is a real, traceable argument.
+        """
+        head = Sam3EncoderQuerySelection(prompt_conditioned=True, **TINY)
+        memory_in = keras.Input(shape=(POSITIONS, TINY["d_model"]))
+        prompt_in = keras.Input(shape=(5, TINY["d_model"]))
+        model = keras.Model([memory_in, prompt_in],
+                            head(memory_in, prompt=prompt_in))
+        _randomize(head, seed=7)
+
+        probe = [_memory(seed=19), _prompt(seed=23)]
+        before = {k: np.asarray(v)
+                  for k, v in model(probe, training=False).items()}
+        path = tmp_path / "prompt_conditioned.keras"
+        model.save(path)
+        restored = keras.models.load_model(path)
+        after = {k: np.asarray(v)
+                 for k, v in restored(probe, training=False).items()}
+
+        assert set(before) == set(after)
+        for key in before:
+            delta = float(np.max(np.abs(
+                before[key].astype("float64") - after[key].astype("float64"))))
+            assert delta == 0.0, f"{key} moved by {delta!r} on round trip"

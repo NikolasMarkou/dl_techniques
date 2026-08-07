@@ -192,8 +192,16 @@ class Sam3DotProductScoring(keras.layers.Layer):
         self.hs_proj.build(tuple(hs_shape))
         super().build(hs_shape)
 
+    # A `@staticmethod` because it reads no state, and because it now has TWO
+    # owners: this head and `Sam3EncoderQuerySelection`'s prompt-conditioned
+    # branch. Both must pool a padded prompt with the SAME polarity and the
+    # SAME floored divisor -- a second spelling of these three lines is exactly
+    # the duplication D-104's two traps would be re-introduced through. Calling
+    # it on an INSTANCE (`self.masked_mean_pool(...)`, as `call` below does)
+    # keeps working unchanged.
+    @staticmethod
     def masked_mean_pool(
-            self, prompt: keras.KerasTensor,
+            prompt: keras.KerasTensor,
             prompt_padding_mask: Optional[keras.KerasTensor],
     ) -> keras.KerasTensor:
         """Mean-pool the prompt over its sequence axis, ignoring padding.

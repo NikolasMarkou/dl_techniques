@@ -19,6 +19,16 @@ Architecture::
     values, indices = top_k(objectness[..., 0], k=num_queries)
     selected_boxes = gather(boxes, indices)
 
+Behind the default-OFF ``prompt_conditioned`` flag the memory is FiLM-modulated
+by the pooled text prompt before either MLP reads it::
+
+    scale, shift = split(Dense(2 * d_model)(masked_mean_pool(prompt)))
+    memory = memory * (1 + scale[:, None, :]) + shift[:, None, :]
+
+which is what makes the top-k SELECTION itself prompt-dependent. With the flag
+off nothing above changes and no weight is created, so the on-disk checkpoints
+and the exact parameter-count oracle are untouched.
+
 Why this head exists, MEASURED and not guessed. SAM 3's box output was
 image-independent BY CONSTRUCTION, not by a training-time collapse:
 ``val_box_std_across_images`` read ``6.9e-06`` against an across-*query* spread
@@ -62,6 +72,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from .decoder import Sam3TransformerDecoder
+from .model_misc import Sam3DotProductScoring
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -111,6 +122,13 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
     :param mlp_depth: Number of ``Dense`` layers in each of the two heads; all
         but the last carry a ReLU. Default: ``3``.
     :type mlp_depth: int
+    :param prompt_conditioned: Whether the head reads the text prompt. When
+        ``False`` (the default) NO extra sub-layer is created and this layer
+        owns exactly the weights it owned before this flag existed, so the
+        on-disk checkpoints and the exact parameter-count oracle are unmoved.
+        When ``True`` the pooled prompt drives a FiLM-style per-channel affine
+        on ``memory`` before both MLPs -- see :meth:`call`. Default: ``False``.
+    :type prompt_conditioned: bool
     :raises ValueError: If any width is non-positive, if ``feat_size`` is not a
         pair of positive integers, if ``anchor_size`` is outside ``(0, 1)``, if
         ``mlp_depth`` is below one, or if the grid holds fewer positions than
@@ -131,7 +149,7 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             self, d_model: int = 256, num_queries: int = 200,
             feat_size: Tuple[int, int] = (72, 72),
             anchor_size: float = DEFAULT_ANCHOR_SIZE, mlp_depth: int = 3,
-            **kwargs: Any,
+            prompt_conditioned: bool = False, **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
@@ -154,6 +172,7 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         self.feat_size = (int(feat_size[0]), int(feat_size[1]))
         self.anchor_size = float(anchor_size)
         self.mlp_depth = int(mlp_depth)
+        self.prompt_conditioned = bool(prompt_conditioned)
         self.num_positions = self.feat_size[0] * self.feat_size[1]
 
         # There are only `H * W` distinct proposals to choose from, so asking
@@ -194,13 +213,39 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         self.box_head = Sam3TransformerDecoder._make_mlp(
             self.mlp_depth, self.d_model, 4, "box_head", zero_init_last=True)
 
+        # DECISION plan-2026-08-07T065516-6add49a9/D-014
+        # Created ONLY when the flag is on, and NOT zero-initialized. Two
+        # things are pinned here and neither is style.
+        #   * Creating it unconditionally is the one change that flips
+        #     `test_query_selection.py`'s exact parameter-count oracle RED at
+        #     defaults and stops the 21 on-disk checkpoints loading. The flag
+        #     is what buys byte-identity-when-off, so do NOT hoist this out of
+        #     the `if`.
+        #   * Do NOT copy `box_head`'s `zero_init_last=True` here. A zero
+        #     initializer makes the modulation the EXACT identity at step 0, so
+        #     an untrained flag-on model is bit-identical to the flag-off one
+        #     and every prompt-liveness measurement reads exactly 0.0 -- the
+        #     head would be born degenerate on precisely the axis this flag
+        #     exists to open. The box head's zero init is correct for a
+        #     DISPLACEMENT of an anchor; this is a GATE, and the two want
+        #     opposite initializations.
+        # The stack is the decoder's sanctioned `_make_mlp` trio at depth 1
+        # (one linear projection, no activation), not a fourth Dense-stack
+        # builder, and it is stored FLAT like the two above it.
+        # See decisions.md D-014.
+        self.prompt_film = None
+        if self.prompt_conditioned:
+            self.prompt_film = Sam3TransformerDecoder._make_mlp(
+                1, self.d_model, 2 * self.d_model, "prompt_film")
+
         self._anchor_grid = self._anchors()
 
         logger.info(
             f"Sam3EncoderQuerySelection: d_model={self.d_model}, "
             f"queries={self.num_queries} of {self.num_positions} positions "
             f"(grid {self.feat_size}), anchor_size={self.anchor_size}, "
-            f"mlp_depth={self.mlp_depth}"
+            f"mlp_depth={self.mlp_depth}, "
+            f"prompt_conditioned={self.prompt_conditioned}"
         )
 
     # -----------------------------------------------------------------
@@ -245,7 +290,17 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build both MLP stacks from the memory shape.
+        """Build every MLP stack from the memory shape.
+
+        MEASURED constraint, not a style choice: this stays a ONE-argument
+        ``build``. Keras refuses a multi-argument ``build`` whose argument
+        names do not match ``call``'s (``ValueError: ... received build()
+        argument 'input_shape', but call() does not have argument 'input'``),
+        and renaming it to ``memory_shape`` would change the key Keras records
+        in the build config -- which every on-disk checkpoint carries as
+        ``input_shape``. Nothing is lost: the FiLM projection reads the POOLED
+        prompt, whose width is ``d_model``, so no prompt shape is needed to
+        build it.
 
         :param input_shape: Memory shape ``(batch, H * W, d_model)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -276,6 +331,9 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
 
         Sam3TransformerDecoder._build_mlp(self.objectness_head, input_shape)
         Sam3TransformerDecoder._build_mlp(self.box_head, input_shape)
+        if self.prompt_film is not None:
+            Sam3TransformerDecoder._build_mlp(
+                self.prompt_film, (input_shape[0], self.d_model))
         super().build(input_shape)
 
     # -----------------------------------------------------------------
@@ -283,16 +341,31 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def call(
-            self, memory: keras.KerasTensor, training: Optional[bool] = None,
+            self, memory: keras.KerasTensor,
+            prompt: Optional[keras.KerasTensor] = None,
+            prompt_padding_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
         """Score every memory position and select the top ``num_queries``.
 
         :param memory: Image memory ``(batch, H * W, d_model)`` -- the
             flattened finest neck level.
         :type memory: keras.KerasTensor
+        :param prompt: Text-prompt features ``(batch, seq, d_model)``. Read
+            only when ``prompt_conditioned`` is set; ignored otherwise, and
+            defaulted to ``None`` so a single-input functional model over this
+            layer still builds.
+        :type prompt: Optional[keras.KerasTensor]
+        :param prompt_padding_mask: ``(batch, seq)``, ``True`` at PADDING
+            positions -- the polarity :meth:`Sam3DotProductScoring.
+            masked_mean_pool` documents. ``None`` pools every position.
+        :type prompt_padding_mask: Optional[keras.KerasTensor]
         :param training: Training-mode flag; accepted for uniformity, unused
             (this head holds no dropout and no normalization).
         :type training: Optional[bool]
+        :raises ValueError: If ``prompt_conditioned`` is set and ``prompt`` is
+            ``None`` -- a silently prompt-blind proposal head is the exact
+            defect this flag exists to remove.
         :return: ``objectness`` ``(batch, H * W, 1)``, ``boxes``
             ``(batch, H * W, 4)`` in normalized ``cxcywh``, ``selected_boxes``
             ``(batch, num_queries, 4)``, ``selected_objectness``
@@ -302,6 +375,34 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         :rtype: Dict[str, keras.KerasTensor]
         """
         del training
+
+        if self.prompt_conditioned:
+            if prompt is None:
+                raise ValueError(
+                    "Sam3EncoderQuerySelection was configured with "
+                    "prompt_conditioned=True but call() got prompt=None: the "
+                    "head would silently fall back to the prompt-BLIND "
+                    "proposals this flag exists to replace, with no shape, "
+                    "dtype or finiteness symptom")
+            # DECISION plan-2026-08-07T065516-6add49a9/D-014
+            # The modulation is a per-CHANNEL affine on `memory`, applied
+            # BEFORE both MLPs, and it is placed here rather than on the
+            # objectness LOGITS on purpose: a term added to the logits that is
+            # constant across positions cannot change an argsort, so a
+            # `top_k` fed by it selects the same positions for every prompt --
+            # a prompt-conditioning that provably cannot condition the
+            # SELECTION, which is the one thing this flag is for. A per-channel
+            # SCALE reweights each position's own features differently, so the
+            # objectness ordering can (and must be shown to) move. Do NOT
+            # "simplify" this to a bias on `objectness`, and do NOT drop the
+            # scale and keep only the shift.
+            # See decisions.md D-014.
+            pooled = Sam3DotProductScoring.masked_mean_pool(
+                ops.cast(prompt, memory.dtype), prompt_padding_mask)
+            film = Sam3TransformerDecoder._run_mlp(self.prompt_film, pooled)
+            scale, shift = ops.split(film, 2, axis=-1)
+            memory = (memory * (1.0 + ops.expand_dims(scale, axis=1))
+                      + ops.expand_dims(shift, axis=1))
 
         objectness = Sam3TransformerDecoder._run_mlp(
             self.objectness_head, memory)
@@ -333,7 +434,9 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
     ) -> Dict[str, Tuple[Optional[int], ...]]:
         """Return one shape per output key.
 
-        :param input_shape: Memory shape ``(batch, H * W, d_model)``.
+        :param input_shape: Memory shape ``(batch, H * W, d_model)``. No output
+            shape depends on the prompt, so this stays a one-argument method
+            for the same Keras naming reason :meth:`build` does.
         :type input_shape: Tuple[Optional[int], ...]
         :return: One shape per key of :meth:`call`'s output dict.
         :rtype: Dict[str, Tuple[Optional[int], ...]]
@@ -360,5 +463,6 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             "feat_size": self.feat_size,
             "anchor_size": self.anchor_size,
             "mlp_depth": self.mlp_depth,
+            "prompt_conditioned": self.prompt_conditioned,
         })
         return config

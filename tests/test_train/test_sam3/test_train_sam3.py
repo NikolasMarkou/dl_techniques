@@ -889,6 +889,104 @@ class TestQuerySelectionCli:
         assert math.isfinite(float(history.history["loss"][-1]))
 
 
+
+class TestPromptConditionedQueriesCli:
+    """``--prompt-conditioned-queries`` through ``argv -> config -> factory``.
+
+    Same defect class, same terminating discipline as
+    :class:`TestQuerySelectionCli`: no assertion here stops at the config
+    field. Each one lands on the MODEL -- the proposal head's own flag, its
+    FiLM sub-layer, or the parameter count -- because a config field that never
+    reaches the factory is exactly the silent no-op these tests exist for.
+    """
+
+    @pytest.mark.parametrize("conditioned", [False, True])
+    def test_the_flag_reaches_the_proposal_head_itself(
+            self, conditioned: bool) -> None:
+        """argv -> parse_args -> config -> factory -> the head's own flag."""
+        extra = ["--query-selection"]
+        if conditioned:
+            extra.append("--prompt-conditioned-queries")
+        config = config_from_argv(_tiny_argv(*extra))
+        assert config.prompt_conditioned_queries is conditioned
+
+        keras.utils.set_random_seed(2468)
+        model = create_training_model(config)
+        head = model.sam3.query_selection_head
+        assert model.sam3.prompt_conditioned_queries is conditioned
+        assert head.prompt_conditioned is conditioned, (
+            "--prompt-conditioned-queries reached the config but not the "
+            "proposal head: the run would train the prompt-BLIND arm while "
+            "its config.json claims the conditioned one")
+        assert (head.prompt_film is not None) is conditioned
+
+    def test_the_flag_changes_the_parameter_count_by_the_structure(
+            self) -> None:
+        """Non-vacuity for the pair above, from the STRUCTURE.
+
+        The FiLM projection is one ``d_model -> 2 * d_model`` affine on the
+        pooled prompt: one kernel plus its biases, enumerated here rather than
+        read off the model.
+        """
+        keras.utils.set_random_seed(2468)
+        off = create_training_model(
+            config_from_argv(_tiny_argv("--query-selection")))
+        keras.utils.set_random_seed(2468)
+        on = create_training_model(config_from_argv(
+            _tiny_argv("--query-selection", "--prompt-conditioned-queries")))
+        width = int(off.sam3.d_model)
+        assert on.count_params() - off.count_params() == (
+            width * (2 * width) + 2 * width)
+
+    def test_it_is_refused_without_query_selection(self) -> None:
+        """There is no head to condition, so the flag would be a no-op."""
+        config = config_from_argv(_tiny_argv("--prompt-conditioned-queries"))
+        assert config.prompt_conditioned_queries is True
+        assert config.query_selection is False
+        with pytest.raises(ValueError, match="requires query_selection"):
+            create_training_model(config)
+
+    def test_the_config_default_is_off(self) -> None:
+        assert Sam3TrainingConfig().prompt_conditioned_queries is False
+        assert config_from_argv([]).prompt_conditioned_queries is False
+
+    def test_it_is_absent_from_the_smoke_preset(self) -> None:
+        """A preset may change HOW MUCH is measured, never WHAT (D-030)."""
+        assert "prompt_conditioned_queries" not in SMOKE_PRESET
+        assert config_from_argv(["--smoke"]).prompt_conditioned_queries is (
+            config_from_argv([]).prompt_conditioned_queries)
+
+    def test_the_flag_survives_the_preset_in_both_directions(self) -> None:
+        """`--smoke` must neither enable nor disable an explicit flag."""
+        smoke = config_from_argv(
+            ["--smoke", "--query-selection", "--prompt-conditioned-queries"])
+        assert smoke.prompt_conditioned_queries is True
+        assert config_from_argv(
+            ["--smoke", "--query-selection",
+             "--no-prompt-conditioned-queries"]
+        ).prompt_conditioned_queries is False
+        # ... and the preset still did its own job in that same command line.
+        assert smoke.smoke is True
+        assert smoke.epochs == SMOKE_PRESET["epochs"]
+
+    def test_a_prompt_conditioned_model_takes_a_real_training_step(
+            self) -> None:
+        """One `fit` step: a forward AND a backward pass through the FiLM
+        projection, through the trainer's own factory and dataset."""
+        config = config_from_argv(_tiny_argv(
+            "--deep-supervision", "--query-selection",
+            "--prompt-conditioned-queries"))
+        keras.utils.set_random_seed(4321)
+        model = create_training_model(config)
+        film = model.sam3.query_selection_head.prompt_film[-1]
+        before = np.asarray(film.weights[0])
+        train_dataset, _ = create_datasets(config, model)
+        history = model.fit(train_dataset, epochs=1, verbose=0)
+        assert math.isfinite(float(history.history["loss"][-1]))
+        assert float(np.max(np.abs(np.asarray(film.weights[0]) - before))) > 0.0, (
+            "the FiLM projection did not move in a training step: it is on "
+            "the forward path but not on the BACKWARD one")
+
 # ---------------------------------------------------------------------------
 # The data path
 # ---------------------------------------------------------------------------

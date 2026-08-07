@@ -231,17 +231,42 @@ class TestReferenceForward:
             f"{delta}")
 
     def test_bilinear_is_measurably_different_at_an_interior_pixel(self, plain):
-        """M8.1's discriminating probe: a NON-constant coarse map."""
+        """M8.1's discriminating probe: a NON-constant coarse map.
+
+        SEED-PINNED, and it builds its own head rather than taking the
+        `plain` fixture. That is not garnish: this is a MAGNITUDE threshold on
+        randomly initialized weights, and those initializers draw from the
+        KERAS GLOBAL RNG -- whose state depends on every layer built by every
+        test that ran earlier in the same process. MEASURED: adding tests to
+        `test_query_selection.py` (which sorts before this file) moved this
+        delta to 0.818 and turned the whole directory gate RED without
+        touching anything this test covers, while the file ALONE stayed green.
+
+        The pin is local and immediately precedes construction, so the probe no
+        longer depends on what ran before it. The SHIPPED initializers are kept
+        -- only their stream is fixed. The seed is not a lucky one: the same
+        measurement at seeds 0/1/2/3/7 reads 1.06 / 1.71 / 1.38 / 2.10 / 3.35,
+        i.e. every one clears the 1.0 bar, and 3 is quoted here with a 2.1x
+        margin. What that spread also says is that this bar sits at the low
+        edge of the distribution; widening the margin is a separate question
+        from removing the ambient dependence, and is deliberately not done
+        here.
+        """
+        del plain
+        keras.utils.set_random_seed(3)
         payload = _payload()
-        other = Sam3SegmentationHead(
-            **dict(TINY, use_cross_attend_prompt=False,
-                   interpolation_mode="bilinear"))
-        other.build([f.shape for f in payload["backbone_feats"]],
-                    payload["obj_queries"].shape,
-                    payload["encoder_hidden_states"].shape)
-        other.set_weights(plain.get_weights())
-        delta = np.abs(_np(plain(**payload)["pred_masks"])
-                       - _np(other(**payload)["pred_masks"])).max()
+        built = []
+        for mode in ("nearest", "bilinear"):
+            head = Sam3SegmentationHead(
+                **dict(TINY, use_cross_attend_prompt=False,
+                       interpolation_mode=mode))
+            head.build([f.shape for f in payload["backbone_feats"]],
+                       payload["obj_queries"].shape,
+                       payload["encoder_hidden_states"].shape)
+            built.append(head)
+        built[1].set_weights(built[0].get_weights())
+        delta = np.abs(_np(built[0](**payload)["pred_masks"])
+                       - _np(built[1](**payload)["pred_masks"])).max()
         assert delta > 1.0, f"nearest vs bilinear separated by only {delta}"
 
     def test_the_bilinear_candidate_fails_the_nearest_oracle(self, plain):

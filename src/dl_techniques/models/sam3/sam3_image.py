@@ -185,6 +185,14 @@ class Sam3Image(keras.Model):
         boxes become the decoder's INITIAL ``reference_boxes``, detached. Query
         CONTENT is untouched -- that is what makes it *mixed*.
     :type query_selection: bool
+    :param prompt_conditioned_queries: Whether that proposal head READS the
+        text prompt. Default ``False``, at which value no weight is added and
+        the head is the prompt-blind one that shipped before. At ``True`` the
+        pooled prompt FiLM-modulates the image memory before the head scores
+        it, so the top-``num_queries`` SELECTION becomes prompt-dependent.
+        Requires ``query_selection=True``; setting it alone raises rather than
+        becoming a silent no-op.
+    :type prompt_conditioned_queries: bool
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If any component's width disagrees with another's, if
@@ -393,6 +401,7 @@ class Sam3Image(keras.Model):
             detach_presence_in_joint_score: bool = False,
             joint_score_clamp: float = 10.0,
             query_selection: bool = False,
+            prompt_conditioned_queries: bool = False,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -419,6 +428,14 @@ class Sam3Image(keras.Model):
             detach_presence_in_joint_score)
         self.joint_score_clamp = float(joint_score_clamp)
         self.query_selection = bool(query_selection)
+        self.prompt_conditioned_queries = bool(prompt_conditioned_queries)
+        if self.prompt_conditioned_queries and not self.query_selection:
+            raise ValueError(
+                "prompt_conditioned_queries=True requires query_selection="
+                "True: the flag conditions the ENCODER QUERY SELECTION head, "
+                "and with query selection off no such head exists, so the "
+                "flag would be a silent no-op -- a run that reports the arm's "
+                "name while training the control")
 
         levels = len(self.neck.scale_factors) - self.scalp
         if levels < 1:
@@ -491,6 +508,7 @@ class Sam3Image(keras.Model):
                 d_model=self.d_model,
                 num_queries=self.transformer.num_queries,
                 feat_size=self.memory_grid,
+                prompt_conditioned=self.prompt_conditioned_queries,
                 name="query_selection_head")
 
         logger.info(
@@ -498,7 +516,8 @@ class Sam3Image(keras.Model):
             f"pyramid {levels} of {len(self.neck.scale_factors)} levels, "
             f"memory {self.memory_grid}, d_model={self.d_model}, "
             f"joint_scores={self.supervise_joint_box_scores}, "
-            f"query_selection={self.query_selection}")
+            f"query_selection={self.query_selection}, "
+            f"prompt_conditioned_queries={self.prompt_conditioned_queries}")
 
     # -----------------------------------------------------------------
     # variants
@@ -648,6 +667,11 @@ class Sam3Image(keras.Model):
         self._build_once(self.segmentation_head, pyramid, hidden_shape,
                          memory_shape, prompt_shape)
         if self.query_selection_head is not None:
+            # ONE shape, at BOTH values of `prompt_conditioned_queries`: the
+            # head's FiLM projection reads the POOLED prompt, whose width is
+            # `d_model`, so it needs no prompt shape -- and Keras would refuse
+            # a two-argument `build` here whose first argument is not named
+            # after `call`'s first argument. See the anchor on that `build`.
             self._build_once(self.query_selection_head, memory_shape)
         super().build(input_shape)
 
@@ -855,7 +879,15 @@ class Sam3Image(keras.Model):
         proposals = None
         reference_boxes = None
         if self.query_selection_head is not None:
-            proposals = self.query_selection_head(memory, training=training)
+            # The prompt is passed at this ONE call site whatever
+            # `prompt_conditioned_queries` says, and the HEAD's own flag is the
+            # single gate on whether it is read. A second gate here would be a
+            # second place for the two to disagree; with the head's flag off
+            # these two arguments are inert and the flag-off path is the path
+            # that shipped before this flag existed.
+            proposals = self.query_selection_head(
+                memory, prompt=prompt, prompt_padding_mask=padding_mask,
+                training=training)
 
             # DECISION plan-2026-08-06T185813-fd80240f/D-006
             # The selected proposals enter the decoder DETACHED, and that is not
@@ -997,6 +1029,7 @@ class Sam3Image(keras.Model):
                 self.detach_presence_in_joint_score,
             "joint_score_clamp": self.joint_score_clamp,
             "query_selection": self.query_selection,
+            "prompt_conditioned_queries": self.prompt_conditioned_queries,
         })
         return config
 
