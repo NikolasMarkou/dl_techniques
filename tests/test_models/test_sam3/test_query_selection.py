@@ -41,6 +41,7 @@ from keras import ops
 from typing import Any, Dict, List
 
 from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
+from dl_techniques.models.sam3.model_misc import Sam3DotProductScoring
 from dl_techniques.models.sam3.query_selection import (
     DEFAULT_ANCHOR_SIZE, Sam3EncoderQuerySelection)
 from dl_techniques.models.sam3.sam3_image import Sam3Image
@@ -742,6 +743,124 @@ def _conditioned_head(seed: int = 3) -> Sam3EncoderQuerySelection:
     return layer
 
 
+# ---------------------------------------------------------------------
+# prompt liveness, measured against the instrument's OWN floor
+# ---------------------------------------------------------------------
+
+#: How many DIFFERENT prompts one liveness probe sweeps. One prompt PAIR is not
+#: enough to characterize this instrument: at TINY the pair-to-pair reading
+#: ranges from 1/12 to 11/12 moved positions (measured, seeds 11..20), so a
+#: single pair could be read as near-dead purely by which two prompts it drew.
+PROMPT_PROBES = 8
+
+#: The instrument's own noise floor, MEASURED on CPU, not assumed. TWO null
+#: arms were run and BOTH read EXACTLY zero moved positions and exactly 0.0
+#: box delta: the SAME prompt passed `PROMPT_PROBES` times (the head is
+#: deterministic), and a flag-OFF head under all `PROMPT_PROBES` DIFFERENT
+#: prompts (that path never reads the prompt at all). `_assert_the_prompt_
+#: reaches_the_selection` re-measures the null arm on every call rather than
+#: trusting this comment.
+PROMPT_MOVED_FLOOR = 0.0
+
+#: The margin a LIVE head must clear over that floor. Measured at TINY over
+#: EIGHT independent weight seeds (0..7): mean moved fraction
+#: 0.667 / 0.679 / 0.690 / 0.702 / 0.798 / 0.702 / 0.774 / 0.905, and
+#: `PROMPT_PROBES` of `PROMPT_PROBES` distinct selection patterns at every one
+#: of them. The bar sits at 2.7x below the smallest of those, so it is not
+#: perched on the low edge of the distribution (the failure mode D-015 was
+#: opened by), while both null arms read 0.0 and both dead-component
+#: injections below read exactly 0.0 too.
+PROMPT_MOVED_BAR = 0.25
+
+
+def _sweep_prompts(head: Sam3EncoderQuerySelection, memory: np.ndarray,
+                   seeds: List[int]) -> List[Dict[str, np.ndarray]]:
+    """Run one head on ONE memory under a list of prompt seeds.
+
+    Args:
+        head: A built head.
+        memory: `(batch, positions, d_model)` image memory, held FIXED so the
+            only thing that varies across the sweep is the prompt.
+        seeds: One prompt seed per probe.
+
+    Returns:
+        One output dict per seed, numpy-materialized.
+    """
+    mask = np.zeros((memory.shape[0], 5), dtype="bool")
+    return [{k: np.asarray(v) for k, v in
+             head(memory, prompt=_prompt(seed=seed), prompt_padding_mask=mask,
+                  training=False).items()}
+            for seed in seeds]
+
+
+def _moved_fraction(sweep: List[Dict[str, np.ndarray]]) -> float:
+    """Mean fraction of selected memory positions that differ from probe 0."""
+    base = sweep[0]["indices"]
+    return float(np.mean([np.mean(out["indices"] != base)
+                          for out in sweep[1:]]))
+
+
+def _box_delta(sweep: List[Dict[str, np.ndarray]]) -> float:
+    """Max abs movement of `selected_boxes` away from probe 0, float64."""
+    base = sweep[0]["selected_boxes"].astype("float64")
+    return max(float(np.max(np.abs(out["selected_boxes"].astype("float64")
+                                   - base))) for out in sweep[1:])
+
+
+def _assert_the_prompt_reaches_the_selection(
+        live: List[Dict[str, np.ndarray]],
+        null: List[Dict[str, np.ndarray]]) -> None:
+    """THE prompt-liveness assertion, stated against a MEASURED floor.
+
+    "The output changed" is not the test. Two things make it one:
+
+    - The comparison is against `null`, the SAME instrument run on an arm that
+      cannot possibly show the effect (the same prompt repeated, or a flag-OFF
+      head). If that arm is not silent, the instrument is measuring something
+      other than the prompt and no reading on `live` means anything.
+    - The quantity is the top-k SELECTION, not a hidden activation. A
+      modulation that shifted every position equally cannot change an argsort,
+      so it could condition nothing that leaves this head -- and `selected_
+      boxes` at the shipped zero-init box head is a pure readout of WHICH
+      positions were selected.
+
+    Args:
+        live: Sweep over `PROMPT_PROBES` DIFFERENT prompts.
+        null: Sweep over an arm that cannot respond to the prompt.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If the null arm is not silent, if the selection is
+            prompt-invariant, or if the selected boxes did not move.
+    """
+    null_moved, null_box = _moved_fraction(null), _box_delta(null)
+    assert null_moved == PROMPT_MOVED_FLOOR and null_box == 0.0, (
+        f"the instrument is not silent on its own null arm: {null_moved:.4f} "
+        f"of the selected positions moved and the selected boxes moved by "
+        f"{null_box:.3e} on an arm that CANNOT respond to the prompt, so no "
+        f"reading on the live arm can be attributed to the prompt")
+
+    moved = _moved_fraction(live)
+    assert moved > PROMPT_MOVED_FLOOR + PROMPT_MOVED_BAR, (
+        f"prompt-INVARIANT selection: only {moved:.4f} of the selected memory "
+        f"positions moved across {len(live)} different prompts, against a "
+        f"measured null-arm floor of {null_moved:.4f} and a required margin "
+        f"of {PROMPT_MOVED_BAR}; the head is reading the prompt but the top-k "
+        f"SELECTION -- the only thing that leaves this head -- is not")
+
+    patterns = len({tuple(out["indices"].ravel().tolist()) for out in live})
+    assert patterns > 1, (
+        f"all {len(live)} prompts produced the SAME selection pattern "
+        f"{live[0]['indices'].tolist()}")
+
+    box = _box_delta(live)
+    assert box > null_box, (
+        f"the selected boxes did not move: {box:.3e} against a null-arm floor "
+        f"of {null_box:.3e}")
+
+
 class TestPromptConditionedFlag:
     """The flag that lets the proposal head read the text prompt."""
 
@@ -810,25 +929,34 @@ class TestPromptConditionedFlag:
         with pytest.raises(ValueError, match="prompt_conditioned=True"):
             _conditioned_head()(_memory(), training=False)
 
-    def test_the_prompt_moves_the_selection_not_just_the_output(self):
+    def test_the_prompt_moves_the_selection_above_the_measured_floor(self):
         """The point of the change: the top-k SELECTION is prompt-dependent.
 
-        A modulation that shifted every position equally could not change an
-        argsort, so "the output moved" is not the assertion -- the selected
-        INDICES are.
+        Goes through the SHARED guard, so this reading and the two RED-proofs
+        below are the same assertion fired on different arms -- there is one
+        definition of "the prompt reaches the selection" in this file, not a
+        strong one for the proof and a weaker one for the green case.
+
+        The null arm is the SAME prompt repeated: it is the head's own
+        determinism, so it isolates the prompt from every other source of
+        movement (weight init, memory draw, backend non-determinism).
         """
         conditioned = _conditioned_head()
         memory = _memory()
-        mask = np.zeros((BATCH, 5), dtype="bool")
-        first = conditioned(memory, prompt=_prompt(seed=11),
-                            prompt_padding_mask=mask, training=False)
-        second = conditioned(memory, prompt=_prompt(seed=12),
-                             prompt_padding_mask=mask, training=False)
-        moved = int(np.sum(np.asarray(first["indices"])
-                           != np.asarray(second["indices"])))
-        assert moved > 0, (
-            "the selected memory positions are identical under two different "
-            "prompts: the head reads the prompt but the SELECTION does not")
+        live = _sweep_prompts(conditioned, memory,
+                              list(range(100, 100 + PROMPT_PROBES)))
+        null = _sweep_prompts(conditioned, memory, [100] * PROMPT_PROBES)
+        _assert_the_prompt_reaches_the_selection(live, null)
+
+    def test_a_flag_off_head_is_the_instrument_s_other_null_arm(self, head):
+        """A SECOND, independent null arm: a head that structurally cannot
+        read the prompt, swept over the same `PROMPT_PROBES` prompts. It must
+        read exactly the floor, which is what makes the floor a property of
+        the mechanism rather than of the prompt draws."""
+        sweep = _sweep_prompts(head, _memory(),
+                               list(range(100, 100 + PROMPT_PROBES)))
+        assert _moved_fraction(sweep) == PROMPT_MOVED_FLOOR
+        assert _box_delta(sweep) == 0.0
 
     def test_the_pool_respects_the_padding_mask(self):
         """It pools through `Sam3DotProductScoring.masked_mean_pool`, so a
@@ -888,3 +1016,143 @@ class TestPromptConditionedFlag:
             delta = float(np.max(np.abs(
                 before[key].astype("float64") - after[key].astype("float64"))))
             assert delta == 0.0, f"{key} moved by {delta!r} on round trip"
+
+
+# ---------------------------------------------------------------------
+# SC-H: the prompt-liveness guard, proven RED by dead-component injection
+# ---------------------------------------------------------------------
+
+
+class _ConstantPool:
+    """A stand-in for `Sam3DotProductScoring` whose pool ignores the prompt.
+
+    Patched over the NAME `query_selection.py` imported, never over
+    `Sam3DotProductScoring.masked_mean_pool` itself. That is not fastidiousness:
+    the real method is a `@staticmethod`, `getattr` on the class unwraps it to a
+    plain function, and `monkeypatch.undo` would put the plain function BACK --
+    silently re-binding it as an instance method and breaking
+    `Sam3DotProductScoring.call`'s own `self.masked_mean_pool(...)` for every
+    test that runs afterwards in the same session. This package has already
+    been bitten once by a test whose effect leaked into whatever collected
+    next (D-016).
+    """
+
+    @staticmethod
+    def masked_mean_pool(prompt, prompt_padding_mask):
+        del prompt_padding_mask
+        return ops.mean(ops.zeros_like(prompt), axis=1) + 0.5
+
+
+def _inject_constant_pool(monkeypatch) -> None:
+    """INJECTION 1: the pooled prompt becomes a constant, path intact."""
+    import dl_techniques.models.sam3.query_selection as module
+    assert module.Sam3DotProductScoring is Sam3DotProductScoring, (
+        "the injection is patching a name the head does not actually pool "
+        "through, so it would be a no-op wearing a mutation's name")
+    monkeypatch.setattr(module, "Sam3DotProductScoring", _ConstantPool)
+
+
+class TestPromptLivenessIsRedProven:
+    """SC-H: `_assert_the_prompt_reaches_the_selection` must FAIL on a dead
+    component, and the assertion that fires is named at each injection.
+
+    Two injections, at the two ends of the one path the flag opens, because
+    either alone leaves half of it unproven:
+
+    - **The prompt's INFORMATION is killed, the code path stays alive.**
+      `masked_mean_pool` is replaced by a constant pool, so the FiLM
+      projection still runs, still emits a scale and a shift, and still
+      modulates `memory` -- with a value that is the same for every prompt.
+    - **The MODULATION is killed, the prompt keeps flowing.** The FiLM
+      projection's kernel AND bias are zeroed, so `scale` and `shift` are zero
+      and `memory * (1 + 0) + 0` is the exact identity. This is precisely the
+      state a `zero_init_last=True` would have SHIPPED the head in (see the
+      anchor in `query_selection.py`), which is why it is worth firing.
+
+    Both injections must ALSO be provably unable to move the flag-OFF path:
+    that path never constructs a FiLM projection and never pools a prompt, so
+    an injection that changed it would mean the two paths are not separate.
+    """
+
+    @staticmethod
+    def _sweeps(head: Sam3EncoderQuerySelection, memory: np.ndarray):
+        live = _sweep_prompts(head, memory,
+                              list(range(100, 100 + PROMPT_PROBES)))
+        null = _sweep_prompts(head, memory, [100] * PROMPT_PROBES)
+        return live, null
+
+    @staticmethod
+    def _assert_plausible(sweep) -> None:
+        """The injected head must look ORDINARY, not obviously broken."""
+        for out in sweep:
+            assert out["indices"].shape == (BATCH, TINY["num_queries"])
+            assert np.all(np.isfinite(out["selected_boxes"]))
+            assert np.all((out["boxes"] > 0.0) & (out["boxes"] < 1.0))
+        assert float(np.mean(np.std(sweep[0]["selected_boxes"], axis=1))) > 1e-2
+
+    def test_a_constant_pooled_prompt_makes_the_guard_fire(self, monkeypatch):
+        """INJECTION 1 -- kill the prompt's information, keep the path."""
+        conditioned = _conditioned_head()
+        memory = _memory()
+        _inject_constant_pool(monkeypatch)
+        live, null = self._sweeps(conditioned, memory)
+        self._assert_plausible(live)
+        assert _moved_fraction(live) == 0.0, (
+            "the injection did not actually kill the prompt's information")
+        with pytest.raises(AssertionError, match="prompt-INVARIANT selection"):
+            _assert_the_prompt_reaches_the_selection(live, null)
+
+    def test_a_constant_pooled_prompt_cannot_move_the_flag_off_path(
+            self, head, monkeypatch):
+        """The same injection, on the default path: it must be inert there."""
+        memory = _memory()
+        before = _sweep_prompts(head, memory, [100, 101])
+        _inject_constant_pool(monkeypatch)
+        after = _sweep_prompts(head, memory, [100, 101])
+        for a, b in zip(before, after):
+            for key in a:
+                assert float(np.max(np.abs(
+                    a[key].astype("float64") - b[key].astype("float64")))) == 0.0
+
+    def test_a_zeroed_film_projection_makes_the_guard_fire(self):
+        """INJECTION 2 -- kill the modulation, keep the prompt flowing.
+
+        `scale = shift = 0` makes `memory * (1 + 0) + 0` the exact identity,
+        so the head is the prompt-BLIND one wearing the flag-ON name.
+        """
+        conditioned = _conditioned_head()
+        memory = _memory()
+        last = conditioned.prompt_film[-1]
+        last.kernel.assign(np.zeros(last.kernel.shape, dtype="float32"))
+        last.bias.assign(np.zeros(last.bias.shape, dtype="float32"))
+
+        live, null = self._sweeps(conditioned, memory)
+        self._assert_plausible(live)
+        # Not merely near-identity: EXACTLY zero moved positions and EXACTLY
+        # zero box movement, because `memory * (1 + 0) + 0` is bit-exact.
+        assert _moved_fraction(live) == 0.0
+        assert _box_delta(live) == 0.0
+        with pytest.raises(AssertionError, match="prompt-INVARIANT selection"):
+            _assert_the_prompt_reaches_the_selection(live, null)
+
+    def test_a_dead_null_arm_detector_fires_its_own_assertion(self):
+        """The guard's FIRST assertion, fired on its own.
+
+        If the null arm is not silent the live reading is uninterpretable, so
+        that check has to be proven RED too -- otherwise a broken null arm
+        would be waved through and every later number would rest on it.
+        """
+        conditioned = _conditioned_head()
+        memory = _memory()
+        live = _sweep_prompts(conditioned, memory,
+                              list(range(100, 100 + PROMPT_PROBES)))
+        with pytest.raises(AssertionError,
+                           match="not silent on its own null arm"):
+            _assert_the_prompt_reaches_the_selection(live, live)
+
+    def test_the_guard_is_green_again_on_an_uninjected_head(self):
+        """The control -- otherwise the RED readings could be the fixture's."""
+        conditioned = _conditioned_head()
+        memory = _memory()
+        live, null = self._sweeps(conditioned, memory)
+        _assert_the_prompt_reaches_the_selection(live, null)

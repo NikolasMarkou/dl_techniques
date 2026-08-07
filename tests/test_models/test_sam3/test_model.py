@@ -1155,6 +1155,20 @@ class TestTrainingFlagTrap:
                                                                      batch):
         # The trap itself, executed rather than described. This is the arm that
         # would have caught the round-trip "failure" that cost this step an hour.
+        #
+        # SEED-PINNED, for the reason D-015/D-016 already found once in
+        # `test_seg_head.py`: both the weights and the six drop-path draws come
+        # from the KERAS GLOBAL RNG, so this reading is a function of whatever
+        # ran BEFORE it. It was observed to flip to `spread == 0.0` when a test
+        # in an EARLIER-collected file failed and therefore consumed a different
+        # amount of that stream -- under a source mutation that does not touch
+        # drop path at all. Pinning the stream here keeps the test measuring
+        # StochasticDepth rather than its neighbours. Measured across seeds
+        # 0..11 the spread reads 8.36 / 5.67 / 2.07 / 1.94 / 3.13 / 3.68 /
+        # 2.51 / 4.84 / 3.63 / 6.81 / 5.02 / 6.05 -- twelve of twelve strictly
+        # positive, so the `> 0.0` bar is nowhere near the low edge and the
+        # seed below is not a lucky draw.
+        keras.utils.set_random_seed(3)
         stochastic = Sam3Image.from_variant("tiny", drop_path_rate=0.9)
         stochastic.build(None)
         draws = [np.array(stochastic(batch)["pred_masks"]) for _ in range(6)]
@@ -1182,6 +1196,34 @@ def across_image_spread(boxes):
     table and this reads EXACTLY 0.0 for any batch of any images.
     """
     return float(np.max(np.std(np.array(boxes), axis=0)))
+
+
+#: Every REACHABLE `(query_selection, prompt_conditioned_queries)` pair. The
+#: fourth, `(False, True)`, does not exist: with query selection off there is
+#: no proposal head to condition, so `Sam3Image.__init__` refuses it rather
+#: than letting a run report the arm's name while training the control.
+QUERY_SELECTION_COMBOS = [(False, False), (True, False), (True, True)]
+
+#: How many DIFFERENT prompts the model-level liveness probe sweeps, on ONE
+#: fixed image. Six rather than two: which prompt PAIR is drawn moves the
+#: reading substantially, so a pair could look near-dead by luck of the draw.
+MODEL_PROMPT_PROBES = 6
+
+#: The margin the flag-ON arm must clear over the flag-OFF arm, as a RATIO
+#: rather than an absolute, because the floor is not zero and must not be
+#: pretended to be. MEASURED on CPU at `tiny`, over three independent weight
+#: seeds (3 / 5 / 9), sweeping `MODEL_PROMPT_PROBES` prompts on one image:
+#:
+#:   flag OFF (the floor):  2.49e-05 / 2.71e-05 / 2.50e-04
+#:   flag ON  (the effect): 1.59e-02 / 8.49e-01 / 2.64e-01
+#:   ratio:                      640 /  31,000  /   1,057
+#:
+#: The flag-OFF reading is NOT noise: it is the measured residual leak of the
+#: attenuation chain (step 1 / D-007) -- the prompt reaches `pred_boxes`
+#: through the decoder's cross-attention, four orders of magnitude weaker than
+#: through this flag. That is exactly why the bar is stated against it and not
+#: against zero. 20x sits 32x below the smallest measured ratio.
+MODEL_PROMPT_RATIO = 20.0
 
 
 @pytest.fixture
@@ -1452,16 +1494,23 @@ class TestQuerySelectionWiring:
         assert Sam3Image.from_config(
             qs_model.get_config()).query_selection is True
 
-    @pytest.mark.parametrize("flag", [False, True])
-    def test_full_keras_roundtrip_preserves_output_VALUES(self, batch, flag):
-        """SC-C1 at BOTH flag values, at `training=False` (D-123).
+    @pytest.mark.parametrize("flag, prompt_conditioned", QUERY_SELECTION_COMBOS)
+    def test_full_keras_roundtrip_preserves_output_VALUES(
+            self, batch, flag, prompt_conditioned):
+        """SC-C1 / SC-F at all THREE reachable flag combinations, at
+        `training=False` (D-123).
+
+        The fourth combination does not exist: `prompt_conditioned_queries`
+        without `query_selection` is refused at construction, because there
+        would be no head to condition and the flag would be a silent no-op.
 
         Compared by VALUE, never by count: a nested sub-layer store restores
         freshly initialized kernels while the weight count, every weight path
         and the parameter total all match (D-098).
         """
         built = Sam3Image.from_variant(
-            "tiny", supervise_joint_box_scores=True, query_selection=flag)
+            "tiny", supervise_joint_box_scores=True, query_selection=flag,
+            prompt_conditioned_queries=prompt_conditioned)
         built.build(None)
         randomize(built.transformer.bbox_embed[-1], seed=11)
         if flag:
@@ -1473,7 +1522,11 @@ class TestQuerySelectionWiring:
         after = restored(batch, training=False)
         assert restored.count_params() == built.count_params()
         assert restored.query_selection is flag
+        assert restored.prompt_conditioned_queries is prompt_conditioned
         assert (restored.query_selection_head is None) is (not flag)
+        if flag:
+            assert (restored.query_selection_head.prompt_film
+                    is None) is (not prompt_conditioned)
         for key in before:
             delta = float(np.max(np.abs(np.array(before[key])
                                         - np.array(after[key]))))
@@ -1481,6 +1534,195 @@ class TestQuerySelectionWiring:
         for key, value in before.items():
             assert len(np.unique(np.array(value))) > 1, (
                 f"{key} is degenerate, so the comparison above is vacuous")
+
+
+# ---------------------------------------------------------------------
+# prompt-conditioned query selection, AT THE MODEL LEVEL
+#
+# `test_query_selection.py` proves the head's own top-k selection moves with
+# the prompt. That is necessary and NOT sufficient: it says nothing about
+# whether `Sam3Image` actually hands the head a prompt, nor whether the
+# selection survives the decoder and reaches `pred_boxes` -- which is the
+# quantity every published `box_iou` is computed from, and the quantity the
+# whole plan exists to make prompt-dependent.
+# ---------------------------------------------------------------------
+
+
+def _prompt_sweep(built, image, mask, seeds):
+    """`pred_boxes` under a list of DIFFERENT prompts on ONE fixed image."""
+    out = []
+    for seed in seeds:
+        rng = np.random.default_rng(seed)
+        out.append(np.array(built({
+            "image": image,
+            "token_ids": rng.integers(1, 64, (2, 8)).astype("int32"),
+            "token_padding_mask": mask,
+        }, training=False)["pred_boxes"]).astype("float64"))
+    return out
+
+
+def _spread(sweep):
+    """Max abs movement away from probe 0 across the sweep."""
+    return max(float(np.max(np.abs(probe - sweep[0]))) for probe in sweep[1:])
+
+
+def _assert_the_prompt_reaches_pred_boxes(live, floor, null):
+    """THE model-level prompt-liveness assertion.
+
+    Stated against TWO measured arms rather than against zero:
+
+    - `null` -- the SAME prompt repeated. Must be EXACTLY 0.0, or the model is
+      non-deterministic and no delta below is attributable to the prompt.
+    - `floor` -- the same geometry with the flag OFF. NOT zero: the prompt
+      already leaks to `pred_boxes` through the decoder's cross-attention at
+      ~1e-5 (step 1 / D-007). Reporting "the boxes moved" without this arm
+      would certify that pre-existing leak as the new mechanism.
+
+    Args:
+        live: `pred_boxes` sweep at `prompt_conditioned_queries=True`.
+        floor: The same sweep at `prompt_conditioned_queries=False`.
+        null: The live model swept on ONE prompt repeated.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: If the model is non-deterministic, or if the flag-ON
+            movement does not clear the flag-OFF floor by `MODEL_PROMPT_RATIO`.
+    """
+    null_spread = _spread(null)
+    assert null_spread == 0.0, (
+        f"the model is not silent on its own null arm: pred_boxes moved by "
+        f"{null_spread:.3e} under the SAME prompt, so no reading below can be "
+        f"attributed to the prompt")
+
+    live_spread, floor_spread = _spread(live), _spread(floor)
+    assert live_spread > MODEL_PROMPT_RATIO * floor_spread, (
+        f"pred_boxes is prompt-INVARIANT beyond the pre-existing leak: the "
+        f"flag-ON arm moved {live_spread:.3e} across the prompt sweep against "
+        f"a flag-OFF floor of {floor_spread:.3e} (ratio "
+        f"{live_spread / max(floor_spread, 1e-30):.1f}x, required "
+        f"{MODEL_PROMPT_RATIO}x). The head's selection may still be moving; "
+        f"what this says is that nothing of it survives to the boxes")
+
+
+class TestPromptConditionedQueriesAtTheModelLevel:
+    """SC-G and SC-H at the level the metric actually reads."""
+
+    IMAGE = np.random.default_rng(7).standard_normal(
+        (2, 32, 32, 3)).astype("float32")
+    MASK = np.array([[False] * 8, [False] * 5 + [True] * 3])
+
+    @classmethod
+    def _arm(cls, prompt_conditioned, seed=5):
+        built = Sam3Image.from_variant(
+            "tiny", supervise_joint_box_scores=True, query_selection=True,
+            prompt_conditioned_queries=prompt_conditioned)
+        built.build(None)
+        randomize(built, seed=seed)
+        return built
+
+    @classmethod
+    def _sweeps(cls, built):
+        seeds = list(range(100, 100 + MODEL_PROMPT_PROBES))
+        return (_prompt_sweep(built, cls.IMAGE, cls.MASK, seeds),
+                _prompt_sweep(built, cls.IMAGE, cls.MASK,
+                              [100] * MODEL_PROMPT_PROBES))
+
+    # -- the flag surface ---------------------------------------------
+
+    def test_the_flag_is_off_by_default(self, model, qs_model):
+        assert model.prompt_conditioned_queries is False
+        assert qs_model.prompt_conditioned_queries is False
+        assert qs_model.query_selection_head.prompt_film is None
+
+    def test_it_is_refused_without_query_selection(self):
+        """A silent no-op here would train the CONTROL under the arm's name."""
+        with pytest.raises(ValueError, match="requires query_selection"):
+            Sam3Image.from_variant("tiny", prompt_conditioned_queries=True)
+
+    def test_get_config_carries_the_flag_at_both_values(self, qs_model):
+        assert qs_model.get_config()["prompt_conditioned_queries"] is False
+        on = self._arm(True)
+        assert on.get_config()["prompt_conditioned_queries"] is True
+        assert Sam3Image.from_config(
+            on.get_config()).prompt_conditioned_queries is True
+
+    # -- SC-G: parameter counts written FROM THE STRUCTURE -------------
+
+    def test_the_small_counts_are_the_structure_derived_ones(self):
+        """SC-G, enumerated from the variant table -- never transcribed and
+        never read off the thing under test.
+
+        The proposal head is two `_make_mlp` stacks of `mlp_depth` Dense
+        layers over width `d_model`, the first `mlp_depth - 1` of them square
+        and the last projecting to 1 (objectness) and to 4 (a cxcywh delta).
+        The FiLM projection is ONE layer consuming the POOLED prompt (width
+        `d_model`) and emitting a scale AND a shift (width `d_model` each).
+        """
+        table = Sam3Image.MODEL_VARIANTS["small"]
+        width = table["d_model"]
+        depth = 3                       # `Sam3EncoderQuerySelection`'s default
+        square = (depth - 1) * (width * width + width)
+        head = (square + width * 1 + 1) + (square + width * 4 + 4)
+        film = width * (2 * width) + 2 * width
+
+        plain = Sam3Image.from_variant("small")
+        plain.build(None)
+        qsel = Sam3Image.from_variant("small", query_selection=True)
+        qsel.build(None)
+        both = Sam3Image.from_variant(
+            "small", query_selection=True, prompt_conditioned_queries=True)
+        both.build(None)
+
+        assert plain.count_params() == SMALL_TOTAL
+        assert qsel.count_params() == SMALL_TOTAL + head
+        assert both.count_params() == SMALL_TOTAL + head + film
+        # The whole point of the default-OFF gate: the flag costs NOTHING
+        # until it is switched on, or the 21 on-disk checkpoints stop loading.
+        explicit_off = Sam3Image.from_variant(
+            "small", query_selection=True, prompt_conditioned_queries=False)
+        explicit_off.build(None)
+        assert qsel.count_params() == explicit_off.count_params()
+
+    # -- SC-H: liveness, against the measured floor -------------------
+
+    def test_the_prompt_reaches_pred_boxes_above_the_flag_off_floor(self):
+        live_model = self._arm(True)
+        live, null = self._sweeps(live_model)
+        floor, _ = self._sweeps(self._arm(False))
+        _assert_the_prompt_reaches_pred_boxes(live, floor, null)
+
+    def test_a_zeroed_film_projection_makes_the_model_level_guard_fire(self):
+        """SC-H RED proof: a dead component INSIDE the assembled model.
+
+        `scale = shift = 0` makes the FiLM modulation the exact identity, so
+        the model is the prompt-blind one wearing the flag-ON name -- right
+        config, right parameter count, right shapes, finite boxes.
+        """
+        live_model = self._arm(True)
+        last = live_model.query_selection_head.prompt_film[-1]
+        last.kernel.assign(np.zeros(last.kernel.shape, dtype="float32"))
+        last.bias.assign(np.zeros(last.bias.shape, dtype="float32"))
+
+        live, null = self._sweeps(live_model)
+        floor, _ = self._sweeps(self._arm(False))
+        assert live_model.prompt_conditioned_queries is True
+        assert np.all(np.isfinite(live[0])), (
+            "the injection must be PLAUSIBLE, not obviously broken")
+        with pytest.raises(AssertionError,
+                           match="prompt-INVARIANT beyond the pre-existing"):
+            _assert_the_prompt_reaches_pred_boxes(live, floor, null)
+
+    def test_a_non_deterministic_null_arm_fires_its_own_assertion(self):
+        """The guard's FIRST assertion, proven RED on its own: if the null arm
+        is not silent, every reading that rests on it is uninterpretable."""
+        live_model = self._arm(True)
+        live, _ = self._sweeps(live_model)
+        floor, _ = self._sweeps(self._arm(False))
+        with pytest.raises(AssertionError,
+                           match="not silent on its own null arm"):
+            _assert_the_prompt_reaches_pred_boxes(live, floor, live)
 
 
 # ---------------------------------------------------------------------
