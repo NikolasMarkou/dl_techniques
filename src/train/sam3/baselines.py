@@ -41,6 +41,20 @@ WIRING / LEARNABILITY result, not a capability result. :func:`family_max`
 excludes the detector on purpose -- ``plans/SYSTEM.md:220`` names the family --
 so the two bars stay separately quotable.
 
+The metric a category-blind predictor cannot win
+------------------------------------------------
+The detector above is the reason ``box_iou`` alone settles nothing on this
+generator, and :func:`distractor_gap` is the answer to it: the SAME predicted
+boxes are scored twice, against the prompted category's ground truth and
+against the pooled ground truth of every OTHER category in the SAME image. A
+predictor that boxes every bright blob matches both sets about equally and
+reads ~0.005; a ground-truth oracle reads 1.0. MEASURED, seed 1: the trained
+query-selection arm reads 0.0158 (1.9% relative) -- above the detector's floor,
+but only just, which is itself the finding. Unlike every arm above, this one
+needs the eval-only all-category export of ``train.sam3.data``
+(``include_all_instances``), and it is NOT a member of the family: it never
+enters :func:`evaluate_family`'s results, so :func:`family_max` cannot see it.
+
 The scoring path is ``evaluate_sam3``'s, expression for expression
 --------------------------------------------------------------------
 :func:`score_prior` reuses ``loss.matcher``, ``box_cxcywh_to_xyxy``,
@@ -105,7 +119,13 @@ from dl_techniques.losses.sam3_detection_loss import (
 )
 from dl_techniques.utils.logger import logger
 from train.common import set_seeds
-from train.sam3.data import build_sam3_dataset
+from train.sam3.data import (
+    RECORD_ALL_BOXES,
+    RECORD_ALL_CATEGORY_IDS,
+    RECORD_ALL_VALID,
+    RECORD_PROMPT_ID,
+    build_sam3_dataset,
+)
 from train.sam3.train_sam3 import Sam3TrainingConfig, create_training_model
 
 #: The offset between a run's TRAIN seed and its VAL seed. Mirrors
@@ -160,6 +180,23 @@ PROMPT_KEYS: Tuple[str, str] = ("token_ids", "token_padding_mask")
 #: chance; :func:`prompt_swap_retention` reports the fraction of images whose
 #: prompt tokens actually changed rather than assuming they all did.
 PROMPT_SWAP_SHIFTS: Tuple[int, ...] = (1, 2, 3)
+
+#: The label the distractor-gap diagnostic is printed and filed under. Named
+#: here for the same reason :data:`CONNECTED_COMPONENTS_ARM` is: it must be
+#: impossible for :func:`family_max`'s ``startswith(("FIXED-GRID",
+#: "KMEANS-PRIOR"))`` allowlist to pick it up. It is not a member of the
+#: ``SYSTEM.md:220`` family, it never enters :func:`evaluate_family`'s results,
+#: and it is reported in its own CLI section.
+DISTRACTOR_GAP_ARM: str = "DISTRACTOR-GAP (same boxes, other categories' GT)"
+
+#: Absolute tolerance of the alignment assertion in :func:`_distractor_targets`.
+#: Both box sets come from ``data.py``'s single ``_normalized_box`` helper and
+#: are float32 all the way through ``pack_targets``/``unpack_targets`` (which
+#: slice and concatenate, never arithmetic), so agreement is expected to be
+#: EXACT; this is a float-safety margin, not a fuzzy match. It is ~1e-3 of the
+#: smallest box side the generator draws, so it cannot make two different
+#: instances look like the same one.
+ALIGNMENT_TOLERANCE: float = 1e-5
 
 
 def kmeans_arm(k: int) -> str:
@@ -442,7 +479,8 @@ def build_context(seed: int, split: Optional[Dict[str, Any]] = None,
 
 
 def build_split_dataset(model: Any, seed: int, train: bool,
-                        split: Optional[Dict[str, Any]] = None) -> Any:
+                        split: Optional[Dict[str, Any]] = None,
+                        include_all_instances: bool = False) -> Any:
     """Build the TRAIN or VAL split for ``seed``.
 
     Interface contract: the VAL split's seed is ``seed + VAL_SEED_OFFSET``,
@@ -456,9 +494,17 @@ def build_split_dataset(model: Any, seed: int, train: bool,
         seed: The run seed (the TRAIN seed).
         train: ``True`` for the train split, ``False`` for the val split.
         split: Overrides for :data:`SPLIT`.
+        include_all_instances: Forwarded verbatim to
+            :func:`train.sam3.data.build_sam3_dataset`. ``True`` makes the
+            elements 3-tuples carrying the eval-only all-category geometry
+            BESIDE the prompted targets of the SAME record -- which is what
+            :func:`distractor_gap` consumes. The default leaves every existing
+            caller byte-identical.
 
     Returns:
-        A batched ``tf.data.Dataset`` of ``(inputs, packed_target)``.
+        A batched ``tf.data.Dataset`` of ``(inputs, packed_target)``, or of
+        ``(inputs, packed_target, all_instances)`` when
+        ``include_all_instances``.
     """
     resolved = dict(SPLIT)
     resolved.update(split or {})
@@ -471,6 +517,7 @@ def build_split_dataset(model: Any, seed: int, train: bool,
         zero_instance_rate=resolved["zero_instance_rate"],
         max_per_category=resolved["max_per_category"],
         seed=seed if train else seed + VAL_SEED_OFFSET,
+        include_all_instances=include_all_instances,
     )
 
 
@@ -818,6 +865,171 @@ def prompt_swap_retention(model: Any, loss: Any, dataset: Any,
     return result
 
 
+def _distractor_targets(all_instances: Dict[str, Any],
+                        prompted: Dict[str, Any]) -> Dict[str, Any]:
+    """The NON-prompted categories' ground truth, in ``_matched_iou``'s shape.
+
+    Interface contract: returns a dict carrying exactly ``target_boxes``
+    ``(B, C, 4)`` and ``target_valid`` ``(B, C)`` -- the two keys
+    :func:`_matched_iou` reads -- so the distractor set goes through the SAME
+    reduction as the prompted one with no second IoU implementation and no
+    change to the matcher. The boxes are every drawn instance's; only
+    ``target_valid`` differs, selecting the rows whose category is NOT the
+    prompted one. An image with a single drawn category yields an all-zero
+    valid row, which the matcher already handles (the generator's
+    ``zero_instance_rate`` produces empty prompted rows on ~25% of images).
+
+    The alignment assertion runs FIRST, before any number is derived. The
+    all-instance arrays and the packed targets arrive in the same tuple from
+    the same record, so they describe the same image by construction -- but
+    "by construction" is what this function refuses to take on trust, since a
+    silently misaligned pair would make every gap number garbage while looking
+    entirely plausible. Every VALID prompted target box must be present among
+    the all-instance rows carrying the prompted category id.
+
+    Args:
+        all_instances: The dataset element's third slot -- the eval-only
+            all-category export of ``train.sam3.data``.
+        prompted: :func:`unpack_targets` output for the SAME batch.
+
+    Returns:
+        A targets dict for the distractor arm.
+
+    Raises:
+        ValueError: If any valid prompted target box has no counterpart in the
+            all-instance rows of the prompted category -- i.e. the two target
+            sets do not describe the same image.
+    """
+    boxes = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_BOXES]),
+                       dtype=np.float32)
+    valid = np.asarray(ops.convert_to_numpy(all_instances[RECORD_ALL_VALID]),
+                       dtype=np.float32)
+    ids = np.asarray(
+        ops.convert_to_numpy(all_instances[RECORD_ALL_CATEGORY_IDS])
+    ).astype(np.int32)
+    prompt_id = np.asarray(
+        ops.convert_to_numpy(all_instances[RECORD_PROMPT_ID])).astype(np.int32)
+    gt_boxes = np.asarray(ops.convert_to_numpy(
+        ops.cast(prompted["target_boxes"], "float32")), dtype=np.float32)
+    gt_valid = np.asarray(ops.convert_to_numpy(
+        ops.cast(prompted["target_valid"], "float32")), dtype=np.float32)
+
+    is_prompted_row = (valid > 0.0) & (ids == prompt_id[:, None])
+    for index in range(boxes.shape[0]):
+        pool = boxes[index][is_prompted_row[index]]
+        for box in gt_boxes[index][gt_valid[index] > 0.0]:
+            hit = pool.shape[0] and bool(np.any(np.all(
+                np.abs(pool - box) <= ALIGNMENT_TOLERANCE, axis=-1)))
+            if not hit:
+                raise ValueError(
+                    f"_distractor_targets: image {index} of this batch has a "
+                    f"valid prompted target box {box.tolist()} with no "
+                    f"counterpart among the {pool.shape[0]} all-instance "
+                    f"row(s) of its prompted category "
+                    f"(id {int(prompt_id[index])}). The two target sets do "
+                    "not describe the same image, so every distractor number "
+                    "derived from them would be garbage.")
+
+    return {
+        "target_boxes": ops.convert_to_tensor(boxes),
+        "target_valid": ops.convert_to_tensor(
+            ((valid > 0.0) & (ids != prompt_id[:, None])).astype(np.float32)),
+    }
+
+
+def distractor_gap(model: Any, loss: Any, dataset: Any) -> Dict[str, float]:
+    """How much better a checkpoint's boxes fit the PROMPTED category's GT.
+
+    Interface contract: the second MODEL-scoring arm in a module of non-model
+    baselines, built exactly like :func:`prompt_swap_retention` -- one forward
+    pass at ``training=False``, a flat ``Dict[str, float]``, scored through
+    :func:`_matched_iou` so it cannot drift from any published ``box_iou``. It
+    takes ONE dataset and reads BOTH target sets out of it (the third tuple
+    slot), rather than zipping two datasets: two datasets would have to be
+    proven aligned batch-for-batch, and this way there is nothing to align.
+
+    Reading the result. ``box_iou`` alone cannot tell "the model learned to
+    find the NAMED shape" from "this generator's box task is solvable by any
+    rule that reads pixels": the zero-parameter connected-components detector
+    scores ABOVE the trained arm. This diagnostic scores the SAME predicted
+    boxes twice -- against the prompted category's GT, and against the pooled
+    GT of every OTHER category in the SAME image. A category-blind predictor
+    reads ~0 no matter how high its raw ``box_iou`` is; a GT oracle reads 1.0.
+
+    The two denominators are NOT equal, and that is correct, not a defect.
+    ``zero_instance_rate`` gives ~25% of images an ABSENT prompted category:
+    those contribute zero prompted pairs and non-zero distractor pairs. Unlike
+    :func:`prompt_swap_retention` -- whose two arms score the same targets and
+    whose ratio would therefore be meaningless across different populations --
+    the two arms here score DIFFERENT target sets by design, so both
+    denominators are reported and neither is asserted equal to the other.
+
+    Args:
+        model: A built or loaded ``Sam3TrainingModel``.
+        loss: The compiled ``Sam3DetectionLoss`` whose matcher is used.
+        dataset: The SCORING split built with ``include_all_instances=True``,
+            i.e. ``(inputs, packed_target, all_instances)`` batches.
+
+    Returns:
+        ``box_iou_prompted``, ``box_iou_distractor``, ``gap``
+        (= prompted - distractor), ``relative_gap`` (= gap / prompted),
+        ``matched_pairs_prompted`` and ``matched_pairs_distractor`` (the two
+        denominators, reported because they differ), and
+        ``images_with_distractor`` -- the number of images that actually had a
+        non-prompted instance. An image with only ONE category drawn has no
+        distractor and contributes to the prompted arm only; that count is
+        reported rather than silently absorbed into the mean.
+
+    Raises:
+        ValueError: If the dataset does not yield 3-tuples (it was built
+            without ``include_all_instances``), or if the alignment assertion
+            of :func:`_distractor_targets` fails.
+    """
+    sums: Dict[str, List[float]] = {"prompted": [0.0, 0.0],
+                                    "distractor": [0.0, 0.0]}
+    with_distractor = 0.0
+    for element in dataset:
+        if len(element) != 3:
+            raise ValueError(
+                f"distractor_gap: the dataset yields {len(element)}-tuples; "
+                "it must be built with include_all_instances=True, whose "
+                "third slot carries the all-category ground truth. Scoring "
+                "the prompted targets twice would report a gap of exactly "
+                "0.0 for every checkpoint, which is a plausible-looking lie.")
+        inputs, y_true, all_instances = element
+        prompted = unpack_targets(ops.cast(y_true, "float32"),
+                                  model.include_masks)
+        # The alignment assertion runs BEFORE the forward pass, so a
+        # misaligned batch cannot even produce a number to quote.
+        distractor = _distractor_targets(all_instances, prompted)
+        with_distractor += float(np.sum(np.asarray(ops.convert_to_numpy(
+            distractor["target_valid"])).sum(axis=-1) > 0.0))
+
+        out = model.sam3(inputs, training=False)
+        pred_boxes = ops.cast(out["pred_boxes"], "float32")
+        pred_logits = ops.cast(out["pred_logits"], "float32")
+        for name, targets in (("prompted", prompted),
+                              ("distractor", distractor)):
+            total, pairs = _matched_iou(pred_boxes, pred_logits, targets, loss)
+            sums[name][0] += total
+            sums[name][1] += pairs
+
+    prompted_iou = sums["prompted"][0] / max(sums["prompted"][1], 1.0)
+    distractor_iou = sums["distractor"][0] / max(sums["distractor"][1], 1.0)
+    gap = prompted_iou - distractor_iou
+    result = {
+        "box_iou_prompted": prompted_iou,
+        "box_iou_distractor": distractor_iou,
+        "gap": gap,
+        "relative_gap": gap / prompted_iou if prompted_iou else float("nan"),
+        "matched_pairs_prompted": sums["prompted"][1],
+        "matched_pairs_distractor": sums["distractor"][1],
+        "images_with_distractor": with_distractor,
+    }
+    logger.info("distractor_gap: %s", result)
+    return result
+
+
 def evaluate_family(seed: int, ks: Sequence[int] = FAMILY_KS,
                     split: Optional[Dict[str, Any]] = None,
                     ) -> Dict[str, Dict[str, float]]:
@@ -932,6 +1144,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "box_iou under the TRUE prompt and under another "
                              "image's prompt, and prints the retention. Quote "
                              "it beside any accuracy claim on this generator.")
+    parser.add_argument("--distractor-gap", type=str, default=None,
+                        metavar="TEMPLATE",
+                        help="A checkpoint path template containing '{seed}', "
+                             "e.g. 'results/step9_qsel_seed{seed}/"
+                             "final_model.keras'. Scores that checkpoint's "
+                             "SAME predicted boxes twice -- against the "
+                             "prompted category's ground truth, and against "
+                             "the pooled ground truth of every OTHER category "
+                             "present in the same image -- and prints the "
+                             "gap. A category-blind predictor reads near zero "
+                             "here however high its raw box_iou is.")
     return parser
 
 
@@ -1040,6 +1263,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"{swap['prompt_changed_fraction']:.2f} of images; relative "
                   f"delta pred_boxes {swap['rel_delta_pred_boxes']:.2e}, "
                   f"pred_logits {swap['rel_delta_pred_logits']:.2e}]")
+
+    if args.distractor_gap:
+        _emit("")
+        _emit(f"{DISTRACTOR_GAP_ARM} -- a CHECKPOINT's same predicted boxes "
+              "scored twice: against the PROMPTED category's ground truth, "
+              "and against the pooled ground truth of every OTHER category in "
+              "the SAME image. This is the number a category-blind predictor "
+              "cannot win: the connected-components detector reads ~0.005 "
+              "here while reading ~0.94 raw box_iou. The two denominators "
+              "DIFFER on purpose -- an image whose prompted category is "
+              "absent contributes zero prompted pairs and non-zero distractor "
+              "pairs -- so both are printed and neither is asserted equal:")
+        for seed in seeds:
+            path = Path(args.distractor_gap.format(seed=seed))
+            if not path.exists():
+                _emit(f"  seed {seed}: {path} ABSENT -- skipped")
+                continue
+            ctx_model, ctx_loss = build_context(seed)
+            gap = distractor_gap(
+                keras.models.load_model(path, compile=False), ctx_loss,
+                build_split_dataset(ctx_model, seed, train=False,
+                                    include_all_instances=True))
+            _emit(f"  seed {seed} ({path}): prompted = "
+                  f"{gap['box_iou_prompted']:.6f}, distractor = "
+                  f"{gap['box_iou_distractor']:.6f}, GAP = {gap['gap']:.6f} "
+                  f"({gap['relative_gap']:.4f} relative)   "
+                  f"[{gap['matched_pairs_prompted']:.0f} prompted vs "
+                  f"{gap['matched_pairs_distractor']:.0f} distractor pairs; "
+                  f"{gap['images_with_distractor']:.0f} image(s) actually had "
+                  "a distractor]")
 
     if args.json:
         payload = {str(seed): per_seed[seed] for seed in seeds}

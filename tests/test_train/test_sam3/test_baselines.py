@@ -61,6 +61,7 @@ from train.sam3.baselines import (
     connected_components_boxes,
     connected_components_predictor,
     degenerate_prior,
+    distractor_gap,
     evaluate_family,
     family_max,
     fit_kmeans_prior,
@@ -232,6 +233,19 @@ def tiny_val_dataset(tiny_context: Tuple[Any, Any]) -> Any:
     """The `tiny` SCORING split -- seed ``7 + VAL_SEED_OFFSET``."""
     model, _loss = tiny_context
     return build_split_dataset(model, seed=7, train=False, split=TINY_SPLIT)
+
+
+@pytest.fixture(scope="module")
+def tiny_all_instance_dataset(tiny_context: Tuple[Any, Any]) -> Any:
+    """The SAME scoring split, carrying the eval-only all-category geometry.
+
+    One dataset object, not two zipped ones: the prompted targets and the
+    all-instance geometry come out of the SAME record, so there is no batch
+    alignment to get wrong.
+    """
+    model, _loss = tiny_context
+    return build_split_dataset(model, seed=7, train=False, split=TINY_SPLIT,
+                               include_all_instances=True)
 
 
 class TestTheFixedGridPrior:
@@ -1013,6 +1027,159 @@ class TestThePromptSwapIsNotAFamilyMember:
             ["--prompt-swap", "results/x_seed{seed}/best_model.keras"])
         assert typed.prompt_swap.format(seed=2) == (
             "results/x_seed2/best_model.keras")
+
+
+class TestDistractorGapOnARealSplit:
+    """The diagnostic run end to end against a real model and split.
+
+    The liveness half (ORACLE reads 1.0, the category-blind detector reads
+    ~0.005) and its RED proofs are a separate concern and live in their own
+    classes; what is pinned here is that the plumbing is real -- the declared
+    keys, the two DIFFERENT denominators, and the arithmetic relating them.
+    """
+
+    @pytest.fixture(scope="class")
+    def gap(self, tiny_context: Tuple[Any, Any],
+            tiny_all_instance_dataset: Any) -> Dict[str, float]:
+        model, loss = tiny_context
+        return distractor_gap(model, loss, tiny_all_instance_dataset)
+
+    def test_it_returns_the_declared_keys_as_floats(
+            self, gap: Dict[str, float]) -> None:
+        assert set(gap) == {
+            "box_iou_prompted", "box_iou_distractor", "gap", "relative_gap",
+            "matched_pairs_prompted", "matched_pairs_distractor",
+            "images_with_distractor"}
+        assert all(isinstance(value, float) for value in gap.values())
+
+    def test_the_gap_is_the_difference_of_the_two_arms(
+            self, gap: Dict[str, float]) -> None:
+        assert gap["gap"] == pytest.approx(
+            gap["box_iou_prompted"] - gap["box_iou_distractor"])
+        assert gap["relative_gap"] == pytest.approx(
+            gap["gap"] / gap["box_iou_prompted"])
+
+    def test_both_denominators_are_reported_and_neither_is_asserted_equal(
+            self, gap: Dict[str, float]) -> None:
+        """The two arms score DIFFERENT target sets, by design.
+
+        ``prompt_swap_retention`` RAISES when its two arms match different
+        pair counts, because there the two arms score the SAME targets and a
+        differing denominator means the ratio compares two populations. Here
+        the populations differ ON PURPOSE -- ``zero_instance_rate`` gives some
+        images an absent prompted category, which contributes zero prompted
+        pairs and non-zero distractor pairs -- so copying that raise would
+        make the diagnostic refuse to run on its own intended input.
+        """
+        assert gap["matched_pairs_prompted"] > 0.0
+        assert gap["matched_pairs_distractor"] > 0.0
+
+    def test_the_prompted_arm_is_the_family_s_own_denominator(
+            self, gap: Dict[str, float], tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """The prompted arm must be like-for-like with every family arm, so
+        the gap qualifies the SAME number the family bars."""
+        model, loss = tiny_context
+        assert gap["matched_pairs_prompted"] == pytest.approx(
+            baselines._score(gt_oracle_predictor, model, loss,
+                             tiny_val_dataset)[1])
+
+    def test_the_image_count_is_reported_not_absorbed(
+            self, gap: Dict[str, float]) -> None:
+        """An image with only ONE category drawn has no distractor at all."""
+        assert 0.0 < gap["images_with_distractor"] <= float(
+            TINY_SPLIT["num_val_samples"])
+
+    def test_it_refuses_a_dataset_built_without_the_all_category_export(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_val_dataset: Any) -> None:
+        """The silent failure this raise exists to prevent: scoring the
+        prompted targets twice reads gap == 0.0 for every checkpoint."""
+        model, loss = tiny_context
+        with pytest.raises(ValueError, match="include_all_instances=True"):
+            distractor_gap(model, loss, tiny_val_dataset)
+
+
+class TestTheDistractorTargetsAreTheSameImageSTargets:
+    """A-2, executed rather than inferred.
+
+    The plan's assumption was that a SIBLING distractor dataset would zip
+    batch-for-batch with the val split. It is retired by construction here --
+    both target sets come out of ONE record -- but the property is still
+    ASSERTED in code before any number is quoted, because a misaligned pair
+    would produce entirely plausible garbage.
+    """
+
+    @staticmethod
+    def _one_batch(dataset: Any, model: Any) -> Tuple[Dict[str, Any],
+                                                      Dict[str, Any]]:
+        for _inputs, y_true, all_instances in dataset:
+            return (dict(all_instances),
+                    baselines.unpack_targets(
+                        baselines.ops.cast(y_true, "float32"),
+                        model.include_masks))
+        raise AssertionError("the fixture dataset yielded no batch")
+
+    def test_the_all_instance_set_contains_every_prompted_target(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_all_instance_dataset: Any) -> None:
+        """The GREEN control beside the mutation below."""
+        model, _loss = tiny_context
+        all_instances, prompted = self._one_batch(tiny_all_instance_dataset,
+                                                  model)
+        targets = baselines._distractor_targets(all_instances, prompted)
+        assert set(targets) == {"target_boxes", "target_valid"}
+
+    def test_a_displaced_box_fires_the_alignment_assertion(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_all_instance_dataset: Any) -> None:
+        """RED proof: move the all-instance geometry off the record it came
+        from and the assertion must REFUSE before any IoU is computed.
+
+        The firing assertion is the ``ValueError`` in
+        ``_distractor_targets``: 'has a valid prompted target box ... with no
+        counterpart among the ... all-instance row(s) of its prompted
+        category'.
+        """
+        model, _loss = tiny_context
+        all_instances, prompted = self._one_batch(tiny_all_instance_dataset,
+                                                  model)
+        displaced = np.asarray(baselines.ops.convert_to_numpy(
+            all_instances[baselines.RECORD_ALL_BOXES]), dtype=np.float32)
+        displaced[..., 0] += 0.25
+        all_instances[baselines.RECORD_ALL_BOXES] = displaced
+        with pytest.raises(ValueError, match="no counterpart"):
+            baselines._distractor_targets(all_instances, prompted)
+
+    def test_the_distractor_rows_exclude_the_prompted_category(
+            self, tiny_context: Tuple[Any, Any],
+            tiny_all_instance_dataset: Any) -> None:
+        """The whole point of the arm: it must not be scoring the prompted
+        instances under another name."""
+        model, _loss = tiny_context
+        all_instances, prompted = self._one_batch(tiny_all_instance_dataset,
+                                                  model)
+        targets = baselines._distractor_targets(all_instances, prompted)
+        ids = np.asarray(baselines.ops.convert_to_numpy(
+            all_instances[baselines.RECORD_ALL_CATEGORY_IDS]))
+        prompt_id = np.asarray(baselines.ops.convert_to_numpy(
+            all_instances[baselines.RECORD_PROMPT_ID]))
+        valid = np.asarray(baselines.ops.convert_to_numpy(
+            targets["target_valid"]))
+        assert valid.sum() > 0.0, "no distractor row at all is a dead arm"
+        assert not np.any(valid[ids == prompt_id[:, None]] > 0.0)
+
+
+class TestTheDistractorGapCli:
+    """The flag is wired end to end and is OFF by default."""
+
+    def test_the_cli_exposes_it_and_it_is_off_by_default(self) -> None:
+        args = build_parser().parse_args([])
+        assert args.distractor_gap is None
+        typed = build_parser().parse_args(
+            ["--distractor-gap", "results/x_seed{seed}/final_model.keras"])
+        assert typed.distractor_gap.format(seed=2) == (
+            "results/x_seed2/final_model.keras")
 
 
 class TestThisParserSHelpDoesNotCrash:
