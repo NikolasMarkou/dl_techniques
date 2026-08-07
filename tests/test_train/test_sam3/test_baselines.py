@@ -2134,6 +2134,101 @@ class TestTheValSeedOffsetDefaultPathIsUnmoved:
             f"({INDEPENDENT_VAL_SEED_OFFSET}).")
 
 
+#: The train seeds whose splits G2 compares. Three, not one: the collision G2
+#: exists to catch is a CROSS-seed one, and it is invisible at a single seed.
+G2_SEEDS: Tuple[int, ...] = (1, 2, 3)
+
+
+class TestSplitTwoIsDisjointFromEverySeedsSplitOne:
+    """G2 -- the second val split is INDEPENDENT, measured, not inferred.
+
+    Step 3 re-scores every checkpoint on a split built at
+    `INDEPENDENT_VAL_SEED_OFFSET` instead of `VAL_SEED_OFFSET`, and the whole
+    value of that re-scoring is that the new split is not the old one wearing a
+    different seed. The arithmetic ALONE does not establish that: the split seed
+    is `train_seed + offset`, so an offset delta smaller than the seed range
+    aliases one seed's second split onto ANOTHER seed's first split -- offset
+    10_001 would make seed 1's second split seed 10002, which IS seed 2's
+    DEFAULT split. That is why the same-seed clause is not enough and the
+    cross-seed clause exists.
+
+    The two clauses are deliberately separate tests, because a single injection
+    cannot distinguish them (see the RED proofs below) and a guard that fires
+    for the wrong reason is this repo's dominant measured defect.
+
+    TWO RED-proofs, both EXECUTED before this was committed, and they fire
+    DIFFERENT assertions -- which is the point of running both:
+
+    1. "the second offset is not second": build BOTH sides at
+       `VAL_SEED_OFFSET` (pass the same offset twice) in the `digests` fixture.
+       Fires `test_split_two_differs_from_the_same_seeds_split_one` at all
+       three seeds (3 failed); the cross-seed test stays GREEN, because three
+       identical-to-themselves splits still differ from each OTHER seed's.
+    2. "the offset delta is smaller than the seed range": build the second side
+       at 10_001 instead of `INDEPENDENT_VAL_SEED_OFFSET`. Fires ONLY
+       `test_no_split_two_equals_another_seeds_split_one` (seed 1's split 2 ==
+       seed 2's split 1, and seed 2's == seed 3's; 2 failed) while
+       `test_split_two_differs_from_the_same_seeds_split_one` stays GREEN at
+       all three seeds -- 10_001 is a different split from 10_000, just the
+       WRONG different split.
+
+    Injection 1 alone would leave the cross-seed clause unproven, and injection
+    2 alone would leave the same-seed clause unproven. Hence one per assertion.
+
+    Scope: this pins the PROPERTY at the `tiny` geometry, cheaply, inside the
+    normal suite. The property was ALSO measured at the shipped 64-image
+    geometry against the prior plan's recorded digests by
+    `plans/plan-2026-08-07T174622-3b8002c3/probes/split2_digests.py`; that probe
+    is the evidence, this is the regression guard.
+
+    Device: CPU-cheap -- the `tiny` split, no forward pass, labels only.
+    """
+
+    @pytest.fixture(scope="class")
+    def digests(self, tiny_context: Tuple[Any, Any]
+                ) -> Dict[Tuple[int, int], str]:
+        model, _loss = tiny_context
+        return {
+            (seed, offset): _split_gt_digest(
+                model, seed=seed, split=TINY_SPLIT,
+                val_seed_offset=offset)
+            for seed in G2_SEEDS
+            for offset in (VAL_SEED_OFFSET, INDEPENDENT_VAL_SEED_OFFSET)
+        }
+
+    @pytest.mark.parametrize("seed", G2_SEEDS)
+    def test_split_two_differs_from_the_same_seeds_split_one(
+            self, digests: Dict[Tuple[int, int], str], seed: int) -> None:
+        """Clause (b): at each seed, the two offsets must build two different
+        splits, or the re-score is the SAME measurement twice."""
+        first = digests[(seed, VAL_SEED_OFFSET)]
+        second = digests[(seed, INDEPENDENT_VAL_SEED_OFFSET)]
+        assert first != second, (
+            f"seed {seed}: the split at offset {INDEPENDENT_VAL_SEED_OFFSET} "
+            f"(val seed {seed + INDEPENDENT_VAL_SEED_OFFSET}) is byte-"
+            f"identical to the split at offset {VAL_SEED_OFFSET} (val seed "
+            f"{seed + VAL_SEED_OFFSET}), digest {first[:16]}. Re-scoring on it "
+            "would repeat the published measurement, not confound-test it.")
+
+    @pytest.mark.parametrize("seed", G2_SEEDS)
+    def test_no_split_two_equals_another_seeds_split_one(
+            self, digests: Dict[Tuple[int, int], str], seed: int) -> None:
+        """Clause (d): the CROSS-seed collision. `seed`'s second split must
+        differ from every OTHER seed's DEFAULT split -- an alias there would
+        silently score one arm on a sibling arm's own training-derived split."""
+        second = digests[(seed, INDEPENDENT_VAL_SEED_OFFSET)]
+        collisions = [other for other in G2_SEEDS
+                      if other != seed
+                      and digests[(other, VAL_SEED_OFFSET)] == second]
+        assert not collisions, (
+            f"seed {seed}'s split at offset {INDEPENDENT_VAL_SEED_OFFSET} "
+            f"(val seed {seed + INDEPENDENT_VAL_SEED_OFFSET}) is byte-"
+            f"identical to the DEFAULT split of seed(s) {collisions}. The "
+            f"offset delta {INDEPENDENT_VAL_SEED_OFFSET - VAL_SEED_OFFSET} is "
+            "not larger than the seed range, so the 'independent' split is "
+            "another arm's own scoring split (D-001).")
+
+
 class TestTheValSeedOffsetFlagReachesTheDatasetBuilder:
     """G3 -- `--val-seed-offset` is threaded, not merely parsed.
 
