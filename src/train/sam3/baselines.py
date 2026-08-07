@@ -1240,8 +1240,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cc = per_seed[seed][CONNECTED_COMPONENTS_ARM]["box_iou"]
         best, value = family_max(per_seed[seed])
         _emit(f"  seed {seed}: connected components = {cc:.6f}   "
-              f"(family max {value:.4f}; the trained query-selection arm read "
-              f"0.8450 / 0.8296 / 0.8191 on seeds 1 / 2 / 3)")
+              f"(family max {value:.4f}; the `step9_qsel` checkpoint -- deep "
+              f"supervision + query selection, WITHOUT prompt conditioning -- "
+              f"read 0.8450 / 0.8296 / 0.8191 on seeds 1 / 2 / 3. Name the "
+              f"CHECKPOINT and not the flag: `step10_pcq` is also a "
+              f"query-selection arm and reads 0.8494 / 0.8223 / 0.8299)")
+
+    swap_by_seed: Dict[int, Dict[str, float]] = {}
+    gap_by_seed: Dict[int, Dict[str, float]] = {}
 
     if args.prompt_swap:
         _emit("")
@@ -1260,6 +1266,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             swap = prompt_swap_retention(
                 keras.models.load_model(path, compile=False), ctx_loss,
                 build_split_dataset(ctx_model, seed, train=False))
+            swap_by_seed[seed] = swap
             _emit(f"  seed {seed} ({path}): true = "
                   f"{swap['box_iou_true']:.6f}, worst wrong prompt = "
                   f"{swap['box_iou_worst_wrong_prompt']:.6f}, RETAINED = "
@@ -1295,6 +1302,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 keras.models.load_model(path, compile=False), ctx_loss,
                 build_split_dataset(ctx_model, seed, train=False,
                                     include_all_instances=True))
+            gap_by_seed[seed] = gap
             _emit(f"  seed {seed} ({path}): prompted = "
                   f"{gap['box_iou_prompted']:.6f}, distractor = "
                   f"{gap['box_iou_distractor']:.6f}, GAP = {gap['gap']:.6f} "
@@ -1305,7 +1313,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   "a distractor]")
 
     if args.json:
-        payload = {str(seed): per_seed[seed] for seed in seeds}
+        # DECISION plan-2026-08-07T065516-6add49a9/D-022
+        # `--distractor-gap` and `--prompt-swap` MUST write into the JSON, not
+        # only into stdout: the plan named this file as the machine-readable
+        # evidence for those numbers and for one release it carried the family
+        # rows ONLY, so the numbers survived just in a log. Two constraints go
+        # with that, and neither is optional. (1) Write into a COPY of
+        # `per_seed[seed]`, never into `per_seed` itself -- `family_max`
+        # iterates that dict, and a nested dict there is an entry a future
+        # widening of the allowlist could pick up (I-6). (2) The keys are
+        # `prompt_swap` / `distractor_gap`, NOT arm-shaped names, so no
+        # `startswith(("FIXED-GRID", "KMEANS-PRIOR"))` reading can ever match
+        # them. See decisions.md D-022.
+        payload: Dict[str, Any] = {
+            str(seed): dict(per_seed[seed]) for seed in seeds}
+        for seed in seeds:
+            if seed in swap_by_seed:
+                payload[str(seed)]["prompt_swap"] = swap_by_seed[seed]
+            if seed in gap_by_seed:
+                payload[str(seed)]["distractor_gap"] = gap_by_seed[seed]
         payload["_family_max"] = {
             str(seed): dict(zip(("arm", "box_iou"), family_max(per_seed[seed])))
             for seed in seeds}

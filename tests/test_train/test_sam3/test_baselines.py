@@ -1797,3 +1797,160 @@ class TestThisParserSHelpDoesNotCrash:
         with pytest.raises(SystemExit) as exit_info:
             build_parser().parse_args(["--help"])
         assert exit_info.value.code == 0
+
+
+#: The stand-in ``distractor_gap`` reading the JSON-payload guard looks for.
+#: Sentinel values, not plausible ones: a number that could have come from
+#: anywhere proves nothing about WHICH dict reached the file.
+_GAP_SENTINEL: Dict[str, float] = {
+    "box_iou_prompted": 0.111111,
+    "box_iou_distractor": 0.222222,
+    "gap": -0.111111,
+    "relative_gap": -1.0,
+    "matched_pairs_prompted": 11.0,
+    "matched_pairs_distractor": 22.0,
+    "images_with_distractor": 33.0,
+}
+
+#: The stand-in ``prompt_swap_retention`` reading, same reasoning.
+_SWAP_SENTINEL: Dict[str, float] = {
+    "box_iou_true": 0.333333,
+    "box_iou_worst_wrong_prompt": 0.444444,
+    "retained": 1.333332,
+    "matched_pairs": 44.0,
+    "prompt_changed_fraction": 0.55,
+    "rel_delta_pred_boxes": 6.6,
+    "rel_delta_pred_logits": 7.7,
+}
+
+
+class TestTheJsonPayloadCarriesTheDiagnosticsAndNotOnlyTheFamily:
+    """``--json`` must write the ``--distractor-gap`` / ``--prompt-swap``
+    numbers, not only the family table.
+
+    This is a WIRING guard for a defect that actually shipped and was caught in
+    review: ``main`` built its payload from ``evaluate_family``'s results alone,
+    so a run invoked as ``--distractor-gap ... --json out.json`` wrote a file
+    with SEVEN family arms and ZERO gap numbers, while the plan naming that file
+    as the gap's machine-readable evidence read as satisfied. The numbers
+    survived only in the stdout log, which nothing parses. Nothing in the
+    module raised, and every other test in this file stayed green -- the only
+    observable is the CONTENT of the written file, which is what this pins.
+
+    RED-proof: reverting ``main``'s ``if args.json`` block to the pre-fix
+    ``payload = {str(seed): per_seed[seed] for seed in seeds}`` (the two loops'
+    dicts never folded in) makes
+    ``test_the_distractor_gap_block_writes_into_the_json`` fire at
+    ``assert "distractor_gap" in payload["1"]``, and the prompt-swap twin fire
+    at ``assert "prompt_swap" in payload["1"]``. Both were executed RED before
+    this test was committed.
+
+    Everything expensive is replaced: the family evaluation, the context, the
+    split builder, ``keras.models.load_model``, and both diagnostics. That is
+    deliberate -- the claim under test is "the value this function returned
+    reached the file", and a real forward pass would only make it slower and
+    make the sentinel unrecognisable.
+    """
+
+    @pytest.fixture
+    def written_payload(self, tmp_path: Any,
+                        monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
+        """Run ``main`` end to end with every heavy call replaced, and return
+        the parsed JSON it wrote."""
+        import json as json_module
+
+        family = {
+            "_meta": {"pool_size": 10.0, "num_queries": 4.0},
+            ORACLE_ARM: {"box_iou": 1.0, "matched": 5.0},
+            DEGENERATE_ARM: {"box_iou": 0.01, "matched": 5.0},
+            CONNECTED_COMPONENTS_ARM: {"box_iou": 0.9, "matched": 5.0},
+            f"{GRID_ARM} 5x5 wh0.2": {"box_iou": 0.2, "matched": 5.0},
+        }
+        monkeypatch.setattr(
+            baselines, "evaluate_family",
+            lambda seed, ks: {k: dict(v) for k, v in family.items()})
+        monkeypatch.setattr(
+            baselines, "build_context", lambda seed: (object(), object()))
+        monkeypatch.setattr(
+            baselines, "build_split_dataset",
+            lambda model, seed, train=False, include_all_instances=False:
+            object())
+        monkeypatch.setattr(baselines.keras.models, "load_model",
+                            lambda path, compile=False: object())
+        monkeypatch.setattr(baselines, "distractor_gap",
+                            lambda *a, **kw: dict(_GAP_SENTINEL))
+        monkeypatch.setattr(baselines, "prompt_swap_retention",
+                            lambda *a, **kw: dict(_SWAP_SENTINEL))
+
+        checkpoint = tmp_path / "ckpt_seed1.keras"
+        checkpoint.write_text("not a real checkpoint -- never opened")
+        out = tmp_path / "payload.json"
+        template = str(tmp_path / "ckpt_seed{seed}.keras")
+
+        code = baselines.main([
+            "--seeds", "1",
+            "--distractor-gap", template,
+            "--prompt-swap", template,
+            "--json", str(out)])
+        assert code == 0
+        return json_module.loads(out.read_text())
+
+    def test_the_distractor_gap_block_writes_into_the_json(
+            self, written_payload: Dict[str, Any]) -> None:
+        """The firing assertion of the RED proof."""
+        assert "distractor_gap" in written_payload["1"]
+        assert written_payload["1"]["distractor_gap"] == _GAP_SENTINEL
+
+    def test_the_prompt_swap_block_writes_into_the_json(
+            self, written_payload: Dict[str, Any]) -> None:
+        """The firing assertion of the RED proof, prompt-swap twin."""
+        assert "prompt_swap" in written_payload["1"]
+        assert written_payload["1"]["prompt_swap"] == _SWAP_SENTINEL
+
+    def test_the_gap_is_keyed_per_seed_and_not_at_the_top_level(
+            self, written_payload: Dict[str, Any]) -> None:
+        """Ambiguity is the failure mode a flat key would reintroduce: three
+        seeds' gaps under one key cannot be told apart."""
+        assert "distractor_gap" not in written_payload
+        assert "prompt_swap" not in written_payload
+        assert set(written_payload) == {"1", "_family_max"}
+
+    def test_the_family_rows_are_undisturbed(
+            self, written_payload: Dict[str, Any]) -> None:
+        """The fix is ADDITIVE: every key the file carried before is still
+        there, with the same value."""
+        row = written_payload["1"]
+        assert row["_meta"] == {"pool_size": 10.0, "num_queries": 4.0}
+        assert row[ORACLE_ARM] == {"box_iou": 1.0, "matched": 5.0}
+        assert row[CONNECTED_COMPONENTS_ARM] == {"box_iou": 0.9,
+                                                 "matched": 5.0}
+        assert written_payload["_family_max"]["1"] == {
+            "arm": f"{GRID_ARM} 5x5 wh0.2", "box_iou": 0.2}
+
+    def test_the_two_diagnostics_never_reach_family_max(
+            self, written_payload: Dict[str, Any]) -> None:
+        """I-6 at the payload level: the bar quoted in the file is still the
+        family's, and neither new key is arm-shaped enough to be picked up."""
+        assert written_payload["_family_max"]["1"]["arm"].startswith(GRID_ARM)
+        for key in ("distractor_gap", "prompt_swap"):
+            assert not key.startswith(("FIXED-GRID", "KMEANS-PRIOR"))
+
+    def test_without_the_two_flags_the_payload_is_exactly_as_before(
+            self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No flag, no key -- an absent diagnostic must not become a null row
+        that a consumer would read as 'measured, and it was nothing'."""
+        import json as json_module
+
+        monkeypatch.setattr(
+            baselines, "evaluate_family",
+            lambda seed, ks: {
+                "_meta": {"pool_size": 10.0, "num_queries": 4.0},
+                ORACLE_ARM: {"box_iou": 1.0, "matched": 5.0},
+                DEGENERATE_ARM: {"box_iou": 0.01, "matched": 5.0},
+                CONNECTED_COMPONENTS_ARM: {"box_iou": 0.9, "matched": 5.0},
+                f"{GRID_ARM} 5x5 wh0.2": {"box_iou": 0.2, "matched": 5.0}})
+        out = tmp_path / "family_only.json"
+        assert baselines.main(["--seeds", "1", "--json", str(out)]) == 0
+        payload = json_module.loads(out.read_text())
+        assert "distractor_gap" not in payload["1"]
+        assert "prompt_swap" not in payload["1"]
