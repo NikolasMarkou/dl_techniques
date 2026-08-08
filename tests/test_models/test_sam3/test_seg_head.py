@@ -1,4 +1,4 @@
-"""Tests for `models/sam3/maskformer_segmentation.py` -- `Sam3SegmentationHead`.
+"""Tests for `models/SAM/SAM3/maskformer_segmentation.py` -- `Sam3SegmentationHead`.
 
 The guards here are organized around the four ways this head can be silently
 wrong: the upsampling MODE, the fusion OPERATOR, the merge ORDER, and the
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sam3.maskformer_segmentation import (
+from dl_techniques.models.SAM.SAM3.maskformer_segmentation import (
     Sam3SegmentationHead,
 )
 

@@ -36,8 +36,8 @@ from dl_techniques.losses.sam3_detection_loss import (
     packed_channel_count,
     unpack_targets,
 )
-from dl_techniques.models.sam3 import Sam3Image
-from dl_techniques.models.sam3.training_model import (
+from dl_techniques.models.SAM.SAM3 import Sam3Image
+from dl_techniques.models.SAM.SAM3.training_model import (
     Sam3TrainingModel,
     compile_sam3_trainer,
 )

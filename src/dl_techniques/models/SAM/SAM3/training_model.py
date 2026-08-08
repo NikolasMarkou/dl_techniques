@@ -44,7 +44,7 @@ zero the plan's prose described; see decisions.md D-010. It is imported as
 
 Importing the TensorFlow package is FORBIDDEN in this file
 -----------------------------------------------------------
-This module lives under ``models/sam3/``, whose ``keras.ops`` purity is a
+This module lives under ``models/SAM/SAM3/``, whose ``keras.ops`` purity is a
 close-out gate checked by GREP -- so the two literal tokens that gate greps for
 are deliberately NOT spelled anywhere in this file, not even in prose. (Writing
 one of them here erodes the instrument, a failure already measured three times
@@ -78,7 +78,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import keras
 from keras import ops
 
-from ...losses.sam3_detection_loss import (
+from dl_techniques.losses.sam3_detection_loss import (
     META_IS_EXHAUSTIVE,
     META_KEEP_LOSS,
     META_NUM_BOXES,
@@ -89,7 +89,7 @@ from ...losses.sam3_detection_loss import (
     derive_keep_loss,
     packed_channel_count,
 )
-from ...utils.logger import logger
+from dl_techniques.utils.logger import logger
 from .sam3_image import Sam3Image
 
 # ---------------------------------------------------------------------

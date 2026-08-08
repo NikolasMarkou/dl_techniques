@@ -1,4 +1,4 @@
-"""Detection supervision for :class:`~dl_techniques.models.sam3.Sam3Image`.
+"""Detection supervision for :class:`~dl_techniques.models.SAM.SAM3.Sam3Image`.
 
 This module ships the **Hungarian matcher** and the six-term
 :class:`Sam3DetectionLoss` that consumes its assignment (``loss_ce`` /
@@ -29,7 +29,7 @@ no ``keras.ops`` equivalent and no differentiable substitute that preserves a
 **training-only** -- it runs inside a ``keras.losses.Loss``, never inside any
 forward path -- which is exactly the exemption ``src/train/sam/data.py:35``
 claims for its ``tf.data`` pipeline. ``import tensorflow`` remains FORBIDDEN in
-``src/dl_techniques/models/sam3/*.py``, and every differentiable arithmetic
+``src/dl_techniques/models/SAM/SAM3/*.py``, and every differentiable arithmetic
 operation below is written in ``keras.ops``.
 
 The direct consequence is that this loss family **cannot run under XLA**: there
@@ -329,7 +329,7 @@ def box_cxcywh_to_xyxy(boxes: Any) -> Any:
 
         [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
 
-    This conversion lives here because ``models/sam3/`` deliberately does not
+    This conversion lives here because ``models/SAM/SAM3/`` deliberately does not
     ship it: ``pred_boxes`` is normalized ``cxcywh`` by contract and the package
     treats the ``xyxy`` form as a consumer-side concern
     (``sam3_image.py:73``). This is that consumer.
@@ -954,7 +954,7 @@ class Sam3DetectionLoss(keras.losses.Loss):
         INDEPENDENTLY by the same matcher and added to the total at the SAME
         weights as the main term, with the mask terms excluded (decisions.md
         D-004 and D-005). It must agree with the training model's own count --
-        :func:`~dl_techniques.models.sam3.training_model.compile_sam3_trainer`
+        :func:`~dl_techniques.models.SAM.SAM3.training_model.compile_sam3_trainer`
         raises on a disagreement, because a mismatch mis-slices instead of
         raising.
     :type num_aux_layers: int

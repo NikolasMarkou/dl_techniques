@@ -1,4 +1,4 @@
-"""Tests for SAM 3's ViTDet trunk (`models/sam3/vitdet.py`).
+"""Tests for SAM 3's ViTDet trunk (`models/SAM/SAM3/vitdet.py`).
 
 Every value oracle here is an INDEPENDENT float64 NumPy computation derived from
 the reference's published arithmetic, never from the implementation under test.
@@ -20,7 +20,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam3.vitdet import (
+from dl_techniques.models.SAM.SAM3.vitdet import (
     Sam3ViTDetBackbone,
     Sam3ViTDetBlock,
     _window_partition,
@@ -673,7 +673,7 @@ class TestPurity:
     def test_library_file_uses_no_tensorflow(self):
         import re
 
-        from dl_techniques.models.sam3 import vitdet
+        from dl_techniques.models.SAM.SAM3 import vitdet
 
         source = open(vitdet.__file__, encoding="utf-8").read()
         assert "import tensorflow" not in source

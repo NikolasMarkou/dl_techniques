@@ -3,9 +3,9 @@ SAM 3's MaskFormer segmentation head: prompt-conditioned pixels, one mask per qu
 
 This module provides the single public class :class:`Sam3SegmentationHead`. It
 turns the multi-scale pyramid produced by
-:class:`~dl_techniques.models.sam3.necks.Sam3DualViTDetNeck` plus the object
+:class:`~dl_techniques.models.SAM.SAM3.necks.Sam3DualViTDetNeck` plus the object
 queries produced by
-:class:`~dl_techniques.models.sam3.decoder.Sam3TransformerDecoder` into one
+:class:`~dl_techniques.models.SAM.SAM3.decoder.Sam3TransformerDecoder` into one
 binary mask logit map per query, in the textbook MaskFormer way: a pixel
 embedding is decoded once for the whole image, every query is projected into
 the same embedding space, and the mask is their dot product.

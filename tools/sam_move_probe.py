@@ -8,7 +8,7 @@ Usage -- identical before and after the `models/{sam,sam2,sam3}` ->
 `models/SAM/{SAM1,SAM2,SAM3}` move::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python tools/sam_move_probe.py \
-        --registrar dl_techniques.models.sam3 \
+        --registrar dl_techniques.models.SAM.SAM3 \
         --checkpoint results/sam3_tiny_20260808_040020/final_model.keras \
         --out plans/<plan>/checkpoints/sam3_before.json [--perturb-ulp]
 

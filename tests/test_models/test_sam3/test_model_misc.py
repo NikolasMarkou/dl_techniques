@@ -1,4 +1,4 @@
-"""Tests for SAM 3's dot-product class-score head (`models/sam3/model_misc.py`).
+"""Tests for SAM 3's dot-product class-score head (`models/SAM/SAM3/model_misc.py`).
 
 Two design choices in this file are load-bearing and both exist because of
 measured precedent in this plan.
@@ -35,7 +35,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sam3.model_misc import Sam3DotProductScoring
+from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
 
 # ---------------------------------------------------------------------
 # tiny variant
@@ -527,7 +527,7 @@ class TestSerialization:
 class TestPackageSurface:
 
     def test_the_head_is_exported_from_the_package(self):
-        from dl_techniques.models import sam3
+        from dl_techniques.models.SAM import SAM3 as sam3
         assert sam3.Sam3DotProductScoring is Sam3DotProductScoring
         assert "Sam3DotProductScoring" in sam3.__all__
 

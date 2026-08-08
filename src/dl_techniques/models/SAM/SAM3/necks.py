@@ -3,7 +3,7 @@ SAM 3's dual SimpleFPN neck: one trunk feature map, four scales, two weight sets
 
 This module provides the single public class :class:`Sam3DualViTDetNeck` -- the
 ViTDet-style SimpleFPN that turns the ONE feature map emitted by
-:class:`~dl_techniques.models.sam3.vitdet.Sam3ViTDetBackbone` into the
+:class:`~dl_techniques.models.SAM.SAM3.vitdet.Sam3ViTDetBackbone` into the
 multi-scale pyramid the detector and the tracker consume.
 
 Architecture:

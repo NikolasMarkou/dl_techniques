@@ -1,4 +1,4 @@
-"""Tests for SAM 3's CLIP text tower wrapper (`models/sam3/text_encoder_ve.py`).
+"""Tests for SAM 3's CLIP text tower wrapper (`models/SAM/SAM3/text_encoder_ve.py`).
 
 The load-bearing guard here is CAUSALITY, and it is asserted as an **exact zero**
 rather than against a tolerance. The wrapped encoder is bidirectional by default,
@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sam3.text_encoder_ve import Sam3TextEncoder
+from dl_techniques.models.SAM.SAM3.text_encoder_ve import Sam3TextEncoder
 
 # ---------------------------------------------------------------------
 # tiny variant

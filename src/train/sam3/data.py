@@ -71,7 +71,7 @@ working directory and checking that the directory is still empty.
 This is a ``tf.data`` pipeline, not a forward path, so it is exempt from the
 ``keras.ops``-only invariant exactly as ``src/train/sam/data.py:36`` records for
 its own module. The packing itself is delegated to
-``models/sam3/training_model.py``'s ``pack_targets``, so no channel index is
+``models/SAM/SAM3/training_model.py``'s ``pack_targets``, so no channel index is
 spelled here either.
 """
 
@@ -82,7 +82,7 @@ import numpy as np
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam3.training_model import pack_targets
+from dl_techniques.models.SAM.SAM3.training_model import pack_targets
 from dl_techniques.utils.logger import logger
 
 #: The closed category set. The four are separated by two coarse statistics that
@@ -642,7 +642,7 @@ def build_sam3_dataset(
 
     Args:
         model: A built or unbuilt
-            :class:`~dl_techniques.models.sam3.training_model.Sam3TrainingModel`.
+            :class:`~dl_techniques.models.SAM.SAM3.training_model.Sam3TrainingModel`.
         num_samples: Records in one epoch.
         batch_size: Batch size, in images.
         max_instances: ``N_max``, the padded GT slot count.

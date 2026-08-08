@@ -1,5 +1,5 @@
 """
-Tests for ``models/sam3/sam3_image.py`` -- the top-level ``Sam3Image`` assembly.
+Tests for ``models/SAM/SAM3/sam3_image.py`` -- the top-level ``Sam3Image`` assembly.
 
 What this file guards, and why each guard is shaped the way it is:
 
@@ -26,8 +26,8 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sam3 import Sam3Image
-from dl_techniques.models.sam3.sam3_image import COMPONENT_KEYS
+from dl_techniques.models.SAM.SAM3 import Sam3Image
+from dl_techniques.models.SAM.SAM3.sam3_image import COMPONENT_KEYS
 
 # ---------------------------------------------------------------------
 # measured constants
@@ -280,7 +280,7 @@ class TestConstruction:
         and round-trips independently. The counts are split so that adding a
         class and adding a helper are not interchangeable here: an unannounced
         twelfth-plus class still fires even if the total happens to match."""
-        import dl_techniques.models.sam3 as package
+        import dl_techniques.models.SAM.SAM3 as package
         assert "Sam3Image" in package.__all__
         exported = {name: getattr(package, name) for name in package.__all__}
         classes = sorted(k for k, v in exported.items() if isinstance(v, type))
@@ -316,13 +316,13 @@ class TestConstruction:
         # Only ONE variant carries a released geometry, and the table says so in
         # its own source rather than leaving a reader to infer it. Inventing the
         # other published SAM 3 sizes would be fabrication, so they are absent.
-        import dl_techniques.models.sam3.sam3_image as module
+        import dl_techniques.models.SAM.SAM3.sam3_image as module
         assert "NOT a published SAM 3 size" in open(module.__file__).read()
         assert Sam3Image.MODEL_VARIANTS["sam3"]["img_size"] == 1008
         assert set(Sam3Image.MODEL_VARIANTS) == {"sam3", "small", "tiny"}
 
     def test_a_width_mismatch_is_refused(self):
-        from dl_techniques.models.sam3 import Sam3DotProductScoring
+        from dl_techniques.models.SAM.SAM3 import Sam3DotProductScoring
         parts = Sam3Image.from_variant("tiny")
         with pytest.raises(ValueError, match="must share one width"):
             Sam3Image(
@@ -587,7 +587,7 @@ class TestPresenceSource:
         assert not any("presence" in key for key in out_keys)
 
     def test_a_decoder_without_a_presence_token_is_refused(self):
-        from dl_techniques.models.sam3 import Sam3TransformerDecoder
+        from dl_techniques.models.SAM.SAM3 import Sam3TransformerDecoder
         parts = Sam3Image.from_variant("tiny")
         with pytest.raises(ValueError, match="use_presence_token=True"):
             Sam3Image(
@@ -641,7 +641,7 @@ class TestBoxRefinement:
             memory_pos=model._flatten(
                 model._scalped(neck_out["sam3_pos"])[-1]),
             training=False)
-        from dl_techniques.models.sam3 import Sam3TransformerDecoder as Dec
+        from dl_techniques.models.SAM.SAM3 import Sam3TransformerDecoder as Dec
         delta = Dec._run_mlp(model.transformer.bbox_embed, hidden)
         expected = np.array(ops.sigmoid(
             delta + Dec._inverse_sigmoid(anchors)))[-1]
@@ -1244,7 +1244,7 @@ def decoder_calls(monkeypatch):
     output comparison cannot distinguish "was not passed" from "was passed and
     happened not to matter".
     """
-    from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
+    from dl_techniques.models.SAM.SAM3.decoder import Sam3TransformerDecoder
 
     recorded = []
     original = Sam3TransformerDecoder.call
@@ -1733,7 +1733,7 @@ class TestPromptConditionedQueriesAtTheModelLevel:
 class TestPackageSurface:
 
     def test_the_curated_exports_all_resolve(self):
-        import dl_techniques.models.sam3 as package
+        import dl_techniques.models.SAM.SAM3 as package
         for name in package.__all__:
             resolved = getattr(package, name)
             # Phase 2 added three FUNCTIONS to a list that was classes-only,
@@ -1743,7 +1743,7 @@ class TestPackageSurface:
             assert isinstance(resolved, type) or callable(resolved), name
 
     def test_the_module_is_keras_ops_pure(self):
-        import dl_techniques.models.sam3.sam3_image as module
+        import dl_techniques.models.SAM.SAM3.sam3_image as module
         source = open(module.__file__).read()
         assert "import tensorflow" not in source
         assert "\ntf." not in source and " tf." not in source
@@ -1757,7 +1757,7 @@ class TestPackageSurface:
         classify by hand. Scanning the whole package here means the erosion
         fires at the moment it is introduced instead of at close-out.
         """
-        import dl_techniques.models.sam3 as package
+        import dl_techniques.models.SAM.SAM3 as package
         directory = os.path.dirname(package.__file__)
         for name in sorted(os.listdir(directory)):
             if not name.endswith(".py"):
@@ -1767,7 +1767,7 @@ class TestPackageSurface:
             assert "\ntf." not in source and " tf." not in source, name
 
     def test_no_defective_loss_module_is_referenced(self):
-        import dl_techniques.models.sam3 as package
+        import dl_techniques.models.SAM.SAM3 as package
         directory = os.path.dirname(package.__file__)
         for name in sorted(os.listdir(directory)):
             if not name.endswith(".py"):

@@ -1,5 +1,5 @@
 """Tests for SAM 3's encoder query-selection head
-(`models/sam3/query_selection.py`).
+(`models/SAM/SAM3/query_selection.py`).
 
 Four design choices in this file are load-bearing.
 
@@ -41,11 +41,11 @@ import pytest
 from keras import ops
 from typing import Any, Dict, Iterator, List
 
-from dl_techniques.models.sam3.decoder import Sam3TransformerDecoder
-from dl_techniques.models.sam3.model_misc import Sam3DotProductScoring
-from dl_techniques.models.sam3.query_selection import (
+from dl_techniques.models.SAM.SAM3.decoder import Sam3TransformerDecoder
+from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
+from dl_techniques.models.SAM.SAM3.query_selection import (
     DEFAULT_ANCHOR_SIZE, Sam3EncoderQuerySelection)
-from dl_techniques.models.sam3.sam3_image import Sam3Image
+from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
 
 # ---------------------------------------------------------------------
 # tiny geometry
@@ -1046,7 +1046,7 @@ class _ConstantPool:
 
 def _inject_constant_pool(monkeypatch) -> None:
     """INJECTION 1: the pooled prompt becomes a constant, path intact."""
-    import dl_techniques.models.sam3.query_selection as module
+    import dl_techniques.models.SAM.SAM3.query_selection as module
     assert module.Sam3DotProductScoring is Sam3DotProductScoring, (
         "the injection is patching a name the head does not actually pool "
         "through, so it would be a no-op wearing a mutation's name")

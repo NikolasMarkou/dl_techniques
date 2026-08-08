@@ -1,4 +1,4 @@
-"""Tests for SAM 3's decoder layer (`models/sam3/decoder.py`).
+"""Tests for SAM 3's decoder layer (`models/SAM/SAM3/decoder.py`).
 
 Four design choices in this file are load-bearing, and every one of them exists
 because of a measurement, not a preference.
@@ -34,7 +34,7 @@ import numpy as np
 import pytest
 from keras import layers, ops
 
-from dl_techniques.models.sam3.decoder import (
+from dl_techniques.models.SAM.SAM3.decoder import (
     Sam3DecoderLayer,
     Sam3TransformerDecoder,
     _Sam3DecoderAttention,

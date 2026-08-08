@@ -1,4 +1,4 @@
-"""Tests for SAM 3's dual SimpleFPN neck (`models/sam3/necks.py`).
+"""Tests for SAM 3's dual SimpleFPN neck (`models/SAM/SAM3/necks.py`).
 
 The positional-encoding oracle here is an INDEPENDENT float64 NumPy computation
 of the sine formula, written channels-LAST. That orientation is deliberate: the
@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sam3.necks import (
+from dl_techniques.models.SAM.SAM3.necks import (
     SUPPORTED_SCALES,
     Sam3DualViTDetNeck,
     _build_scale_stack,
@@ -739,7 +739,7 @@ class TestTrunkCoupling:
     """The neck consumes the trunk's ONE channels-last map (D-092)."""
 
     def test_accepts_the_real_trunk_output_shape_and_dtype(self):
-        from dl_techniques.models.sam3.vitdet import Sam3ViTDetBackbone
+        from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
         trunk = Sam3ViTDetBackbone(
             img_size=16, patch_size=2, in_channels=3, embed_dim=TINY_DIM,
             depth=2, num_heads=2, window_size=4, global_att_blocks=(1,),
@@ -904,7 +904,7 @@ class TestTrainingBehaviour:
 
 class TestPurity:
     def test_library_file_uses_no_tensorflow(self):
-        import dl_techniques.models.sam3.necks as module
+        import dl_techniques.models.SAM.SAM3.necks as module
         source = open(module.__file__, "r", encoding="utf-8").read()
         assert "import tensorflow" not in source
         assert "tf." not in source

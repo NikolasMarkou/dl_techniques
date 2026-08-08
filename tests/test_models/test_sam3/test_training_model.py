@@ -1,4 +1,4 @@
-"""Tests for ``models/sam3/training_model.py`` -- the packed-tensor wrapper.
+"""Tests for ``models/SAM/SAM3/training_model.py`` -- the packed-tensor wrapper.
 
 What this file guards, and why each guard is shaped the way it is:
 
@@ -45,8 +45,8 @@ from dl_techniques.losses.sam3_detection_loss import (
     unpack_predictions,
     unpack_targets,
 )
-from dl_techniques.models.sam3 import Sam3Image
-from dl_techniques.models.sam3.training_model import (
+from dl_techniques.models.SAM.SAM3 import Sam3Image
+from dl_techniques.models.SAM.SAM3.training_model import (
     Sam3TrainingModel,
     compile_sam3_trainer,
     pack_predictions,
