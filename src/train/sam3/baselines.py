@@ -479,7 +479,7 @@ def build_context(seed: int, split: Optional[Dict[str, Any]] = None,
     return model, model.loss
 
 
-# DECISION plan-2026-08-07-3b8002c3/D-001
+# DECISION plan-2026-08-07T174622-3b8002c3/D-001
 # The val-seed offset is a PARAMETER whose default equals the previously
 # hardcoded `VAL_SEED_OFFSET` constant, so no published number moves unless a
 # caller explicitly passes something else. Do NOT re-hardcode `VAL_SEED_OFFSET`

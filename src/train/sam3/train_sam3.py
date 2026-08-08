@@ -1316,7 +1316,7 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     callbacks.append(keras.callbacks.ModelCheckpoint(
         filepath=str(output_dir / "best_model.keras"), monitor=SELECTION_METRIC,
         mode="max", save_best_only=True, verbose=1))
-    # DECISION plan-2026-08-07-3b8002c3/D-003
+    # DECISION plan-2026-08-07T174622-3b8002c3/D-003
     # An ADDITIVE OBSERVER, so ONE run yields BOTH selections and "should we
     # select on the gap" becomes a measurement instead of a second 3.25-GPU-hour
     # arm. `SELECTION_METRIC` is DELIBERATELY unchanged: this callback writes a
