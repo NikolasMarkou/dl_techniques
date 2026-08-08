@@ -81,9 +81,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 from keras import ops
 
-from ...losses.sam2_video_loss import SAM2GatedMaskLoss, mask_presence_gate
-from ...losses.sam_mask_loss import SAMIoULoss
-from ..sam.training_model import achieved_mask_iou
+from dl_techniques.losses.sam2_video_loss import SAM2GatedMaskLoss, mask_presence_gate
+from dl_techniques.losses.sam_mask_loss import SAMIoULoss
+from dl_techniques.models.SAM.SAM1.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
 from .model import SAM2, _select_best_by_iou
 
@@ -546,7 +546,7 @@ class SAM2TrainingModel(keras.Model):
             max_obj_ptrs_in_encoder=self.sam2.max_obj_ptrs_in_encoder,
             # D-074: the bank must NOT detach on insertion here. This is a
             # plain constructor keyword the bank has always accepted
-            # (`memory_bank.py:236`), so `models/sam2/memory_bank.py` -- an
+            # (`memory_bank.py:236`), so `models/SAM/SAM2/memory_bank.py` -- an
             # iteration-1 file this iteration must leave byte-unchanged -- is
             # not touched. The STREAMING bank built by `SAM2` keeps the
             # `True` default, which is correct there: inference has no

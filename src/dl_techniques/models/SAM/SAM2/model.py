@@ -52,11 +52,11 @@ from keras import ops
 from dl_techniques.models.SAM.SAM1.mask_decoder import _build_mlp_head
 from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
 from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
-from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
-from dl_techniques.models.sam2.memory_attention import SAM2MemoryAttention
-from dl_techniques.models.sam2.memory_bank import SAM2MemoryBank
-from dl_techniques.models.sam2.memory_encoder import SAM2MemoryEncoder
-from dl_techniques.models.sam2.neck import SAM2ImageEncoder
+from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
+from dl_techniques.models.SAM.SAM2.memory_attention import SAM2MemoryAttention
+from dl_techniques.models.SAM.SAM2.memory_bank import SAM2MemoryBank
+from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MemoryEncoder
+from dl_techniques.models.SAM.SAM2.neck import SAM2ImageEncoder
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------

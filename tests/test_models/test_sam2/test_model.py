@@ -32,18 +32,18 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-import dl_techniques.models.sam2.model as model_module
+import dl_techniques.models.SAM.SAM2.model as model_module
 from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
-from dl_techniques.models.sam2.hiera import Hiera, hiera_block_specs
-from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
-from dl_techniques.models.sam2.memory_encoder import SAM2MemoryEncoder
-from dl_techniques.models.sam2.model import (
+from dl_techniques.models.SAM.SAM2.hiera import Hiera, hiera_block_specs
+from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
+from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MemoryEncoder
+from dl_techniques.models.SAM.SAM2.model import (
     MEMORY_STRIDE,
     NO_OBJ_SCORE,
     SAM2,
     create_sam2,
 )
-from dl_techniques.models.sam2.neck import SAM2FpnNeck, SAM2ImageEncoder
+from dl_techniques.models.SAM.SAM2.neck import SAM2FpnNeck, SAM2ImageEncoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
 from ..test_sam.dead_component_oracle import (
@@ -927,7 +927,7 @@ import keras
 names = {names!r}
 before = {{n: [k for k in keras.saving.get_custom_objects()
               if k.endswith(">" + n)] for n in names}}
-import dl_techniques.models.sam2.model  # noqa: F401
+import dl_techniques.models.SAM.SAM2.model  # noqa: F401
 after = {{n: [k for k in keras.saving.get_custom_objects()
              if k.endswith(">" + n)] for n in names}}
 print("RESULT " + json.dumps({{"before": before, "after": after}}))

@@ -34,8 +34,8 @@ from keras import ops
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
-from dl_techniques.models.sam2.hiera import Hiera
-from dl_techniques.models.sam2.neck import SAM2FpnNeck, SAM2ImageEncoder
+from dl_techniques.models.SAM.SAM2.hiera import Hiera
+from dl_techniques.models.SAM.SAM2.neck import SAM2FpnNeck, SAM2ImageEncoder
 
 from ..test_sam.dead_component_oracle import zeroed_variables
 

@@ -32,7 +32,7 @@ from dl_techniques.layers.upsample import upsample
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
-from dl_techniques.models.sam2.hiera import Hiera
+from dl_techniques.models.SAM.SAM2.hiera import Hiera
 
 # ---------------------------------------------------------------------
 

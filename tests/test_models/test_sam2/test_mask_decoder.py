@@ -30,7 +30,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
-from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
+from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
 # Moving it would touch SAM 1's test tree and put the 357-test regression gate

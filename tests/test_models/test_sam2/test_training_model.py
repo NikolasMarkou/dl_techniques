@@ -47,8 +47,8 @@ from dl_techniques.losses.sam2_video_loss import (
     mask_presence_gate,
 )
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss
-from dl_techniques.models.sam2.model import NO_OBJ_SCORE, SAM2, create_sam2
-from dl_techniques.models.sam2.training_model import (
+from dl_techniques.models.SAM.SAM2.model import NO_OBJ_SCORE, SAM2, create_sam2
+from dl_techniques.models.SAM.SAM2.training_model import (
     OUTPUT_KEYS,
     SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
@@ -298,7 +298,7 @@ class TestGradientReachesTheEncoder:
         anywhere. Over ``keras.utils.set_random_seed(0..5)`` the scores are
         all-negative at exactly 2 of 6 seeds, so the unseeded form was a coin
         flip that happened to land. D-043 had already recorded this hazard for
-        ``models/sam2/test_model.py``; step 1 reintroduced it here.
+        ``models/SAM/SAM2/test_model.py``; step 1 reintroduced it here.
         """
         keras.utils.set_random_seed(1)
         model = trainer()
@@ -502,7 +502,7 @@ class TestFrameZeroTakesADifferentPath:
         :return: ``(raw_features, positions, conditioned)``.
         :rtype: Any
         """
-        from dl_techniques.models.sam2.memory_bank import SAM2MemoryBank
+        from dl_techniques.models.SAM.SAM2.memory_bank import SAM2MemoryBank
 
         size = model.sam2.image_size
         rng = np.random.default_rng(3)
@@ -553,7 +553,7 @@ class TestFrameZeroTakesADifferentPath:
         assert float(np.max(np.abs(logits[:, 0] - logits[:, 1]))) > 1.0
 
     def test_the_documented_empty_memory_fallback_is_unreachable(self) -> None:
-        """A LATENT DEFECT in ``models/sam2/model.py``, measured here.
+        """A LATENT DEFECT in ``models/SAM/SAM2/model.py``, measured here.
 
         D-027's ``directly_add_no_mem_embed=False`` branch builds a ONE-token
         zero memory, and memory attention's ``repeat_k=True`` rotary path
@@ -566,7 +566,7 @@ class TestFrameZeroTakesADifferentPath:
         This is NOT introduced by the training wrapper -- ``SAM2.stream_step``
         reaches the identical branch through
         ``SAM2._condition_on_memory``. It is out of scope for this step
-        (``models/sam2/``'s eight pre-existing modules stay byte-unchanged), so
+        (``models/SAM/SAM2/``'s eight pre-existing modules stay byte-unchanged), so
         it is PINNED here rather than left to be rediscovered. Both the
         reference and this port leave the branch off in every shipped config.
         """

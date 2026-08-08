@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.sam2.training_model import (
+from dl_techniques.models.SAM.SAM2.training_model import (
     INPUT_BOXES,
     INPUT_GT_MASKS,
     INPUT_IMAGE,

@@ -41,7 +41,7 @@ describe.
 
 Target keys have ONE home
 -------------------------
-The three target keys come from ``models/sam2/training_model.py``'s exported
+The three target keys come from ``models/SAM/SAM2/training_model.py``'s exported
 constants, and ``tests/test_train/test_sam2/test_data.py`` asserts the emitted
 target key set equals that module's ``OUTPUT_KEYS``. That assertion was RED by
 design between step 2 and step 4, while the wrapper had two output keys and the
@@ -61,7 +61,7 @@ import cv2
 import numpy as np
 import tensorflow as tf
 
-from dl_techniques.models.sam2.training_model import (
+from dl_techniques.models.SAM.SAM2.training_model import (
     INPUT_BOXES,
     INPUT_GT_MASKS,
     INPUT_IMAGE,
@@ -502,7 +502,7 @@ def to_video_training_record(
             jitter_box(record[RECORD_BOX], image_size), axis=0
         )
     # DECISION plan-2026-08-04T044628-4c240b4c/D-058
-    # THREE target keys, each sourced from `models/sam2/training_model.py`'s
+    # THREE target keys, each sourced from `models/SAM/SAM2/training_model.py`'s
     # exported constants. Do NOT spell any of these strings locally: a key
     # spelled in two places is exactly the drift H-5 exists to prevent, and
     # `compile(loss={...})` reports the mismatch as a key error with no cause
@@ -615,7 +615,7 @@ def build_sam2_video_dataset(
     # encoder's positional encodings trace as `(None, 16, 16, None)`, their
     # CHANNEL axis unknown. Both raise `TypeError: int() argument must be a
     # string, a bytes-like object or a real number, not 'NoneType'` at the
-    # FIRST `fit()` step, from inside `models/sam2/model.py`, which this
+    # FIRST `fit()` step, from inside `models/SAM/SAM2/model.py`, which this
     # iteration must leave byte-unchanged. A `fit()` over numpy arrays never
     # sees it, because Keras traces those with a static batch -- so this is
     # invisible to every hand-built fixture and shows up only here.

@@ -110,7 +110,7 @@ What is deliberately NOT here
   both the squared error and its gradient exactly 0 under a mean reduction.
 
 Both of those choices, and the ``compile()`` dict that assembles all three, live
-in ``models/sam2/training_model.py::compile_sam2_video_trainer`` -- the site a
+in ``models/SAM/SAM2/training_model.py::compile_sam2_video_trainer`` -- the site a
 reader assembling a training run actually reaches. See ``decisions.md`` D-052.
 """
 

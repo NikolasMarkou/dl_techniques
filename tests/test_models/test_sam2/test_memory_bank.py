@@ -16,7 +16,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam2.memory_bank import SAM2MemoryBank
+from dl_techniques.models.SAM.SAM2.memory_bank import SAM2MemoryBank
 
 # ---------------------------------------------------------------------
 # geometry
@@ -798,7 +798,7 @@ class TestMemoryAttentionContract:
         ``num_k_exclude`` counts TRAILING key rows, so this only stays correct
         while the bank keeps pointers at the tail (G6.2).
         """
-        from dl_techniques.models.sam2.memory_attention import (
+        from dl_techniques.models.SAM.SAM2.memory_attention import (
             SAM2MemoryAttention,
         )
 

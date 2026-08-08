@@ -45,7 +45,7 @@ from keras import ops
 from scipy.special import erf
 
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.models.sam2.memory_encoder import (
+from dl_techniques.models.SAM.SAM2.memory_encoder import (
     SAM2Fuser,
     SAM2MaskDownSampler,
     SAM2MemoryEncoder,

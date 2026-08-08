@@ -32,7 +32,7 @@ Keras 3.8's ``fit()`` defaults to ``jit_compile='auto'``, which selects XLA on a
 GPU, and ``Hiera``'s stem interpolates its learned positional embedding with a
 BICUBIC resize that has no XLA GPU kernel (MEASURED; ``decisions.md`` D-055).
 This trainer never re-spells the setting: it compiles through
-:func:`dl_techniques.models.sam2.training_model.compile_sam2_video_trainer`,
+:func:`dl_techniques.models.SAM.SAM2.training_model.compile_sam2_video_trainer`,
 which is the single home of the three-key ``loss=`` dict, of the mandatory
 object-score BCE, and of ``jit_compile=False`` (D-064).
 
@@ -86,9 +86,9 @@ from train.common import (
 # `train.common.args`, which is how every other adopter imports it.
 from train.common.args import explicitly_set_flags
 
-from dl_techniques.models.sam2.hiera import Hiera
-from dl_techniques.models.sam2.model import SAM2, create_sam2
-from dl_techniques.models.sam2.training_model import (
+from dl_techniques.models.SAM.SAM2.hiera import Hiera
+from dl_techniques.models.SAM.SAM2.model import SAM2, create_sam2
+from dl_techniques.models.SAM.SAM2.training_model import (
     SAM2TrainingModel,
     compile_sam2_video_trainer,
 )

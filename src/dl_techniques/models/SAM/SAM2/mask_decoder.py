@@ -136,7 +136,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
     Example::
 
         from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
-        from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
+        from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
 
         decoder = SAM2MaskDecoder(
             transformer_dim=256,

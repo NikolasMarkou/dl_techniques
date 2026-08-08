@@ -29,7 +29,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam2.hiera import (
+from dl_techniques.models.SAM.SAM2.hiera import (
     Hiera,
     HieraBlock,
     HieraMultiScaleAttention,
@@ -146,7 +146,7 @@ def _capture_attention_shapes(
     :return: One shape tuple per block, in block order.
     :rtype: List[Tuple[int, ...]]
     """
-    import dl_techniques.models.sam2.hiera as hiera_module
+    import dl_techniques.models.SAM.SAM2.hiera as hiera_module
 
     captured: List[Tuple[int, ...]] = []
     original = hiera_module.ops.softmax
@@ -245,7 +245,7 @@ class TestVariantTableIsTheSingleHome:
     def test_tiny_is_defined_only_in_model_variants(self) -> None:
         """No second copy of the tiny geometry may exist in the source tree."""
         import inspect
-        import dl_techniques.models.sam2 as package
+        import dl_techniques.models.SAM.SAM2 as package
 
         source_root = inspect.getfile(package).rsplit("/", 1)[0]
         import pathlib

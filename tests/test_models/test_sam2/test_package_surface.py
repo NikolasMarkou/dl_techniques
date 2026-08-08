@@ -2,7 +2,7 @@
 
 Two things are pinned here, both of which drift SILENTLY.
 
-**The export surface.** ``models/sam2/__init__.py`` exports exactly three names
+**The export surface.** ``models/SAM/SAM2/__init__.py`` exports exactly three names
 (S-2, mirroring ``models/SAM/SAM1/__init__.py``). A surface widens one convenience
 re-export at a time, and no other test in this suite would notice: every
 component test imports from its own submodule, so the package init could export
@@ -11,7 +11,7 @@ set, in both directions -- nothing missing, nothing extra.
 
 **Registered-key uniqueness across the WHOLE repository.** ``test_model.py``'s
 G8.5 probe asks a narrower question: were the SAM 2 keys absent from a fresh
-interpreter's registry BEFORE ``dl_techniques.models.sam2.model`` was imported.
+interpreter's registry BEFORE ``dl_techniques.models.SAM.SAM2.model`` was imported.
 That catches a collision with anything on that module's own import path, which
 includes SAM 1. It CANNOT see a collision with a module neither of them imports
 -- some third package registering ``Custom>Hiera`` would only ever collide in a
@@ -32,8 +32,10 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from dl_techniques.models import sam2
-from dl_techniques.models.sam2 import SAM2, SAM2MemoryBank, create_sam2
+# The PACKAGE, aliased to keep the module object distinct from the class named
+# ``SAM2`` imported on the next line; the two differ only by case after the move.
+from dl_techniques.models.SAM import SAM2 as sam2
+from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
 
 # ---------------------------------------------------------------------
 # The pinned surface. Changing this tuple is the deliberate act; the tests
@@ -74,11 +76,11 @@ class TestExportSurface:
         )
 
     def test_every_exported_name_resolves_to_the_right_object(self) -> None:
-        from dl_techniques.models.sam2.memory_bank import (
+        from dl_techniques.models.SAM.SAM2.memory_bank import (
             SAM2MemoryBank as BankFromSubmodule,
         )
-        from dl_techniques.models.sam2.model import SAM2 as ModelFromSubmodule
-        from dl_techniques.models.sam2.model import (
+        from dl_techniques.models.SAM.SAM2.model import SAM2 as ModelFromSubmodule
+        from dl_techniques.models.SAM.SAM2.model import (
             create_sam2 as FactoryFromSubmodule,
         )
 
@@ -89,7 +91,7 @@ class TestExportSurface:
     def test_star_import_binds_exactly_the_curated_names(self) -> None:
         """``import *`` is the surface a user actually gets."""
         namespace: Dict[str, object] = {}
-        exec("from dl_techniques.models.sam2 import *", namespace)  # noqa: S102
+        exec("from dl_techniques.models.SAM.SAM2 import *", namespace)  # noqa: S102
         bound = {k for k in namespace if not k.startswith("__")}
         assert bound == set(EXPECTED_ALL), (
             f"`import *` bound {sorted(bound)!r}, expected "
@@ -205,7 +207,7 @@ class TestRepoWideRegistryUniqueness:
     """Registry keys must be unique across the WHOLE of ``src/``.
 
     Wider than ``test_model.py``'s G8.5, which can only see collisions on
-    ``models/sam2/model.py``'s own import path.
+    ``models/SAM/SAM2/model.py``'s own import path.
     """
 
     @pytest.fixture(scope="class")
