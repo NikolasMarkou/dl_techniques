@@ -1,30 +1,57 @@
-"""SAM 2 memory encoder.
+"""
+SAM 2 memory encoder: mask plus pixel features compressed into ``mem_dim``.
+===========================================================================
 
-Compresses a predicted high-resolution mask together with the image encoder's
-pixel features into the narrow ``mem_dim``-wide spatial memory that memory
-attention later reads as keys and values.
+:class:`SAM2MemoryEncoder`, with :class:`SAM2MaskDownSampler` and
+:class:`SAM2Fuser`, compresses a predicted high-resolution mask together with
+the image encoder's pixel features into the narrow ``mem_dim``-wide spatial
+memory that memory attention later reads as keys and values.
 
-Three mechanisms in this file are SILENT when ported wrong -- the model builds,
-forward-passes, trains and serializes either way:
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-1. **The mask is passed through** ``20 * sigmoid(x) - 10``\\ **, i.e. the affine
-   is applied AFTER the sigmoid, not before it.** The transform rescales a
-   probability in ``(0, 1)`` into the wide SIGNED range ``(-10, +10)``. Two
-   wrong readings produce the same shapes and a plausible loss: a bare
-   ``sigmoid(x)`` (range ``(0, 1)``), and the affine-then-sigmoid
-   ``sigmoid(20 * x - 10)``, which is a near-step function also in ``(0, 1)``
-   and therefore ~20x narrower with no negative half at all.
-2. **The downsampler's layer COUNT comes from the shipped configuration, not
-   from the reference class signature.** At ``k=3, s=2, p=1`` it is four
-   convolutions; the signature default ``k=4, s=4, p=0`` is two. **Both give a
-   total stride of 16**, so an assertion on the output resolution alone cannot
-   tell them apart.
-3. **The fusion is additive.** The projected pixel features and the downsampled
-   mask are ADDED, never concatenated, so the fuser sees ``in_dim`` channels
-   rather than ``2 * in_dim``.
+Key Features:
+------------
+- A signed mask transform that widens a probability into ``(-10, +10)``.
+- A strided-convolution mask downsampler at a total stride of 16.
+- An ADDITIVE fusion of the two streams, then a projection to ``out_dim``.
 
-All three are guarded behaviourally in
-``tests/test_models/test_sam2/test_memory_encoder.py``.
+Architecture Overview:
+---------------------
+1. Mask -> the signed transform -> :class:`SAM2MaskDownSampler`.
+2. Pixel features -> ``pix_feat_proj``, a real ``1x1`` convolution.
+3. -> additive fusion -> :class:`SAM2Fuser` -> ``out_proj``, ``Conv2D(out_dim)``.
+
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MemoryEncoder
+encoder = SAM2MemoryEncoder(out_dim=64, in_dim=256)
+memory, memory_pos = encoder(pixel_features, masks, training=False)
+```
+
+Measured caveats:
+----------------
+Three mechanisms are SILENT when ported wrong -- the model builds,
+forward-passes, trains and serializes either way. All three are guarded
+behaviourally in ``tests/test_models/test_sam2/test_memory_encoder.py``:
+
+- **The mask is passed through** ``20 * sigmoid(x) - 10``\\ **, i.e. the affine
+  is applied AFTER the sigmoid, not before it.** The transform rescales a
+  probability in ``(0, 1)`` into the wide SIGNED range ``(-10, +10)``. Two
+  wrong readings produce the same shapes and a plausible loss: a bare
+  ``sigmoid(x)`` (range ``(0, 1)``), and the affine-then-sigmoid
+  ``sigmoid(20 * x - 10)``, which is a near-step function also in ``(0, 1)``
+  and therefore ~20x narrower with no negative half at all.
+- **The downsampler's layer COUNT comes from the shipped configuration, not
+  from the reference class signature.** At ``k=3, s=2, p=1`` it is four
+  convolutions; the signature default ``k=4, s=4, p=0`` is two. **Both give a
+  total stride of 16**, so an assertion on the output resolution alone cannot
+  tell them apart.
+- **The fusion is additive.** The projected pixel features and the downsampled
+  mask are ADDED, never concatenated, so the fuser sees ``in_dim`` channels
+  rather than ``2 * in_dim``.
 """
 
 import math

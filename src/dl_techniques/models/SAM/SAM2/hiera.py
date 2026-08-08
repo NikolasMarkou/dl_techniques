@@ -1,41 +1,59 @@
 """
-SAM 2 Hiera trunk — the hierarchical, window-attention image backbone.
+SAM 2 Hiera trunk: the hierarchical, window-attention image backbone.
+=====================================================================
 
-This module provides the four public classes of SAM 2's vision trunk,
-:class:`HieraPatchEmbed`, :class:`HieraMultiScaleAttention`,
-:class:`HieraBlock` and :class:`Hiera`, plus the pure configuration function
-:func:`hiera_block_specs` that derives the per-block geometry.
+Four public classes -- :class:`HieraPatchEmbed`,
+:class:`HieraMultiScaleAttention`, :class:`HieraBlock` and :class:`Hiera` --
+plus :func:`hiera_block_specs`, a pure configuration function that derives the
+per-block geometry from a stage description without constructing anything.
 
-Architecture:
-    An overlapping strided convolution reduces the image by 4x and keeps the
-    spatial grid ``(B, H, W, C)``. A learned background positional embedding
-    plus a tiled window positional embedding is added ONCE, at the stem. A flat
-    list of :class:`HieraBlock` blocks then runs; the list is partitioned into
-    four *stages*, and at each stage boundary the channel width and the head
-    count both double while the spatial grid is halved by a max-pool applied to
-    the attention queries.
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+- Ryali, C. et al. (2023). "Hiera: A Hierarchical Vision Transformer without
+  the Bells-and-Whistles."
 
-    Four feature levels are returned, one per stage, in **ascending stage
-    order** — ``outputs[0]`` is the finest / narrowest, ``outputs[-1]`` is the
-    coarsest / widest. This is the REVERSE of the channel list that the FPN neck
-    is configured with, and the reversal is deliberate on both sides.
+Key Features:
+------------
+- A learned background positional embedding plus a tiled window positional
+  embedding, added ONCE, at the stem.
+- One flat block list partitioned into four stages; at each boundary the
+  channel width and the head count both double while the grid is halved by a
+  max-pool applied to the attention QUERIES.
+- Four feature levels out, one per stage, in ASCENDING stage order:
+  ``outputs[0]`` is finest and narrowest, ``outputs[-1]`` coarsest and widest.
+  That is the REVERSE of the channel list the FPN neck is configured with, and
+  the reversal is deliberate on both sides.
 
-Two details in here are correctness bugs with no shape error if ported wrong,
-so they are called out at their code sites and guarded behaviourally by
+Architecture Overview:
+---------------------
+1. **HieraPatchEmbed** -- one overlapping strided convolution, 4x reduction,
+   spatial grid kept as ``(batch, height, width, channels)``.
+2. **HieraMultiScaleAttention** -- windowed attention with query pooling.
+3. **HieraBlock** -- attention and MLP, carrying the stage-boundary projection.
+4. **Hiera** -- the block list, returning one feature map per stage.
+
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.hiera import Hiera, hiera_block_specs
+trunk = Hiera(embed_dim=96, num_heads=1, stages=(1, 2, 7, 2))
+levels = trunk(images)               # four maps, finest first
+```
+
+Measured caveats:
+----------------
+Two details are correctness bugs with NO shape error if ported wrong, so both
+are called out at their code sites and guarded behaviourally by
 ``tests/test_models/test_sam2/test_hiera.py``:
 
-    1. **The window size lags one block behind the stage transition.** The first
-       block of a new stage uses the PREVIOUS stage's window size. See
-       :func:`hiera_block_specs`.
-    2. **Query pooling is asymmetric.** Inside attention only ``q`` is pooled;
-       ``k`` and ``v`` keep the full window resolution. The residual shortcut is
-       pooled by the same factor, on a separate path. See
-       :class:`HieraMultiScaleAttention` and :class:`HieraBlock`.
-
-References:
-    - Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos".
-    - Ryali, C. et al. (2023). "Hiera: A Hierarchical Vision Transformer without
-      the Bells-and-Whistles".
+- **The window size lags one block behind the stage transition.** The first
+  block of a new stage uses the PREVIOUS stage's window size. See
+  :func:`hiera_block_specs`.
+- **Query pooling is asymmetric.** Inside attention only ``q`` is pooled; ``k``
+  and ``v`` keep the full window resolution, and the residual shortcut is
+  pooled by the same factor on a separate path. See
+  :class:`HieraMultiScaleAttention` and :class:`HieraBlock`.
 """
 
 import keras

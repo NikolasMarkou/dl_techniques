@@ -1,49 +1,69 @@
-"""SAM 2 memory bank -- the per-video streaming state container.
+"""
+SAM 2 memory bank: the per-video streaming state container.
+===========================================================
 
-This module holds the state that SAM 2's online tracker carries from frame to
-frame: the conditioning-frame store, the non-conditioning frame FIFO, and the
-object-pointer store. It implements the temporal frame-selection policy and
-assembles the memory sequence that ``SAM2MemoryAttention`` reads as keys and
-values.
+:class:`SAM2MemoryBank` holds the state SAM 2's online tracker carries from
+frame to frame -- the conditioning-frame store, the non-conditioning frame
+FIFO, and the object-pointer store. It implements the temporal frame-selection
+policy and assembles the memory sequence ``SAM2MemoryAttention`` reads as keys
+and values.
 
-**This is NOT a Keras layer.** :class:`SAM2MemoryBank` is a plain-Python object.
-It owns no weights, carries no ``@keras.saving.register_keras_serializable``
-decorator, and has no ``get_config``. Everything learned lives on the top-level
-``SAM2`` model:
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-* ``maskmem_tpos_enc`` -- the ``(num_maskmem, 1, 1, mem_dim)`` learned per-slot
-  temporal embedding. The bank returns the **slot indices**
-  (``num_maskmem - t_pos - 1``) that select rows of that weight; it never adds
-  the embedding itself.
-* ``no_mem_embed`` / ``no_obj_ptr`` -- the two no-object mechanisms.
+Key Features:
+------------
+- **This is NOT a Keras layer.** It is a plain-Python object: no weights, no
+  ``@keras.saving.register_keras_serializable`` decorator, no ``get_config``.
+- Everything learned lives on the top-level ``SAM2`` model:
+  ``maskmem_tpos_enc``, the ``(num_maskmem, 1, 1, mem_dim)`` learned per-slot
+  temporal embedding, and the ``no_mem_embed`` / ``no_obj_ptr`` no-object
+  mechanisms.
+- The bank returns the SLOT INDICES ``num_maskmem - t_pos - 1`` that select
+  rows of that weight; it never adds the embedding itself.
 
-That weightless/stateful split is deliberate: it makes the H-13 separation
-directly testable. RoPE inside memory attention carries **spatial** position
-only, broadcast identically across every memory frame; the temporal distinction
-is carried **exclusively** by the additive per-slot embedding whose indices this
-bank hands back. If the bank added the embedding, no test could tell a spatial
-mechanism from a temporal one.
+Architecture Overview:
+---------------------
+1. ``add_conditioning_frame`` / ``add_frame`` -- the two stores plus the FIFO.
+2. ``select_frames`` / ``select_object_pointer_frames`` -- the temporal policy.
+3. ``assemble`` -- the memory sequence, with object pointers appended.
 
-**Not to be confused with** ``src/dl_techniques/models/memory_bank/``. That
-package is ``WaveFieldMemoryLLM``'s keyed read/write store for language
-modelling -- a different data structure with a colliding name. It was reviewed
-and REJECTED as a reuse target for this component; nothing here derives from it.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2 import SAM2MemoryBank
+bank = SAM2MemoryBank(num_maskmem=7, mem_dim=64)
+memory, memory_pos, num_obj_ptr_tokens = bank.assemble(frame_index=3)
+```
 
-Two mechanisms in this file are SILENT when ported wrong -- shapes are identical
-either way:
+Measured caveats:
+----------------
+- The weightless/stateful split is deliberate, and it is what makes the spatial
+  / temporal separation testable at all. RoPE inside memory attention carries
+  SPATIAL position only, broadcast identically across every memory frame; the
+  temporal distinction is carried EXCLUSIVELY by the additive per-slot
+  embedding whose indices this bank hands back. If the bank added the embedding
+  itself, no test could tell the two mechanisms apart.
+- **Not to be confused with** ``src/dl_techniques/models/memory_bank/``. That
+  package is ``WaveFieldMemoryLLM``'s keyed read/write store for language
+  modelling -- a different data structure with a colliding name. It was
+  reviewed and REJECTED as a reuse target here; nothing in this file derives
+  from it.
+- Two mechanisms are SILENT when ported wrong -- shapes are identical either
+  way -- and both are guarded behaviourally in
+  ``tests/test_models/test_sam2/test_memory_bank.py``:
 
-1. **Object-pointer tokens sit at the TAIL of the memory sequence.** Memory
-   attention excludes exactly ``num_obj_ptr_tokens`` trailing key rows from
-   rotary embedding. Prepending them instead would exclude the wrong rows: the
-   pointers would get spatial rotation they must not have, and the oldest
-   spatial frame would lose the rotation it needs. No shape changes.
-2. **Conditioning frames always occupy temporal slot ``t_pos = 0``**, however
-   far away in time they are. They are "always maximally relevant", unlike the
-   recency-decayed non-conditioning slots. Deriving ``t_pos`` from the temporal
-   distance yields a plausible model that quietly forgets the prompt.
-
-Both are guarded behaviourally in
-``tests/test_models/test_sam2/test_memory_bank.py``.
+  1. **Object-pointer tokens sit at the TAIL of the memory sequence.** Memory
+     attention excludes exactly ``num_obj_ptr_tokens`` TRAILING key rows from
+     rotary embedding. Prepending them instead would exclude the wrong rows:
+     the pointers would get spatial rotation they must not have, and the oldest
+     spatial frame would lose the rotation it needs. No shape changes.
+  2. **Conditioning frames always occupy temporal slot ``t_pos = 0``**, however
+     far away in time they are -- they are always maximally relevant, unlike
+     the recency-decayed non-conditioning slots. Deriving ``t_pos`` from the
+     temporal distance yields a plausible model that quietly forgets the
+     prompt.
 """
 
 from keras import ops

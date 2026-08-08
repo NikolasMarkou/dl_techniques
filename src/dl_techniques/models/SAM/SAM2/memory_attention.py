@@ -1,55 +1,57 @@
 """
-SAM 2 memory attention — the stack that conditions a frame on its memory bank.
+SAM 2 memory attention: the stack that conditions a frame on its memory bank.
+=============================================================================
 
-This module provides the two public classes of SAM 2's memory-conditioning
-transformer, :class:`SAM2MemoryAttentionLayer` and :class:`SAM2MemoryAttention`,
-plus the private rotary attention primitive they are composed from.
+Two public classes -- :class:`SAM2MemoryAttentionLayer` and
+:class:`SAM2MemoryAttention` -- plus the private rotary attention primitive
+they are composed from.
 
-Architecture:
-    ``SAM2MemoryAttention`` is a stack of ``num_layers`` identical
-    ``SAM2MemoryAttentionLayer`` blocks followed by a final layer
-    normalization. Each block is post-norm-free (pre-norm) and runs three
-    sub-blocks in order::
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+- Su, J. et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
+  Embedding."
 
-        self-attention  (queries attend to the current frame's own tokens)
-        cross-attention (queries attend to the memory sequence)
-        feed-forward    (Dense -> activation -> dropout -> Dense)
+Key Features:
+------------
+- Pre-norm blocks, each running self-attention (the frame's own tokens), then
+  cross-attention (the memory sequence), then a feed-forward sub-block.
+- 2D axial RoPE applied AFTER the head split, on both attention sub-blocks, via
+  :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`.
+- Cross-attention consumes keys and values of width ``kv_in_dim`` (SAM 2's
+  compressed ``mem_dim=64`` memory channels) while queries stay at
+  ``d_model=256``, and enables ``repeat_k``, broadcasting ONE spatial angle
+  table across the ``r`` memory frames stacked along the key axis.
 
-    Both attention sub-blocks apply 2D axial RoPE *after* the head split, via
-    :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`. The
-    cross-attention additionally
+Architecture Overview:
+---------------------
+1. **SAM2MemoryAttentionLayer** -- self-attention -> cross-attention -> MLP.
+2. **SAM2MemoryAttention** -- ``num_layers`` identical blocks, then a final
+   layer normalization.
 
-    * consumes keys/values of width ``kv_in_dim`` (SAM 2's compressed
-      ``mem_dim=64`` memory channels) while queries stay at ``d_model=256``, and
-    * enables ``repeat_k``, broadcasting ONE spatial angle table across the
-      ``r`` memory frames stacked along the key axis.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.memory_attention import SAM2MemoryAttention
+attention = SAM2MemoryAttention(d_model=256, num_layers=4)
+conditioned = attention(tokens, memory, memory_pos, num_obj_ptr_tokens=4)
+```
 
-Positional encoding is re-added at four independently configurable points. The
-shipped SAM 2.1 configuration is deliberately **asymmetric** between queries and
-keys, and every combination runs without a shape error, so these four booleans
-are explicit configuration fields rather than an assumed-uniform "add positional
-encoding everywhere":
-
-    ==================================  =========
-    field                               shipped
-    ==================================  =========
-    ``pos_enc_at_input``                ``True``
-    ``pos_enc_at_attn``                 ``False``
-    ``pos_enc_at_cross_attn_queries``   ``False``
-    ``pos_enc_at_cross_attn_keys``      ``True``
-    ==================================  =========
-
-Temporal position:
-    RoPE here is **spatial only**. The same angle table is reused for every
-    memory frame; a memory frame's temporal identity is carried exclusively by
-    an additive per-slot embedding owned by the top-level ``SAM2`` model and
-    folded into ``memory_pos`` before it reaches this module. Nothing in this
-    file may introduce a temporal term.
-
-References:
-    - Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos".
-    - Su, J. et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
-      Embedding".
+Measured caveats:
+----------------
+- **Positional encoding is re-added at four independently configurable points,
+  and the shipped SAM 2.1 setting is ASYMMETRIC between queries and keys.**
+  ``pos_enc_at_input=True``, ``pos_enc_at_attn=False``,
+  ``pos_enc_at_cross_attn_queries=False``, ``pos_enc_at_cross_attn_keys=True``.
+  Every combination runs without a shape error, which is why these are four
+  explicit configuration fields rather than one assumed-uniform "add positional
+  encoding everywhere".
+- **RoPE here is SPATIAL ONLY.** The same angle table is reused for every
+  memory frame. A memory frame's temporal identity is carried exclusively by an
+  additive per-slot embedding owned by the top-level ``SAM2`` model and folded
+  into ``memory_pos`` before it reaches this module. Nothing in this file may
+  introduce a temporal term; if it did, no test could tell a spatial mechanism
+  from a temporal one.
 """
 
 import math

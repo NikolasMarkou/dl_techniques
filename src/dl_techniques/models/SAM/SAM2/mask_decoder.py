@@ -1,37 +1,65 @@
-"""SAM 2 mask decoder.
+"""
+SAM 2 mask decoder: masks, IoU predictions, an object score and a pointer.
+==========================================================================
 
-A NEW SIBLING of :class:`dl_techniques.models.SAM.SAM1.mask_decoder.MaskDecoder`, not
-an extension of it. SAM 1's decoder bakes its token layout into positional slices
+:class:`SAM2MaskDecoder` is a NEW SIBLING of
+:class:`dl_techniques.models.SAM.SAM1.mask_decoder.MaskDecoder`, not an
+extension of it. SAM 1's decoder bakes its token layout into positional slices
 inside method bodies (``hs[:, 0, :]``, ``hs[:, 1:1 + N, :]``), has no
-skip-connection argument in its signature at all, and returns a 2-tuple; none of
-the three SAM 2 deltas below can be expressed as a defaulted ``__init__`` kwarg.
-``models/SAM/SAM1/`` is CLOSED (357 pinned tests) and is not edited by this file --
-only *imported* from.
+skip-connection argument in its signature at all, and returns a 2-tuple; none
+of the SAM 2 deltas below can be expressed as a defaulted ``__init__`` kwarg.
+SAM 1 is imported from, never edited, by this file.
 
-Four mechanisms here are SILENT when ported wrong: the layer builds,
-forward-passes, trains and serializes either way.
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-1. **The object-score token is PREPENDED**, so every subsequent token index
-   shifts by ``s = 1``. The block is
-   ``concat([obj_score_token, iou_token, mask_tokens])``; the IoU token is
-   ``hs[:, s, :]`` and the mask tokens are ``hs[:, s + 1 : s + 1 + N, :]``. The
-   object score is read from ``hs[:, 0, :]`` -- the obj-score token's OWN
-   transformer output, not a separate branch off the IoU token. Reading index 1
-   yields the same shapes and a plausible score.
-2. **The high-resolution skips are ADDED**, before the norm/activation, never
-   concatenated: ``act1(ln1(dc1(src) + feat_s1))`` then
-   ``act2(dc2(upscaled) + feat_s0)``. A coherent concat port keeps every output
-   shape (only the DECLARED widths change), which is why the width is asserted
-   and not just the movement -- see decisions.md D-016.
-3. **The stability score is a self-consistency measure**, not an IoU against
-   ground truth: ``area_i = sum(logits > +delta)``,
-   ``area_u = sum(logits > -delta)``. Swapping the two deltas produces a
-   perfectly finite score in ``[1, inf)`` and never raises.
-4. **The unstable-case fallback is PER BATCH ELEMENT.** A single global
-   ``argmax`` over the batch is shape-identical and is invisible at batch 1.
+Key Features:
+------------
+- A token block of ``concat([obj_score_token, iou_token, mask_tokens])``.
+- Two high-resolution skip connections from the image encoder's finer levels.
+- A stability score per mask, and a per-batch-element fallback that uses it.
 
-All four are guarded behaviourally in
-``tests/test_models/test_sam2/test_mask_decoder.py``.
+Architecture Overview:
+---------------------
+1. Tokens and image embedding go through the two-way transformer.
+2. -> two transposed-convolution upscaling steps, each taking one skip.
+3. -> per-mask hypernetwork MLPs dotted against the upscaled embedding.
+4. -> the IoU head, the object-score head, and the stability-based selection.
+
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
+decoder = SAM2MaskDecoder(transformer_dim=256)
+low_res_logits, iou_predictions, object_score_logits, object_pointer = (
+    decoder(image_embeddings, image_pe, sparse, dense, multimask_output=True))
+```
+
+Measured caveats:
+----------------
+Four mechanisms are SILENT when ported wrong -- the layer builds,
+forward-passes, trains and serializes either way. All four are guarded
+behaviourally in ``tests/test_models/test_sam2/test_mask_decoder.py``:
+
+- **The object-score token is PREPENDED**, so every subsequent token index
+  shifts by ``s = 1``. The block is
+  ``concat([obj_score_token, iou_token, mask_tokens])``; the IoU token is
+  ``hs[:, s, :]`` and the mask tokens are ``hs[:, s + 1 : s + 1 + N, :]``. The
+  object score is read from ``hs[:, 0, :]`` -- the obj-score token's OWN
+  transformer output, not a separate branch off the IoU token. Reading index 1
+  yields the same shapes and a plausible score.
+- **The high-resolution skips are ADDED**, before the norm/activation, never
+  concatenated: ``act1(ln1(dc1(src) + feat_s1))`` then
+  ``act2(dc2(upscaled) + feat_s0)``. A coherent concat port keeps every output
+  SHAPE and changes only the DECLARED widths, which is why the guard asserts
+  the width and not merely that the value moved.
+- **The stability score is a self-consistency measure**, not an IoU against
+  ground truth: ``area_i = sum(logits > +delta)``,
+  ``area_u = sum(logits > -delta)``. Swapping the two deltas produces a
+  perfectly finite score in ``[1, inf)`` and never raises.
+- **The unstable-case fallback is PER BATCH ELEMENT.** A single global
+  ``argmax`` over the batch is shape-identical and is invisible at batch 1.
 """
 
 import keras

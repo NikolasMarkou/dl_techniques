@@ -1,47 +1,67 @@
-"""The SAM 2 model: image path, streaming video path, and the variant tables.
+"""
+The SAM 2 model: the image path, the streaming path, and the variant tables.
+============================================================================
 
-This module assembles the six components built by the preceding steps into one
-``keras.Model`` and owns the four learned tensors that belong to none of them:
+:class:`SAM2` assembles the six components into one ``keras.Model``, owns the
+learned tensors and projections that belong to none of them, and carries
+``SAM2.MODEL_VARIANTS``. That table READS the trunk and neck geometry from
+``Hiera.MODEL_VARIANTS`` and ``SAM2ImageEncoder.MODEL_VARIANTS`` rather than
+restating it, so each geometry has exactly one home. :func:`create_sam2` is the
+factory over it.
 
-``maskmem_tpos_enc``
-    ``(num_maskmem, 1, 1, mem_dim)`` — the per-slot TEMPORAL embedding. The
-    memory bank returns SLOT INDICES; this class turns them into vectors and
-    adds them to the memory positional encoding. That split is deliberate
-    (H-13): the rotary embedding inside memory attention is SPATIAL-ONLY and is
-    broadcast identically across every memory frame, so temporal distinction is
-    carried exclusively here. Conflating the two produces a model that runs.
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-``no_mem_embed`` / ``no_mem_pos_enc``
-    The empty-memory path — what the first frame of a video sees.
+Key Features:
+------------
+- ``maskmem_tpos_enc``: the ``(num_maskmem, 1, 1, mem_dim)`` per-slot TEMPORAL
+  embedding. The memory bank returns SLOT INDICES; this class turns them into
+  vectors and adds them to the memory positional encoding.
+- ``no_mem_embed`` / ``no_mem_pos_enc``: the empty-memory path, which is what
+  the first frame of a video sees.
+- ``no_obj_ptr``: the learned "no object" pointer, blended in by the object
+  score.
+- ``no_obj_embed_spatial``: ``(1, mem_dim)``, added into the encoded memory in
+  proportion to ``1 - is_obj_appearing``.
+- ``obj_ptr_proj``: a 3-layer MLP (``use_mlp_for_obj_ptr_proj: true``) turning
+  the decoder's selected output token into an object pointer.
+- ``obj_ptr_tpos_proj``: ``Dense(mem_dim)``
+  (``proj_tpos_enc_in_obj_ptrs: true``), projecting the object-pointer
+  TEMPORAL sine encoding down to the memory width so it cannot interfere with
+  the spatial positional encoding.
 
-``no_obj_ptr``
-    The learned "no object" pointer blended in by the object score.
+Architecture Overview:
+---------------------
+1. :meth:`SAM2.call` -- the IMAGE path: encoder -> prompt encoder -> decoder.
+2. :meth:`SAM2.stream_step` -- the VIDEO path: encoder -> memory attention ->
+   prompt encoder -> decoder -> memory encoder -> bank.
 
-``no_obj_embed_spatial``
-    ``(1, mem_dim)`` — the SPATIAL no-object embedding, added into the encoded
-    memory in proportion to ``1 - is_obj_appearing``. This is the SECOND,
-    independent no-object mechanism: ``no_obj_ptr`` marks the pointer stream,
-    this one marks the spatial stream. Shipping only the former leaves an
-    occluded frame's spatial memory indistinguishable from a visible frame's.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
+model = create_sam2("tiny")
+outputs = model({"image": images, "points": (coords, labels)})
+```
 
-It also owns two projections that belong to no component:
-
-``obj_ptr_proj``
-    A 3-layer MLP (``use_mlp_for_obj_ptr_proj: true``) turning the decoder's
-    selected output token into an object pointer.
-``obj_ptr_tpos_proj``
-    ``Dense(mem_dim)`` (``proj_tpos_enc_in_obj_ptrs: true``) projecting the
-    object-pointer TEMPORAL sine encoding down to the memory width, so it does
-    not interfere with the spatial positional encoding.
-
-**Two entry points, deliberately different in kind.**
-
-* :meth:`SAM2.call` is the IMAGE path. It is traceable under ``tf.function``
-  and is what ``fit()`` sees. It touches neither the memory bank nor memory
-  attention.
-* :meth:`SAM2.stream_step` is the VIDEO path. It is a plain Python method that
-  mutates Python state, is never traced, and never calls ``self(...)``. It
-  follows the ``VideoJEPA.stream_reset`` / ``stream_step`` precedent.
+Measured caveats:
+----------------
+- **Two entry points, deliberately different in kind.** :meth:`SAM2.call` is
+  traceable under ``tf.function`` and is what ``fit()`` sees; it touches
+  neither the memory bank nor memory attention. :meth:`SAM2.stream_step` is a
+  plain Python method that mutates Python state, is never traced, and never
+  calls ``self(...)``. It follows the ``VideoJEPA.stream_reset`` /
+  ``stream_step`` precedent.
+- **The spatial / temporal split is a correctness constraint, not a layout
+  choice.** The rotary embedding inside memory attention is SPATIAL-ONLY and is
+  broadcast identically across every memory frame, so temporal distinction is
+  carried exclusively by ``maskmem_tpos_enc`` here. Conflating the two produces
+  a model that runs.
+- **There are TWO independent no-object mechanisms.** ``no_obj_ptr`` marks the
+  pointer stream and ``no_obj_embed_spatial`` marks the spatial stream.
+  Shipping only the former leaves an occluded frame's spatial memory
+  indistinguishable from a visible frame's.
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Union

@@ -1,79 +1,94 @@
-"""``SAM2TrainingModel`` -- the trainable, traceable multi-frame wrapper.
+"""
+``SAM2TrainingModel``: the trainable, traceable multi-frame wrapper.
+====================================================================
 
-Why a wrapper exists at all
----------------------------
-:meth:`SAM2.stream_step` is the video path, and it is deliberately NOT
-traceable: it mutates a Python object (the memory bank), branches on whether
-that object is empty, and reads Python integers out of its selection policy.
-It therefore cannot be the inner operation of a ``fit()`` step, and a custom
-``train_step`` is forbidden by standing instruction.
+:meth:`SAM2.stream_step` is the video path and is deliberately NOT traceable:
+it mutates a Python object (the memory bank), branches on whether that object
+is empty, and reads Python integers out of its selection policy. It therefore
+cannot be the inner operation of a ``fit()`` step, and a custom ``train_step``
+is forbidden by standing instruction. This wrapper takes the other route.
 
-This wrapper takes the other route. It runs the image encoder ONCE over a
-flattened ``(B * T, ...)`` batch, then an explicit **unrolled Python loop** over
-a STATIC ``num_frames``, driving SAM 2's submodules directly:
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-    ``image_encoder -> memory_attention -> prompt_encoder -> mask_decoder ->
-    memory_encoder``
+Key Features:
+------------
+- The image encoder runs ONCE over a flattened ``(B * T, ...)`` batch, then an
+  explicit UNROLLED Python loop over a STATIC ``num_frames`` drives SAM 2's
+  submodules directly. The whole loop traces under stock graph-mode ``fit()``.
+- The memory bank is constructed FRESH inside :meth:`call`, as a local
+  variable, so it holds no symbolic tensor across traces and the shipped
+  selection policy (``select_frames``, ``select_object_pointer_frames``, the
+  ``t_pos`` slots) is reused verbatim rather than re-derived.
+- ``SAM2.call`` / ``SAM2.__call__`` is never invoked -- pinned by a spy in
+  ``tests/test_models/test_sam2/test_training_model.py``, not by inspection.
 
-The whole loop traces under stock graph-mode ``fit()``. The memory bank is
-constructed FRESH inside :meth:`call`, as a local variable, so it holds no
-symbolic tensor across traces and the full iteration-1 selection policy
-(``select_frames``, ``select_object_pointer_frames``, the ``t_pos`` slots) is
-reused verbatim rather than re-derived. That this traces at all was PROBED
-before this module was written; see ``decisions.md`` D-053.
+Architecture Overview:
+---------------------
+Per frame, in order:
+``image_encoder -> memory_attention -> prompt_encoder -> mask_decoder ->
+memory_encoder``.
 
-``SAM2.call`` / ``SAM2.__call__`` is never invoked. That is pinned by a spy in
-``tests/test_models/test_sam2/test_training_model.py``, not by inspection.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.training_model import SAM2TrainingModel
+trainer = SAM2TrainingModel(sam2_model, num_frames=4)
+trainer.compile(optimizer="adam", loss=loss, jit_compile=False)  # MANDATORY
+trainer.fit(dataset)
+```
 
-``compile(jit_compile=False)`` IS MANDATORY
--------------------------------------------
-Keras 3.8's ``fit()`` defaults to ``jit_compile='auto'``, which selects XLA on
-a GPU. ``Hiera``'s stem interpolates its learned positional embedding with a
-BICUBIC ``ops.image.resize``, and MEASURED on this stack that op has no XLA GPU
-kernel::
+Measured caveats:
+----------------
+- **``compile(jit_compile=False)`` IS MANDATORY.** Keras 3.8's ``fit()``
+  defaults to ``jit_compile='auto'``, which selects XLA on a GPU. ``Hiera``'s
+  stem interpolates its learned positional embedding with a BICUBIC
+  ``ops.image.resize``, and MEASURED on this stack that op has no XLA GPU
+  kernel::
 
-    InvalidArgumentError: Detected unsupported operations when trying to
-    compile graph ... on XLA_GPU_JIT: ResizeBicubic (No registered
-    'ResizeBicubic' OpKernel for XLA_GPU_JIT devices ...)
+      InvalidArgumentError: Detected unsupported operations when trying to
+      compile graph ... on XLA_GPU_JIT: ResizeBicubic (No registered
+      'ResizeBicubic' OpKernel for XLA_GPU_JIT devices ...)
 
-The failure is at the FIRST ``fit()`` step, is loud, and is not a defect in
-this wrapper -- the same graph traces and runs perfectly under a plain
-``tf.function``. Every caller that trains this model must pass
-``jit_compile=False`` to :meth:`compile`. Pinned in both directions by
-``TestXLARefusal``.
-
-The gradient policy is TRUNCATED BPTT, with exactly one truncation point
---------------------------------------------------------------------------
-Upstream backpropagates through the entire T-frame memory chain -- it has no
-``detach()`` or ``no_grad()`` anywhere in ``sam2/modeling/`` or
-``training/model/`` (verified at ``2b90b9f5``; the only ``@torch.no_grad()``
-decorators are on the non-parametric sin/cos position-encoding cache) -- and
-pays the memory cost with ``torch.utils.checkpoint.checkpoint``
-(``training/model/sam2.py:495``). This wrapper does not have that budget, so it
-truncates. The truncation is placed at the memory encoder's **inputs** in
-:meth:`_store`, and nowhere else:
-
-* ``features`` / ``high_res`` into ``memory_encoder``: **detached** -- this is
-  the truncation, and it is what bounds the graph.
-* ``readout.memory`` / ``readout.memory_pos`` in :meth:`_condition`: **live**.
-* the per-call :class:`SAM2MemoryBank`: ``stop_gradient=False``.
-* ``object_score_logits`` into ``_mark_occlusion``: **detached** -- it would
-  otherwise reconstruct the full recursion through the score head.
-* ``object_pointer`` into the bank: **detached** -- see the limitation below.
-
-The result is a backward pass that reaches ``memory_encoder`` and stops there:
-one extra hop per read, never a T-deep recursion, and ``memory_encoder``'s 40
-variables train.
-
-**Known limitation.** ``obj_ptr_proj`` (6 variables) still ships FROZEN. The
-object pointer bypasses the memory encoder, so leaving it live would rebuild the
-whole T-deep graph, and its only usable truncation point is its own input --
-computed inside ``SAM2._decode``, an iteration-1 file this module must leave
-byte-unchanged. This is stated rather than left looking fixed.
-
-This module makes **no accuracy claim**. It proves the multi-frame training
-path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded in
-this repository.
+  The failure is at the FIRST ``fit()`` step, is loud, and is not a defect in
+  this wrapper -- the same graph traces and runs perfectly under a plain
+  ``tf.function``. Pinned in both directions by ``TestXLARefusal``.
+- **The gradient policy is TRUNCATED BPTT, with exactly one truncation point.**
+  Upstream backpropagates through the entire T-frame memory chain -- it has no
+  ``detach()`` or ``no_grad()`` anywhere in ``sam2/modeling/`` or
+  ``training/model/`` (verified at ``2b90b9f5``; the only
+  ``@torch.no_grad()`` decorators are on the non-parametric sin/cos
+  position-encoding cache) -- and pays the memory cost with
+  ``torch.utils.checkpoint.checkpoint`` (``training/model/sam2.py:495``). This
+  wrapper does not have that budget, so it truncates, at the memory encoder's
+  INPUTS in :meth:`_store` and nowhere else: ``features`` / ``high_res`` into
+  ``memory_encoder`` are DETACHED (this is the truncation, and it is what
+  bounds the graph); ``readout.memory`` / ``readout.memory_pos`` in
+  :meth:`_condition` stay LIVE; the per-call :class:`SAM2MemoryBank` runs at
+  ``stop_gradient=False``; ``object_score_logits`` into ``_mark_occlusion`` is
+  DETACHED, since it would otherwise reconstruct the full recursion through the
+  score head; ``object_pointer`` into the bank is DETACHED. The backward pass
+  therefore reaches ``memory_encoder`` and stops there -- one extra hop per
+  read, never a T-deep recursion -- and ``memory_encoder``'s 40 variables
+  train.
+- **Known limitation: ``obj_ptr_proj`` (6 variables) still ships FROZEN.** The
+  object pointer bypasses the memory encoder, so leaving it live would rebuild
+  the whole T-deep graph, and its only usable truncation point is its own
+  input, computed inside ``SAM2._decode``. Stated rather than left looking
+  fixed.
+- **The mask head does NOT learn under joint training, the cause is known, and
+  it is UNFIXED.** Every objective arm failed -- plain BCE, the shipped
+  focal+dice, upstream's ``alpha_t``, and dice-only. The binding constraint is
+  the JOINTLY-TRAINED IMAGE ENCODER, not the loss family and not the step
+  budget: the SAME decoder with a FROZEN encoder reaches IoU ``1.0000`` on the
+  trainer's own 8 diverse targets within the same budget, against ``0.0091``
+  jointly. Two earlier written diagnoses -- the loss composition, and "the
+  decoder's convergence rate at ``lr=1e-4`` / 240 steps" -- are both
+  SUPERSEDED.
+- This module makes **no accuracy claim**. It proves the multi-frame training
+  path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded
+  in this repository.
 """
 
 from typing import Any, Dict, List, Optional, Tuple

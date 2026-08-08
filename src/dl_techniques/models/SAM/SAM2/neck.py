@@ -1,22 +1,51 @@
-"""SAM 2 FPN neck and image encoder.
+"""
+SAM 2 FPN neck and image encoder.
+=================================
 
-The neck turns the Hiera trunk's four ascending-stage feature levels into four
-``d_model``-wide levels plus one sine positional encoding per level. The image
-encoder wraps trunk + neck and applies the ``scalp`` level drop.
+:class:`SAM2FpnNeck` turns the Hiera trunk's four ascending-stage feature
+levels into four ``d_model``-wide levels plus one sine positional encoding per
+level. :class:`SAM2ImageEncoder` wraps trunk and neck and applies the ``scalp``
+level drop.
 
-Two mechanisms in this file are silent when ported wrong -- they produce a
-model that builds, forward-passes and trains, with no shape error anywhere:
+Based on:
+---------
+- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
-1. **The lateral-convolution index orientation.** The trunk returns levels in
-   ASCENDING stage order (finest first) while ``backbone_channel_list`` is in
-   DESCENDING order (widest first). The lateral convolutions are therefore
-   indexed ``convs[n - i]`` against ``xs[i]``. Reversing either list alone
-   would still line the channel counts up.
-2. **The ``scalp`` drop happens BEFORE ``vision_features`` is taken.** The neck
-   builds four levels; the encoder returns three and reads the last of the
-   already-scalped list. Dropping the other end keeps the count at three.
+Key Features:
+------------
+- One lateral ``1x1`` convolution per trunk level, all at ``d_model``.
+- Top-down addition over the interpolated levels, at ``fpn_interp_model``
+  (default ``'nearest'``).
+- One :class:`PositionEmbeddingSine2D` map emitted per level.
 
-Both are guarded behaviourally in ``tests/test_models/test_sam2/test_neck.py``.
+Architecture Overview:
+---------------------
+1. Trunk levels ``xs[0..3]`` (finest first) -> lateral convolutions.
+2. -> top-down addition -> four ``d_model`` levels plus four position maps.
+3. -> ``scalp`` drop -> three levels; ``vision_features`` is the last of those.
+
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM2.neck import SAM2ImageEncoder
+encoder = SAM2ImageEncoder(trunk=trunk, neck=neck, scalp=1)
+out = encoder(images)                 # vision_features, backbone_fpn, pos_enc
+```
+
+Measured caveats:
+----------------
+Two mechanisms are silent when ported wrong -- they produce a model that
+builds, forward-passes and trains, with no shape error anywhere. Both are
+guarded behaviourally in ``tests/test_models/test_sam2/test_neck.py``:
+
+- **The lateral-convolution index orientation.** The trunk returns levels in
+  ASCENDING stage order (finest first) while ``backbone_channel_list`` is in
+  DESCENDING order (widest first). The lateral convolutions are therefore
+  indexed ``convs[n - i]`` against ``xs[i]``. Reversing either list alone would
+  still line the channel counts up.
+- **The ``scalp`` drop happens BEFORE ``vision_features`` is taken.** The neck
+  builds four levels; the encoder returns three and reads the LAST of the
+  already-scalped list. Dropping the other end keeps the count at three.
 """
 
 import keras
