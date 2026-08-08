@@ -52,7 +52,8 @@ SAM 1 segments a single image from a prompt. SAM 2 keeps that and adds a
 frames plus a set of object pointers, so a prompt given on frame 0 propagates
 forward without being re-given.
 
-The package is fifteen public classes across nine modules. The exported
+The package is fifteen public classes across eight implementation modules (the
+ninth `.py` file is the package `__init__`). The exported
 surface is deliberately three names — `SAM2`, `SAM2MemoryBank`, `create_sam2` —
 mirroring SAM 1's; every component stays behind its own submodule and is
 imported from there. Widening `__all__` is a deliberate act, asserted in both
@@ -290,11 +291,13 @@ Replacing that import with `import dl_techniques.models.SAM.SAM2` and changing
 nothing else reproduces the `TypeError` above.
 
 One further caveat for anyone A/B-ing a checkpoint's outputs across a change:
-**SAM 2's forward pass is nondeterministic on GPU.** Measured on an RTX 4070,
-same commit, same weights, same seed: 8 runs produced **three** distinct output
-digests while all 8 produced one identical weight digest, and 3 CPU runs
-produced a single output digest. Compare outputs on CPU, or a reduction-order
-difference will read as a model change.
+**SAM 2's forward pass is nondeterministic on GPU.** Measured on one RTX 4070,
+on a single 796,401-parameter `SAM2TrainingModel` checkpoint, holding commit,
+weights, seed and input fixed: 8 runs produced **three** distinct output digests
+while all 8 produced one identical weight digest, and 3 runs of the same probe
+on CPU produced a single output digest. Compare outputs on CPU, or a
+reduction-order difference will read as a model change. The specific
+nondeterministic op was not identified.
 
 ## 9. Testing
 

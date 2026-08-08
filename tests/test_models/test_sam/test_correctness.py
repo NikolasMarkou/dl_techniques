@@ -3147,13 +3147,16 @@ class TestRealVariantForwardPass:
         self, variant: str, encoder_params: int
     ):
         """
-        F-R4 --- pin README section 15's per-variant counts to a MEASUREMENT.
+        F-R4 --- pin the documented per-variant counts to a MEASUREMENT.
 
-        README section 15 previously quoted reference-PyTorch figures that two
-        of this iteration's own layout changes had falsified (the mask decoder
-        was listed at 3,143,424 against a real 4,058,340). Those numbers now
-        come from this measurement, and this test is what keeps them true: any
-        further layout change fails HERE with the new number in the message.
+        The per-variant table's single home is the ``Model Variants:`` block of
+        ``models/SAM/SAM1/model.py``'s module docstring; ``SAM1/README.md`` §7
+        points at it rather than restating it. That table previously quoted
+        reference-PyTorch figures that two of this iteration's own layout
+        changes had falsified (the mask decoder was listed at 3,143,424 against
+        a real 4,058,340). Those numbers now come from this measurement, and
+        this test is what keeps them true: any further layout change fails HERE
+        with the new number in the message.
 
         Parameter counts are exact integers and are process-independent, unlike
         the forward-pass magnitudes carried surprise #9 forbids asserting.
@@ -3189,8 +3192,9 @@ class TestRealVariantForwardPass:
                 measured = int(encoder.count_params())
                 assert measured == encoder_params, (
                     f"{variant} image encoder measures {measured:,} params, "
-                    f"README section 15 says {encoder_params:,} -- update the "
-                    f"README table from this measurement"
+                    f"model.py's Model Variants: table says "
+                    f"{encoder_params:,} -- update that table from this "
+                    f"measurement"
                 )
             finally:
                 del model
@@ -3199,11 +3203,14 @@ class TestRealVariantForwardPass:
 
     def test_prompt_encoder_and_mask_decoder_are_variant_independent(self):
         """
-        The other half of README section 15's table: 6,476 and 4,058,340 for
-        EVERY variant, which is what makes the table's per-variant totals add up.
+        The other half of the ``Model Variants:`` table in
+        ``models/SAM/SAM1/model.py``'s module docstring: 6,476 and 4,058,340 for
+        every one of the three variants that table lists, which is what makes
+        its per-variant totals add up.
 
-        4,058,340 is the number the reviewer measured against README's stale
-        3,143,424; it is pinned here so it cannot rot again.
+        4,058,340 is the number the reviewer measured against the stale
+        3,143,424 that table used to carry; it is pinned here so it cannot rot
+        again.
         """
         model = SAM.from_variant("vit_b")
         try:
@@ -3226,13 +3233,13 @@ class TestRealVariantForwardPass:
             )
             assert int(model.prompt_encoder.count_params()) == 6_476, (
                 f"prompt encoder measures "
-                f"{int(model.prompt_encoder.count_params()):,} params, README "
-                f"section 15 says 6,476"
+                f"{int(model.prompt_encoder.count_params()):,} params, "
+                f"model.py's Model Variants: table says 6,476"
             )
             assert int(model.mask_decoder.count_params()) == 4_058_340, (
                 f"mask decoder measures "
-                f"{int(model.mask_decoder.count_params()):,} params, README "
-                f"section 15 says 4,058,340"
+                f"{int(model.mask_decoder.count_params()):,} params, "
+                f"model.py's Model Variants: table says 4,058,340"
             )
         finally:
             del model

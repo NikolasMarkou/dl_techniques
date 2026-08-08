@@ -23,9 +23,11 @@ decoder light enough to re-run per click.
 >   dim, the MLP head depth), but no key-mapping layer exists and no such load
 >   has been demonstrated. Every reference-fidelity statement in this package
 >   is an architectural argument, not a measurement against real weights.
-> - **`vit_l` and `vit_h` are never forward-passed by any test.** The one
->   forward pass on record for them is §7's parameter measurement, which ran
->   each component once. Do not read that table as evidence they train.
+> - **`vit_l` and `vit_h` are constructed by tests but forward-passed by none
+>   of them.** §7's parameter counts come from a build-only measurement that
+>   runs on CPU with no forward pass at all
+>   (`test_correctness.py::TestRealVariantForwardPass`, which declares the gap
+>   in its own docstring). Do not read that table as evidence they run or train.
 
 ---
 
@@ -251,10 +253,14 @@ Two readings of it are worth stating in prose:
   reference-PyTorch numbers without accounting for the
   `attention_downsample_rate=2` cross-attentions and the 3-layer MLP heads.
 
-**Inference latency and memory footprint are NOT measured anywhere in this
-package.** No benchmark ships here, none was ever run, and no timing or
-GB-per-variant figure is quoted in this repository. Treat any such number you
-find elsewhere for these variants as unrelated to this implementation.
+**Inference latency and per-variant memory footprint are NOT measured anywhere
+in this package.** No inference benchmark ships here and none was ever run, so
+no latency or GB-per-variant figure for `vit_b` / `vit_l` / `vit_h` appears
+under `models/SAM/`. Treat any such number you find elsewhere for these variants
+as unrelated to this implementation. (The two memory figures that DO appear —
+the 6,754.5 MiB `vit_h` forward peak in `test_correctness.py` and the COCO
+wall-clock in §10 — are a test-cost measurement and a data-pipeline
+measurement, not inference benchmarks.)
 
 ## 8. Serialization, Checkpoints and Deployment
 
@@ -415,9 +421,12 @@ rediscovers them.
   resized frame, but **no test asserts they still agree after a strongly
   non-square source image**, so an asymmetric resize on one of the three would
   go uncaught.
-- **`--data-source coco` is I/O-bound, not GPU-bound.** Measured on this
-  machine at a 16-step epoch: ~1 s on the synthetic source against ~18 s on
-  COCO. Budget for that before reading a COCO wall-clock as a model cost.
+- **`--data-source coco` is I/O-bound, not GPU-bound.** One epoch at
+  `--steps-per-epoch 16` on one machine read ~1 s on the synthetic source
+  against ~18 s on COCO. No test pins that ratio and nothing else in the
+  repository records it, so treat it as an order-of-magnitude budgeting hint and
+  re-derive it on your own hardware — the two runs differ only in
+  `--data-source`.
 
 ## 11. Licensing
 

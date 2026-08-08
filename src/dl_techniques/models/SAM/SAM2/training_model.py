@@ -79,13 +79,13 @@ Measured caveats:
   fixed.
 - **The mask head does NOT learn under joint training, the cause is known, and
   it is UNFIXED.** Every objective arm failed -- plain BCE, the shipped
-  focal+dice, upstream's ``alpha_t``, and dice-only. The binding constraint is
-  the JOINTLY-TRAINED IMAGE ENCODER, not the loss family and not the step
-  budget: the SAME decoder with a FROZEN encoder reaches IoU ``1.0000`` on the
-  trainer's own 8 diverse targets within the same budget, against ``0.0091``
-  jointly. Two earlier written diagnoses -- the loss composition, and "the
-  decoder's convergence rate at ``lr=1e-4`` / 240 steps" -- are both
-  SUPERSEDED.
+  focal+dice, upstream's ``alpha_t``, and dice-only -- and the binding
+  constraint is the JOINTLY-TRAINED IMAGE ENCODER, not the loss family and not
+  the step budget. The frozen-encoder / joint IoU pair that settles it, and the
+  two earlier diagnoses it SUPERSEDES, have ONE home: ``README.md`` section 7.
+  They are deliberately not restated here -- a measured pair restated in two
+  places is a hand-maintained lockstep invariant, i.e. a latent defect. Read
+  that section before reading any training run of this wrapper as a result.
 - This module makes **no accuracy claim**. It proves the multi-frame training
   path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded
   in this repository.

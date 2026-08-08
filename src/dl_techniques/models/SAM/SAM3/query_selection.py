@@ -48,9 +48,13 @@ Measured caveats:
 ----------------
 - **Why this head exists, MEASURED not guessed**: SAM 3's box output was
   image-independent BY CONSTRUCTION, not by a training-time collapse.
-  ``val_box_std_across_images`` read ``6.9e-06`` against an across-*query*
-  spread of ``0.13``, and is already that low at epoch 0 -- the decoder's box
-  chain is ``sigmoid(delta + inverse_sigmoid(reference))`` with a zero-init last
+  On the shipped synthetic runs ``val_box_std_across_images`` read ``6.9e-06``
+  ON GPU against an across-*query* spread of ``0.13``, and is already that low
+  at epoch 0. Below ``~1e-5`` that statistic is DEVICE-DEPENDENT (same weights,
+  split and code: ``6.94e-06`` GPU vs ``1.84e-06`` CPU, a factor of 3.8 --
+  ``train/sam3/train_sam3.py``'s module docstring is its home), so the argument
+  rests on the four-order gap to the across-query spread, not on the digits.
+  The mechanism is that the decoder's box chain is ``sigmoid(delta + inverse_sigmoid(reference))`` with a zero-init last
   projection over a learned table broadcast across the batch, so at step 0 the
   boxes cannot depend on the image at all.
 - With the flag off nothing changes and no weight is created, so the on-disk

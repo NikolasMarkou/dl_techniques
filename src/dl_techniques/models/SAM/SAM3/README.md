@@ -55,8 +55,9 @@ what a *phrase* names: it takes an image plus tokenized text and returns, per
 decoder query, a class score, a box and a mask. There is no vocabulary — swap
 the prompt and you have swapped the "class".
 
-Nine independently constructible, serializable classes, plus the `Sam3Image`
-assembly that wires six of them together:
+Nine independently constructible, serializable layer classes, plus two
+`keras.Model`s — the `Sam3Image` assembly, which wires six of the nine together,
+and the `Sam3TrainingModel` wrapper:
 
 | Module | Public classes | Role |
 |---|---|---|
@@ -174,18 +175,26 @@ each.
 `small` and `tiny` are this repository's own development geometries and
 correspond to nothing upstream.
 
-| Variant | What it is | Trainable parameters, measured from random init | Pinned by |
+| Variant | What it is | Trainable parameters, measured from random init | Where the figure is held |
 |---|---|---:|---|
-| `tiny` | the test/CI geometry | **24,818** | `tests/test_models/test_sam3/test_model.py` |
-| `small` | a development geometry | **5,881,614** | measured, not test-pinned |
-| `sam3` | the released configuration | **821,708,598** | `tests/test_train/test_sam3/test_train_sam3.py` |
+| `tiny` | the test/CI geometry | **24,818** | MEASURED, not asserted anywhere: `Sam3Image.from_variant("tiny").build(None)` then `count_params()`, on CPU at this commit |
+| `small` | a development geometry | **5,881,614** | `SMALL_TOTAL` in `tests/test_models/test_sam3/test_model.py` |
+| `sam3` | the released configuration | **821,708,598** | `SHIPPED_TOTAL` in `tests/test_models/test_sam3/test_model.py`, and matched against the trainer's refusal message in `tests/test_train/test_sam3/test_train_sam3.py` |
+
+`sam3`'s total is asserted two ways, and only one of them runs by default: the
+test that actually instantiates the 821 M-parameter model is **opt-in**
+(`SAM3_SHIPPED_AUDIT=1`, ~3.3 GiB of device memory). The default gate checks the
+closed form against per-component figures instead. Read the row as a closed form
+cross-checked per component, not as a routinely-executed end-to-end count.
 
 The trainer **refuses** the `sam3` variant outright, and its refusal message
 carries the reason: 821,708,598 parameters at a measured **10,072.9 MiB forward
-peak** leaves no room for AdamW moments on a 12 GB card. That message is the
-single home of both figures — `Sam3TrainingConfig(variant="sam3")` raising it
-is asserted in `tests/test_train/test_sam3/test_train_sam3.py`, which is what
-pins the parameter count above.
+peak** leaves no room for AdamW moments on a 12 GB card. That refusal message is
+the single home of the 10,072.9 MiB figure — a measurement, carried by no
+assertion — and `Sam3TrainingConfig(variant="sam3")` raising it is asserted in
+`tests/test_train/test_sam3/test_train_sam3.py`. This table is the single prose
+home of all three parameter counts; the package `__init__` points here rather
+than restating them.
 
 Enabling `query_selection=True` with `prompt_conditioned=True` adds weights on
 top of `small` (§7); with the flag off, no weight is created at all, so the
@@ -247,9 +256,15 @@ package's own addition, reached through `Sam3Image(..., query_selection=True)`,
 **OFF by default**, and behaviourally inert when off.
 
 It exists for a measured reason: SAM 3's box output was image-independent **by
-construction**, not by a training-time collapse. `val_box_std_across_images`
-read `6.9e-06` against an across-*query* spread of `0.13`, and it is already
-that low at epoch 0 — the decoder's box chain is
+construction**, not by a training-time collapse. On the shipped synthetic runs
+`val_box_std_across_images` read `6.9e-06` **on GPU** against an
+across-*query* spread of `0.13`, and it is already that low at epoch 0. Quote
+that figure to one significant figure and with the device attached: below
+`~1e-5` the statistic is DEVICE-DEPENDENT — the same weights, split and code
+read `6.94e-06` on GPU and `1.84e-06` on CPU, a factor of 3.8
+(`src/train/sam3/train_sam3.py`'s module docstring is its home). What carries
+the argument is the four-order gap to the across-query spread, not the digits.
+The mechanism is that the decoder's box chain is
 `sigmoid(delta + inverse_sigmoid(reference))` with a zero-initialized last
 projection over a learned table broadcast across the batch, so at step 0 the
 boxes *cannot* depend on the image at all.
@@ -263,10 +278,15 @@ breaks ties by ascending index — an image-independent selection with the right
 shapes, dtypes and a plausible spread.
 
 An optional `prompt_conditioned` FiLM modulation makes the top-k *selection*
-itself prompt-dependent. Prompt-swap retention measured **1.0000 on 9 of 9**
-pre-phase-5 checkpoints — i.e. swapping the prompt changed the selection on
-none of them — against **0.6219 / 0.5982 / 0.6227** for the `prompt_conditioned`
-arm across its three seeds, which is the arm doing something. It is default-off.
+itself prompt-dependent. The instrument is prompt-swap retention — replace every
+image's prompt with another image's, then score the SAME checkpoint against the
+SAME ground truth through the SAME IoU expression; it ships as
+`train.sam3.baselines.prompt_swap_retention` and is runnable with
+`python -m train.sam3.baselines --prompt-swap`. Read per arm, never as a
+constant of the generator: **1.0000 on 9 of 9** prompt-blind checkpoints — the
+swap changed nothing on any of them — against **0.6219 / 0.5982 / 0.6227** for
+the `prompt_conditioned` arm across its three seeds, which is the arm doing
+something. It is default-off.
 
 ## 8. The Baseline That Beats Every Trained Arm
 
@@ -279,8 +299,16 @@ gradient, no text input — scores box IoU **0.9413 / 0.9370 / 0.9397** across
 three seeds, through the identical IoU evaluation path and against the
 identical 93 / 88 / 98 matched-pair denominators as the model arms.
 
-The best trained SAM 3 arm this repository has ever produced scores
-**0.8450 / 0.8296 / 0.8191** on the same three seeds.
+The best trained SAM 3 arm this repository has produced — the `step9_qsel`
+checkpoints, `val_box_iou` — scores **0.8450 / 0.8296 / 0.8191** on those same
+three seeds.
+
+`src/train/sam3/train_sam3.py`'s module docstring, which is the home of both
+readings, forbids quoting that pair without **two** qualifiers. The first is the
+paragraph above. The second: **`box_iou` does not read the text prompt at all.**
+Replacing every image's prompt with another image's and scoring the same
+checkpoint against the same ground truth retains `box_iou` at 100.00% on 3 of 3
+seeds, in the arm AND in the deep-supervision control.
 
 It ships as `connected_components_predictor` in
 [`src/train/sam3/baselines.py`](../../../../train/sam3/baselines.py) and is

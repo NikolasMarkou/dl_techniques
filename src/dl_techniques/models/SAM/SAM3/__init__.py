@@ -2,8 +2,9 @@
 SAM 3 (Segment Anything with Concepts): the phase-1 text-prompted image path.
 =============================================================================
 
-Nine independently constructible, serializable classes plus the ``Sam3Image``
-assembly wiring six of them together. No pretrained weights ship here, and this
+Nine independently constructible, serializable layer classes plus two
+``keras.Model``s -- the ``Sam3Image`` assembly, wiring six of the nine together,
+and the ``Sam3TrainingModel`` wrapper. No pretrained weights ship here, and this
 package makes NO learnability, quality or accuracy claim: nothing here has been
 trained to any quality and no released SAM 3 checkpoint has ever been loaded.
 
@@ -43,10 +44,10 @@ Measured caveats:
   reference's ``drop_path_rate=0.1`` and the shared ``StochasticDepth``
   short-circuits on ``training is False`` ONLY, so the ``training=None`` a plain
   ``model(inputs)`` passes down DROPS PATHS (D-123). ``tiny`` uses 0.0.
-- Parameter geometries: ``tiny`` 24,818 (pinned by
-  ``tests/test_models/test_sam3/test_model.py``); ``small`` 5,881,614 trainable
-  from random init; ``sam3`` 821,708,598 at a 10,072.9 MiB forward peak (pinned
-  by ``tests/test_train/test_sam3/test_train_sam3.py``).
+- The three variants' measured parameter geometries have ONE home, ``README.md``
+  section 5, which also names the test pinning each. They are deliberately not
+  restated here: a count restated in two places is a hand-maintained lockstep
+  invariant, i.e. a latent defect.
 - The segmentation head has no presence mechanism, so exactly ONE presence
   signal exists here: the decoder's own presence token.
 - Out of scope in phase 1, named rather than left to be rediscovered: the

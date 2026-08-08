@@ -2,7 +2,8 @@
 SAM 2 (Segment Anything in Images and Videos): the image and streaming paths.
 =============================================================================
 
-Fifteen public classes across nine modules: a Hiera trunk with an FPN neck, a
+Fifteen public classes across eight implementation modules: a Hiera trunk with
+an FPN neck, a
 streaming memory (memory attention, memory encoder, memory bank) and a mask
 decoder that additionally emits an object score and an object pointer. No
 pretrained weights ship here, and this package makes NO accuracy claim --
@@ -64,8 +65,9 @@ Measured caveats:
   no longer exists; that path is deliberately not spelled here, because a
   repo-wide grep asserts it survives nowhere under ``src/``.
 - **SAM 2's mask head does not learn under joint training, the cause is known,
-  and it is UNFIXED** -- see ``training_model``'s docstring for the arms that
-  were measured and the constraint that binds.
+  and it is UNFIXED.** ``training_model``'s docstring names the arms that were
+  measured and the constraint that binds; ``README.md`` section 7 is the single
+  home of the frozen-encoder / joint IoU pair that settles it.
 """
 
 from .memory_bank import SAM2MemoryBank
