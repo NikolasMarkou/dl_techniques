@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 import train.sam.train_sam as train_sam_module
-from dl_techniques.models.sam.training_model import (
+from dl_techniques.models.SAM.SAM1.training_model import (
     IOU_SUPERVISION,
     LOW_RES_LOGITS,
 )

@@ -26,9 +26,9 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam import SAM, SAMTrainingModel
+from dl_techniques.models.SAM.SAM1 import SAM, SAMTrainingModel
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
-from dl_techniques.models.sam.training_model import (
+from dl_techniques.models.SAM.SAM1.training_model import (
     INPUT_BOXES,
     INPUT_GT_MASK,
     INPUT_IMAGE,
@@ -1270,7 +1270,7 @@ class TestRefinementShapes:
     def test_the_class_default_runs_exactly_one_round(self) -> None:
         """Refinement is opt-in. At the default the wrapper keeps the
         inference-shaped contract every step-2 guard pins."""
-        from dl_techniques.models.sam.training_model import (
+        from dl_techniques.models.SAM.SAM1.training_model import (
             DEFAULT_REFINEMENT_ROUNDS,
             TRAINING_REFINEMENT_ROUNDS,
         )

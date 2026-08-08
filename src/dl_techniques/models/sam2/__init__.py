@@ -5,7 +5,7 @@ neck, a streaming memory (memory attention, memory encoder, memory bank) and a
 mask decoder that additionally emits an object score and an object pointer.
 
 **The exported surface is deliberately minimal**, mirroring
-``dl_techniques.models.sam``'s: the model, its factory, and the one plain-Python
+``dl_techniques.models.SAM.SAM1``'s: the model, its factory, and the one plain-Python
 state container a caller must construct itself to drive the streaming API.
 Everything else is an implementation component and is imported from its own
 submodule::

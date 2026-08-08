@@ -20,7 +20,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `jepa/` — Joint Embedding Predictive Architecture
 - `masked_autoencoder/` — MAE
 - `depth_anything/` — Depth estimation
-- `sam/` — Segment Anything Model
+- `SAM/SAM1/` — Segment Anything Model
 - `detr/` — DEtection TRansformer
 - `yolo12/` — YOLOv12 detection
 - `pft_sr/` — Super-resolution

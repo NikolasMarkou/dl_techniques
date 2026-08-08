@@ -24,11 +24,11 @@ import os
 from typing import Dict, Any
 
 # Import SAM components
-from dl_techniques.models.sam.model import SAM
-from dl_techniques.models.sam.image_encoder import ImageEncoderViT
-from dl_techniques.models.sam.prompt_encoder import PromptEncoder
-from dl_techniques.models.sam.mask_decoder import MaskDecoder
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.model import SAM
+from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
+from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
+from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 
 
 class TestSAMInstantiation:

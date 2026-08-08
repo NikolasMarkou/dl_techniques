@@ -29,7 +29,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
@@ -814,9 +814,9 @@ class TestSam1Untouched:
     """G7.5: this step imports SAM 1 internals but must not perturb them."""
 
     def test_sam1_source_tree_has_no_diff(self):
-        """``git diff --stat -- src/dl_techniques/models/sam/`` is empty."""
+        """``git diff --stat -- src/dl_techniques/models/SAM/SAM1/`` is empty."""
         result = subprocess.run(
-            ["git", "diff", "--stat", "--", "src/dl_techniques/models/sam/"],
+            ["git", "diff", "--stat", "--", "src/dl_techniques/models/SAM/SAM1/"],
             capture_output=True,
             text=True,
             check=True,
@@ -838,7 +838,7 @@ class TestSam1Untouched:
 
     def test_sam1_decoder_still_produces_its_own_two_tuple(self):
         """Importing SAM 1's module here did not change its own behaviour."""
-        from dl_techniques.models.sam.mask_decoder import MaskDecoder
+        from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
 
         sam1 = MaskDecoder(transformer_dim=DIM, transformer=make_transformer())
         sam1.build(None)

@@ -225,7 +225,7 @@ Input Image (up to 1024x1024 -- SEE BELOW)
   `SAM.preprocess` PADS ONLY. An image LARGER than the encoder's `img_size`
   in either axis raises `ValueError` naming the offending size. Downscale it
   first with `resize_longest_side(image, model.image_encoder.img_size)`
-  (`dl_techniques.models.sam.preprocessing`), which is the transform reference
+  (`dl_techniques.models.SAM.SAM1.preprocessing`), which is the transform reference
   SAM assumes has already been applied.
 
 
@@ -767,7 +767,7 @@ pip install keras>=3.8.0 tensorflow>=2.18.0 numpy
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.SAM.SAM1 import SAM
 
 # 1. Create a SAM model (Base variant for speed)
 model = SAM.from_variant('vit_b')
@@ -847,10 +847,10 @@ plt.show()
 
 **Purpose**: Transform input images into rich feature embeddings.
 
-**Location**: `dl_techniques.models.sam.image_encoder.ImageEncoderViT`
+**Location**: `dl_techniques.models.SAM.SAM1.image_encoder.ImageEncoderViT`
 
 ```python
-from dl_techniques.models.sam.image_encoder import ImageEncoderViT
+from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
 
 # Create an encoder
 encoder = ImageEncoderViT(
@@ -898,10 +898,10 @@ relative to a pre-iteration-1 default-constructed encoder.
 
 **Purpose**: Convert user prompts into embeddings.
 
-**Location**: `dl_techniques.models.sam.prompt_encoder.PromptEncoder`
+**Location**: `dl_techniques.models.SAM.SAM1.prompt_encoder.PromptEncoder`
 
 ```python
-from dl_techniques.models.sam.prompt_encoder import PromptEncoder
+from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
 
 # Create a prompt encoder
 prompt_encoder = PromptEncoder(
@@ -943,11 +943,11 @@ sparse_emb, dense_emb = prompt_encoder(
 
 **Purpose**: Predict segmentation masks from embeddings.
 
-**Location**: `dl_techniques.models.sam.mask_decoder.MaskDecoder`
+**Location**: `dl_techniques.models.SAM.SAM1.mask_decoder.MaskDecoder`
 
 ```python
-from dl_techniques.models.sam.mask_decoder import MaskDecoder
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 
 # Create transformer
 transformer = TwoWayTransformer(
@@ -1029,10 +1029,10 @@ masks, iou_pred = mask_decoder(
 
 **Purpose**: End-to-end promptable segmentation model.
 
-**Location**: `dl_techniques.models.sam.model.SAM`
+**Location**: `dl_techniques.models.SAM.SAM1.model.SAM`
 
 ```python
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.SAM.SAM1 import SAM
 
 # Method 1: Use predefined variants (recommended)
 model = SAM.from_variant('vit_b')   # Base: fast, good quality
@@ -1201,7 +1201,7 @@ The simplest use case - click a point to segment an object.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.SAM.SAM1 import SAM
 
 # Setup
 model = SAM.from_variant('vit_b')
@@ -2026,7 +2026,7 @@ Every executed run on record (§13, and the limitations below) used the reduced
 and validated, but its memory and throughput under `fit()` are unmeasured:
 
 ```python
-from dl_techniques.models.sam import SAM, SAMTrainingModel
+from dl_techniques.models.SAM.SAM1 import SAM, SAMTrainingModel
 from dl_techniques.losses.sam_mask_loss import SAMMaskLoss, SAMIoULoss
 from train.sam.data import build_sam_dataset
 
@@ -2494,7 +2494,7 @@ docker run -p 5000:5000 --gpus all sam-api
 # Export model
 python -c "
 import keras
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.SAM.SAM1 import SAM
 
 model = SAM.from_variant('vit_b')
 # Build model...
@@ -2549,7 +2549,7 @@ The illustrative snippets below are a starting point, not that suite.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.sam import SAM
+from dl_techniques.models.SAM.SAM1 import SAM
 
 def test_model_creation():
     """Test that model variants can be created."""
@@ -2657,7 +2657,7 @@ if __name__ == '__main__':
 ```python
 def test_interactive_workflow():
     """Test typical interactive segmentation workflow."""
-    from dl_techniques.models.sam import SAM
+    from dl_techniques.models.SAM.SAM1 import SAM
     
     model = SAM.from_variant('vit_b')
     image = keras.random.normal(shape=(1, 1024, 1024, 3))
@@ -2885,7 +2885,7 @@ never resizes**, and an image larger than the encoder's `img_size` in either
 axis raises `ValueError`:
 - **Larger than 1024 in any axis**: downscale first with
   `resize_longest_side(image, 1024)` from
-  `dl_techniques.models.sam.preprocessing`, and scale your prompt coordinates
+  `dl_techniques.models.SAM.SAM1.preprocessing`, and scale your prompt coordinates
   by the same factor. Tiling is an alternative when you need full resolution.
 - **Smaller**: bottom/right padding is automatic, but may affect edge quality.
 
@@ -3303,7 +3303,7 @@ This implementation is based on the work by Kirillov et al. (2023) and follows t
 ```python
 # Create model (RANDOM weights -- no checkpoint ships with this repo)
 import keras
-from dl_techniques.models.sam import SAM, resize_longest_side
+from dl_techniques.models.SAM.SAM1 import SAM, resize_longest_side
 model = SAM.from_variant('vit_b')  # or 'vit_l', 'vit_h'
 
 # Preprocess: preprocess() pads only; pin the longest side to img_size first

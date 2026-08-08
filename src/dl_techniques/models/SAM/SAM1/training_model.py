@@ -46,7 +46,7 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 from keras import ops
 
-from ...losses.sam_mask_loss import match_mask_axis
+from dl_techniques.losses.sam_mask_loss import match_mask_axis
 from .model import SAM
 
 # ---------------------------------------------------------------------------

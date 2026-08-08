@@ -3,7 +3,7 @@
 Two things are pinned here, both of which drift SILENTLY.
 
 **The export surface.** ``models/sam2/__init__.py`` exports exactly three names
-(S-2, mirroring ``models/sam/__init__.py``). A surface widens one convenience
+(S-2, mirroring ``models/SAM/SAM1/__init__.py``). A surface widens one convenience
 re-export at a time, and no other test in this suite would notice: every
 component test imports from its own submodule, so the package init could export
 all fifteen classes and stay green. :class:`TestExportSurface` asserts the exact
@@ -64,7 +64,7 @@ SRC_ROOT = pathlib.Path(__file__).resolve().parents[3] / "src"
 
 
 class TestExportSurface:
-    """S-2: exactly three exported names, mirroring ``models/sam``."""
+    """S-2: exactly three exported names, mirroring ``models/SAM/SAM1``."""
 
     def test_all_is_exactly_the_curated_three(self) -> None:
         assert tuple(sorted(sam2.__all__)) == EXPECTED_ALL, (
@@ -119,7 +119,7 @@ class TestExportSurface:
         someone broadens SAM 1's surface this test says so rather than letting
         SAM 2 quietly follow.
         """
-        sam1 = importlib.import_module("dl_techniques.models.sam")
+        sam1 = importlib.import_module("dl_techniques.models.SAM.SAM1")
         assert len(sam1.__all__) == len(sam2.__all__) == 3
 
 

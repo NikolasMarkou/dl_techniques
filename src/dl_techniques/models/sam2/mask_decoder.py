@@ -1,11 +1,11 @@
 """SAM 2 mask decoder.
 
-A NEW SIBLING of :class:`dl_techniques.models.sam.mask_decoder.MaskDecoder`, not
+A NEW SIBLING of :class:`dl_techniques.models.SAM.SAM1.mask_decoder.MaskDecoder`, not
 an extension of it. SAM 1's decoder bakes its token layout into positional slices
 inside method bodies (``hs[:, 0, :]``, ``hs[:, 1:1 + N, :]``), has no
 skip-connection argument in its signature at all, and returns a 2-tuple; none of
 the three SAM 2 deltas below can be expressed as a defaulted ``__init__`` kwarg.
-``models/sam/`` is CLOSED (357 pinned tests) and is not edited by this file --
+``models/SAM/SAM1/`` is CLOSED (357 pinned tests) and is not edited by this file --
 only *imported* from.
 
 Four mechanisms here are SILENT when ported wrong: the layer builds,
@@ -46,10 +46,10 @@ from dl_techniques.layers.norms import create_normalization_layer
 
 # Reuse, do not re-implement: SAM 1's transformer and its MLP-head builder are
 # imported UNCHANGED (a second instance of the former, a plain function call for
-# the latter). `models/sam/__init__.py` does not re-export either name, so both
+# the latter). `models/SAM/SAM1/__init__.py` does not re-export either name, so both
 # imports must name the submodule directly -- exactly as `train_sam.py` does.
-from dl_techniques.models.sam.transformer import TwoWayTransformer
-from dl_techniques.models.sam.mask_decoder import _build_mlp_head
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.mask_decoder import _build_mlp_head
 
 # ---------------------------------------------------------------------
 
@@ -74,7 +74,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
         embeddings.
     :type transformer_dim: int
     :param transformer: The two-way transformer instance. Construct a SECOND
-        :class:`~dl_techniques.models.sam.transformer.TwoWayTransformer` at
+        :class:`~dl_techniques.models.SAM.SAM1.transformer.TwoWayTransformer` at
         ``(depth=2, embedding_dim=256, num_heads=8, mlp_dim=2048)``; do not
         share SAM 1's instance and do not subclass it.
     :type transformer: TwoWayTransformer
@@ -127,7 +127,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
         hypernetwork MLPs, the IoU head and the object-score MLP. Defaults to
         ``'relu'``. This is a SEPARATE knob from ``activation`` because the
         reference implementation makes the two halves differ; see
-        ``models/sam/mask_decoder.py``'s D-024 anchor.
+        ``models/SAM/SAM1/mask_decoder.py``'s D-024 anchor.
     :type mlp_activation: str
 
     :raises ValueError: if any positive-valued argument is non-positive, or if
@@ -135,7 +135,7 @@ class SAM2MaskDecoder(keras.layers.Layer):
 
     Example::
 
-        from dl_techniques.models.sam.transformer import TwoWayTransformer
+        from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
         from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
 
         decoder = SAM2MaskDecoder(

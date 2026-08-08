@@ -33,7 +33,7 @@ import tensorflow as tf
 from keras import ops
 
 import dl_techniques.models.sam2.model as model_module
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 from dl_techniques.models.sam2.hiera import Hiera, hiera_block_specs
 from dl_techniques.models.sam2.mask_decoder import SAM2MaskDecoder
 from dl_techniques.models.sam2.memory_encoder import SAM2MemoryEncoder
@@ -972,7 +972,7 @@ class TestRegisteredKeyUniqueness:
 
     def test_sam1_source_is_untouched(self) -> None:
         result = subprocess.run(
-            ["git", "diff", "--stat", "--", "src/dl_techniques/models/sam/"],
+            ["git", "diff", "--stat", "--", "src/dl_techniques/models/SAM/SAM1/"],
             capture_output=True, text=True, check=True,
         )
         assert result.stdout.strip() == "", (
@@ -2084,8 +2084,13 @@ class TestOpsPurity:
     """H-6: no raw ``tf.`` CALLs in the new source."""
 
     def test_no_raw_tensorflow_calls(self) -> None:
-        source = pathlib.Path(
-            "src/dl_techniques/models/sam2/model.py").read_text()
+        # Move-proof: resolve the source file from the ALREADY-IMPORTED module
+        # object rather than from a repo-relative literal, which silently
+        # becomes a FileNotFoundError the moment the package is relocated.
+        # Same idiom as ``test_hiera.py``'s ``inspect.getfile(package)``.
+        import inspect
+
+        source = pathlib.Path(inspect.getfile(model_module)).read_text()
         assert "import tensorflow" not in source, (
             "model.py imports tensorflow; no raw tf. CALL is possible without "
             "it, so this is the load-bearing assertion"

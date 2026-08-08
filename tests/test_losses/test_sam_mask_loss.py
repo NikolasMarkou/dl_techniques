@@ -40,7 +40,7 @@ from dl_techniques.losses.sam_mask_loss import (
     to_dice_layout,
     to_focal_layout,
 )
-from dl_techniques.models.sam.training_model import achieved_mask_iou
+from dl_techniques.models.SAM.SAM1.training_model import achieved_mask_iou
 
 from tests.test_models.test_sam.dead_component_oracle import (
     destroy_negatives,

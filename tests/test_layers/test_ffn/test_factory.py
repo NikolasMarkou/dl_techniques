@@ -1296,7 +1296,7 @@ def _strictness_break(fn) -> Optional[str]:
 #
 # It was RIGHT not to be one at step 5, when 4 sites --
 # `layers/time_series/mixed_sequential_block.py`, `models/nam/cell.py`,
-# `models/sam/image_encoder.py` and `models/tree_transformer/components.py` --
+# `models/SAM/SAM1/image_encoder.py` and `models/tree_transformer/components.py` --
 # passed `activation` unconditionally and dropped it for `differential`,
 # `gelu_tanh`, `squared_relu` and `swiglu`. All four adopted
 # `assemble_ffn_config` at step 6 (D-021/D-022) and now measure 0/21; per-site
@@ -1529,14 +1529,14 @@ def _b_models_relgt():
 
 
 def _b_models_sam_image_encoder():
-    from dl_techniques.models.sam.image_encoder import ViTBlock
+    from dl_techniques.models.SAM.SAM1.image_encoder import ViTBlock
     b = ViTBlock(dim=16, num_heads=2)
     b.build((None, 8, 8, 16))
     return b.ffn
 
 
 def _b_models_sam_transformer():
-    from dl_techniques.models.sam.transformer import TwoWayAttentionBlock
+    from dl_techniques.models.SAM.SAM1.transformer import TwoWayAttentionBlock
     b = TwoWayAttentionBlock(embedding_dim=16, num_heads=2, mlp_dim=32)
     b.build([(None, 4, 16), (None, 8, 16)])
     return b.ffn
@@ -1584,8 +1584,8 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/nam/cell.py": _b_models_nam,
     "models/pw_fnet/model.py": _b_models_pw_fnet,
     "models/relgt/model.py": _b_models_relgt,
-    "models/sam/image_encoder.py": _b_models_sam_image_encoder,
-    "models/sam/transformer.py": _b_models_sam_transformer,
+    "models/SAM/SAM1/image_encoder.py": _b_models_sam_image_encoder,
+    "models/SAM/SAM1/transformer.py": _b_models_sam_transformer,
     "models/time_series/prism/model.py": _b_models_prism,
     "models/tree_transformer/components.py": _b_models_tree_transformer,
 }
@@ -1933,7 +1933,7 @@ class TestFormerlyDroppingConstructionSites:
 
     @staticmethod
     def _sam(ffn_type: str):
-        from dl_techniques.models.sam.image_encoder import ViTBlock
+        from dl_techniques.models.SAM.SAM1.image_encoder import ViTBlock
         block = ViTBlock(dim=16, num_heads=2, ffn_type=ffn_type,
                          activation='relu')
         block.build((None, 8, 8, 16))

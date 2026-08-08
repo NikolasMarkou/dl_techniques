@@ -17,8 +17,8 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.sam import SAMTrainingModel
-from dl_techniques.models.sam.training_model import (
+from dl_techniques.models.SAM.SAM1 import SAMTrainingModel
+from dl_techniques.models.SAM.SAM1.training_model import (
     INPUT_BOXES,
     INPUT_GT_MASK,
     INPUT_IMAGE,

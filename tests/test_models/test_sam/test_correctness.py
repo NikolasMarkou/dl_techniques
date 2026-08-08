@@ -1,5 +1,5 @@
 """
-Correctness Instruments for SAM (`src/dl_techniques/models/sam/`)
+Correctness Instruments for SAM (`src/dl_techniques/models/SAM/SAM1/`)
 =================================================================
 
 This module is deliberately NOT a second copy of ``test_model.py``. That suite
@@ -47,18 +47,18 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.sam.model import SAM
-from dl_techniques.models.sam.image_encoder import (
+from dl_techniques.models.SAM.SAM1.model import SAM
+from dl_techniques.models.SAM.SAM1.image_encoder import (
     ImageEncoderViT,
     WindowedAttentionWithRelPos,
 )
-from dl_techniques.models.sam.preprocessing import resize_longest_side
-from dl_techniques.models.sam.prompt_encoder import (
+from dl_techniques.models.SAM.SAM1.preprocessing import resize_longest_side
+from dl_techniques.models.SAM.SAM1.prompt_encoder import (
     PromptEncoder,
     PositionEmbeddingRandom,
 )
-from dl_techniques.models.sam.mask_decoder import MaskDecoder
-from dl_techniques.models.sam.transformer import (
+from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+from dl_techniques.models.SAM.SAM1.transformer import (
     TwoWayAttentionBlock,
     TwoWayTransformer,
 )
@@ -699,7 +699,7 @@ class TestRelPosInterpolationBranch:
         It documented a resolved framework triviality as if it were a live
         blocker on the very function this step repairs.
         """
-        import dl_techniques.models.sam.image_encoder as image_encoder_module
+        import dl_techniques.models.SAM.SAM1.image_encoder as image_encoder_module
 
         with open(image_encoder_module.__file__, "r", encoding="utf-8") as handle:
             source = handle.read()

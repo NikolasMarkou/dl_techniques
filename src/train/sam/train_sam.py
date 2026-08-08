@@ -72,17 +72,17 @@ from train.common import (
 from train.common.args import explicitly_set_flags
 
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
-from dl_techniques.models.sam.image_encoder import ImageEncoderViT
-from dl_techniques.models.sam.mask_decoder import MaskDecoder
-from dl_techniques.models.sam.model import SAM
-from dl_techniques.models.sam.prompt_encoder import PromptEncoder
-from dl_techniques.models.sam.training_model import (
+from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
+from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+from dl_techniques.models.SAM.SAM1.model import SAM
+from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
+from dl_techniques.models.SAM.SAM1.training_model import (
     IOU_SUPERVISION,
     LOW_RES_LOGITS,
     SAMTrainingModel,
     TRAINING_REFINEMENT_ROUNDS,
 )
-from dl_techniques.models.sam.transformer import TwoWayTransformer
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 from dl_techniques.utils.logger import logger
 
 from train.sam.data import DATA_SOURCES, MASK_DIVISOR, build_sam_dataset
