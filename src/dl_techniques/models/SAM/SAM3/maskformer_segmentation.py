@@ -1,60 +1,55 @@
 """
-SAM 3's MaskFormer segmentation head: prompt-conditioned pixels, one mask per query.
+SAM 3 MaskFormer Head: prompt-conditioned pixels, one mask per query.
+=====================================================================
 
-This module provides the single public class :class:`Sam3SegmentationHead`. It
-turns the multi-scale pyramid produced by
-:class:`~dl_techniques.models.SAM.SAM3.necks.Sam3DualViTDetNeck` plus the object
-queries produced by
-:class:`~dl_techniques.models.SAM.SAM3.decoder.Sam3TransformerDecoder` into one
-binary mask logit map per query, in the textbook MaskFormer way: a pixel
-embedding is decoded once for the whole image, every query is projected into
-the same embedding space, and the mask is their dot product.
+:class:`Sam3SegmentationHead` turns the neck's pyramid plus the decoder's object
+queries into one binary mask logit map per query, the textbook MaskFormer way:
+one pixel embedding for the whole image, every query projected into the same
+space, mask = their dot product.
 
-Architecture:
-    Three stages, in this order::
+Based on:
+---------
+- Cheng, B., Schwing, A., & Kirillov, A. (2021). MaskFormer.
+- Lin, T.-Y. et al. (2017). Feature Pyramid Networks for Object Detection.
 
-        1. prompt cross-attend   (optional, pre-norm residual)
-           tgt2 = cross_attend(LayerNorm(encoder_states), prompt, prompt)
-           encoder_states = tgt2 + encoder_states          <- residual, NOT a
-                                                              replacement
+Key Features:
+------------
+- Optional prompt cross-attend BEFORE pixel decoding, so the prompt reaches the
+  pixel features and not only the queries.
+- Top-down FPN merge, coarsest level first.
+- Channels-LAST throughout, matching the trunk and the neck.
 
-        2. pixel decoder         (top-down FPN merge, COARSEST first)
-           prev = feats[-1]                                <- the coarsest map
-           for curr in reversed(feats[:-1]):               <- coarse -> fine
-               prev = curr + resize(prev, curr.shape, "nearest")
-               prev = relu(GroupNorm(8)(Conv3x3(prev)))
+Architecture Overview:
+---------------------
+1. **Prompt cross-attend** (optional, pre-norm residual):
+   ``encoder_states += cross_attend(LayerNorm(encoder_states), prompt, prompt)``
+   -- a residual, NOT a replacement.
+2. **Pixel decoder**, top-down merge starting from the COARSEST level: for each
+   finer ``curr``, ``prev = relu(GroupNorm(8)(Conv3x3(curr + resize(prev,
+   curr.shape, "nearest"))))``.
+3. **Mask decode**: ``pixel_embed = Conv1x1(prev)`` (d_model per pixel),
+   ``mask_embed = MLP3(queries)`` (mask_dim per query), then
+   ``pred_masks = einsum("bqc,bhwc->bqhw", mask_embed, pixel_embed)`` and
+   ``semantic_seg = Conv1x1(prev)``.
 
-        3. mask decode
-           pixel_embed  = Conv1x1(prev)          -> d_model per pixel
-           mask_embed   = 3-layer MLP(queries)   -> mask_dim per query
-           pred_masks   = einsum("bqc,bhwc->bqhw", mask_embed, pixel_embed)
-           semantic_seg = Conv1x1(prev)          -> 1 channel per pixel
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.maskformer_segmentation import (
+    Sam3SegmentationHead)
+head = Sam3SegmentationHead(d_model=256, upsampling_stages=3, num_heads=8)
+```
 
-    The cross-attend happens BEFORE pixel decoding, so the text prompt reaches
-    the pixel features themselves and not only the queries. The result is then
-    folded back into the coarsest pyramid level, which is the level the FPN
-    merge starts from -- so prompt information propagates through every
-    upsampling stage.
-
-Implementation notes:
-    - Feature maps are channels-LAST throughout, matching the trunk and the
-      neck. The reference is channels-first; the merge, the group
-      normalization and the mask einsum are all written for the channels-last
-      layout directly rather than transposed into it.
-    - The head has **no presence mechanism of any kind** -- not disabled, not
-      built and left unused: absent. The shipped reference configuration
-      constructs this head with its presence head switched off and drives the
-      presence signal from the decoder's own presence token instead, so a
-      presence branch here would be a second, dead signal.
-    - The pixel decoder is part of this class rather than a class of its own.
-      It has exactly one call site and no independent configuration surface.
-
-References:
-    - Cheng, B., Schwing, A., & Kirillov, A. (2021). "Per-Pixel Classification
-      is Not All You Need for Semantic Segmentation" (MaskFormer; the
-      per-query dot-product-with-pixel-embedding mask decode).
-    - Lin, T.-Y. et al. (2017). "Feature Pyramid Networks for Object
-      Detection" (the top-down merge with additive lateral connections).
+Measured caveats:
+----------------
+- This head has **no presence mechanism of any kind** -- not disabled, not built
+  and left unused: absent. The shipped reference configuration switches its
+  presence head off and drives presence from the decoder's presence token, so a
+  presence branch here would be a second, dead signal.
+- The cross-attend result folds back into the COARSEST pyramid level, the level
+  the merge starts from, so prompt information reaches every upsampling stage.
+- The reference is channels-first: the merge, the group normalization and the
+  mask einsum are written for channels-last directly, not transposed into it.
 """
 
 import keras

@@ -1,83 +1,75 @@
 """
-SAM 3's CLIP text tower: a causal per-token encoder plus the ``d_model`` resizer.
+SAM 3 CLIP Text Tower: a causal per-token encoder plus the ``d_model`` resizer.
+===============================================================================
 
-This module provides the single public class :class:`Sam3TextEncoder`, the text
-side of SAM 3's open-vocabulary prompt path. It is a thin wrapper: all of the
-transformer arithmetic is the repo's existing
-:class:`~dl_techniques.layers.transformers.text_encoder.TextEncoder`, and this
-class supplies the two things that layer does not.
+:class:`Sam3TextEncoder` is the text side of SAM 3's open-vocabulary prompt
+path. It is a thin wrapper: the transformer arithmetic is the repository's
+existing :class:`~dl_techniques.layers.transformers.text_encoder.TextEncoder`,
+and this class supplies the two things that layer does not -- a causal mask and
+a sequence-wide resizer.
 
-Architecture:
-    Token ids ``(batch, seq)`` -> learned token + learned absolute positional
-    embeddings -> ``depth`` pre-normalized self-attention blocks at ``width`` ->
-    a final normalization -> a single ``Dense(width -> d_model)`` resizer,
-    yielding the full **per-token** sequence ``(batch, seq, d_model)``.
+Based on:
+---------
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+- Radford, A. et al. (2021). CLIP -- causal masking, pre-normalized blocks.
 
-    At the settled SAM 3 configuration that is ``width=1024``, ``depth=24``,
-    ``num_heads=16``, ``mlp_ratio=4.0``, ``context_length=32``,
-    ``vocab_size=49408`` and ``d_model=256``.
+Key Features:
+------------
+- An explicit lower-triangular keep-mask, rebuilt from ``arange`` on every call
+  at the sequence length actually supplied. No cached buffer.
+- A single ``Dense(width -> d_model)`` resizer over the WHOLE sequence.
+- No pooling of any kind happens here. Pooling in SAM 3 is a MASKED MEAN and it
+  happens later, in the scorer -- never as an end-of-text argmax.
 
-What this wrapper adds, and why each piece exists:
-    1. **The causal mask.** The wrapped encoder is BIDIRECTIONAL by default --
-       its docstring's "not causally masked" describes the default, not a
-       structural limitation, and nothing in it builds a causal mask for you.
-       MEASURED at the settled width: perturbing the LAST token moves the
-       position-0 output by ``0.1404891`` with no mask and by exactly ``0.0``
-       with the explicit lower-triangular keep-mask this class passes. Omitting
-       it is a silent value defect with no shape symptom and no exception, which
-       is why the guard for it asserts EXACT zero rather than a tolerance -- a
-       tolerance loose enough to feel safe is loose enough to hide the leak.
-    2. **The resizer**, applied to the whole sequence rather than to a pooled
-       vector.
+Architecture Overview:
+---------------------
+1. Token ids ``(batch, seq)`` -> learned token + absolute positional embeddings.
+2. -> ``depth`` pre-normalized self-attention blocks at ``width``.
+3. -> a final normalization -> ``Dense(width -> d_model)``, yielding the full
+   per-token sequence ``(batch, seq, d_model)``.
+Settled configuration: ``width=1024``, ``depth=24``, ``num_heads=16``,
+``mlp_ratio=4.0``, ``context_length=32``, ``vocab_size=49408``, ``d_model=256``.
 
-    The mask is built explicitly on every call, at the sequence length actually
-    supplied, and passed as ``attention_mask=``. There is no cached buffer: the
-    reference slices a pre-registered ``(ctx, ctx)`` buffer to the live sequence
-    length, and rebuilding the same triangle from ``arange`` is the identical
-    quantity with no state to keep consistent.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.text_encoder_ve import Sam3TextEncoder
+encoder = Sam3TextEncoder(d_model=256, width=1024, depth=24, num_heads=16)
+prompt = encoder(token_ids)          # (batch, seq, 256)
+```
 
-Two ACCEPTED structural divergences from the reference (D-142), both measured:
-    1. **An extra normalization on the embeddings.** The reference goes
-       ``token_embedding -> + positional_embedding -> transformer`` with
-       **nothing between** (`sam3/model/text_encoder_ve.py:238-245` at the
-       pinned SHA). The wrapped repo layer creates an ``embed_norm`` and applies
-       it unconditionally on the live path
-       (`layers/transformers/text_encoder.py:429-433,775`), and there is no
-       constructor argument that removes it -- ``normalization_type`` governs
-       ``embed_norm``, every block norm and ``final_norm`` jointly. MEASURED at
-       the SETTLED width by replacing it with a passthrough: max abs output
-       delta **5.917600** against a max output amplitude of **5.536552**
-       (**106.9 %**, and 460 % of the output RMS); **1.805329** against
-       **3.722330** (48.5 %) at this package's tiny width. This is NOT a
-       reparametrization -- a normalization on the residual stream destroys the
-       per-token mean and scale of the embedding irreversibly.
-    2. **No ``text_projection``.** The reference's ``TextTransformer`` carries a
-       ``(width, output_dim)`` parameter (`:224`) that ``VETextEncoder``
-       **never consumes** -- it keeps only the per-token memory -- but that
-       exists in any released checkpoint. ``_create_text_encoder`` does not pass
-       ``output_dim``, so it is ``(1024, 512)`` = **524,288** parameters, not
-       the 1024x256 a reader who assumes ``output_dim == d_model`` would expect.
-
-    Net: this tower is the reference's **plus 2,048** unmatched and **minus
-    524,288** missing parameters -- 353,202,432 here against 353,724,672
-    upstream. Phase 1 loads no pretrained weights, so nothing is wrong today;
-    both are BINDING on any future weight transfer, and both are recorded in
-    ``progress.md`` § Deferred D-6.
-
-No pooling of any kind happens here:
-    The reference computes a pooled sentence vector inside its text transformer
-    and its own wrapper then **discards** it, keeping only the per-token
-    sequence. Reproducing that pooling and throwing the result away would be
-    wasted work, and a naive CLIP transliteration that wires the pooled vector
-    downstream diverges from SAM 3's actual data flow with matching ranks at
-    every intermediate step. Pooling in SAM 3 is a MASKED MEAN and it happens
-    later, in the scorer -- not here, and never as an end-of-text argmax.
-
-References:
-    - Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-    - Radford, A. et al. (2021). "Learning Transferable Visual Models From
-      Natural Language Supervision" (CLIP; the text tower's causal masking and
-      pre-normalized residual blocks).
+Measured caveats:
+----------------
+- The wrapped encoder is BIDIRECTIONAL by default and builds no causal mask for
+  you. MEASURED at the settled width: perturbing the LAST token moves the
+  position-0 output by ``0.1404891`` with no mask and by exactly ``0.0`` with
+  the keep-mask this class passes. Omitting it is a silent value defect with no
+  shape symptom and no exception, which is why the guard asserts EXACT zero
+  rather than a tolerance.
+- **ACCEPTED divergence 1 (D-142), an extra ``embed_norm``.** The reference goes
+  ``token_embedding -> + positional_embedding -> transformer`` with nothing
+  between (``sam3/model/text_encoder_ve.py:238-245`` at the pinned SHA); the
+  wrapped repo layer creates an ``embed_norm``, applies it unconditionally, and
+  offers no constructor argument that removes it. MEASURED at the SETTLED
+  ``width=1024`` by replacing it with a passthrough: max abs output delta
+  ``5.917600`` against a max output amplitude of ``5.536552`` -- **106.9 %**,
+  and 460 % of the output RMS. The same probe at this package's ``tiny`` width
+  reads ``1.805329`` against ``3.722330`` (**48.5 %**), so a toy-width probe
+  understates the divergence 2.2x. This is NOT a reparametrization: a
+  normalization on the residual stream destroys the per-token mean and scale of
+  the embedding irreversibly.
+- **ACCEPTED divergence 2 (D-142), no ``text_projection``.** The reference's
+  ``TextTransformer`` carries a ``(width, output_dim)`` parameter its own
+  wrapper never consumes but which exists in any released checkpoint. Upstream
+  does not pass ``output_dim``, so it is ``(1024, 512)`` = **524,288**
+  parameters, not the ``1024 x 256`` a reader assuming ``output_dim == d_model``
+  would expect.
+- **Net, in signed named terms**: this tower is the reference's **plus 2,048**
+  unmatched (``embed_norm``) and **minus 524,288** missing
+  (``text_projection``) -- ``353,202,432`` here against ``353,724,672``
+  upstream, a difference of exactly ``522,240``. Phase 1 loads no pretrained
+  weights so nothing is wrong today; both are BINDING on any future weight
+  transfer.
 """
 
 import keras

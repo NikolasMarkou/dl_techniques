@@ -1,108 +1,81 @@
 """
-SAM 3's top-level text-prompted image model: the six components wired together.
+SAM 3 Image Model: the six components wired together.
+=====================================================
 
-This module provides the single public class :class:`Sam3Image`, the ninth and
-last class of the SAM 3 phase-1 package. It owns no learned weights of its own --
-every parameter belongs to one of the six components it composes -- and its whole
-substance is the DATA FLOW between them plus one arithmetic expression: the
-presence x localization fusion.
+:class:`Sam3Image` owns no learned weights of its own -- every parameter belongs
+to one of the six components it composes -- and its whole substance is the data
+flow between them plus one arithmetic expression, the presence x localization
+fusion.
 
-Architecture:
-    .. code-block:: text
+Based on:
+---------
+- Meta AI (2025). "SAM 3: Segment Anything with Concepts."
+- Carion, N. et al. (2020). DETR.
+- Liu, S. et al. (2022). DAB-DETR -- the logit-space box refinement reused here.
 
-        image ─▶ Sam3ViTDetBackbone ─▶ ONE trunk map
-                                          │
-                                 Sam3DualViTDetNeck
-                                          │
-                          [4x, 2x, 1x, 0.5x] + per-scale sine PE
-                                          │   drop the coarsest `scalp` levels
-                          [4x, 2x, 1x]  ───┴──▶ segmentation pyramid
-                                 │
-                            1x flattened ─▶ image memory (+ its PE)
-                                 │
-        token ids ─▶ Sam3TextEncoder ─▶ prompt ─┐
-                                 │              │
-                          Sam3TransformerDecoder┘
-                                 │
-             hidden states, per-layer anchors, presence logits
-                    │              │                │
-        Sam3DotProductScoring   box head        (sigmoid)
-                    │              │                │
-              class logits ◀── FUSION* ◀────────────┘
-                    │              │
-                    │         pred_boxes
-                    │
-             Sam3SegmentationHead ─▶ pred_masks, semantic_seg
+Key Features:
+------------
+- Text-prompted, open-vocabulary detection and segmentation in one forward pass.
+- ``from_variant('sam3' | 'small' | 'tiny')``.
+- ``call_per_layer`` is public and returns every decoder layer's five quantities
+  with the shared box head re-applied exactly as ``call`` does; calling the
+  decoder directly is NOT the supported route to them, since it skips that
+  re-application. ``call`` returns the LAST layer's quantities only.
+- Opt-in ``query_selection`` gives the box output an image-conditioned route.
 
-``*`` **The FUSION step is OFF by default.** It runs only when
-``supervise_joint_box_scores=True``; the constructor defaults it to ``False``
-and ``from_variant`` never sets it, so on every default path ``pred_logits`` is
-the scorer's output untouched and ``_fuse`` is not reached (D-124, traced at the
-pinned reference SHA -- ``build_sam3_image_model`` never passes the key either).
-Everything below about the fusion describes that opt-in expression.
+Architecture Overview:
+---------------------
+1. ``image`` -> **Sam3ViTDetBackbone** -> ONE trunk map.
+2. -> **Sam3DualViTDetNeck** -> ``[4x, 2x, 1x, 0.5x]`` + per-scale sine PE; the
+   coarsest ``scalp`` levels are dropped, leaving the segmentation pyramid.
+3. The ``1x`` level, flattened, is the image memory (with its PE).
+4. ``token_ids`` -> **Sam3TextEncoder** -> prompt.
+5. memory + prompt -> **Sam3TransformerDecoder** -> hidden states, per-layer
+   anchors, presence logits.
+6. -> **Sam3DotProductScoring** -> class logits; box head -> ``pred_boxes``;
+   **Sam3SegmentationHead** -> ``pred_masks``, ``semantic_seg``.
 
-Three mechanisms carry this class's correctness, and each has its own guard:
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
+model = Sam3Image.from_variant("tiny")
+outputs = model({"image": images, "token_ids": ids}, training=False)
+```
 
-1. **The fused presence is the DECODER's**, never the segmentation head's. The
-   segmentation head in this package has no presence mechanism of any kind, so
-   there is exactly ONE presence signal in the model and no way to fuse the
-   wrong one by accident.
-2. **The fusion multiplies PROBABILITIES and then re-logits**, it does not
-   multiply logits (when it runs at all -- see ``*`` above). The two candidates
-   agree only along a thin curve in ``(class logit, presence logit)`` space;
-   everywhere else they differ by O(1) nats.
-3. **The final box is produced HERE, not by the decoder.** The decoder returns
-   the anchor each layer CONSUMED; the last layer's refinement is applied at
-   this level, which is why the box head is re-applied to the stacked hidden
-   states rather than read out of the stack.
-
-**Deliberately NOT built in phase 1**, and named here rather than left to be
-rediscovered as a gap:
-
-- the vision-language **early-fusion encoder** that upstream runs between the
-  neck and the decoder. Phase 1 feeds the neck's image memory and the text
-  tower's prompt straight into the decoder. That is a structural divergence,
-  not an oversight, and it is the largest single one in this package;
-- the exemplar / geometry prompt path (points and boxes), which needs bilinear
-  ``grid_sample`` and ``roi_align`` primitives ``keras.ops`` does not have;
-- DAC query doubling, provably inert at inference;
-- the reference's ``first_stage`` (encoder-side proposal) auxiliary outputs are
-  no longer absent either, but what ships is NOT a port of them: it is
-  ``query_selection``, an opt-in DINO-style *mixed* proposal head
-  (:class:`~dl_techniques.models.SAM.SAM3.query_selection.Sam3EncoderQuerySelection`)
-  that this package added to give the box output an image-conditioned route,
-  default OFF and behaviourally inert when off.
-  The DECODER-side per-layer stacks are no longer absent: :meth:`call_per_layer`
-  is public on this class, returns every decoder layer's five quantities with
-  the shared box head re-applied exactly as :meth:`call` does, and is consumed
-  by ``Sam3TrainingModel``'s deep-supervision path and by
-  ``train.sam3.train_sam3.evaluate_sam3``. Calling the decoder directly is NOT
-  the supported route to them -- it skips that re-application. :meth:`call`
-  itself still returns the LAST layer's quantities only, unchanged;
-- the ``cxcywh -> xyxy`` box conversion, which is a consumer-side utility.
-
-**What deep supervision was MEASURED to do**, so the flag is not read as a fix
-for something it did not fix: on a like-for-like 3-seed x 60-epoch synthetic
-re-run with ``--deep-supervision`` as the only changed variable, box IoU rose on
-3 of 3 seeds (+0.110 .. +0.140, mean 0.2505 -> 0.3794) while
-``box_std_across_images`` improved on 0 of those 3 seeds. It did not make the
-box head read the image. The accuracy half is real on 3 of 3 seeds and does NOT
-clear a trivial baseline. Name the comparator, because the answer depends on it:
-against a hand-written image-independent 5x5 grid of fixed boxes
-(0.357/0.331/0.343) the deep-supervision arm is ahead on 3 of 3 seeds, by only
-0.025..0.044 IoU; against a 32-box prior fitted by k-means on the TRAINING
-split's ground-truth boxes -- still no network, no gradient and no image read --
-it is BEHIND on 2 of 3 seeds in both independent fits of that prior (0.415/0.389/
-0.411 here, 0.399/0.396/0.373 in adversarial review pass 2), and the two fits
-disagree on the third seed's sign. No variance estimate on any of those deltas
-was measured. See the plan's ``findings/step8-verdict.md`` and
-``findings/chance-floor-and-instrument.md``.
-
-References:
-    - Meta AI (2025). "SAM 3: Segment Anything with Concepts."
-    - Carion, N. et al. (2020). "End-to-End Object Detection with Transformers."
-    - Liu, S. et al. (2022). "DAB-DETR: Dynamic Anchor Boxes are Better Queries
-      for DETR" (the logit-space box refinement reused here).
+Measured caveats:
+----------------
+- The presence x localization FUSION is **OFF by default**: it runs only at
+  ``supervise_joint_box_scores=True``, the constructor defaults it to ``False``
+  and ``from_variant`` never sets it, so on every default path ``pred_logits``
+  is the scorer's output untouched and ``_fuse`` is not reached (D-124, traced
+  at the pinned reference SHA -- ``build_sam3_image_model`` never passes it).
+- The fused presence is the DECODER's, never the segmentation head's, which has
+  no presence mechanism at all -- so there is exactly ONE presence signal.
+- The fusion multiplies PROBABILITIES and then re-logits; it does not multiply
+  logits. The two candidates agree only along a thin curve in ``(class logit,
+  presence logit)`` space and differ by O(1) nats elsewhere.
+- The final box is produced HERE, not by the decoder: the decoder returns the
+  anchor each layer CONSUMED, so the box head is re-applied to the stacked
+  hidden states rather than read out of the stack.
+- **What deep supervision was MEASURED to do**, so the flag is not read as a fix
+  for something it did not fix: on a like-for-like 3-seed x 60-epoch synthetic
+  re-run with ``--deep-supervision`` the only changed variable, box IoU rose on
+  3 of 3 seeds (+0.110 .. +0.140, mean 0.2505 -> 0.3794) while
+  ``box_std_across_images`` improved on 0 of those 3 seeds -- it did not make
+  the box head read the image. Name the comparator, because the answer depends
+  on it: against a hand-written image-independent 5x5 grid of fixed boxes
+  (0.357/0.331/0.343) the arm is ahead on 3 of 3 seeds by only 0.025 .. 0.044
+  IoU; against a 32-box prior fitted by k-means on the TRAINING split's
+  ground-truth boxes -- still no network, no gradient, no image read -- it is
+  BEHIND on 2 of 3 seeds in both independent fits of that prior (0.415/0.389/
+  0.411 and 0.399/0.396/0.373), which disagree on the third seed's sign. No
+  variance estimate on any of those deltas was measured.
+- Phase 1 does NOT build the vision-language early-fusion encoder the reference
+  runs between neck and decoder; the neck's image memory and the text tower's
+  prompt go straight into the decoder, the largest single structural divergence
+  in this package. The exemplar / geometry prompt path, DAC query doubling and
+  the ``cxcywh -> xyxy`` conversion are likewise out of scope.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union

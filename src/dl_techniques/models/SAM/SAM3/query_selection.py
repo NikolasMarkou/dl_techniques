@@ -1,65 +1,69 @@
 """
-SAM 3's encoder query selection head: DINO-style *mixed* proposal generation.
+SAM 3 Encoder Query Selection: DINO-style *mixed* proposal generation.
+======================================================================
 
-This module provides the single public class
-:class:`Sam3EncoderQuerySelection`. It reads the decoder's image ``memory`` --
-the flattened finest neck level -- and emits, for EVERY memory position, an
-objectness logit and a ``cxcywh`` box refined from that position's own grid
-anchor. The top ``num_queries`` positions' boxes are the proposals that replace
-the decoder's learned, image-INDEPENDENT ``reference_points`` table as its
-initial ``reference_boxes``.
+:class:`Sam3EncoderQuerySelection` reads the decoder's image ``memory`` -- the
+flattened finest neck level -- and emits, per position, an objectness logit and
+a ``cxcywh`` box refined from that position's grid anchor. The top
+``num_queries`` boxes replace the decoder's learned, image-INDEPENDENT
+``reference_points`` table as its initial ``reference_boxes``. This head is NOT
+a reference component: it is this package's own addition, reached through
+``Sam3Image(..., query_selection=True)``, OFF by default.
 
-Architecture::
+Based on:
+---------
+- Zhang, H. et al. (2022). DINO -- the *mixed* selection implemented here: a
+  query's POSITIONAL part comes from the encoder, its CONTENT part stays a
+  learned table.
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
 
-    memory (batch, H * W, d_model)
-      -> objectness MLP  d_model -> ... -> 1     (batch, H * W, 1)
-      -> box MLP         d_model -> ... -> 4     (batch, H * W, 4)   [delta]
-    boxes = sigmoid(delta + inverse_sigmoid(anchor_j))
-    anchor_j = ((col + 0.5) / W, (row + 0.5) / H, anchor_size, anchor_size)
-    values, indices = top_k(objectness[..., 0], k=num_queries)
-    selected_boxes = gather(boxes, indices)
+Key Features:
+------------
+- Per-position objectness and box MLPs over the image memory.
+- Row-major grid anchors at pixel centres.
+- Optional, default-OFF ``prompt_conditioned`` FiLM modulation that makes the
+  top-k SELECTION itself prompt-dependent.
 
-Behind the default-OFF ``prompt_conditioned`` flag the memory is FiLM-modulated
-by the pooled text prompt before either MLP reads it::
+Architecture Overview:
+---------------------
+1. ``memory (batch, H * W, d_model)`` -> objectness MLP ``-> 1`` and box MLP
+   ``-> 4`` (a delta).
+2. ``boxes = sigmoid(delta + inverse_sigmoid(anchor_j))``, with
+   ``anchor_j = ((col + 0.5) / W, (row + 0.5) / H, anchor_size, anchor_size)``.
+3. ``top_k(objectness[..., 0], k=num_queries)``, then ``gather(boxes, indices)``.
+4. Behind ``prompt_conditioned``, before either MLP reads it: ``scale, shift =
+   split(Dense(2 * d_model)(masked_mean_pool(prompt)))`` then
+   ``memory = memory * (1 + scale[:, None, :]) + shift[:, None, :]``.
 
-    scale, shift = split(Dense(2 * d_model)(masked_mean_pool(prompt)))
-    memory = memory * (1 + scale[:, None, :]) + shift[:, None, :]
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.query_selection import (
+    Sam3EncoderQuerySelection)
+head = Sam3EncoderQuerySelection(d_model=256, num_queries=200,
+                                 feat_size=(72, 72))
+```
 
-which is what makes the top-k SELECTION itself prompt-dependent. With the flag
-off nothing above changes and no weight is created, so the on-disk checkpoints
-and the exact parameter-count oracle are untouched.
-
-Why this head exists, MEASURED and not guessed. SAM 3's box output was
-image-independent BY CONSTRUCTION, not by a training-time collapse:
-``val_box_std_across_images`` read ``6.9e-06`` against an across-*query* spread
-of ``0.13``, and it is already that low at epoch 0. The decoder's box chain is
-``sigmoid(delta + inverse_sigmoid(reference))`` with a zero-initialized last
-projection, and its initial ``reference`` is a learned table broadcast over the
-batch -- so at step 0 the boxes cannot depend on the image at all. Selecting the
-initial references FROM the image makes them image-dependent by construction,
-and supervising the proposals gives the vision trunk a dense image-grounded
-gradient it does not otherwise have.
-
-Three details carry the whole correctness of this layer:
-    1. **The flatten order is row-major, and it is not a matter of taste.**
-       ``anchor_j`` must be laid out exactly as the memory it annotates.
-       A transposed grid is a silent, plausible-looking defect with no shape
-       symptom; see the anchor on :meth:`Sam3EncoderQuerySelection._anchors`.
-    2. **The box stack's last projection is zero-initialized**, matching the
-       decoder's own box head (D-112). At step 0 every proposal is EXACTLY its
-       grid anchor, so no reference is displaced before a gradient step.
-    3. **A degenerate objectness field selects positions ``0 .. k - 1``.**
-       ``top_k`` breaks ties by ascending index, so a dead objectness head
-       yields an image-INDEPENDENT selection that still has the right shapes,
-       the right dtypes and a plausible spread across queries. That vacuity
-       mode is what this layer's guards exist to exclude.
-
-References:
-    - Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-    - Zhang, H. et al. (2022). "DINO: DETR with Improved DeNoising Anchor Boxes
-      for End-to-End Object Detection" -- the *mixed* query selection this head
-      implements: the POSITIONAL part of a query comes from the encoder, the
-      CONTENT part stays a learned table.
+Measured caveats:
+----------------
+- **Why this head exists, MEASURED not guessed**: SAM 3's box output was
+  image-independent BY CONSTRUCTION, not by a training-time collapse.
+  ``val_box_std_across_images`` read ``6.9e-06`` against an across-*query*
+  spread of ``0.13``, and is already that low at epoch 0 -- the decoder's box
+  chain is ``sigmoid(delta + inverse_sigmoid(reference))`` with a zero-init last
+  projection over a learned table broadcast across the batch, so at step 0 the
+  boxes cannot depend on the image at all.
+- With the flag off nothing changes and no weight is created, so the on-disk
+  checkpoints and the exact parameter-count oracle are untouched.
+- The flatten order is row-major and not a matter of taste: ``anchor_j`` must be
+  laid out exactly as the memory it annotates, and a transposed grid is a
+  silent, plausible-looking defect with no shape symptom.
+- The box stack's last projection is zero-initialized (D-112), so at step 0
+  every proposal is EXACTLY its grid anchor.
+- A degenerate objectness field selects positions ``0 .. k - 1``, because
+  ``top_k`` breaks ties by ascending index -- an image-INDEPENDENT selection
+  with the right shapes, dtypes and a plausible spread. That vacuity mode is
+  what this layer's guards exist to exclude.
 """
 
 import keras

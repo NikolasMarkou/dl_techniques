@@ -1,62 +1,67 @@
 """
-SAM 3 (Segment Anything with Concepts) -- phase 1: the text-prompt-only image path.
+SAM 3 (Segment Anything with Concepts): the phase-1 text-prompted image path.
+=============================================================================
 
-**Phase boundary.** The package is complete for phase 1: the ViTDet image trunk,
-the dual SimpleFPN neck, the CLIP text tower, the DETR decoder, the
-open-vocabulary dot-product scorer, the MaskFormer segmentation head, and the
-top-level ``Sam3Image`` assembly that wires all six together and -- when
-``supervise_joint_box_scores=True``, which is **OFF by default** and which
-``from_variant`` never sets -- applies the presence x localization fusion.
+Nine independently constructible, serializable classes plus the ``Sam3Image``
+assembly wiring six of them together. No pretrained weights ship here, and this
+package makes NO learnability, quality or accuracy claim: nothing here has been
+trained to any quality and no released SAM 3 checkpoint has ever been loaded.
 
-Start at :class:`Sam3Image`; ``Sam3Image.from_variant('sam3')`` builds the
-released configuration and ``from_variant('tiny')`` a small development one.
+Based on:
+---------
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
 
-**Pass ``training=False`` when you run the ``sam3`` variant for inference.**
-The released configuration carries the reference's ``drop_path_rate=0.1``, and
-this repository's shared ``StochasticDepth`` short-circuits on ``training is
-False`` ONLY -- so the ``training=None`` that a plain ``model(inputs)`` passes
-down DROPS PATHS and makes the shipped variant non-deterministic. Use
-``model(inputs, training=False)`` (or ``model.predict``). The ``tiny`` variant
-sets the rate to 0.0 and is unaffected.
-The eight component classes are exported too, because each is independently
-constructible, serializable and testable -- which is the property that let this
-package be built and gated one leaf at a time.
+Key Features:
+------------
+- Open vocabulary: no class table, no softmax over categories; prompt = class.
+- ``from_variant('sam3')`` is the released configuration; ``'small'`` and
+  ``'tiny'`` are this repository's own development geometries.
+- ``Sam3TrainingModel`` emits ONE packed supervision tensor for one joint loss.
+- ``Sam3EncoderQuerySelection`` is this package's OWN opt-in proposal head, not
+  a reference component: default OFF, behaviourally inert when off.
 
-:class:`Sam3EncoderQuerySelection` is the ninth and NOT a component of the
-released reference: it is this package's own opt-in DINO-style *mixed* proposal
-head, reached through ``Sam3Image(..., query_selection=True)``, which is OFF by
-default and behaviourally inert when off. It is exported on the same terms as
-the rest -- it owns weights and round-trips independently.
+Architecture Overview:
+---------------------
+1. **Sam3ViTDetBackbone** -- plain-ViT trunk, ONE feature map out.
+2. **Sam3DualViTDetNeck** -- SimpleFPN, four scales, two weight sets.
+3. **Sam3TextEncoder** -- CLIP text tower, per-token memory.
+4. **Sam3TransformerDecoder** -- DETR decoder, boxRPB and presence token.
+5. **Sam3DotProductScoring** -- open-vocabulary per-query class logits.
+6. **Sam3SegmentationHead** -- MaskFormer head, one mask per query.
 
-The segmentation head has **no presence mechanism**: the shipped reference
-configuration disables it there and drives presence from the decoder's own
-presence token, so only ONE presence signal exists in this package.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3 import Sam3Image
+model = Sam3Image.from_variant("tiny")
+outputs = model({"image": images, "token_ids": ids}, training=False)
+```
 
-**Deliberately out of scope in phase 1**, and named here rather than left to be
-rediscovered as a gap:
-
-- the exemplar / geometry prompt path (points and boxes), which needs bilinear
-  ``grid_sample`` and ``roi_align`` primitives that ``keras.ops`` does not have;
-- DAC-DETR query doubling, which the reference gates on ``self.training`` and is
-  therefore provably inert at inference;
-- ``Sam3TriViTDetNeck`` (the SAM 3.1 three-way neck);
-- the video / tracking path;
-- the vision-language EARLY-FUSION ENCODER that the reference runs between the
-  neck and the decoder. Phase 1 feeds the neck's image memory and the text
-  tower's prompt straight into the decoder; this is the largest single
-  structural divergence in the package and it is named, not hidden;
-- the loss and the matcher, which live in the losses package, not here. What
-  this package now ships of the training path is :class:`Sam3TrainingModel`,
-  a wrapper that emits ONE packed supervision tensor so a single joint loss can
-  split it (the layout itself is defined by that loss module, not by this one),
-  plus its single ``compile`` site. Nothing in this package may route mask
-  supervision through SAM 1's mask-loss module or the shared segmentation focal
-  loss it calls, whose
-  probability clip has an exactly-zero derivative outside its range. (The two
-  module names are deliberately NOT spelled here: the close-out gate for that
-  constraint is a grep, and a prose mention erodes the instrument -- the same
-  failure mode already measured twice in this repo for the ``tensorflow`` purity
-  grep.)
+Measured caveats:
+----------------
+- **Pass ``training=False`` for the ``sam3`` variant**: it carries the
+  reference's ``drop_path_rate=0.1`` and the shared ``StochasticDepth``
+  short-circuits on ``training is False`` ONLY, so the ``training=None`` a plain
+  ``model(inputs)`` passes down DROPS PATHS (D-123). ``tiny`` uses 0.0.
+- Parameter geometries: ``tiny`` 24,818 (pinned by
+  ``tests/test_models/test_sam3/test_model.py``); ``small`` 5,881,614 trainable
+  from random init; ``sam3`` 821,708,598 at a 10,072.9 MiB forward peak (pinned
+  by ``tests/test_train/test_sam3/test_train_sam3.py``).
+- The segmentation head has no presence mechanism, so exactly ONE presence
+  signal exists here: the decoder's own presence token.
+- Out of scope in phase 1, named rather than left to be rediscovered: the
+  vision-language EARLY-FUSION ENCODER the reference runs between neck and
+  decoder (the largest single structural divergence here); the exemplar /
+  geometry prompt path, needing ``grid_sample`` / ``roi_align`` primitives
+  ``keras.ops`` lacks; DAC-DETR query doubling, gated on ``self.training``
+  upstream and so provably inert at inference; ``Sam3TriViTDetNeck``; the video
+  / tracking path; and the loss and matcher, which live in the losses package.
+- Nothing here may route mask supervision through SAM 1's mask-loss class or the
+  shared segmentation focal-loss class it calls, whose probability clip has an
+  exactly-zero derivative outside its range. Those two names are deliberately
+  NOT spelled: the gate is a grep over every file in this package, and a prose
+  mention erodes the instrument as it did four times for the ``tensorflow``
+  purity grep.
 """
 
 from .decoder import Sam3DecoderLayer, Sam3TransformerDecoder

@@ -1,42 +1,49 @@
 """
-SAM 3's open-vocabulary class-score head: the dot-product scorer.
+SAM 3 Dot-Product Scoring: the open-vocabulary class-score head.
+================================================================
 
-This module provides the single public class :class:`Sam3DotProductScoring`.
-It is the classification head of SAM 3's detector, and it is deliberately NOT a
-fixed-vocabulary classifier: there is no class table and no softmax over
-categories. Each decoder query gets exactly ONE scalar logit, obtained by
-projecting the query and the pooled text prompt into a shared space and taking
-their scaled dot product. Swapping the prompt swaps the "class" -- which is what
-makes the vocabulary open.
+:class:`Sam3DotProductScoring` is SAM 3's classification head and deliberately
+NOT a fixed-vocabulary classifier: no class table, no softmax over categories.
+Each decoder query gets exactly ONE scalar logit -- query and pooled text prompt
+projected into a shared space, then their scaled dot product.
 
-Architecture:
-    prompt ``(batch, seq, d_model)``
-      -> optional 2-layer residual prompt MLP with a terminal normalization
-      -> masked mean-pool over the sequence axis  -> ``(batch, d_model)``
-      -> ``Dense(d_proj)``                        -> ``(batch, d_proj)``
-    queries ``(..., num_queries, d_model)``
-      -> a SECOND, INDEPENDENT ``Dense(d_proj)``  -> ``(..., num_queries, d_proj)``
-    score = clip(queries . prompt / sqrt(d_proj), -clamp_max_val, +clamp_max_val)
+Based on:
+---------
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+- Radford, A. et al. (2021). CLIP -- the image-text dot-product score
+  generalized here to per-query detection logits.
 
-    At the settled SAM 3 configuration that is ``d_model=256``, ``d_proj=256``,
-    a ``256 -> 2048 -> 256`` prompt MLP with dropout ``0.1``, and a clamp at
-    ``12.0``.
+Key Features:
+------------
+- Open vocabulary: swapping the prompt swaps the "class".
+- Masked mean-pool over the prompt sequence, divisor floored at one.
+- Two independent projections, one per operand, and a symmetric logit clamp.
 
-Three details carry the whole correctness of this layer:
-    1. **The two projections are independent.** One consumes queries, one
-       consumes the pooled prompt. Sharing a single projection would still
-       produce the right shapes and a plausible score; it is a different model.
-    2. **The pool is MASKED, and its divisor is floored at one.** Padding
-       positions must not contribute, and a row whose every position is padding
-       has divisor zero under the naive spelling -- see the anchors below.
-    3. **The clamp bound is a different number from the decoder's.** They are
-       NOT to be unified; see the anchor on ``clamp_max_val``.
+Architecture Overview:
+---------------------
+1. prompt ``(batch, seq, d_model)`` -> optional 2-layer residual prompt MLP with
+   a terminal normalization -> masked mean-pool -> ``Dense(d_proj)``.
+2. queries ``(..., num_queries, d_model)`` -> a SECOND, INDEPENDENT
+   ``Dense(d_proj)``.
+3. ``score = clip(queries . prompt / sqrt(d_proj), -clamp_max_val, clamp_max_val)``.
+Settled configuration: ``d_model=256``, ``d_proj=256``, a ``256 -> 2048 -> 256``
+prompt MLP at dropout ``0.1``, clamp ``12.0``.
 
-References:
-    - Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-    - Radford, A. et al. (2021). "Learning Transferable Visual Models From
-      Natural Language Supervision" (CLIP; the image-text dot-product score
-      this head generalizes to per-query detection logits).
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
+scorer = Sam3DotProductScoring(d_model=256, d_proj=256, clamp_max_val=12.0)
+```
+
+Measured caveats:
+----------------
+- The two projections are independent; sharing one still produces the right
+  shapes and a plausible score, but it is a different model.
+- The pool is MASKED and its divisor is floored at one: padding must not
+  contribute, and an all-padding row has divisor zero under the naive spelling.
+- The clamp bound is a different number from the decoder's and they are NOT to
+  be unified; see the anchor on ``clamp_max_val``.
 """
 
 import keras

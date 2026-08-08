@@ -1,65 +1,57 @@
 """
-SAM 3's DETR decoder layer, with boxRPB and the presence token.
+SAM 3 DETR Decoder: three attention sub-blocks, boxRPB, and a presence token.
+=============================================================================
 
-This module provides two public classes: :class:`Sam3DecoderLayer` -- ONE layer
-of SAM 3's detection decoder -- and :class:`Sam3TransformerDecoder`, the stack
-that repeats it, refines the reference boxes and reads out the per-layer
-presence logits.
+:class:`Sam3DecoderLayer` is ONE layer of SAM 3's detection decoder;
+:class:`Sam3TransformerDecoder` is the stack that repeats it, refines the
+reference boxes and reads out the per-layer presence logits.
 
-**Why this is not a stock transformer decoder layer.** A DETR decoder layer has
-two attention sub-blocks. This one has THREE, in this order:
+Based on:
+---------
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+- Carion, N. et al. (2020). DETR -- the decoder shape this one extends.
+- Liu, S. et al. (2023). Grounding DINO -- the text cross-attention sub-block.
 
-.. code-block:: text
+Key Features:
+------------
+- THREE attention sub-blocks per layer, not DETR's two.
+- boxRPB: a log-compressed, box-conditioned relative position bias added to the
+  RAW image-cross-attention scores, per head and per query, before the softmax.
+- A presence token that rides the query sequence and is split back off.
 
-    tgt (batch, num_queries, d_model)
-      |
-      +-- 1. self-attention          q = k = tgt + query_pos, v = tgt
-      |      residual, then norm2
-      |
-      +-- 2. text cross-attention    q = tgt + query_pos, k = v = text memory
-      |      residual, then catext_norm
-      |
-      +-- 3. image cross-attention   q = tgt + query_pos,
-      |                              k = image memory + memory_pos,
-      |                              v = image memory,
-      |                              scores += boxRPB per-head additive bias
-      |      residual, then norm1
-      |
-      +-- 4. feed-forward            fc1 -> relu -> drop -> fc2 -> drop
-             residual, then norm3
+Architecture Overview:
+---------------------
+1. **Self-attention**: ``q = k = tgt + query_pos``, ``v = tgt``; residual, norm2.
+2. **Text cross-attention**: ``q = tgt + query_pos``, ``k = v = text memory``;
+   residual, catext_norm.
+3. **Image cross-attention**: ``q = tgt + query_pos``, ``k = image memory +
+   memory_pos``, ``v = image memory``, ``scores += boxRPB``; residual, norm1.
+4. **Feed-forward**: ``fc1 -> relu -> drop -> fc2 -> drop``; residual, norm3.
+Settled configuration: ``d_model=256``, ``num_heads=8``,
+``dim_feedforward=2048``, ``dropout_rate=0.1``, ``relu``, ``box_rpb="log"``.
 
-Three details carry the correctness of this layer:
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.decoder import Sam3TransformerDecoder
+decoder = Sam3TransformerDecoder(d_model=256, num_heads=8, num_layers=6,
+                                 num_queries=200, feat_size=(72, 72))
+```
 
-1. **The image cross-attention takes a real-valued, per-head, per-query
-   additive bias (boxRPB) into its RAW scores, before the softmax.** No existing
-   attention layer in this repository can carry it -- see the ``D-080`` anchor
-   on :class:`_Sam3DecoderAttention` and the measurement recorded there.
-2. **Neither the self-attention nor the image cross-attention draws its keys and
-   its values from the same tensor.** ``k`` carries a positional embedding that
-   ``v`` does not. That single asymmetry is what disqualifies the repository's
-   cross-attention layer at those two sites -- and does NOT disqualify it at the
-   text site, which is why the text site uses it unmodified.
-3. **The presence token rides along.** It is prepended to the query sequence
-   with a ZEROED query position, given an all-zero bias row so that it always
-   attends everywhere in image cross-attention regardless of any per-query
-   boxRPB bias, and split back off after the feed-forward.
-
-boxRPB itself -- the log-compressed, box-conditioned relative position bias --
-is built by :func:`_box_rpb_bias` here and OWNED by the layer stack, not by this
-layer: the reference shares one pair of embedding MLPs across every decoder
-layer, so making them per-layer would multiply their parameters by the layer
-count with no shape symptom.
-
-At the settled SAM 3 configuration this layer is ``d_model=256``,
-``num_heads=8``, ``dim_feedforward=2048``, ``dropout=0.1``, ``relu``, with text
-cross-attention enabled and ``boxRPB="log"``.
-
-References:
-    - Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-    - Carion, N. et al. (2020). "End-to-End Object Detection with Transformers"
-      (DETR; the decoder shape this one extends).
-    - Liu, S. et al. (2023). "Grounding DINO" (the text cross-attention
-      sub-block inserted between self- and image cross-attention).
+Measured caveats:
+----------------
+- No attention layer in this repository can carry the real-valued additive
+  boxRPB bias into raw scores -- see the ``D-080`` anchor on
+  ``_Sam3DecoderAttention`` and the measurement recorded there.
+- Neither self- nor image cross-attention draws ``k`` and ``v`` from the same
+  tensor: ``k`` carries a positional embedding ``v`` does not. That single
+  asymmetry disqualifies the repo's cross-attention layer at those two sites and
+  does NOT disqualify it at the text site, which uses it unmodified.
+- The presence token has a ZEROED query position and an all-zero bias row, so it
+  attends everywhere in image cross-attention whatever boxRPB says.
+- The reference shares one pair of boxRPB embedding MLPs across every layer, so
+  making them per-layer multiplies their parameters by the layer count with no
+  shape symptom.
 """
 
 import keras

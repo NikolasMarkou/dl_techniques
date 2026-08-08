@@ -1,58 +1,60 @@
 """
-SAM 3's dual SimpleFPN neck: one trunk feature map, four scales, two weight sets.
+SAM 3 Dual SimpleFPN Neck: one trunk map, four scales, two weight sets.
+=======================================================================
 
-This module provides the single public class :class:`Sam3DualViTDetNeck` -- the
-ViTDet-style SimpleFPN that turns the ONE feature map emitted by
-:class:`~dl_techniques.models.SAM.SAM3.vitdet.Sam3ViTDetBackbone` into the
-multi-scale pyramid the detector and the tracker consume.
+:class:`Sam3DualViTDetNeck` is the ViTDet-style SimpleFPN that turns the ONE
+feature map emitted by :class:`Sam3ViTDetBackbone` into the multi-scale pyramid
+the detector and the tracker consume.
 
-Architecture:
-    The trunk emits a single ``(batch, grid, grid, dim)`` map. The neck resamples
-    THAT ONE map to four resolutions -- there is no multi-block pyramid coming
-    out of the trunk -- and projects every resolution to a common ``d_model``::
+Based on:
+---------
+- Li, Y., Mao, H., Girshick, R., & He, K. (2022). ViTDet / SimpleFPN.
+- Carion, N. et al. (2020). DETR -- the sine positional encoding reused here.
 
-        scale 4.0 : ConvT(dim -> dim/2, k=2, s=2) -> GELU
-                    -> ConvT(dim/2 -> dim/4, k=2, s=2)
-        scale 2.0 : ConvT(dim -> dim/2, k=2, s=2)
-        scale 1.0 : identity
-        scale 0.5 : MaxPool(k=2, s=2)
+Key Features:
+------------
+- ONE trunk map resampled to four resolutions; no multi-block trunk pyramid.
+- "Dual" = two structurally identical, INDEPENDENTLY-WEIGHTED copies of the
+  four-branch conv stack reading the SAME trunk feature, one feeding the SAM 3
+  detector and one the SAM-2-style tracker. One backbone, two neck weight sets,
+  never two backbones.
+- A fixed 2D sine positional encoding per branch, on that branch's OWN grid.
 
-    and then, on EVERY branch::
+Architecture Overview:
+---------------------
+1. **Resample** the single ``(batch, grid, grid, dim)`` trunk map: scale ``4.0``
+   = ``ConvT(dim -> dim/2, k=2, s=2) -> GELU -> ConvT(dim/2 -> dim/4, k=2,
+   s=2)``; ``2.0`` = ``ConvT(dim -> dim/2, k=2, s=2)``; ``1.0`` = identity;
+   ``0.5`` = ``MaxPool(k=2, s=2)``.
+2. On EVERY branch: ``Conv(1x1 -> d_model, bias) -> Conv(3x3, pad=1 ->
+   d_model, bias)``.
+3. Add that branch's own sine encoding. A ``72x72`` trunk gives ``288 / 144 /
+   72 / 36``.
 
-        Conv(1x1, -> d_model, bias) -> Conv(3x3, pad=1, -> d_model, bias)
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.necks import Sam3DualViTDetNeck
+neck = Sam3DualViTDetNeck(dim=1024, d_model=256,
+                          scale_factors=(4.0, 2.0, 1.0, 0.5))
+```
 
-    with **no normalization of any kind**. (The SAM 3.1 three-way neck adds an
-    optional norm here; this class is the SAM 3.0 dual neck and has none.)
-
-    "Dual" means two structurally IDENTICAL but INDEPENDENTLY-WEIGHTED copies of
-    that whole four-branch conv stack, both reading the SAME trunk feature: one
-    feeds the SAM-3 detector, the other feeds the SAM-2-style tracker. It is one
-    backbone with two neck weight sets, never two backbones.
-
-    Each branch output additionally gets a fixed 2D sine positional encoding,
-    computed on that branch's OWN token grid. The encodings are therefore
-    per-scale and not shared: the normalized coordinate pitch differs at every
-    resolution, so a single encoding resampled across scales is a value defect
-    with no shape symptom.
-
-Implementation notes:
-    - Feature maps are channels-LAST throughout, matching the trunk and the
-      repo-wide Keras convention. The sine-encoding layer this module reuses
-      returns channels-FIRST and emits ``2 * num_pos_feats`` channels, so BOTH
-      conventions meet inside :func:`_encode_position`, which transposes, casts,
-      and then re-checks the resulting width and spatial extent against the
-      feature it must be added to. On a square grid whose side happens to equal
-      ``d_model`` a forgotten transpose broadcasts silently instead of raising,
-      which is exactly why the check is on the OUTPUT and not on the layer's
-      constructor argument.
-    - The resolution ladder is fully determined by the trunk grid: a ``72x72``
-      trunk gives ``288 / 144 / 72 / 36``.
-
-References:
-    - Li, Y., Mao, H., Girshick, R., & He, K. (2022). "Exploring Plain Vision
-      Transformer Backbones for Object Detection" (ViTDet / SimpleFPN).
-    - Carion, N. et al. (2020). "End-to-End Object Detection with Transformers"
-      (the sine positional encoding reused here).
+Measured caveats:
+----------------
+- The branch convs carry **no normalization of any kind**. The SAM 3.1 three-way
+  neck adds an optional norm there; this is the SAM 3.0 dual neck and has none.
+- The sine encoding omits the reference's half-pixel centre offset, a constant
+  angular shift of ``pi / H`` MEASURED at ``0.010908 / 0.021815 / 0.043630 /
+  0.087266`` radians for ``H = 288 / 144 / 72 / 36`` -- largest at the coarsest
+  level, and BINDING on any future transfer of released SAM 3 weights (D-134,
+  carrying D-042 forward).
+- Per-scale encodings are not shared: the normalized coordinate pitch differs at
+  every resolution, so one encoding resampled across scales is a value defect
+  with no shape symptom.
+- The transpose check is on the OUTPUT, not on a constructor argument: the
+  reused sine layer returns channels-FIRST and emits ``2 * num_pos_feats``
+  channels, and on a square grid whose side happens to equal ``d_model`` a
+  forgotten transpose broadcasts silently instead of raising.
 """
 
 import keras

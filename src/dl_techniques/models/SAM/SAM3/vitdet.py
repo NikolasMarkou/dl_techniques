@@ -1,66 +1,66 @@
 """
-SAM 3's ViTDet image trunk: windowed + global pre-LN ViT blocks over one feature map.
+SAM 3 ViTDet Trunk: windowed and global pre-LN ViT blocks over one feature map.
+===============================================================================
 
-This module provides the two public classes of SAM 3's plain-ViT detection
-backbone -- :class:`Sam3ViTDetBlock` (one pre-LN transformer block, either
-window-local or global) and :class:`Sam3ViTDetBackbone` (patch-embed stem,
-tiled absolute position embedding, the block stack, and the single output
-feature map).
+Two public classes make up SAM 3's plain-ViT detection backbone:
+:class:`Sam3ViTDetBlock` (one pre-LN transformer block, either window-local or
+global) and :class:`Sam3ViTDetBackbone` (patch-embed stem, tiled absolute
+position embedding, the block stack, and the single output feature map).
 
-Architecture:
-    An image is cut into non-overlapping patches by a single strided
-    convolution, giving a ``(batch, h, w, embed_dim)`` spatial grid. A learned
-    absolute position embedding, stored at the PRE-TRAINING grid resolution, is
-    TILED (not interpolated) up to the current grid and added. One LayerNorm
-    (``ln_pre``) runs once at that point, before the block stack. Every block is
-    a standard pre-LN ViT block; most restrict attention to a ``window_size``
-    square window, a small set of them attend globally. The trunk emits exactly
-    ONE feature map -- the last global block's -- and the whole feature pyramid
-    is built downstream by the neck.
+Based on:
+---------
+- Li, Y., Mao, H., Girshick, R., & He, K. (2022). ViTDet.
+- Dosovitskiy, A. et al. (2021). "An Image is Worth 16x16 Words".
+- Su, J. et al. (2021). RoFormer -- the axial 2D rotary variant used here.
 
-Foundational Mathematics:
-    Each block computes, with ``ls1``/``ls2`` the optional layer-scale gains and
-    ``dp`` the stochastic-depth (drop-path) operator::
+Key Features:
+------------
+- Mostly window-local attention with a small set of global blocks.
+- 2D axial rotary position embedding on queries and keys, never on values.
+- Absolute position embedding stored at the PRE-TRAINING grid and TILED (not
+  interpolated) up to the current grid.
+- Exactly ONE output feature map; the pyramid is built downstream by the neck.
+- Channels-LAST throughout, and no complex dtype -- the rotation is the
+  real-valued cos/sin form from
+  :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`.
 
-        x = x + dp(ls1(attn(norm1(x))))
-        x = x + dp(ls2(mlp(norm2(x))))
+Architecture Overview:
+---------------------
+1. A single strided convolution cuts the image into non-overlapping patches,
+   giving a ``(batch, h, w, embed_dim)`` grid.
+2. The tiled absolute position embedding is added, then ``ln_pre`` runs once
+   before the block stack.
+3. Each block computes ``x = x + dp(ls1(attn(norm1(x))))`` then
+   ``x = x + dp(ls2(mlp(norm2(x))))``, with ``ls1``/``ls2`` the optional
+   layer-scale gains and ``dp`` stochastic depth.
+4. The last global block's output is the single trunk feature map.
 
-    Attention is scaled dot-product attention over the head-split tensors, with
-    2D axial rotary position embedding applied to queries and keys (never to
-    values). A windowed block partitions the grid into ``window_size`` squares
-    and runs attention independently inside each, so its receptive field is
-    strictly window-local; a global block runs attention over all ``h * w``
-    tokens.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
+trunk = Sam3ViTDetBackbone(img_size=1008, patch_size=14, embed_dim=1024,
+                           depth=32, num_heads=16, window_size=24)
+```
 
-    The rotary frequency ladder is built at the block's OWN token grid, while
-    the position indices are scaled by ``scale_pos = rope_pt_size / grid_side``.
-    A windowed block's grid IS the window (``24x24`` at the settled config,
-    equal to the rotary pre-training grid), so ``scale_pos = 1.0``. A global
-    block's grid is the full image grid (``72x72``), so ``scale_pos = 24/72``:
-    the angular pitch of the rotation matches the grid the rotation was trained
-    on, without resizing any table.
-
-Implementation notes:
-    - Position-embedding tiling is LITERAL ``tile`` + ``crop``. The tile count
-      is ``grid // pretrain_grid + 1`` per axis and the result is cropped to the
-      grid, so at the settled ``72 / 24`` geometry FOUR tiles are produced and
-      the fourth is discarded in its entirety. An interpolating implementation
-      produces different values with no shape error whatsoever.
-    - The MLP hidden width is ``int(dim * mlp_ratio)`` -- TRUNCATION. At the
-      settled ``1024 * 4.625 = 4736`` truncation and rounding coincide, so that
-      configuration cannot distinguish the two rules.
-    - Feature maps are channels-LAST throughout, which is the repo-wide Keras
-      convention; the reference implementation transposes its trunk output to
-      channels-first, and the downstream neck is written against channels-last.
-    - No complex dtype: the rotation is the real-valued cos/sin form supplied by
-      :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`.
-
-References:
-    - Li, Y., Mao, H., Girshick, R., & He, K. (2022). "Exploring Plain Vision
-      Transformer Backbones for Object Detection" (ViTDet).
-    - Dosovitskiy, A. et al. (2021). "An Image is Worth 16x16 Words".
-    - Su, J. et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
-      Embedding" (the axial 2D variant used here).
+Measured caveats:
+----------------
+- The rotary frequency ladder is built at the block's OWN token grid while
+  position indices are scaled by ``scale_pos = rope_pt_size / grid_side``. A
+  windowed block's grid IS the window (``24x24`` at the settled config, equal to
+  the rotary pre-training grid) so ``scale_pos = 1.0``; a global block's grid is
+  the full ``72x72`` image grid so ``scale_pos = 24/72``. The angular pitch of
+  the rotation therefore matches the grid it was trained on, resizing no table.
+- Position-embedding tiling is LITERAL ``tile`` + ``crop`` -- ``grid //
+  pretrain_grid + 1`` tiles per axis, then cropped -- so at the settled
+  ``72 / 24`` geometry FOUR tiles are produced and the fourth is discarded in
+  its entirety. An interpolating implementation produces different values with
+  no shape error whatsoever.
+- The MLP hidden width is ``int(dim * mlp_ratio)`` -- TRUNCATION. At the settled
+  ``1024 * 4.625 = 4736`` truncation and rounding coincide, so that
+  configuration cannot distinguish the two rules.
+- The reference transposes its trunk output to channels-first; the downstream
+  neck here is written against channels-last.
 """
 
 import math

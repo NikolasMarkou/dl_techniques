@@ -1,76 +1,81 @@
-"""``Sam3TrainingModel`` -- the packed-tensor training wrapper for SAM 3.
+"""
+SAM 3 Training Wrapper: one packed supervision tensor for one joint loss.
+=========================================================================
 
-Why a wrapper exists at all: TARGET PACKING, and nothing else
---------------------------------------------------------------
-SAM 1 needed a separate ``SAMTrainingModel`` because ``SAM.call``'s
-``postprocess_masks`` runs ``ops.image.resize``, which raises under ``fit()``'s
-graph mode. **That reason has NO analogue here and is deliberately not reused.**
-It was CHECKED, not assumed: a plain ``keras.Model`` wrapping :class:`Sam3Image`
-at ``jit_compile=False`` completed a real ``fit()`` step (loss ``0.0467``), so
-``Sam3Image.call`` traces fine. Carrying SAM 1's forcing reason forward would be
-a GHOST constraint, and the ghost is recorded here so nobody re-derives it and
-then over-scopes this wrapper into driving submodules directly the way SAM 1's
-must.
+:class:`Sam3TrainingModel` wraps :class:`Sam3Image` and emits ONE packed
+supervision tensor. That is all it does, and the reason is that the SAM 3
+detection loss is JOINT: one Hungarian assignment is shared across the
+classification, box, presence and mask terms, so all four must be seen by ONE
+:class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss` object.
 
-The real -- and only -- reason is that the SAM 3 detection loss is **JOINT**:
-one Hungarian assignment is shared across the classification, box, presence and
-mask terms, so all four have to be seen by ONE
-:class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss` object. A
-single ``Loss`` object handed a dict ``y_pred`` breaks:
-``CompileLoss.build`` broadcasts that one object across every leaf of the
-structure via ``tree.map_structure`` and then ``KeyError``s. Splitting
-supervision into per-output-key dict losses would compute a different (or no)
-assignment per term, which is exactly the property the joint matcher exists to
-provide. The sanctioned precedent is DINO's D-024: **emit ONE packed tensor and
-let one ``Loss`` split it.** That is all this wrapper does.
+Based on:
+---------
+- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+- Carion, N. et al. (2020). DETR -- the Hungarian set-prediction loss this
+  packing serves.
 
-There is no custom ``train_step`` here, and there must never be one.
+Key Features:
+------------
+- ONE packed tensor out; no custom ``train_step``, and there must never be one.
+- :func:`compile_sam3_trainer` is the single compile site.
+- Optional deep supervision over the decoder's per-layer outputs.
 
-The layout is NOT defined here
-------------------------------
-``losses/sam3_detection_loss.py`` is the layout's single home: the ``PACKED_*``
-and ``META_*`` channel constants, :func:`packed_channel_count`,
-``unpack_predictions``, ``unpack_targets`` and ``derive_keep_loss`` all live
-there and are IMPORTED below. Nothing in this module re-spells a channel index
-or re-derives ``C``; the pack functions here place their fields BY the imported
-constants (see :func:`_pack_rows`), so a layout change moves one file. A count
-restated in two places is a hand-maintained lockstep invariant, i.e. a latent
-defect, and the pack/unpack pair is pinned value-exactly by
-``tests/test_models/test_sam3/test_training_model.py``.
+Architecture Overview:
+---------------------
+1. ``Sam3TrainingModel.call`` runs :class:`Sam3Image` and packs its outputs into
+   one ``(batch, rows, C)`` tensor.
+2. The layout is NOT defined here. ``losses/sam3_detection_loss.py`` is its
+   single home: the ``PACKED_*`` and ``META_*`` channel constants,
+   :func:`packed_channel_count`, ``unpack_predictions``, ``unpack_targets`` and
+   ``derive_keep_loss`` all live there and are IMPORTED below. Nothing here
+   re-spells a channel index or re-derives ``C`` -- :func:`_pack_rows` places
+   its fields BY the imported constants, so a layout change moves one file.
+3. :func:`compile_sam3_trainer` compiles the wrapper against that one loss.
 
-Note that the meta row's channel ``2`` is ``is_exhaustive``, not the reserved
-zero the plan's prose described; see decisions.md D-010. It is imported as
-``META_IS_EXHAUSTIVE`` rather than treated as spare.
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
+from dl_techniques.models.SAM.SAM3.training_model import (
+    Sam3TrainingModel, compile_sam3_trainer)
+trainer = Sam3TrainingModel(Sam3Image.from_variant("tiny"), include_masks=True)
+compile_sam3_trainer(trainer)
+```
 
-Importing the TensorFlow package is FORBIDDEN in this file
------------------------------------------------------------
-This module lives under ``models/SAM/SAM3/``, whose ``keras.ops`` purity is a
-close-out gate checked by GREP -- so the two literal tokens that gate greps for
-are deliberately NOT spelled anywhere in this file, not even in prose. (Writing
-one of them here erodes the instrument, a failure already measured three times
-in this repository; it was measured a fourth time on this very docstring, which
-is why it now reads the way it does.) The packing below is pure ``keras.ops``.
-The loss module's own TensorFlow dependency is sanctioned because it is
-training-only and never traced in a forward path; this file inherits no such
-exemption and takes none.
-
-``jit_compile=False`` is MANDATORY, and has ONE home
------------------------------------------------------
-:func:`compile_sam3_trainer` is the single compile site, and it sets
-``jit_compile=False`` by ``setdefault`` so the invariant holds by construction
-rather than by remembering. The constraint is doubly forced: this model family
-already pins it, and the matcher crosses an eager ``py_function`` boundary for
-which no ``EagerPyFunc`` XLA kernel exists, so ``jit_compile=True`` fails hard.
-
-``training=`` is forwarded EXPLICITLY at every call site
----------------------------------------------------------
-``training=None`` is NOT inference at a non-zero ``drop_path_rate``: this
-repository's shared ``StochasticDepth`` short-circuits on ``training is False``
-ONLY, so the ``None`` a plain ``model(inputs)`` passes down DROPS PATHS
-(D-123). :meth:`Sam3TrainingModel.call` therefore threads its own ``training``
-argument into :class:`Sam3Image` explicitly, and the ``.keras`` round-trip test
-compares values at ``training=False`` -- at ``training=None`` a correct round
-trip measures deltas of 0.2-2.2 that look exactly like reinitialized weights.
+Measured caveats:
+----------------
+- A single ``Loss`` object handed a dict ``y_pred`` breaks: ``CompileLoss.build``
+  broadcasts it across every leaf via ``tree.map_structure`` and then
+  ``KeyError``s, while per-output-key dict losses would compute a different (or
+  no) assignment per term -- exactly the property the joint matcher provides.
+  The sanctioned precedent is DINO's D-024: emit ONE packed tensor, let one
+  ``Loss`` split it.
+- SAM 1's forcing reason for a wrapper is a GHOST here and was CHECKED, not
+  assumed: a plain ``keras.Model`` wrapping :class:`Sam3Image` at
+  ``jit_compile=False`` completed a real ``fit()`` step (loss ``0.0467``), so
+  ``Sam3Image.call`` traces fine and this wrapper must not be over-scoped into
+  driving submodules the way SAM 1's must.
+- The meta row's channel ``2`` is ``is_exhaustive``, not a reserved zero; it is
+  imported as ``META_IS_EXHAUSTIVE`` rather than treated as spare.
+- ``jit_compile=False`` is MANDATORY and has ONE home:
+  :func:`compile_sam3_trainer` sets it by ``setdefault``, so the invariant holds
+  by construction. It is doubly forced -- this model family already pins it, and
+  the matcher crosses an eager ``py_function`` boundary for which no
+  ``EagerPyFunc`` XLA kernel exists, so ``jit_compile=True`` fails hard.
+- ``training=`` is forwarded EXPLICITLY at every call site. ``training=None`` is
+  NOT inference at a non-zero ``drop_path_rate``: the shared ``StochasticDepth``
+  short-circuits on ``training is False`` ONLY, so the ``None`` a plain
+  ``model(inputs)`` passes down DROPS PATHS (D-123). The ``.keras`` round-trip
+  test compares values at ``training=False``; at ``training=None`` a CORRECT
+  round trip measures deltas of 0.2-2.2 that look exactly like reinitialized
+  weights.
+- Importing the TensorFlow package is FORBIDDEN in this file, whose ``keras.ops``
+  purity is gated by a grep over every file in this package -- so the two
+  literal tokens that gate greps for are deliberately NOT spelled anywhere here,
+  not even in prose, because writing one erodes the instrument (already measured
+  four times in this repository). The packing below is pure ``keras.ops``. The
+  loss module's own dependency is sanctioned as training-only and never traced
+  in a forward path; this file inherits no such exemption and takes none.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
