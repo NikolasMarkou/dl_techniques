@@ -1,99 +1,51 @@
 """
-SAM Two-Way Transformer Implementation
-=================================================
+SAM 1 Two-Way Transformer: the mask decoder's bidirectional core.
+=================================================================
 
-Implementation of the Two-Way Transformer used
-in the Segment Anything Model's mask decoder. This is a specialized decoder
-architecture that bidirectionally updates both token and image embeddings.
+:class:`TwoWayTransformer` is a stack of :class:`TwoWayAttentionBlock` layers
+that update the query tokens AND the image features in the same pass. The
+positional encoding is re-added at every attention rather than once at the
+input, so the geometry survives ``depth`` residual updates.
 
-**Intent**: To create a faithful and serializable Keras implementation of the
-SAM transformer architecture, following modern Keras best practices for building
-complex, composite layers with factory pattern integration.
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+- Vaswani, A. et al. (2017). "Attention Is All You Need."
 
-**Architecture**: The Two-Way Transformer consists of a series of
-`TwoWayAttentionBlock` layers. Each block performs four main operations:
+Key Features:
+------------
+- Four ordered operations per block: query self-attention, token-to-image
+  cross-attention, an FFN on the queries, then image-to-token cross-attention.
+- ``skip_first_layer_pe`` reproduces reference SAM's first block, whose query
+  self-attention runs WITHOUT the positional term.
+- A final token-to-image cross-attention plus normalization after the stack.
 
-1.  **Query Self-Attention**: Queries (prompt and mask tokens) attend to
-    themselves.
-2.  **Cross-Attention (Token to Image)**: Queries attend to the image embeddings.
-3.  **MLP on Queries**: A standard feed-forward network is applied to the
-    updated queries.
-4.  **Cross-Attention (Image to Token)**: Image embeddings attend to the
-    updated queries.
+Architecture Overview:
+---------------------
+Per block, in order: ``self_attn(q+pe) -> cross_attn_token_to_image(q+pe,
+k+pe) -> ffn(q) -> cross_attn_image_to_token(k+pe, q+pe)``, each a residual
+followed by a normalization. Image features enter as ``(B, H, W, C)`` and are
+flattened to ``(B, H*W, C)`` for attention.
 
-This bidirectional flow allows prompts to gather information from the image and
-the image representation to be refined based on the prompts.
-
-**Data Flow (per block)**:
-```
-Queries_in (tokens), Keys_in (image features)
-    │
-    v
-┌─────────────────────────────────────────┐
-│ 1. Self-Attention on Queries            │
-│    Q, K, V = Queries + PE               │
-│    Queries' = Queries + Attention(Q,K,V)│
-│    Queries' = Norm(Queries')            │
-└─────────────────────────────────────────┘
-    │
-    v
-┌───────────────────────────────────────────┐
-│ 2. Cross-Attention (Token to Image)       │
-│    Q = Queries' + PE                      │
-│    K, V = Keys + PE, Keys                 │
-│    Queries'' = Queries' + Attention(Q,K,V)│
-│    Queries'' = Norm(Queries'')            │
-└───────────────────────────────────────────┘
-    │
-    v
-┌───────────────────────────────────────────┐
-│ 3. MLP/FFN on Queries                     │
-│    Queries''' = Queries'' + FFN(Queries'')│
-│    Queries''' = Norm(Queries''')          │
-└───────────────────────────────────────────┘
-    │
-    v
-┌─────────────────────────────────────────┐
-│ 4. Cross-Attention (Image to Token)     │
-│    Q = Keys + PE                        │
-│    K, V = Queries''' + PE, Queries'''   │
-│    Keys' = Keys + Attention(Q,K,V)      │
-│    Keys' = Norm(Keys')                  │
-└─────────────────────────────────────────┘
-    │
-    v
-Queries_out, Keys_out
-```
-
-**Usage Example**:
+Usage Examples:
+--------------
 ```python
-import keras
-
-# Create two-way transformer
-transformer = TwoWayTransformer(
-    depth=2,
-    embedding_dim=256,
-    num_heads=8,
-    mlp_dim=2048,
-    normalization_type='layer_norm',
-    activation='relu'
-)
-
-# Prepare inputs
-image_embedding = keras.random.normal(shape=(1, 64, 64, 256))
-image_pe = keras.random.normal(shape=(1, 64, 64, 256))
-point_embedding = keras.random.normal(shape=(1, 5, 256))
-
-# Run transformer
-queries_out, keys_out = transformer(image_embedding, image_pe, point_embedding)
-
-print(f"Queries output shape: {queries_out.shape}")  # (1, 5, 256)
-print(f"Keys output shape: {keys_out.shape}")        # (1, 64*64, 256)
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+transformer = TwoWayTransformer(depth=2, embedding_dim=256, num_heads=8,
+                                mlp_dim=2048)
+queries, keys = transformer(image_embedding, image_pe, point_embedding)
 ```
 
-**References**:
-- Kirillov, A., et al. (2023). Segment Anything. *arXiv*.
-- Vaswani, A., et al. (2017). Attention is All You Need. *NeurIPS*.
+Measured caveats:
+----------------
+- **``attention_downsample_rate`` defaults to 2 and is a LAYOUT knob.** The
+  three CROSS-attentions (``cross_attn_token_to_image``,
+  ``cross_attn_image_to_token``, ``final_attn_token_to_image``) run at internal
+  dim ``embedding_dim // rate``, as reference SAM does, while ``self_attn``
+  always runs at full ``embedding_dim``. ``rate=1`` restores a uniform width
+  and changes the weight shapes, so the two settings are not checkpoint
+  compatible. ``embedding_dim`` must be divisible by ``num_heads * rate`` or
+  construction raises ``ValueError``.
 """
 
 import keras

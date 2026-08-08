@@ -1,102 +1,70 @@
 """
-SAM Image Encoder (ViT) Implementation
-=================================================
+SAM 1 Image Encoder: the ViT backbone and its stride-1 channel neck.
+====================================================================
 
-Implementation of the Vision Transformer (ViT)
-based image encoder used in the Segment Anything Model (SAM). It is meticulously
-crafted to follow modern Keras best practices for creating composite,
-serializable, and production-ready layers and models.
+:class:`ImageEncoderViT` turns an image into the single dense embedding every
+other SAM 1 component consumes. It is a plain (non-hierarchical) ViT whose
+attention is windowed everywhere except at a named set of global block indices,
+followed by a two-convolution neck that changes the channel count only.
 
-**Intent**: To create a robust and production-ready ViT backbone that can
-process images into high-dimensional embeddings. The implementation is designed
-to be configurable, supporting different model variants (e.g., Base, Large, Huge)
-while maintaining full serialization capabilities by strictly following the
-"Create vs. Build" lifecycle pattern.
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+- Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
+- Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
 
-**Architecture**: The encoder consists of four main parts:
-1.  **Patch Embedding**: Converts an input image into a sequence of patch
-    embeddings using a single `Conv2D` layer.
-2.  **Positional Embedding**: Adds a learnable absolute positional embedding
-    to the patch embeddings to retain spatial information.
-3.  **Transformer Blocks**: A series of transformer blocks that process the
-    sequence of embeddings. These blocks use the configurable TransformerLayer
-    from dl_techniques with windowed or global attention.
-4.  **Neck**: A final feature-refining module that upsamples the feature map
-    resolution using convolutional and normalization layers to produce the
-    final output embedding.
+Key Features:
+------------
+- Windowed attention with an optional learnable RELATIVE positional bias
+  (:class:`WindowedAttentionWithRelPos`), interleaved with full-grid global
+  blocks at ``global_attn_indexes``.
+- The neck is a 1x1 conv -> norm -> 3x3 conv -> norm stack at stride 1. It
+  does NOT change the spatial grid; the grid is fixed by the patch embedding
+  alone (measured ``(1, 64, 64, out_chans)`` at ``img_size=1024,
+  patch_size=16``).
+- Every sublayer is built through the repository factories
+  (``create_ffn_layer``, ``create_normalization_layer``,
+  :class:`PatchEmbedding2D`), so attention/FFN/norm types are configurable.
 
-**Data Flow**:
-```
-Input Image (B, H, W, C)
-      │
-      v
-PatchEmbedding (Conv2D) -> (B, H/p, W/p, D)
-      │
-      + PositionalEmbedding (learnable weight)
-      │
-      v
-Sequence of TransformerLayer Layers
-  - Attention (Windowed or Global) with Relative Positional Bias
-  - Feed-Forward Network
-  - Residual Connections
-  - Normalization
-      │
-      v
-Neck (Conv2D -> LayerNorm -> Conv2D -> LayerNorm)
-      │
-      v
-Output Embedding (B, H_emb, W_emb, D_out)
-```
+Architecture Overview:
+---------------------
+1. ``(B, H, W, 3)`` -> ``Conv2D`` patch embedding -> ``(B, H/p, W/p, embed_dim)``.
+2. -> plus a learnable absolute positional embedding of that grid shape.
+3. -> ``depth`` ViT blocks; block ``i`` runs global attention if
+   ``i in global_attn_indexes``, else windowed at ``window_size``.
+4. -> neck -> ``(B, H/p, W/p, out_chans)``.
 
-**Usage Example**:
+Model Variants:
+--------------
+``vit_b`` 768/12/12, ``vit_l`` 1024/24/16, ``vit_h`` 1280/32/16
+(``embed_dim``/``depth``/``num_heads``), all at ``out_chans=256``. See
+:mod:`.model` for the measured per-variant parameter counts.
+
+Usage Examples:
+--------------
 ```python
-import keras
-import numpy as np
-
-# Instantiate the model for a 1024x1024 image
-# This is the "Huge" variant configuration
-encoder = ImageEncoderViT(
-    img_size=1024,
-    patch_size=16,
-    embed_dim=1280,
-    depth=32,
-    num_heads=16,
-    out_chans=256,
-    use_rel_pos=True,
-    window_size=14,
-    global_attn_indexes=(7, 15, 23, 31),
-)
-
-# Create a dummy input tensor
-dummy_image = np.random.rand(1, 1024, 1024, 3).astype("float32")
-input_tensor = keras.ops.convert_to_tensor(dummy_image)
-
-# Get the image embedding
-embedding = encoder(input_tensor)
-print(f"Output embedding shape: {embedding.shape}")
-# Expected output: Output embedding shape: (1, 64, 64, 256)
-
-# Test serialization
-model_path = "image_encoder.keras"
-encoder.save(model_path)
-loaded_encoder = keras.models.load_model(model_path)
-print("Model serialized and loaded successfully.")
-
-# Verify output consistency
-embedding_from_loaded = loaded_encoder(input_tensor)
-np.testing.assert_allclose(
-    keras.ops.convert_to_numpy(embedding),
-    keras.ops.convert_to_numpy(embedding_from_loaded),
-    rtol=1e-6, atol=1e-6
-)
-print("Outputs are consistent after serialization.")
+from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
+encoder = ImageEncoderViT(img_size=1024, patch_size=16, embed_dim=768,
+                          depth=12, num_heads=12, out_chans=256,
+                          window_size=14, global_attn_indexes=(2, 5, 8, 11))
+embedding = encoder(image)           # (batch, 64, 64, 256)
 ```
 
-**References**:
-- Dosovitskiy, A., et al. (2020). An Image is Worth 16x16 Words: Transformers
-  for Image Recognition at Scale. *ICLR*.
-- Liu, Z., et al. (2021). Swin Transformer: Hierarchical Vision Transformer
-  using Shifted Windows. *ICCV*. (For window attention concepts).
+Measured caveats:
+----------------
+- **A windowed-only encoder is REFUSED, by construction.** ``0 < window_size <
+  grid_size`` with an EMPTY ``global_attn_indexes`` windows every block, so no
+  unit ever attains a global receptive field; the constructor raises
+  ``ValueError`` rather than silently training a crippled backbone. The two
+  legitimate configurations -- ``window_size=0`` (all global) and a non-empty
+  ``global_attn_indexes`` -- are unaffected.
+- **``use_rel_pos=True`` is a ``.keras`` LAYOUT change, not a flag.** It creates
+  per-block ``rel_pos_h`` / ``rel_pos_w`` variables, so a checkpoint saved at
+  one setting cannot be restored at the other. It also requires ``input_size``;
+  omitting it raises.
+- The relative-position path is pinned by a spy in
+  ``tests/test_models/test_sam/test_correctness.py`` (call count non-zero with
+  the flag on, exactly zero with it off) rather than assumed to be reached.
 """
 
 import keras

@@ -1,106 +1,67 @@
 """
-SAM Mask Decoder Implementation
-==========================================
+SAM 1 Mask Decoder: output tokens, a two-way transformer and a hypernetwork.
+============================================================================
 
-Implementation of the mask decoder from the
-Segment Anything Model (SAM). The mask decoder takes image and prompt
-embeddings as input and predicts segmentation masks.
+:class:`MaskDecoder` consumes the image embedding and the prompt embeddings and
+emits low-resolution mask logits plus one predicted IoU per mask. The masks are
+not produced by a convolutional head: a per-mask MLP emits a weight VECTOR
+which is dotted against the upscaled feature map, so the head is a hypernetwork.
 
-**Intent**: To create a robust, serializable mask decoder that faithfully
-reproduces the SAM architecture while adhering to modern Keras 3 best
-practices for composite layers and factory pattern integration.
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
 
-**Architecture**: The mask decoder is a transformer-based architecture with
-several key components:
-1.  **Output Tokens**: Learnable embeddings for an IoU prediction token and
-    multiple mask tokens. These are concatenated with the sparse prompt
-    embeddings to form the initial query for the transformer.
-2.  **Two-Way Transformer**: The core of the decoder, which bidirectionally
-    updates the query tokens and image embeddings.
-3.  **Upscaling Module**: A series of transposed convolutions that upsample
-    the final image embeddings to a higher resolution.
-4.  **Hypernetwork MLPs**: A set of small MLPs (one for each mask token) that
-    transform the final mask token embeddings into parameters for the final
-    mask prediction layer.
-5.  **Mask Prediction**: The upscaled image embeddings are multiplied by the
-    hypernetwork outputs to produce the final low-resolution mask logits.
-6.  **IoU Prediction Head**: An MLP that predicts the quality (IoU) of each
-    predicted mask from the final IoU token embedding.
+Key Features:
+------------
+- ``num_multimask_outputs + 1`` learnable mask tokens -- index 0 is the
+  single-mask output returned at ``multimask_output=False``, the rest are the
+  proposals -- plus one IoU token, concatenated in front of the sparse prompts.
+- Output upscaling by 4x via transposed convolutions; the mask logits are the
+  matrix product of the upscaled map with the hypernetwork vectors.
+- Every MLP head is ``iou_head_depth`` Dense layers total, hidden layers
+  activated by ``mlp_activation`` and the final layer linear so it can emit
+  signed logits.
 
-**Data Flow**:
-```
-Image Embeddings (B, H, W, C) ─────┐
-Dense Prompt Embeddings (B, H, W, C) ─> Add ─> Source
-                                              │
-IoU Token (1, C) ──┐                          │
-Mask Tokens (N, C) ─┴─> Output Tokens         │
-Sparse Prompts (B, M, C) ─> Concat ─> Tokens  │
-                                              │
-                                              v
-                                     Two-Way Transformer
-                                              │
-                     ┌────────────────────────┴────────────────────┐
-                     v                                             v
-              Updated Tokens                              Updated Source
-              (B, N+M, C)                                  (B, H, W, C)
-                     │                                             │
-         ┌───────────┴──────────┐                                  v
-         v                      v                          Upscale (4x)
-    IoU Token           Mask Tokens                                │
-         │              (B, N, C)                                  v
-         v                      │                          (B, H*4, W*4, C/8)
-    IoU Head                    v                                 │
-         │              Hypernetwork MLPs                         │
-         v              (B, N, C/8)                               │
-    IoU Predictions            │                                  │
-    (B, N)                     └──────────> Matrix Multiply <─────┘
-                                                   |
-                                                   v
-                                            Mask Logits
-                                            (B, N, H*4, W*4)
-```
+Architecture Overview:
+---------------------
+1. ``image_embeddings + dense_prompt_embeddings`` -> source ``(B, H, W, C)``.
+2. ``[iou_token, mask_tokens, sparse_prompts]`` -> tokens ``(B, 1+N+M, C)``.
+3. -> :class:`TwoWayTransformer` -> updated tokens and updated source.
+4. -> source upscaled 4x to ``(B, 4H, 4W, C/8)``; each mask token -> its own
+   MLP -> ``(B, N, C/8)``.
+5. -> matmul -> mask logits ``(B, N, 4H, 4W)``; IoU token -> MLP -> ``(B, N)``.
 
-**Usage Example**:
+Usage Examples:
+--------------
 ```python
-import keras
-from .transformer import TwoWayTransformer
-
-# Create transformer
-transformer = TwoWayTransformer(
-    depth=2,
-    embedding_dim=256,
-    num_heads=8,
-    mlp_dim=2048
-)
-
-# Create decoder
-decoder = MaskDecoder(
-    transformer_dim=256,
-    transformer=transformer,
-    num_multimask_outputs=3,
-    iou_head_hidden_dim=256,
-)
-
-# Use decoder
-image_embeddings = keras.random.normal(shape=(1, 64, 64, 256))
-image_pe = keras.random.normal(shape=(1, 64, 64, 256))
-sparse_prompts = keras.random.normal(shape=(1, 2, 256))
-dense_prompts = keras.random.normal(shape=(1, 64, 64, 256))
-
-masks, iou_pred = decoder(
-    image_embeddings=image_embeddings,
-    image_pe=image_pe,
-    sparse_prompt_embeddings=sparse_prompts,
-    dense_prompt_embeddings=dense_prompts,
-    multimask_output=True
-)
-
-print(f"Masks shape: {masks.shape}")      # (1, 3, 256, 256)
-print(f"IoU pred shape: {iou_pred.shape}") # (1, 3)
+from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+decoder = MaskDecoder(transformer_dim=256, num_multimask_outputs=3,
+                      transformer=TwoWayTransformer(depth=2, embedding_dim=256,
+                                                    num_heads=8, mlp_dim=2048))
+masks, iou = decoder(image_embeddings=feat, image_pe=pe,
+                     sparse_prompt_embeddings=sparse,
+                     dense_prompt_embeddings=dense, multimask_output=True)
 ```
 
-**References**:
-- Kirillov, A., et al. (2023). Segment Anything. *arXiv*.
+Measured caveats:
+----------------
+- **``activation`` and ``mlp_activation`` are two SEPARATE knobs and their
+  defaults deliberately differ** -- ``'gelu'`` for ``output_upscaling`` only,
+  ``'relu'`` for every non-final layer of the hypernetwork and IoU heads. This
+  mirrors reference SAM, whose ``MaskDecoder(activation=...)`` reaches the
+  upscaler alone while ``MLP`` hardcodes ``F.relu``. Do NOT collapse them into
+  one knob "so the decoder agrees with itself": either single choice makes one
+  of the two halves wrong, and the error is a value drift with no shape symptom.
+- **``iou_head_depth`` drives BOTH the IoU head and every hypernetwork MLP.**
+  Reference SAM hardcodes 3 for the hypernetwork and applies the knob to the
+  IoU head only, so this is a deliberate deviation reachable only at a
+  non-default depth. At the default 3 the two agree exactly.
+- **``sparse_prompt_embeddings`` must carry a batch of 1 or exactly
+  ``batch_size``.** Anything in between raises ``ValueError``; before that
+  guard existed an intermediate value tiled into an interleaved ``[a, b, a,
+  b]`` order and scored every image against the wrong prompt with no error at
+  all.
 """
 
 import keras

@@ -1,73 +1,60 @@
 """
-SAM Prompt Encoder
-============================================
+SAM 1 Prompt Encoder: points, boxes and masks into decoder embeddings.
+======================================================================
 
-Implementation of the prompt encoder from the
-Segment Anything Model (SAM). The prompt encoder is responsible for converting
-various user inputs (points, boxes, masks) into high-dimensional embeddings that
-can be consumed by the mask decoder.
+:class:`PromptEncoder` turns user input into the two things the mask decoder
+takes: SPARSE embeddings ``(B, N, D)`` for points and boxes, and a DENSE
+embedding grid ``(B, H_emb, W_emb, D)`` for an input mask. It is also the owner
+of the image positional encoding -- :meth:`get_dense_pe` is what supplies
+``image_pe`` to the decoder.
 
-**Intent**: To create a robust, serializable, and flexible prompt encoder that
-can handle different combinations of prompts, following modern Keras 3 best
-practices for composite layer construction.
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
 
-**Architecture**: The prompt encoder processes three types of inputs:
-1.  **Points and Boxes (Sparse Prompts)**: These are encoded using a learned
-    positional encoding (`PositionEmbeddingRandom`) combined with learnable
-    embeddings for different prompt types (e.g., foreground point, background
-    point, top-left corner, bottom-right corner).
-2.  **Masks (Dense Prompts)**: Input masks are processed through a small
-    convolutional network to produce a dense embedding grid that matches the
-    spatial dimensions of the image embedding.
+Key Features:
+------------
+- A random-Gaussian Fourier positional encoding
+  (:class:`PositionEmbeddingRandom`) shared by the sparse prompts and by
+  :meth:`get_dense_pe`, so prompts and image live in one coordinate frame.
+- Four learnable type embeddings -- background point, foreground point,
+  box top-left, box bottom-right -- plus ``not_a_point_embed`` for padding rows
+  and ``no_mask_embed`` for the no-mask case.
+- Masks go through a fixed 4x downscaling conv stack to reach the embedding
+  grid.
 
-If no prompt of a certain type is provided, a learned "not-a-prompt" embedding
-is used as a placeholder.
+Architecture Overview:
+---------------------
+1. Points ``(B, N, 2)`` + labels ``(B, N)`` -> positional encoding + the type
+   embedding selected by the label -> ``(B, N, D)``.
+2. Boxes ``(B, 1, 4)`` -> two corner rows -> ``(B, 2, D)``; concatenated with
+   the point rows.
+3. Masks ``(B, 1, 4*H_emb, 4*W_emb)`` -> conv stack -> ``(B, H_emb, W_emb, D)``;
+   absent -> ``no_mask_embed`` broadcast to the same shape.
 
-**Data Flow**:
-```
-Points (B, N, 2) --+
-Labels (B, N) ----> _embed_points() -> Sparse Embeddings (B, N, D) -----+
-                                                                        │
-Boxes (B, 1, 4) --> _embed_boxes() --> Sparse Embeddings (B, 2, D) -----+--> Concat
-                                                                        │
-(No points/boxes)--> not_a_point_embed --> Sparse Embeddings (B, 1, D) -+
-
-Masks (B, 1, H, W) -> _embed_masks (CNN) -> Dense Embeddings (B, H_emb, W_emb, D)
-(No mask) ---------> no_mask_embed ------> Dense Embeddings (B, H_emb, W_emb, D)
-```
-
-**Usage Example**:
+Usage Examples:
+--------------
 ```python
-import keras
-import numpy as np
-
-# Create prompt encoder
-prompt_encoder = PromptEncoder(
-    embed_dim=256,
-    image_embedding_size=(64, 64),
-    input_image_size=(1024, 1024),
-    mask_in_chans=16,
-)
-
-# Example: Encode points
-points = keras.ops.convert_to_tensor(np.array([[[100.0, 200.0], [300.0, 400.0]]]))
-labels = keras.ops.convert_to_tensor(np.array([[1, 0]]))  # 1=foreground, 0=background
-
-sparse_emb, dense_emb = prompt_encoder(points=(points, labels))
-print(f"Sparse embedding shape: {sparse_emb.shape}")  # (1, 2, 256)
-print(f"Dense embedding shape: {dense_emb.shape}")     # (1, 64, 64, 256)
-
-# Example: Encode boxes
-boxes = keras.ops.convert_to_tensor(np.array([[[50.0, 50.0, 500.0, 500.0]]]))
-sparse_emb, dense_emb = prompt_encoder(boxes=boxes)
-
-# Example: Encode masks
-masks = keras.random.normal(shape=(1, 1, 256, 256))
-sparse_emb, dense_emb = prompt_encoder(masks=masks)
+from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
+encoder = PromptEncoder(embed_dim=256, image_embedding_size=(64, 64),
+                        input_image_size=(1024, 1024), mask_in_chans=16)
+sparse, dense = encoder(points=(coords, labels))   # (B, N, 256), (B, 64, 64, 256)
+image_pe = encoder.get_dense_pe()                  # (1, 64, 64, 256)
 ```
 
-**References**:
-- Kirillov, A., et al. (2023). Segment Anything. *arXiv*.
+Measured caveats:
+----------------
+- **A mask prompt's spatial size must be EXACTLY ``4 * image_embedding_size``
+  in BOTH axes.** The downscaling stack is a fixed 4x reduction, so nothing
+  else can land on the embedding grid; anything else raises ``ValueError``.
+- **A padding row (``label == -1``) has its positional encoding ZEROED before
+  ``not_a_point_embed`` is added, not merely overwritten by it.** Reference SAM
+  does ``point_embedding[labels == -1] = 0.0`` first. Relying on the additive
+  block alone leaves the padding point's coordinate in the embedding: measured
+  max abs deviation ``0.962855`` against the correct row, and ``1.727846``
+  between two padding points placed at different coordinates -- both exactly
+  ``0.0`` after the fix, which is why the guard asserts exact zero rather than
+  a tolerance.
 """
 
 import keras

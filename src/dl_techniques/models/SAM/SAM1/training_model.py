@@ -1,44 +1,90 @@
 """
-`SAMTrainingModel` -- the trainable wrapper around :class:`SAM`.
+``SAMTrainingModel``: the trainable, traceable wrapper around :class:`SAM`.
+===========================================================================
 
-Why a wrapper exists at all
----------------------------
-``SAM.call`` **cannot be traced**. ``postprocess_masks`` runs unconditionally at
-the end of ``SAM.call``, and its ``ops.image.resize`` raises
-``TypeError: len is not well defined for a symbolic Tensor`` under ``fit()``'s
-graph mode. Reading only the ``low_res_logits`` key does *not* avoid it -- the
-postprocess runs regardless of which key the caller consumes. A Python-tuple
-``original_size`` cannot be passed either, because ``Layer.__call__`` rejects
-non-tensor positional arguments.
+:meth:`SAM.call` cannot be traced, so it cannot be the inner operation of a
+``fit()`` step, and a custom ``train_step`` is forbidden by standing
+instruction. This wrapper takes the other route: it calls SAM's submodules
+directly and returns the differentiable tensors as a dict that stock
+``compile()`` / ``fit()`` trains.
 
-So the training path calls SAM's submodules directly:
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
 
-    ``preprocess -> image_encoder -> prompt_encoder -> mask_decoder``
+Key Features:
+------------
+- The training path is ``preprocess -> image_encoder -> prompt_encoder ->
+  mask_decoder`` -- ``postprocess_masks`` is never reached, which is exactly
+  what makes it traceable.
+- ``SAM.call`` / ``SAM.__call__`` is never invoked -- pinned by a spy in
+  ``tests/test_models/test_sam/test_training_model.py`` that is itself RED-proved
+  by a control which deliberately routes through ``SAM.call``.
+- ``num_refinement_rounds > 1`` re-prompts with the previous round's DETACHED
+  logits plus two freshly sampled points; the default is ``1`` (no refinement).
+- Public output-key constants (``LOW_RES_LOGITS``, ``IOU_PREDICTIONS``,
+  ``IOU_SUPERVISION``) are shared with the losses and the trainer so a
+  ``compile(loss={...})`` dict cannot drift from what ``call`` returns.
 
-and returns the two differentiable tensors as a dict, which stock
-``compile()``/``fit()`` trains provided ``loss=`` is itself a **dict keyed to
-the output names** with a matching dict ``y_true``. (The often-repeated claim
-that a dict ``y_pred`` cannot be trained by stock ``fit()`` is over-general: it
-fails for exactly one configuration, a single ``Loss`` object plus a bare-tensor
-``y_true``.)
+Architecture Overview:
+---------------------
+1. ``image`` -> ``SAM.preprocess`` -> ``SAM.image_encoder``.
+2. prompts (``point_coords`` / ``point_labels`` / ``boxes``) ->
+   ``SAM.prompt_encoder``.
+3. -> ``SAM.mask_decoder`` -> ``low_res_logits`` + ``iou_predictions``, repeated
+   ``num_refinement_rounds`` times and concatenated round-major.
+4. If ``gt_mask`` is supplied, an extra ``iou_supervision`` output packs the
+   predicted IoU against the ``stop_gradient``-ed achieved IoU.
 
-Usage
------
-    >>> trainer = SAMTrainingModel(sam, multimask_output=False)
-    >>> trainer.compile(
-    ...     optimizer="adam",
-    ...     loss={"low_res_logits": SAMMaskLoss(), "iou_supervision": SAMIoULoss()},
-    ...     loss_weights={"low_res_logits": 1.0, "iou_supervision": 1.0},
-    ... )
-    >>> trainer.fit(dataset)          # dataset yields (inputs_dict, y_true_dict)
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM1.training_model import SAMTrainingModel
+trainer = SAMTrainingModel(sam, multimask_output=False)
+trainer.compile(optimizer="adam",
+                loss={"low_res_logits": SAMMaskLoss(),
+                      "iou_supervision": SAMIoULoss()})
+trainer.fit(dataset)          # dataset yields (inputs_dict, y_true_dict)
+```
 
-    ``loss=`` may key a SUBSET of the output keys (measured), which is why
-    ``iou_predictions`` can stay unsupervised while ``iou_supervision`` carries
-    the IoU term. ``SAMMaskLoss`` already carries the focal:dice mix internally,
-    so ``loss_weights`` only balances mask against IoU.
-
-This module makes **no accuracy claim**. It proves that the training path runs
-with live gradients; it does not claim SAM trained to any quality.
+Measured caveats:
+----------------
+- **This module makes no accuracy claim.** It proves the training path runs
+  with live gradients; it does not claim SAM trained to any quality, and it says
+  nothing about segmentation quality. No official Meta SAM checkpoint has ever
+  been loaded in this repository.
+- **``SAM.call`` itself CANNOT be traced, and that is not a defect this wrapper
+  hides.** ``postprocess_masks`` runs unconditionally at the end of
+  ``SAM.call``, and its ``ops.image.resize`` raises ``TypeError: len is not
+  well defined for a symbolic Tensor`` under ``fit()``'s graph mode --
+  regardless of which output key a trainer supervises, so consuming only
+  ``low_res_logits`` does NOT avoid it. A Python-tuple ``original_size`` cannot
+  be passed either: ``Layer.__call__`` rejects non-tensor positional arguments.
+- **A dict ``y_pred`` IS trainable by stock ``fit()``.** The often-repeated
+  claim that it is not is over-general: it fails for exactly one configuration,
+  a single ``Loss`` object plus a bare-tensor ``y_true``. ``loss=`` may key a
+  SUBSET of the output keys (measured), which is why ``iou_predictions`` can
+  stay unsupervised while ``iou_supervision`` carries the IoU term.
+- **``multimask_output=True`` runs, but its objective is an approximation.** All
+  ``num_multimask_outputs`` proposals are supervised against the SAME single
+  ground-truth mask, because the pipeline emits one GT per instance and
+  ``SAMMaskLoss`` repeats it across the mask axis. The paper's
+  "back-propagate only the minimum loss over the masks" reduction is
+  UNIMPLEMENTED -- stated here rather than left silently reachable. The default
+  is ``False``.
+- **At ``num_refinement_rounds > 1`` the ``.keras`` round-trip is value-exact
+  only on the round-1 slice.** Later rounds depend on a random draw whose
+  generator state advanced differently; asserted in both directions rather than
+  papered over.
+- **Loading a pre-restructure ``.keras`` file requires a registrar-first
+  import.** A checkpoint records the module path its classes lived in when it
+  was saved, and this package has since moved, so Keras' ``importlib`` fallback
+  now raises ``TypeError: Could not deserialize class 'SAMTrainingModel'
+  because its parent module ... cannot be imported``. Import the module that
+  DEFINES the saved class before calling ``load_model`` and the registry path
+  resolves it. (The old dotted path is deliberately not spelled here: a
+  close-out gate for the restructure is a repo-wide grep for it, and writing it
+  in prose erodes the instrument as effectively as a real reference would.)
 """
 
 from typing import Any, Dict, Optional, Tuple

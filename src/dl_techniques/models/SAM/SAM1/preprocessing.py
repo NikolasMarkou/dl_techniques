@@ -1,17 +1,42 @@
 """
-Input transforms that reference SAM applies **before** the model.
+SAM 1 Input Transforms: the resize reference SAM applies before the model.
+==========================================================================
 
-`SAM.preprocess` normalizes and pads an image up to the encoder's `img_size`;
-it cannot shrink one. Reference SAM never asks it to: the official pipeline runs
-a `ResizeLongestSide` transform on the raw image first, so what reaches the
-model is always at most `img_size` on its longest side and the pad is
-non-negative by construction. No equivalent transform existed anywhere in this
-repository (a repo-wide grep for `ResizeLongest|longest` returned zero hits),
-which is why `SAM.preprocess`'s oversize `ValueError` would otherwise be a dead
-end rather than a remedy.
+:func:`resize_longest_side` scales an image so its LONGEST side equals the
+encoder's ``img_size``, preserving aspect ratio. It is the transform reference
+SAM's official pipeline runs on the raw image, and it is what makes
+``SAM.preprocess`` well defined.
 
-This module is `keras.ops`-only (no raw TensorFlow ops), so it stays inside the
-package's backend-purity invariant (I-1).
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+
+Key Features:
+------------
+- Aspect-ratio-preserving; the short side is left to :meth:`SAM.preprocess`'s
+  zero padding.
+- ``keras.ops``-only (no raw TensorFlow ops), so it stays inside the package's
+  backend-purity invariant.
+
+Usage Examples:
+--------------
+```python
+from dl_techniques.models.SAM.SAM1.preprocessing import resize_longest_side
+image = resize_longest_side(raw_image, target_length=1024)
+padded = sam.preprocess(image)
+```
+
+Measured caveats:
+----------------
+- **``SAM.preprocess`` pads only -- it never resizes.** It normalizes and pads
+  up to ``img_size`` and cannot shrink an image, so an oversize input raises.
+  Without this module's transform in front of it that ``ValueError`` is a dead
+  end rather than a remedy; no equivalent existed anywhere in this repository
+  before (a repo-wide grep for ``ResizeLongest|longest`` returned zero hits).
+- **This function has ZERO production consumers today.** Under ``src/`` a grep
+  finds only its definition, its ``__init__`` export, the two error messages
+  that name it as the remedy, and README examples -- the shipped trainer's data
+  pipeline does not call it. Every caller is a test or a reader.
 """
 
 import keras

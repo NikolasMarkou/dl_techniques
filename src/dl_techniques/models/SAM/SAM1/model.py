@@ -1,124 +1,85 @@
 """
-Segment Anything Model (SAM)
-===================================================
+Segment Anything Model (SAM 1): the end-to-end promptable segmenter.
+====================================================================
 
-This file provides the main `SAM` model class, which integrates the image
-encoder, prompt encoder, and mask decoder into a single, end-to-end Keras model.
-It follows the structure of modern, variant-based models like ConvNeXt, offering
-a `from_variant` class method to easily instantiate different model sizes
-(e.g., `vit_b`, `vit_l`, `vit_h`).
+:class:`SAM` composes the three SAM 1 components -- image encoder, prompt
+encoder, mask decoder -- into one serializable Keras model with a
+``from_variant`` constructor. It owns preprocessing (normalize + pad),
+orchestration, and the postprocess that lifts low-resolution logits back to the
+original image size.
 
-**Intent**: To provide a user-friendly, high-level interface for the SAM model
-that is fully serializable and adheres to modern Keras 3 best practices. This
-class handles preprocessing, postprocessing, and the orchestration of the three
-main sub-components.
+Based on:
+---------
+- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+- Dosovitskiy, A. et al. (2020). ViT -- the encoder family.
 
-**Architecture Overview**:
-```
-                            SAM Model
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        │                       │                       │
-        v                       v                       v
-  Image Encoder          Prompt Encoder          Mask Decoder
-  (ViT Backbone)         (Multi-modal)           (Transformer)
-        │                       │                       │
-        v                       v                       v
-  Image Features         Sparse + Dense              Masks
-  (B, H/16, W/16, C)     Prompt Embeddings          (B, N, H, W)
-                                │                       │
-                                └───────────────────────┘
-                                      IoU Predictions
-                                         (B, N)
-```
+Key Features:
+------------
+- ``SAM.from_variant('vit_b' | 'vit_l' | 'vit_h')`` builds the three components
+  at matching widths; the prompt encoder and mask decoder are
+  variant-INDEPENDENT (both run at ``prompt_embed_dim=256``).
+- ``call`` takes a DICT (``image``, optional ``points`` / ``boxes`` / ``masks``,
+  ``original_size``) and returns a dict of ``masks``, ``iou_predictions`` and
+  ``low_res_logits``.
+- ``get_build_config`` / ``build_from_config`` materialize the FULL weight set
+  at load time; without them the lazily-built attention and transformer
+  sublayers are restored fresh. See the anchored notes on those methods.
 
-**Data Flow**:
-```
-Input Image (B, H, W, 3)
-    │
-    v
-Preprocessing (normalize + pad)
-    │
-    v
-Image Encoder (ViT) ──────────────────> Image Embeddings (B, H', W', C)
-                                              │
-Input Prompts:                                │
-- Points (coords, labels)                     │
-- Boxes (x1, y1, x2, y2)                      │
-- Masks (B, 1, H, W)                          │
-    │                                         │
-    v                                         │
-Prompt Encoder ──> Sparse Embeddings (B, N, C)|
-                  Dense Embeddings (B, H', W', C)
-                                              │
-    ┌─────────────────────────────────────────┘
-    │
-    v
-Mask Decoder (Two-Way Transformer + Hypernetwork)
-    │
-    v
-Low-Res Masks (B, N, H/4, W/4)
-    │
-    v
-Postprocessing (upscale + threshold)
-    │
-    v
-Output Masks (B, N, H, W)
-IoU Predictions (B, N)
-```
+Architecture Overview:
+---------------------
+1. ``preprocess`` -> normalize by ``pixel_mean``/``pixel_std``, pad to
+   ``img_size``.
+2. -> ``image_encoder`` -> ``(B, img_size/16, img_size/16, 256)``.
+3. -> ``prompt_encoder`` -> sparse ``(B, N, 256)`` + dense ``(B, H', W', 256)``.
+4. -> ``mask_decoder`` -> ``low_res_logits (B, N, H'*4, W'*4)`` + ``iou``.
+5. -> ``postprocess_masks`` -> ``masks`` at ``original_size``, optionally
+   binarized at ``mask_threshold``.
 
-**Usage Example**:
+Model Variants:
+--------------
+Measured with ``count_params()`` after one forward pass per component at
+``img_size=1024`` -- these are this package's own numbers, not reference-PyTorch
+quotes, and this package's layout deviations move them:
+
+| Variant | Image Encoder | Prompt Encoder | Mask Decoder | Total |
+|---|---:|---:|---:|---:|
+| ``vit_b`` | 89,670,912 | 6,476 | 4,058,340 | 93,735,728 |
+| ``vit_l`` | 308,278,272 | 6,476 | 4,058,340 | 312,343,088 |
+| ``vit_h`` | 637,026,048 | 6,476 | 4,058,340 | 641,090,864 |
+
+Usage Examples:
+--------------
 ```python
-import keras
-import numpy as np
-
-# Create SAM model using a predefined variant
-model = SAM.from_variant('vit_b')  # Options: 'vit_b', 'vit_l', 'vit_h'
-
-# Prepare input data
-image = keras.random.normal(shape=(1, 1024, 1024, 3))
-points = (
-    keras.ops.convert_to_tensor([[512.0, 512.0]]),  # coordinates
-    keras.ops.convert_to_tensor([[1]])               # labels (1=foreground)
-)
-
-# Run inference
-outputs = model({
-    'image': image,
-    'points': points,
-    'original_size': (1024, 1024)
-})
-
-print(f"Masks shape: {outputs['masks'].shape}")                # (1, N, 1024, 1024)
-print(f"IoU predictions: {outputs['iou_predictions'].shape}")  # (1, N)
-print(f"Low-res logits: {outputs['low_res_logits'].shape}")    # (1, N, 256, 256)
-
-# Example with boxes
-boxes = keras.ops.convert_to_tensor([[[100.0, 100.0, 500.0, 500.0]]])
-outputs = model({
-    'image': image,
-    'boxes': boxes,
-    'original_size': (1024, 1024)
-})
-
-# Example with mask
-mask_prompt = keras.random.normal(shape=(1, 1, 256, 256))
-outputs = model({
-    'image': image,
-    'masks': mask_prompt,
-    'original_size': (1024, 1024)
-})
+from dl_techniques.models.SAM.SAM1 import SAM
+model = SAM.from_variant('vit_b')
+outputs = model({'image': image, 'points': (coords, labels),
+                 'original_size': (1024, 1024)})
+outputs['low_res_logits']    # (B, N, 256, 256) -- the differentiable key
 ```
 
-**Model Variants**:
-- **vit_b** (Base): 768 dim, 12 layers, 12 heads (~90M parameters)
-- **vit_l** (Large): 1024 dim, 24 layers, 16 heads (~300M parameters)
-- **vit_h** (Huge): 1280 dim, 32 layers, 16 heads (~630M parameters)
-
-**References**:
-- Kirillov, A., et al. (2023). Segment Anything. *arXiv*.
-- Dosovitskiy, A., et al. (2020). An Image is Worth 16x16 Words: Transformers
-  for Image Recognition at Scale. *ICLR*.
+Measured caveats:
+----------------
+- **No weights ship and no accuracy claim is made.**
+  ``SAM.from_variant('vit_b')`` builds a RANDOMLY INITIALIZED model. No
+  official Meta SAM checkpoint has ever been loaded in this repository, no
+  key-mapping layer exists, and ``vit_l`` / ``vit_h`` are never forward-passed
+  by any test -- only ``vit_b`` and a reduced fixture are.
+- **``SAM.call`` cannot be traced.** ``postprocess_masks`` runs unconditionally
+  at the end of ``call`` and its ``ops.image.resize`` raises under graph mode,
+  regardless of which output key the caller consumes. Consuming only
+  ``low_res_logits`` does NOT avoid it. Use :class:`SAMTrainingModel` for any
+  ``fit()`` path.
+- **``masks`` is not differentiable at the default.** ``binarize_masks=True``
+  casts it to ``uint8``, so differentiating it returns ``None`` for EVERY
+  trainable variable, silently and with no error. ``low_res_logits`` is the
+  training target; ``binarize_masks=False`` is the escape hatch.
+- The layout control at the reduced test fixture (``img_size=256``,
+  ``patch_size=16``, ``embed_dim=64``, ``depth=4``, ``num_heads=4``,
+  ``out_chans=32``): **202 weights / 201 trainable / 321,862 parameters**, and
+  a ``.keras`` round-trip whose max abs diff on ``low_res_logits`` is exactly
+  ``0.0``. A weight COUNT cannot see a partial restore -- both the correct and
+  the broken build report 202/201/321,862 after any forward pass -- which is why
+  the guards compare index-aligned VALUES.
 """
 
 import keras
