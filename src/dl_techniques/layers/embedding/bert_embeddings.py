@@ -484,7 +484,10 @@ class BertEmbeddings(keras.layers.Layer):
             Must be ``None`` when ``use_token_type_embeddings`` is ``False``.
         :type token_type_ids: Optional[keras.KerasTensor]
         :param position_ids: Position IDs of shape
-            ``(batch_size, seq_length)``. If ``None``, defaults to sequential
+            ``(batch_size, seq_length)`` or ``(seq_length,)``; the rank-1 form
+            is broadcast across the batch. Accepted as a tensor, a NumPy array
+            or any nested Python sequence (list/tuple), which is converted
+            before the rank is read. If ``None``, defaults to sequential
             positions.
         :type position_ids: Optional[keras.KerasTensor]
         :param training: Whether the layer is in training mode.
@@ -493,7 +496,8 @@ class BertEmbeddings(keras.layers.Layer):
             ``(batch_size, seq_length, hidden_size)``.
         :rtype: keras.KerasTensor
         :raises ValueError: If ``token_type_ids`` is supplied while
-            ``use_token_type_embeddings`` is ``False``.
+            ``use_token_type_embeddings`` is ``False``; or if ``position_ids``
+            is neither rank 1 nor rank 2.
         """
         input_shape = ops.shape(input_ids)
         batch_size = input_shape[0]
@@ -504,25 +508,43 @@ class BertEmbeddings(keras.layers.Layer):
             position_ids = ops.arange(seq_length, dtype="int32")
             position_ids = ops.expand_dims(position_ids, axis=0)
             position_ids = ops.broadcast_to(position_ids, (batch_size, seq_length))
-        # DECISION plan-2026-08-10T183739-b007f435/D-015
-        # Rank normalization happens HERE, once, for BOTH branches. Do NOT delete
-        # it and do NOT push it down into either branch: the two branches consume
-        # position_ids differently, so without this the SAME rank-1 input that the
-        # learned branch silently broadcasts (keras.layers.Embedding returns
-        # (seq, hidden), broadcast in the sum) crashes the sinusoidal branch with
-        # an opaque `IndexError: tuple index out of range` from the
-        # (shape[0], shape[1], hidden_size) reshape, which assumes rank 2.
-        # Measured at c6ab51084. See decisions.md D-015.
-        elif len(position_ids.shape) == 1:
-            position_ids = ops.broadcast_to(
-                ops.expand_dims(position_ids, axis=0), (batch_size, seq_length)
-            )
-        elif len(position_ids.shape) != 2:
-            raise ValueError(
-                f"position_ids must be rank 1 (seq_length,) or rank 2 "
-                f"(batch_size, seq_length), got rank {len(position_ids.shape)} "
-                f"with shape {tuple(position_ids.shape)}"
-            )
+        else:
+            # DECISION plan-2026-08-10T183739-b007f435/D-021
+            # Materialize BEFORE reading the rank. Do NOT reduce this to a bare
+            # `len(position_ids.shape)`: a Python list/tuple/int has no `.shape`,
+            # so that form turns every non-array caller into an opaque
+            # `AttributeError: 'list' object has no attribute 'shape'` raised from
+            # inside call() -- the exact failure shape D-015 exists to remove, and
+            # a REGRESSION measured at 7e65bdb43 against c6ab51084 (where a
+            # `[[0,1,2,3],[0,1,2,3]]` was accepted by the sinusoidal branch).
+            # The `hasattr` gate is deliberate: convert_to_tensor is applied only
+            # to objects that are not already arrays/tensors, so the symbolic
+            # KerasTensor path through a functional graph is left untouched.
+            # See decisions.md D-021.
+            if not hasattr(position_ids, 'shape'):
+                position_ids = ops.convert_to_tensor(position_ids)
+
+            # DECISION plan-2026-08-10T183739-b007f435/D-015
+            # Rank normalization happens HERE, once, for BOTH branches. Do NOT
+            # delete it and do NOT push it down into either branch: the two
+            # branches consume position_ids differently, so without this the SAME
+            # rank-1 input that the learned branch silently broadcasts
+            # (keras.layers.Embedding returns (seq, hidden), broadcast in the sum)
+            # crashes the sinusoidal branch with an opaque
+            # `IndexError: tuple index out of range` from the
+            # (shape[0], shape[1], hidden_size) reshape, which assumes rank 2.
+            # Measured at c6ab51084. See decisions.md D-015.
+            position_rank = len(position_ids.shape)
+            if position_rank == 1:
+                position_ids = ops.broadcast_to(
+                    ops.expand_dims(position_ids, axis=0), (batch_size, seq_length)
+                )
+            elif position_rank != 2:
+                raise ValueError(
+                    f"position_ids must be rank 1 (seq_length,) or rank 2 "
+                    f"(batch_size, seq_length), got rank {position_rank} "
+                    f"with shape {tuple(position_ids.shape)}"
+                )
 
         # Apply word and position embeddings
         word_embeds = self.word_embeddings(input_ids)

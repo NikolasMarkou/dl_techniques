@@ -321,14 +321,22 @@ class TestMaskingContract:
         site and every output sha stayed bit-identical, with no `_keras_mask`
         anywhere (`LayerNormalization`/`Dropout` do not forward it on the eager
         path). Only the structural flag catches it.
+
+        Scope, per decisions.md D-018: the flag is numerically INERT downstream
+        -- at `mask_zero=True` the inner `Embedding`'s mask is already gone by
+        the `word_embeds + position_embeds` sum, so no mask reaches the model at
+        EITHER setting. This test pins the flag's VALUE and the observable
+        absence of a `_keras_mask`; it is not evidence for a live
+        "two masking mechanisms collide" hazard, which D-018 measured FALSE.
         """
         model = _model()
         emb = model.embeddings
 
         assert emb.mask_zero is False, (
             "the embedding layer was built with mask_zero=True; DistilBERT "
-            "threads an explicit attention_mask and must not also acquire a "
-            "Keras auto-mask (I-4)"
+            "passes mask_zero explicitly so that omitting it cannot silently "
+            "flip this model to BERT's default True (I-4; decisions.md D-018 "
+            "-- the flag is inert downstream, this pins the recorded intent)"
         )
         assert emb.word_embeddings.mask_zero is False, (
             "word_embeddings emits a Keras auto-mask despite the layer's "
@@ -338,8 +346,10 @@ class TestMaskingContract:
         ids = _padded_tokens()
         embedding_output = emb(input_ids=ids, training=False)
         assert getattr(embedding_output, "_keras_mask", None) is None, (
-            "the embedding output carries a _keras_mask; a second, "
-            "uncoordinated masking mechanism has appeared (I-4)"
+            "the embedding output carries a _keras_mask; BertEmbeddings has "
+            "gained mask propagation, so the 'no mask leaves this layer at "
+            "either mask_zero setting' claim in the D-011 anchor, the layer "
+            "docstring and the DistilBERT README is now false (I-4, D-018)"
         )
         model_output = model(ids, training=False)["last_hidden_state"]
         assert getattr(model_output, "_keras_mask", None) is None, (

@@ -502,6 +502,75 @@ class TestOptionalBranches:
         with pytest.raises(ValueError, match="position_ids must be rank 1"):
             layer(ids_2d, position_ids=bad, training=False)
 
+    def test_position_ids_accept_plain_python_and_numpy_containers(
+            self, distil_params):
+        """A list/tuple/ndarray ``position_ids`` must behave exactly like a tensor.
+
+        This is a REGRESSION guard, not a feature test. The rank dispatch added
+        for D-015 originally read ``len(position_ids.shape)`` directly, which a
+        Python ``list`` does not have: a ``[[0, 1, 2, 3], [0, 1, 2, 3]]`` that
+        the sinusoidal branch ACCEPTED at ``c6ab51084`` began raising
+        ``AttributeError: 'list' object has no attribute 'shape'`` at
+        ``7e65bdb43`` -- the same opaque, un-named failure D-015 existed to
+        remove -- and the learned branch's Keras-level ``ValueError`` degraded
+        into it too. Assert VALUES, not just shapes.
+
+        The container-vs-tensor comparison alone is NOT enough and must not be
+        left as the only assertion: it computes its own reference through the
+        same code path, so an implementation that discarded ``position_ids``
+        and rebuilt them from ``arange`` agrees with itself and passes
+        (measured -- mutation ``M-R2_rebuild_positions_from_arange`` was GREEN
+        against that assertion alone). The REVERSED positions plus the explicit
+        "differs from the ``position_ids=None`` default" control below are what
+        make it non-vacuous. See decisions.md D-021.
+        """
+        seq_length = 8
+        ids_2d = ops.convert_to_tensor(
+            np.full((2, seq_length), 5, dtype='int32'))
+        rows = list(range(seq_length))[::-1]
+        rank2_np = np.asarray([rows, rows], dtype='int32')
+        containers = {
+            'list_rank2': [list(rows), list(rows)],
+            'tuple_rank2': (tuple(rows), tuple(rows)),
+            'list_rank1': list(rows),
+            'tuple_rank1': tuple(rows),
+            'ndarray_rank2': rank2_np,
+            'ndarray_rank1': np.asarray(rows, dtype='int32'),
+        }
+
+        for position_type in ('sinusoidal', 'learned'):
+            keras.utils.set_random_seed(4242)
+            layer = BertEmbeddings(
+                **{**distil_params, 'position_embedding_type': position_type})
+            reference = ops.convert_to_numpy(layer(
+                ids_2d,
+                position_ids=ops.convert_to_tensor(rank2_np),
+                training=False,
+            ))
+            default = ops.convert_to_numpy(
+                layer(ids_2d, position_ids=None, training=False))
+            assert np.max(np.abs(reference - default)) > 0.0, (
+                f"reversed position_ids produce the same output as the "
+                f"position_ids=None default on the '{position_type}' branch -- "
+                f"position_ids are being ignored, so every container "
+                f"comparison below is vacuous")
+
+            for name, position_ids in containers.items():
+                out = ops.convert_to_numpy(
+                    layer(ids_2d, position_ids=position_ids, training=False))
+                assert out.shape == reference.shape, (
+                    f"'{name}' position_ids changed the output shape on the "
+                    f"'{position_type}' branch")
+                assert np.max(np.abs(out - reference)) == 0.0, (
+                    f"'{name}' position_ids does not reproduce the tensor "
+                    f"result on the '{position_type}' branch -- the container "
+                    f"is being reinterpreted, not just converted")
+
+            # A rank-0 container must reach the SAME named ValueError as a
+            # rank-3 tensor, not an AttributeError from a missing `.shape`.
+            with pytest.raises(ValueError, match="position_ids must be rank 1"):
+                layer(ids_2d, position_ids=3, training=False)
+
     # -- dtype policies -------------------------------------------------------------
 
     def test_sinusoidal_table_gets_float64_precision_under_a_float64_policy(
@@ -606,6 +675,7 @@ class TestOptionalBranches:
         mask propagation, this test must go red BEFORE those texts become false.
         """
         outputs = {}
+        functional = {}
         for mask_zero in (True, False):
             keras.utils.set_random_seed(99)
             layer = BertEmbeddings(**{**distil_params, 'mask_zero': mask_zero})
@@ -618,18 +688,30 @@ class TestOptionalBranches:
             assert getattr(eager, '_keras_mask', None) is None, (
                 f"an eager _keras_mask escaped the layer at mask_zero={mask_zero}"
             )
-            symbolic = layer(keras.Input(shape=(8,), dtype='int32'))
+            inputs = keras.Input(shape=(8,), dtype='int32')
+            symbolic = layer(inputs)
             assert getattr(symbolic, '_keras_mask', None) is None, (
                 f"a functional _keras_mask escaped the layer at "
                 f"mask_zero={mask_zero}"
             )
             outputs[mask_zero] = ops.convert_to_numpy(eager)
+            # The shipped texts say the output is bit-identical "eagerly AND in
+            # a functional graph"; measure the functional path too, so the claim
+            # and its instrument have the same scope.
+            functional[mask_zero] = keras.Model(inputs, symbolic).predict(
+                ops.convert_to_numpy(ids), verbose=0)
 
         # ... and the flag is numerically inert, which is WHY it has to be passed
         # explicitly rather than relied upon to show up in a forward comparison.
         assert np.max(np.abs(outputs[True] - outputs[False])) == 0.0, (
-            "mask_zero now changes the forward output; the 'numerically inert' "
-            "claim in the D-011 anchor and the DistilBERT README is now false"
+            "mask_zero now changes the EAGER forward output; the 'numerically "
+            "inert' claim in the D-011 anchor and the DistilBERT README is now "
+            "false"
+        )
+        assert np.max(np.abs(functional[True] - functional[False])) == 0.0, (
+            "mask_zero now changes the FUNCTIONAL-GRAPH forward output; the "
+            "'bit-identical eagerly and in a functional graph' claim in the "
+            "mask_zero docstring and README §4.1 is now false"
         )
 
     def test_mask_zero_controls_auto_masking(self, distil_params, ids):
