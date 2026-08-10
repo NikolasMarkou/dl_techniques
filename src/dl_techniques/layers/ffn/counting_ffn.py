@@ -126,10 +126,10 @@ class CountingFFN(keras.layers.Layer):
         │ (scope-based)  │         │
         └───────┬────────┘         │
                 ▼                  │
-        ┌────────────────┐         │
-        │count_transform │         │
+        ┌─────────────────┐        │
+        │count_transform  │        │
         │Dense(activation)│        │
-        └───────┬────────┘         │
+        └───────┬─────────┘        │
                 │                  │
                 └────────┬─────────┘
                          ▼

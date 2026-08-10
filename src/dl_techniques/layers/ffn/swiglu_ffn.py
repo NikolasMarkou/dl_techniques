@@ -95,7 +95,7 @@ class SwiGLUFFN(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────┐
-        │  Input (..., output_dim)  │
+        │  Input (..., output_dim) │
         └─────────┬────────────────┘
                   │
             ┌─────┴─────┐
@@ -112,7 +112,7 @@ class SwiGLUFFN(keras.layers.Layer):
             └─────┬─────┘
                   ▼
         ┌──────────────────┐
-        │ Element-wise Mult │
+        │Element-wise Mult │
         └────────┬─────────┘
                  ▼
         ┌──────────────────────────┐

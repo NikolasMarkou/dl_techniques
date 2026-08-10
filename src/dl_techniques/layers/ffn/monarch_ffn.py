@@ -16,16 +16,16 @@ The block keeps the familiar "expand-then-contract" FFN shape, but each linear
 map is realized as a Monarch map rather than a single dense kernel::
 
     Input (..., input_dim)
-        |
-        v   expand: Monarch(input_dim -> hidden_dim)   [+bias]
-        |
-        v   activation (e.g. GELU)
-        |
-        v   Dropout (optional)
-        |
-        v   contract: Monarch(hidden_dim -> output_dim) [+bias]
-        |
-        v
+        │
+        ▼   expand: Monarch(input_dim -> hidden_dim)   [+bias]
+        │
+        ▼   activation (e.g. GELU)
+        │
+        ▼   Dropout (optional)
+        │
+        ▼   contract: Monarch(hidden_dim -> output_dim) [+bias]
+        │
+        ▼
     Output (..., output_dim)
 
 Foundational Mathematics:
