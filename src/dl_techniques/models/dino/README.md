@@ -39,7 +39,7 @@ defects found in the measuring instruments, and the questions still open — liv
 | `src/dl_techniques/models/dino/dino_v1.py` | `DINOHead` (the projection head all three versions use for SSL), `DINOv1`, `create_dino_v1`, `create_dino_teacher_student_pair`. |
 | `src/dl_techniques/models/dino/dino_v2.py` | `DINOv2Block`, `DINOv2VisionTransformer` (the backbone), `DINOv2` (backbone + classifier), `create_dino_v2`. |
 | `src/dl_techniques/models/dino/dino_v3.py` | `DINOv3`, `create_dino_v3`. |
-| `src/dl_techniques/models/dino/dino_training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
+| `src/dl_techniques/models/dino/training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
 | `src/dl_techniques/models/dino/common.py` | `reject_input_shape` (the one piece of the converged factory scheme identical in all three files) and `sync_teacher_to_student` (the construction-time student→teacher weight copy DINO requires). Neither is part of the public API. |
 | `src/dl_techniques/models/dino/README.md` | This file. |
 
@@ -433,7 +433,7 @@ and anneals nothing.
 
 ### 5.5 — `DINOTrainingModel`
 
-`src/dl_techniques/models/dino/dino_training.py` packages the two networks:
+`src/dl_techniques/models/dino/training.py` packages the two networks:
 
 - Input: one fixed-shape tensor `(batch, n_views, height, width, channels)`, where views
   `0` and `1` are the **global** crops and every view is at the **same** pixel resolution
@@ -513,7 +513,7 @@ every number in this section is in `research/2026_dino_ssl_measurements.md`.
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
 ```
 
-`src/dl_techniques/models/dino/dino_training.py` (§ 5.5) is the trainable model,
+`src/dl_techniques/models/dino/training.py` (§ 5.5) is the trainable model,
 `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data side, and the
 trainer joins them under stock `fit()` with **no** `validation_data` — § 5 Rule 1 is the
 reason, not a preference.
@@ -703,8 +703,8 @@ last edited this file; they are a shape check, not a promise.
 | `tests/test_models/test_dino/test_dino_v3.py` | 24 | v3 smoke, RoPE liveness (a same-weights token-permutation contrast against a positional-information-free control), `.keras` round-trips at BOTH `positional_embedding_type` values, the `get_last_selfattention` raises, `image_size` int-or-tuple, dtype-policy forward on both positional modes. |
 | `tests/test_models/test_dino/conftest.py` | — | The restore-safe parametrized `dtype_policy` fixture (float32 / mixed_float16 / float64). It is a LOCAL copy: `tests/test_layers/conftest.py`'s fixture is not reachable from `tests/test_models/` (sibling trees). |
 | `tests/test_models/test_dino/test_dino_package.py` | 20 | The package surface: `__all__` completeness in both directions, factory-signature convergence, the `None`-defers-to-the-variant precedence rule, the `input_shape` refusal, and a checker asserting every path and import named in **this README** resolves. |
-| `tests/test_models/test_dino/test_dino_training.py` | 40 | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
-| `tests/test_datasets/test_multi_crop.py` | 44 | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `dino_training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
+| `tests/test_models/test_dino/test_training.py` | 40 | `DINOTrainingModel`: the multi-crop input contract, the packed row layout verified pair-by-pair against independent sub-model calls, a gradient-free teacher (with a student control proving the probe can see a gradient), the `update_teacher_ema` contract and its exact EMA arithmetic, a real `fit()` with `TeacherEMACallback` asserting the teacher moved TOWARD the student, `.keras` round-trip with numeric assertions AND an explicit `teacher.trainable is False` assertion. |
+| `tests/test_datasets/test_multi_crop.py` | 44 | The multi-crop element (§ 5.6): the fixed-shape `(2 + n_local)`-view stack pinned against `training.N_GLOBAL_VIEWS`, a REAL batched-and-iterated `tf.data` pipeline, pairwise proof that the crops are genuinely different tensors, a statistical check that global views cover a larger area than local ones, the `local_crop_size` refusal asserted on its MESSAGE, seeded determinism and unseeded non-determinism, per-augmentation liveness, and an end-to-end forward pass of a batched element through `DINOTrainingModel`. |
 | `tests/test_train/test_dino/test_train_dino.py` | 57 | The trainer (`src/train/dino/train_dino.py`): a STRUCTURAL CLI-to-config wiring guard (reflection over `dataclasses.fields` and the parser's dests, fail-closed in both directions, so an unwired flag is RED by default), `TrainingConfig.__post_init__` rejections asserted on their messages, model/loss/callback construction, a spy on the real `train_dino()` path asserting `fit()` receives **no** `validation_data`, and a real two-epoch `fit()` asserting the teacher-temperature `LambdaCallback` MOVES the loss's `teacher_temp` Variable. |
 | `tests/test_train/test_dino/test_knn_eval.py` | 47 | The k-NN probe and the collapse diagnostic (`src/train/dino/knn_eval.py`): perfectly separable synthetic features scoring 1.0 against identical features falling to chance (with a non-vacuity control proving a constant predictor cannot satisfy both), a contrast proving the `exp(sim/T)` weighting is really used rather than a majority vote, the bank/query OVERLAP guard — which fires on self-retrieval but deliberately does NOT fire on collapse — a RED-proven collapse detector fed a deliberately collapsed matrix, the entropy half isolated with spread features and a one-hot teacher, the entropy taken of the MEAN distribution rather than the mean of per-sample entropies, a backbone-vs-projection-head width assertion, and REAL two-epoch `fit()` runs proving the columns reach `CSVLogger`'s CSV — including the executed negative control that placing the callback AFTER `CSVLogger` loses every column. |
 | `tests/test_losses/test_dino_loss.py` | 66 | The three losses: construction, forward finiteness, the center reaching a hand-computed EMA value under a real 2-step `fit()`, `get_config` round-trip including the center's value, the all-masked / none-masked `iBOTPatchLoss` edges, the packed single-tensor convention under a real `fit()`, the schedulable `teacher_temp`, and the D-023 KoLeo fp16 normalization-overflow guard. |

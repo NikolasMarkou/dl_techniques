@@ -400,7 +400,7 @@ class DINOLoss(keras.losses.Loss):
            dimension is treated as a batch dimension, so the model must have
            already flattened its (view, pair) structure into rows -- see
            `DINOTrainingModel` in
-           `src/dl_techniques/models/dino/dino_training.py`, which emits
+           `src/dl_techniques/models/dino/training.py`, which emits
            `(batch * n_pairs, 2 * out_dim)`. **A rank > 2 packed `y_pred` is
            NOT supported**: the centering EMA reduces only `axis=0`, so a
            `(batch, n_pairs, 2 * out_dim)` input makes the batch centre

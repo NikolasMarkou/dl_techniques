@@ -39,7 +39,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.losses.dino_loss import DINOLoss
-from dl_techniques.models.dino.dino_training import create_dino_training_model
+from dl_techniques.models.dino.training import create_dino_training_model
 from train.dino import train_dino as trainer
 from train.dino.knn_eval import (
     COLLAPSE_COSINE_THRESHOLD,

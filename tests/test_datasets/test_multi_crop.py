@@ -150,13 +150,13 @@ class TestElementContract:
 
     def test_n_global_views_agrees_with_the_training_model(self):
         """The two constants are declared in two modules; pin them together."""
-        from dl_techniques.models.dino.dino_training import (
+        from dl_techniques.models.dino.training import (
             N_GLOBAL_VIEWS as MODEL_N_GLOBAL_VIEWS,
         )
 
         assert N_GLOBAL_VIEWS == MODEL_N_GLOBAL_VIEWS, (
             f"multi_crop.N_GLOBAL_VIEWS ({N_GLOBAL_VIEWS}) has drifted from "
-            f"dino_training.N_GLOBAL_VIEWS ({MODEL_N_GLOBAL_VIEWS}). The "
+            f"models.dino.training.N_GLOBAL_VIEWS ({MODEL_N_GLOBAL_VIEWS}). The "
             f"dataset element and the model's input contract must agree on "
             f"how many leading views are global."
         )
@@ -679,7 +679,7 @@ class TestEndToEndWithTheTrainingModel:
     """The seam most likely to be off by one axis, checked here not at step 12."""
 
     def test_a_batched_element_forward_passes_through_DINOTrainingModel(self):
-        from dl_techniques.models.dino.dino_training import (
+        from dl_techniques.models.dino.training import (
             create_dino_training_model,
         )
 

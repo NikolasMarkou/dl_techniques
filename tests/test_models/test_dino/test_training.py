@@ -1,4 +1,4 @@
-"""Tests for `src/dl_techniques/models/dino/dino_training.py` (DINOTrainingModel).
+"""Tests for `src/dl_techniques/models/dino/training.py` (DINOTrainingModel).
 
 Written for plan-2026-08-01T105809-dc0c402e step 8. Three things here are load
 bearing and must not be "simplified":
@@ -58,7 +58,7 @@ from dl_techniques.models.depth_anything.teacher_ema import (
     cosine_ema_schedule,
 )
 from dl_techniques.models.dino import DINOv1
-from dl_techniques.models.dino.dino_training import (
+from dl_techniques.models.dino.training import (
     N_GLOBAL_VIEWS,
     DINOTrainingModel,
     create_dino_training_model,
@@ -793,7 +793,7 @@ class TestSerialization:
         # comparison below with every weight dropped.
         assert np.abs(original).max() > 1e-3
 
-        path = tmp_path / "dino_training.keras"
+        path = tmp_path / "dino_training_model.keras"
         model.save(path)
         restored = keras.models.load_model(path)
 
@@ -808,7 +808,7 @@ class TestSerialization:
         """
         model = _model()
         model(_batch(2))
-        path = tmp_path / "dino_training.keras"
+        path = tmp_path / "dino_training_model.keras"
         model.save(path)
         restored = keras.models.load_model(path)
         restored(_batch(2))
@@ -824,7 +824,7 @@ class TestSerialization:
     def test_round_trip_preserves_the_view_layout(self, tmp_path):
         model = _model()
         model(_batch(2))
-        path = tmp_path / "dino_training.keras"
+        path = tmp_path / "dino_training_model.keras"
         model.save(path)
         restored = keras.models.load_model(path)
 
@@ -839,7 +839,7 @@ class TestSerialization:
         # moves nothing, so the divergence is created explicitly.
         _diverge_teacher(model)
         model(_batch(2))
-        path = tmp_path / "dino_training.keras"
+        path = tmp_path / "dino_training_model.keras"
         model.save(path)
         restored = keras.models.load_model(path)
 
@@ -870,7 +870,7 @@ class TestSerialization:
         assert saved_distance > 0.0
 
         model(_batch(2))
-        path = tmp_path / "dino_training.keras"
+        path = tmp_path / "dino_training_model.keras"
         model.save(path)
         restored = keras.models.load_model(path)
 

@@ -15,7 +15,7 @@ This module holds the pieces that more than one DINO module needs verbatim:
 It is imported by `src/dl_techniques/models/dino/dino_v1.py`,
 `src/dl_techniques/models/dino/dino_v2.py`,
 `src/dl_techniques/models/dino/dino_v3.py` and
-`src/dl_techniques/models/dino/dino_training.py`.
+`src/dl_techniques/models/dino/training.py`.
 
 Do NOT grow this into a shared ViT trunk or a shared `MODEL_VARIANTS` table — that
 unification is a deliberate, recorded non-goal (plan decision D-003: the three model

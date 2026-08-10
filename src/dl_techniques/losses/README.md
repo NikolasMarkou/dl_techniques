@@ -108,7 +108,7 @@ Under stock `fit()` the model must return a **single rank-2 tensor** in the
 `concatenate([student_logits, teacher_logits], axis=-1)`. Build it with
 `pack_student_teacher` from `src/dl_techniques/losses/dino_loss.py`, which is
 the single source of truth for that layout. `y_true` is ignored.
-`src/dl_techniques/models/dino/dino_training.py::DINOTrainingModel` already
+`src/dl_techniques/models/dino/training.py::DINOTrainingModel` already
 returns this shape; see `src/dl_techniques/models/dino/README.md` § "Rule 3"
 for the full derivation and the two measured constraints on the packed form.
 

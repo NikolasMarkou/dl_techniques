@@ -19,7 +19,7 @@ produces), yielding the 2-tuple element::
 
 **Views ``0`` and ``1`` are the GLOBAL crops**; views ``2 ...`` are the local
 crops. That ordering, and the number of global views, are the contract stated
-in ``src/dl_techniques/models/dino/dino_training.py`` — batching this element
+in ``src/dl_techniques/models/dino/training.py`` — batching this element
 gives exactly the ``(batch, n_views, H, W, C)`` tensor
 ``DINOTrainingModel.call`` documents. ``N_GLOBAL_VIEWS`` is re-declared here
 rather than imported, so that a ``tf.data`` module does not pull in the whole
@@ -223,7 +223,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 # DINO always uses exactly two global crops. This MUST equal
-# `dl_techniques.models.dino.dino_training.N_GLOBAL_VIEWS`; the equality is
+# `dl_techniques.models.dino.training.N_GLOBAL_VIEWS`; the equality is
 # asserted in tests/test_datasets/test_multi_crop.py rather than created by an
 # import, so that this tf.data module stays free of the Keras model package.
 N_GLOBAL_VIEWS = 2

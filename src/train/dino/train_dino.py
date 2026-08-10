@@ -246,7 +246,7 @@ from dl_techniques.datasets.vision.multi_crop import (
     make_multi_crop_map_fn,
     make_stateless_multi_crop_map_fn,
 )
-from dl_techniques.models.dino.dino_training import (
+from dl_techniques.models.dino.training import (
     N_GLOBAL_VIEWS,
     create_dino_training_model,
 )
