@@ -62,6 +62,7 @@ References:
       Understanding".
 """
 
+import math
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
@@ -126,8 +127,12 @@ class BertEmbeddings(keras.layers.Layer):
     :param max_position_embeddings: Maximum sequence length for positional
         embeddings. Must be positive.
     :type max_position_embeddings: int
-    :param type_vocab_size: Size of the token type vocabulary. Must be positive.
-    :type type_vocab_size: int
+    :param type_vocab_size: Size of the token type vocabulary. Required (and
+        must be positive) when ``use_token_type_embeddings`` is ``True``;
+        must be ``None`` otherwise. A value supplied while token type
+        embeddings are disabled is normalized to ``None`` with a warning, so
+        it can never be serialized as an inert config key.
+    :type type_vocab_size: Optional[int]
     :param initializer_range: Standard deviation for weight initialization.
         Must be positive.
     :type initializer_range: float
@@ -140,6 +145,25 @@ class BertEmbeddings(keras.layers.Layer):
     :param normalization_type: Type of normalization layer to use. Supported:
         ``'layer_norm'``, ``'rms_norm'``, ``'band_rms'``, ``'batch_norm'``.
     :type normalization_type: str
+    :param use_token_type_embeddings: Whether to build and add the segment
+        (token type) embedding term. ``True`` reproduces BERT. Set ``False``
+        for DistilBERT-style models, which have no segment embedding: no
+        ``token_type_embeddings`` weight is created and passing
+        ``token_type_ids`` to ``call()`` raises.
+    :type use_token_type_embeddings: bool
+    :param position_embedding_type: How positional information is produced.
+        ``'learned'`` (BERT, the default) allocates a trainable
+        ``(max_position_embeddings, hidden_size)`` embedding table.
+        ``'sinusoidal'`` computes a fixed, non-trainable sin/cos table on the
+        fly — it allocates no weight and is not bounded by
+        ``max_position_embeddings``, but requires an even ``hidden_size``.
+        Any other value raises; there is deliberately no silent fallback.
+    :type position_embedding_type: str
+    :param mask_zero: Whether ``word_embeddings`` treats token id ``0`` as a
+        padding mask (Keras auto-masking). ``True`` reproduces BERT. Set
+        ``False`` for models that thread an explicit ``attention_mask``
+        instead, so two masking mechanisms cannot disagree.
+    :type mask_zero: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :raises ValueError: If any parameter is invalid or out of expected range.
@@ -150,11 +174,14 @@ class BertEmbeddings(keras.layers.Layer):
             vocab_size: int,
             hidden_size: int,
             max_position_embeddings: int,
-            type_vocab_size: int,
+            type_vocab_size: Optional[int] = None,
             initializer_range: float = 0.02,
             layer_norm_eps: float = 1e-8,
             dropout_rate: float = 0.0,
             normalization_type: str = "layer_norm",
+            use_token_type_embeddings: bool = True,
+            position_embedding_type: str = "learned",
+            mask_zero: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -166,8 +193,20 @@ class BertEmbeddings(keras.layers.Layer):
             raise ValueError(f"hidden_size must be positive, got {hidden_size}")
         if max_position_embeddings <= 0:
             raise ValueError(f"max_position_embeddings must be positive, got {max_position_embeddings}")
-        if type_vocab_size <= 0:
-            raise ValueError(f"type_vocab_size must be positive, got {type_vocab_size}")
+        if use_token_type_embeddings:
+            if type_vocab_size is None or type_vocab_size <= 0:
+                raise ValueError(
+                    f"type_vocab_size must be positive when use_token_type_embeddings is True, "
+                    f"got {type_vocab_size}"
+                )
+        elif type_vocab_size is not None:
+            # Never carry an inert value into get_config(): it would be serialized
+            # into every checkpoint as a config key that shapes nothing.
+            logger.warning(
+                f"type_vocab_size={type_vocab_size} is ignored because "
+                f"use_token_type_embeddings is False; storing None instead."
+            )
+            type_vocab_size = None
         if initializer_range <= 0:
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
         if layer_norm_eps <= 0:
@@ -179,6 +218,24 @@ class BertEmbeddings(keras.layers.Layer):
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
+        # DECISION plan-2026-08-10-b007f435/D-006
+        # An unrecognized position_embedding_type MUST raise. Do NOT "simplify" this
+        # into an `else:` that falls back to 'learned' -- a silent normalization
+        # fallback of exactly that shape is the defect this plan exists to delete
+        # (models/distilbert/model.py:170-174, measured in findings/
+        # step1-premise-rederivation.md (c)). See decisions.md D-006.
+        valid_position_types = ['learned', 'sinusoidal']
+        if position_embedding_type not in valid_position_types:
+            raise ValueError(
+                f"position_embedding_type must be one of {valid_position_types}, "
+                f"got {position_embedding_type}"
+            )
+        if position_embedding_type == 'sinusoidal' and hidden_size % 2 != 0:
+            raise ValueError(
+                f"hidden_size must be even for sinusoidal position embeddings "
+                f"(sin/cos pairs are interleaved), got {hidden_size}"
+            )
+
         # Store parameters
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -188,35 +245,56 @@ class BertEmbeddings(keras.layers.Layer):
         self.layer_norm_eps = layer_norm_eps
         self.dropout_rate = dropout_rate
         self.normalization_type = normalization_type
+        self.use_token_type_embeddings = use_token_type_embeddings
+        self.position_embedding_type = position_embedding_type
+        self.mask_zero = mask_zero
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        #
+        # DECISION plan-2026-08-10-b007f435/D-007
+        # The ORDER of these constructor statements is load-bearing: each
+        # TruncatedNormal instance draws its seed from the process-global RNG at
+        # construction, so reordering them changes every initialized weight. A
+        # measured probe (findings/step2-i1-reference.md, mutation M2) showed a
+        # swap of position_embeddings <-> token_type_embeddings moves the forward
+        # output only at the ~7th decimal -- invisible to an atol=1e-6 comparison
+        # and to every structural check (paths, shapes and param total all still
+        # matched). Do NOT reorder, and do NOT hoist the new branches above an
+        # existing construction: guard in place. See decisions.md D-007.
         self.word_embeddings = keras.layers.Embedding(
             input_dim=vocab_size,
             output_dim=hidden_size,
             embeddings_initializer=keras.initializers.TruncatedNormal(
                 stddev=initializer_range
             ),
-            mask_zero=True,
+            mask_zero=mask_zero,
             name="word_embeddings"
         )
 
-        self.position_embeddings = keras.layers.Embedding(
-            input_dim=max_position_embeddings,
-            output_dim=hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=initializer_range
-            ),
-            name="position_embeddings"
-        )
+        if position_embedding_type == 'learned':
+            self.position_embeddings = keras.layers.Embedding(
+                input_dim=max_position_embeddings,
+                output_dim=hidden_size,
+                embeddings_initializer=keras.initializers.TruncatedNormal(
+                    stddev=initializer_range
+                ),
+                name="position_embeddings"
+            )
+        else:
+            # 'sinusoidal': a fixed table computed in call(); no weight is allocated.
+            self.position_embeddings = None
 
-        self.token_type_embeddings = keras.layers.Embedding(
-            input_dim=type_vocab_size,
-            output_dim=hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=initializer_range
-            ),
-            name="token_type_embeddings"
-        )
+        if use_token_type_embeddings:
+            self.token_type_embeddings = keras.layers.Embedding(
+                input_dim=type_vocab_size,
+                output_dim=hidden_size,
+                embeddings_initializer=keras.initializers.TruncatedNormal(
+                    stddev=initializer_range
+                ),
+                name="token_type_embeddings"
+            )
+        else:
+            self.token_type_embeddings = None
 
         # Create normalization layer based on type
         self.layer_norm = self._create_normalization_layer("layer_norm")
@@ -264,6 +342,55 @@ class BertEmbeddings(keras.layers.Layer):
                 f"Supported types: layer_norm, rms_norm, band_rms, batch_norm"
             )
 
+    def _sinusoidal_position_embeddings(
+            self,
+            position_ids: keras.KerasTensor,
+            target_dtype: str
+    ) -> keras.KerasTensor:
+        """Compute the fixed sin/cos positional table for the given positions.
+
+        The table is ``PE(p, 2i) = sin(p / 10000^(2i/d))`` and
+        ``PE(p, 2i+1) = cos(p / 10000^(2i/d))``, with the sin and cos halves
+        interleaved along the feature axis. No weight is allocated and no
+        position bound is enforced, so this branch accepts positions beyond
+        ``max_position_embeddings``.
+
+        :param position_ids: Integer positions of shape
+            ``(batch_size, seq_length)``.
+        :type position_ids: keras.KerasTensor
+        :param target_dtype: dtype of the tensor this table will be summed
+            with. The table is always COMPUTED in ``float32`` and cast to this
+            dtype as the last step.
+        :type target_dtype: str
+        :return: Positional embeddings of shape
+            ``(batch_size, seq_length, hidden_size)`` in ``target_dtype``.
+        :rtype: keras.KerasTensor
+        """
+        # DECISION plan-2026-08-10-b007f435/D-008
+        # Compute in float32 for numeric range (10000^(2i/d) underflows fp16),
+        # then cast to the dtype of the tensor this is actually summed with --
+        # NOT to self.compute_dtype. Under mixed_float16 a Keras sub-layer
+        # autocasts its output, so compute_dtype and the real tensor dtype can
+        # disagree; summing a float32 table with a float16 word-embedding raises
+        # `InvalidArgumentError: cannot compute AddV2 as input #1 was expected to
+        # be a half tensor but is a float tensor` (measured at HEAD in
+        # findings/step1-premise-rederivation.md (b)). Do NOT drop this cast and
+        # do NOT re-key it off compute_dtype. See decisions.md D-008.
+        positions = ops.cast(position_ids, "float32")
+        positions = ops.expand_dims(positions, axis=-1)
+
+        div_term = ops.exp(
+            ops.arange(0, self.hidden_size, 2, dtype="float32")
+            * -(math.log(10000.0) / self.hidden_size)
+        )
+        angles = positions * div_term
+
+        interleaved = ops.stack([ops.sin(angles), ops.cos(angles)], axis=-1)
+        shape = ops.shape(position_ids)
+        table = ops.reshape(interleaved, (shape[0], shape[1], self.hidden_size))
+
+        return ops.cast(table, target_dtype)
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the embeddings layer by explicitly building all sub-layers.
 
@@ -284,8 +411,10 @@ class BertEmbeddings(keras.layers.Layer):
 
         # CRITICAL: Explicitly build all sub-layers for robust serialization
         self.word_embeddings.build(input_shape)
-        self.position_embeddings.build(input_shape)
-        self.token_type_embeddings.build(input_shape)
+        if self.position_embeddings is not None:
+            self.position_embeddings.build(input_shape)
+        if self.token_type_embeddings is not None:
+            self.token_type_embeddings.build(input_shape)
 
         # Build normalization and dropout with embeddings output shape
         embeddings_output_shape = (*input_shape, self.hidden_size)
@@ -309,6 +438,7 @@ class BertEmbeddings(keras.layers.Layer):
         :type input_ids: keras.KerasTensor
         :param token_type_ids: Token type IDs of shape
             ``(batch_size, seq_length)``. If ``None``, defaults to all zeros.
+            Must be ``None`` when ``use_token_type_embeddings`` is ``False``.
         :type token_type_ids: Optional[keras.KerasTensor]
         :param position_ids: Position IDs of shape
             ``(batch_size, seq_length)``. If ``None``, defaults to sequential
@@ -319,6 +449,8 @@ class BertEmbeddings(keras.layers.Layer):
         :return: Embedded and normalized tokens of shape
             ``(batch_size, seq_length, hidden_size)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``token_type_ids`` is supplied while
+            ``use_token_type_embeddings`` is ``False``.
         """
         input_shape = ops.shape(input_ids)
         batch_size = input_shape[0]
@@ -330,17 +462,29 @@ class BertEmbeddings(keras.layers.Layer):
             position_ids = ops.expand_dims(position_ids, axis=0)
             position_ids = ops.broadcast_to(position_ids, (batch_size, seq_length))
 
-        # Create token type IDs if not provided
-        if token_type_ids is None:
-            token_type_ids = ops.zeros_like(input_ids, dtype="int32")
-
-        # Apply all embeddings
+        # Apply word and position embeddings
         word_embeds = self.word_embeddings(input_ids)
-        position_embeds = self.position_embeddings(position_ids)
-        token_type_embeds = self.token_type_embeddings(token_type_ids)
 
-        # Sum all embeddings
-        embeddings = word_embeds + position_embeds + token_type_embeds
+        if self.position_embedding_type == 'learned':
+            position_embeds = self.position_embeddings(position_ids)
+        else:
+            position_embeds = self._sinusoidal_position_embeddings(
+                position_ids,
+                keras.backend.standardize_dtype(word_embeds.dtype)
+            )
+
+        embeddings = word_embeds + position_embeds
+
+        # Add the segment term only when this layer owns one
+        if self.use_token_type_embeddings:
+            if token_type_ids is None:
+                token_type_ids = ops.zeros_like(input_ids, dtype="int32")
+            embeddings = embeddings + self.token_type_embeddings(token_type_ids)
+        elif token_type_ids is not None:
+            raise ValueError(
+                "token_type_ids was provided but use_token_type_embeddings is False; "
+                "this layer has no segment embedding to look them up in."
+            )
 
         # Apply normalization and dropout
         embeddings = self.layer_norm(embeddings, training=training)
@@ -374,6 +518,9 @@ class BertEmbeddings(keras.layers.Layer):
             'layer_norm_eps': self.layer_norm_eps,
             'dropout_rate': self.dropout_rate,
             'normalization_type': self.normalization_type,
+            'use_token_type_embeddings': self.use_token_type_embeddings,
+            'position_embedding_type': self.position_embedding_type,
+            'mask_zero': self.mask_zero,
         })
         return config
 
