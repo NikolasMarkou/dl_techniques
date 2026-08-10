@@ -614,7 +614,8 @@ def create_qwen3_classification(
     # Apply the selected pooling strategy via the shared SequencePooling layer.
     # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via shipped SequencePooling
     # (byte-identical cls/mean; parameter-free -> no checkpoint change) -- was a duplicated
-    # hand-rolled cls/mean if/else across qwen3/qwen3_next/qwen3_som/gemma3. Do NOT re-inline
+    # hand-rolled cls/mean if/else across qwen3/qwen3_next/gemma3 (and qwen3_som, deleted at
+    # plan-2026-08-10-3649c19e). Do NOT re-inline
     # a bespoke masked-mean here; SequencePooling('mean') reproduces it exactly (probe: 0.0).
     pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
         sequence_output, mask=attention_mask

@@ -19,6 +19,13 @@ failed in the full `tests/test_layers/` run. Four collisions existed:
     Custom>ByteTokenizer   layers.blt_blocks             vs models.modern_bert.components
     Custom>CoverageMetric  metrics.probabilistic_...     vs models.cliffordnet...
 
+Two of those right-hand modules have since been DELETED and no longer exist anywhere in
+the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`
+(plan-2026-08-10-3649c19e). The table is kept verbatim as the historical record of why
+the `package=` arguments below exist -- do not go looking for those two modules, and do
+not drop a `package=` just because its collision partner is gone: the checker below is
+derived from what is importable TODAY, so it is the thing that decides, not this table.
+
 Fix: give each colliding class an explicit, distinct ``package=``. This is backward
 compatible -- a `.keras` file records ``module`` + ``class_name`` alongside
 ``registered_name``, and Keras falls back to the module path when the registered key is

@@ -1542,6 +1542,19 @@ def _b_models_sam_transformer():
     return b.ffn
 
 
+def _b_models_sam3_decoder():
+    from dl_techniques.models.SAM.SAM3.decoder import Sam3DecoderLayer
+    # `ffn` is created in `__init__`, not `build`, so no build call is needed.
+    return Sam3DecoderLayer(d_model=16, num_heads=2, dim_feedforward=32).ffn
+
+
+def _b_models_sam3_vitdet():
+    from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBlock
+    b = Sam3ViTDetBlock(dim=16, num_heads=2, input_size=(8, 8))
+    b.build((None, 8, 8, 16))
+    return b.mlp
+
+
 def _b_models_prism():
     from dl_techniques.models.time_series.prism.model import PRISMModel
     m = PRISMModel(context_len=16, forecast_len=4, num_features=2, num_layers=1)
@@ -1586,6 +1599,8 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/relgt/model.py": _b_models_relgt,
     "models/SAM/SAM1/image_encoder.py": _b_models_sam_image_encoder,
     "models/SAM/SAM1/transformer.py": _b_models_sam_transformer,
+    "models/SAM/SAM3/decoder.py": _b_models_sam3_decoder,
+    "models/SAM/SAM3/vitdet.py": _b_models_sam3_vitdet,
     "models/time_series/prism/model.py": _b_models_prism,
     "models/tree_transformer/components.py": _b_models_tree_transformer,
 }
@@ -2023,9 +2038,11 @@ class TestFormerlyDroppingConstructionSites:
 # That is precisely what shipped: at `3ada9cdb` `Qwen3(ffn_type='mlp')` raised
 # `create_ffn_layer('mlp'): 1 unsupported parameter(s) ['ffn_expansion_factor']`.
 # MEASURED across the full 21-type registry, HEAD vs a pristine `f013c232`
-# worktree, on `Qwen3` / `Qwen3SOM` / a third qwen family that has since been
-# deleted as dead code (plan-2026-08-03-4c570ee4/D-006). The measurement below
-# is the historical record from that run and is not re-derived here:
+# worktree, on `Qwen3` / `Qwen3SOM` / a third qwen family. Two of those three
+# have since been deleted as dead code (the third at
+# plan-2026-08-03-4c570ee4/D-006, `Qwen3SOM` at plan-2026-08-10-3649c19e), so
+# only `Qwen3` below is still constructible. The measurement is the historical
+# record from that run and is not re-derived here:
 #
 #     dense block path  (`ffn_args`)  : 12 of 21 constructed -> 1 of 21
 #     MoE expert path (`ffn_config`)  :  7 of 21 constructed -> 1 of 21
@@ -2198,14 +2215,10 @@ _MODEL_FFN_RECIPES: Dict[str, List[Dict[str, Any]]] = {
          "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
          "moe_intermediate_size": 64},
     ],
-    "Qwen3SOM": [
-        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
-         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8},
-        {"vocab_size": 64, "hidden_size": 32, "num_layers": 1,
-         "num_attention_heads": 4, "num_key_value_heads": 2, "max_seq_len": 8,
-         "moe_layers": [0], "num_experts": 2, "num_experts_per_tok": 1,
-         "moe_intermediate_size": 64},
-    ],
+    # `Qwen3SOM` had a recipe here until plan-2026-08-10-3649c19e/step-8.
+    # `models/qwen/qwen3_som.py` was deleted, so
+    # `_derive_dynamic_type_model_classes()` no longer yields the class and
+    # `test_every_dynamic_type_model_has_a_recipe` went RED on the stale row.
     "Qwen3Next": [
         # `num_experts > 1` is the MoE trigger here and its default is 64, so
         # this single recipe already exercises the `ffn_config` path.
@@ -2270,8 +2283,15 @@ class TestModelBuiltFFNKwargDictSweep:
         `SyntaxError` swallowed by the `except` -- would make every assertion
         below pass over an empty set, forever.
         """
+        # The floor was 15 until plan-2026-08-10-3649c19e/step-8. Three sites
+        # went away with two deleted modules (`models/qwen/qwen3_som.py`, 2;
+        # `models/modern_bert/modern_bert_blt.py`, 1), taking the true count to
+        # 13. The floor is a BLINDNESS guard, not an inventory: it is lowered
+        # to the new true count rather than kept above it, because a floor the
+        # repo cannot meet reports "the walk is blind" for a walk that is
+        # seeing correctly.
         rows = _derive_self_built_ffn_kwarg_sites()
-        assert len(rows) >= 15, (
+        assert len(rows) >= 13, (
             f"only {len(rows)} `ffn_args=`/`ffn_config=` sites found under "
             f"{_SWEEP_SRC_ROOT}; the walk is blind"
         )

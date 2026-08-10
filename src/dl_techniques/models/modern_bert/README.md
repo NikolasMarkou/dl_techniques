@@ -231,7 +231,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.modern_bert.modern_bert import ModernBERT
+from dl_techniques.models.modern_bert.model import ModernBERT
 
 # 1. Create a ModernBERT-base model
 model = ModernBERT.from_variant("base")
@@ -265,16 +265,16 @@ print(f"Shape of last_hidden_state: {outputs['last_hidden_state'].shape}")
 
 | Component                      | Location                                     | Purpose                                                                          |
 | :----------------------------- | :------------------------------------------- | :------------------------------------------------------------------------------- |
-| **`ModernBERT`**               | `...nlp.modern_bert.ModernBERT`              | The main Keras `Model` for the foundation encoder.                               |
-| **`create_modern_bert_with_head`** | `...nlp.modern_bert.create_modern_bert_with_head` | Recommended factory function to combine a `ModernBERT` with a task-specific head. |
+| **`ModernBERT`**               | `models.modern_bert.model.ModernBERT`              | The main Keras `Model` for the foundation encoder.                               |
+| **`create_modern_bert_with_head`** | `models.modern_bert.model.create_modern_bert_with_head` | Recommended factory function to combine a `ModernBERT` with a task-specific head. |
 
 ### 6.2 Core Building Blocks
 
 | Layer                  | Location                                             | Purpose                                                                             |
 | :--------------------- | :--------------------------------------------------- | :---------------------------------------------------------------------------------- |
-| **`ModernBertEmbeddings`** | `...embedding.modern_bert_embeddings.ModernBertEmbeddings` | Handles the initial embedding lookup and normalization.                             |
-| **`TransformerLayer`** | `...layers.transformers.TransformerLayer`            | The highly configurable, modern Transformer block that powers the encoder.          |
-| **`create_nlp_head`**  | `...layers.heads.nlp.factory.create_nlp_head`        | A factory for creating various downstream task heads (e.g., classification, NER). |
+| **`ModernBertEmbeddings`** | `layers.embedding.modern_bert_embeddings.ModernBertEmbeddings` | Handles the initial embedding lookup and normalization.                             |
+| **`TransformerLayer`** | `layers.transformers.TransformerLayer`            | The highly configurable, modern Transformer block that powers the encoder.          |
+| **`create_nlp_head`**  | `layers.heads.nlp.factory.create_nlp_head`        | A factory for creating various downstream task heads (e.g., classification, NER). |
 
 ---
 
@@ -298,7 +298,7 @@ Use the factory function to attach a classification head to a ModernBERT encoder
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.modern_bert.modern_bert import ModernBERT
+from dl_techniques.models.modern_bert.model import ModernBERT
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the classification task
@@ -331,7 +331,7 @@ ModernBERT's native 8192 sequence length makes it ideal for long-document tasks.
 
 ```python
 import numpy as np
-from dl_techniques.models.modern_bert.modern_bert import ModernBERT
+from dl_techniques.models.modern_bert.model import ModernBERT
 
 # 1. Create a foundation model
 long_context_bert = ModernBERT.from_variant("base")
@@ -359,7 +359,7 @@ This implementation is designed to load pre-trained weights from local files or 
 # Create a model and load official pre-trained weights by setting pretrained=True
 # The from_variant method will handle downloading.
 import keras
-from dl_techniques.models.modern_bert.modern_bert import create_modern_bert_with_head
+from dl_techniques.models.modern_bert.model import create_modern_bert_with_head
 
 ner_model_pretrained = create_modern_bert_with_head(
     bert_variant="base",
@@ -446,7 +446,7 @@ You can validate the implementation by ensuring all variants can be created and 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.modern_bert.modern_bert import ModernBERT, create_modern_bert_with_head
+from dl_techniques.models.modern_bert.model import ModernBERT, create_modern_bert_with_head
 
 def test_creation_all_variants():
     """Test model creation for all variants."""
