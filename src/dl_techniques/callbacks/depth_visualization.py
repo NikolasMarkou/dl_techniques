@@ -95,8 +95,8 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
             if isinstance(pred_depth, (list, tuple)):
                 pred_depth = pred_depth[0]
             elif isinstance(pred_depth, dict):
-                # CliffordNetUNet returns dict keyed by head name; primary head
-                # is the one without an ``_aux_`` suffix.  Prefer an explicit
+                # A multi-head model returns a dict keyed by head name; the
+                # primary head is the one without an ``_aux_`` suffix.  Prefer an explicit
                 # ``depth`` key if present.
                 if "depth" in pred_depth:
                     pred_depth = pred_depth["depth"]

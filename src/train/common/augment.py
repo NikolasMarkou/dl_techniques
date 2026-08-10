@@ -5,6 +5,11 @@ cliffordnet denoiser trainers, where ``augment_patch`` was duplicated
 verbatim across 6 sites and the synchronized-pair variant ``augment_pair``
 across the 2 cliffordnet conditional/confidence denoisers.
 
+NOTE (plan-2026-08-10-3649c19e/iter-1/step-4): the cliffordnet conditional /
+confidence denoiser trainers were deleted, so ``augment_pair`` currently has
+NO caller — it survives only as a ``train.common`` export. Delete it, or give
+it a caller, rather than letting it drift.
+
 ``augment_patch`` applies independent random horizontal/vertical flips and a
 random 90-degree rotation to a single image patch.
 

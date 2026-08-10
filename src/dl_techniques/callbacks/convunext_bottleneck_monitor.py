@@ -42,6 +42,16 @@ import numpy as np
 from dl_techniques.utils.logger import logger
 
 
+# DECISION plan-2026-08-10T130454-3649c19e/D-011
+# This is now the ONLY bottleneck-monitor callback in the repo. Its sibling
+# `cliffordnet_bottleneck_monitor.py` (CliffordBottleneckMonitorCallback) was
+# DELETED: it monitored `CliffordLaplacianUNet`, whose module
+# (models/cliffordnet/autoencoder.py) no longer exists, and a string grep over
+# src/ and tests/ found its only two references were its own trainer and its own
+# test — no registry key, no custom_objects entry, no getattr-by-name lookup.
+# Do NOT resurrect it "for symmetry" or generalize THIS class to cover a Clifford
+# model: it reads `model.encode(...)`, which is a ConvUNeXt-side contract.
+# See decisions.md D-011.
 class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
     """Monitor the ConvUNeXt denoiser bottleneck over a fixed val batch.
 

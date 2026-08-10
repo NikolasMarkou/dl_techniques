@@ -252,9 +252,11 @@ _KEY_COUNTER_STRIDE = 0x9E3779B1
 #
 # DECISION plan-2026-08-01T105809-dc0c402e/D-025
 # These are NOT promoted into `src/train/common/augment.py`. That module holds
-# `augment_patch` / `augment_pair`, shared by the bfunet / cliffordnet denoiser
-# family, whose augmentation is flips plus a random 90-degree rotation on a
-# fixed-size patch. It has no plausible use for an area-scale random resized
+# `augment_patch` / `augment_pair`, shared by the bfunet denoiser family
+# (the cliffordnet denoiser trainers that also used them were deleted by
+# plan-2026-08-10-3649c19e), whose augmentation is flips plus a random
+# 90-degree rotation on a fixed-size patch.
+# It has no plausible use for an area-scale random resized
 # crop, for per-view-role blur probabilities, or for jitter expressed in a
 # normalized value domain -- and `augment_patch` itself is NOT reused here,
 # because its vertical flip and 90-degree rotation are not part of DINO's

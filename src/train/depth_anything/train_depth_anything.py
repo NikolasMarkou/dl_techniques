@@ -1,8 +1,9 @@
 """Depth Anything monocular depth estimation training script.
 
 Pattern-5 trainer for ``dl_techniques.models.depth_anything.DepthAnything`` on
-MegaDepth.  Mirrors ``train.cliffordnet.train_depth_estimation`` 1:1 in
-structure, swapping in ``create_depth_anything`` as the model factory and
+MegaDepth.  Structurally a Pattern-5 trainer (it was derived 1:1 from the
+now-deleted ``train.cliffordnet.train_depth_estimation``, which is why the two
+read alike in the git history), swapping in ``create_depth_anything`` as the model factory and
 using a locally-defined ``DepthEstimationLoss`` (masked L1 + multi-scale
 gradient matching) that is compatible with the model's ``sigmoid``-clamped
 output.
@@ -171,7 +172,6 @@ class DepthEstimationLoss(keras.losses.Loss):
 
     ``L = L1_masked + gradient_weight * L_grad``
 
-    Identical to ``train.cliffordnet.train_depth_estimation.DepthEstimationLoss``.
     Compatible with any output range (so it works with DepthAnything's default
     ``sigmoid``-clamped output — see Known Issue #6 in the model README).
     """

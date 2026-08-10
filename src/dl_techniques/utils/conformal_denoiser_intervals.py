@@ -32,13 +32,14 @@ Guarantees and caveats (read before trusting an interval):
   the migration was a pure DC shift.
 
 Deliberate design choice — coverage/width are computed with **plain numpy
-reductions** inline, NOT via a Keras metric. There are two colliding
-``CoverageMetric`` classes in the repo
-(``dl_techniques/metrics/probabilistic_forecast_metrics.py`` and
-``dl_techniques/models/cliffordnet/confidence_denoiser.py``); importing either
-would couple this post-hoc utility to an unrelated stateful metric and pick a
-side of a name collision. The math (a boolean mean and a width mean) is trivial,
-so we keep it stateless and dependency-free.
+reductions** inline, NOT via a Keras metric. Importing
+``dl_techniques/metrics/probabilistic_forecast_metrics.py``'s ``CoverageMetric``
+would couple this post-hoc utility to an unrelated stateful metric. The math
+(a boolean mean and a width mean) is trivial, so we keep it stateless and
+dependency-free. (This note previously cited a second, colliding
+``CoverageMetric`` in ``models/cliffordnet/confidence_denoiser.py``; that module
+was deleted by plan-2026-08-10-3649c19e, so the collision no longer exists — the
+decoupling argument above stands on its own.)
 
 Layering: part of ``dl_techniques.utils``; depends only on numpy, tensorflow,
 keras, and ``dl_techniques.utils.logger``. It MUST NOT import from ``src/train``.

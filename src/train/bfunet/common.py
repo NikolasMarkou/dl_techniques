@@ -939,8 +939,8 @@ def _read_current_lr(model: keras.Model) -> float:
 
 # DECISION plan_2026-07-13_f44e2cb0/D-002: the admissible Gabor-stem activations.
 # The generic builder (initializers/gabor_filters_initializer.py) deliberately does NOT
-# validate its `activation` kwarg -- it also serves the non-bias-free cliffordnet
-# autoencoder. This trainer IS the bias-free path, so the guard lives here. Only
+# validate its `activation` kwarg -- it is a generic initializer with non-bias-free
+# consumers too. This trainer IS the bias-free path, so the guard lives here. Only
 # positively homogeneous activations may go on the stem: relu/leaky_relu/linear satisfy
 # f(a*x) = a*f(x) for a >= 0, so D_sigma(y) = sigma*D(y/sigma) survives. Do NOT add gelu,
 # elu, tanh, sigmoid, mish or swish to this set -- they have scale-dependent curvature and
@@ -2022,7 +2022,7 @@ def train(
     # Optional warm-start from a saved .keras checkpoint (e.g. self-iterate
     # fine-tuning on top of a normally-trained denoiser). The functional model is
     # already built, so layer-by-layer transfer works. skip_prefixes=() loads ALL
-    # layers (the denoiser has no head_ layers to skip, unlike CliffordNetUNet).
+    # layers -- the denoiser is single-output and has no head_ layers to skip.
     if config.init_from is not None:
         # Its [0,1] provenance was already gated at the top of train() — a legacy-domain
         # checkpoint never reaches this transfer (D-005).

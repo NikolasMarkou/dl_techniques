@@ -15,10 +15,10 @@ Typical use::
 
     from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
-    depth_model = create_cliffordnet_depth(variant="base")
-    depth_model.build((None, 256, 256, 3))
+    finetune_model = build_my_model(...)     # any multi-head Keras model
+    finetune_model.build((None, 256, 256, 3))
     report = load_weights_from_checkpoint(
-        target=depth_model,
+        target=finetune_model,
         ckpt_path="results/coco_pretrain/final_model.keras",
         skip_prefixes=("head_primary_", "head_aux_"),
     )
@@ -117,9 +117,9 @@ def load_weights_from_checkpoint(
         ``keras.Model.save(path)``).  Non-``.keras`` paths raise ``ValueError``
         — use ``keras.models.load_model`` manually for legacy formats.
     :param skip_prefixes: Layer-name prefixes whose source weights should NOT
-        be copied into *target*.  Default ``("head_",)`` matches
-        :class:`CliffordNetUNet`'s head-layer naming (``head_<name>``,
-        ``head_<name>_aux_<k>``).
+        be copied into *target*.  Default ``("head_",)`` matches this repo's
+        multi-head naming convention (``head_<name>``, ``head_<name>_aux_<k>``);
+        pass ``()`` to transfer every matching layer including the heads.
     :param strict: If ``True``, any ``shape_mismatch`` during transfer raises
         :class:`ValueError`.  When ``False`` (default), mismatches are recorded
         in the report and skipped so other layers can still load.

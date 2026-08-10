@@ -3,7 +3,7 @@ Local COCO 2017 multi-task loader — image classification + semantic segmentati
 
 Reads directly from a local COCO directory (``train2017/``, ``val2017/``,
 ``annotations/instances_*.json``) via ``pycocotools``.  Produces dict labels
-that match a :class:`CliffordNetUNet`-style multi-head forward pass:
+that match a multi-head (classification + segmentation) forward pass:
 
     (image, {"classification": (B, 80) float32 multi-hot,
              "segmentation":   (B, H, W)  int32  class indices in [0..80]})
