@@ -17,7 +17,11 @@ from typing import Dict, Any, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 
-from .bert_embeddings import BertEmbeddings
+from .bert_embeddings import (
+    BertEmbeddings,
+    VALID_NORMALIZATION_TYPES,
+    VALID_POSITION_EMBEDDING_TYPES,
+)
 from .continuous_rope_embedding import ContinuousRoPE
 from .dual_rotary_position_embedding import DualRotaryPositionEmbedding
 from .continuous_sin_cos_embedding import ContinuousSinCosEmbed
@@ -136,13 +140,27 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'bert_embeddings': {
         'class': BertEmbeddings,
-        'description': 'BERT embeddings combining word, position, and token type embeddings with configurable normalization.',
-        'required_params': ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size'],
+        'description': 'BERT embeddings combining word, optional position, and optional token type embeddings with configurable normalization.',
+        # DECISION plan-2026-08-10-b007f435/D-010
+        # type_vocab_size is CONDITIONALLY required, not unconditionally optional:
+        # it belongs here only because it is meaningless (and normalized to None by
+        # the constructor) when use_token_type_embeddings is False. The static
+        # required-params check no longer covers it -- validate_embedding_config's
+        # computed rule below does. Do NOT "simplify" by deleting that rule, and do
+        # NOT move type_vocab_size back into required_params (that would force every
+        # token-type-free caller, e.g. models/distilbert/, to pass a dummy positive
+        # integer that is then serialized into every checkpoint -- the exact inert
+        # config key this plan exists to delete). See decisions.md D-002 and D-010.
+        'required_params': ['vocab_size', 'hidden_size', 'max_position_embeddings'],
         'optional_params': {
+            'type_vocab_size': None,
             'initializer_range': 0.02,
             'layer_norm_eps': 1e-8,
             'dropout_rate': 0.0,
-            'normalization_type': 'layer_norm'
+            'normalization_type': 'layer_norm',
+            'use_token_type_embeddings': True,
+            'position_embedding_type': 'learned',
+            'mask_zero': True
         },
         'use_case': 'BERT-style language models combining word, positional, and segment embeddings with sum aggregation and normalization.'
     },
@@ -297,9 +315,39 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
 
     if embedding_type == 'bert_embeddings':
         if 'normalization_type' in kwargs:
-            valid_norm_types = ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm']
+            valid_norm_types = list(VALID_NORMALIZATION_TYPES)
             if kwargs['normalization_type'] not in valid_norm_types:
                 raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {kwargs['normalization_type']}")
+
+        if 'position_embedding_type' in kwargs:
+            valid_position_types = list(VALID_POSITION_EMBEDDING_TYPES)
+            if kwargs['position_embedding_type'] not in valid_position_types:
+                raise ValueError(
+                    f"position_embedding_type must be one of {valid_position_types}, "
+                    f"got {kwargs['position_embedding_type']}"
+                )
+
+        # DECISION plan-2026-08-10-b007f435/D-010
+        # CONDITIONAL-REQUIRED rule replacing the static required_params entry for
+        # type_vocab_size. The default below is READ FROM THE REGISTRY rather than
+        # written as a literal True, so flipping the registry default can never leave
+        # this rule disagreeing with what the factory actually injects.
+        # Deleting this block re-introduces the silent degradation the move to
+        # optional_params would otherwise cause: a caller who omits type_vocab_size
+        # with token types enabled would reach the constructor instead of failing the
+        # config check. See decisions.md D-010.
+        token_types_default = EMBEDDING_REGISTRY['bert_embeddings'][
+            'optional_params']['use_token_type_embeddings']
+        if kwargs.get('use_token_type_embeddings', token_types_default):
+            type_vocab_size = kwargs.get('type_vocab_size')
+            if type_vocab_size is None or type_vocab_size <= 0:
+                raise ValueError(
+                    f"type_vocab_size is required and must be positive when "
+                    f"use_token_type_embeddings is True (the default), got "
+                    f"{type_vocab_size!r}. Pass a positive int, or pass "
+                    f"use_token_type_embeddings=False for a model without segment "
+                    f"embeddings."
+                )
 
     if embedding_type == 'positional_sine_2d':
         if 'temperature' in kwargs and kwargs['temperature'] <= 0:

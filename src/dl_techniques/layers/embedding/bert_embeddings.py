@@ -76,6 +76,25 @@ from ..norms.band_rms import BandRMS
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
+# Accepted enum values -- the SINGLE source of truth.
+#
+# DECISION plan-2026-08-10-b007f435/D-009
+# These two tuples are imported by layers/embedding/factory.py's
+# validate_embedding_config. Do NOT inline a literal list back into either the
+# constructor's checks or the factory's: before this step the normalization list
+# existed as two hand-maintained copies (factory.py and this file), which is a
+# lockstep invariant, i.e. a defect waiting for one side to be edited alone.
+# The factory validation is defence-in-depth in front of the constructor's own
+# raise, so the two MUST agree by construction, not by discipline.
+# See decisions.md D-009.
+# ---------------------------------------------------------------------
+
+VALID_NORMALIZATION_TYPES: Tuple[str, ...] = (
+    'layer_norm', 'rms_norm', 'band_rms', 'batch_norm'
+)
+VALID_POSITION_EMBEDDING_TYPES: Tuple[str, ...] = ('learned', 'sinusoidal')
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BertEmbeddings(keras.layers.Layer):
@@ -214,7 +233,7 @@ class BertEmbeddings(keras.layers.Layer):
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        valid_norm_types = ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm']
+        valid_norm_types = list(VALID_NORMALIZATION_TYPES)
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
@@ -224,7 +243,7 @@ class BertEmbeddings(keras.layers.Layer):
         # fallback of exactly that shape is the defect this plan exists to delete
         # (models/distilbert/model.py:170-174, measured in findings/
         # step1-premise-rederivation.md (c)). See decisions.md D-006.
-        valid_position_types = ['learned', 'sinusoidal']
+        valid_position_types = list(VALID_POSITION_EMBEDDING_TYPES)
         if position_embedding_type not in valid_position_types:
             raise ValueError(
                 f"position_embedding_type must be one of {valid_position_types}, "

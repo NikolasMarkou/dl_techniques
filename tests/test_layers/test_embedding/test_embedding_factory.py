@@ -2,6 +2,7 @@
 passthrough, validation, and config-driven construction."""
 
 import math
+import numpy as np
 import pytest
 import keras
 
@@ -98,3 +99,181 @@ class TestEmbeddingFactory:
         with pytest.raises(ValueError):
             validate_embedding_config("albert_factorized", vocab_size=50,
                                       bottleneck_dim=0, output_dim=16)
+
+
+# =====================================================================
+# I-5: the three opt-in BertEmbeddings parameters must SURVIVE the factory.
+#
+# ``create_embedding_layer`` filters kwargs to
+# ``required_params | optional_params`` and silently DROPS the rest
+# (``factory.py``, the ``final_params`` comprehension). A parameter that is
+# not registered is therefore a silent no-op, and a test that only asserts
+# "construction succeeded" cannot see it -- it would pass identically with the
+# parameter registered and un-registered.
+#
+# Every test below asserts the parameter's EFFECT: the value read back off
+# ``get_config()`` AND a behavioural consequence (which weight exists, whether a
+# Keras mask is produced). Each was proven red by un-registering its own
+# parameter from ``EMBEDDING_REGISTRY['bert_embeddings']['optional_params']``;
+# see ``findings/step5-mutation-log.md`` of
+# plans/plan-2026-08-10T183739-b007f435.
+# =====================================================================
+
+BERT_BASE = dict(vocab_size=50, hidden_size=16, max_position_embeddings=32)
+
+
+def _weight_paths(layer):
+    """Build the layer on a fixed input and return its weight paths."""
+    ids = keras.ops.convert_to_tensor(np.array([[1, 2, 0, 0]], dtype="int32"))
+    layer(ids)
+    return {w.path for w in layer.weights}
+
+
+class TestBertEmbeddingsFactoryParams:
+
+    def test_use_token_type_embeddings_false_reaches_the_layer(self):
+        layer = create_embedding_layer(
+            "bert_embeddings", **BERT_BASE,
+            type_vocab_size=2,            # supplied but inert -> normalized to None
+            use_token_type_embeddings=False,
+        )
+        cfg = layer.get_config()
+        assert cfg["use_token_type_embeddings"] is False, (
+            "use_token_type_embeddings did not survive create_embedding_layer -- it is "
+            "missing from EMBEDDING_REGISTRY['bert_embeddings'] and was silently dropped"
+        )
+        # Behavioural consequence: no segment-embedding weight is allocated at all.
+        paths = _weight_paths(layer)
+        assert not any("token_type_embeddings" in p for p in paths), (
+            f"token_type_embeddings weight exists despite use_token_type_embeddings=False: "
+            f"{sorted(paths)}"
+        )
+        # And the now-inert value is not serialized (D-002).
+        assert cfg["type_vocab_size"] is None
+
+    def test_use_token_type_embeddings_default_still_builds_the_segment_weight(self):
+        """Control for the test above: the assertion must be able to go both ways."""
+        layer = create_embedding_layer("bert_embeddings", **BERT_BASE, type_vocab_size=2)
+        assert layer.get_config()["use_token_type_embeddings"] is True
+        paths = _weight_paths(layer)
+        assert any("token_type_embeddings" in p for p in paths), sorted(paths)
+
+    def test_position_embedding_type_sinusoidal_reaches_the_layer(self):
+        layer = create_embedding_layer(
+            "bert_embeddings", **BERT_BASE, type_vocab_size=2,
+            position_embedding_type="sinusoidal",
+        )
+        assert layer.get_config()["position_embedding_type"] == "sinusoidal", (
+            "position_embedding_type did not survive create_embedding_layer -- it is "
+            "missing from EMBEDDING_REGISTRY['bert_embeddings'] and was silently dropped"
+        )
+        # Behavioural consequence: the sinusoidal branch allocates NO position table.
+        paths = _weight_paths(layer)
+        assert not any("position_embeddings" in p for p in paths), (
+            f"a learned position_embeddings weight exists despite "
+            f"position_embedding_type='sinusoidal': {sorted(paths)}"
+        )
+
+    def test_position_embedding_type_default_still_builds_the_learned_table(self):
+        """Control for the test above."""
+        layer = create_embedding_layer("bert_embeddings", **BERT_BASE, type_vocab_size=2)
+        assert layer.get_config()["position_embedding_type"] == "learned"
+        paths = _weight_paths(layer)
+        assert any("position_embeddings" in p for p in paths), sorted(paths)
+
+    def test_mask_zero_false_reaches_the_layer(self):
+        layer = create_embedding_layer(
+            "bert_embeddings", **BERT_BASE, type_vocab_size=2, mask_zero=False,
+        )
+        assert layer.get_config()["mask_zero"] is False, (
+            "mask_zero did not survive create_embedding_layer -- it is missing from "
+            "EMBEDDING_REGISTRY['bert_embeddings'] and was silently dropped"
+        )
+        # Behavioural consequence: no Keras auto-mask is produced for pad id 0 (I-4).
+        ids = keras.ops.convert_to_tensor(np.array([[1, 2, 0, 0]], dtype="int32"))
+        layer(ids)
+        assert layer.word_embeddings.compute_mask(ids) is None, (
+            "word_embeddings still emits a Keras auto-mask despite mask_zero=False"
+        )
+
+    def test_mask_zero_default_still_emits_a_mask(self):
+        """Control: mask_zero=True really does produce a mask, so the `is None`
+        assertion above is discriminating rather than vacuously true."""
+        layer = create_embedding_layer("bert_embeddings", **BERT_BASE, type_vocab_size=2)
+        assert layer.get_config()["mask_zero"] is True
+        ids = keras.ops.convert_to_tensor(np.array([[1, 2, 0, 0]], dtype="int32"))
+        layer(ids)
+        mask = layer.word_embeddings.compute_mask(ids)
+        assert mask is not None
+        assert keras.ops.convert_to_numpy(mask).tolist() == [[True, True, False, False]]
+
+    # ---- the conditional-required `type_vocab_size` rule (D-002 / D-010) ----
+
+    def test_omitting_type_vocab_size_with_token_types_enabled_still_raises(self):
+        """Regression guard for moving type_vocab_size out of required_params.
+
+        Before this change the static required-params check produced this error. The
+        computed rule in validate_embedding_config must keep producing it, or the move
+        would be a silent downgrade of an existing loud failure.
+        """
+        with pytest.raises(ValueError, match="type_vocab_size"):
+            create_embedding_layer("bert_embeddings", **BERT_BASE)
+
+    def test_validate_rejects_missing_type_vocab_size_when_token_types_enabled(self):
+        """Isolates the FACTORY-level rule from the constructor's own raise: this calls
+        validation only, so no BertEmbeddings is ever constructed."""
+        with pytest.raises(ValueError, match="type_vocab_size"):
+            validate_embedding_config("bert_embeddings", **BERT_BASE)
+        with pytest.raises(ValueError, match="type_vocab_size"):
+            validate_embedding_config("bert_embeddings", **BERT_BASE, type_vocab_size=None)
+        with pytest.raises(ValueError, match="type_vocab_size"):
+            validate_embedding_config("bert_embeddings", **BERT_BASE,
+                                      use_token_type_embeddings=True, type_vocab_size=None)
+
+    def test_validate_allows_missing_type_vocab_size_when_token_types_disabled(self):
+        # No raise: the parameter is genuinely meaningless on this path.
+        validate_embedding_config("bert_embeddings", **BERT_BASE,
+                                  use_token_type_embeddings=False)
+
+    def test_validate_rejects_bad_position_embedding_type(self):
+        """Factory-level enum check, isolated from the constructor's (defence-in-depth)."""
+        with pytest.raises(ValueError, match="position_embedding_type"):
+            validate_embedding_config("bert_embeddings", **BERT_BASE, type_vocab_size=2,
+                                      position_embedding_type="relative")
+        # Both legal values pass validation.
+        for value in ("learned", "sinusoidal"):
+            validate_embedding_config("bert_embeddings", **BERT_BASE, type_vocab_size=2,
+                                      position_embedding_type=value)
+
+    def test_bad_position_embedding_type_raises_through_the_factory_too(self):
+        with pytest.raises(ValueError, match="position_embedding_type"):
+            create_embedding_layer("bert_embeddings", **BERT_BASE, type_vocab_size=2,
+                                   position_embedding_type="relative")
+
+    # ---- negative control: unregistered keys are STILL dropped silently ----
+
+    def test_bogus_key_is_still_silently_dropped(self):
+        """The silent-drop contract itself is unchanged by this step. Registering three
+        real params must not turn the factory strict, and it must not start accepting
+        arbitrary keys either."""
+        layer = create_embedding_layer(
+            "bert_embeddings", **BERT_BASE, type_vocab_size=2,
+            definitely_not_a_real_param=123,
+        )
+        assert isinstance(layer, keras.layers.Layer)
+        assert not hasattr(layer, "definitely_not_a_real_param")
+        assert "definitely_not_a_real_param" not in layer.get_config()
+
+    def test_registry_declares_all_three_new_params_with_ctor_defaults(self):
+        """Static companion to the effect tests: names AND default values.
+
+        The defaults are injected by create_embedding_layer
+        (``params.update(optional_params)``), so a wrong default here is behavioural,
+        not documentation.
+        """
+        optional = EMBEDDING_REGISTRY["bert_embeddings"]["optional_params"]
+        assert optional["use_token_type_embeddings"] is True
+        assert optional["position_embedding_type"] == "learned"
+        assert optional["mask_zero"] is True
+        assert optional["type_vocab_size"] is None
+        assert "type_vocab_size" not in EMBEDDING_REGISTRY["bert_embeddings"]["required_params"]
