@@ -1,4 +1,4 @@
-"""GUI-free core wrapper around the frozen bias-free CliffordUNet denoiser.
+"""GUI-free core wrapper around the frozen bias-free ConvUNext denoiser.
 
 This module holds the single load-bearing "prior" object for the inverse-problem
 app: :class:`DenoiserPrior`. It loads the frozen denoiser :math:`D`, exposes the
@@ -9,40 +9,34 @@ domain-normalization helpers every caller needs. It imports NO GUI framework
 Loading contract (F1 H2 / INV-2)
 --------------------------------
 ``keras.models.load_model`` on the saved ``.keras`` file FAILS unless the
-registrar module ``dl_techniques.models.bias_free_denoisers.bfcliffordunet`` has
-been *imported* (executed) first, so that ``GaborFiltersInitializer`` and the
-Clifford / Laplacian / LayerScale custom objects are present in the Keras
-serialization registry. A bare ``import dl_techniques`` is NOT enough (its
-``__init__`` is empty). This mirrors the canonical loader at
-``src/train/bfunet/eval_per_pixel_uncertainty.py:109-177`` (``_load_denoiser``).
-The sibling registrar ``dl_techniques.models.bias_free_denoisers.bfconvunext`` is
-now ALSO imported before load, so a ConvUNext checkpoint (``ConvUNextStem``,
-``ConvNextV1Block``, ``GlobalResponseNormalization``, ``MatchChannels``, Gabor
-initializer) deserializes from the same registry (INV-B1).
+registrar module ``dl_techniques.models.bias_free_denoisers.bfconvunext`` has
+been *imported* (executed) first, so that ``ConvUNextStem``, ``ConvNextV1Block``,
+``GlobalResponseNormalization``, ``MatchChannels`` and ``GaborFiltersInitializer``
+are present in the Keras serialization registry. A bare ``import dl_techniques`` is
+NOT enough (its ``__init__`` is empty). This mirrors the canonical loader at
+``src/train/bfunet/eval_per_pixel_uncertainty.py`` (``_load_denoiser``).
 
 Resolution contract (F1 §2 / D-006)
 -----------------------------------
 The saved graph's ``Input`` is hard-locked to ``(256, 256, 3)`` (the training
 patch size) and raises on any other spatial size. Two loader paths are provided:
 
-* ``resolution="dynamic"`` (DEFAULT, D-006): rebuild the fully-convolutional
-  architecture at ``input_shape=(None, None, 3)`` via the SAME factory
-  (:func:`create_cliffordunet_denoiser`) and transfer weights with
-  :func:`load_weights_from_checkpoint`. Runs any ``H, W`` divisible by ``8`` in a
-  single pass. Factory kwargs are reconstructed from the checkpoint's sibling
-  ``config.json`` mapped through ``CLIFFORDUNET_CONFIGS[variant] + overrides``
-  (mirroring the trainer's ``build_model``) — never hand-copied resolved numbers.
+* ``resolution="dynamic"`` (DEFAULT): take the *graph-relax* path
+  (:meth:`_build_dynamic_convunext`) — the saved graph is loaded directly (real
+  weights + layer instances, bit-identical) and its size-locked ``Input`` is
+  relaxed to ``(None, None, 3)`` in-place, so it runs any ``H, W`` divisible by
+  ``8`` in a single pass. This avoids the ConvUNext factory-kwargs reconstruction
+  traps a naive mapper would silently get wrong (D-001).
 * ``resolution="fixed256"`` (fallback): load the saved ``.keras`` graph directly
   (locked to ``(256, 256, 3)``); use :meth:`tile` / :meth:`untile` for larger
   inputs.
 
-The ``"dynamic"`` path dispatches on the checkpoint architecture (sniffed from
-``config.json`` via :meth:`_detect_architecture`). CliffordUNet uses the
-factory-rebuild + weight-transfer path above (byte-identical, D-006). A ConvUNext
-checkpoint instead takes a *graph-relax* path (:meth:`_build_dynamic_convunext`):
-the saved graph is loaded directly (real weights + layer instances, bit-identical)
-and its size-locked ``Input`` is relaxed to ``(None, None, 3)`` in-place, avoiding
-the ConvUNext factory-kwargs reconstruction traps (D-001).
+ConvUNext is the ONLY supported architecture. The CliffordUNet branch (a
+factory-rebuild + weight-transfer path over
+``dl_techniques.models.bias_free_denoisers.bfcliffordunet``) was removed together
+with its model module; :meth:`_detect_architecture` still recognizes such a
+checkpoint so :meth:`from_pretrained` can refuse it by name instead of dying on a
+``ModuleNotFoundError`` (see decisions.md D-009).
 
 Domain contract (INV-1 / plan_2026-07-12_e56909cd D-004)
 --------------------------------------------------------
@@ -66,13 +60,12 @@ well — one implementation, four load paths.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 
 # NumPy/array image input (host-side ingest helpers operate on concrete arrays).
@@ -141,33 +134,33 @@ class DenoiserPrior:
     ) -> "DenoiserPrior":
         """Load the frozen denoiser from a training checkpoint.
 
-        The registrar module ``bfcliffordunet`` is imported BEFORE any
+        The registrar module ``bfconvunext`` is imported BEFORE any
         ``keras.models.load_model`` call so the custom objects (Gabor initializer,
-        Clifford blocks, Laplacian pyramid, LayerScale) resolve from the registry
+        ConvNeXt blocks, Laplacian pyramid, LayerScale) resolve from the registry
         (F1 H2 / INV-2). On any failure the error is logged and re-raised.
 
         Args:
             checkpoint_path: Path to the saved ``.keras`` file OR to the training
                 results directory containing ``best_model.keras`` +
                 ``config.json``.
-            resolution: ``"dynamic"`` (DEFAULT, D-006) rebuilds at ``input_shape``
-                and transfers weights for arbitrary ``H, W`` (÷8). ``"fixed256"``
+            resolution: ``"dynamic"`` (DEFAULT) loads the saved graph and relaxes its
+                size-locked ``Input`` for arbitrary ``H, W`` (÷8). ``"fixed256"``
                 loads the saved ``(256, 256, 3)``-locked graph directly.
-            input_shape: Rebuild input shape for the ``"dynamic"`` path. Defaults
-                to ``(None, None, 3)`` (any spatial size divisible by 8).
+            input_shape: Retained for API compatibility; the graph-relax path always
+                produces ``(None, None, C)`` and does not consume this value.
 
         Returns:
             A :class:`DenoiserPrior` wrapping the loaded model.
 
         Raises:
-            ValueError: If ``resolution`` is not ``"dynamic"`` or ``"fixed256"``, or if
+            ValueError: If ``resolution`` is not ``"dynamic"`` or ``"fixed256"``; if
                 the checkpoint's ``config.json`` does not stamp ``data_range == "[0,1]"``
-                (D-005 provenance gate).
+                (D-005 provenance gate); or if the checkpoint is a CliffordUNet, whose
+                support was removed (D-009).
             FileNotFoundError: If the resolved checkpoint / config paths are absent.
         """
         # Registrar-first import (INV-2). This MUST precede any load_model call —
         # bare `import dl_techniques` does not register the custom objects.
-        import dl_techniques.models.bias_free_denoisers.bfcliffordunet  # noqa: F401
         import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
 
         if resolution not in ("dynamic", "fixed256"):
@@ -180,12 +173,33 @@ class DenoiserPrior:
         # rather than loading it and emitting silent garbage (D-005). SHARED with the
         # three src/train/bfunet/ load paths — do not re-implement it here.
         require_unit_domain_checkpoint(keras_path)
+
+        # DECISION plan-2026-08-10T130454-3649c19e/D-009: refuse a CliffordUNet
+        # checkpoint HERE, by name, before any load attempt. Do NOT delete
+        # `_detect_architecture`'s "cliffordunet" verdict and let the load fall
+        # through to `keras.models.load_model` — the model module
+        # `...bias_free_denoisers.bfcliffordunet` is gone, so that route dies with a
+        # bare `ModuleNotFoundError` / unknown-custom-object `TypeError` that names
+        # a Keras internal instead of the removed architecture, and a user with a
+        # real trained checkpoint cannot tell "unsupported" from "app is broken".
+        # The check is deliberately OUTSIDE the resolution branch: `fixed256` is just
+        # as unloadable as `dynamic`. See decisions.md D-009.
+        architecture = cls._detect_architecture(config_path)
+        if architecture != "convunext":
+            raise ValueError(
+                f"unsupported denoiser architecture {architecture!r} for checkpoint "
+                f"{keras_path}: CliffordUNet support was REMOVED from this "
+                f"application along with the "
+                f"dl_techniques.models.bias_free_denoisers.bfcliffordunet model "
+                f"module, so this checkpoint can no longer be loaded at all. "
+                f"ConvUNext is the only supported architecture; its config.json "
+                f"records a 'convnext_version' key. Retrain or use the shipped "
+                f"ConvUNext checkpoint."
+            )
+
         try:
             if resolution == "dynamic":
-                if cls._detect_architecture(config_path) == "convunext":
-                    model = cls._build_dynamic_convunext(keras_path)
-                else:
-                    model = cls._build_dynamic(keras_path, config_path, input_shape)
+                model = cls._build_dynamic_convunext(keras_path)
             else:
                 model = cls._load_fixed(keras_path)
         except Exception as exc:  # noqa: BLE001 — log + re-raise per F1 template
@@ -239,8 +253,10 @@ class DenoiserPrior:
         """Sniff the checkpoint's sibling config.json for the denoiser architecture.
 
         ConvUNext checkpoints record ``convnext_version`` (v1/v2); CliffordUNet ones
-        do not. Missing/unreadable config.json falls back to ``"cliffordunet"`` so the
-        pre-existing default loader path is preserved (back-compat).
+        do not. Missing/unreadable config.json falls back to ``"cliffordunet"`` — the
+        historical default — which :meth:`from_pretrained` now turns into a named
+        refusal rather than a load (D-009). Only ``"convunext"`` is loadable; the
+        other verdict exists solely so the refusal can name what it refused.
 
         Returns:
             ``"convunext"`` or ``"cliffordunet"``.
@@ -252,54 +268,17 @@ class DenoiserPrior:
         return "convunext" if "convnext_version" in raw else "cliffordunet"
 
     @classmethod
-    def _build_dynamic(
-        cls,
-        keras_path: Path,
-        config_path: Path,
-        input_shape: Tuple[Optional[int], Optional[int], int],
-    ) -> keras.Model:
-        """Rebuild the architecture at ``input_shape`` and transfer weights.
-
-        # DECISION plan_2026-07-06_d6b88914/D-006: this rebuild + weight-transfer
-        # is the DEFAULT loader, NOT `keras.models.load_model` fed non-256 inputs.
-        # The saved graph's Input is hard-locked to (256,256,3) (F1 §2) and RAISES
-        # on any other spatial size, so we reconstruct the fully-convolutional
-        # architecture at (None,None,3) via the SAME factory and copy weights by
-        # name. Reconstruct factory kwargs by mapping config.json through
-        # CLIFFORDUNET_CONFIGS[variant] + overrides (mirroring the trainer's
-        # build_model); do NOT hand-copy resolved numbers (drift risk, F1 §Risks).
-        # See decisions.md D-006.
-        """
-        from dl_techniques.models.bias_free_denoisers.bfcliffordunet import (
-            create_cliffordunet_denoiser,
-        )
-
-        factory_kwargs = cls._factory_kwargs_from_config(config_path)
-        model = create_cliffordunet_denoiser(input_shape=input_shape, **factory_kwargs)
-        # Functional models are built at construction; weight_transfer requires it.
-        report = load_weights_from_checkpoint(
-            model, str(keras_path), skip_prefixes=(), strict=False,
-        )
-        if report.shape_mismatch:
-            logger.warning(
-                "dynamic rebuild had %d shape-mismatched layer(s): %s",
-                len(report.shape_mismatch),
-                [name for name, *_ in report.shape_mismatch][:10],
-            )
-        return model
-
-    @classmethod
     def _build_dynamic_convunext(cls, keras_path: Path) -> keras.Model:
         """Load a ConvUNext checkpoint and relax its input to ``(None, None, C)``.
 
-        # DECISION plan_2026-07-10_77fb9b17/D-001: for the ConvUNext branch we do NOT
-        # reconstruct factory kwargs (unlike the Clifford `_build_dynamic` path). The
-        # saved graph is loaded directly and its size-locked Input is relaxed in-place,
-        # so the real trained layer instances + weights transfer bit-identically. This
-        # sidesteps the ConvUNext factory-kwargs traps (block_normalization batchnorm-vs-
-        # layernorm homogeneity; the LeakyReLU(0.1) instance detail) a naive mapper would
-        # silently get wrong. The Clifford factory path (D-006) is left byte-identical.
-        # See decisions.md D-001.
+        # DECISION plan_2026-07-10_77fb9b17/D-001: do NOT reconstruct factory kwargs
+        # from config.json here. The saved graph is loaded directly and its size-locked
+        # Input is relaxed in-place, so the real trained layer instances + weights
+        # transfer bit-identically. This sidesteps the ConvUNext factory-kwargs traps
+        # (block_normalization batchnorm-vs-layernorm homogeneity; the LeakyReLU(0.1)
+        # instance detail) a naive mapper would silently get wrong. The sibling
+        # factory-rebuild path this was contrasted against served CliffordUNet and was
+        # deleted with it (D-009). See decisions.md D-001.
         """
         model = keras.models.load_model(keras_path, compile=False)
         return cls._relax_to_flexible_input(model)
@@ -339,86 +318,6 @@ class DenoiserPrior:
         flex.set_weights(model.get_weights())
         logger.info("rebuilt '%s' with flexible (None,None,C) input", model.name)
         return flex
-
-    @staticmethod
-    def _factory_kwargs_from_config(config_path: Path) -> Dict[str, Any]:
-        """Map a checkpoint ``config.json`` to ``create_cliffordunet_denoiser`` kwargs.
-
-        Faithfully mirrors ``train_cliffordunet_denoiser.build_model``: start from
-        ``CLIFFORDUNET_CONFIGS[variant]`` (drop ``description``), apply the same
-        field overrides, and resolve ``final_projection_groups == -1`` to the
-        channel count. The per-level topology (``depth`` / ``initial_filters`` /
-        ``blocks_per_level`` / ``shifts`` / ``drop_path_rate``) is delivered via
-        the variant config + overrides — never hand-copied resolved numbers (D-006).
-
-        Args:
-            config_path: Path to the checkpoint's sibling ``config.json``.
-
-        Returns:
-            Keyword arguments for :func:`create_cliffordunet_denoiser` (excluding
-            ``input_shape``, which the caller supplies).
-
-        Raises:
-            FileNotFoundError: If ``config.json`` is absent (required for rebuild).
-        """
-        from dl_techniques.models.bias_free_denoisers.bfcliffordunet import (
-            CLIFFORDUNET_CONFIGS,
-        )
-
-        if not config_path.is_file():
-            raise FileNotFoundError(
-                f"config.json required for dynamic rebuild but not found: "
-                f"{config_path}. Use resolution='fixed256' to load the saved graph."
-            )
-        raw = json.loads(config_path.read_text())
-
-        variant = raw.get("variant", "base")
-        if variant not in CLIFFORDUNET_CONFIGS:
-            raise ValueError(
-                f"config.json variant {variant!r} not in "
-                f"{list(CLIFFORDUNET_CONFIGS)}"
-            )
-        # Variant topology base; overridable fields mirror build_model.
-        cfg = CLIFFORDUNET_CONFIGS[variant].copy()
-        cfg.pop("description", None)
-        if raw.get("initial_filters") is not None:
-            cfg["initial_filters"] = raw["initial_filters"]
-        if raw.get("shifts") is not None:
-            cfg["shifts"] = list(raw["shifts"])
-        if raw.get("depth") is not None:
-            cfg["depth"] = raw["depth"]
-        if raw.get("blocks_per_level") is not None:
-            cfg["blocks_per_level"] = raw["blocks_per_level"]
-
-        channels = raw.get("channels", 3)
-        # -1 means one group per output channel (groups == channels), per build_model.
-        fpg_raw = raw.get("final_projection_groups", 1)
-        final_projection_groups = channels if fpg_raw == -1 else fpg_raw
-
-        # Non-topology factory kwargs (defaults match the factory / TrainingConfig
-        # when absent from config.json).
-        factory_kwargs: Dict[str, Any] = dict(
-            filter_multiplier=raw.get("filter_multiplier", 2.0),
-            cli_mode=raw.get("cli_mode", "full"),
-            ctx_mode=raw.get("ctx_mode", "abs"),
-            layer_scale_init=raw.get("layer_scale_init", 1e-5),
-            use_gabor_stem=raw.get("use_gabor_stem", False),
-            gabor_filters=raw.get("gabor_filters", 32),
-            gabor_kernel_size=raw.get("gabor_kernel_size", 11),
-            gabor_activation=raw.get("gabor_activation", None),
-            gabor_stem_projection=raw.get("gabor_stem_projection", True),
-            use_laplacian_pyramid=raw.get("use_laplacian_pyramid", False),
-            high_freq_blocks=raw.get("high_freq_blocks", 0),  # D-001: older config.json -> 0 (byte-identical no-op)
-            zero_pad_channels=raw.get("zero_pad_channels", False),
-            final_projection_groups=final_projection_groups,
-            downsample_pool_type=raw.get("downsample_pool_type", "max"),
-            enable_deep_supervision=False,
-            expose_bottleneck=False,
-            final_activation="linear",  # HARD invariant: bias-free homogeneity.
-            model_name=f"cliffordunet_denoiser_{variant}",
-        )
-        factory_kwargs.update(cfg)
-        return factory_kwargs
 
     # ------------------------------------------------------------------
     # Core symbolic methods

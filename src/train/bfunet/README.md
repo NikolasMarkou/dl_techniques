@@ -2,7 +2,7 @@
 
 Production training suite for **bias-free image denoisers** built on a shared substrate.
 Several bias-free denoiser families are trained here — a **ConvUNeXt** (ConvNeXt U-Net)
-denoiser, a **CliffordUNet** (geometric-algebra U-Net) denoiser, a plain **U-Net** baseline,
+denoiser, a plain **U-Net** baseline,
 and a flat **BFCNN** (bias-free ResNet, non-U-Net) baseline — all wired through one common
 data/curriculum/training module (`common.py`).
 
@@ -46,14 +46,13 @@ its value *is* `‖f(1) − 1‖`.
 |------|------|
 | `common.py` | **Shared substrate** — data pipeline, noise curriculum, self-iteration pool, callbacks, dashboard, the `train()` orchestrator, the `BFUnetTrainingConfig` base dataclass, and `add_common_arguments()` (the CLI shared by all trainers). Not run directly. |
 | `train_convunext_denoiser.py` | **Production trainer** — bias-free ConvNeXt U-Net denoiser. The most actively developed. |
-| `train_cliffordunet_denoiser.py` | **Production trainer** — bias-free homogeneous CliffordUNet denoiser (Clifford geometric-product blocks). |
 | `train_unet_denoiser.py` | **Baseline trainer** — bias-free plain U-Net denoiser (classic conv/residual blocks). Same infrastructure feature set as ConvUNeXt; the apples-to-apples baseline. |
 | `train_bfcnn_denoiser.py` | **Baseline trainer** — flat bias-free ResNet (BFCNN, Mohan et al. ICLR 2020), a stack of residual blocks with **no downsampling / no skips** — the non-U-Net baseline. Trains on the same shared substrate. |
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
 | `FINDINGS.md` | Empirical note on the channel-matching (`--zero-pad-channels`) experiment. |
 
-All four trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
+All three trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
 a model-specific `TrainingConfig(BFUnetTrainingConfig)`, and CLI glue. Everything else —
 the fit loop, dataset streaming, curriculum, visualization — lives once in `common.py` and is
 invoked via `common.train(config, build_model, verify_bias_free, ...)`.
@@ -67,10 +66,6 @@ Always run with a non-interactive matplotlib backend (headless-safe) and from th
 ```bash
 # ConvUNeXt base denoiser, full training run
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
-    --variant base --epochs 100 --batch-size 4 --gpu 1
-
-# CliffordUNet base denoiser
-MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
     --variant base --epochs 100 --batch-size 4 --gpu 1
 
 # Plain U-Net baseline denoiser
@@ -140,14 +135,13 @@ in the per-trainer sections below.
 | `--block-activation` | leaky_relu | Activation for blocks + stem + deep-supervision heads (final activation stays linear) |
 | `--block-activation-alpha` | 0.1 | LeakyReLU negative slope |
 
-> **All four trainers now default to `block_activation=leaky_relu` (alpha `0.1`) and
+> **All three trainers now default to `block_activation=leaky_relu` (alpha `0.1`) and
 > `block_normalization=batchnorm`.** For the ConvUNeXt / plain-U-Net / BFCNN denoisers, `batchnorm`
 > resolves to the real degree-1-homogeneous `BiasFreeBatchNorm`: ConvUNeXt already used it via its
 > ConvNeXt blocks, and BFCNN + the plain U-Net were switched onto it (their `BiasFreeConv2D` /
 > `BiasFreeResidualBlock` `'batchnorm'` opt into the additive `'bias_free_batchnorm'` value). As a
 > result **all three are now degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is a
-> valid scaled score (Miyasawa/Tweedie). CliffordUNet ignores these three inherited fields — its
-> norm/activation are factory-pinned for provable homogeneity (D-004), intentionally out of scope.
+> valid scaled score (Miyasawa/Tweedie).
 
 **Noise curriculum** — training sweeps `sigma_max` from a narrow low-noise range up to a wide one:
 
@@ -220,28 +214,6 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 
 > A few tests import re-exported names from this module path; treat its public names as a
 > stable API surface.
-
----
-
-## CliffordUNet trainer (`train_cliffordunet_denoiser.py`)
-
-Trains `create_cliffordunet_denoiser` — a bias-free, degree-1-homogeneous U-Net built from
-Clifford geometric-product blocks. Variants: `tiny`, `small`, `base` (default).
-Model-specific flags:
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--variant` | base | CliffordUNet size preset |
-| `--cli-mode` | full | Clifford components for the local interaction: `inner` / `wedge` / `full` |
-| `--ctx-mode` | abs | **HOMOGENEITY-CRITICAL.** `abs` keeps the context stream degree-0 (block stays degree-1 homogeneous, strict Miyasawa). `diff` makes the geometric product degree-2 and **breaks homogeneity** — use only deliberately. |
-| `--shifts` | variant | Override the geometric-product base shift offsets (ints ≥1, sized per level) |
-| `--layer-scale-init` | 1e-5 | Initial LayerScale γ for the gated geometric residual |
-
-```bash
-MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
-    --variant base --cli-mode full --ctx-mode abs \
-    --epochs 100 --batch-size 4 --gpu 1
-```
 
 ---
 
@@ -331,8 +303,8 @@ flags: `--patch-size`, `--channels`, `--batch-size`, `--full-image` (SOTA reflec
 `--size-multiple`, `--no-clip`, `--confidence`, `--seed`, `--output-dir`, `--experiment-name`.
 
 > The tool imports the ConvUNeXt model module to register its custom layers for deserialization.
-> Loading a **CliffordUNet** checkpoint standalone may require importing the Clifford model module
-> first so its custom objects are registered.
+> A checkpoint from any other architecture may require importing that model module first so its
+> custom objects are registered.
 
 ### `variance_probe.py` — training-stability probe
 
@@ -353,8 +325,6 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
 - **Additive-only self-iteration.** `--self-iterate` is rejected at parse time with
   `--multiplicative-noise` / `--composite-noise`: the Miyasawa residual-as-score identity (and the
   clean-image fixed point that makes 2–5 passes non-decreasing) holds for additive noise only.
-- **Clifford homogeneity.** Keep `--ctx-mode abs` unless you specifically want to break degree-1
-  homogeneity; `diff` makes the block degree-2.
 - **Mixed precision is usually slower here** — leave it off unless you have measured a win.
 - **Outputs go to repo-root `results/`.** Do not point `--output-dir` inside `src/`.
 - **Always set `MPLBACKEND=Agg`** to avoid X11 crashes on headless/remote systems.

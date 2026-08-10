@@ -178,7 +178,7 @@ def collect_image_paths(
     Shared extraction of the byte-identical ``rglob`` + extension-filter +
     cap-then-shuffle path-collection preamble previously duplicated across the
     denoiser trainers (``train/bfunet/train_bfcnn_denoiser.py`` /
-    ``train_convunext_denoiser.py`` / ``train_cliffordunet_denoiser.py`` /
+    ``train_convunext_denoiser.py`` /
     ``train_unet_denoiser.py``) and the ``DatasetBuilder._create_file_list``
     methods.
 

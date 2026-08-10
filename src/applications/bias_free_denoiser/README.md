@@ -9,9 +9,11 @@ Reference: A. Kadkhodaie & E. P. Simoncelli, *"Stochastic Solutions for Linear
 Inverse Problems using the Prior Implicit in a Denoiser"* (NeurIPS 2021). The
 denoiser is a bias-free **ConvUNext** (bias-free ConvNeXt U-Net, BF-CNN-style:
 strictly bias-free so it is input-scale equivariant / degree-1 homogeneous, trained
-blind on additive Gaussian noise with an MSE objective). `DenoiserPrior.from_pretrained`
-also still loads a bias-free CliffordUNet checkpoint — the architecture is auto-detected
-from the checkpoint's `config.json`.
+blind on additive Gaussian noise with an MSE objective). ConvUNext is the ONLY
+architecture `DenoiserPrior.from_pretrained` supports: the app previously also loaded a
+bias-free CliffordUNet checkpoint, but that model was removed from the library, so
+`from_pretrained` now refuses such a checkpoint with an error naming the removed
+architecture.
 
 Shipped checkpoint: `results/convunext_denoiser_base_20260707_122133/` (ConvUNext base,
 3.4M params, blind additive curriculum σ up to 0.5). Measured blind denoising PSNR on
@@ -177,10 +179,10 @@ from applications.bias_free_denoiser import (
 - **`DenoiserPrior`** — loads the frozen denoiser (registrar-first, `compile=False`).
   The default `from_pretrained(...)` returns a fully-convolutional graph at
   `(None, None, 3)` so it runs any sufficiently-divisible `H, W` in a single pass.
-  Architecture is auto-detected: a ConvUNext checkpoint loads the saved graph and relaxes
-  its size-locked input in place (bit-identical weights); a CliffordUNet checkpoint rebuilds
-  via its factory + weight-transfer. `resolution="fixed256"` loads the saved 256x256 graph
-  for either. Exposes `residual(y) = D(y) - y` (the score estimate) plus
+  A ConvUNext checkpoint loads the saved graph and relaxes its size-locked input in
+  place (bit-identical weights); any non-ConvUNext checkpoint is refused by name.
+  `resolution="fixed256"` loads the saved 256x256 graph instead. Exposes
+  `residual(y) = D(y) - y` (the score estimate) plus
   `ingest` / `denorm` / `tile`.
 - **`UniversalInverseSolver`** — `solve(operator, measurements=..., shape=..., seed=...)`
   runs the annealed ascent and returns `(best_y, info)` where `info` holds

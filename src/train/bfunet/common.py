@@ -1,4 +1,4 @@
-"""Shared building blocks for the bfunet denoiser trainers (train_convunext_denoiser.py, train_cliffordunet_denoiser.py, and train_unet_denoiser.py). Data pipeline, curriculum noise, eval/PSNR helpers, dashboard, and callbacks live here once; each trainer imports/re-exports them."""
+"""Shared building blocks for the bfunet denoiser trainers (train_convunext_denoiser.py, train_bfcnn_denoiser.py, and train_unet_denoiser.py). Data pipeline, curriculum noise, eval/PSNR helpers, dashboard, and callbacks live here once; each trainer imports/re-exports them."""
 
 import gc
 import csv
@@ -953,7 +953,7 @@ GABOR_ACTIVATIONS = frozenset({"relu", "leaky_relu", "linear"})
 class BFUnetTrainingConfig:
     """Shared configuration base for the bfunet bias-free denoiser trainers.
 
-    Holds the ~55 fields that are byte-identical between the ConvUNeXt and Clifford
+    Holds the ~55 fields that are byte-identical between the ConvUNeXt and U-Net
     trainers (Data / Memory / Noise-curriculum / shared U-Net topology / Training /
     Optimization / Self-iterate / WW-PGD / init_from / Analysis / Output) plus the
     shared ``__post_init__`` validation body. Each trainer subclasses this, adds its
@@ -965,7 +965,7 @@ class BFUnetTrainingConfig:
 
     # Overridable experiment-name prefix. Declared WITHOUT a type annotation so the
     # dataclass machinery ignores it (it is a plain class attribute, NOT a field);
-    # subclasses set it to e.g. "convunext_denoiser_" / "cliffordunet_denoiser_".
+    # subclasses set it to e.g. "convunext_denoiser_" / "bfcnn_denoiser_".
     experiment_prefix = "denoiser_"
 
     # Data
@@ -1062,7 +1062,7 @@ class BFUnetTrainingConfig:
     # default from the model CONFIGS. Shared by both bfunet trainers; passed into each
     # factory by build_model. Must be >= 2 when set.
     depth: Optional[int] = None
-    # Override the variant's number of Clifford/ConvNeXt blocks per U-Net level. None ->
+    # Override the variant's number of ConvNeXt/residual blocks per U-Net level. None ->
     # use the variant default from the model CONFIGS. Shared by both bfunet trainers;
     # passed into each factory by build_model. Must be >= 1 when set.
     blocks_per_level: Optional[int] = None

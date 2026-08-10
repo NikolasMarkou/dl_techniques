@@ -3,7 +3,7 @@
 This trains ``create_bfunet_denoiser`` — a classic bias-free U-Net (plain
 ``BiasFreeConv2D`` / ``BiasFreeResidualBlock`` blocks, no ConvNeXt inverted
 bottleneck) — through the SAME shared substrate (``train.bfunet.common``) as the
-ConvUNeXt and Clifford trainers: identical data pipeline, noise curriculum, callbacks,
+ConvUNeXt trainer: identical data pipeline, noise curriculum, callbacks,
 dashboard, self-iterate, and eval. It is the apples-to-apples baseline: same training
 machinery, same optional infrastructure features (Gabor stem, Laplacian pyramid,
 zero-pad channel matching, pooling-type, expose-bottleneck, block-normalization choice,

@@ -2,10 +2,10 @@
 
 SLOW / GPU test. Unlike ``test_operators.py`` / ``test_solver.py`` (which run on a
 tiny stub denoiser in well under a second on CPU), this module loads the ACTUAL
-trained checkpoints and runs the full stack — real ``DenoiserPrior`` + real
+trained checkpoint and runs the full stack — real ``DenoiserPrior`` + real
 ``UniversalInverseSolver`` + real ``MeasurementOperator`` — at 256x256x3 on GPU1.
-The ``prior`` fixture is parametrized over BOTH shipped architectures (the ConvUNext
-default and the legacy CliffordUNet), each skipped if its checkpoint is absent.
+The ``prior`` fixture loads the app's only shipped architecture (ConvUNext), skipped
+if its checkpoint is absent.
 
 Gating (so the fast suite is unaffected):
 
@@ -70,15 +70,14 @@ from dl_techniques.utils.logger import logger
 # (the fast unit suite never touches the 22 MB checkpoint).
 pytestmark = pytest.mark.slow
 
-# The real trained checkpoints (F1 / plan.md). Absolute-from-repo-root; resolved
-# relative to this file so the test is CWD-independent. The `prior` fixture is
-# parametrized over BOTH bias-free architectures (plan_2026-07-10_77fb9b17/step-6):
-# the ConvUNext default that the app now ships and the CliffordUNet checkpoint it
-# used to ship, so `from_pretrained`'s architecture auto-dispatch (graph-relax vs.
-# factory-rebuild) is regression-covered for both. Each param skips if absent.
+# The real trained checkpoint (F1 / plan.md). Absolute-from-repo-root; resolved
+# relative to this file so the test is CWD-independent. The `prior` fixture stays
+# parametrized (single param) so adding a second supported architecture later is a
+# one-line change. The former CliffordUNet param was dropped with the architecture
+# itself (plan-2026-08-10-3649c19e/step-2b): `from_pretrained` no longer has a
+# factory-rebuild branch to regression-cover.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 CONVUNEXT_CKPT = _REPO_ROOT / "results" / "convunext_denoiser_base_20260707_122133" / "best_model.keras"
-CLIFFORD_CKPT = _REPO_ROOT / "results" / "cliffordunet_denoiser_base_20260705_004751" / "best_model.keras"
 
 # 256x256x3: the checkpoint's native patch size; divisible by 8 (depth-3 U-Net).
 H, W, C = 256, 256, 3
@@ -227,15 +226,13 @@ def _has_unit_domain_stamp(ckpt: Path) -> bool:
     scope="module",
     params=[
         pytest.param(CONVUNEXT_CKPT, id="convunext"),
-        pytest.param(CLIFFORD_CKPT, id="cliffordunet"),
     ],
 )
 def prior(request) -> DenoiserPrior:
     """Load a real checkpoint ONCE per architecture (dynamic path). Skip if unusable.
 
-    Parametrized over both bias-free architectures so `from_pretrained`'s
-    auto-detected dynamic path — ConvUNext graph-relax vs. CliffordUNet
-    factory-rebuild — is exercised end-to-end by every test below.
+    Exercises `from_pretrained`'s dynamic path — the ConvUNext graph-relax load —
+    end-to-end for every test below.
 
     Two independent SKIP conditions, both "the artifact is absent", not "the code is
     broken":

@@ -1,6 +1,6 @@
 """CLI demo for the bias-free-denoiser inverse-problem application.
 
-Loads the frozen CliffordUNet denoiser as an implicit prior and runs the SAME
+Loads the frozen ConvUNext denoiser as an implicit prior and runs the SAME
 :class:`UniversalInverseSolver` loop over any subset of the six supported problems
 (``prior``, ``inpaint``, ``random_pixels``, ``super_resolution``, ``deblur``,
 ``compressive_sensing``). It saves a matplotlib grid — target, measured/degraded

@@ -4,7 +4,7 @@ This trains ``create_bfcnn_denoiser`` / ``create_bfcnn_variant`` — a bias-free
 ResNet denoiser (an initial ``BiasFreeConv2D`` stem, a stack of
 ``BiasFreeResidualBlock`` blocks, a 1x1 bias-free output conv; NO U-Net skips /
 encoder-decoder) — through the SAME shared substrate (``train.bfunet.common``) as the
-plain U-Net, ConvUNeXt, and Clifford trainers: identical data pipeline, noise
+plain U-Net and ConvUNeXt trainers: identical data pipeline, noise
 curriculum, callbacks, dashboard, self-iterate, WW-PGD, and eval.
 
 BFCNN is a flat CNN, so it consumes NONE of the shared U-Net topology knobs (Gabor
