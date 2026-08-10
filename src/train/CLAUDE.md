@@ -18,7 +18,7 @@ src/train/
 │   ├── tfrecord.py      # TFRecord read/write utilities
 │   └── __init__.py      # Re-exports all public functions
 ├── convnext/            # ConvNeXt V1, V2, V2+MAE
-├── cliffordnet/         # CliffordNet classification, depth estimation, denoising, CLIP
+├── cliffordnet/         # CliffordNet classification, causal-LM pretraining + inference, CLIP
 ├── time_series/         # Time-series trainers (grouped)
 │   ├── mdn/             # Mixture Density Network forecasting
 │   ├── nbeats/          # N-BEATS
@@ -248,7 +248,7 @@ def main():
 
 These scripts use file-based datasets (not `load_dataset()`), monitor `val_loss` or domain metrics (`val_psnr`), and have domain-specific callbacks (visualization, deep supervision scheduling). They wrap `create_callbacks()` and append domain callbacks.
 
-> **BFCNN note:** the flat bias-free ResNet (BFCNN) denoiser is now trained via `train/bfunet/train_bfcnn_denoiser.py` — a thin `common.py` consumer (alongside the ConvUNeXt / Clifford / plain U-Net denoisers), NOT a separate `train/bfcnn/` package. That directory was removed; the callbacks/dashboard/curriculum come from the shared `common.train()` substrate rather than the local wrap-`create_callbacks` shape shown below. The example remains a valid illustration of that shape for the other Pattern-4 users.
+> **BFCNN note:** the flat bias-free ResNet (BFCNN) denoiser is now trained via `train/bfunet/train_bfcnn_denoiser.py` — a thin `common.py` consumer (alongside the ConvUNeXt and plain U-Net denoisers), NOT a separate `train/bfcnn/` package. That directory was removed; the callbacks/dashboard/curriculum come from the shared `common.train()` substrate rather than the local wrap-`create_callbacks` shape shown below. The example remains a valid illustration of that shape for the other Pattern-4 users.
 
 ```python
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
@@ -274,9 +274,13 @@ def create_callbacks(config, val_directories, num_outputs):
 
 ---
 
-### Pattern 5: Depth Estimation (CliffordNet Depth)
+### Pattern 5: Depth Estimation (MegaDepth)
 
-**Used by:** CliffordNet depth estimation
+**Used by:** `src/train/depth_anything/train_depth_anything.py` — the only surviving
+Pattern-5 trainer. The original exemplar was `train.cliffordnet.train_depth_estimation`,
+which the depth_anything trainer was derived from 1:1; that trainer and the
+`CliffordNetUNet` / `create_cliffordnet_depth` model behind it were deleted on
+2026-08-10. Read `train_depth_anything.py` for the live version of everything below.
 
 These scripts use `train.common.megadepth` for the MegaDepth RGB+depth dataset pipeline, depth-specific metrics from `dl_techniques.metrics.depth_metrics`, and visualization callbacks from `dl_techniques.callbacks.depth_visualization`. They monitor `val_loss` and use `optimizer_builder` / `learning_rate_schedule_builder` from `dl_techniques.optimization`.
 
@@ -287,7 +291,7 @@ from train.common.megadepth import (
     load_and_process_pair,
     MegaDepthDataset,
 )
-from dl_techniques.models.cliffordnet.unet import create_cliffordnet_depth
+from dl_techniques.models.depth_anything.model import create_depth_anything
 from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
 from dl_techniques.callbacks.depth_visualization import (
     DepthPredictionGridCallback,
@@ -306,7 +310,10 @@ def train_model(config):
     )
 
     # Model
-    model = create_cliffordnet_depth(variant=config.model_variant, enable_deep_supervision=True)
+    model = create_depth_anything(
+        encoder_type=config.encoder_type,
+        image_shape=(config.patch_size, config.patch_size, 3),
+    )
 
     # Compile with depth-specific loss + metrics from dl_techniques
     model.compile(
@@ -334,20 +341,19 @@ def train_model(config):
 
 #### Pretrained backbone init (`--init-from`)
 
-`train_depth_estimation.py` supports initializing the backbone (non-head layers) from a saved `.keras` model — typically a COCO multi-task pretraining checkpoint produced by `train_coco_multitask.py`:
+`train_depth_anything.py` supports initializing from a saved `.keras` model — typically a self-supervised pretraining checkpoint:
 
 ```bash
-MPLBACKEND=Agg python -m train.cliffordnet.train_depth_estimation \
-    --model-variant base --epochs 100 --batch-size 16 --patch-size 256 \
-    --enable-deep-supervision \
-    --init-from results/cliffordnet_coco_multitask_*/final_model.keras \
+MPLBACKEND=Agg python -m train.depth_anything.train_depth_anything \
+    --encoder-type vit_b --epochs 100 --batch-size 16 --patch-size 384 \
+    --init-from results/depth_anything_pretrain_*/model_inference.keras \
     --seed 42 \
     --gpu 0
 ```
 
-Under the hood this calls `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` which, after `model.build()` and before the probe forward pass, loads weights layer-by-layer (skipping any layer whose name starts with `head_`).
+Under the hood this calls `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` which, after `model.build()` and before the probe forward pass, loads weights layer-by-layer (skipping any layer whose name starts with the model's head prefix — `dpt_decoder` for Depth Anything).
 
-**Gotcha — Keras 3.8 `.keras` + `by_name` is broken.** `model.load_weights(path.keras, by_name=True, skip_mismatch=True)` raises `ValueError("Invalid keyword arguments: {'by_name': True}")` in Keras 3.8+ — the `by_name` path is only supported for legacy `.h5`/`.hdf5` files. Use `load_weights_from_checkpoint` (full-model load + layer-by-layer `set_weights`) for name-based transfer from `.keras` checkpoints. Three helpers in the repo (`cliffordnet/model.py:413`, `bfunet.py:515`, `convnext_v2.py:400`) still pass `by_name=by_name` and carry this latent bug.
+**Gotcha — Keras 3.8 `.keras` + `by_name` is broken.** `model.load_weights(path.keras, by_name=True, skip_mismatch=True)` raises `ValueError("Invalid keyword arguments: {'by_name': True}")` in Keras 3.8+ — the `by_name` path is only supported for legacy `.h5`/`.hdf5` files. Use `load_weights_from_checkpoint` (full-model load + layer-by-layer `set_weights`) for name-based transfer from `.keras` checkpoints. Re-measured 2026-08-10 (`grep -rn "by_name=by_name" src/dl_techniques/`): **six** `load_pretrained_weights` helpers still forward the flag straight into `self.load_weights` and carry this latent bug — `models/convnext/convnext_v1.py`, `models/resnet/model.py`, `models/distilbert/model.py`, `models/modern_bert/model.py`, `models/bert/bert.py`, `models/fnet/model.py`. The three previously listed here (`cliffordnet/model.py`, `bias_free_denoisers/bfunet.py`, `convnext/convnext_v2.py`) have since been migrated to `load_weights_from_checkpoint` and now ignore the argument — do not use them as evidence of the bug.
 
 **Reproducibility.** `--seed <int>` (default 42) seeds Python/NumPy/TF/Keras at startup so two runs with the same seed have bitwise-identical initialization. `MegaDepthDataset` does not currently expose a seed, so dataset shuffle ordering is not reproducible — acceptable for baseline-vs-pretrained-init comparison (init differences dwarf shuffle differences at realistic run lengths).
 

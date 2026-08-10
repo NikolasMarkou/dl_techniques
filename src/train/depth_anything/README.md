@@ -166,9 +166,13 @@ but the model behind it isn't trained as advertised.
 
 ## Reference implementation
 
-This trainer mirrors `src/train/cliffordnet/train_depth_estimation.py` 1:1 in
-structure (config dataclass, callback wiring, optimizer setup, MegaDepth
-dataset usage). Differences:
+This trainer was derived 1:1 from `src/train/cliffordnet/train_depth_estimation.py`
+(config dataclass, callback wiring, optimizer setup, MegaDepth dataset usage).
+**That file was deleted on 2026-08-10** together with the `CliffordNetUNet` /
+`create_cliffordnet_depth` model it trained, so this trainer is now the only
+Pattern-5 trainer in the repo and the reference implementation is itself — read
+`git log`/`git show` for the original if the lineage matters. The differences that
+were recorded against it:
 
 - Single-output model (no deep supervision), so no `_MultiScaleDataset` or
   `DeepSupervisionWeightScheduler`.

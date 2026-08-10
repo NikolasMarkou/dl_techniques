@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-Geometric-algebra-based neural network architectures. The family includes a vision classifier, a causal language model, an image denoiser, and a dual-encoder contrastive vision-language model.
+Geometric-algebra-based neural network architectures. The surviving family is a vision classifier, a causal language model, and a dual-encoder contrastive vision-language model.
 
 Based on: **"CliffordNet: All You Need is Geometric Algebra"** (arXiv:2601.06793v2)
 
@@ -15,24 +15,44 @@ Based on: **"CliffordNet: All You Need is Geometric Algebra"** (arXiv:2601.06793
 1. [Models](#1-models)
 2. [CliffordNet (Vision)](#2-cliffordnet-vision)
 3. [CliffordNetLM (Language)](#3-cliffordnetlm-language)
-4. [CliffordNetDenoiser](#4-cliffordnetdenoiser)
-5. [CliffordCLIP (Vision-Language)](#5-cliffordclip-vision-language)
-6. [Core Primitives](#6-core-primitives)
-7. [Architectural Compliance](#7-architectural-compliance)
-8. [Quick Start](#8-quick-start)
+4. [CliffordCLIP (Vision-Language)](#4-cliffordclip-vision-language)
+5. [Core Primitives](#5-core-primitives)
+6. [Architectural Compliance](#6-architectural-compliance)
+7. [Quick Start](#7-quick-start)
 
 ---
 
 ## 1. Models
 
+This package contains exactly two modules plus its `__init__.py`:
+
 | Model | Domain | File | Key Idea |
 |:------|:-------|:-----|:---------|
-| `CliffordNet` | Vision | `model.py` | Attention-free backbone: geometric product replaces both attention and FFN |
-| `CliffordNetLM` | NLP | `lm.py` | Autoregressive LM with causal Clifford blocks |
-| `CliffordNetDenoiser` | Vision | `denoiser.py` | Bias-free denoiser satisfying Miyasawa's theorem |
-| `CliffordCLIP` | Vision-Language | `clip.py` | Dual-encoder contrastive model with Clifford-aware projection head |
+| `CliffordNet` | Vision | `src/dl_techniques/models/cliffordnet/model.py` | Attention-free backbone: geometric product replaces both attention and FFN |
+| `CliffordNetLM` | NLP | `src/dl_techniques/models/cliffordnet/lm.py` | Autoregressive LM with causal Clifford blocks |
 
-All models share the same algebraic core: `SparseRollingGeometricProduct` and `GatedGeometricResidual` from `layers/geometric/clifford_block.py`.
+A third family member lives in a sibling package and is documented here because it
+shares the same algebraic core:
+
+| Model | Domain | File | Key Idea |
+|:------|:-------|:-----|:---------|
+| `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/clip/clifford_clip.py` | Dual-encoder contrastive model with Clifford-aware projection head |
+
+**Export surface.** `src/dl_techniques/models/cliffordnet/__init__.py` exports exactly
+two names — `CliffordNet` and `create_cliffordnet`. `CliffordNetLM` is **not**
+re-exported; import it from `dl_techniques.models.cliffordnet.lm` directly. That
+`__all__` is pinned by `tests/test_models/test_cliffordnet/test_model.py`.
+
+**Removed 2026-08-10.** The denoiser (`CliffordNetDenoiser`), the conditional and
+confidence-interval denoisers, the Laplacian autoencoder (`CliffordLaplacianUNet`),
+the routing LM (`CliffordNetLMRouting`), the U-Net depth/segmentation model
+(`CliffordNetUNet`, `create_cliffordnet_depth`), the bidirectional embedding U-Net
+(`CliffordNetEmbedding`) and the LM U-Net (`CliffordNetLMUNet`) were all deleted
+together with the strided `CliffordNetBlockDSv2` / `CausalCliffordNetBlockDSv2`
+blocks they were built on. Do not re-document them; recover them from git history
+if they are ever needed.
+
+All models share the same algebraic core: `SparseRollingGeometricProduct` and `GatedGeometricResidual` from `src/dl_techniques/layers/geometric/clifford_block.py`.
 
 ---
 
@@ -92,35 +112,7 @@ The causal block uses `padding="valid"` with explicit left-only zero-padding to 
 
 ---
 
-## 4. CliffordNetDenoiser
-
-Bias-free image denoiser satisfying Miyasawa's theorem (1961).
-
-All Dense/Conv layers use `use_bias=False`, and all normalizations use `center=False` (scale-only, no additive shift). This ensures the network acts as a score function estimator, suitable for diffusion models.
-
-### Architecture
-
-```
-Input (B, H, W, C) in [-1, 1]
-  --> BN(center=False) --> Conv2D(bias=False)
-  --> L x BiasFreeClifordNetBlock
-  --> LayerNorm(center=False)
-  --> Conv2D(C, 1x1, bias=False) --> residual
-  --> Output = Input + residual
-```
-
-### Variants
-
-| Variant | Channels | Depth | Shifts | Global Context |
-|:--------|:--------:|:-----:|:-------|:--------------:|
-| `tiny` | 64 | 6 | [1, 2] | No |
-| `small` | 96 | 8 | [1, 2, 4] | No |
-| `base` | 128 | 12 | [1, 2, 4, 8] | No |
-| `large` | 128 | 16 | [1, 2, 4, 8, 16] | Yes |
-
----
-
-## 5. CliffordCLIP (Vision-Language)
+## 4. CliffordCLIP (Vision-Language)
 
 Dual-encoder CLIP-style contrastive model. Both towers are built from Clifford blocks, and the projection head itself is Clifford-aware so the contrastive loss sees explicit bivector (structural) content -- not just the scalar coherence term.
 
@@ -192,9 +184,9 @@ The `small` variant is parameter-matched to ViT-CLIP at the same channel width (
 
 ---
 
-## 6. Core Primitives
+## 5. Core Primitives
 
-All models share these building blocks from `layers/geometric/clifford_block.py`:
+All models share these building blocks from `src/dl_techniques/layers/geometric/clifford_block.py`:
 
 ### SparseRollingGeometricProduct
 
@@ -230,9 +222,9 @@ Full isotropic / causal vision-and-sequence blocks composed of the primitives ab
 
 ---
 
-## 7. Architectural Compliance
+## 6. Architectural Compliance
 
-Every model in the family was audited against the core properties of the Clifford geometric product. The audit verifies that each model fully exploits the algebra's strengths and does not introduce components (FFN, attention, biased operations in the denoiser) that would undermine those properties.
+Every model in the family was audited against the core properties of the Clifford geometric product. The audit verifies that each model fully exploits the algebra's strengths and does not introduce components (FFN, attention) that would undermine those properties.
 
 ### What the Clifford block provides
 
@@ -242,67 +234,60 @@ Every model in the family was audited against the core properties of the Cliffor
 | **Information preservation** | The geometric product is the only standard algebraic product over vectors that is fully invertible | No information-lossy bottleneck (unlike attention's softmax or FFN's ReLU/GeLU truncation) |
 | **FFN redundancy** | Second-order multiplicative terms + SiLU in the GGR gate already provide non-linear channel mixing | No separate FFN needed; the entire FFN parameter budget (typically 4x channel expansion) is eliminated |
 | **Identity-start training** | GGR LayerScale gamma initialises to 1e-5; blocks start as near-identity residuals | Deep stacking (20+ blocks) is stable from step 1 without warmup hacks |
-| **Linear sequence cost** | O(N) via depthwise convolution, not O(N^2) via attention | Dense prediction (denoising, segmentation) and long sequences (LM) don't hit a quadratic wall |
+| **Linear sequence cost** | O(N) via depthwise convolution, not O(N^2) via attention | Long sequences (LM) and high-resolution images don't hit a quadratic wall |
 | **Dual-stream structure** | Detail (1x1 Dense) and context (DWConv x2, effective 7x7 RF) generate complementary views | The geometric product needs two distinct inputs; feeding the same signal to both would collapse the wedge to zero |
 
 ### Per-model compliance
 
-| Check | CliffordNet | CliffordNetLM | CliffordNetDenoiser | CliffordCLIP |
-|:------|:-----------:|:--------------:|:-------------------:|:------------:|
-| Uses `SparseRollingGeometricProduct` | Yes (backbone) | Yes (backbone) | Yes (backbone, bias-free) | Yes (backbone + head) |
-| Dual-stream (detail + context) | Yes | Yes (causal DWConv) | Yes (bias-free DWConv) | Yes (both towers) |
-| GGR + LayerScale (gamma=1e-5) | Yes | Yes | Yes (bias-free variant) | Yes (backbone + head residual) |
-| No FFN | Yes | Yes | Yes | Yes |
-| No attention | Yes | Yes | Yes | Yes |
-| Residual = X_prev + GGR output | Yes | Yes | Yes (X_in + f(X_in)) | Yes |
-| Shifts filtered with warning | Yes | Yes | Yes | Yes (+ `_head_shifts_for` validation) |
-| Causality preserved | N/A | Left-only DWConv padding + causal cumulative mean | N/A | Text tower: causal; vision: bidirectional |
-| Bias-free constraint | N/A | N/A | All Dense/Conv `use_bias=False`; all norms `center=False` | N/A |
-| Clifford algebra in projection head | N/A | N/A | N/A | `SparseRollingGeometricProduct` + `LearnableMultiplier` (CHANNEL) residual |
-| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `LearnableMultiplier`, `AttentionPooling`) |
+| Check | CliffordNet | CliffordNetLM | CliffordCLIP |
+|:------|:-----------:|:--------------:|:------------:|
+| Uses `SparseRollingGeometricProduct` | Yes (backbone) | Yes (backbone) | Yes (backbone + head) |
+| Dual-stream (detail + context) | Yes | Yes (causal DWConv) | Yes (both towers) |
+| GGR + LayerScale (gamma=1e-5) | Yes | Yes | Yes (backbone + head residual) |
+| No FFN | Yes | Yes | Yes |
+| No attention | Yes | Yes | Yes |
+| Residual = X_prev + GGR output | Yes | Yes | Yes |
+| Shifts filtered with warning | Yes | Yes | Yes (+ `_head_shifts_for` validation) |
+| Causality preserved | N/A | Left-only DWConv padding + causal cumulative mean | Text tower: causal; vision: bidirectional |
+| Clifford algebra in projection head | N/A | N/A | `SparseRollingGeometricProduct` + `LearnableMultiplier` (CHANNEL) residual |
+| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `LearnableMultiplier`, `AttentionPooling`) |
 
 ### Design decisions and their rationale
 
-1. **No FFN anywhere.** The geometric product's second-order multiplicative terms combined with SiLU gating in the GGR already provide the non-linear channel mixing that FFNs exist to supply. Adding an FFN would double the parameter count per block without increasing algebraic expressivity. All four models honour this.
+1. **No FFN anywhere.** The geometric product's second-order multiplicative terms combined with SiLU gating in the GGR already provide the non-linear channel mixing that FFNs exist to supply. Adding an FFN would double the parameter count per block without increasing algebraic expressivity. All three models honour this.
 
-2. **Denoiser enforces bias-free end-to-end.** Miyasawa's theorem (1961) requires that a least-squares denoiser have zero-mean output, implying no additive bias in the network. `BiasFreeClifordNetBlock` passes `use_bias=False` through every Dense, Conv2D, and GGR gate layer; all norms use `center=False` (scale-only, no shift). LayerScale gamma is multiplicative, not additive, so it is compatible with the constraint.
+2. **CliffordCLIP uses the geometric product in the projection head, not just the backbone.** A plain CLIP head (GAP -> Dense -> cosine) collapses the bivector content the backbone computed. The `learned_query_residual` head runs two pooled views (GAP + learned-query attention pool) through a `SparseRollingGeometricProduct` and injects the result as a LayerScale-gated residual on top of the canonical CLIP anchor. This keeps the contrastive loss pathway Clifford-algebra-aware end-to-end. An A/B sweep on CC3M (12,500 steps, 5 variants) confirmed this head matches or beats the plain baseline on 5/6 retrieval metrics.
 
-3. **CliffordCLIP uses the geometric product in the projection head, not just the backbone.** A plain CLIP head (GAP -> Dense -> cosine) collapses the bivector content the backbone computed. The `learned_query_residual` head runs two pooled views (GAP + learned-query attention pool) through a `SparseRollingGeometricProduct` and injects the result as a LayerScale-gated residual on top of the canonical CLIP anchor. This keeps the contrastive loss pathway Clifford-algebra-aware end-to-end. An A/B sweep on CC3M (12,500 steps, 5 variants) confirmed this head matches or beats the plain baseline on 5/6 retrieval metrics.
+3. **Global-context branch uses hardcoded shifts=[1, 2] and cli_mode='full'.** The global branch summarises whole-image or whole-sequence statistics via GAP (vision) or causal cumulative mean (text). It deliberately decouples its hyperparameters from the local branch because the global view operates at a different spatial scale and does not need the same shift set.
 
-4. **Global-context branch uses hardcoded shifts=[1, 2] and cli_mode='full'.** The global branch summarises whole-image or whole-sequence statistics via GAP (vision) or causal cumulative mean (text). It deliberately decouples its hyperparameters from the local branch because the global view operates at a different spatial scale and does not need the same shift set.
-
-5. **CliffordCLIP-small (15+15 depth) is parameter-matched to ViT-CLIP at 192ch/12L.** At the same 20.4M parameter budget, CliffordCLIP fits 25% more layers (15 vs 12 per tower) because each block has no FFN and no QKV projections. This trades single-layer receptive field (7x7 DWConv vs global attention) for deeper compositional feature extraction, which is the natural scaling axis of the Clifford architecture.
+4. **CliffordCLIP-small (15+15 depth) is parameter-matched to ViT-CLIP at 192ch/12L.** At the same 20.4M parameter budget, CliffordCLIP fits 25% more layers (15 vs 12 per tower) because each block has no FFN and no QKV projections. This trades single-layer receptive field (7x7 DWConv vs global attention) for deeper compositional feature extraction, which is the natural scaling axis of the Clifford architecture.
 
 ---
 
-## 8. Quick Start
+## 7. Quick Start
 
 ### CliffordNet (Vision)
 
 ```python
-from dl_techniques.models.cliffordnet import CliffordNet
+from dl_techniques.models.cliffordnet import CliffordNet, create_cliffordnet
 
 model = CliffordNet.nano(num_classes=100)
 # or: CliffordNet.lite(num_classes=100)
 # or: CliffordNet.lite_g(num_classes=100)  # with global context
+# or the module-level factory, which delegates to CliffordNet.from_variant:
+model = create_cliffordnet("lite", num_classes=100)
 ```
 
 ### CliffordNetLM (Language)
 
-```python
-from dl_techniques.models.cliffordnet import CliffordNetLM
+`CliffordNetLM` is not re-exported from the package `__init__`, and it has no
+per-variant classmethods — use `from_variant`:
 
-model = CliffordNetLM.nano(vocab_size=32000, max_seq_length=512)
+```python
+from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+
+model = CliffordNetLM.from_variant("nano", vocab_size=32000, max_seq_length=512)
 result = model(token_ids)  # {"logits": (B, seq_len, vocab_size)}
-```
-
-### CliffordNetDenoiser
-
-```python
-from dl_techniques.models.cliffordnet import CliffordNetDenoiser
-
-model = CliffordNetDenoiser.base(image_channels=3)
-noise_pred = model(noisy_images)  # (B, H, W, C)
 ```
 
 ### CliffordCLIP (Vision-Language)
@@ -319,33 +304,17 @@ out = model({"image": images, "text": tokens})
 # Default head_kind="learned_query_residual" -- Clifford-aware end-to-end
 ```
 
-### CliffordNet Embedding (Bidirectional U-Net)
+### Training
 
-A non-causal, BERT-style packaged sibling of `CliffordNetLMUNet`. Same U-Net
-encoder/bottleneck/decoder structure, but uses the bidirectional
-`CliffordNetBlock` / `CliffordNetBlockDSv2` and drops the causal upsample
-right-shift. Returns BERT-style dict outputs and is compatible with
-`MaskedLanguageModel` and the `dl_techniques.layers.heads.nlp` task heads.
+No public pretrained weights are distributed for any model in this family. The
+training and inference entry points are:
 
-```python
-from dl_techniques.models.cliffordnet import (
-    CliffordNetEmbedding,
-    create_cliffordnet_embedding,
-    create_cliffordnet_embedding_with_head,
-)
+| Task | Script |
+|:-----|:-------|
+| CIFAR-10/100 classification | `src/train/cliffordnet/train_cliffordnet.py` |
+| Causal LM pre-training | `src/train/cliffordnet/train_cliffordnet_nlp.py` |
+| Text generation / power sampling | `src/train/cliffordnet/infer_cliffordnet_nlp.py` |
+| CLIP contrastive pre-training | `src/train/cliffordnet/train_clip.py` |
+| Downsampling-variant ablation | `src/train/cliffordnet/train_downsampling_techniques.py` |
 
-model = CliffordNetEmbedding.from_variant("nano", vocab_size=100277)
-out = model({
-    "input_ids": input_ids,            # (B, T) int32
-    "attention_mask": attention_mask,  # (B, T) int32, optional
-})
-# out keys: last_hidden_state (B, T, hidden_size), pooled_output
-#          (B, hidden_size), attention_mask
-```
-
-Variants: `nano | mini | base | large | xl` (same ladder as
-`CliffordNetLMUNet` for fair head-to-head comparison). Three pooling
-strategies are exposed via `pooling_strategy={"mean", "cls", "max"}` (default
-mask-aware mean + BERT-style tanh pooler). No public pretrained weights are
-distributed; pretrain via `src/train/cliffordnet/train_embeddings.py` (MLM on
-tiktoken cl100k_base + IMDB by default).
+See `src/train/cliffordnet/README.md` for the full protocol, flags and results.

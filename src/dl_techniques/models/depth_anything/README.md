@@ -370,8 +370,10 @@ folded into the work below. Item numbers are kept stable for traceability.
 
 - `src/train/depth_anything/` — Pattern-5 training scaffold for this model
   (MegaDepth + masked depth loss + visualization callbacks).
-- `src/train/cliffordnet/train_depth_estimation.py` — reference Pattern-5
-  trainer that the depth_anything trainer mirrors.
+- `src/train/CLAUDE.md` § "Pattern 5: Depth Estimation (MegaDepth)" — the pattern
+  this trainer implements. (Its original exemplar,
+  `src/train/cliffordnet/train_depth_estimation.py`, was deleted on 2026-08-10;
+  `train_depth_anything.py` is now the only surviving Pattern-5 trainer.)
 - `src/dl_techniques/models/depth_anything/components.py` — `DPTDecoder` source.
 - `src/dl_techniques/models/depth_anything/model.py` — `DepthAnything` source.
 - `tests/test_models/test_depth_anything/` — pytest coverage.

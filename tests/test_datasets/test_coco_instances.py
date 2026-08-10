@@ -3,10 +3,11 @@ Guards for ``COCO2017MultiTaskLoader._build_instances`` -- the per-instance
 sibling of ``_build_mask``.
 
 This loader had NO tests before this module (verified by grep over ``tests/``),
-and it has other consumers (``callbacks/coco_map_callback.py``,
-``train/cliffordnet/train_coco_multitask.py``). So the module opens with a
-CHARACTERIZATION guard pinning ``_build_mask``'s pre-change output before it
-asserts anything about the new method.
+and it has other consumers (``src/dl_techniques/callbacks/coco_map_callback.py``
+and ``src/train/sam/data.py``; a third, ``train/cliffordnet/train_coco_multitask.py``,
+was deleted on 2026-08-10). So the module opens with a CHARACTERIZATION guard
+pinning ``_build_mask``'s pre-change output before it asserts anything about the
+new method.
 
 The pinned SHA-256 digests were captured by executing the loader at the commit
 BEFORE ``_build_instances`` existed, on ``val2017`` at ``image_size=128`` -- see

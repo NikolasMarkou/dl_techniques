@@ -419,6 +419,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # (+13.4 dB mild-regime mean PSNR, all five inverse tasks improved, every
     # reconstruction finite+bounded). Paper-EXACT literals beta/sigma_l/h0 keep
     # their 0.01 values. See decisions.md D-003.
+    # PROVENANCE (2026-08-10): that +13.4 dB was measured on a CliffordUNet
+    # checkpoint whose architecture has since been REMOVED from the library, and
+    # it has not been re-measured on the shipped ConvUNext default. It is not
+    # reproducible as measured. The mechanism it found (a step-size cap that
+    # strands the ascent above sigma_l) is a property of the SCHEDULE, not of the
+    # denoiser, so these defaults stand; only the magnitude is checkpoint-specific.
+    # See README.md § "Solver-regime flags".
     p.add_argument("--iterations", type=int, default=500,
                    help="Solver max iterations (default 500; paper-quality regime per "
                         "Step-2 measurement). Lower budgets (e.g. 200) converge coarser.")

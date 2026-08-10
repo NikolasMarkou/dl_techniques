@@ -49,6 +49,7 @@ its value *is* `‖f(1) − 1‖`.
 | `train_unet_denoiser.py` | **Baseline trainer** — bias-free plain U-Net denoiser (classic conv/residual blocks). Same infrastructure feature set as ConvUNeXt; the apples-to-apples baseline. |
 | `train_bfcnn_denoiser.py` | **Baseline trainer** — flat bias-free ResNet (BFCNN, Mohan et al. ICLR 2020), a stack of residual blocks with **no downsampling / no skips** — the non-U-Net baseline. Trains on the same shared substrate. |
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
+| `eval_per_pixel_uncertainty.py` | **Standalone tool** — per-pixel uncertainty / residual maps for a saved `.keras` denoiser. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
 | `FINDINGS.md` | Empirical note on the channel-matching (`--zero-pad-channels`) experiment. |
 

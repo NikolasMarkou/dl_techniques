@@ -244,10 +244,18 @@ of the seven ids (`denoise`, `prior`, `inpaint`, `random_pixels`, `super_resolut
 `--keep-fraction`, `--measurement-ratio`.
 
 **Solver-regime flags** (the annealed-ascent schedule from Algorithm 2). The defaults
-below are the paper-quality regime — an A/B (measured on the previous CliffordUNet
-checkpoint; pending re-measurement on the ConvUNext default) showed **+13.4 dB mean PSNR**
+below are the paper-quality regime. The A/B that chose them showed **+13.4 dB mean PSNR**
 on the inverse tasks versus the old capped/short-budget defaults, because the old cap left
-the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`:
+the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`.
+
+> **Provenance of the +13.4 dB.** It was measured on a bias-free **CliffordUNet**
+> checkpoint whose architecture has since been removed from the library (see the top
+> of this README). It has **not** been re-measured on the shipped ConvUNext default,
+> and it cannot be reproduced as measured — the model it was measured on is no longer
+> loadable. Treat it as the historical justification for the defaults, not as a
+> ConvUNext number. The *mechanism* it identified (a step-size cap that strands the
+> ascent above `sigma_l`) is a property of the schedule, not of the denoiser, so the
+> defaults themselves are not in question; only the magnitude is checkpoint-specific.
 
 | flag | default | meaning |
 |------|---------|---------|

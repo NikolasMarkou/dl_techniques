@@ -17,10 +17,9 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `vit_siglip/` — ViT with SigLIP
 - `swin_transformer/` — Swin Transformer
 - `dino/` — DINO self-supervised
-- `jepa/` — Joint Embedding Predictive Architecture
 - `masked_autoencoder/` — MAE
 - `depth_anything/` — Depth estimation
-- `SAM/SAM1/` — Segment Anything Model
+- `SAM/SAM1/`, `SAM/SAM2/`, `SAM/SAM3/` — Segment Anything Model (v1, v2, v3)
 - `detr/` — DEtection TRansformer
 - `yolo12/` — YOLOv12 detection
 - `pft_sr/` — Super-resolution
@@ -31,6 +30,11 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `fractalnet/` — FractalNet
 - `bias_free_denoisers/` — Bias-free denoiser models
 - `video_jepa/` — Video JEPA (joint embedding predictive)
+- `superpoint/` — SuperPoint keypoint detector + descriptor
+- `thera/` — THERA aliasing-free arbitrary-scale super-resolution
+- `sd3_mmdit/` — SD3 MMDiT dual-stream text-to-image diffusion transformer
+- `ideogram4/` — Ideogram4 text-to-image flow-matching DiT
+- `energy_transformer/` — Energy Transformer (masked image completion + classifier)
 
 ### NLP / Language
 - `bert/` — BERT
@@ -43,6 +47,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `gpt2/` — GPT-2 architecture
 - `wave_field/` — Wave-field LLM
 - `memory_bank/` — Memory-bank language model components
+- `power_sampling/` — Inference-time power sampling for any causal LM/VLM
 
 ### Vision-Language
 - `clip/` — CLIP
@@ -71,6 +76,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `relgt/` — Relational Graph Transformer
 - `shgcn/` — Simplified Hyperbolic GCN
 - `som/` — Self-Organizing Maps
+- `graph_energy_transformer/` — Graph Energy Transformer (node anomaly + graph classification)
 
 ### Specialized Architectures
 - `capsnet/` — Capsule Networks
