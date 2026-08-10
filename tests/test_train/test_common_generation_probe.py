@@ -101,7 +101,7 @@ def _make_stub_model(value_matrix: np.ndarray) -> Callable:
 
 # --------------------------------------------------------------------------- #
 # Independent reference oracle. Implements the canonical generation algorithm
-# from scratch (extracted from wave_field_llm/pretrain.py:245-295). It must NOT
+# from scratch (extracted from wave_field/pretrain.py:245-295). It must NOT
 # call any production code -- it is the ground truth the callback is asserted
 # against.
 # --------------------------------------------------------------------------- #

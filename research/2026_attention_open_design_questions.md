@@ -640,10 +640,10 @@ not a guard.
 - **(d) Leave as-is.** *Buys* nothing beyond zero risk.
 
 **Blast radius.** Three production consumers:
-`src/dl_techniques/models/wave_field_llm/wave_field_llm.py`,
+`../src/dl_techniques/models/wave_field/model.py`,
 `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py`,
-`src/train/wave_field_llm/pretrain.py`; plus
-`tests/test_models/test_wave_field_llm/test_wave_field_llm.py` and factory key
+`src/train/wave_field/pretrain.py`; plus
+`tests/test_models/test_wave_field/test_model.py` and factory key
 `'wave_field'` (`factory.py:99` import). `self.scale` is **not** a `get_config()` key, so
 no checkpoint schema is at risk from any option — but option (a) is a numerics change on a
 trained-model path if botched.

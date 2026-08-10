@@ -13,7 +13,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.wave_field_llm.wave_field_llm import (
+from dl_techniques.models.wave_field.model import (
     WaveFieldLLM,
     WaveFieldDecoderBlock,
 )

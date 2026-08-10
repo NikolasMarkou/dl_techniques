@@ -470,7 +470,7 @@ class WaveFieldLLM(keras.Model):
 
         # Eagerly build the embedding tables and decoder blocks. The
         # WaveFieldAttention layer constructs its weights via
-        # `_IdentityPlusNoise` which calls `keras.random.normal` at build
+        # `IdentityPlusNoise` which calls `keras.random.normal` at build
         # time. Under Keras 3's symbolic call tracing for `keras.Model`
         # subclasses, nested-layer build can be skipped, leading to the
         # initializer firing on every forward pass with no backing

@@ -2,7 +2,7 @@
 
 This module hosts a single :class:`StepCheckpointCallback` that is the
 behavioral superset of the six near-identical copies that previously lived
-inside individual trainers (gpt2, wave_field_llm, cliffordnet NLP / NLP-UNet /
+inside individual trainers (gpt2, wave_field, cliffordnet NLP / NLP-UNet /
 NLP-routing, and CLIP). For datasets where one epoch spans hundreds of
 thousands of steps, epoch-level checkpoints are far too infrequent; this
 callback saves on a fixed *step* cadence, keeps a rolling window of the most

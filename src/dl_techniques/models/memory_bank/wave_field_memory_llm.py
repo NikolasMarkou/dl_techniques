@@ -35,9 +35,11 @@ from keras import ops
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
-    _IdentityPlusNoise,
 )
-from dl_techniques.models.wave_field_llm.wave_field_llm import (
+from dl_techniques.initializers.identity_plus_noise import (
+    IdentityPlusNoise,
+)
+from dl_techniques.models.wave_field.model import (
     WaveFieldDecoderBlock,
 )
 from dl_techniques.models.memory_bank.memory_banks import (
@@ -807,20 +809,37 @@ class WaveFieldMemoryLLM(keras.Model):
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-08-10T130454-3649c19e/D-014
+# Do NOT key this dict by bare class name (`"WaveFieldAttention": ...`), which
+# is what it did before. Keras looks a serialized CLASS up by its
+# `registered_name` field, not by `class_name`
+# (`keras/src/saving/serialization_lib.py::_retrieve_class_or_fn` calls
+# `get_registered_object(registered_name, custom_objects=...)`). Every class
+# here is decorated with a bare `@keras.saving.register_keras_serializable()`,
+# so its registered name is `"Custom>ClassName"` and a bare-name key can never
+# match. Deriving the keys with `keras.saving.get_registered_name` keeps the
+# registration decorator as the single source of that fact, so adding a
+# `package=`/`name=` argument to any of these classes cannot silently
+# desynchronize this dict. See decisions.md D-014.
 def memory_llm_custom_objects() -> Dict[str, Any]:
     """Return the ``custom_objects`` dict needed by ``keras.models.load_model``
     to deserialize a saved :class:`WaveFieldMemoryLLM`.
+
+    Keys are the Keras *registered* names (``"Custom>WaveFieldAttention"``,
+    ...), derived from each class rather than hard-coded, because that is the
+    string Keras actually looks up when deserializing a class.
     """
     from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
-    return {
-        "MaskedCausalLMLoss": MaskedCausalLMLoss,
-        "FocalCausalLMLoss": FocalCausalLMLoss,
-        "WaveFieldMemoryLLM": WaveFieldMemoryLLM,
-        "WaveFieldDecoderBlock": WaveFieldDecoderBlock,
-        "WaveFieldAttention": WaveFieldAttention,
-        "_IdentityPlusNoise": _IdentityPlusNoise,
-        "LongTermMemoryBank": LongTermMemoryBank,
-        "WorkingMemoryBank": WorkingMemoryBank,
-        "MemoryWriteController": MemoryWriteController,
-        "MemoryReadController": MemoryReadController,
-    }
+    classes = (
+        MaskedCausalLMLoss,
+        FocalCausalLMLoss,
+        WaveFieldMemoryLLM,
+        WaveFieldDecoderBlock,
+        WaveFieldAttention,
+        IdentityPlusNoise,
+        LongTermMemoryBank,
+        WorkingMemoryBank,
+        MemoryWriteController,
+        MemoryReadController,
+    )
+    return {keras.saving.get_registered_name(cls): cls for cls in classes}

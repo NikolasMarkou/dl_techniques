@@ -148,4 +148,4 @@ wave_field_memory_llm.py # WaveFieldMemoryLLM, split_trainable_by_prefix, linear
 __init__.py              # Re-exports memory_llm_custom_objects, MemoryStats
 ```
 
-Trainer: `src/train/wave_field_llm/train_memory.py`. Tests: `tests/test_models/test_memory_bank/`.
+Trainer: `src/train/wave_field/train_memory.py`. Tests: `tests/test_models/test_memory_bank/`.

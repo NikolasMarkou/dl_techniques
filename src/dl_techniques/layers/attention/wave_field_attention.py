@@ -83,42 +83,9 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.identity_plus_noise import IdentityPlusNoise
 from dl_techniques.layers.attention.common import validate_head_divisibility
 from ..activations import resolve_activation_layer
-
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class _IdentityPlusNoise(keras.initializers.Initializer):
-    """Initializer that returns ``eye(H) + RandomNormal(stddev, seed)``.
-
-    Reproducible under ``keras.utils.set_random_seed`` when ``seed`` is set,
-    or when ``seed=None`` and the global Keras seed is set. Preserves the
-    invariant that ``stddev=0`` ⇒ exact identity.
-    """
-
-    def __init__(self, stddev: float = 0.01, seed: Optional[int] = None) -> None:
-        self.stddev = float(stddev)
-        self.seed = seed
-
-    def __call__(self, shape, dtype=None):
-        if len(shape) != 2 or shape[0] != shape[1]:
-            raise ValueError(
-                f"_IdentityPlusNoise expects square 2-D shape, got {shape}"
-            )
-        dtype = dtype or "float32"
-        eye = ops.eye(shape[0], dtype=dtype)
-        if self.stddev == 0.0:
-            return eye
-        noise = keras.random.normal(
-            shape, mean=0.0, stddev=self.stddev, dtype=dtype, seed=self.seed
-        )
-        return eye + noise
-
-    def get_config(self) -> Dict[str, Any]:
-        return {"stddev": self.stddev, "seed": self.seed}
-
 
 # ---------------------------------------------------------------------
 
@@ -209,7 +176,7 @@ class WaveFieldAttention(keras.layers.Layer):
     :param coupling_noise_stddev: Std-dev of Gaussian noise added to the
         identity-initialized head coupling matrix.
     :type coupling_noise_stddev: float
-    :param coupling_seed: Seed for the ``_IdentityPlusNoise`` initializer of
+    :param coupling_seed: Seed for the ``IdentityPlusNoise`` initializer of
         ``field_coupling``. ``None`` (the default) draws from the global Keras
         RNG, so reproducibility then depends on ``keras.utils.set_random_seed``;
         passing an explicit int makes a rebuild-from-config deterministic on its
@@ -424,7 +391,7 @@ class WaveFieldAttention(keras.layers.Layer):
         self.field_coupling = self.add_weight(
             name="field_coupling",
             shape=(H, H),
-            initializer=_IdentityPlusNoise(
+            initializer=IdentityPlusNoise(
                 stddev=self.coupling_noise_stddev,
                 seed=self.coupling_seed,
             ),

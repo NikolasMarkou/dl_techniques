@@ -2,7 +2,7 @@
 
 This is the single home for the generation-probe callback that previously
 existed as five near-identical copies under ``src/train/`` (gpt2,
-wave_field_llm, and three cliffordnet NLP trainers). It periodically generates
+wave_field, and three cliffordnet NLP trainers). It periodically generates
 sample text from the model during training, logs the result (and tok/s), and
 optionally appends a JSONL probe record.
 

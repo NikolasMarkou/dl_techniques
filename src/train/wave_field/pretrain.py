@@ -1,45 +1,36 @@
-"""WaveFieldMemoryLLM Training Script (Phase 1-3 curriculum CLM).
+"""WaveFieldLLM Pre-training Script with Causal Language Modeling.
 
-Mirrors :mod:`train.wave_field_llm.pretrain` 1:1 except for:
-
-- Model factory: :class:`WaveFieldMemoryLLM` (`from_variant`).
-- Compile: two AdamW optimizers (backbone vs memory), passed via the
-  model's custom :meth:`compile` override.
-- Callbacks: :class:`PhaseScheduler` is appended (with a warmup dataset
-  derived from the first 64 train batches) so trainable flags + aux
-  losses + KMeans warmup advance with global step.
-- New CLI flags: ``--init-from``, ``--phase1-steps``, ``--phase2-steps``,
-  ``--phase3-steps``, ``--memory-lr``, ``--top-k``.
-
-The model returns a dict ``{"logits", "last_hidden_state"}`` keyed on
-``"logits"`` so :func:`prepare_dict_keyed_compile` + ``MaskedCausalLMLoss``
-+ ``build_clm_metrics`` work unchanged.
+Pre-trains a WaveFieldLLM decoder on a text dataset using next-token
+prediction (causal LM). Mirrors :mod:`train.gpt2.pretrain` so the only
+training-side difference between GPT-2 and WaveFieldLLM is the model class
+and an optional ``--field-size`` hyperparameter.
 
 Usage::
 
-    # Smoke test
-    MPLBACKEND=Agg .venv/bin/python -m train.wave_field_llm.train_memory \\
-        --variant tiny --max-seq-length 64 --batch-size 2 --epochs 1 \\
-        --steps-per-epoch 4 --phase1-steps 2 --phase2-steps 2 \\
-        --phase3-steps 100 --max-train-samples 16 --val-fraction 0.5 \\
-        --max-samples 16 --save-dir /tmp/mem_smoke
+    # TFDS smoke run on GPU 1
+    python -m train.wave_field.pretrain --gpu 1 --variant tiny \
+        --dataset-source tfds --dataset-name imdb_reviews --max-samples 64 \
+        --epochs 1 --batch-size 2 --max-seq-length 32
 
-    # Resume from Phase-1 WaveFieldLLM checkpoint
-    MPLBACKEND=Agg .venv/bin/python -m train.wave_field_llm.train_memory \\
-        --gpu 0 --variant small --epochs 5 \\
-        --init-from results/wave_field_llm_pretrain_*/checkpoints/final.keras
+    # Wikipedia full pre-training (GPU 0)
+    python -m train.wave_field.pretrain --gpu 0 --variant small --epochs 3
+
+    # Resume from checkpoint
+    python -m train.wave_field.pretrain --resume results/.../checkpoints/step_0050000.keras
 """
 
-import argparse
 import os
+import glob
+import argparse
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional, Tuple, List
 
 import keras
 import numpy as np
 import tensorflow as tf
 
 from train.common import setup_gpu
+from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -52,17 +43,17 @@ from train.common.nlp import (
     prepare_dict_keyed_compile,
     augment_probe_results,
 )
-from train.common import StepCheckpointCallback, GenerationProbeCallback
-from train.wave_field_llm.pretrain import (
-    _extract_step_from_checkpoint,
+from dl_techniques.models.wave_field.model import (
+    WaveFieldLLM,
+    WaveFieldDecoderBlock,
 )
-from dl_techniques.models.memory_bank.wave_field_memory_llm import (
-    WaveFieldMemoryLLM,
-    memory_llm_custom_objects,
+from dl_techniques.layers.attention.wave_field_attention import (
+    WaveFieldAttention,
 )
-from dl_techniques.models.memory_bank.phase_scheduler import PhaseScheduler
+from dl_techniques.initializers.identity_plus_noise import (
+    IdentityPlusNoise,
+)
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -74,19 +65,20 @@ from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
 @dataclass
 class TrainingConfig:
-    """Training configuration for WaveFieldMemoryLLM CLM curriculum."""
+    """Configuration for WaveFieldLLM CLM pre-training."""
 
     # Model
     model_variant: str = "small"
     vocab_size: int = 50261
     max_seq_length: int = 512
-    field_size: Optional[int] = None
+    num_layers: Optional[int] = None
+    num_heads: Optional[int] = None
+    field_size: Optional[int] = None  # None -> 2 * max_seq_length per variant
     dropout_rate: float = 0.0
     attention_dropout_rate: float = 0.0
     tie_word_embeddings: bool = True
-    top_k: int = 32
 
-    # Tokenizer
+    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
     encoding_name: str = "gpt2"
     cls_token_id: int = 50257
     sep_token_id: int = 50258
@@ -96,50 +88,45 @@ class TrainingConfig:
     # Training
     batch_size: int = 8
     num_epochs: int = 3
-    learning_rate: float = 1e-5  # backbone LR (Phase 3)
-    memory_lr: float = 3e-4
+    learning_rate: float = 3e-4
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
 
-    # Loss
+    # Loss: "ce" (default) or "focal"
     loss_type: str = "ce"
     focal_gamma: float = 1.0
     label_smoothing: float = 0.0
 
-    # Phase boundaries (default 50K / 25K / 100K).
-    phase1_steps: int = 50_000
-    phase2_steps: int = 25_000
-    phase3_steps: int = 100_000
-    warmup_num_batches: int = 64
-
-    # Resume / init.
-    resume_from: Optional[str] = None
-    init_from: Optional[str] = None
-
     # Paths
-    save_dir: str = "results/wave_field_memory_llm"
+    save_dir: str = "results/wave_field_llm_pretrain"
 
-    # Data source
+    # Data source: "huggingface" or "tfds"
     dataset_source: str = "huggingface"
-    dataset_name: str = "imdb_reviews"
-    max_samples: Optional[int] = 10_000
 
+    # TFDS settings
+    dataset_name: str = "imdb_reviews"
+    max_samples: Optional[int] = 10000
+
+    # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
     min_article_length: int = 0
     val_fraction: float = 0.02
-    max_val_samples: int = 5_000
+    max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
     shuffle_shards: int = 4
 
-    # Checkpointing
-    checkpoint_every_steps: int = 25_000
-    analyze_every_steps: int = 50_000
+    # Checkpointing & analysis (step-based for large datasets)
+    checkpoint_every_steps: int = 25000
+    analyze_every_steps: int = 50000
     max_checkpoints: int = 3
     steps_per_epoch: Optional[int] = None
+
+    # Resume from checkpoint
+    resume_from: Optional[str] = None
     seed: int = 42
 
-    # Generation probes
+    # Generation probes (run before each checkpoint)
     probe_prompts: List[str] = field(default_factory=lambda: [
         "The United States of America is a",
         "In mathematics, a prime number is",
@@ -152,69 +139,128 @@ class TrainingConfig:
 
 
 # ---------------------------------------------------------------------
-# Model creation / resume
+# Model creation & resume
 # ---------------------------------------------------------------------
 
 
-def create_memory_model(config: TrainingConfig) -> WaveFieldMemoryLLM:
-    """Build a :class:`WaveFieldMemoryLLM` from the variant ladder."""
-    logger.info(f"Creating WaveFieldMemoryLLM-{config.model_variant.upper()}...")
+def _extract_step_from_checkpoint(path: str) -> int:
+    import re
+    basename = os.path.basename(path)
+    match = re.search(r"step_(\d+)", basename)
+    if match:
+        return int(match.group(1))
+    return 0
 
-    overrides = dict(
+
+def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
+    """Load a WaveFieldLLM model from a ``.keras`` checkpoint."""
+    logger.info(f"Resuming from checkpoint: {path}")
+    model = keras.models.load_model(
+        path,
+        # All six classes auto-register via @register_keras_serializable;
+        # listing them defensively protects against import-order surprises.
+        # Keys are the Keras REGISTERED names (`"Custom>WaveFieldLLM"`, ...),
+        # derived rather than hard-coded -- see D-014 in the memory_bank
+        # sibling `memory_llm_custom_objects()` for why a bare class-name key
+        # can never match.
+        custom_objects={
+            keras.saving.get_registered_name(cls): cls
+            for cls in (
+                MaskedCausalLMLoss,
+                FocalCausalLMLoss,
+                WaveFieldLLM,
+                WaveFieldDecoderBlock,
+                WaveFieldAttention,
+                IdentityPlusNoise,
+            )
+        },
+    )
+    step = _extract_step_from_checkpoint(path)
+    logger.info(
+        f"Loaded model: {model.count_params():,} params, "
+        f"resumed at step {step:,}"
+    )
+    return model, step
+
+
+def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
+    """Create and build a WaveFieldLLM model from the training configuration."""
+    logger.info(f"Creating WaveFieldLLM-{config.model_variant.upper()}...")
+
+    variant_kwargs = dict(
         vocab_size=config.vocab_size,
         max_seq_len=config.max_seq_length,
         dropout_rate=config.dropout_rate,
         attention_dropout_rate=config.attention_dropout_rate,
         tie_word_embeddings=config.tie_word_embeddings,
-        top_k=config.top_k,
     )
+    if config.num_layers is not None:
+        variant_kwargs["depth"] = config.num_layers
+    if config.num_heads is not None:
+        variant_kwargs["num_heads"] = config.num_heads
     if config.field_size is not None:
-        overrides["field_size"] = config.field_size
+        variant_kwargs["field_size"] = config.field_size
 
-    model = WaveFieldMemoryLLM.from_variant(config.model_variant, **overrides)
+    model = WaveFieldLLM.from_variant(config.model_variant, **variant_kwargs)
 
-    # Build with a dummy forward pass (parity with WaveFieldLLM trainer).
+    # Build with a dummy forward pass to initialize weights.
     dummy = np.random.randint(
         0, config.vocab_size,
         size=(1, max(1, config.max_seq_length - 1)),
     ).astype("int32")
     model(dummy, training=False)
 
-    n_params = sum(int(np.prod(w.shape)) for w in model.weights)
-    logger.info(f"WaveFieldMemoryLLM model: {n_params:,} parameters")
+    logger.info(f"WaveFieldLLM model: {model.count_params():,} parameters")
     return model
 
 
-def load_memory_model_from_checkpoint(
-    path: str,
-) -> Tuple[WaveFieldMemoryLLM, int]:
-    logger.info(f"Resuming from checkpoint: {path}")
-    model = keras.models.load_model(
-        path, custom_objects=memory_llm_custom_objects(),
-    )
-    step = _extract_step_from_checkpoint(path)
-    n_params = sum(int(np.prod(w.shape)) for w in model.weights)
-    logger.info(f"Loaded model: {n_params:,} params, resumed at step {step:,}")
-    return model, step
-
-
 # ---------------------------------------------------------------------
-# Loss
+# Loss construction
 # ---------------------------------------------------------------------
 
 
 def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
     if config.loss_type == "focal":
-        return FocalCausalLMLoss(
+        loss_fn = FocalCausalLMLoss(
             gamma=config.focal_gamma,
             label_smoothing=config.label_smoothing,
         )
-    return MaskedCausalLMLoss(label_smoothing=config.label_smoothing)
+        logger.info(f"Loss: FocalCausalLMLoss(gamma={config.focal_gamma})")
+    else:
+        loss_fn = MaskedCausalLMLoss(label_smoothing=config.label_smoothing)
+        logger.info("Loss: MaskedCausalLMLoss")
+    return loss_fn
 
 
 # ---------------------------------------------------------------------
-# Data loading (mirrors pretrain.py)
+# Data loading
 # ---------------------------------------------------------------------
+
+
+def load_train_val_datasets(
+    config: TrainingConfig,
+    preprocessor,
+    data_seed: int,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
+    n_train_articles: Optional[int] = None
+    if config.dataset_source == "tfds":
+        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
+    elif config.dataset_source == "huggingface":
+        train_ds, val_ds, n_train_articles = _load_hf_datasets(
+            config, preprocessor, data_seed,
+        )
+    else:
+        raise ValueError(
+            f"Unknown dataset_source: {config.dataset_source!r}. "
+            f"Use 'tfds' or 'huggingface'."
+        )
+
+    # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
+    wrap = lambda ds: ds.map(
+        lambda x, y: (x, {"logits": y}),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    return wrap(train_ds), wrap(val_ds), n_train_articles
 
 
 def _load_tfds_datasets(config, preprocessor):
@@ -229,8 +275,8 @@ def _load_tfds_datasets(config, preprocessor):
     return train, val
 
 
-def _load_hf_datasets(config, preprocessor, data_seed):
-    train_raw, val_raw, n_train, _ = load_wikipedia_train_val(
+def _load_hf_datasets(config, preprocessor, data_seed: int):
+    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
         cache_dir=config.hf_cache_dir,
         config_name=config.hf_wikipedia_config,
         min_article_length=config.min_article_length,
@@ -242,82 +288,51 @@ def _load_hf_datasets(config, preprocessor, data_seed):
         return_counts=True,
     )
     train = preprocess_clm_dataset(
-        train_raw, preprocessor, config.max_seq_length, config.batch_size,
+        train_raw, preprocessor,
+        config.max_seq_length, config.batch_size,
     )
     val = preprocess_clm_dataset(
-        val_raw, preprocessor, config.max_seq_length, config.batch_size,
+        val_raw, preprocessor,
+        config.max_seq_length, config.batch_size,
     )
     return train, val, n_train
 
 
-def load_train_val_datasets(config, preprocessor, data_seed):
-    n_train_articles: Optional[int] = None
-    if config.dataset_source == "tfds":
-        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
-    elif config.dataset_source == "huggingface":
-        train_ds, val_ds, n_train_articles = _load_hf_datasets(
-            config, preprocessor, data_seed,
-        )
-    else:
-        raise ValueError(
-            f"Unknown dataset_source: {config.dataset_source!r}"
-        )
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    return wrap(train_ds), wrap(val_ds), n_train_articles
-
-
 # ---------------------------------------------------------------------
-# Compile (dual optimizer)
+# Training
 # ---------------------------------------------------------------------
 
 
-def compile_memory_model(
-    model: WaveFieldMemoryLLM,
+def compile_model(
+    model: WaveFieldLLM,
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> None:
-    backbone_lr_schedule = create_warmup_lr_schedule(
+    lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
         steps_per_epoch,
         config.warmup_ratio,
     )
-    memory_lr_schedule = create_warmup_lr_schedule(
-        config.memory_lr,
-        config.num_epochs,
-        steps_per_epoch,
-        config.warmup_ratio,
-    )
-
-    backbone_opt = keras.optimizers.AdamW(
-        learning_rate=backbone_lr_schedule,
-        weight_decay=config.weight_decay,
-        clipnorm=1.0,
-    )
-    memory_opt = keras.optimizers.AdamW(
-        learning_rate=memory_lr_schedule,
-        weight_decay=config.weight_decay,
-        clipnorm=1.0,
-    )
-
     prepare_dict_keyed_compile(model)
     model.compile(
-        backbone_optimizer=backbone_opt,
-        memory_optimizer=memory_opt,
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=lr_schedule,
+            weight_decay=config.weight_decay,
+            clipnorm=1.0,
+        ),
         loss={"logits": create_loss_fn(config)},
         metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
-
     logger.info(
-        f"Compiled: backbone_lr={config.learning_rate}, "
-        f"memory_lr={config.memory_lr}, wd={config.weight_decay}"
+        f"Compiled: AdamW, peak_lr={config.learning_rate}, "
+        f"wd={config.weight_decay}"
     )
 
 
-def _make_steps_per_epoch(config, n_train_articles):
+def _make_steps_per_epoch(
+    config: TrainingConfig, n_train_articles: Optional[int],
+) -> int:
     if (
         config.dataset_source == "tfds"
         and config.max_samples
@@ -332,17 +347,13 @@ def _make_steps_per_epoch(config, n_train_articles):
     )
 
 
-# ---------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------
-
-
-def train_memory_llm(
+def train_wave_field_llm(
     config: TrainingConfig,
-    model_factory: Callable[[TrainingConfig], WaveFieldMemoryLLM] = create_memory_model,
-) -> Tuple[WaveFieldMemoryLLM, keras.callbacks.History]:
+    model_factory: Callable[[TrainingConfig], WaveFieldLLM] = create_wave_field_llm_model,
+) -> Tuple[WaveFieldLLM, keras.callbacks.History]:
+    """Run WaveFieldLLM CLM pre-training."""
     logger.info("=" * 60)
-    logger.info("WaveFieldMemoryLLM CLM Curriculum Training")
+    logger.info("WaveFieldLLM Causal LM Pre-training")
     logger.info("=" * 60)
 
     tf.random.set_seed(config.seed)
@@ -367,54 +378,36 @@ def train_memory_llm(
     train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
         config, preprocessor, data_seed=data_seed,
     )
+
     steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
 
     if config.resume_from:
-        model, initial_step = load_memory_model_from_checkpoint(config.resume_from)
+        model, initial_step = load_model_from_checkpoint(config.resume_from)
     else:
         model = model_factory(config)
-        if config.init_from:
-            logger.info(
-                f"Loading Phase-1 backbone weights from: {config.init_from}"
-            )
-            load_weights_from_checkpoint(
-                model, config.init_from,
-                skip_prefixes=("memory_", "gate_"),
-            )
-            # `--init-from` skips Phase 1 entirely.
-            config.phase1_steps = 0
 
-    compile_memory_model(model, config, steps_per_epoch)
+    compile_model(model, config, steps_per_epoch)
 
     callbacks, results_dir = create_nlp_callbacks(
-        model_name=f"WaveFieldMemoryLLM-{config.model_variant}",
-        results_dir_prefix="wave_field_memory_llm",
+        model_name=f"WaveFieldLLM-{config.model_variant}",
+        results_dir_prefix="wave_field_llm_pretrain",
         include_analyzer=False,
     )
-
-    # Phase scheduler (warmup dataset = first N batches of train).
-    phase_cb = PhaseScheduler(
-        phase1_steps=config.phase1_steps,
-        phase2_steps=config.phase2_steps,
-        phase3_steps=config.phase3_steps,
-        warmup_dataset=train_dataset.take(config.warmup_num_batches),
-        warmup_num_batches=config.warmup_num_batches,
-    )
-    callbacks.append(phase_cb)
-
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=config.checkpoint_every_steps,
         analyze_every_steps=config.analyze_every_steps,
         max_checkpoints=config.max_checkpoints,
-        model_name=f"WaveFieldMemoryLLM-{config.model_variant}",
+        model_name=f"WaveFieldLLM-{config.model_variant}",
         initial_step=initial_step,
     ))
 
+    # Generation probe context window: model's max - 1 keeps room for the
+    # next token. For the smoke variant (max_seq_len=32) this means 31.
     # Common GenerationProbeCallback owns suppression/sampling/decode; the
     # closure supplies ONLY the next-position logits vector from the unpadded
-    # ctx (dict output keyed "logits"; divide-mode rep penalty). Copy B's old
-    # `context_window=` maps to `ctx_length=`.
+    # ctx (variable-length, no padding; dict output keyed "logits"; divide-mode
+    # rep penalty). Copy B's old `context_window=` maps to `ctx_length=`.
     probe_ctx = max(1, config.max_seq_length - 1)
     probe_cb = GenerationProbeCallback(
         logits_fn=lambda ctx: model(ctx, training=False)["logits"][0, -1, :].numpy(),
@@ -435,9 +428,8 @@ def train_memory_llm(
 
     logger.info(
         f"Starting training: source={config.dataset_source}, "
-        f"steps_per_epoch~{steps_per_epoch:,}, batch_size={config.batch_size}, "
-        f"phases=({config.phase1_steps}, {config.phase2_steps}, "
-        f"{config.phase3_steps})"
+        f"steps_per_epoch~{steps_per_epoch:,}, "
+        f"batch_size={config.batch_size}"
     )
     history = model.fit(
         train_dataset,
@@ -446,12 +438,12 @@ def train_memory_llm(
         validation_data=val_dataset,
         verbose=1,
     )
-    logger.info("Training completed.")
+    logger.info("Training completed!")
 
     generate_training_curves(history, results_dir)
 
     if "val_loss" in history.history:
-        best_epoch = int(tf.argmin(history.history["val_loss"]).numpy())
+        best_epoch = tf.argmin(history.history["val_loss"]).numpy()
         logger.info(
             f"Best epoch: {best_epoch + 1} "
             f"(val_loss: {history.history['val_loss'][best_epoch]:.4f})"
@@ -467,94 +459,92 @@ def train_memory_llm(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="WaveFieldMemoryLLM CLM Curriculum Training",
+        description="WaveFieldLLM Causal LM Pre-training",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # Hardware
-    p.add_argument("--gpu", type=int, default=None)
+    p.add_argument("--gpu", type=int, default=None, help="GPU device index")
 
     # Model
     p.add_argument(
         "--variant", type=str, default="small",
-        choices=list(WaveFieldMemoryLLM.MODEL_VARIANTS.keys()),
+        choices=list(WaveFieldLLM.MODEL_VARIANTS.keys()),
+        help="WaveFieldLLM model variant",
     )
-    p.add_argument("--field-size", type=int, default=None)
+    p.add_argument("--num-layers", type=int, default=None,
+                    help="Override number of decoder blocks")
+    p.add_argument("--num-heads", type=int, default=None,
+                    help="Override number of attention heads")
+    p.add_argument(
+        "--field-size", type=int, default=None,
+        help="Override wave field grid resolution (default: variant-defined "
+             "or 2 * max_seq_length).",
+    )
     p.add_argument(
         "--tie-word-embeddings",
-        action=argparse.BooleanOptionalAction, default=True,
-    )
-    p.add_argument(
-        "--top-k", type=int, default=32,
-        help="Top-K retrieval count.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Tie LM head to token embeddings",
     )
 
     # Training
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--max-seq-length", type=int, default=512)
-    p.add_argument("--learning-rate", type=float, default=1e-5,
-                    help="Backbone learning rate (Phase 3).")
-    p.add_argument("--memory-lr", type=float, default=3e-4,
-                    help="Memory components learning rate.")
+    p.add_argument("--learning-rate", type=float, default=3e-4)
 
     # Loss
-    p.add_argument("--loss-type", type=str, default="ce",
-                    choices=["ce", "focal"])
+    p.add_argument(
+        "--loss-type", type=str, default="ce",
+        choices=["ce", "focal"],
+    )
     p.add_argument("--focal-gamma", type=float, default=1.0)
     p.add_argument("--label-smoothing", type=float, default=0.0)
 
-    # Phase boundaries
-    p.add_argument("--phase1-steps", type=int, default=50_000)
-    p.add_argument("--phase2-steps", type=int, default=25_000)
-    p.add_argument("--phase3-steps", type=int, default=100_000)
-
-    # Init / resume
+    # Data source
     p.add_argument(
-        "--init-from", type=str, default=None,
-        help="Path to a Phase-1 WaveFieldLLM .keras checkpoint. "
-             "Backbone is loaded; memory_/gate_ variables skipped. "
-             "Forces phase1_steps=0.",
+        "--dataset-source", type=str, default="huggingface",
+        choices=["tfds", "huggingface"],
     )
-    p.add_argument("--resume", type=str, default=None,
-                    help="Resume full memory model from .keras checkpoint.")
-
-    # Data source (CLM CLI uniformity — see train/CLAUDE.md)
-    p.add_argument("--dataset-source", type=str, default="huggingface",
-                    choices=["tfds", "huggingface"])
     p.add_argument("--dataset-name", type=str, default="imdb_reviews")
     p.add_argument("--max-samples", type=int, default=None)
-    p.add_argument(
-        "--hf-cache-dir", type=str,
-        default="/media/arxwn/data0_4tb/datasets/wikipedia",
-    )
+    p.add_argument("--hf-cache-dir", type=str,
+                    default="/media/arxwn/data0_4tb/datasets/wikipedia")
     p.add_argument("--max-train-samples", type=int, default=None)
     p.add_argument("--val-fraction", type=float, default=0.02)
     p.add_argument(
         "--min-article-length", type=int, default=0,
-        help="HF Wikipedia char-length filter. 0 = no filter.",
+        help="HF Wikipedia char-length filter. 0 = no filter (recommended "
+             "for packed CLM).",
     )
     p.add_argument(
         "--shuffle-shards", type=int, default=4,
-        help="HF Wikipedia parallel tokenization shards.",
+        help="HF Wikipedia parallel tokenization shards. 1 = single-thread, "
+             "deterministic.",
     )
     p.add_argument(
         "--seed", type=int, default=42,
-        help="Global seed (data seed shifted by initial_step on resume).",
+        help="Global seed. On --resume, data seed is shifted by initial_step.",
     )
 
     # Checkpointing
-    p.add_argument("--checkpoint-every-steps", type=int, default=25_000)
-    p.add_argument("--analyze-every-steps", type=int, default=50_000)
+    p.add_argument("--checkpoint-every-steps", type=int, default=25000)
+    p.add_argument("--analyze-every-steps", type=int, default=50000,
+                    help="0 to disable")
     p.add_argument("--max-checkpoints", type=int, default=3)
     p.add_argument(
         "--steps-per-epoch", type=int, default=None,
         help="Override LR-schedule horizon.",
     )
 
+    # Resume
+    p.add_argument("--resume", type=str, default=None,
+                    help="Path to .keras checkpoint to resume from")
+
     # Output
     p.add_argument("--save-dir", type=str,
-                    default="results/wave_field_memory_llm")
+                    default="results/wave_field_llm_pretrain")
 
     return p
 
@@ -562,22 +552,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
     return TrainingConfig(
         model_variant=args.variant,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
         field_size=args.field_size,
         tie_word_embeddings=args.tie_word_embeddings,
-        top_k=args.top_k,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         max_seq_length=args.max_seq_length,
         learning_rate=args.learning_rate,
-        memory_lr=args.memory_lr,
         loss_type=args.loss_type,
         focal_gamma=args.focal_gamma,
         label_smoothing=args.label_smoothing,
-        phase1_steps=args.phase1_steps,
-        phase2_steps=args.phase2_steps,
-        phase3_steps=args.phase3_steps,
-        resume_from=args.resume,
-        init_from=args.init_from,
         dataset_source=args.dataset_source,
         dataset_name=args.dataset_name,
         max_samples=args.max_samples,
@@ -591,6 +576,7 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         checkpoint_every_steps=args.checkpoint_every_steps,
         analyze_every_steps=args.analyze_every_steps,
         max_checkpoints=args.max_checkpoints,
+        resume_from=args.resume,
         save_dir=args.save_dir,
     )
 
@@ -603,12 +589,12 @@ def main() -> None:
     logger.info(
         f"Config: variant={config.model_variant}, "
         f"epochs={config.num_epochs}, batch={config.batch_size}, "
-        f"backbone_lr={config.learning_rate}, memory_lr={config.memory_lr}, "
-        f"phases=({config.phase1_steps}, {config.phase2_steps}, "
-        f"{config.phase3_steps}), top_k={config.top_k}, "
-        f"init_from={config.init_from}, source={config.dataset_source}"
+        f"lr={config.learning_rate}, loss={config.loss_type}, "
+        f"source={config.dataset_source}, "
+        f"field_size={config.field_size}"
     )
-    train_memory_llm(config)
+
+    train_wave_field_llm(config)
 
 
 if __name__ == "__main__":

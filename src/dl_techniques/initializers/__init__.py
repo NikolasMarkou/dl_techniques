@@ -27,6 +27,10 @@ Available Initializers:
 -   `LinearUpInitializer`: THERA heat-field frequency init -- 2D frequency vectors
     drawn uniformly over a disk of radius `pi*scale` (`r = pi*scale*sqrt(U)`),
     producing a `(2, N)` x/y-row matrix for SIREN-style neural heat fields.
+-   `IdentityPlusNoise`: `eye(H) + RandomNormal(stddev, seed)` for SQUARE 2-D
+    matrices only -- a near-identity start for a mixing/coupling matrix that is
+    meant to begin as (close to) a no-op. `stddev=0` gives the exact identity.
+    Used by `WaveFieldAttention`'s cross-head `field_coupling` matrix.
 -   `KANInitializer`: variance-controlled init for Kolmogorov-Arnold Network
     residual (`base_scaler`) and spline (`spline_weight`) roles, using the
     Rigas et al. (2026) per-role variance schemes (`power_law`,
@@ -46,6 +50,7 @@ from .orthonormal_initializer import OrthonormalInitializer
 from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from .polar_initializer import PolarInitializer
 from .linear_up_initializer import LinearUpInitializer
+from .identity_plus_noise import IdentityPlusNoise
 from .kan_initializer import (
     KANInitializer,
     create_kan_initializers,
@@ -61,6 +66,7 @@ __all__ = [
     "OrthogonalHypersphereInitializer",
     "PolarInitializer",
     "LinearUpInitializer",
+    "IdentityPlusNoise",
     "KANInitializer",
     "create_kan_initializers",
 ]
