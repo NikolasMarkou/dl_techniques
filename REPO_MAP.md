@@ -61,6 +61,15 @@ Weighting matters more than completeness here: layers and models together are 55
 library's Python files, i.e. 55% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
+> **STALE as of 2026-08-10 — every `.py` FILE-COUNT digit in this section and in the
+> corresponding Numbers-table rows.** A multi-package deletion pass is in flight
+> (`convnext_patch_vae`, `cliffordnet`, `bfcliffordunet`, `anomaly_detection`, with more
+> queued), so `555`, `55%`, and each per-subpackage `.py` count below are known wrong and
+> are deliberately NOT half-corrected here: they form one row-group that must move
+> together, in a single edit, once the pass lands. Run the Numbers-table command for any
+> digit you need. Directory-COUNT rows (model packages, trainer dirs, test dirs,
+> applications) WERE re-derived on 2026-08-10 and are current.
+
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 283 | **The largest package.** 20 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
@@ -164,14 +173,14 @@ transformer block's constructor arguments. For the options behind `attention_typ
 ## The model / trainer / test triangle
 
 Three trees are meant to line up by directory name: 72 model packages under
-`src/dl_techniques/models/`, 46 trainer directories under `src/train/`, and 79 test
-directories under `tests/test_models/`. (Only the first digit was re-measured on
-2026-08-10, when `convnext_patch_vae` was deleted from all three trees; the
-trainer and test-directory digits have since drifted for unrelated reasons and
-are pending a full re-derivation — run the Numbers-table commands, do not quote
-them.) **46 counts `src/train/` entries EXCLUDING
+`src/dl_techniques/models/`, 47 trainer directories under `src/train/`, and 80 test
+directories under `tests/test_models/`. (All three digits were re-measured on
+2026-08-10 after the `convnext_patch_vae` and `anomaly_detection` deletions. A
+further deletion pass is in flight in the same session, so re-run the Numbers-table
+commands before quoting these; they are correct as of that measurement, not
+permanently.) **47 counts `src/train/` entries EXCLUDING
 `src/train/common/`, which is a shared library, not a trainer** — the Numbers table
-carries both derivations (47 including it, 46 excluding it), because the two rows were
+carries both derivations (48 including it, 47 excluding it), because the two rows were
 once read as contradicting each other. Comparing those name lists directly is the
 obvious move and it produces a badly wrong picture. Four things break the correspondence:
 
@@ -235,11 +244,14 @@ layout. Concretely, `results/20260717_convunext_denoiser/config.json` and
 `results/20260717_convunext_denoiser/training_log.csv` on this machine. Remember Part A:
 `results/` is gitignored, so a run directory exists only where it was produced.
 
-**Applications.** Two Streamlit apps, each following the GUI-free-core plus thin entry
+**Applications.** **One** Streamlit app, following the GUI-free-core plus thin entry
 split documented in `src/applications/CLAUDE.md`:
 `src/applications/bias_free_denoiser/streamlit_app.py` (denoiser-as-prior inverse-problem
-solver; also has a headless `src/applications/bias_free_denoiser/main.py`) and
-`src/applications/anomaly_detection/streamlit_app.py`. Launch:
+solver; also has a headless `src/applications/bias_free_denoiser/main.py`). A second app,
+`src/applications/anomaly_detection/`, was deleted on 2026-08-10: the only architecture
+its loader supported (`models/convnext_patch_vae/`) had been removed, and no surviving
+model in the library implements the `sample_from(...)` decode API its scoring loop
+called, so it was end-to-end non-functional. Launch:
 
 ```
 CUDA_VISIBLE_DEVICES=1 .venv/bin/streamlit run src/applications/<app>/streamlit_app.py \
@@ -505,6 +517,11 @@ count, run `find src -name '*.py' -exec cat {} + | wc -l` yourself and treat the
 valid for that instant only. The FILE-count rows below are kept: they move only when a
 file is added or deleted, which is a reviewable event rather than a side effect of typing.
 
+> **The `.py` FILE-COUNT rows are STALE as of 2026-08-10** — see the boxed note in
+> Part A § "src/dl_techniques/ — the 13 subpackages". They are one row-group with that
+> section's prose and must be re-derived together once the in-flight deletion pass
+> lands. The directory-count rows are current.
+
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1008 | `find src -name '*.py' \| wc -l` |
@@ -529,8 +546,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Subpackages under `src/dl_techniques/layers/` | 20 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 74 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model packages under `src/dl_techniques/models/` | 72 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Entries under `src/train/` | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Entries under `src/applications/` | 2 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Entries under `src/train/` | 48 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Run dirs under `results/` (local) | 59 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Size of `results/` (local) | 7.3G | `LC_ALL=C du -sh results \| cut -f1` |
@@ -550,8 +567,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Keys in `MIXTURE_REGISTRY` | 3 | `awk 'index($0,"MIXTURE_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/mixtures/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
-| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 46 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
-| Test dirs under `tests/test_models/` | 79 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
+| Test dirs under `tests/test_models/` | 80 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Files under `src/` naming `keras.callbacks.Callback` | 58 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 11 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |

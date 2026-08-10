@@ -1,8 +1,10 @@
 # src/applications/
 
 Ready-made, end-to-end applications built on `dl_techniques` models (not research
-code). Each app lives in its own subdirectory (e.g. `anomaly_detection/`,
-`bias_free_denoiser/`).
+code). Each app lives in its own subdirectory. There is currently **one**:
+`bias_free_denoiser/`. A second, `anomaly_detection/`, was deleted on 2026-08-10
+along with the only architecture it could load (`models/convnext_patch_vae/`);
+recover it from git history if you need it.
 
 ## GUI standard: Streamlit
 
@@ -10,20 +12,21 @@ code). Each app lives in its own subdirectory (e.g. `anomaly_detection/`,
 **`streamlit-webrtc`** (real WebRTC frame delivery via a `VideoProcessorBase`).
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ANOMALY_MODEL=<ckpt> \
+CUDA_VISIBLE_DEVICES=1 BFDENOISER_MODEL=<ckpt> \
   .venv/bin/streamlit run src/applications/<app>/streamlit_app.py \
   --server.address 127.0.0.1 --server.port 8501
 ```
 
 **Do NOT use Gradio.** Its webcam streaming is broken in 6.x (`gr.Image(streaming=True)`
 passes `None` frames), and downgrading to 4.x cascades into a `fastapi`/`pydantic`
-dependency wall in this env. We migrated `anomaly_detection/` off it for exactly
-this reason — see `anomaly_detection/streamlit_app.py` as the reference pattern.
+dependency wall in this env. The (now-deleted) `anomaly_detection/` app was migrated
+off it for exactly this reason — `bias_free_denoiser/streamlit_app.py` is the
+surviving reference pattern.
 
 ## Conventions
 
 - **Keep the core GUI-free.** Inference/logic lives in a plain importable module
-  (e.g. `anomaly_detector.py`) with **no** streamlit import, so it stays usable
+  (e.g. `bias_free_denoiser/main.py`) with **no** streamlit import, so it stays usable
   headless and programmatically. Only the `streamlit_app.py` entry imports
   streamlit. Mirror this split in every app.
 - The Streamlit entry guards `main()` with `if __name__ == "__main__":` (streamlit
@@ -31,7 +34,7 @@ this reason — see `anomaly_detection/streamlit_app.py` as the reference patter
   imports (`from applications...`, `from dl_techniques...`) resolve under
   `streamlit run`.
 - Load the model once with `@st.cache_resource`. Take the checkpoint path from an
-  env var (e.g. `ANOMALY_MODEL`) and/or a sidebar input.
+  env var (e.g. `BFDENOISER_MODEL`) and/or a sidebar input.
 - For `streamlit-webrtc`: process frames in `VideoProcessorBase.recv`, push the
   current sidebar control values into the running processor each rerun
   (`if ctx.video_processor: setattr(...)`), wrap processing in try/except so a bad

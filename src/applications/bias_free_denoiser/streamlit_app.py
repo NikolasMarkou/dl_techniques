@@ -29,8 +29,9 @@ import sys
 # app never touches an X server on headless / remote GPU boxes.
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-# `streamlit run` executes this file as __main__, so make `src/` importable
-# (mirrors anomaly_detection/streamlit_app.py:25-28).
+# `streamlit run` executes this file as __main__, so make `src/` importable.
+# (The sibling app this pattern was mirrored from, `anomaly_detection/`, was deleted
+# on 2026-08-10; the convention it established is documented in ../CLAUDE.md.)
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _SRC not in sys.path:
@@ -80,7 +81,8 @@ def load_prior(checkpoint_path: str) -> DenoiserPrior:
 class DenoiserProcessor(VideoProcessorBase):
     """Per-frame webrtc denoiser; the forward-pass size / noise knob are pushed in live.
 
-    Mirrors ``anomaly_detection/streamlit_app.py``'s ``AnomalyProcessor`` (D-003): the
+    Follows the repo's webrtc-processor convention (D-003; the ``AnomalyProcessor`` it
+    was mirrored from lived in the since-deleted ``anomaly_detection/`` app): the
     cached :class:`DenoiserPrior` is injected via the constructor (the
     ``video_processor_factory`` lambda closes over the ``@st.cache_resource``
     singleton), and ``recv`` runs one ``D(y)`` forward pass per frame through the
