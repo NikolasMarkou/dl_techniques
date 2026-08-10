@@ -78,7 +78,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 # Accepted enum values -- the SINGLE source of truth.
 #
-# DECISION plan-2026-08-10-b007f435/D-009
+# DECISION plan-2026-08-10T183739-b007f435/D-009
 # These two tuples are imported by layers/embedding/factory.py's
 # validate_embedding_config. Do NOT inline a literal list back into either the
 # constructor's checks or the factory's: before this step the normalization list
@@ -237,7 +237,7 @@ class BertEmbeddings(keras.layers.Layer):
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
-        # DECISION plan-2026-08-10-b007f435/D-006
+        # DECISION plan-2026-08-10T183739-b007f435/D-006
         # An unrecognized position_embedding_type MUST raise. Do NOT "simplify" this
         # into an `else:` that falls back to 'learned' -- a silent normalization
         # fallback of exactly that shape is the defect this plan exists to delete
@@ -270,7 +270,7 @@ class BertEmbeddings(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         #
-        # DECISION plan-2026-08-10-b007f435/D-007
+        # DECISION plan-2026-08-10T183739-b007f435/D-007
         # The ORDER of these constructor statements is load-bearing: each
         # TruncatedNormal instance draws its seed from the process-global RNG at
         # construction, so reordering them changes every initialized weight. A
@@ -385,7 +385,7 @@ class BertEmbeddings(keras.layers.Layer):
             ``(batch_size, seq_length, hidden_size)`` in ``target_dtype``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-10-b007f435/D-008
+        # DECISION plan-2026-08-10T183739-b007f435/D-008
         # Compute in float32 for numeric range (10000^(2i/d) underflows fp16),
         # then cast to the dtype of the tensor this is actually summed with --
         # NOT to self.compute_dtype. Under mixed_float16 a Keras sub-layer

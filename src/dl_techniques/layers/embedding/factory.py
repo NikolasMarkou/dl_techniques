@@ -141,7 +141,7 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
     'bert_embeddings': {
         'class': BertEmbeddings,
         'description': 'BERT embeddings combining word, optional position, and optional token type embeddings with configurable normalization.',
-        # DECISION plan-2026-08-10-b007f435/D-010
+        # DECISION plan-2026-08-10T183739-b007f435/D-010
         # type_vocab_size is CONDITIONALLY required, not unconditionally optional:
         # it belongs here only because it is meaningless (and normalized to None by
         # the constructor) when use_token_type_embeddings is False. The static
@@ -327,7 +327,7 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
                     f"got {kwargs['position_embedding_type']}"
                 )
 
-        # DECISION plan-2026-08-10-b007f435/D-010
+        # DECISION plan-2026-08-10T183739-b007f435/D-010
         # CONDITIONAL-REQUIRED rule replacing the static required_params entry for
         # type_vocab_size. The default below is READ FROM THE REGISTRY rather than
         # written as a literal True, so flipping the registry default can never leave

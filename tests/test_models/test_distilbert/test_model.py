@@ -2,7 +2,7 @@
 Test suite for DistilBERT (encoder foundation model).
 
 Covers the paths that were never exercised before plan
-`plan-2026-08-10-b007f435`: the top-level package import, the sinusoidal
+`plan-2026-08-10T183739-b007f435`: the top-level package import, the sinusoidal
 position branch under `float32` and `mixed_float16`, `rms_norm`, the
 unknown-`normalization_type` raise (which must come from the EMBEDDING stage,
 not from the first `TransformerLayer`), the I-4 no-auto-masking guard, the
@@ -166,7 +166,7 @@ class TestSinusoidalPositions:
         )
         assert not np.allclose(arr[0, 0], arr[0, -1], atol=1e-5)
 
-        # DECISION plan-2026-08-10-b007f435/D-013
+        # DECISION plan-2026-08-10T183739-b007f435/D-013
         # Weight paths are read AFTER the forward pass, never before: an
         # unbuilt keras.Model reports `weights == []`, so the same assertion
         # placed above the call is VACUOUS (measured this step, mutation M4c3 --
@@ -245,7 +245,7 @@ class TestNormalizationType:
         with pytest.raises(ValueError) as excinfo:
             _model(normalization_type="definitely_not_a_norm")
 
-        # DECISION plan-2026-08-10-b007f435/D-013
+        # DECISION plan-2026-08-10T183739-b007f435/D-013
         # Assertion order is load-bearing: the "not from a TransformerLayer"
         # check must be first, because the pre-plan defect (embeddings degrade
         # silently, the encoder raises later) satisfies neither and would
@@ -319,7 +319,7 @@ class TestMaskingContract:
         mutation that auto-derives a mask would satisfy neither and the
         inequality would shadow the equality.
         """
-        # DECISION plan-2026-08-10-b007f435/D-013
+        # DECISION plan-2026-08-10T183739-b007f435/D-013
         # Do NOT reorder the three assertions below. Measured this step: the
         # pad_token_id-derivation mutation (M14) reds ONLY the equality, and
         # the mask-never-reaches-the-encoder mutation (M15) reds ONLY the

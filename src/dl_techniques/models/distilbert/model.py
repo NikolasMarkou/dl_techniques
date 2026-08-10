@@ -404,7 +404,7 @@ class DistilBERT(keras.Model):
         self.sinusoidal_pos_embds = sinusoidal_pos_embds
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
-        # DECISION plan-2026-08-10-b007f435/D-003
+        # DECISION plan-2026-08-10T183739-b007f435/D-003
         # pad_token_id is stored and serialized but DELIBERATELY never read.
         # Do NOT "fix" this by deriving `attention_mask = input_ids !=
         # pad_token_id` in call() when no mask is supplied: that silently
@@ -481,7 +481,7 @@ class DistilBERT(keras.Model):
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings and encoder layers)."""
-        # DECISION plan-2026-08-10-b007f435/D-011
+        # DECISION plan-2026-08-10T183739-b007f435/D-011
         # Every value below is passed EXPLICITLY. Do NOT "simplify" any of the
         # four that look droppable -- each one differs from the shared layer's
         # default, which is BERT's behaviour, not DistilBERT's:
@@ -652,7 +652,7 @@ class DistilBERT(keras.Model):
                     skip_mismatch=True
                 )
         """
-        # DECISION plan-2026-08-10-b007f435/D-012
+        # DECISION plan-2026-08-10T183739-b007f435/D-012
         # This method is BROKEN and is knowingly left broken by this plan; the
         # docstring warning above states it. Two defects, both measured:
         #   1. the `keras.random.uniform(..., dtype="int32")` dummy input below
