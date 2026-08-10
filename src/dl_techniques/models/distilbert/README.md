@@ -4,9 +4,11 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **DistilBERT** architecture in **Keras 3**. This implementation is based on the paper *"DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter"* by Sanh et al.
+An implementation of the **DistilBERT** *architecture* in **Keras 3**, based on the paper *"DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter"* by Sanh et al.
 
-DistilBERT retains approximately **97% of BERT's performance** while being **40% smaller and 60% faster**. It achieves this by distilling knowledge from a large "teacher" BERT model into a smaller "student" model during pre-training.
+> **No trained weights ship with this package, none can be downloaded, and the `pretrained=` argument does not work in either of its two forms.** Every URL in `DistilBERT.PRETRAINED_WEIGHTS` is an `example.com` placeholder, so `pretrained=True` returns a **randomly initialized** model after logging a warning; and `pretrained="<path>.keras"` **raises `ValueError`** — `load_pretrained_weights` is broken independently of the URLs. Both behaviours are measured in [§8](#8-comprehensive-usage-examples), which also gives the one loading route that does work (`keras.models.load_model`). Everything below describes an architecture you must train yourself.
+
+The published DistilBERT checkpoint retains approximately **97% of BERT's performance** while being **40% smaller and 60% faster**, by distilling knowledge from a large "teacher" BERT model into a smaller "student" model during pre-training. Those are the paper's numbers for the paper's checkpoint; nothing in this repo reproduces or measures them.
 
 ---
 
@@ -42,16 +44,15 @@ This implementation provides the core DistilBERT encoder as a **foundation model
 ### Key Innovations of this Implementation
 
 1.  **Foundation Model Design**: The `DistilBERT` class is a pure encoder, decoupled from task-specific heads.
-2.  **Pretrained Weights Support**: Supports loading standard variants (`base`, `small`, `tiny`) and handles downloading official weights.
-3.  **Keras 3 Native**: Built as a composite `keras.Model`, fully serializable and compatible with TensorFlow, PyTorch, and JAX backends.
-4.  **Optimized Architecture**: Faithfully implements DistilBERT's simplified embedding layer (no segment embeddings) and reduced layer count.
+2.  **Weight loading**: use `keras.models.load_model(path)` on a file you saved (verified to restore every weight exactly). The package's own `pretrained=` / `load_pretrained_weights` machinery is present but non-functional — §8.
+3.  **Keras 3 Native**: Built as a composite `keras.Model` and fully serializable — a `.keras` save/load round trip with no `custom_objects` reproduces the forward output exactly (measured max abs diff `0.0`). Only the TensorFlow backend is exercised here; other backends are untested.
+4.  **Shared embedding stage**: no DistilBERT-private embedding class exists. The model builds `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings` — the same layer `models/bert/` and `models/fnet/` use — via `create_embedding_layer('bert_embeddings', ...)` with `use_token_type_embeddings=False` (no segment embeddings) and `mask_zero=False`.
 
 ### Why DistilBERT Matters
 
 While BERT achieved state-of-the-art results, its sheer size (110M+ parameters) makes it difficult to deploy in resource-constrained environments like mobile phones or real-time applications.
 
-**Comparison with BERT-Base**:
-*   **Parameters**: ~66M (vs. 110M)
+**Comparison with BERT-Base** (Sanh et al.'s reported figures for their trained checkpoint, not measurements of this code — for this implementation's own parameter counts see [§7](#7-configuration--model-variants)):
 *   **Inference Speed**: ~60% faster
 *   **Performance**: ~97% of BERT's GLUE score
 
@@ -111,7 +112,8 @@ The architecture is very similar to BERT but streamlined. Notably, **Token Type 
 │                  DistilBERT Foundation Model Architecture        │
 │                                                                  │
 │ Input (Token IDs) ───►┌────────────────┐                         │
-│                       │DistilBertEmbeds│ (Token + Position)      │
+│                       │ BertEmbeddings │ (Token + Position;      │
+│                       │    (shared)    │  token types disabled)  │
 │                       └────────┬───────┘                         │
 │                                │                                 │
 │                       ┌────────▼───────────┐                     │
@@ -143,14 +145,15 @@ STEP 1: INPUT PREPARATION (Simplified)
 Input Text -> Tokenizer -> Input Representation
     │
     ├─► Input IDs: Numerical IDs for each token.
-    ├─► Attention Mask: Binary mask for padding.
+    ├─► Attention Mask: Binary mask for padding. NOT optional in practice --
+    │   nothing infers it, see section 11.
     │   (Note: No Token Type/Segment IDs required)
     │
-    └─► DistilBertEmbeddings Layer
+    └─► BertEmbeddings (shared layer, token types disabled)
         ├─► Word Embeddings
         ├─► Position Embeddings (Learned or Sinusoidal)
         │
-        └─► Summed Embeddings -> LayerNorm -> Dropout -> (B, seq_len, D)
+        └─► Summed Embeddings -> Norm -> Dropout -> (B, seq_len, D)
 
 
 STEP 2: ENCODING (Reduced Depth)
@@ -173,12 +176,30 @@ Final Hidden States (B, seq_len, D)
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `DistilBertEmbeddings` Layer
+### 4.1 Embedding Stage — the shared `BertEmbeddings`
 
-Unlike BERT, DistilBERT does not use "segment embeddings" (token type IDs). The model treats the input as a continuous sequence.
--   **Inputs**: `input_ids` and `position_ids` (optional).
--   **Structure**: Sum of Word Embeddings + Position Embeddings.
--   **Position Embeddings**: Supports both standard learned embeddings and fixed **sinusoidal** embeddings (configurable via `sinusoidal_pos_embds=True`).
+There is **no DistilBERT-private embedding class**. `_build_architecture` calls
+
+```python
+create_embedding_layer(
+    'bert_embeddings',
+    ...,
+    type_vocab_size=None,
+    use_token_type_embeddings=False,
+    position_embedding_type='sinusoidal' if sinusoidal_pos_embds else 'learned',
+    mask_zero=False,
+    layer_norm_eps=layer_norm_eps,
+    normalization_type=normalization_type,
+)
+```
+
+so the layer is `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings`, the same one `models/bert/` and `models/fnet/` build. Three kwargs carry DistilBERT's whole delta from BERT, and each differs from that layer's default — do not drop them (see the `D-011` comment at the call site):
+
+-   **`use_token_type_embeddings=False`**: no "segment embeddings" (token type IDs). Unlike BERT, the input is treated as one continuous sequence, and no `token_type_embeddings` weight is allocated. `type_vocab_size=None` follows from it.
+-   **`mask_zero=False`**: the layer does **not** emit a Keras auto-mask. DistilBERT threads an explicit `attention_mask` into every `TransformerLayer` instead; two masking mechanisms reaching the same attention stack is the failure this pins shut.
+-   **`position_embedding_type`**: learned embeddings by default, fixed **sinusoidal** with `sinusoidal_pos_embds=True`.
+
+Consequence worth knowing: `normalization_type` is validated by `BertEmbeddings`, which accepts exactly `layer_norm`, `rms_norm`, `band_rms`, `batch_norm`. Any other value raises `ValueError` at construction from the embedding stage, even for values a `TransformerLayer` alone would accept.
 
 ### 4.2 `TransformerLayer`
 
@@ -217,12 +238,11 @@ sentiment_config = NLPTaskConfig(
     num_classes=3
 )
 
-# 2. Create a DistilBERT model with a sentiment head
-print("🚀 Creating DistilBERT-base model...")
+# 2. Create a DistilBERT model with a sentiment head (random weights)
 model = create_distilbert_with_head(
     distilbert_variant="base",
     task_config=sentiment_config,
-    pretrained=False  # Set to True to download weights
+    pretrained=False  # True does NOT fetch weights -- see section 8
 )
 
 # 3. Compile
@@ -239,8 +259,10 @@ dummy_inputs = {
     "input_ids": np.random.randint(0, 30522, size=(BATCH_SIZE, SEQ_LEN)),
     "attention_mask": np.ones((BATCH_SIZE, SEQ_LEN), dtype="int32")
 }
-# Output shape: (4, 3)
-print(model.predict(dummy_inputs).shape)
+# A classification head returns a DICT, not one tensor:
+# {'logits': (4, 3), 'probabilities': (4, 3)}
+outputs = model.predict(dummy_inputs, verbose=0)
+print({k: v.shape for k, v in outputs.items()})
 ```
 
 ---
@@ -254,8 +276,8 @@ print(model.predict(dummy_inputs).shape)
 ```python
 from dl_techniques.models.distilbert import DistilBERT
 
-# Standard Base model
-model = DistilBERT.from_variant("base", pretrained=True)
+# Standard Base model (randomly initialized)
+model = DistilBERT.from_variant("base")
 
 # Tiny model for edge devices
 model = DistilBERT.from_variant("tiny")
@@ -274,30 +296,60 @@ DistilBERT variants are generally defined by their reduced depth compared to BER
 
 | Variant | Hidden Size | Layers | Heads | Parameters | Use Case |
 |:---:|:---:|:---:|:---:|:---:|:---|
-| **`tiny`** | 256 | 2 | 4 | ~10M | Ultra-lightweight, mobile/IoT |
-| **`small`**| 512 | 4 | 8 | ~29M | Fast CPU inference |
-| **`base`** | 768 | 6 | 12 | ~66M | General purpose, good balance |
+| **`tiny`** | 256 | 2 | 4 | 9,524,736 | Ultra-lightweight, mobile/IoT |
+| **`small`**| 512 | 4 | 8 | 28,499,968 | Fast CPU inference |
+| **`base`** | 768 | 6 | 12 | 66,362,880 | General purpose, good balance |
+
+Parameter counts are measured with `count_params()` on a built model at the default `vocab_size=30522` and `max_position_embeddings=512`; they move with either of those.
 
 *Note: DistilBERT does not typically have a "Large" variant, as the goal is reduction.*
+
+### Constrained configuration values
+
+-   `normalization_type` — one of `layer_norm`, `rms_norm`, `band_rms`, `batch_norm`. All four are verified to build and forward-pass; anything else raises `ValueError` at construction (§4.1).
+-   `sinusoidal_pos_embds` — `False` (learned) or `True` (fixed sinusoidal). Both are verified under `float32` and `mixed_float16` (§10).
+-   `pad_token_id` — stored and serialized, never read. See §11.
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Loading Pretrained Weights
+### Example 1: What `pretrained=` actually does
+
+**`pretrained=True` does not download weights.** Every entry of `DistilBERT.PRETRAINED_WEIGHTS` is an `https://example.com/...` placeholder. Measured behaviour of `DistilBERT.from_variant("tiny", pretrained=True)`:
+
+1.  `keras.utils.get_file` fails on the placeholder URL.
+2.  `from_variant` catches the exception and emits exactly one warning — *"Failed to download pretrained weights: ... Continuing with random initialization."*
+3.  `load_pretrained_weights` is invoked **0 times**, and every non-constant weight of the returned model differs from an independently constructed one.
+4.  A `DistilBERT` is returned, **randomly initialized**, and nothing raises.
+
+A caller who does not read logs cannot tell this apart from a successful load. The machinery is kept deliberately (it is the wiring a real checkpoint would use); only the URLs are missing.
+
+**`pretrained="<path>.keras"` does not work either — it raises.** `from_variant` forwards it to `load_pretrained_weights`, which fails on both of its two paths (measured with a file written by `model.save(...)`):
+
+| Route | Result |
+|---|---|
+| `from_variant(pretrained="<file>.keras")` on a fresh model | `ValueError: Failed to load weights ...: keras.random.uniform requires a floating point dtype. Received: dtype=int32` — the "build the model first" dummy input is itself invalid |
+| `model(...)` first, then `load_pretrained_weights("<file>.keras")` | `ValueError: Failed to load weights ...: Invalid keyword arguments: {'by_name': True}` — Keras 3's `Model.load_weights` has no `by_name` |
+| same, with a `.weights.h5` file | same `by_name` `ValueError` |
+| **`keras.models.load_model("<file>.keras")`** | **works — all 28/28 weights restored identically** |
+
+So the loading story for now is: save with `model.save(path)`, load with `keras.models.load_model(path)`.
 
 ```python
+import keras
 from dl_techniques.models.distilbert import DistilBERT
 
-# 1. Download and load default 'uncased' weights
-model = DistilBERT.from_variant("base", pretrained=True)
+# Randomly initialized -- the working construction route
+model = DistilBERT.from_variant("base")
 
-# 2. Load from local file
-model = DistilBERT.from_variant("base", pretrained="./distilbert_weights.keras")
+# Save / restore a model you trained yourself
+model.save("./distilbert_weights.keras")
+model = keras.models.load_model("./distilbert_weights.keras")
 
-# 3. Custom vocab (e.g., for multilingual)
-# This will load encoder weights but skip embedding weights due to shape mismatch
-model = DistilBERT.from_variant("base", pretrained=True, vocab_size=50000)
+# DO NOT USE (both raise / silently no-op, see the table above):
+#   DistilBERT.from_variant("base", pretrained=True)
+#   DistilBERT.from_variant("base", pretrained="./distilbert_weights.keras")
 ```
 
 ### Example 2: NER (Token Classification)
@@ -315,9 +367,10 @@ ner_config = NLPTaskConfig(
 ner_model = create_distilbert_with_head(
     distilbert_variant="base",
     task_config=ner_config,
-    pretrained=True
 )
-# Output shape: (batch, seq_len, 9)
+# Output (measured): {'logits': (batch, seq_len, 9), 'predictions': (batch, seq_len)}
+# -- a token-classification head returns different keys from the
+# sentiment head in section 5. Always inspect the dict.
 ```
 
 ---
@@ -332,7 +385,7 @@ Use the model to get embeddings for downstream systems.
 import keras
 from dl_techniques.models.distilbert import DistilBERT
 
-encoder = DistilBERT.from_variant("base", pretrained=True)
+encoder = DistilBERT.from_variant("base")
 
 inputs = {
     "input_ids": keras.Input(shape=(None,), dtype="int32"),
@@ -354,14 +407,15 @@ model = keras.Model(inputs, outputs)
 
 ### Inference Speed
 
-DistilBERT is naturally ~60% faster than BERT. For further gains:
+The published DistilBERT is reported at ~60% faster than BERT-base at 6 layers instead of 12; this repo measures no latency. Two knobs are verified to *work* (not to be faster — no timing was taken):
 
-1.  **XLA Compilation**: Use `jit_compile=True` in `model.compile()`.
+1.  **XLA Compilation**: `model.compile(..., jit_compile=True)` — verified end to end through `create_distilbert_with_head` + `predict`.
 2.  **Mixed Precision**:
     ```python
     keras.mixed_precision.set_global_policy('mixed_float16')
     model = DistilBERT.from_variant("base")
     ```
+    Verified for **both** position-embedding modes: `sinusoidal_pos_embds=False` and `sinusoidal_pos_embds=True` each forward-pass to a finite `float16` output. (The sinusoidal branch used to raise `InvalidArgumentError` under this policy — it built its sin/cos table in hard `float32` and added it to a `float16` word embedding. The shared `BertEmbeddings` now casts the table to the dtype of the tensor it is summed with.)
 
 ---
 
@@ -375,13 +429,21 @@ Since DistilBERT is shallower, it can be more sensitive to aggressive learning r
 
 ### Input Representation
 
-Ensure you use a tokenizer compatible with the original BERT (WordPiece). Note that `token_type_ids` are **not** passed to the model. Passing them will not cause an error (the model accepts kwargs), but they will be ignored by the logic.
+Ensure you use a tokenizer compatible with the original BERT (WordPiece). `token_type_ids` are **not** used. A `"token_type_ids"` key inside the input dict is silently ignored (measured: the forward pass succeeds and returns the usual `last_hidden_state` / `attention_mask`), but passing `token_type_ids=` as a **keyword argument** raises `TypeError: ... got an unexpected keyword argument 'token_type_ids'`, because `call()` does not declare it.
+
+### Padding is your responsibility (`pad_token_id` is advisory)
+
+`pad_token_id` is stored on the model and written into `get_config()`, and **that is all it does**. Nothing reads it: no attention mask is derived from it anywhere in the package.
+
+*   If you call the model **without** an `attention_mask`, padding tokens are attended to exactly like real tokens. Measured on a batch whose second half is `pad_token_id`: the masked and unmasked forward passes differ (max abs diff `3.6e-2` at a small config) — proof that the mask is doing work and that none is inferred for you.
+*   Always pass `attention_mask` (`1` = keep, `0` = pad), either as a dict key or as the `attention_mask=` argument.
+*   This matches upstream HuggingFace DistilBERT, which also defaults the mask to all-ones rather than deriving it. Deriving one here was considered and rejected: it would silently change the output of every mask-less forward pass written against this model so far.
 
 ---
 
 ## 12. Serialization & Deployment
 
-Fully serializable via Keras 3.
+Fully serializable via Keras 3. Verified: a save/load round trip with **no** `custom_objects` reproduces the `training=False` forward output exactly (max abs diff `0.0`).
 
 ```python
 model = create_distilbert_with_head(...)
@@ -405,10 +467,11 @@ def test_forward_pass():
         "input_ids": np.random.randint(0, 1000, (2, 10)),
         "attention_mask": np.ones((2, 10), dtype="int32")
     }
-    out = model(inputs)
-    assert out["last_hidden_state"].shape == (2, 10, 512)
-    print("✓ DistilBERT shape check passed")
+    out = model(inputs, training=False)
+    assert tuple(out["last_hidden_state"].shape) == (2, 10, 512)
 ```
+
+The package's own suite lives in `tests/test_models/test_distilbert/`.
 
 ---
 
@@ -418,7 +481,10 @@ def test_forward_pass():
 A: DistilBERT removed them to simplify the architecture. It does not distinguish between "Sentence A" and "Sentence B" explicitly via embeddings, though it can still process pairs separated by `[SEP]`.
 
 **Q: Can I use BERT weights?**
-A: Not directly. While the architectures are similar, the layer count is different (6 vs 12), and the weights matrices are not 1:1 mappable without the specific distillation selection process. Use `DistilBERT.from_variant("base", pretrained=True)` to get the correct weights.
+A: Not directly. While the architectures are similar, the layer count is different (6 vs 12), and the weight matrices are not 1:1 mappable without the specific distillation selection process.
+
+**Q: Where do I get trained weights, then?**
+A: You train them, or you convert them yourself. This package ships no checkpoint and contains no HuggingFace converter. `pretrained=True` reaches placeholder URLs and falls back to random init; `pretrained="<path>"` raises. Save with `model.save(path)` and reload with `keras.models.load_model(path)` (§8).
 
 **Q: Why is there no Pooler output?**
 A: The original DistilBERT removed the pre-training "Next Sentence Prediction" task, and thus removed the dense pooler layer associated with the `[CLS]` token. You should simply take the 0-th index of `last_hidden_state` for classification tasks.

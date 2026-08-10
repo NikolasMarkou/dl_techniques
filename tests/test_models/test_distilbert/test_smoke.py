@@ -3,11 +3,13 @@
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_b5cec9e4).
 REPORT-ONLY: a build/forward break is documented via xfail, never fixed.
 
-We exercise the raw ``DistilBERT`` foundation class at its smallest config
-(ctor verified at model.py:448). The ``create_distilbert_with_head`` factory
-needs an ``NLPTaskConfig`` object and is out of scope here. ``call()``
-(model.py:639) accepts a plain ``int32 (B, T)`` token tensor (or dict with
-``input_ids``) and returns a dict with ``last_hidden_state``.
+We exercise the raw ``DistilBERT`` foundation class at its smallest config.
+The ``create_distilbert_with_head`` factory needs an ``NLPTaskConfig`` object
+and is out of scope here. ``DistilBERT.call`` accepts a plain ``int32 (B, T)``
+token tensor (or a dict with ``input_ids``) and returns a dict with
+``last_hidden_state`` and ``attention_mask``. (Line numbers deliberately not
+quoted: the two this docstring used to cite were both stale after the embedding
+stage moved to the shared ``BertEmbeddings``.)
 """
 
 import numpy as np
