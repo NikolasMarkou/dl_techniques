@@ -209,7 +209,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 analyses/
-plans/
+plans/*
 results/
 
 # Runtime logs and pids
@@ -258,3 +258,4 @@ research/papers/**/*.zip
 # WOULD make cliffordnet.pdf permanently invisible to `git status` and `git add -A`,
 # silently blocking it from ever being committed without `git add -f`. Its visibility
 # as `??` is the feature, not the noise.
+!plans/ANCHORS.md
