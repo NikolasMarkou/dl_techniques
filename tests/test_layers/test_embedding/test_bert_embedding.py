@@ -386,15 +386,32 @@ class TestOptionalBranches:
 
     def test_sinusoidal_accepts_positions_beyond_max_position_embeddings(
             self, distil_params):
-        """The sinusoidal branch is unbounded by construction; assert it, don't assume."""
+        """The sinusoidal branch is unbounded by construction; assert it, don't assume.
+
+        Shape and finiteness alone do NOT establish this: a silent clamp of the
+        positions to ``max_position_embeddings - 1`` produces an output of exactly
+        the right shape, entirely finite, and left this file 31/31 GREEN when it
+        was measured as mutation ``M28_clamp_sinusoidal_positions``
+        (findings/step4-mutation-log.md). The claim only becomes testable by
+        asserting that the encoding keeps VARYING past the bound.
+        """
+        bound = distil_params['max_position_embeddings']
+        seq_length = bound + 16
         layer = BertEmbeddings(**distil_params)
-        long_ids = ops.convert_to_tensor(
-            np.ones((1, distil_params['max_position_embeddings'] + 16), dtype='int32')
-        )
+        long_ids = ops.convert_to_tensor(np.ones((1, seq_length), dtype='int32'))
         output = layer(long_ids, training=False)
-        assert output.shape == (1, distil_params['max_position_embeddings'] + 16,
-                                distil_params['hidden_size'])
+        assert output.shape == (1, seq_length, distil_params['hidden_size'])
         assert bool(ops.all(ops.isfinite(output)))
+
+        # The token ids are constant, so rows differ ONLY through the positional
+        # term. Under a clamp every row from `bound` onward would be identical.
+        out = ops.convert_to_numpy(output)[0]
+        assert not np.allclose(out[bound], out[bound + 1], atol=1e-5), (
+            "positions past max_position_embeddings are not distinct -- "
+            "the sinusoidal branch is bounded, not unbounded"
+        )
+        assert not np.allclose(out[bound], out[-1], atol=1e-5)
+        assert not np.allclose(out[bound - 1], out[bound], atol=1e-5)
 
     # -- mask_zero -----------------------------------------------------------------
 
