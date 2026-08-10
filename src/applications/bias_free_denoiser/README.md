@@ -9,16 +9,29 @@ Reference: A. Kadkhodaie & E. P. Simoncelli, *"Stochastic Solutions for Linear
 Inverse Problems using the Prior Implicit in a Denoiser"* (NeurIPS 2021). The
 denoiser is a bias-free **ConvUNext** (bias-free ConvNeXt U-Net, BF-CNN-style:
 strictly bias-free so it is input-scale equivariant / degree-1 homogeneous, trained
-blind on additive Gaussian noise with an MSE objective). ConvUNext is the ONLY
-architecture `DenoiserPrior.from_pretrained` supports: the app previously also loaded a
-bias-free CliffordUNet checkpoint, but that model was removed from the library, so
-`from_pretrained` now refuses such a checkpoint with an error naming the removed
-architecture.
+blind on additive Gaussian noise with an MSE objective). ConvUNext is the only
+architecture with a `resolution="dynamic"` loader: the app previously also rebuilt a
+bias-free CliffordUNet through a factory over
+`dl_techniques.models.bias_free_denoisers.bfcliffordunet`, and that model module was
+removed from the library, so `from_pretrained` refuses `resolution="dynamic"` for such
+a checkpoint with an error naming the removed factory. A CliffordUNet checkpoint is
+**still loadable** via `resolution="fixed256"`, which reads the saved graph and needs no
+model module (measured on `results/20260722_cliffordunet_denoiser_hfb3/final_model.keras`:
+873,114 params, finite 256×256 forward); use `tile()` / `untile()` for larger inputs.
 
-Shipped checkpoint: `results/convunext_denoiser_base_20260707_122133/` (ConvUNext base,
+Reference checkpoint: `results/convunext_denoiser_base_20260707_122133/` (ConvUNext base,
 3.4M params, blind additive curriculum σ up to 0.5). Measured blind denoising PSNR on
 DIV2K-validation (256px patches, 100 images): 40.7 dB @ σ255=5, 35.5 @ σ255=15, 33.3 @
 σ255=25, 30.3 @ σ255=50, 29.1 @ σ255=65 — a single blind model across the whole range.
+
+> **That directory is NOT present in this checkout** (2026-08-10), although it is still
+> the built-in default in `main.py` and `streamlit_app.py` and the path used in the
+> examples below — pass `--model` / `BFDENOISER_MODEL` explicitly. The PSNR row above is
+> kept as the provenance of those numbers, not as a claim about an artifact you can open.
+> The app's integration suite runs against `results/20260808_convunext_denoiser/`
+> (ConvUNext v1 base, `data_range="[0,1]"`), which does exist here; two of its
+> annealed-ascent gates currently `xfail` on it (see
+> `tests/test_applications/test_bias_free_denoiser/test_integration.py`).
 
 ## Theory (one paragraph)
 
@@ -250,9 +263,10 @@ the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`.
 
 > **Provenance of the +13.4 dB.** It was measured on a bias-free **CliffordUNet**
 > checkpoint whose architecture has since been removed from the library (see the top
-> of this README). It has **not** been re-measured on the shipped ConvUNext default,
-> and it cannot be reproduced as measured — the model it was measured on is no longer
-> loadable. Treat it as the historical justification for the defaults, not as a
+> of this README). It has **not** been re-measured on the shipped ConvUNext default.
+> The checkpoint itself is still loadable (`resolution="fixed256"`), but the A/B was run
+> through the removed factory-rebuild path, so it cannot be reproduced as it was
+> measured. Treat it as the historical justification for the defaults, not as a
 > ConvUNext number. The *mechanism* it identified (a step-size cap that strands the
 > ascent above `sigma_l`) is a property of the schedule, not of the denoiser, so the
 > defaults themselves are not in question; only the magnitude is checkpoint-specific.

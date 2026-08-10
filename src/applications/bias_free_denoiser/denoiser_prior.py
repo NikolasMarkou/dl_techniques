@@ -31,12 +31,18 @@ patch size) and raises on any other spatial size. Two loader paths are provided:
   (locked to ``(256, 256, 3)``); use :meth:`tile` / :meth:`untile` for larger
   inputs.
 
-ConvUNext is the ONLY supported architecture. The CliffordUNet branch (a
-factory-rebuild + weight-transfer path over
+ConvUNext is the only architecture with a ``dynamic`` loader. The CliffordUNet
+``dynamic`` branch (a factory-rebuild + weight-transfer path over
 ``dl_techniques.models.bias_free_denoisers.bfcliffordunet``) was removed together
-with its model module; :meth:`_detect_architecture` still recognizes such a
-checkpoint so :meth:`from_pretrained` can refuse it by name instead of dying on a
-``ModuleNotFoundError`` (see decisions.md D-009).
+with its model module, so :meth:`from_pretrained` refuses ``resolution="dynamic"``
+for such a checkpoint by name, instead of dying on a ``ModuleNotFoundError``.
+
+``resolution="fixed256"`` is NOT restricted by architecture and never was:
+:meth:`_load_fixed` is a plain ``keras.models.load_model`` on the saved graph, which
+carries its own layer configs and needs no model module. A CliffordUNet checkpoint
+still loads through it (measured on
+``results/20260722_cliffordunet_denoiser_hfb3/final_model.keras``: 873,114 params,
+finite ``(1, 256, 256, 3)`` forward). See decisions.md D-027, which corrects D-009.
 
 Domain contract (INV-1 / plan_2026-07-12_e56909cd D-004)
 --------------------------------------------------------
@@ -155,8 +161,9 @@ class DenoiserPrior:
         Raises:
             ValueError: If ``resolution`` is not ``"dynamic"`` or ``"fixed256"``; if
                 the checkpoint's ``config.json`` does not stamp ``data_range == "[0,1]"``
-                (D-005 provenance gate); or if the checkpoint is a CliffordUNet, whose
-                support was removed (D-009).
+                (D-005 provenance gate); or if ``resolution="dynamic"`` is requested for
+                a non-ConvUNext checkpoint, whose factory-rebuild loader was removed
+                (D-027). ``resolution="fixed256"`` is architecture-agnostic.
             FileNotFoundError: If the resolved checkpoint / config paths are absent.
         """
         # Registrar-first import (INV-2). This MUST precede any load_model call —
@@ -174,27 +181,32 @@ class DenoiserPrior:
         # three src/train/bfunet/ load paths — do not re-implement it here.
         require_unit_domain_checkpoint(keras_path)
 
-        # DECISION plan-2026-08-10T130454-3649c19e/D-009: refuse a CliffordUNet
-        # checkpoint HERE, by name, before any load attempt. Do NOT delete
-        # `_detect_architecture`'s "cliffordunet" verdict and let the load fall
-        # through to `keras.models.load_model` — the model module
-        # `...bias_free_denoisers.bfcliffordunet` is gone, so that route dies with a
-        # bare `ModuleNotFoundError` / unknown-custom-object `TypeError` that names
-        # a Keras internal instead of the removed architecture, and a user with a
-        # real trained checkpoint cannot tell "unsupported" from "app is broken".
-        # The check is deliberately OUTSIDE the resolution branch: `fixed256` is just
-        # as unloadable as `dynamic`. See decisions.md D-009.
+        # DECISION plan-2026-08-10T130454-3649c19e/D-027: the architecture refusal
+        # belongs to the `dynamic` branch ONLY — it must NOT gate `fixed256`.
+        # `_load_fixed` is `keras.models.load_model` on the SAVED GRAPH: it needs no
+        # model module at all, so a CliffordUNet checkpoint loads through it exactly
+        # as it did before the `bfcliffordunet` deletion (measured: 873,114 params,
+        # finite (1,256,256,3) forward). D-009 placed this check outside the branch
+        # on the false premise that such a checkpoint "can no longer be loaded at
+        # all", which broke a working load path for a real artifact on disk. Do NOT
+        # move this check back up: the only thing that was removed is the non-
+        # ConvUNext DYNAMIC route (a factory rebuild over the deleted module), and
+        # the surviving graph-relax dynamic path is validated for ConvUNext only.
+        # See decisions.md D-027 (which corrects D-009).
         architecture = cls._detect_architecture(config_path)
-        if architecture != "convunext":
+        if resolution == "dynamic" and architecture != "convunext":
             raise ValueError(
-                f"unsupported denoiser architecture {architecture!r} for checkpoint "
-                f"{keras_path}: CliffordUNet support was REMOVED from this "
-                f"application along with the "
-                f"dl_techniques.models.bias_free_denoisers.bfcliffordunet model "
-                f"module, so this checkpoint can no longer be loaded at all. "
-                f"ConvUNext is the only supported architecture; its config.json "
-                f"records a 'convnext_version' key. Retrain or use the shipped "
-                f"ConvUNext checkpoint."
+                f"resolution='dynamic' is not available for a "
+                f"{architecture!r} checkpoint ({keras_path}). The non-ConvUNext "
+                f"dynamic loader was a factory rebuild over "
+                f"dl_techniques.models.bias_free_denoisers.bfcliffordunet, and "
+                f"that model module has been REMOVED; the surviving dynamic "
+                f"path is the ConvUNext graph-relax loader, which is validated "
+                f"for ConvUNext only. The checkpoint ITSELF is still loadable: "
+                f"pass resolution='fixed256' to load the saved (256,256,3) "
+                f"graph directly and use tile()/untile() for larger inputs. "
+                f"(A ConvUNext checkpoint's config.json records a "
+                f"'convnext_version' key; this one does not.)"
             )
 
         try:
@@ -252,11 +264,15 @@ class DenoiserPrior:
     def _detect_architecture(config_path: Path) -> str:
         """Sniff the checkpoint's sibling config.json for the denoiser architecture.
 
-        ConvUNext checkpoints record ``convnext_version`` (v1/v2); CliffordUNet ones
-        do not. Missing/unreadable config.json falls back to ``"cliffordunet"`` — the
-        historical default — which :meth:`from_pretrained` now turns into a named
-        refusal rather than a load (D-009). Only ``"convunext"`` is loadable; the
-        other verdict exists solely so the refusal can name what it refused.
+        This sniffs ONE bit of evidence and nothing more: ConvUNext checkpoints record
+        ``convnext_version`` (v1/v2) in their sibling config.json; CliffordUNet ones do
+        not. Missing/unreadable config.json falls back to ``"cliffordunet"`` — the
+        historical default — so the verdict means "this is not a recognizable ConvUNext
+        checkpoint", not "this file was proven to be a CliffordUNet".
+
+        :meth:`from_pretrained` uses the verdict to gate the ``dynamic`` loader ONLY
+        (D-027). Both verdicts are loadable via ``resolution="fixed256"``, which reads
+        the saved graph and consults no architecture information at all.
 
         Returns:
             ``"convunext"`` or ``"cliffordunet"``.

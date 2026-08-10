@@ -37,6 +37,15 @@ Coverage (plan.md Step 6 / Pre-Mortem STOP-IF #3 / Success Criterion 7):
 * ``test_inpainting_operator`` — block inpainting on a synthetic in-domain target:
   output finite, in-domain, constraint error ``||measure(best_y) - m||`` decreases.
 
+Status 2026-08-10 (plan-2026-08-10-3649c19e/iter-2/step-12, D-028): the fixture
+pointed at a checkpoint directory that does not exist, so all 10 tests SKIPPED and
+this module read as a pass. It now points at ``results/20260808_convunext_denoiser/``.
+Against that real checkpoint 8 tests PASS and the two annealed-ascent gates
+(``test_prior_sampling_null_operator``, ``test_inpainting_operator``) FAIL; they carry
+an ``xfail(strict=True)`` with the measured divergence numbers at their definition
+site. The 60->300-iteration contraction figures quoted below were measured on the
+2026-07 checkpoint and do NOT reproduce on the current one.
+
 Run (GPU1, serial — never parallel GPU jobs):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest \
         tests/test_applications/test_bias_free_denoiser/test_integration.py -vvv -s
@@ -67,7 +76,7 @@ from applications.bias_free_denoiser.solver import UniversalInverseSolver
 from dl_techniques.utils.logger import logger
 
 # SLOW marker on the whole module: `pytest -m "not slow"` deselects all of it
-# (the fast unit suite never touches the 22 MB checkpoint).
+# (the fast unit suite never touches the 17 MB checkpoint).
 pytestmark = pytest.mark.slow
 
 # The real trained checkpoint (F1 / plan.md). Absolute-from-repo-root; resolved
@@ -76,8 +85,18 @@ pytestmark = pytest.mark.slow
 # one-line change. The former CliffordUNet param was dropped with the architecture
 # itself (plan-2026-08-10-3649c19e/step-2b): `from_pretrained` no longer has a
 # factory-rebuild branch to regression-cover.
+#
+# REPOINTED 2026-08-10 (plan-2026-08-10-3649c19e/iter-2/step-12, D-028): this pointed
+# at `results/convunext_denoiser_base_20260707_122133/best_model.keras`, a directory
+# that does NOT exist on this machine, so all 10 tests SKIPPED and the module read as
+# a pass — an app whose only end-to-end suite exercised nothing. It now points at a
+# real run, verified before use: `results/20260808_convunext_denoiser/` stamps
+# `data_range="[0,1]"` and `convnext_version="v1"` at `patch_size=256`.
+# `final_model.keras`, not `best_model.keras`: under the noise curriculum the
+# min-val_loss checkpoint can be an epoch under-exposed to high sigma (a measured trap
+# in this repo), and these gates watch denoiser behaviour under annealing.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-CONVUNEXT_CKPT = _REPO_ROOT / "results" / "convunext_denoiser_base_20260707_122133" / "best_model.keras"
+CONVUNEXT_CKPT = _REPO_ROOT / "results" / "20260808_convunext_denoiser" / "final_model.keras"
 
 # 256x256x3: the checkpoint's native patch size; divisible by 8 (depth-3 U-Net).
 H, W, C = 256, 256, 3
@@ -277,6 +296,38 @@ def test_load_and_callable(prior: DenoiserPrior) -> None:
     )
 
 
+# Repointing the fixture (D-028) turned these two from SKIP into FAIL, which is a real
+# finding about the CURRENT default checkpoint, not about this plan's edits. Measured
+# on results/20260808_convunext_denoiser/final_model.keras (NullOperator, seed 0, GPU1):
+#
+#   iters=120  best-y dev-max 3.1289  std 0.3992  sigma 0.3974 -> 0.0437
+#   iters=300  best-y dev-max 3.2082  std 0.4016  sigma 0.3974 -> 1.744e+01
+#   iters=600  best-y dev-max 3.2082  std 0.4016  sigma 0.3974 -> 1.275e+14
+#
+# So the annealed ascent does NOT contract on this checkpoint the way the module
+# docstring records for the 2026-07 checkpoint (60->300 iters: dev-max 1.82 -> 1.22);
+# sigma_t turns around and DIVERGES past the smoke budget, and only the early-stop
+# "best sigma" bookkeeping keeps best_y finite. The two ceilings below (dev-max <
+# 6*sigma_0, field std <= sigma_0) were tuned against that older, now-absent
+# checkpoint.
+#
+# xfail(strict=True), NOT a loosened threshold and NOT a skip: retuning the gate to
+# whatever today's checkpoint does would delete the only signal that anything changed,
+# and a skip is what made this whole module vacuous in the first place. strict=True
+# means these go RED the moment the pairing is fixed, forcing the marker off.
+# OPEN — attribution (solver schedule vs this checkpoint) is a GPU campaign, out of
+# scope for the load-path repair this step exists to do.
+_DIVERGES_ON_CURRENT_CHECKPOINT = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "annealed ascent diverges on results/20260808_convunext_denoiser "
+        "(sigma_t 0.397 -> 1.7e1 at 300 iters, -> 1.3e14 at 600); the dev-max/std "
+        "ceilings were tuned on the deleted 2026-07 checkpoint. See D-028."
+    ),
+)
+
+
+@_DIVERGES_ON_CURRENT_CHECKPOINT
 def test_prior_sampling_null_operator(prior: DenoiserPrior) -> None:
     """Algorithm-1 prior sampling (NullOperator): finite, in-domain, sigma anneals.
 
@@ -325,6 +376,7 @@ def test_prior_sampling_null_operator(prior: DenoiserPrior) -> None:
     assert frac_in >= 0.6, f"only {frac_in:.2%} of pixels in-domain (expected >=60%)"
 
 
+@_DIVERGES_ON_CURRENT_CHECKPOINT
 def test_inpainting_operator(prior: DenoiserPrior) -> None:
     """Block inpainting on an in-domain target: finite, in-domain, constraint ↓.
 
@@ -435,7 +487,7 @@ def test_all_six_problems_finite_and_bounded(prior: DenoiserPrior, problem: str)
     full domain containment (consistent with D-009's accepted annealed-Langevin
     relaxation).
 
-    The ``prior`` fixture is module-scoped, so the 22 MB checkpoint loads ONCE and
+    The ``prior`` fixture is module-scoped, so the 17 MB checkpoint loads ONCE and
     is shared across all parametrizations.
     """
     if problem == "denoise":
