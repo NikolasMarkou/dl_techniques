@@ -134,6 +134,8 @@ class ScaleLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class GaussianLikelihoodHead(keras.layers.Layer):
@@ -162,16 +164,16 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             └──────┬───────┘     └────────┬──────────┘
                    │                      │
                    ▼                      ▼
-                mu (mean)         ┌──────────────┐
-                                  │  Softplus    │
-                                  │  log(1+exp)  │
-                                  └──────┬───────┘
-                                         │
-                                         ▼
-                                   sigma (std > 0)
+                mu (mean)          ┌──────────────┐
+                   │               │  Softplus    │
+                   │               │  log(1+exp)  │
+                   │               └──────┬───────┘
+                   │                      │
+                   │                      ▼
+                   │                sigma (std > 0)
                    │                      │
                    ▼                      ▼
-            Output: (mu, sigma)
+            Output:mu, sigma
 
     :param units: Dimensionality of output (typically 1 for univariate time series).
     :type units: int
@@ -264,6 +266,8 @@ class GaussianLikelihoodHead(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class NegativeBinomialLikelihoodHead(keras.layers.Layer):
@@ -291,15 +295,15 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
                     ├─────────────────────┐
                     ▼                     ▼
             ┌──────────────┐     ┌──────────────────┐
-            │ Dense(units) │     │  Dense(units)     │
-            │ (linear)     │     │  (linear logits)  │
-            └──────┬───────┘     └────────┬──────────┘
+            │ Dense(units) │     │  Dense(units)    │
+            │ (linear)     │     │  (linear logits) │
+            └──────┬───────┘     └────────┬─────────┘
                    │                      │
                    ▼                      ▼
             ┌──────────────┐     ┌──────────────────┐
-            │  Softplus    │     │  Softplus         │
-            │  log(1+exp)  │     │  log(1+exp)       │
-            └──────┬───────┘     └────────┬──────────┘
+            │  Softplus    │     │  Softplus        │
+            │  log(1+exp)  │     │  log(1+exp)      │
+            └──────┬───────┘     └────────┬─────────┘
                    │                      │
                    ▼                      ▼
               mu (mean > 0)       alpha (shape > 0)
@@ -399,6 +403,7 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DeepARCell(keras.layers.Layer):
@@ -423,13 +428,13 @@ class DeepARCell(keras.layers.Layer):
                     ▼                       │
             ┌───────────────┐               │
             │  Concatenate  │               │
-            │  [z_{t-1}, x_t]               │
+            │ [z_{t-1}, x_t]│               │
             └───────┬───────┘               │
                     │                       │
                     ▼                       ▼
             ┌───────────────────────────────────┐
             │           LSTM Cell               │
-            │  h_t = LSTM([z_{t-1}, x_t], h_{t-1})│
+            │h_t = LSTM([z_{t-1}, x_t], h_{t-1})│
             └───────────────┬───────────────────┘
                             │
                             ▼
@@ -550,3 +555,5 @@ class DeepARCell(keras.layers.Layer):
             'recurrent_dropout': self.recurrent_dropout,
         })
         return config
+
+# ---------------------------------------------------------------------

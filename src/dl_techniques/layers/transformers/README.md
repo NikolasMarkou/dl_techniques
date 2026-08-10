@@ -565,7 +565,7 @@ x_in = keras.Input(shape=(seq_len, dim), name="x")
 c_in = keras.Input(shape=(seq_len, dim), name="c")
 y = AdaLNZeroConditionalBlock(
     dim=dim, num_heads=num_heads, dim_head=dim_head, mlp_dim=mlp_dim,
-    dropout=0.1, use_causal_mask=True, eps=1e-6,
+    dropout_rate=0.1, use_causal_mask=True, eps=1e-6,
 )([x_in, c_in])
 model = keras.Model([x_in, c_in], y)
 ```

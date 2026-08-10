@@ -21,6 +21,10 @@ import numpy as np
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger  # noqa: F401  (kept for parity with model.py imports)
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
@@ -28,6 +32,8 @@ from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
 )
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PositionalEncoding(keras.layers.Layer):
@@ -151,6 +157,7 @@ class PositionalEncoding(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GroupAttention(keras.layers.Layer):
@@ -347,6 +354,7 @@ class GroupAttention(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TreeMHA(keras.layers.Layer):
@@ -506,6 +514,7 @@ class TreeMHA(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TreeTransformerBlock(keras.layers.Layer):
@@ -721,3 +730,4 @@ class TreeTransformerBlock(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------

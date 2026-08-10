@@ -98,7 +98,7 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
        (threshold path)               (optional quantile path)
        upper = m + softplus(r)        Conv1D causal featurizer
        lower = m - softplus(r)               │
-            │                                 ▼
+            │                                ▼
             ▼                          QuantileSequenceHead → (B,T,K)
        signal_{above,below,between}
 

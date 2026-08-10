@@ -1,6 +1,5 @@
 import keras
-from keras import ops
-from typing import Optional, Union, Tuple, List, Dict, Any
+from typing import Tuple
 
 # ---------------------------------------------------------------------
 # local imports

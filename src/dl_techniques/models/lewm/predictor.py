@@ -89,7 +89,7 @@ class ARPredictor(keras.layers.Layer):
                 num_heads=num_heads,
                 dim_head=dim_head,
                 mlp_dim=mlp_dim,
-                dropout=dropout,
+                dropout_rate=dropout,
                 name=f"block_{i}",
             )
             for i in range(depth)

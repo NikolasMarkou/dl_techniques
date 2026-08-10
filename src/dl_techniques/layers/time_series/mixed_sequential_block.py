@@ -585,3 +585,5 @@ class MixedSequentialBlock(keras.layers.Layer):
             "ffn_args": self.ffn_args,
         })
         return config
+
+# ---------------------------------------------------------------------

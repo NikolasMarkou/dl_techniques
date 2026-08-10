@@ -84,8 +84,8 @@ class DeepAR(keras.Model, ForecastMixin):
     Args:
         num_layers: Number of LSTM layers. Defaults to 3.
         hidden_dim: Hidden dimension of LSTM layers. Defaults to 40.
-        dropout: Dropout rate for LSTM layers. Defaults to 0.0.
-        recurrent_dropout: Recurrent dropout rate. Defaults to 0.0.
+        dropout_rate: Dropout rate for LSTM layers. Defaults to 0.0.
+        recurrent_dropout_rate: Recurrent dropout rate. Defaults to 0.0.
         likelihood: Distribution for modeling observations. Either 'gaussian'
             for real-valued data or 'negative_binomial' for count data.
             Defaults to 'gaussian'.
@@ -122,7 +122,7 @@ class DeepAR(keras.Model, ForecastMixin):
             num_layers=3,
             hidden_dim=128,
             likelihood='gaussian',
-            dropout=0.1
+            dropout_rate=0.1
         )
 
         model.compile(
@@ -165,8 +165,8 @@ class DeepAR(keras.Model, ForecastMixin):
             self,
             num_layers: int = 3,
             hidden_dim: int = 40,
-            dropout: float = 0.0,
-            recurrent_dropout: float = 0.0,
+            dropout_rate: float = 0.0,
+            recurrent_dropout_rate: float = 0.0,
             likelihood: Literal['gaussian', 'negative_binomial'] = 'gaussian',
             target_dim: int = 1,
             num_samples: int = 100,
@@ -193,8 +193,8 @@ class DeepAR(keras.Model, ForecastMixin):
         # Store configuration
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        self.dropout = dropout
-        self.recurrent_dropout = recurrent_dropout
+        self.dropout_rate = dropout_rate
+        self.recurrent_dropout_rate = recurrent_dropout_rate
         self.likelihood = likelihood
         self.target_dim = target_dim
         self.num_samples = num_samples
@@ -217,8 +217,8 @@ class DeepAR(keras.Model, ForecastMixin):
                 hidden_dim,
                 return_sequences=True,
                 return_state=False,
-                dropout=dropout,
-                recurrent_dropout=recurrent_dropout,
+                dropout=dropout_rate,
+                recurrent_dropout=recurrent_dropout_rate,
                 name=f'lstm_{i}'
             )
             self.lstm_layers.append(lstm)
@@ -688,8 +688,8 @@ class DeepAR(keras.Model, ForecastMixin):
         config.update({
             'num_layers': self.num_layers,
             'hidden_dim': self.hidden_dim,
-            'dropout': self.dropout,
-            'recurrent_dropout': self.recurrent_dropout,
+            'dropout_rate': self.dropout_rate,
+            'recurrent_dropout_rate': self.recurrent_dropout_rate,
             'likelihood': self.likelihood,
             'target_dim': self.target_dim,
             'num_samples': self.num_samples,
@@ -715,8 +715,8 @@ class DeepAR(keras.Model, ForecastMixin):
 def create_deepar(
         num_layers: int = 3,
         hidden_dim: int = 40,
-        dropout: float = 0.0,
-        recurrent_dropout: float = 0.0,
+        dropout_rate: float = 0.0,
+        recurrent_dropout_rate: float = 0.0,
         likelihood: Literal['gaussian', 'negative_binomial'] = 'gaussian',
         target_dim: int = 1,
         num_samples: int = 100,
@@ -734,8 +734,8 @@ def create_deepar(
     Args:
         num_layers: Number of stacked LSTM layers.
         hidden_dim: LSTM hidden width.
-        dropout: LSTM output dropout rate.
-        recurrent_dropout: LSTM recurrent dropout rate.
+        dropout_rate: LSTM output dropout rate.
+        recurrent_dropout_rate: LSTM recurrent dropout rate.
         likelihood: Observation distribution, ``'gaussian'`` or
             ``'negative_binomial'``.
         target_dim: Target feature dimension.
@@ -751,12 +751,12 @@ def create_deepar(
     model = DeepAR(
         num_layers=num_layers,
         hidden_dim=hidden_dim,
-        dropout=dropout,
-        recurrent_dropout=recurrent_dropout,
+        dropout_rate=dropout_rate,
         likelihood=likelihood,
         target_dim=target_dim,
         num_samples=num_samples,
         scale_epsilon=scale_epsilon,
+        recurrent_dropout_rate=recurrent_dropout_rate,
         **kwargs
     )
 

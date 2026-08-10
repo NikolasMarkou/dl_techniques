@@ -23,7 +23,7 @@ from typing import Dict, Any
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
-from dl_techniques.models.modern_bert.modern_bert  import ModernBERT, create_modern_bert_with_head
+from dl_techniques.models.modern_bert.model  import ModernBERT, create_modern_bert_with_head
 
 # Define a small window size for all tests to avoid OOM errors.
 TEST_WINDOW_SIZE = 16

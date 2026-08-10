@@ -55,15 +55,19 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.attention.factory import create_attention_layer
-from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.activations.factory import resolve_activation_layer
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable()
 class AdaLNZeroConditionalBlock(keras.layers.Layer):
     """Transformer block with AdaLN-zero conditioning and causal self-attention.
 
@@ -99,7 +103,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
     :param num_heads: number of attention heads.
     :param dim_head: per-head dimension for the default MultiHeadAttention.
     :param mlp_dim: hidden dimension of the FFN sub-block.
-    :param dropout: dropout rate applied in attention, FFN, and residual
+    :param dropout_rate: dropout rate applied in attention, FFN, and residual
         branches of the block (default-path only). Defaults to 0.0.
     :param use_causal_mask: if True (default), applies causal self-attention
         mask — matches upstream LeWM ``is_causal=True``. Only forwarded to
@@ -138,7 +142,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
         num_heads: int,
         dim_head: int,
         mlp_dim: int,
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         use_causal_mask: bool = True,
         eps: float = 1e-6,
         normalization_type: Optional[str] = None,
@@ -156,14 +160,14 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if not (0.0 <= dropout < 1.0):
-            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
+        if not (0.0 <= dropout_rate < 1.0):
+            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
 
         self.dim = dim
         self.num_heads = num_heads
         self.dim_head = dim_head
         self.mlp_dim = mlp_dim
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.use_causal_mask = use_causal_mask
         self.eps = eps
 
@@ -210,7 +214,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
                 num_heads=num_heads,
                 key_dim=dim_head,
                 value_dim=dim_head,
-                dropout=dropout,
+                dropout=dropout_rate,
                 use_bias=True,
                 name="attn",
             )
@@ -239,7 +243,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
                 hidden_dim=mlp_dim,
                 output_dim=dim,
                 activation="gelu",
-                dropout_rate=dropout,
+                dropout_rate=dropout_rate,
                 use_bias=True,
             )
         else:
@@ -380,7 +384,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
             "num_heads": self.num_heads,
             "dim_head": self.dim_head,
             "mlp_dim": self.mlp_dim,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "use_causal_mask": self.use_causal_mask,
             "eps": self.eps,
             "normalization_type": self.normalization_type,

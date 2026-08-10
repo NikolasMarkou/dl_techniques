@@ -63,21 +63,30 @@ class CBAMNet(keras.Model):
 
     **Architecture**:
     ```
-        Input(shape=input_shape)
-               ↓
-    -----------------------------------
-    | Stage i (for each dim in dims): |
-    |   Conv2D(dim, 3, 'relu')        |
-    |   BatchNormalization()          |
-    |   CBAM(channels=dim)            |
-    |   MaxPooling2D(2x2)             |
-    -----------------------------------
-               ↓
-        GlobalAveragePooling2D()
-               ↓
-        Dense(num_classes, 'softmax') ← (if include_top=True)
-               ↓
-             Output
+    ┌─────────────────────────────────┐
+    │   Input(shape=input_shape)      │
+    └──────────────┬──────────────────┘
+                   ▼
+    ┌─────────────────────────────────┐
+    │ Stage i (for each dim in dims): │
+    │   Conv2D(dim, 3, 'relu')        │
+    │   BatchNormalization()          │
+    │   CBAM(channels=dim)            │
+    │   MaxPooling2D(2x2)             │
+    └──────────────┬──────────────────┘
+                   ▼
+    ┌─────────────────────────────────┐
+    │    GlobalAveragePooling2D()     │
+    └──────────────┬──────────────────┘
+                   ▼
+    ┌─────────────────────────────────┐
+    │  Dense(num_classes, 'softmax')  │
+    │    ← (if include_top=True)      │
+    └──────────────┬──────────────────┘
+                   ▼
+    ┌─────────────────────────────────┐
+    │           Output                │
+    └─────────────────────────────────┘
     ```
 
     **Mathematical Operations**:

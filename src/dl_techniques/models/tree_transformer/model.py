@@ -78,15 +78,8 @@ from dl_techniques.layers.norms import (
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
-# Sub-layer re-exports
-#
-# Sub-layer classes live in `components.py`; re-exported here so that
-# callers importing from `dl_techniques.models.tree_transformer.model`
-# (e.g. `nam/`, `train/nam/`, and the deep-import lock-in test)
-# continue to resolve.
-# ---------------------------------------------------------------------
 
-from dl_techniques.models.tree_transformer.components import (  # noqa: F401
+from .components import (  # noqa: F401
     PositionalEncoding,
     GroupAttention,
     TreeMHA,

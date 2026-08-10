@@ -77,7 +77,7 @@ class NBeatsXNet(keras.Model):
         theta_regularizer: Optional regularizer for block theta projections.
         tcn_filters: Integer, channels for the exogenous TCN encoder.
         tcn_kernel_size: Integer, kernel size for the exogenous TCN.
-        tcn_dropout: Float, dropout inside the exogenous TCN.
+        tcn_dropout_rate: Float, dropout inside the exogenous TCN.
         **kwargs: Forwarded to ``keras.Model``.
 
     Example:
@@ -119,7 +119,7 @@ class NBeatsXNet(keras.Model):
             theta_regularizer: Optional[regularizers.Regularizer] = None,
             tcn_filters: int = 16,
             tcn_kernel_size: int = 3,
-            tcn_dropout: float = 0.0,
+            tcn_dropout_rate: float = 0.0,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -151,7 +151,7 @@ class NBeatsXNet(keras.Model):
         # TCN Config
         self.tcn_filters = tcn_filters
         self.tcn_kernel_size = tcn_kernel_size
-        self.tcn_dropout = tcn_dropout
+        self.tcn_dropout_rate = tcn_dropout_rate
 
         self.blocks = []
         self.dropout_layers = []
@@ -231,7 +231,7 @@ class NBeatsXNet(keras.Model):
                         exogenous_dim=self.exogenous_dim,
                         tcn_filters=self.tcn_filters,
                         tcn_kernel_size=self.tcn_kernel_size,
-                        tcn_dropout=self.tcn_dropout,
+                        tcn_dropout_rate=self.tcn_dropout_rate,
                         use_tcn=use_tcn,
                         **base_kwargs
                     )
@@ -354,7 +354,7 @@ class NBeatsXNet(keras.Model):
             'theta_regularizer': regularizers.serialize(self.theta_regularizer),
             'tcn_filters': self.tcn_filters,
             'tcn_kernel_size': self.tcn_kernel_size,
-            'tcn_dropout': self.tcn_dropout,
+            'tcn_dropout_rate': self.tcn_dropout_rate,
         })
         return config
 

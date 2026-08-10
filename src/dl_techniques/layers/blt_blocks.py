@@ -248,13 +248,9 @@ class ByteTokenizer(keras.layers.Layer):
     Text String → UTF-8 Encoding → Byte Values + Offset → Special Tokens
     "Hello" → [72, 101, 108, 108, 111] → [76, 105, 112, 112, 115] → [1, 76, ..., 2]
     ```
-
         :param vocab_size: Size of the vocabulary including special tokens.
         :param byte_offset: Offset added to raw byte values for special tokens.
             **kwargs: Additional layer arguments.
-
-
-
     """
 
     def __init__(
