@@ -282,6 +282,7 @@ class PointCloudAutoencoder(keras.layers.Layer):
         config.update({'k_neighbors': self.k_neighbors})
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class CorrespondenceNetwork(keras.layers.Layer):
@@ -298,8 +299,8 @@ class CorrespondenceNetwork(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────┐  ┌──────────────────┐
-        │ Local Features    │  │ Global Features   │
-        │ [B, N, F_local]   │  │ [B, F_global]     │
+        │ Local Features    │  │ Global Features  │
+        │ [B, N, F_local]   │  │ [B, F_global]    │
         └────────┬──────────┘  └────────┬─────────┘
                  │                      ▼
                  │            ┌──────────────────┐
