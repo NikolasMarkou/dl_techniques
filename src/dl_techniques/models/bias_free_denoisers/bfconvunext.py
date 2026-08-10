@@ -387,7 +387,9 @@ def _apply_residual_convnext_block(
     # DECISION plan_2026-06-21_eb7fd829/D-002: block activation is threaded via this single
     # choke-point (mirrors the kernel_regularizer / depthwise_* precedent) so one factory arg
     # reaches every encoder/bottleneck/decoder block at once. Factory default stays 'gelu' so
-    # non-bfunet callers (convnext, convnext_patch_vae) are byte-identical. NOTE (iter-2,
+    # non-bfunet callers are byte-identical. (That claim was originally justified against two
+    # named callers, `convnext` and `convnext_patch_vae`; the latter package has since been
+    # deleted, so only the `convnext` half is still checkable.) NOTE (iter-2,
     # D-005/D-006 superseded the original iter-1 scope): the stem (ConvUNextStem, D-005) and the
     # deep-supervision head (_make_supervision_activation, D-006) are now ALSO configurable via
     # the factory's stem_activation / supervision_activation params (each default 'gelu'). See

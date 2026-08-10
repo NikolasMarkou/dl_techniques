@@ -1,4 +1,17 @@
-"""Reconstruction-error anomaly detector built on ``ConvNeXtPatchVAE``.
+"""Reconstruction-error anomaly detector — **currently non-functional**.
+
+.. warning::
+
+   This application has no model to run. It was built entirely on
+   ``ConvNeXtPatchVAE``, and ``dl_techniques.models.convnext_patch_vae`` was
+   removed from the library (along with ``src/train/convnext_patch_vae/``).
+   :meth:`PatchReconstructionAnomalyDetector.from_pretrained` therefore raises
+   ``RuntimeError`` unconditionally, and no surviving model in
+   ``dl_techniques`` implements the ``sample_from(x, temperature=...)``
+   deterministic-decode API that :meth:`anomaly_maps` calls. The scoring,
+   thresholding and overlay code below is architecture-agnostic and still
+   correct, so the module is kept for a caller who supplies their own
+   compatible model object — but there is no in-repo way to obtain one.
 
 The detector scores every patch by how poorly the trained VAE **reconstructs**
 it: the squared error between the input and a deterministic decode, average-
@@ -20,15 +33,14 @@ non-overlapping ``patch_size x patch_size`` blocks → an ``(Hp, Wp)`` map (e.g.
 This module deliberately has **no GUI dependency** — it stays importable and
 usable headless. The Streamlit front-end lives in ``streamlit_app.py``.
 
-Example::
+Example (requires a model object you bring yourself — ``from_pretrained``
+raises)::
 
     from applications.anomaly_detection.anomaly_detector import (
         PatchReconstructionAnomalyDetector,
     )
 
-    det = PatchReconstructionAnomalyDetector.from_pretrained(
-        "results/.../best_model.keras"
-    )
+    det = PatchReconstructionAnomalyDetector(my_model)  # must expose sample_from
     x, (h, w) = det.preprocess("photo.jpg")             # native res, padded to /patch
     amap = det.anomaly_maps(x, orig_hw=(h, w))["anomaly"]  # (Hp, Wp)
     mask, thr = det.anomaly_mask(amap)                  # boolean (Hp, Wp)
@@ -55,8 +67,15 @@ class PatchReconstructionAnomalyDetector:
     trained VAE's deterministic decode, pooled to the ``(Hp, Wp)`` patch grid.
     The signal is sampler-agnostic (no branch on the latent prior type).
 
+    There is no in-repo way to obtain a compatible ``model``: the only
+    architecture that ever provided one (``ConvNeXtPatchVAE``) was removed from
+    the library, and :meth:`from_pretrained` now raises. Construct this class
+    directly only if you already hold your own model object.
+
     Args:
-        model: A loaded ``ConvNeXtPatchVAE`` instance.
+        model: A model exposing ``sample_from(x, temperature)`` and, optionally,
+            a ``.config`` carrying ``patch_size`` / ``recon_loss_type`` /
+            ``img_size`` (each falls back to a default when absent).
     """
 
     def __init__(
@@ -78,39 +97,59 @@ class PatchReconstructionAnomalyDetector:
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
+    # DECISION plan-2026-08-10T130454-3649c19e/D-016: this method raises
+    # unconditionally and MUST NOT be "repaired" by re-adding a load path.
+    # ``ConvNeXtPatchVAE`` was the ONLY architecture it ever supported, and
+    # ``dl_techniques.models.convnext_patch_vae`` no longer exists in the
+    # library, so there is no surviving branch to fall through to. Do NOT
+    # replace this with `keras.models.load_model(...)` without custom objects:
+    # a `.keras` checkpoint of that model deserializes its registered custom
+    # classes by name, so it would fail deep inside Keras with an opaque
+    # unknown-object error instead of naming the removed architecture. Do NOT
+    # return ``None`` either — every caller (`streamlit_app.load_detector`, the
+    # README's programmatic example) immediately dereferences the result. See
+    # decisions.md D-016; the sibling app's D-009 set this precedent.
     @classmethod
     def from_pretrained(
         cls,
         model_path: str,
     ) -> "PatchReconstructionAnomalyDetector":
-        """Load a trained checkpoint and wrap it in a detector.
+        """Unsupported: the only architecture this detector could load is gone.
 
         Args:
-            model_path: Path to the ``.keras`` checkpoint.
+            model_path: Path to the ``.keras`` checkpoint. Reported back in the
+                error message; never opened.
 
         Returns:
-            A ready detector.
+            Never returns.
 
         Raises:
-            Exception: re-raised after logging if ``load_model`` fails.
+            RuntimeError: always. ``ConvNeXtPatchVAE`` was the sole architecture
+                this loader supported and its model module was removed from the
+                library, so no checkpoint can be loaded through this path.
         """
-        # Import so the @register_keras_serializable classes resolve by name.
-        from dl_techniques.models.convnext_patch_vae.model import (
-            ConvNeXtPatchVAE,
+        logger.error(
+            "PatchReconstructionAnomalyDetector.from_pretrained is no longer "
+            "supported; refusing to load %s",
+            model_path,
         )
-
-        custom_objects = {
-            "ConvNeXtPatchVAE": ConvNeXtPatchVAE,
-        }
-        logger.info("Loading anomaly-detection model from %s", model_path)
-        try:
-            model = keras.models.load_model(
-                model_path, custom_objects=custom_objects, compile=False
-            )
-        except Exception as exc:  # noqa: BLE001 - log then re-raise
-            logger.error("Failed to load model %s: %s", model_path, exc)
-            raise
-        return cls(model)
+        raise RuntimeError(
+            "PatchReconstructionAnomalyDetector.from_pretrained cannot load "
+            f"'{model_path}'. This detector only ever supported the "
+            "ConvNeXtPatchVAE architecture, and its model module "
+            "(dl_techniques.models.convnext_patch_vae) has been REMOVED from "
+            "the library, together with its trainers "
+            "(src/train/convnext_patch_vae/). There is no alternative "
+            "architecture to fall back to: no surviving model in "
+            "dl_techniques implements the sample_from(x, temperature=...) "
+            "deterministic-decode API this detector scores with, so the whole "
+            "application is non-functional, not just this loader. Your "
+            "options: (1) construct PatchReconstructionAnomalyDetector(model) "
+            "directly with your own already-loaded keras.Model that exposes "
+            "sample_from(x, temperature=0.0) and a .config carrying "
+            "patch_size; or (2) recover the convnext_patch_vae package from "
+            "git history if you still hold a trained checkpoint."
+        )
 
     # ------------------------------------------------------------------
     # Preprocessing

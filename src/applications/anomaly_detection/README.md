@@ -1,5 +1,30 @@
 # Patch-Reconstruction Anomaly Detection
 
+> ## ⚠ This application does not currently run
+>
+> It was built entirely on **`ConvNeXtPatchVAE`**, and that model package
+> (`src/dl_techniques/models/convnext_patch_vae/`) plus its trainers
+> (`src/train/convnext_patch_vae/`) have been **removed from the repository**.
+>
+> - `PatchReconstructionAnomalyDetector.from_pretrained(...)` raises
+>   `RuntimeError` unconditionally — it supported no other architecture.
+> - The Streamlit GUI cannot start, because it loads the model through that
+>   same method.
+> - No surviving model in `dl_techniques` implements the
+>   `sample_from(x, temperature=...)` deterministic-decode API that
+>   `anomaly_maps()` calls, so there is **no drop-in replacement** to point it at.
+>
+> What still works: the module imports cleanly, and `preprocess()`,
+> `anomaly_maps()`, `anomaly_mask()`, `score()`, `overlay()` and
+> `mask_overlay()` are architecture-agnostic and unchanged. You can use them by
+> constructing `PatchReconstructionAnomalyDetector(model)` **directly** with
+> your own already-loaded model that exposes `sample_from`. To revive the app as
+> designed, recover `convnext_patch_vae` from git history and retrain.
+>
+> Everything below describes the app as designed and is retained for that
+> revival; the checkpoint paths it used to name have been removed, because none
+> of them can be loaded.
+
 A lightweight anomaly detector that reuses a trained
 **`ConvNeXtPatchVAE`** to flag *poorly reconstructed patches* — regions the
 model cannot faithfully reproduce. It scores every patch by its **reconstruction
@@ -33,18 +58,23 @@ MSE on `[0, 1]` pixels, so in-distribution values are small (≈ 0.001–0.05).
 - The `dl_techniques` env (`.venv`), Keras 3 / TF 2.18.
 - GUI: `streamlit` + `streamlit-webrtc` (live webcam) —
   `.venv/bin/pip install streamlit streamlit-webrtc`.
-- A trained checkpoint, e.g.
-  `results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras`
-  (vmf, `patch_size=8`, `img_size=256`, `latent_dim=32`, BCE).
+- A trained `ConvNeXtPatchVAE` checkpoint. **None is obtainable any more** — the
+  model package and its trainers were removed, so there is nothing to train and
+  no loader that accepts an existing checkpoint (see the warning at the top).
+  The reference checkpoint was a vmf model at `patch_size=8`, `img_size=256`,
+  `latent_dim=32`, BCE.
 
 The core `PatchReconstructionAnomalyDetector` has **no GUI dependency** and works
 headless / programmatically; only `streamlit_app.py` imports streamlit.
 
 ## GUI (Streamlit)
 
+**Does not start** — `load_detector` calls `from_pretrained`, which raises. The
+invocation is recorded for whoever revives the app:
+
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
-ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras \
+ANOMALY_MODEL=<path-to-a-compatible-checkpoint> \
   .venv/bin/streamlit run src/applications/anomaly_detection/streamlit_app.py \
   --server.address 127.0.0.1 --server.port 8501
 ```
@@ -76,11 +106,14 @@ Sidebar controls:
 
 ## Programmatic use
 
+`from_pretrained` raises `RuntimeError`. The only usable entry point is the
+constructor, with a model you supply yourself that exposes
+`sample_from(x, temperature=0.0)`:
+
 ```python
 from applications.anomaly_detection import PatchReconstructionAnomalyDetector
 
-det = PatchReconstructionAnomalyDetector.from_pretrained(
-    "results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras")
+det = PatchReconstructionAnomalyDetector(my_model)   # NOT .from_pretrained(...)
 x, orig_hw = det.preprocess("image.jpg", max_size=384)
 amap = det.anomaly_maps(x, orig_hw=orig_hw)["anomaly"]   # (Hp, Wp)
 mask, thr = det.anomaly_mask(amap, method="zscore", k=3.0)

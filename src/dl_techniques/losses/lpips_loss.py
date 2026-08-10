@@ -7,9 +7,10 @@ ImageNet-pretrained VGG16 backbone. Computes per-channel-normalized
 distances between feature maps at selected layers, weighted by per-layer
 scalars.
 
-Authored for use with `ConvNeXtPatchVAEV2` (multi-task VAE pretraining)
-but generally applicable as a perceptual term in any image-to-image
-training (reconstruction, super-resolution, generation, restoration).
+Originally authored for a multi-task VAE pretraining model that has since
+been removed from the library; it has no dedicated consumer today and is
+generally applicable as a perceptual term in any image-to-image training
+(reconstruction, super-resolution, generation, restoration).
 
 Distinct from `dl_techniques.losses.image_restoration_loss.VGGLoss`:
 - VGGLoss: MSE on VGG block outputs (un-normalized features).

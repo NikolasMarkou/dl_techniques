@@ -1,13 +1,21 @@
-"""Streamlit GUI for patch-reconstruction anomaly detection.
+"""Streamlit GUI for patch-reconstruction anomaly detection — **cannot start**.
+
+.. warning::
+
+   This app has no model to load. It ran on ``ConvNeXtPatchVAE``, whose model
+   package was removed from the library; ``from_pretrained`` now raises
+   ``RuntimeError``, so :func:`load_detector` fails on the first rerun no matter
+   what ``ANOMALY_MODEL`` points at. Nothing below is reachable until a
+   compatible model exists again. See ``README.md`` and ``anomaly_detector.py``.
 
 Live webcam (via ``streamlit-webrtc``) and still-image modes. Each frame runs the
-``ConvNeXtPatchVAE`` deterministic decode and overlays the per-patch
-reconstruction-error heatmap / anomaly mask. The decoder runs every frame
-(reconstruction-error scoring).
+model's deterministic decode and overlays the per-patch reconstruction-error
+heatmap / anomaly mask. The decoder runs every frame (reconstruction-error
+scoring).
 
-Run::
+Run (kept for reference; currently raises at model load)::
 
-    CUDA_VISIBLE_DEVICES=1 ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras \\
+    CUDA_VISIBLE_DEVICES=1 ANOMALY_MODEL=<path-to-a-compatible-checkpoint> \\
         .venv/bin/streamlit run src/applications/anomaly_detection/streamlit_app.py \\
         --server.address 127.0.0.1 --server.port 8501
 
@@ -36,10 +44,10 @@ from applications.anomaly_detection.anomaly_detector import (
     PatchReconstructionAnomalyDetector,
 )
 
-_DEFAULT_MODEL = os.environ.get(
-    "ANOMALY_MODEL",
-    "results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras",
-)
+# No default checkpoint: the architecture this app loaded was removed from the
+# library, so every path is equally unloadable. An empty default keeps the
+# sidebar honest instead of pre-filling a path that raises.
+_DEFAULT_MODEL = os.environ.get("ANOMALY_MODEL", "")
 _THRESHOLD_METHODS = ["zscore", "percentile", "absolute"]
 _RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 

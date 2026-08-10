@@ -30,7 +30,6 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `accunet/` — AccuNet
 - `fractalnet/` — FractalNet
 - `bias_free_denoisers/` — Bias-free denoiser models
-- `convnext_patch_vae/` — ConvNeXt patch-level VAE with SIGReg anti-collapse
 - `video_jepa/` — Video JEPA (joint embedding predictive)
 
 ### NLP / Language
@@ -42,7 +41,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `masked_language_model/` — MLM training
 - `byte_latent_transformer/` — Byte Latent Transformer (BLT)
 - `gpt2/` — GPT-2 architecture
-- `wave_field_llm/` — Wave-field LLM
+- `wave_field/` — Wave-field LLM
 - `memory_bank/` — Memory-bank language model components
 
 ### Vision-Language
@@ -100,11 +99,13 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `src/dl_techniques/models/__init__.py` (the parent) is empty — always import
   from the model subpackage, never from `dl_techniques.models` itself.
 - Per-model `<pkg>/__init__.py` is **mixed, and the empty case is no longer a
-  safe default assumption**. Measured at 2026-08-01: 23 of the 73 model packages
+  safe default assumption**. Re-measured 2026-08-10: 23 of the 72 model packages
   bind a `create_*` factory in their own `__init__.py` (an import, a `def` or an
-  assignment — a plain `grep create_` gives 24 because
-  `convnext_patch_vae/__init__.py` only cross-references its factories in a
-  docstring). Exemplars of a curated init with `__all__`:
+  assignment). A plain `grep create_` now agrees at 23 — it used to give 24
+  because `convnext_patch_vae/__init__.py` mentioned its factories in a docstring
+  without binding them, and that package has since been deleted; the two figures
+  can diverge again the moment any init mentions a factory it does not bind.
+  Exemplars of a curated init with `__all__`:
   `energy_transformer/`, `dino/`, `vit/`. The remaining ~50 are empty or
   near-empty and do require importing from the submodule directly. **Read the
   package init before assuming either shape.** (`REPO_MAP.md` § "The factory
