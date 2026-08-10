@@ -1,4 +1,4 @@
-"""External-residual verification for the 5 Clifford block classes.
+"""External-residual verification for the surviving Clifford block classes.
 
 Purpose-built tripwire for the silent-failure mode introduced by
 ``plan_2026-07-03_eb53492e``: the internal identity residual + StochasticDepth
@@ -8,7 +8,8 @@ compiles and runs but silently degrades the network to a non-residual stack.
 
 This module locks the new contract in two layers:
 
-Part A -- **Transform-only contract** for each of the 5 block classes at
+Part A -- **Transform-only contract** for each of the 2 surviving block
+classes (``CliffordNetBlock``, ``CausalCliffordNetBlock``) at
 ``layer_scale_init ~ 0`` (gamma ~ 0). With the residual now external:
 
   * ``block(x)`` must NOT be ~ x. If the internal residual were still present,
@@ -34,8 +35,6 @@ import tensorflow as tf
 from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CausalCliffordNetBlock,
-    CliffordNetBlockDSv2,
-    CausalCliffordNetBlockDSv2,
 )
 from dl_techniques.models.cliffordnet.model import CliffordNet
 
@@ -71,7 +70,11 @@ def _assert_transform_only(block, x):
 
 
 class TestTransformOnlyContract:
-    """Part A: all 5 block classes are transform-only at gamma ~ 0."""
+    """Part A: both surviving block classes are transform-only at gamma ~ 0.
+
+    The two ``*DSv2`` cases were dropped with the DSv2 surface itself
+    (plan-2026-08-10-3649c19e/iter-1/step-2, decisions.md D-005/D-006).
+    """
 
     def test_clifford_net_block(self):
         block = CliffordNetBlock(
@@ -85,31 +88,6 @@ class TestTransformOnlyContract:
             channels=_CHANNELS, shifts=_SHIFTS, layer_scale_init=_TINY_GAMMA,
         )
         # Causal blocks operate on (B, 1, seq, D).
-        x = tf.random.normal([2, 1, 8, _CHANNELS], seed=0)
-        _assert_transform_only(block, x)
-
-    def test_clifford_net_block_ds_v2(self):
-        # strides=1, out_channels=None -> skip_pool=Identity, out_proj=None:
-        # the DSv2 transform-only return collapses to the isotropic case.
-        block = CliffordNetBlockDSv2(
-            channels=_CHANNELS, shifts=_SHIFTS, strides=1, out_channels=None,
-            layer_scale_init=_TINY_GAMMA,
-        )
-        assert block.out_proj is None, (
-            "at out_channels=None out_proj must be None (isotropic reduction)"
-        )
-        x = tf.random.normal([2, 8, 8, _CHANNELS], seed=0)
-        _assert_transform_only(block, x)
-
-    def test_causal_clifford_net_block_ds_v2(self):
-        # Causal DSv2 at strides=1, out_channels=None; skip_pool in {avg,max}.
-        block = CausalCliffordNetBlockDSv2(
-            channels=_CHANNELS, shifts=_SHIFTS, strides=1, out_channels=None,
-            skip_pool="avg", stream_pool="avg", layer_scale_init=_TINY_GAMMA,
-        )
-        assert block.out_proj is None, (
-            "at out_channels=None out_proj must be None (isotropic reduction)"
-        )
         x = tf.random.normal([2, 1, 8, _CHANNELS], seed=0)
         _assert_transform_only(block, x)
 
