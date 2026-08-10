@@ -261,8 +261,6 @@ class OrthoBlock(keras.layers.Layer):
         # Stage 4: Apply activation function
         if self.activation is not None:
             outputs = self.activation(outputs)
-        else:
-            outputs = outputs
 
         return outputs
 
