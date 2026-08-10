@@ -384,6 +384,17 @@ class TestOptionalBranches:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
+    # DECISION plan-2026-08-10T183739-b007f435/D-017
+    # The three value-varying assertions at the END of the test below are the
+    # test. Do NOT "simplify" it back to the shape+finiteness form it started as:
+    # a silent clamp of the positions to max_position_embeddings - 1 satisfies
+    # shape and isfinite exactly, and left this file 31/31 GREEN when it was
+    # measured as mutation M28_clamp_sinusoidal_positions (findings/
+    # step4-mutation-log.md). Only "the encoding keeps VARYING past the bound"
+    # can fail. Same rule for the reversed-positions and rank-1 guards that
+    # follow: their value/row-correspondence assertions are what make them
+    # non-vacuous -- a branch that ignores position_ids entirely, or that
+    # rebuilds them from arange, passes every shape check. See decisions.md D-017.
     def test_sinusoidal_accepts_positions_beyond_max_position_embeddings(
             self, distil_params):
         """The sinusoidal branch is unbounded by construction; assert it, don't assume.
@@ -413,10 +424,221 @@ class TestOptionalBranches:
         assert not np.allclose(out[bound], out[-1], atol=1e-5)
         assert not np.allclose(out[bound - 1], out[bound], atol=1e-5)
 
+    # -- position_ids on the sinusoidal branch --------------------------------------
+
+    def test_sinusoidal_follows_user_supplied_position_ids(self, distil_params):
+        """Honouring position_ids is the sinusoidal branch's largest behaviour delta.
+
+        The deleted ``DistilBertEmbeddings`` ignored ``position_ids`` entirely, so
+        "it runs" proves nothing here: a branch that silently rebuilds positions
+        from ``arange`` produces the right shape and finite values. The claim is
+        only testable by feeding NON-IDENTITY positions and asserting the output
+        rows move WITH them.
+        """
+        layer = BertEmbeddings(**distil_params)
+        seq_length = 8
+        # Constant token ids: rows can differ ONLY through the positional term.
+        const_ids = ops.convert_to_tensor(np.full((1, seq_length), 5, dtype='int32'))
+        forward = ops.convert_to_tensor(
+            np.arange(seq_length, dtype='int32')[None, :])
+        reversed_ = ops.convert_to_tensor(
+            np.arange(seq_length, dtype='int32')[::-1].copy()[None, :])
+
+        out_fwd = ops.convert_to_numpy(
+            layer(const_ids, position_ids=forward, training=False))[0]
+        out_rev = ops.convert_to_numpy(
+            layer(const_ids, position_ids=reversed_, training=False))[0]
+
+        # A branch that ignored position_ids would make these two identical.
+        assert not np.allclose(out_fwd, out_rev, atol=1e-5), (
+            "reversing position_ids did not change the output -- the sinusoidal "
+            "branch is ignoring user-supplied positions"
+        )
+        # And the rows must be exactly permuted, not merely different: row i of
+        # the reversed run must equal row (L-1-i) of the forward run.
+        np.testing.assert_allclose(
+            out_rev, out_fwd[::-1], rtol=1e-6, atol=1e-6,
+            err_msg="reversed position_ids did not permute the output rows"
+        )
+
+    def test_sinusoidal_accepts_rank_1_position_ids_like_the_learned_branch(
+            self, distil_params):
+        """A rank-1 (seq_length,) position_ids must behave the same on both branches.
+
+        Before the fix this exact input crashed the sinusoidal branch with an
+        opaque ``IndexError: tuple index out of range`` from the rank-2 reshape,
+        while the learned branch accepted and broadcast it -- an asymmetry no
+        caller could predict from the signature.
+        """
+        seq_length = 8
+        ids_2d = ops.convert_to_tensor(
+            np.full((2, seq_length), 5, dtype='int32'))
+        rank1 = ops.convert_to_tensor(
+            np.arange(seq_length, dtype='int32')[::-1].copy())
+        rank2 = ops.convert_to_tensor(
+            np.broadcast_to(ops.convert_to_numpy(rank1), (2, seq_length)).copy())
+
+        for position_type in ('sinusoidal', 'learned'):
+            keras.utils.set_random_seed(4242)
+            layer = BertEmbeddings(
+                **{**distil_params, 'position_embedding_type': position_type})
+            out_rank1 = ops.convert_to_numpy(
+                layer(ids_2d, position_ids=rank1, training=False))
+            out_rank2 = ops.convert_to_numpy(
+                layer(ids_2d, position_ids=rank2, training=False))
+            assert out_rank1.shape == (2, seq_length, distil_params['hidden_size'])
+            np.testing.assert_allclose(
+                out_rank1, out_rank2, rtol=1e-6, atol=1e-6,
+                err_msg=f"rank-1 position_ids is not broadcast like rank-2 "
+                        f"on the '{position_type}' branch"
+            )
+
+    def test_position_ids_of_unsupported_rank_raises_a_named_error(
+            self, distil_params):
+        """A rank-3 position_ids must raise a NAMED ValueError, not an IndexError."""
+        layer = BertEmbeddings(**distil_params)
+        ids_2d = ops.convert_to_tensor(np.full((2, 8), 5, dtype='int32'))
+        bad = ops.convert_to_tensor(np.zeros((2, 8, 1), dtype='int32'))
+        with pytest.raises(ValueError, match="position_ids must be rank 1"):
+            layer(ids_2d, position_ids=bad, training=False)
+
+    # -- dtype policies -------------------------------------------------------------
+
+    def test_sinusoidal_table_gets_float64_precision_under_a_float64_policy(
+            self, distil_params):
+        """Under float64 the table must carry float64 ACCURACY, not just float64 dtype.
+
+        Computing the table in a hard-coded float32 produces a float64-dtyped
+        result whose error against a float64 oracle is ~1e-06 -- the dtype check
+        and the finiteness check both pass while ten significant digits are gone.
+        Only an accuracy assertion sees it.
+        """
+        d = distil_params['hidden_size']
+        positions = np.array([[0, 1, 2, 1006, 4095]], dtype='int32')
+
+        angles = positions[0].astype('float64')[:, None] * np.exp(
+            np.arange(0, d, 2, dtype='float64') * -(np.log(10000.0) / d)
+        )
+        oracle = np.zeros((positions.shape[1], d), dtype='float64')
+        oracle[:, 0::2] = np.sin(angles)
+        oracle[:, 1::2] = np.cos(angles)
+
+        previous = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy('float64')
+            layer = BertEmbeddings(**distil_params)
+            table = layer._sinusoidal_position_embeddings(
+                ops.convert_to_tensor(positions), 'float64')
+            assert keras.backend.standardize_dtype(table.dtype) == 'float64'
+            err_f64 = float(np.max(np.abs(
+                ops.convert_to_numpy(table).astype('float64') - oracle)))
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+        assert err_f64 < 1e-13, (
+            f"float64 policy yields only {err_f64:.3e} error against a float64 "
+            f"oracle -- the table is still being computed in float32"
+        )
+
+        # Control: the float32 policy is UNCHANGED (float32 is a floor, not a
+        # ceiling), so the same comparison must remain ~1e-06 there.
+        assert keras.mixed_precision.global_policy().name == 'float32'
+        table32 = BertEmbeddings(**distil_params)._sinusoidal_position_embeddings(
+            ops.convert_to_tensor(positions), 'float32')
+        assert keras.backend.standardize_dtype(table32.dtype) == 'float32'
+        err_f32 = float(np.max(np.abs(
+            ops.convert_to_numpy(table32).astype('float64') - oracle)))
+        assert err_f32 > 1e-8, (
+            f"float32 policy error {err_f32:.3e} is unexpectedly float64-grade; "
+            f"this control no longer distinguishes the two paths"
+        )
+
+    # -- dropout / training threading -----------------------------------------------
+
+    def test_dropout_is_applied_at_training_true(self, distil_params, ids):
+        """Nothing else in this plan runs the layer at training=True.
+
+        Every other guard here, the I-1 bit-identity reference and the DistilBERT
+        equivalence capture all call the layer at ``training=False``, under which
+        ``Dropout`` is the identity -- so deleting the dropout call outright is
+        invisible to all of them (measured: ``dropout_rate`` 0.1 and 0.0 give the
+        IDENTICAL I-1 output sha). This test is the only thing that sees it.
+        """
+        keras.utils.set_random_seed(20260811)
+        layer = BertEmbeddings(**{**distil_params, 'dropout_rate': 0.5})
+
+        train_a = ops.convert_to_numpy(layer(ids, training=True))
+        train_b = ops.convert_to_numpy(layer(ids, training=True))
+        infer_a = ops.convert_to_numpy(layer(ids, training=False))
+        infer_b = ops.convert_to_numpy(layer(ids, training=False))
+
+        # Inference is the deterministic control: if these differ, the assertions
+        # below would pass for a reason that has nothing to do with dropout.
+        np.testing.assert_allclose(
+            infer_a, infer_b, rtol=1e-7, atol=1e-7,
+            err_msg="training=False is not deterministic; this test's control failed"
+        )
+        assert not np.allclose(train_a, train_b, atol=1e-5), (
+            "two training=True forwards are identical -- dropout is not being "
+            "applied at training=True"
+        )
+        assert not np.allclose(train_a, infer_a, atol=1e-5), (
+            "training=True matches training=False -- the training flag is not "
+            "reaching the dropout sub-layer"
+        )
+        # Rate 0.5 must actually zero entries; a mere noise term would not.
+        assert np.sum(train_a == 0.0) > 0, (
+            "no zeroed entries at dropout_rate=0.5 -- the dropout sub-layer did "
+            "not run"
+        )
+
     # -- mask_zero -----------------------------------------------------------------
 
+    def test_mask_zero_is_not_propagated_out_of_this_layer(self, distil_params, ids):
+        """Pin the MEASURED masking behaviour so the docstrings cannot rot.
+
+        ``BertEmbeddings`` never propagates a Keras mask at EITHER ``mask_zero``
+        setting: it declares ``supports_masking = False``, defines no
+        ``compute_mask``, and the inner ``Embedding``'s mask dies at the
+        ``word_embeds + position_embeds`` sum. The shipped docs (this layer's
+        ``mask_zero`` docstring, the ``D-011`` anchor in ``models/distilbert``
+        and that package's README) state exactly this; if the layer ever gains
+        mask propagation, this test must go red BEFORE those texts become false.
+        """
+        outputs = {}
+        for mask_zero in (True, False):
+            keras.utils.set_random_seed(99)
+            layer = BertEmbeddings(**{**distil_params, 'mask_zero': mask_zero})
+            eager = layer(ids, training=False)
+            assert layer.supports_masking is False, (
+                f"BertEmbeddings now declares supports_masking at "
+                f"mask_zero={mask_zero}; the mask_zero docs claiming it does not "
+                f"propagate a mask are now false"
+            )
+            assert getattr(eager, '_keras_mask', None) is None, (
+                f"an eager _keras_mask escaped the layer at mask_zero={mask_zero}"
+            )
+            symbolic = layer(keras.Input(shape=(8,), dtype='int32'))
+            assert getattr(symbolic, '_keras_mask', None) is None, (
+                f"a functional _keras_mask escaped the layer at "
+                f"mask_zero={mask_zero}"
+            )
+            outputs[mask_zero] = ops.convert_to_numpy(eager)
+
+        # ... and the flag is numerically inert, which is WHY it has to be passed
+        # explicitly rather than relied upon to show up in a forward comparison.
+        assert np.max(np.abs(outputs[True] - outputs[False])) == 0.0, (
+            "mask_zero now changes the forward output; the 'numerically inert' "
+            "claim in the D-011 anchor and the DistilBERT README is now false"
+        )
+
     def test_mask_zero_controls_auto_masking(self, distil_params, ids):
-        """mask_zero must decide whether a Keras auto-mask is produced at all."""
+        """mask_zero must decide whether the INNER Embedding computes a mask.
+
+        Scope note: this is the sub-layer level. The mask never leaves
+        ``BertEmbeddings`` at either setting -- see
+        ``test_mask_zero_is_not_propagated_out_of_this_layer``.
+        """
         off = BertEmbeddings(**distil_params)
         off(ids, training=False)
         assert off.word_embeddings.mask_zero is False

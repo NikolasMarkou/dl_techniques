@@ -203,6 +203,45 @@ class TestSinusoidalPositions:
             keras.mixed_precision.set_global_policy(previous)
         assert keras.mixed_precision.global_policy().name == "float32"
 
+    def test_sinusoidal_honours_user_position_ids_at_both_ranks(self):
+        """`position_ids` reach the sinusoidal branch and are honoured there.
+
+        The deleted `DistilBertEmbeddings` ignored `position_ids` entirely, so
+        this is the largest behaviour delta the swap introduced -- and it was
+        untested. It is also where a rank asymmetry hid: a rank-1 `(seq,)`
+        `position_ids` that the learned branch broadcast crashed the sinusoidal
+        branch with an opaque `IndexError: tuple index out of range` from the
+        rank-2 reshape in `_sinusoidal_position_embeddings` (measured at
+        `c6ab51084`).
+        """
+        keras.utils.set_random_seed(SEED)
+        model = _model(sinusoidal_pos_embds=True)
+        seq = 12
+        const_ids = np.full((1, seq), 5, dtype="int32")
+        forward = np.arange(seq, dtype="int32")
+        reverse = np.arange(seq, dtype="int32")[::-1].copy()
+
+        out_fwd = _np(model({"input_ids": const_ids,
+                             "position_ids": forward[None, :]},
+                            training=False)["last_hidden_state"])
+        out_rev = _np(model({"input_ids": const_ids,
+                             "position_ids": reverse[None, :]},
+                            training=False)["last_hidden_state"])
+        assert not np.allclose(out_fwd, out_rev, atol=1e-5), (
+            "reversing position_ids left the DistilBERT output unchanged -- "
+            "user-supplied positions are not reaching the sinusoidal branch"
+        )
+
+        # Rank-1 must be accepted and behave exactly like the rank-2 broadcast.
+        out_rank1 = _np(model({"input_ids": const_ids,
+                               "position_ids": reverse},
+                              training=False)["last_hidden_state"])
+        np.testing.assert_allclose(
+            out_rank1, out_rev, rtol=1e-6, atol=1e-6,
+            err_msg="rank-1 position_ids is not handled like rank-2 on the "
+                    "sinusoidal branch"
+        )
+
 
 class TestNormalizationType:
 

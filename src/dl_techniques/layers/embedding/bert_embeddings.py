@@ -178,10 +178,19 @@ class BertEmbeddings(keras.layers.Layer):
         ``max_position_embeddings``, but requires an even ``hidden_size``.
         Any other value raises; there is deliberately no silent fallback.
     :type position_embedding_type: str
-    :param mask_zero: Whether ``word_embeddings`` treats token id ``0`` as a
-        padding mask (Keras auto-masking). ``True`` reproduces BERT. Set
-        ``False`` for models that thread an explicit ``attention_mask``
-        instead, so two masking mechanisms cannot disagree.
+    :param mask_zero: Whether the inner ``word_embeddings`` sub-layer treats
+        token id ``0`` as a padding mask. ``True`` reproduces BERT.
+
+        MEASURED CAVEAT — this layer does not PROPAGATE that mask at either
+        setting: ``BertEmbeddings.supports_masking`` is ``False``, it defines
+        no ``compute_mask``, and the inner ``Embedding``'s mask is dropped at
+        the ``word_embeds + position_embeds`` sum, so no ``_keras_mask``
+        reaches a consumer eagerly or in a functional graph, and the forward
+        output is bit-identical (max abs diff ``0.0``) either way. The flag is
+        therefore observable only through ``get_config()`` and
+        ``word_embeddings.mask_zero``. Set it ``False`` in models that thread
+        an explicit ``attention_mask``, so the declared intent stays correct
+        if this layer ever gains mask propagation.
     :type mask_zero: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
 
@@ -378,7 +387,9 @@ class BertEmbeddings(keras.layers.Layer):
             ``(batch_size, seq_length)``.
         :type position_ids: keras.KerasTensor
         :param target_dtype: dtype of the tensor this table will be summed
-            with. The table is always COMPUTED in ``float32`` and cast to this
+            with. The table is COMPUTED in the WIDER of ``float32`` and the
+            layer's ``variable_dtype`` (so a ``float64`` policy gets float64
+            precision, and every narrow policy gets float32), then cast to this
             dtype as the last step.
         :type target_dtype: str
         :return: Positional embeddings of shape
@@ -386,20 +397,33 @@ class BertEmbeddings(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-10T183739-b007f435/D-008
-        # Compute in float32 for numeric range (10000^(2i/d) underflows fp16),
-        # then cast to the dtype of the tensor this is actually summed with --
-        # NOT to self.compute_dtype. Under mixed_float16 a Keras sub-layer
-        # autocasts its output, so compute_dtype and the real tensor dtype can
-        # disagree; summing a float32 table with a float16 word-embedding raises
-        # `InvalidArgumentError: cannot compute AddV2 as input #1 was expected to
-        # be a half tensor but is a float tensor` (measured at HEAD in
-        # findings/step1-premise-rederivation.md (b)). Do NOT drop this cast and
-        # do NOT re-key it off compute_dtype. See decisions.md D-008.
-        positions = ops.cast(position_ids, "float32")
+        # DECISION plan-2026-08-10T183739-b007f435/D-016
+        # Two separate dtype rules, neither of which may be collapsed into the
+        # other or re-keyed off self.compute_dtype:
+        #  (1) COMPUTE in the WIDER of float32 and self.variable_dtype. float32 is
+        #      the FLOOR because 10000^(-2i/d) underflows fp16 across the feature
+        #      axis; it is not the ceiling -- a float64 policy computing in float32
+        #      capped the table's accuracy at ~1.5e-06 where a float64 user expects
+        #      ~1e-16 (measured at c6ab51084). Gate on variable_dtype, NOT
+        #      compute_dtype: under a mixed policy compute_dtype is the NARROW one
+        #      (float16/bfloat16) while variables stay float32, so compute_dtype
+        #      would silently re-introduce the underflow this floor exists to stop.
+        #  (2) CAST to target_dtype -- the dtype of the tensor this table is
+        #      actually summed with, NOT self.compute_dtype. Under mixed_float16 a
+        #      Keras sub-layer autocasts its output, so compute_dtype and the real
+        #      tensor dtype can disagree; summing a float32 table with a float16
+        #      word-embedding raises `InvalidArgumentError: cannot compute AddV2 as
+        #      input #1 was expected to be a half tensor but is a float tensor`
+        #      (measured at HEAD in findings/step1-premise-rederivation.md (b)).
+        # See decisions.md D-008 and D-016.
+        variable_dtype = keras.backend.standardize_dtype(self.variable_dtype)
+        compute_precision = "float64" if variable_dtype == "float64" else "float32"
+
+        positions = ops.cast(position_ids, compute_precision)
         positions = ops.expand_dims(positions, axis=-1)
 
         div_term = ops.exp(
-            ops.arange(0, self.hidden_size, 2, dtype="float32")
+            ops.arange(0, self.hidden_size, 2, dtype=compute_precision)
             * -(math.log(10000.0) / self.hidden_size)
         )
         angles = positions * div_term
@@ -480,6 +504,25 @@ class BertEmbeddings(keras.layers.Layer):
             position_ids = ops.arange(seq_length, dtype="int32")
             position_ids = ops.expand_dims(position_ids, axis=0)
             position_ids = ops.broadcast_to(position_ids, (batch_size, seq_length))
+        # DECISION plan-2026-08-10T183739-b007f435/D-015
+        # Rank normalization happens HERE, once, for BOTH branches. Do NOT delete
+        # it and do NOT push it down into either branch: the two branches consume
+        # position_ids differently, so without this the SAME rank-1 input that the
+        # learned branch silently broadcasts (keras.layers.Embedding returns
+        # (seq, hidden), broadcast in the sum) crashes the sinusoidal branch with
+        # an opaque `IndexError: tuple index out of range` from the
+        # (shape[0], shape[1], hidden_size) reshape, which assumes rank 2.
+        # Measured at c6ab51084. See decisions.md D-015.
+        elif len(position_ids.shape) == 1:
+            position_ids = ops.broadcast_to(
+                ops.expand_dims(position_ids, axis=0), (batch_size, seq_length)
+            )
+        elif len(position_ids.shape) != 2:
+            raise ValueError(
+                f"position_ids must be rank 1 (seq_length,) or rank 2 "
+                f"(batch_size, seq_length), got rank {len(position_ids.shape)} "
+                f"with shape {tuple(position_ids.shape)}"
+            )
 
         # Apply word and position embeddings
         word_embeds = self.word_embeddings(input_ids)

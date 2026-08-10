@@ -490,16 +490,33 @@ class DistilBERT(keras.Model):
         #     adds a third term to the embedding sum.
         #   * type_vocab_size=None -- mandatory once token types are off (D-002).
         #   * mask_zero=False -- BertEmbeddings defaults to True. DistilBERT
-        #     threads an EXPLICIT attention_mask into every TransformerLayer; a
-        #     Keras auto-mask arriving at the same attention stack would be a
-        #     second, uncoordinated masking mechanism (I-4, pre-mortem #2).
+        #     threads an EXPLICIT attention_mask into every TransformerLayer.
+        #     What is MEASURED (step 10.2, at c6ab51084): BertEmbeddings NEVER
+        #     propagates a Keras mask at EITHER setting -- supports_masking is
+        #     False, it defines no compute_mask, and the inner Embedding's mask
+        #     is dropped at the `word_embeds + position_embeds` sum; the forward
+        #     output is bit-identical (max abs diff 0.0) with mask_zero True vs
+        #     False, eagerly and in a functional graph. So this kwarg is INERT
+        #     downstream today and its only observable effects are get_config()
+        #     and embeddings.word_embeddings.mask_zero. It is passed anyway
+        #     because it is the ONLY place DistilBERT's "no auto-mask" intent is
+        #     recorded, and omitting it would flip the flag to BERT's True --
+        #     silently correct today, silently wrong the day BertEmbeddings
+        #     gains mask propagation. Do NOT restate this as a live
+        #     two-masks-collide hazard: that claim was measured FALSE.
         #   * layer_norm_eps -- I-2. Omitting it does NOT inherit this model's
         #     1e-12; BertEmbeddings' own default is 1e-8.
         # create_embedding_layer SILENTLY DROPS any kwarg not registered in
         # EMBEDDING_REGISTRY['bert_embeddings'] (measured, findings/
         # step1-premise-rederivation.md (f)), so a misspelt kwarg here is a
         # silent no-op: any test covering these must assert the EFFECT, never
-        # that construction succeeded. See decisions.md D-011.
+        # that construction succeeded.
+        # DECISION plan-2026-08-10T183739-b007f435/D-018
+        # See decisions.md D-011, whose stated mask_zero rationale is SUPERSEDED
+        # by D-018: the "two masking mechanisms collide" hazard was re-measured
+        # and does not exist. The executable pin on the corrected claim is
+        # tests/test_layers/test_embedding/test_bert_embedding.py::
+        # TestOptionalBranches::test_mask_zero_is_not_propagated_out_of_this_layer.
         self.embeddings = create_embedding_layer(
             'bert_embeddings',
             name="embeddings",

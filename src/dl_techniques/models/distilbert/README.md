@@ -196,7 +196,7 @@ create_embedding_layer(
 so the layer is `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings`, the same one `models/bert/` and `models/fnet/` build. Three kwargs carry DistilBERT's whole delta from BERT, and each differs from that layer's default — do not drop them (see the `D-011` comment at the call site):
 
 -   **`use_token_type_embeddings=False`**: no "segment embeddings" (token type IDs). Unlike BERT, the input is treated as one continuous sequence, and no `token_type_embeddings` weight is allocated. `type_vocab_size=None` follows from it.
--   **`mask_zero=False`**: the layer does **not** emit a Keras auto-mask. DistilBERT threads an explicit `attention_mask` into every `TransformerLayer` instead; two masking mechanisms reaching the same attention stack is the failure this pins shut.
+-   **`mask_zero=False`**: DistilBERT threads an explicit `attention_mask` into every `TransformerLayer`, and this flag records that the embedding stage is not meant to supply a second one. Measured caveat, so the comment does not rot into a false claim: `BertEmbeddings` never *propagates* a Keras mask at **either** setting — `supports_masking` is `False`, it defines no `compute_mask`, and the inner `Embedding`'s mask is dropped at the `word_embeds + position_embeds` sum. The forward output is bit-identical (max abs diff `0.0`) with `mask_zero` `True` vs `False`, eagerly and in a functional graph. The flag's only observable effects today are `get_config()['mask_zero']` and `model.embeddings.word_embeddings.mask_zero`; it is passed explicitly so that omitting it cannot silently flip the model to BERT's `True` if the layer ever gains mask propagation.
 -   **`position_embedding_type`**: learned embeddings by default, fixed **sinusoidal** with `sinusoidal_pos_embds=True`.
 
 Consequence worth knowing: `normalization_type` is validated by `BertEmbeddings`, which accepts exactly `layer_norm`, `rms_norm`, `band_rms`, `batch_norm`. Any other value raises `ValueError` at construction from the embedding stage, even for values a `TransformerLayer` alone would accept.
@@ -332,7 +332,7 @@ A caller who does not read logs cannot tell this apart from a successful load. T
 | `from_variant(pretrained="<file>.keras")` on a fresh model | `ValueError: Failed to load weights ...: keras.random.uniform requires a floating point dtype. Received: dtype=int32` — the "build the model first" dummy input is itself invalid |
 | `model(...)` first, then `load_pretrained_weights("<file>.keras")` | `ValueError: Failed to load weights ...: Invalid keyword arguments: {'by_name': True}` — Keras 3's `Model.load_weights` has no `by_name` |
 | same, with a `.weights.h5` file | same `by_name` `ValueError` |
-| **`keras.models.load_model("<file>.keras")`** | **works — all 28/28 weights restored identically** |
+| **`keras.models.load_model("<file>.keras")`** | **works — all 28/28 weights restored identically for the `tiny` variant** (`len(model.weights)` is variant-dependent: 28 `tiny` / 52 `small` / 76 `base`; re-measured at step 10.2) |
 
 So the loading story for now is: save with `model.save(path)`, load with `keras.models.load_model(path)`.
 
