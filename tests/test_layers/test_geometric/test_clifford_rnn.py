@@ -497,3 +497,389 @@ class TestSaveLoad:
             x,
         )
         np.testing.assert_allclose(before, after, rtol=1e-5, atol=1e-5)
+
+
+# ===========================================================================
+# TestDropout
+# ===========================================================================
+
+
+class TestDropout:
+    """``dropout_rate`` / ``recurrent_dropout_rate`` must actually be LIVE.
+
+    Added in iteration 2 (plan-2026-08-10-3649c19e step 13; review concern 6):
+    the layer's variational-dropout path is its riskiest machinery -- it hangs
+    off a private Keras mixin (see :class:`TestPrivateKerasImportContract`) --
+    and the original 68-test suite never executed it. A silently dead dropout
+    is invisible to every shape, config and round-trip test in this file.
+
+    Each test asserts BOTH directions, which is what makes it non-vacuous:
+
+    * train != eval           -- the mask is applied at all;
+    * train call 1 != call 2  -- ``reset_dropout_mask()`` really runs between
+      calls and the ``SeedGenerator`` really advances (a mask cached forever
+      would make two train calls identical while still differing from eval);
+    * eval call 1 == call 2   -- and nothing stochastic leaks into inference.
+    """
+
+    UNITS = 8
+    RATE = 0.5
+
+    @pytest.fixture
+    def seq(self) -> tf.Tensor:
+        keras.utils.set_random_seed(101)
+        return tf.random.normal([4, 6, 6])
+
+    @staticmethod
+    def _np(t):
+        return keras.ops.convert_to_numpy(t)
+
+    def _deltas(self, layer, x):
+        """Return ``(train_vs_eval, train_vs_train, eval_vs_eval)`` max-abs."""
+        eval_a = self._np(layer(x, training=False))
+        eval_b = self._np(layer(x, training=False))
+        train_a = self._np(layer(x, training=True))
+        train_b = self._np(layer(x, training=True))
+        return (
+            float(np.max(np.abs(train_a - eval_a))),
+            float(np.max(np.abs(train_a - train_b))),
+            float(np.max(np.abs(eval_a - eval_b))),
+        )
+
+    # ------------------------------------------------------------------
+
+    def test_input_dropout_is_live(self, seq):
+        """``dropout_rate`` changes the output under ``training=True``."""
+        keras.utils.set_random_seed(103)
+        layer = CliffordRNN(units=self.UNITS, dropout_rate=self.RATE, seed=7)
+        d_train_eval, d_train_train, d_eval_eval = self._deltas(layer, seq)
+
+        assert d_train_eval > 1e-4, (
+            "training=True output equals training=False output at "
+            f"dropout_rate={self.RATE}: the input dropout mask is never "
+            f"applied (delta {d_train_eval})"
+        )
+        assert d_train_train > 1e-4, (
+            "two training=True calls are identical: the dropout mask is "
+            "cached across calls (reset_dropout_mask is not running) or the "
+            f"SeedGenerator is not advancing (delta {d_train_train})"
+        )
+        assert d_eval_eval == 0.0, (
+            f"inference is not deterministic (delta {d_eval_eval})"
+        )
+
+    def test_recurrent_dropout_is_live(self, seq):
+        """``recurrent_dropout_rate`` changes the output the same way."""
+        keras.utils.set_random_seed(107)
+        layer = CliffordRNN(
+            units=self.UNITS, recurrent_dropout_rate=self.RATE, seed=7
+        )
+        d_train_eval, d_train_train, d_eval_eval = self._deltas(layer, seq)
+
+        assert d_train_eval > 1e-4, (
+            "training=True output equals training=False output at "
+            f"recurrent_dropout_rate={self.RATE}: the recurrent mask is never "
+            f"applied (delta {d_train_eval})"
+        )
+        assert d_train_train > 1e-4, (
+            "two training=True calls are identical: reset_recurrent_dropout_"
+            f"mask is not running (delta {d_train_train})"
+        )
+        assert d_eval_eval == 0.0
+
+    def test_zero_rate_is_a_no_op(self, seq):
+        """The control: at rate 0 train and eval must agree EXACTLY.
+
+        Without this, `test_input_dropout_is_live` could be passing on some
+        other source of train/eval divergence (a norm layer in training mode,
+        say) rather than on dropout.
+        """
+        keras.utils.set_random_seed(109)
+        layer = CliffordRNN(
+            units=self.UNITS,
+            dropout_rate=0.0,
+            recurrent_dropout_rate=0.0,
+            seed=7,
+        )
+        train = self._np(layer(seq, training=True))
+        evaluation = self._np(layer(seq, training=False))
+        np.testing.assert_allclose(train, evaluation, rtol=0, atol=0)
+
+    def test_the_mask_is_shared_across_timesteps(self, seq):
+        """Variational dropout: ONE mask per sequence, not one per timestep.
+
+        Measured structurally rather than statistically: the cell caches the
+        mask, so a second `get_dropout_mask` on the same cell returns the
+        identical tensor until `reset_dropout_mask()` is called.
+        """
+        keras.utils.set_random_seed(113)
+        cell = CliffordRNNCell(units=self.UNITS, dropout_rate=self.RATE, seed=7)
+        step = tf.random.normal([4, 6])
+        first = self._np(cell.get_dropout_mask(step))
+        second = self._np(cell.get_dropout_mask(step))
+        np.testing.assert_array_equal(first, second)
+        cell.reset_dropout_mask()
+        third = self._np(cell.get_dropout_mask(step))
+        assert float(np.max(np.abs(first - third))) > 0.0, (
+            "reset_dropout_mask() did not clear the cache"
+        )
+
+    def test_rate_is_validated(self):
+        """Out-of-range rates raise rather than silently clamping."""
+        with pytest.raises(ValueError, match="dropout"):
+            CliffordRNNCell(units=self.UNITS, dropout_rate=1.0)
+        with pytest.raises(ValueError, match="recurrent_dropout"):
+            CliffordRNNCell(units=self.UNITS, recurrent_dropout_rate=-0.1)
+
+
+# ===========================================================================
+# TestMasking
+# ===========================================================================
+
+
+class TestMasking:
+    """``mask`` support is inherited from ``keras.layers.RNN`` -- prove it.
+
+    ``CliffordRNN.call`` forwards ``mask`` to ``keras.layers.RNN.call``, and
+    ``keras.layers.RNN.__init__`` sets ``supports_masking = True``, so a
+    ``Masking`` / ``Embedding(mask_zero=True)`` upstream layer propagates
+    automatically. "Inherited" is a claim, not a measurement, so these tests
+    measure it: a masked-out timestep must not reach the state at all.
+    """
+
+    UNITS = 8
+
+    @staticmethod
+    def _np(t):
+        return keras.ops.convert_to_numpy(t)
+
+    def test_supports_masking_is_declared(self):
+        assert CliffordRNN(units=self.UNITS).supports_masking is True
+
+    def test_masked_tail_timesteps_do_not_reach_the_output(self):
+        """Overwriting a MASKED tail step must not change the final output.
+
+        This is the real masking contract: the state stops updating once the
+        mask goes False, so garbage in the padded tail is inert.
+        """
+        keras.utils.set_random_seed(127)
+        layer = CliffordRNN(units=self.UNITS)
+
+        x = np.asarray(tf.random.normal([2, 5, 6]))
+        mask = np.array(
+            [[True, True, True, False, False],
+             [True, True, True, True, True]]
+        )
+        base = self._np(layer(tf.constant(x), mask=tf.constant(mask)))
+
+        # Perturb ONLY sample 0's masked tail.
+        perturbed = x.copy()
+        perturbed[0, 3:, :] += 100.0
+        after = self._np(
+            layer(tf.constant(perturbed), mask=tf.constant(mask))
+        )
+
+        d_masked = float(np.max(np.abs(base[0] - after[0])))
+        d_unmasked = float(np.max(np.abs(base[1] - after[1])))
+        assert d_masked == 0.0, (
+            f"a MASKED timestep changed the output by {d_masked}; the mask is "
+            "not gating the state update"
+        )
+        assert d_unmasked == 0.0, "sample 1 was not perturbed; sanity check"
+
+    def test_the_mask_probe_is_not_vacuous(self):
+        """Control: the SAME perturbation with no mask MUST change the output.
+
+        Without this, `test_masked_tail_timesteps_do_not_reach_the_output`
+        would pass for a layer that ignores its late timesteps entirely (or
+        whose state saturates), not for a layer that honours the mask.
+        """
+        keras.utils.set_random_seed(127)
+        layer = CliffordRNN(units=self.UNITS)
+        x = np.asarray(tf.random.normal([2, 5, 6]))
+        perturbed = x.copy()
+        perturbed[0, 3:, :] += 100.0
+
+        base = self._np(layer(tf.constant(x)))
+        after = self._np(layer(tf.constant(perturbed)))
+        assert float(np.max(np.abs(base[0] - after[0]))) > 1e-3, (
+            "the unmasked control did not move: the probe cannot distinguish "
+            "'mask honoured' from 'late timesteps ignored'"
+        )
+
+    def test_masking_layer_propagates(self):
+        """End-to-end through ``keras.layers.Masking``, the documented path.
+
+        The claim measured here is the strong one: a ZERO-padded length-5
+        sequence run through ``Masking(0.0) -> CliffordRNN`` must give exactly
+        the same answer as the unpadded length-3 prefix run through the SAME
+        layer. That can only hold if the mask reaches the recurrence.
+        """
+        keras.utils.set_random_seed(131)
+        rnn = CliffordRNN(units=self.UNITS)
+        inp = keras.Input(shape=(5, 6))
+        model = keras.Model(inp, rnn(keras.layers.Masking(0.0)(inp)))
+
+        x = np.array(tf.random.normal([2, 3, 6]))
+        padded = np.concatenate([x, np.zeros((2, 2, 6), dtype=x.dtype)], axis=1)
+
+        padded_out = self._np(model(padded, training=False))
+        prefix_out = self._np(rnn(tf.constant(x), training=False))
+        np.testing.assert_allclose(padded_out, prefix_out, rtol=1e-6, atol=1e-6)
+
+        # Anti-vacuity: without the mask the padding DOES move the answer.
+        unmasked_out = self._np(rnn(tf.constant(padded), training=False))
+        assert float(np.max(np.abs(unmasked_out - prefix_out))) > 1e-4, (
+            "zero padding is inert even WITHOUT a mask, so this test cannot "
+            "distinguish a working mask from a no-op one"
+        )
+
+    def test_zero_output_for_mask(self):
+        """``zero_output_for_mask`` zeroes the masked positions' outputs."""
+        keras.utils.set_random_seed(137)
+        layer = CliffordRNN(
+            units=self.UNITS, return_sequences=True, zero_output_for_mask=True
+        )
+        x = tf.random.normal([2, 5, 6])
+        mask = tf.constant(
+            [[True, True, True, False, False],
+             [True, True, True, True, True]]
+        )
+        out = self._np(layer(x, mask=mask))
+        assert float(np.max(np.abs(out[0, 3:]))) == 0.0, out[0, 3:]
+        assert float(np.max(np.abs(out[1, 3:]))) > 0.0, "sample 1 must be live"
+
+
+# ===========================================================================
+# TestPrivateKerasImportContract
+# ===========================================================================
+
+
+class TestPrivateKerasImportContract:
+    """``keras.src.layers.rnn.dropout_rnn_cell`` is a PRIVATE Keras path.
+
+    ``clifford_rnn.py`` imports ``DropoutRNNCell`` from it at module scope,
+    with no ``try``/``except``, so a Keras upgrade that moves or deletes that
+    module makes the whole module unimportable.
+
+    DECISION plan-2026-08-10T130454-3649c19e/D-029: this suite is the chosen
+    remedy INSTEAD of a ``try``/``except`` fallback, because a fallback cannot
+    keep the promise the old in-code comment made. The inheritance is not
+    decorative: ``keras/src/layers/rnn/rnn.py`` gates BOTH
+    ``_maybe_config_dropout_masks`` (rnn.py:436) and
+    ``_maybe_reset_dropout_masks`` (rnn.py:449) on
+    ``isinstance(cell, DropoutRNNCell)``. Without the base class the per-batch
+    ``reset_dropout_mask()`` never fires, so ONE dropout mask would be reused
+    for an entire training run -- a silent, hard-to-see degradation. A loud
+    import error is strictly better than that. See decisions.md D-029.
+    """
+
+    def test_the_private_keras_module_still_exists(self):
+        """Fail LEGIBLY, here, rather than as a collection error everywhere."""
+        try:
+            from keras.src.layers.rnn.dropout_rnn_cell import (  # noqa: F401
+                DropoutRNNCell,
+            )
+        except ImportError as exc:  # pragma: no cover - upgrade tripwire
+            pytest.fail(
+                "keras.src.layers.rnn.dropout_rnn_cell.DropoutRNNCell has "
+                f"moved or been removed ({exc}). This is a PRIVATE Keras path "
+                "that clifford_rnn.py inherits from at module scope, so this "
+                "breaks the whole module, not just dropout. Fix: re-point the "
+                "import, or re-implement the mask lifecycle -- note that "
+                "keras.layers.RNN gates reset_dropout_mask() on "
+                "isinstance(cell, DropoutRNNCell), so simply dropping the "
+                "base class leaks ONE dropout mask across every batch."
+            )
+
+    def test_the_cell_is_recognised_by_keras_rnn(self):
+        """The reason the base class is inherited at all.
+
+        Asserts the *behavioural* consequence, not just the import: an
+        ``isinstance`` check that silently went False would leave every
+        assertion in :class:`TestDropout` still passing (masks are created
+        lazily by our local implementations) while the per-batch reset died.
+        """
+        from keras.src.layers.rnn.dropout_rnn_cell import DropoutRNNCell
+
+        cell = CliffordRNNCell(units=8, dropout_rate=0.25)
+        assert isinstance(cell, DropoutRNNCell), (
+            "keras.layers.RNN gates its dropout-mask lifecycle on this "
+            "isinstance check; CliffordRNNCell must inherit DropoutRNNCell"
+        )
+
+    def test_the_local_mask_api_is_complete(self):
+        """All four mixin methods are implemented locally, not inherited.
+
+        The class overrides them so the mask lifecycle is readable in one file.
+        A future edit that deletes one would fall back to the mixin's version,
+        which reads ``self.dropout`` / ``self.recurrent_dropout`` -- names this
+        cell does NOT have (they are ``*_rate`` here), i.e. an AttributeError
+        at the first training step.
+        """
+        for name in (
+            "get_dropout_mask",
+            "get_recurrent_dropout_mask",
+            "reset_dropout_mask",
+            "reset_recurrent_dropout_mask",
+        ):
+            assert name in CliffordRNNCell.__dict__, (
+                f"{name} is no longer defined on CliffordRNNCell; the "
+                "inherited mixin version reads self.dropout / "
+                "self.recurrent_dropout, which do not exist on this cell"
+            )
+
+
+# ===========================================================================
+# TestModuleDocstringExamples
+# ===========================================================================
+
+
+class TestModuleDocstringExamples:
+    """Every code example in ``clifford_rnn.py`` must actually RUN.
+
+    The module docstring shipped ``CliffordRNN(64, ..., dropout=0.1)`` (the
+    kwarg is ``dropout_rate``) and ``from clifford_rnn import CliffordRNN``
+    (not an importable path) -- both raise. Copy-pasteable examples are part of
+    the public surface; this pins them.
+    """
+
+    def test_module_docstring_usage_block(self):
+        x = keras.Input((None, 32))
+        assert CliffordRNN(
+            64, return_sequences=True, dropout_rate=0.1
+        )(x).shape == (None, None, 64)
+        assert keras.layers.RNN(
+            CliffordRNNCell(64), return_sequences=True
+        )(x).shape == (None, None, 64)
+        assert keras.layers.Bidirectional(
+            CliffordRNN(64, return_sequences=True)
+        )(x).shape == (None, None, 128)
+        assert keras.layers.RNN(
+            [CliffordRNNCell(64), CliffordRNNCell(64)]
+        )(x).shape == (None, 64)
+
+    def test_class_docstring_example(self):
+        x = keras.Input((None, 32))
+        y = CliffordRNN(64, shifts=[1, 2, 4], return_sequences=True)(x)
+        assert y.shape == (None, None, 64)
+
+    def test_no_docstring_example_uses_a_renamed_kwarg(self):
+        """Guards the whole module against the rename regressing.
+
+        `dropout=` / `recurrent_dropout=` / `tcn_dropout=` are the three names
+        this repo renamed to `*_rate`; none may reappear in a docstring here.
+        """
+        import re
+
+        import dl_techniques.layers.geometric.clifford_rnn as mod
+
+        src = open(mod.__file__).read()
+        offenders = re.findall(
+            r"\b(?:dropout|recurrent_dropout|tcn_dropout)=(?!\w)", src
+        )
+        assert not offenders, (
+            f"found {len(offenders)} use(s) of a pre-rename kwarg name in "
+            "clifford_rnn.py; the accepted names are dropout_rate / "
+            "recurrent_dropout_rate"
+        )

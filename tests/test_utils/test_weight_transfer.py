@@ -13,6 +13,16 @@ the contract under test explicit and removes a 3-second model build per test.
 Do NOT re-point these at a real architecture to make them "realistic" — a real
 model reintroduces the exact coupling (a utility test that dies when an
 unrelated model is deleted) this rewrite removed.
+
+Nested-weight note (iter-2 step 13, review concern 7): the D-012 rewrite was
+right to decouple, but the first version narrowed what was covered — five flat
+``Dense`` layers exercise ``set_weights`` on single-tensor-pair layers only,
+while the old ``CliffordNetUNet`` fixture had COMPOSITE ``model.layers`` whose
+``get_weights()`` / ``set_weights()`` flatten several sub-layers into one
+ordered list. ``load_weights_from_checkpoint`` dispatches on ``.layers`` and
+then does a whole-layer ``set_weights`` (``utils/weight_transfer.py:148-149,
+179``), so that ORDERING is part of the contract under test. ``_TwoSubDense``
+below restores it without re-coupling to any model package.
 """
 
 import os
@@ -32,6 +42,49 @@ from dl_techniques.utils.weight_transfer import (
 # ---------------------------------------------------------------------------
 
 _INPUT_DIM = 8
+
+
+@keras.saving.register_keras_serializable(package="test_weight_transfer")
+class _TwoSubDense(keras.layers.Layer):
+    """A composite layer: ONE ``model.layers`` entry, TWO weight-bearing subs.
+
+    This is the piece the flat-``Dense`` fixture cannot supply. ``get_weights``
+    on this layer returns FOUR tensors — ``inner_a`` kernel/bias then
+    ``inner_b`` kernel/bias — flattened in sub-layer creation order, and
+    ``set_weights`` re-assigns them positionally. So a source and a target that
+    build their sub-layers in different orders have identical layer names,
+    identical weight COUNTS and identical shapes (when the widths coincide),
+    and ``load_weights_from_checkpoint`` will happily transfer ``inner_a``'s
+    weights into ``inner_b``. Nothing in the flat fixture can see that.
+
+    Kept deliberately tiny and package-local: the point is the nesting, not the
+    architecture. See the module docstring and decisions.md D-012 / D-030.
+    """
+
+    def __init__(self, units_a: int, units_b: int, **kwargs):
+        super().__init__(**kwargs)
+        self.units_a = units_a
+        self.units_b = units_b
+        # Creation ORDER is the contract: inner_a's weights precede inner_b's
+        # in get_weights() / set_weights().
+        self.inner_a = keras.layers.Dense(units_a, name="inner_a")
+        self.inner_b = keras.layers.Dense(units_b, name="inner_b")
+
+    def build(self, input_shape):
+        self.inner_a.build(input_shape)
+        self.inner_b.build((*input_shape[:-1], self.units_a))
+        super().build(input_shape)
+
+    def call(self, x):
+        return self.inner_b(keras.activations.relu(self.inner_a(x)))
+
+    def compute_output_shape(self, input_shape):
+        return (*input_shape[:-1], self.units_b)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"units_a": self.units_a, "units_b": self.units_b})
+        return config
 
 
 # DECISION plan-2026-08-10T130454-3649c19e/D-012
@@ -59,7 +112,12 @@ def _build_multihead(
     inp = keras.Input(shape=(_INPUT_DIM,), name="input")
     x = keras.layers.Dense(widths[0], activation="relu", name="stem_dense")(inp)
     x = keras.layers.Dense(widths[1], activation="relu", name="enc_dense")(x)
-    x = keras.layers.Dense(widths[1], activation="relu", name="bottleneck_dense")(x)
+    # ONE composite layer with two weight-bearing sub-layers, so the whole-layer
+    # set_weights() ORDERING contract stays exercised (see module docstring).
+    # Its two subs are deliberately SHAPE-IDENTICAL (widths[1] -> widths[1] ->
+    # widths[1]): a swap between them is then invisible to every shape and
+    # count check, which is exactly the failure mode being guarded.
+    x = _TwoSubDense(widths[1], widths[1], name="bottleneck_dense")(x)
     x = keras.layers.Dense(widths[0], activation="relu", name="dec_dense")(x)
     out = keras.layers.Dense(head_units, name=f"head_{head_name}")(x)
     return keras.Model(inp, out, name=f"tiny_{head_name}")
@@ -146,6 +204,37 @@ class TestTransferHappyPath:
             if not before and not after:
                 continue
             assert _weights_equal(before, after), f"head layer {n} was modified"
+
+    def test_nested_sublayer_weights_transfer_in_order(self, tmp_path):
+        """The composite layer's FOUR weights must land on the right subs.
+
+        `load_weights_from_checkpoint` does a whole-layer `set_weights`, which
+        is positional. A flat-Dense-only fixture cannot tell "transferred" from
+        "transferred into the wrong sub-layer": both give the right count and
+        the right shapes.
+        """
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+
+        tgt = _build_segmenter()
+        report = load_weights_from_checkpoint(tgt, ckpt)
+
+        assert "bottleneck_dense" in report.loaded, report.summary_string()
+
+        src_layer = src.get_layer("bottleneck_dense")
+        tgt_layer = tgt.get_layer("bottleneck_dense")
+        assert len(src_layer.get_weights()) == 4, "fixture must be composite"
+
+        # Per SUB-LAYER, not just per flattened list: comparing the flattened
+        # lists would also pass if the two subs' weights had been swapped and
+        # then swapped back by an equally wrong read.
+        for sub in ("inner_a", "inner_b"):
+            got = getattr(tgt_layer, sub).get_weights()
+            want = getattr(src_layer, sub).get_weights()
+            assert _weights_equal(got, want), (
+                f"bottleneck_dense/{sub} did not receive its own source weights; "
+                "the nested set_weights ordering is wrong"
+            )
 
     def test_report_summary_string(self, tmp_path):
         src = _build_classifier()

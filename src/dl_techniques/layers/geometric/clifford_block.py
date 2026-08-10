@@ -1,6 +1,31 @@
 """
 CliffordNet block and constituent primitives.
 
+.. warning::
+
+   **HIGH blast radius. Any edit to this module must run EVERY importer's test
+   suite, not just ``tests/test_layers/test_geometric/``.**
+
+   The importers are not local and the diff size does not predict the risk.
+   Re-derive the list before editing::
+
+       grep -rln "geometric.clifford_block" src/ tests/
+
+   Measured 2026-08-10 (9 source modules across 4 packages, plus 3 test
+   modules): ``models/cliffordnet/{lm,model}.py``,
+   ``models/clip/clifford_clip.py``,
+   ``models/video_jepa/{encoder,predictor}.py``,
+   ``train/cliffordnet/{infer_cliffordnet_nlp,train_cliffordnet_nlp,
+   train_downsampling_techniques}.py``. The corresponding suites are
+   ``tests/test_layers/test_geometric/``, ``tests/test_models/test_cliffordnet/``,
+   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``.
+
+   This warning exists because it was learned the expensive way: an edit to this
+   file (plan-2026-08-10-3649c19e/iter-1/step-2) was scored ``radius:MED`` on
+   diff size, so ``test_clip`` and ``test_video_jepa`` were never run — and the
+   adversarial review found a red test in the first unrun one it opened. See
+   decisions.md D-033.
+
 Implements the geometric-algebra vision block from
     Zhongping Ji, "CliffordNet: All You Need is Geometric Algebra",
     arXiv:2601.06793v2 (2026).  Reference code: github.com/ParaMind2025/CAN

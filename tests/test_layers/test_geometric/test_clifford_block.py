@@ -1270,5 +1270,141 @@ class TestInertGateNotTrainable:
         assert self._gate_vars(restored, "trainable_variables") == []
 
 
+# ===========================================================================
+# TestUseGateCheckpointLayoutInvariant
+# ===========================================================================
+
+
+class TestUseGateCheckpointLayoutInvariant:
+    """SC-3: the `use_gate` flag must be checkpoint-NEUTRAL.
+
+    Landed from a review-transcript probe (plan-2026-08-10-3649c19e,
+    findings/review-iter-1.md concern 8, iteration-2 priority 5). The invariant
+    was verified once by hand and then existed only in that transcript; this
+    class makes it executable.
+
+    The contract, in three parts:
+
+    1. ``use_gate=True`` and ``use_gate=False`` produce IDENTICAL weight paths
+       and counts (the inert-sublayer pattern, `plans/SYSTEM.md` § Known
+       Patterns). Building ``gate_dense`` conditionally would satisfy every
+       shape/forward test in this file while silently changing the ``.keras``
+       weight layout across the flag, i.e. breaking every existing checkpoint.
+    2. ``trainable_variables`` DOES differ (3 vs 1) — that asymmetry is the
+       point: the weights are saved but the optimizer never sees them.
+    3. A ``.keras`` round-trip with RANDOMIZED weights preserves both the
+       weight VALUES and the output VALUES at both flag settings.
+
+    Randomizing every weight before saving is load-bearing, not decoration: a
+    freshly-built layer whose weights are silently re-initialized on load can
+    round-trip "correctly" because both draws come from the same seeded RNG.
+    This repo has already been bitten by exactly that (nested sub-layer weight
+    loss with matching counts AND paths).
+    """
+
+    CHANNELS = 8
+    EXPECTED_PATHS = [
+        "ggr/gamma",
+        "ggr/gate_dense/bias",
+        "ggr/gate_dense/kernel",
+    ]
+
+    @staticmethod
+    def _build(use_gate: bool):
+        """A functional model wrapping one GGR named ``ggr``."""
+        inp_a = keras.Input(shape=(4, 4, 8))
+        inp_b = keras.Input(shape=(4, 4, 8))
+        ggr = GatedGeometricResidual(
+            channels=8, use_gate=use_gate, name="ggr"
+        )
+        return keras.Model([inp_a, inp_b], ggr(inp_a, inp_b))
+
+    @staticmethod
+    def _randomize(model, seed):
+        """Assign a non-default value to EVERY weight."""
+        rng = np.random.RandomState(seed)
+        for w in model.weights:
+            w.assign(rng.normal(size=w.shape).astype("float32") * 0.1)
+
+    # ------------------------------------------------------------------
+
+    def test_weight_paths_and_counts_are_identical_across_the_flag(self):
+        """The measured invariant: 3 weights, same 3 paths, both settings."""
+        paths = {
+            ug: sorted(w.path for w in self._build(ug).weights)
+            for ug in (True, False)
+        }
+        assert paths[True] == self.EXPECTED_PATHS, paths[True]
+        assert paths[False] == paths[True], (
+            "`.keras` weight layout differs across use_gate: "
+            f"True={paths[True]} False={paths[False]}. gate_dense must be "
+            "built UNCONDITIONALLY (inert-sublayer pattern) or every existing "
+            "checkpoint carrying the other flag value breaks."
+        )
+        assert len(paths[False]) == 3
+
+    def test_trainable_surface_differs_but_weights_do_not(self):
+        """3 trainable at True, exactly ``ggr/gamma`` at False."""
+        trainable = {
+            ug: sorted(w.path for w in self._build(ug).trainable_variables)
+            for ug in (True, False)
+        }
+        assert trainable[True] == self.EXPECTED_PATHS
+        assert trainable[False] == ["ggr/gamma"], trainable[False]
+
+    @pytest.mark.parametrize("use_gate", [True, False])
+    def test_randomized_round_trip_is_value_exact(self, use_gate):
+        """max|dW| == 0 and max|dY| == 0 after a `.keras` round-trip.
+
+        ``training=False`` is passed EXPLICITLY on both forward calls:
+        ``training=None`` is not inference in this repo.
+        """
+        rng = np.random.RandomState(0)
+        xa = rng.normal(size=(2, 4, 4, 8)).astype("float32")
+        xb = rng.normal(size=(2, 4, 4, 8)).astype("float32")
+
+        model = self._build(use_gate)
+        self._randomize(model, seed=1 if use_gate else 2)
+        before = keras.ops.convert_to_numpy(model([xa, xb], training=False))
+        # Anti-vacuity: a degenerate all-zero output would make any dY == 0.
+        assert np.abs(before).max() > 0.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ggr.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(restored([xa, xb], training=False))
+
+        assert len(restored.weights) == len(model.weights)
+        dw = max(
+            float(
+                np.max(
+                    np.abs(
+                        keras.ops.convert_to_numpy(a)
+                        - keras.ops.convert_to_numpy(b)
+                    )
+                )
+            )
+            for a, b in zip(model.weights, restored.weights)
+        )
+        assert dw == 0.0, (
+            f"max|dW| = {dw} after a .keras round-trip at use_gate={use_gate}; "
+            "the reloaded layer is not carrying the SAVED weights"
+        )
+        dy = float(np.max(np.abs(before - after)))
+        assert dy == 0.0, f"max|dY| = {dy} at use_gate={use_gate}"
+
+    @pytest.mark.parametrize("use_gate", [True, False])
+    def test_use_gate_survives_get_config(self, use_gate):
+        """The flag must round-trip, or the restored layer changes semantics."""
+        model = self._build(use_gate)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ggr.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        cfg = restored.get_layer("ggr").get_config()
+        assert cfg["use_gate"] is use_gate, cfg
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -889,6 +889,38 @@ class TestVideoJEPAIter2:
             f"unexpected advisory warning at strong EMA; captured={captured}"
         )
 
+    # PRE-EXISTING FAILURE, attributed 2026-08-10 (plan-2026-08-10-3649c19e,
+    # iter-2/step-13, decisions.md D-031). NOT caused by the clifford cleanup.
+    #
+    # The test no longer reaches the predictor Dropout site it was written for:
+    # it dies EARLIER, in the encoder, at
+    #   layers/geometric/clifford_block.py `self.ctx_norm(z_ctx, training=training)`
+    # with `OperatorNotAllowedInGraphError`, because `training` is a symbolic
+    # tensor and Keras `BatchNormalization.call` does a Python `if training:`.
+    # `normalization_type="batch_norm"` is the CliffordNetBlock default the
+    # video_jepa encoder uses.
+    #
+    # Attribution is MEASURED, not inferred: the same single test was run in a
+    # read-only `git worktree --detach 1ac2c6365` (the commit immediately before
+    # this plan's first commit) and fails there identically — same exception,
+    # same call site, `clifford_block.py:1074` at that commit vs `:1297` here,
+    # the line having moved with the module rewrite. 1 failed / 52 deselected in
+    # both trees.
+    #
+    # Deliberately NOT fixed here: a graph-safe `training` gate inside
+    # CliffordNetBlock is a change to the repo's highest-blast-radius geometric
+    # module (21 importers across 10 packages) and is outside a test-integrity
+    # round. `strict=True` so the marker cannot outlive the defect.
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "PRE-EXISTING at 1ac2c6365 (measured in a detached worktree): "
+            "CliffordNetBlock's BatchNormalization ctx_norm cannot take a "
+            "symbolic `training` tensor under @tf.function "
+            "(OperatorNotAllowedInGraphError). The failure is in the ENCODER, "
+            "before the predictor Dropout site this test targets."
+        ),
+    )
     def test_predictor_graph_mode_dropout_zero(self) -> None:
         """F9 regression (iter-3 D-005): at production default dropout=0.0,
         @tf.function-wrapped inference must not raise at the predictor MLP

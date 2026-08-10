@@ -108,11 +108,20 @@ Usage
 .. code-block:: python
 
     import keras
-    from clifford_rnn import CliffordRNN, CliffordRNNCell
+    from dl_techniques.layers.geometric.clifford_rnn import (
+        CliffordRNN,
+        CliffordRNNCell,
+    )
 
-    # Drop-in for GRU/LSTM/RNN
+    # Drop-in for GRU/LSTM/RNN.
+    # NOTE the kwarg is `dropout_rate`, NOT keras's `dropout` -- this layer
+    # follows the repo-wide `*_rate` naming, and `keras.layers.RNN` forwards
+    # unknown kwargs straight to `Layer.__init__`, which raises
+    # `ValueError: Unrecognized keyword arguments`. Same for
+    # `recurrent_dropout_rate`. Both examples below are EXECUTED by
+    # tests/test_layers/test_geometric/test_clifford_rnn.py::TestModuleDocstringExamples.
     x = keras.Input((None, 32))
-    y = CliffordRNN(64, return_sequences=True, dropout=0.1)(x)
+    y = CliffordRNN(64, return_sequences=True, dropout_rate=0.1)(x)
 
     # Or as a cell, with every keras.layers.RNN feature
     y = keras.layers.RNN(CliffordRNNCell(64), return_sequences=True)(x)
@@ -126,11 +135,23 @@ import keras
 from keras import initializers, regularizers
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# DropoutRNNCell is a private-but-stable Keras mixin. It is inherited purely so
-# that ``keras.layers.RNN._maybe_config_dropout_masks`` recognises this cell and
-# pre-populates the masks OUTSIDE the scan (required for a stateless JAX loop).
-# All mask methods are also implemented locally, so behaviour is identical if the
-# import ever fails.
+# DECISION plan-2026-08-10T130454-3649c19e/D-029: this is a PRIVATE Keras path
+# and it is imported HARD, with no try/except, ON PURPOSE.
+#
+# DropoutRNNCell is inherited so that ``keras.layers.RNN`` recognises this cell.
+# All four mask methods are also implemented locally (see the "Dropout masks"
+# section of CliffordRNNCell) -- but do NOT conclude from that, as an earlier
+# version of this comment did, that "behaviour is identical if the import ever
+# fails". That is measurably FALSE. ``keras/src/layers/rnn/rnn.py`` gates BOTH
+# ``_maybe_config_dropout_masks`` (rnn.py:436) and ``_maybe_reset_dropout_masks``
+# (rnn.py:449) on ``isinstance(cell, DropoutRNNCell)``. Without the base class:
+#   * masks are no longer pre-populated outside the scan (breaks a stateless
+#     JAX loop), and, far worse,
+#   * ``reset_dropout_mask()`` is never called between batches, so ONE dropout
+#     mask silently persists for an entire training run.
+# A degraded-but-running fallback would hide that; a hard ImportError will not.
+# The tripwire that explains it when Keras moves the module is
+# tests/test_layers/test_geometric/test_clifford_rnn.py::TestPrivateKerasImportContract.
 from keras.src.layers.rnn.dropout_rnn_cell import (  # type: ignore
     DropoutRNNCell as _DropoutRNNCellMixin,
 )
