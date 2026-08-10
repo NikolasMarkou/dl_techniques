@@ -61,7 +61,7 @@ CHUNK_ORDER = (
 #: (``name``, ``trainable``, ``dtype``). RE-DERIVED by reading the source: 15,
 #: not the 14 the review notes claimed.
 OWN_CONFIG_KEYS = frozenset({
-    "dim", "num_heads", "dim_head", "mlp_dim", "dropout", "use_causal_mask",
+    "dim", "num_heads", "dim_head", "mlp_dim", "dropout_rate", "use_causal_mask",
     "eps", "normalization_type", "normalization_args", "attention_type",
     "attention_args", "ffn_type", "ffn_args", "adaln_activation_type",
     "adaln_activation_args",
@@ -309,7 +309,7 @@ class TestConstructionAndConfig:
     def test_get_config_surface_and_round_trip(self):
         block = AdaLNZeroConditionalBlock(
             dim=DIM, num_heads=HEADS, dim_head=DIM_HEAD, mlp_dim=MLP_DIM,
-            dropout=0.1, use_causal_mask=False, eps=1e-5,
+            dropout_rate=0.1, use_causal_mask=False, eps=1e-5,
             normalization_type="rms_norm", normalization_args={"use_scale": False},
             attention_type="multi_head",
             attention_args=dict(FACTORY_ATTENTION_ARGS),
@@ -323,7 +323,7 @@ class TestConstructionAndConfig:
         assert set(cfg) - OWN_CONFIG_KEYS == {"name", "trainable", "dtype"}, (
             "unexpected extra get_config() keys beyond Layer's own three"
         )
-        assert cfg["dim"] == DIM and cfg["dropout"] == 0.1
+        assert cfg["dim"] == DIM and cfg["dropout_rate"] == 0.1
         assert cfg["use_causal_mask"] is False and cfg["eps"] == 1e-5
         assert cfg["normalization_type"] == "rms_norm"
         assert cfg["attention_type"] == "multi_head"
@@ -625,3 +625,54 @@ class TestCausalMaskContract:
             assert spy_block.attn.seen["use_causal_mask"] is None, (
                 "the factory attention branch DID receive use_causal_mask"
             )
+
+    def test_causal_mask_does_not_leak_the_future(self):
+        """Perturbing ``x`` at the LAST position must not move ANY earlier output.
+
+        PORTED from the deleted ``tests/test_layers/test_adaln_zero.py`` (step 9
+        of plan-2026-08-10-3649c19e), which was the only place in the repo that
+        probed the mask's DIRECTION. The sibling test above proves only that the
+        ``use_causal_mask`` flag is LIVE — that masking does *something*. A mask
+        applied on the wrong triangle, or a per-tile rescue applied off the full
+        softmax axis, changes the output while leaving every "flag is live"
+        assertion green (see plans/LESSONS.md, "repair granularity"). This test
+        pins the direction: only the future may be hidden.
+
+        Non-vacuity is asserted two ways, so the equality below cannot be
+        explained by an absent cross-token path: (1) the LAST position must
+        itself move under the perturbation, and (2) the same probe run with
+        ``use_causal_mask=False`` MUST leak.
+        """
+        rng = np.random.RandomState(11)
+        x = rng.normal(size=(BATCH, N, DIM)).astype("float32")
+        c = rng.normal(size=(BATCH, N, DIM)).astype("float32")
+        x_perturbed = x.copy()
+        x_perturbed[:, -1] += rng.normal(size=(BATCH, DIM)).astype("float32") * 3.0
+
+        deltas = {}
+        for causal in (True, False):
+            # seed=13 re-seeds adaLN_linear NON-ZERO: at its zero-init default the
+            # block is the identity in x and every position is trivially causal.
+            block = _make_block(seed=13, use_causal_mask=causal)
+            ref = ops.convert_to_numpy(block([x, c]))
+            out = ops.convert_to_numpy(block([x_perturbed, c]))
+            deltas[causal] = {
+                "past": float(np.max(np.abs(ref[:, :-1] - out[:, :-1]))),
+                "last": float(np.max(np.abs(ref[:, -1] - out[:, -1]))),
+            }
+
+        assert deltas[True]["last"] > 1e-3, (
+            "the probe is vacuous: perturbing the last token did not even move "
+            f"the last output (delta = {deltas[True]['last']:.6e})"
+        )
+        assert deltas[False]["past"] > 1e-3, (
+            "the probe is vacuous: with use_causal_mask=False the earlier "
+            "positions did NOT move either, so there is no cross-token path for "
+            f"a mask to hide (delta = {deltas[False]['past']:.6e})"
+        )
+        assert deltas[True]["past"] < 1e-6, (
+            "CAUSALITY VIOLATION: perturbing x at the last position moved the "
+            f"outputs at positions 0..{N - 2} by {deltas[True]['past']:.6e} "
+            f"(the acausal control moves them by {deltas[False]['past']:.6e}). "
+            "The attention mask is not hiding the future."
+        )

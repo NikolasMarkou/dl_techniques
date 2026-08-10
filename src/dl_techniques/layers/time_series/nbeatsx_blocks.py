@@ -92,8 +92,8 @@ class ExogenousBlock(NBeatsBlock):
     :type tcn_filters: int
     :param tcn_kernel_size: Kernel size for TCN convolutions.
     :type tcn_kernel_size: int
-    :param tcn_dropout: Dropout rate for TCN.
-    :type tcn_dropout: float
+    :param tcn_dropout_rate: Dropout rate for TCN.
+    :type tcn_dropout_rate: float
     :param use_tcn: If True, uses TCN basis (NBEATSx-G). If False, uses
         linear projection of X (NBEATSx-I).
     :type use_tcn: bool
@@ -105,7 +105,7 @@ class ExogenousBlock(NBeatsBlock):
             exogenous_dim: int,
             tcn_filters: int = 16,
             tcn_kernel_size: int = 2,
-            tcn_dropout: float = 0.0,
+            tcn_dropout_rate: float = 0.0,
             use_tcn: bool = True,
             **kwargs
     ):
@@ -117,14 +117,14 @@ class ExogenousBlock(NBeatsBlock):
         self.use_tcn = use_tcn
         self.tcn_filters = tcn_filters
         self.tcn_kernel_size = tcn_kernel_size
-        self.tcn_dropout = tcn_dropout
+        self.tcn_dropout_rate = tcn_dropout_rate
 
         # The encoder for exogenous variables
         if self.use_tcn:
             self.encoder = TemporalConvNet(
                 filters=tcn_filters,
                 kernel_size=tcn_kernel_size,
-                dropout_rate=tcn_dropout
+                dropout_rate=tcn_dropout_rate
             )
         else:
             # For Interpretable (NBEATSx-I), the basis is just X itself.
@@ -274,7 +274,7 @@ class ExogenousBlock(NBeatsBlock):
             'exogenous_dim': self.exogenous_dim,
             'tcn_filters': self.tcn_filters,
             'tcn_kernel_size': self.tcn_kernel_size,
-            'tcn_dropout': self.tcn_dropout,
+            'tcn_dropout_rate': self.tcn_dropout_rate,
             'use_tcn': self.use_tcn
         })
         return config

@@ -271,7 +271,7 @@ model = DeepAR(
     num_layers=3,
     hidden_dim=128,
     likelihood='gaussian', # or 'negative_binomial'
-    dropout=0.1
+    dropout_rate=0.1
 )
 ```
 
@@ -293,7 +293,8 @@ model = DeepAR(
 | `num_layers` | int | 3 | Number of stacked LSTM layers. |
 | `hidden_dim` | int | 40 | Number of units in each LSTM layer. |
 | `likelihood` | str | 'gaussian' | 'gaussian' for real values, 'negative_binomial' for counts. |
-| `dropout` | float | 0.0 | Dropout rate for LSTM inputs. |
+| `dropout_rate` | float | 0.0 | Dropout rate for LSTM inputs. |
+| `recurrent_dropout_rate` | float | 0.0 | Recurrent dropout rate inside the LSTM cells. |
 | `num_samples`| int | 100 | Number of Monte Carlo samples during prediction. |
 | `scale_epsilon`| float | 1.0 | Added to mean to prevent division by zero. |
 

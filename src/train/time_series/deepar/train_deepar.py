@@ -23,11 +23,10 @@ Reference:
 
 import os
 import sys
-import json
 import math
 import argparse
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -40,14 +39,11 @@ import seaborn as sns
 from train.common import (
     setup_gpu,
     set_seeds,
-    create_callbacks as create_common_callbacks,
-    create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
     TimeSeriesPerformanceCallback,
     BaseTimeSeriesTrainer,
     create_ts_argument_parser,
-    _prepare_viz_data_from_processor,
 )
 from train.common.args import build_generator_config
 from train.common.timeseries import (
@@ -55,7 +51,6 @@ from train.common.timeseries import (
     _plot_ts_forecast,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.time_series.deepar.model import DeepAR
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.datasets.time_series import (
@@ -94,7 +89,7 @@ class DeepARTrainingConfig(BaseTimeSeriesTrainingConfig):
         num_layers: Number of stacked LSTM layers.
         hidden_dim: LSTM hidden width.
         dropout_rate: LSTM output dropout rate.
-        recurrent_dropout: LSTM recurrent dropout rate.
+        recurrent_dropout_rate: LSTM recurrent dropout rate.
         likelihood: Observation distribution, ``'gaussian'`` or
             ``'negative_binomial'``.
         num_samples: Monte-Carlo sample count for prediction. Keep LOW for
@@ -117,7 +112,7 @@ class DeepARTrainingConfig(BaseTimeSeriesTrainingConfig):
     num_layers: int = 3
     hidden_dim: int = 40
     dropout_rate: float = 0.0
-    recurrent_dropout: float = 0.0
+    recurrent_dropout_rate: float = 0.0
     likelihood: str = "gaussian"
     num_samples: int = 20
     scale_epsilon: float = 1.0
@@ -505,8 +500,8 @@ class DeepARTrainer(BaseTimeSeriesTrainer):
         base = DeepAR(
             num_layers=self.config.num_layers,
             hidden_dim=self.config.hidden_dim,
-            dropout=self.config.dropout_rate,
-            recurrent_dropout=self.config.recurrent_dropout,
+            dropout_rate=self.config.dropout_rate,
+            recurrent_dropout_rate=self.config.recurrent_dropout_rate,
             likelihood=self.config.likelihood,
             target_dim=self.config.num_features,
             num_samples=self.config.num_samples,
@@ -629,7 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--num_features", type=int, default=1)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
-    parser.add_argument("--recurrent_dropout", type=float, default=0.0)
+    parser.add_argument("--recurrent_dropout_rate", type=float, default=0.0)
     parser.add_argument("--scale_epsilon", type=float, default=1.0)
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
@@ -655,7 +650,7 @@ def main() -> None:
         num_layers=args.num_layers,
         hidden_dim=args.hidden_dim,
         dropout_rate=args.dropout_rate,
-        recurrent_dropout=args.recurrent_dropout,
+        recurrent_dropout_rate=args.recurrent_dropout_rate,
         likelihood=args.likelihood,
         num_samples=args.num_samples,
         scale_epsilon=args.scale_epsilon,

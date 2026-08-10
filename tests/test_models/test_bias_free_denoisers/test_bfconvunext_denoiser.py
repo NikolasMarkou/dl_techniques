@@ -326,6 +326,10 @@ class TestDropoutPassThrough:
         for blk in blocks:
             assert blk.get_config()['dropout_rate'] == 0.3
             # the active sublayer is a real Dropout, not the no_dropout Lambda
+            # NOTE: `blk.dropout_rate` is the plain float; `blk.dropout` is the
+            # sublayer (convnext_v1_block.py:224 vs :332-338, same in v2). Do NOT
+            # sweep this to `dropout_rate` — that turns the ON assertion into an
+            # AttributeError and the OFF assertion below into a vacuous pass.
             assert isinstance(blk.dropout, keras.layers.Dropout), (
                 f"block {blk.name} has a passthrough dropout sublayer "
                 f"({type(blk.dropout).__name__}) despite dropout_rate=0.3"
@@ -350,6 +354,8 @@ class TestDropoutPassThrough:
             for blk in blocks:
                 assert blk.get_config()['dropout_rate'] == 0.0
                 # OFF path: no active Dropout (rate>0) anywhere in the block
+                # `blk.dropout` (the sublayer), NOT `blk.dropout_rate` (a float):
+                # a float is never a Dropout, so the swept form passed vacuously.
                 assert not isinstance(blk.dropout, keras.layers.Dropout), (
                     f"block {blk.name} has an active Dropout in the OFF default path"
                 )

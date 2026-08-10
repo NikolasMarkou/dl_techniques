@@ -635,7 +635,7 @@ class TestNBeatsXNet:
         expected_keys = [
             'share_weights_in_stack', 'activation', 'use_bias',
             'kernel_initializer', 'kernel_regularizer', 'theta_regularizer',
-            'tcn_filters', 'tcn_kernel_size', 'tcn_dropout',
+            'tcn_filters', 'tcn_kernel_size', 'tcn_dropout_rate',
         ]
         for key in expected_keys:
             assert key in config, f"Missing default parameter {key} in get_config()"
