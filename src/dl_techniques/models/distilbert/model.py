@@ -72,208 +72,10 @@ from dl_techniques.layers.transformers import (
     NormalizationType,
     NormalizationPositionType,
 )
-from dl_techniques.layers.norms import RMSNorm
+from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class DistilBertEmbeddings(keras.layers.Layer):
-    """Embeddings layer for DistilBERT.
-
-    Unlike BERT, DistilBERT does not use token type embeddings. This layer
-    combines word embeddings with position embeddings only.
-
-    Supports both learned and sinusoidal position embeddings as per the
-    original DistilBERT implementation.
-
-    :param vocab_size: Size of the vocabulary.
-    :type vocab_size: int
-    :param hidden_size: Dimensionality of the embeddings.
-    :type hidden_size: int
-    :param max_position_embeddings: Maximum sequence length for positional
-        embeddings.
-    :type max_position_embeddings: int
-    :param sinusoidal_pos_embds: Whether to use sinusoidal position embeddings
-        instead of learned ones.
-    :type sinusoidal_pos_embds: bool
-    :param initializer_range: Standard deviation for weight initialization.
-    :type initializer_range: float
-    :param layer_norm_eps: Epsilon for layer normalization.
-    :type layer_norm_eps: float
-    :param dropout_rate: Dropout probability.
-    :type dropout_rate: float
-    :param normalization_type: Type of normalization to use.
-    :type normalization_type: str
-    :param kwargs: Additional keyword arguments for the Layer base class.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        hidden_size: int,
-        max_position_embeddings: int = 512,
-        sinusoidal_pos_embds: bool = False,
-        initializer_range: float = 0.02,
-        layer_norm_eps: float = 1e-12,
-        dropout_rate: float = 0.1,
-        normalization_type: str = "layer_norm",
-        **kwargs: Any
-    ) -> None:
-        """Initialize DistilBERT embeddings layer."""
-        super().__init__(**kwargs)
-
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.max_position_embeddings = max_position_embeddings
-        self.sinusoidal_pos_embds = sinusoidal_pos_embds
-        self.initializer_range = initializer_range
-        self.layer_norm_eps = layer_norm_eps
-        self.dropout_rate = dropout_rate
-        self.normalization_type = normalization_type
-
-        # Word embeddings
-        self.word_embeddings = keras.layers.Embedding(
-            input_dim=vocab_size,
-            output_dim=hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=initializer_range
-            ),
-            name="word_embeddings"
-        )
-
-        # Position embeddings (learned or sinusoidal)
-        if not sinusoidal_pos_embds:
-            self.position_embeddings = keras.layers.Embedding(
-                input_dim=max_position_embeddings,
-                output_dim=hidden_size,
-                embeddings_initializer=keras.initializers.TruncatedNormal(
-                    stddev=initializer_range
-                ),
-                name="position_embeddings"
-            )
-        else:
-            self.position_embeddings = None
-
-        # Normalization layer
-        if normalization_type == "layer_norm":
-            self.layer_norm = keras.layers.LayerNormalization(
-                epsilon=layer_norm_eps,
-                name="layer_norm"
-            )
-        elif normalization_type == "rms_norm":
-            self.layer_norm = RMSNorm(
-                epsilon=layer_norm_eps,
-                name="layer_norm"
-            )
-        else:
-            self.layer_norm = keras.layers.LayerNormalization(
-                epsilon=layer_norm_eps,
-                name="layer_norm"
-            )
-
-        self.dropout = keras.layers.Dropout(rate=dropout_rate)
-
-    def _create_sinusoidal_embeddings(
-        self,
-        seq_length: int
-    ) -> keras.KerasTensor:
-        """Create sinusoidal position embeddings.
-
-        :param seq_length: Length of the sequence.
-        :type seq_length: int
-        :return: Sinusoidal position embeddings of shape (1, seq_length, hidden_size).
-        :rtype: keras.KerasTensor
-        """
-        position = keras.ops.arange(seq_length, dtype="float32")
-        position = keras.ops.expand_dims(position, axis=1)
-
-        div_term = keras.ops.exp(
-            keras.ops.arange(0, self.hidden_size, 2, dtype="float32")
-            * -(keras.ops.log(10000.0) / self.hidden_size)
-        )
-
-        sin_embeddings = keras.ops.sin(position * div_term)
-        cos_embeddings = keras.ops.cos(position * div_term)
-
-        # Interleave sin and cos
-        position_embeddings = keras.ops.zeros((seq_length, self.hidden_size))
-        indices_sin = keras.ops.arange(0, self.hidden_size, 2)
-        indices_cos = keras.ops.arange(1, self.hidden_size, 2)
-
-        # Use scatter or concatenation approach
-        sin_part = sin_embeddings
-        cos_part = cos_embeddings
-
-        # Stack and reshape to interleave
-        stacked = keras.ops.stack([sin_part, cos_part], axis=-1)
-        position_embeddings = keras.ops.reshape(
-            stacked, (seq_length, self.hidden_size)
-        )
-
-        return keras.ops.expand_dims(position_embeddings, axis=0)
-
-    def call(
-        self,
-        input_ids: keras.KerasTensor,
-        position_ids: Optional[keras.KerasTensor] = None,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass of the embeddings layer.
-
-        :param input_ids: Token IDs of shape (batch_size, seq_length).
-        :type input_ids: keras.KerasTensor
-        :param position_ids: Position IDs of shape (batch_size, seq_length).
-            If None, positions are generated automatically.
-        :type position_ids: Optional[keras.KerasTensor]
-        :param training: Whether the model is in training mode.
-        :type training: Optional[bool]
-        :return: Embedded representations of shape
-            (batch_size, seq_length, hidden_size).
-        :rtype: keras.KerasTensor
-        """
-        seq_length = keras.ops.shape(input_ids)[1]
-
-        # Word embeddings
-        word_embeds = self.word_embeddings(input_ids)
-
-        # Position embeddings
-        if self.sinusoidal_pos_embds:
-            position_embeds = self._create_sinusoidal_embeddings(seq_length)
-        else:
-            if position_ids is None:
-                position_ids = keras.ops.arange(seq_length)
-                position_ids = keras.ops.expand_dims(position_ids, axis=0)
-            position_embeds = self.position_embeddings(position_ids)
-
-        # Combine embeddings
-        embeddings = word_embeds + position_embeds
-
-        # Apply normalization and dropout
-        embeddings = self.layer_norm(embeddings)
-        embeddings = self.dropout(embeddings, training=training)
-
-        return embeddings
-
-    def compute_output_shape(self, input_shape):
-        """Compute output shape: (batch_size, seq_length) -> (batch_size, seq_length, hidden_size)."""
-        return (*input_shape, self.hidden_size)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "vocab_size": self.vocab_size,
-            "hidden_size": self.hidden_size,
-            "max_position_embeddings": self.max_position_embeddings,
-            "sinusoidal_pos_embds": self.sinusoidal_pos_embds,
-            "initializer_range": self.initializer_range,
-            "layer_norm_eps": self.layer_norm_eps,
-            "dropout_rate": self.dropout_rate,
-            "normalization_type": self.normalization_type,
-        })
-        return config
 
 
 @keras.saving.register_keras_serializable()
@@ -367,8 +169,11 @@ class DistilBERT(keras.Model):
     :type stochastic_depth_rate: float
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
-    :ivar embeddings: The embedding layer instance.
-    :vartype embeddings: DistilBertEmbeddings
+    :ivar embeddings: The embedding layer instance — the shared
+        ``layers/embedding/bert_embeddings.py::BertEmbeddings``, built through
+        ``create_embedding_layer('bert_embeddings', ...)`` with token type
+        embeddings disabled.
+    :vartype embeddings: BertEmbeddings
     :ivar encoder_layers: A list of `TransformerLayer` instances.
     :vartype encoder_layers: list[TransformerLayer]
 
@@ -600,16 +405,41 @@ class DistilBERT(keras.Model):
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings and encoder layers)."""
-        self.embeddings = DistilBertEmbeddings(
+        # DECISION plan-2026-08-10-b007f435/D-011
+        # Every value below is passed EXPLICITLY. Do NOT "simplify" any of the
+        # four that look droppable -- each one differs from the shared layer's
+        # default, which is BERT's behaviour, not DistilBERT's:
+        #   * use_token_type_embeddings=False -- BertEmbeddings defaults to True.
+        #     Dropping it silently allocates a token_type_embeddings weight and
+        #     adds a third term to the embedding sum.
+        #   * type_vocab_size=None -- mandatory once token types are off (D-002).
+        #   * mask_zero=False -- BertEmbeddings defaults to True. DistilBERT
+        #     threads an EXPLICIT attention_mask into every TransformerLayer; a
+        #     Keras auto-mask arriving at the same attention stack would be a
+        #     second, uncoordinated masking mechanism (I-4, pre-mortem #2).
+        #   * layer_norm_eps -- I-2. Omitting it does NOT inherit this model's
+        #     1e-12; BertEmbeddings' own default is 1e-8.
+        # create_embedding_layer SILENTLY DROPS any kwarg not registered in
+        # EMBEDDING_REGISTRY['bert_embeddings'] (measured, findings/
+        # step1-premise-rederivation.md (f)), so a misspelt kwarg here is a
+        # silent no-op: any test covering these must assert the EFFECT, never
+        # that construction succeeded. See decisions.md D-011.
+        self.embeddings = create_embedding_layer(
+            'bert_embeddings',
+            name="embeddings",
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
             max_position_embeddings=self.max_position_embeddings,
-            sinusoidal_pos_embds=self.sinusoidal_pos_embds,
+            type_vocab_size=None,
+            use_token_type_embeddings=False,
+            position_embedding_type=(
+                'sinusoidal' if self.sinusoidal_pos_embds else 'learned'
+            ),
+            mask_zero=False,
             initializer_range=self.initializer_range,
             layer_norm_eps=self.layer_norm_eps,
             dropout_rate=self.dropout_rate,
             normalization_type=self.normalization_type,
-            name="embeddings"
         )
 
         self.encoder_layers: List[TransformerLayer] = []
