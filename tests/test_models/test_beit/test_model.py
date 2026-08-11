@@ -197,9 +197,24 @@ class TestBeitModelInitialization:
         Why this can fail if the implementation is wrong: silently accepting the flag
         and building per-layer tables anyway would train a different architecture than
         the caller asked for, with no error and no shape change.
+
+        The message content is asserted too, because README §15.6 (deviation X-5)
+        promises an ACTIONABLE refusal: the reference shares one table across all
+        layers during pre-training, and stage 1 of this package's own trainer IS
+        pre-training, so a caller who hits this needs to be told what is unsupported
+        and why — not merely that something is wrong.
         """
         with pytest.raises(ValueError, match="use_shared_relative_position_bias"):
             _tiny(use_shared_relative_position_bias=True)
+
+        with pytest.raises(ValueError) as excinfo:
+            _tiny(use_shared_relative_position_bias=True)
+        message = str(excinfo.value)
+        assert "is not implemented" in message, message
+        # ... and it says WHY, naming the shared-block signature change that is out
+        # of scope, so the reader does not have to guess whether it is a bug.
+        assert "TransformerLayer" in message, message
+        assert "out of scope" in message, message
 
     def test_a_single_layer_model_does_not_divide_by_zero(self):
         """The drop-path ramp's degenerate case."""
@@ -654,6 +669,62 @@ class TestBeitForMaskedImageModeling:
         assert model.compute_output_shape(
             [(2,) + IMG, (2, NUM_PATCHES)]
         ) == (2, NUM_PATCHES, VOCAB)
+
+    def test_the_head_reads_the_patch_tokens_not_a_shifted_window(self):
+        """Pin the cls slice by IDENTITY, not by shape.
+
+        WHY THIS TEST EXISTS (adversarial review, iteration 1): replacing
+        ``tokens[:, 1:, :]`` with ``tokens[:, :-1, :]`` in
+        ``BeitForMaskedImageModeling.call`` — the exact off-by-one this package's own
+        README §14 Issue 2 describes as producing "a finite, plausible loss curve and
+        no error" — left 91/91 model tests GREEN. The neighbouring
+        ``test_output_shape_excludes_the_cls_position`` cannot see it: the mutated
+        code emits ``(B, N, vocab)`` too. Under that mutation every MIM target is
+        attributed to the wrong patch and output index ``i`` is patch ``i - 1``, with
+        the cls token standing in for the last patch.
+
+        The assertion is therefore an EQUALITY against the head applied to the
+        correct slice, plus a control proving the two slices are distinguishable at
+        this geometry. Note the tempting alternative — "position 0's logits must not
+        depend on the cls token" — is a FALSE invariant: the cls token reaches every
+        patch token through self-attention, so it legitimately influences all of
+        them. Only the slice boundary itself can be pinned.
+
+        This is also the test for the ``D-012`` anchor at the slice site in
+        ``models/beit/model.py``; an anchor with no test that can fail is a comment.
+        """
+        model = _mim(drop_path_rate=0.0)
+        model.build((None,) + IMG)
+        x = _images()
+
+        tokens = ops.convert_to_numpy(model.backbone(x, training=False))
+        assert tokens.shape == (2, SEQ_LEN, model.hidden_size)
+
+        def _head(slice_: np.ndarray) -> np.ndarray:
+            normed = model.decoder_norm(slice_, training=False)
+            return ops.convert_to_numpy(model.decoder_head(normed))
+
+        expected = _head(tokens[:, 1:, :])      # cls dropped — the shipped slice
+        shifted = _head(tokens[:, :-1, :])      # last patch dropped — the mutant
+
+        # Setup assertion (stays GREEN under the mutation): the two candidate slices
+        # really do produce different logits here, so matching one is informative.
+        assert not np.allclose(expected, shifted, atol=1e-3), (
+            "the two slices are indistinguishable at this geometry — the guard "
+            "would pass either way"
+        )
+
+        out = ops.convert_to_numpy(model(x, training=False))
+        # IDENTITY ASSERTION — RED when the slice is `[:, :-1, :]`.
+        np.testing.assert_allclose(
+            out, expected, atol=1e-5, rtol=0,
+            err_msg=(
+                "the MIM head is not reading tokens[:, 1:, :]: output index i must "
+                "be the projection of backbone token i + 1 (patch i). Any other "
+                "slice still yields (B, N, vocab) and a plausible loss curve while "
+                "attributing every code-id target to the wrong patch."
+            ),
+        )
 
     def test_forward_without_a_mask_is_accepted(self):
         out = _mim()(_images(), training=False)

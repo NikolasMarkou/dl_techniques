@@ -804,7 +804,19 @@ class BeitForMaskedImageModeling(keras.Model):
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         tokens = self.backbone(inputs, training=training)
+        # DECISION plan-2026-08-11T012340-f63796dc/D-012
         # Drop the cls position BEFORE the head so output index i is patch i.
+        # Do NOT change this slice. `tokens` is `(B, N+1, D)` with cls at index 0, and
+        # EVERY length-N window of it produces the same `(B, N, vocab)` output shape,
+        # the same finite logits and the same plausible loss curve:
+        #   - `[:, :-1, :]`  drops the LAST PATCH and feeds cls in as patch 0 — every
+        #     code-id target is then attributed to the wrong patch, silently;
+        #   - `[:, :, :]`    keeps cls and emits N+1 logits, which only fails loudly if
+        #     the loss refuses to broadcast.
+        # Do NOT "verify" this with a shape assertion — a shape cannot see it (README
+        # §14 Issue 2). It is pinned by IDENTITY in
+        # `TestBeitForMaskedImageModeling::test_the_head_reads_the_patch_tokens_not_a_
+        # shifted_window`, which was demonstrated RED under the `[:, :-1, :]` mutation.
         patch_tokens = tokens[:, 1:, :]
         x = self.decoder_norm(patch_tokens, training=training)
         return self.decoder_head(x)  # logits — no softmax

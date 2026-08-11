@@ -27,7 +27,7 @@ checkpoint layer-for-layer:
 > `load_weights_from_checkpoint` (§9.1). Every code block in this README runs against the
 > shipped API exactly as written.
 
-> ⚠️ **This implementation deviates from the reference in four recorded ways** — most
+> ⚠️ **This implementation deviates from the reference in six recorded ways** — most
 > importantly, its discrete visual tokenizer is a **VQ-VAE**, not BEiT v1's Gumbel-softmax
 > DALL·E dVAE. Comparison against published BEiT numbers is therefore **invalid by
 > construction**. Read [§15 Deviations from the reference implementation](#15-deviations-from-the-reference-implementation)
@@ -870,8 +870,8 @@ green.
 
 | Suite | Command | Result |
 |:---|:---|:---|
-| Model package | `pytest tests/test_models/test_beit/ -q` | **91 passed / 91 collected** |
-| Attention layer | `pytest tests/test_layers/test_attention/test_beit_attention.py -q` | **97 passed / 97 collected** |
+| Model package | `pytest tests/test_models/test_beit/ -q` | **92 passed / 92 collected** |
+| Attention layer | `pytest tests/test_layers/test_attention/test_beit_attention.py -q` | **99 passed / 99 collected** |
 | Masking + map fn | `pytest tests/test_datasets/test_beit_masking.py -q` | **32 passed / 32 collected** |
 | `TransformerLayer` wiring | `pytest tests/test_layers/test_transformers/test_transformer_beit_integration.py -q` | **31 passed / 31 collected** |
 
@@ -900,6 +900,15 @@ Guards worth knowing about, because they encode facts rather than shapes:
   square and a non-square grid.
 - `TestBeitAttentionBiasIsLive` has a documented dead-component mutation (zero the bias
   table) that must turn the named liveness assertion RED.
+- `TestBeitAttentionBiasOrientation` recovers the **actual attention matrix** (zeroed `k`
+  kernel, identity `v`/`proj`, one head, one-hot inputs) on a **non-square** grid and pins
+  `bias[h, query, key]`. Without it, a fully transposed bias is invisible: measured, the
+  `(2,0,1) -> (2,1,0)` mutation left 97/97 attention and 122/122 model + integration tests
+  green. With it, that mutation gives **2 failed / 99 collected**.
+- `TestBeitForMaskedImageModeling::test_the_head_reads_the_patch_tokens_not_a_shifted_window`
+  pins the cls slice by **identity**, not shape: `decoder_head(decoder_norm(tokens[:, 1:, :]))`
+  must equal the model's output elementwise. Measured, `[:, 1:, :] -> [:, :-1, :]` left
+  91/91 model tests green before this guard existed; with it, **1 failed / 92 collected**.
 
 ---
 
@@ -907,12 +916,15 @@ Guards worth knowing about, because they encode facts rather than shapes:
 
 **Issue 1: `ValueError: use_shared_relative_position_bias=True is not implemented`.**
 
-- **Cause**: You asked for BEiT's pre-training-only shared-table mode. Only per-layer tables
-  are implemented (`False`), which is what every shipped BEiT/BEiTv2 variant in HF and timm
+- **Cause**: You asked for BEiT's shared-table mode. Only per-layer tables are implemented
+  (`False`), which is what every shipped BEiT/BEiTv2 *fine-tuned* variant in HF and timm
   actually uses.
 - **Solution**: Leave it at `False`. Supporting `True` would require threading a
   per-forward-pass bias tensor through `TransformerLayer.call()` — a shared-block signature
   change affecting ~33 unrelated consumers, deliberately out of scope.
+- **But do not read this as harmless**: the shared table is what BEiT v1 uses during
+  **pre-training**, and `src/train/beit/train_mim.py` *is* pre-training. This is a recorded
+  deviation with a parameter cost — see **§15.6 (X-5)** before comparing to the paper.
 
 **Issue 2: The MIM logits and the target ids are off by one position.**
 
@@ -992,8 +1004,12 @@ available here; keep the flag identical across pre-training and fine-tuning.
 ## 15. Deviations from the reference implementation
 
 **Read this section before comparing anything from this package to published BEiT
-results.** Four deviations are recorded, each decided deliberately and each pinned by a
-test.
+results.** **Six** deviations are recorded — §15.1 through §15.6 — each decided
+deliberately. **Three of them are pinned by a named test** (§15.2, §15.4 and §15.6, each
+cited at the end of its own subsection). The other three are *configuration* choices with
+no reference behaviour to assert against — a different tokenizer family (§15.1), two
+invented scales (§15.3), one pipeline resolution (§15.5) — so no test claims to cover
+them, and none is implied here. §15.7 lists what is deliberately *not* a deviation.
 
 ### 15.1 The visual tokenizer is a VQ-VAE, not a Gumbel-softmax DALL·E dVAE (X-1)
 
@@ -1100,10 +1116,44 @@ the pixels per sample. The grid, which is the thing MIM actually depends on, is 
 
 *(Decision D-004.)*
 
-### 15.6 What is *not* a deviation
+### 15.6 Per-layer relative-position tables during *pre-training* (X-5)
 
-For the avoidance of doubt, these are faithful: the `(2Wh−1)(2Ww−1)+3` relative-position
-table with the exact three cls-interaction slots; the structurally-absent K bias;
+BEiT v1 uses **one relative-position-bias table shared across every self-attention
+layer during pre-training**, and forks to per-layer tables only at fine-tuning
+(the reference's `use_shared_rel_pos_bias` / `use_rel_pos_bias` pair). **This package
+uses per-layer tables everywhere, including stage 1 — which *is* pre-training.**
+
+`use_shared_relative_position_bias=True` is therefore refused rather than silently
+ignored: `BeitModel._validate_config` raises a `ValueError` naming the flag, stating that
+it is not implemented, and stating why (a shared table would have to be threaded through
+`TransformerLayer.call()` as a per-forward tensor — a shared-block signature change that
+is deliberately out of scope for this package).
+
+The cost is parameters, and only parameters. At `base` / 14×14 the table holds
+`(2·14−1)·(2·14−1) + 3 = 732` rows × `12` heads = **8,784** floats:
+
+| | tables | rel-pos parameters at base/14×14 |
+|:---|:---:|---:|
+| BEiT v1 pre-training (shared) | 1 | **8,784** |
+| this package (per-layer, 12 layers) | 12 | **105,408** |
+
+That is +96,624 parameters, ≈ +0.11 % of the `base` backbone's 85.7 M — negligible in
+memory, but it is a real capacity difference in the pre-training objective, not a
+book-keeping detail. Anyone reproducing BEiT v1's pre-training recipe should treat it as
+a deviation and not as an implementation artifact.
+
+Note this is the *sharing topology*, not the table itself: the table's shape and its
+three cls-interaction slots are faithful (§15.7).
+
+*(Decision D-013. The refusal is pinned by
+`TestBeitModelInitialization::test_shared_relative_position_bias_is_refused_not_ignored`.)*
+
+### 15.7 What is *not* a deviation
+
+For the avoidance of doubt, these are faithful: the **shape** of the
+`(2Wh−1)(2Ww−1)+3` relative-position table, with the exact three cls-interaction slots
+(its per-layer vs shared *topology* during pre-training is a deviation — §15.6);
+the structurally-absent K bias;
 `layer_norm_eps=1e-12`; mask-token substitution with full-sequence processing (no token
 dropping); pre-norm blocks with LayerScale on both branches and a linear stochastic-depth
 ramp; GELU MLP at 4× width; hard-argmax MIM targets; the block-wise masking algorithm

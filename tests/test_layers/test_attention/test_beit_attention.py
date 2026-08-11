@@ -11,6 +11,7 @@ Coverage:
 2. Relative-position INDEX vs an oracle transcribed from the research finding
 3. Forward pass (shapes, head counts, non-square grids, training flag)
 4. Bias liveness (the table actually reaches the logits) + a dead-component mutation
+4b. Bias ORIENTATION: the bias is `[head, query, key]`, recovered from a non-square grid
 5. Structural no-k-bias assertions (exact bias-parameter counts)
 6. Gradient flow to every trainable weight including the bias table
 7. Serialization: ``get_config`` round-trip and ``.keras`` VALUE equality
@@ -474,6 +475,123 @@ class TestBeitAttentionBiasIsLive:
         x = np.concatenate([row, row], axis=0)
         out = keras.ops.convert_to_numpy(layer(x, training=False))
         np.testing.assert_allclose(out[0], out[1], atol=1e-6, rtol=0)
+
+
+# ==============================================================================
+# 4b. Bias ORIENTATION — the bias is indexed [head, QUERY, KEY], not [head, key, query]
+# ==============================================================================
+
+def _row_softmax(logits: np.ndarray) -> np.ndarray:
+    """Numerically-stable softmax over the last axis, written here on purpose.
+
+    Using ``keras.ops.softmax`` would share an implementation with the layer under
+    test; this is four lines of numpy instead.
+    """
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / exp.sum(axis=-1, keepdims=True)
+
+
+class TestBeitAttentionBiasOrientation:
+    """The relative-position bias must be added as ``bias[h, query, key]``.
+
+    WHY THIS CLASS EXISTS (adversarial review, iteration 1): with the final
+    ``ops.transpose(bias, (2, 0, 1))`` in ``BeitAttention.call`` changed to
+    ``(2, 1, 0)`` — i.e. a FULLY TRANSPOSED bias, ``bias[h, key, query]`` — the entire
+    rest of the suite still passed: 97/97 attention tests and 122/122 model +
+    integration tests. The index oracle in
+    ``TestBeitAttentionRelativePositionIndex`` cannot see it, because the
+    transposition happens AFTER the gather; and on the square 14x14 production grid
+    the symptom is invisible in every shape, loss and finiteness check.
+
+    HOW THE PROBE WORKS: zero the ``k`` kernel (``k_dense`` is structurally
+    bias-free, so ``k`` becomes exactly 0 and every pre-bias logit is exactly 0),
+    make ``v`` and ``proj`` the identity, use ONE head, and feed the identity matrix
+    as the token sequence. The layer's output is then literally the attention matrix:
+    ``out[i, j] == attn[i, j]``. That is compared against
+    ``softmax_j(table[index[i, j]])`` — with ``i`` as the QUERY — and, as a control,
+    against the transposed hypothesis, which must NOT match.
+
+    The grid is deliberately NON-SQUARE (2x3): the index matrix of a square grid is
+    still asymmetric, but a non-square grid also makes the stride wrong under a
+    transposition, so the guard fails for two independent reasons rather than one.
+    """
+
+    WH, WW = 2, 3
+
+    def _identity_probe(self):
+        """Build a layer whose output IS its attention matrix; return (layer, x)."""
+        layer = BeitAttention(
+            dim=self.WH * self.WW + 1,
+            num_heads=1,
+            window_size=(self.WH, self.WW),
+            qv_bias=False,
+            use_proj_bias=False,
+        )
+        n = layer.num_tokens
+        layer.build((1, n, n))
+        eye = np.eye(n, dtype="float32")
+        # k == 0 exactly (no k bias exists), so q @ k^T == 0 for every pair and the
+        # relative-position bias is the ONLY term reaching the logits.
+        layer.k_dense.kernel.assign(np.zeros((n, n), dtype="float32"))
+        layer.v_dense.kernel.assign(eye)
+        layer.proj.kernel.assign(eye)
+        return layer, eye[None]
+
+    @staticmethod
+    def _seed_table(layer: BeitAttention, seed: int = 11) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        values = rng.normal(
+            scale=2.0, size=tuple(layer.relative_position_bias_table.shape)
+        ).astype("float32")
+        layer.relative_position_bias_table.assign(values)
+        return values
+
+    def test_recovered_attention_matrix_is_query_major(self):
+        layer, x = self._identity_probe()
+        table = self._seed_table(layer)
+        n = layer.num_tokens
+
+        attn = keras.ops.convert_to_numpy(layer(x, training=False))[0]
+
+        # Setup assertion (stays GREEN under the transposition): the recovered matrix
+        # really is a row-stochastic attention matrix.
+        np.testing.assert_allclose(attn.sum(axis=-1), np.ones(n), atol=1e-5, rtol=0)
+
+        index = _layer_index_matrix(layer)
+        # Single head -> column 0 of the table.
+        logits = table[index, 0]
+        expected = _row_softmax(logits)
+        transposed = _row_softmax(logits.T)
+
+        # Setup assertion: the two hypotheses are actually distinguishable here, so a
+        # match against `expected` is not a match against both.
+        assert not np.allclose(expected, transposed, atol=1e-3), (
+            "the probe cannot distinguish the two orientations — pick a grid whose "
+            "relative-position index matrix is less symmetric"
+        )
+
+        # ORIENTATION ASSERTION — RED when `call`'s final transpose is (2, 1, 0).
+        np.testing.assert_allclose(
+            attn, expected, atol=1e-6, rtol=0,
+            err_msg=(
+                "the relative-position bias is not indexed [head, query, key]: "
+                "attention row i must be softmax over j of table[index[i, j]], "
+                "where i is the QUERY. A transposed bias produces a valid, finite, "
+                "row-stochastic attention matrix of the right shape, so nothing "
+                "else in this suite can see it."
+            ),
+        )
+
+    def test_the_transposed_orientation_is_rejected(self):
+        """The control half: the key-major hypothesis must NOT fit the output."""
+        layer, x = self._identity_probe()
+        table = self._seed_table(layer, seed=12)
+        attn = keras.ops.convert_to_numpy(layer(x, training=False))[0]
+        transposed = _row_softmax(table[_layer_index_matrix(layer), 0].T)
+        assert not np.allclose(attn, transposed, atol=1e-4), (
+            "the recovered attention matrix matches bias[h, key, query]"
+        )
 
 
 # ==============================================================================
