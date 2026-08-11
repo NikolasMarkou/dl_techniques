@@ -184,7 +184,7 @@ depend on any in-block strided Clifford variant.
 **Script**: `train_cliffordnet_nlp.py`
 **Model**: `CliffordNetLM` (`dl_techniques/models/cliffordnet/lm.py`)
 
-Pre-trains a causal language model on English Wikipedia (HuggingFace) or TFDS text datasets. The `CausalCliffordNetBlock` operates on 4D tensors `(B, 1, seq_len, D)` where left-only padded depthwise convolutions enforce strict autoregressive causality -- no attention mask needed.
+Pre-trains a causal language model on English Wikipedia (HuggingFace) or TFDS text datasets. The `CausalCliffordNetBlock` layers consume the `(B, seq_len, D)` sequence directly -- the caller does no reshaping; the block resolves its own layout (see `dl_techniques/layers/geometric/clifford_block.py`). Left-only padded depthwise convolutions enforce strict autoregressive causality -- no attention mask needed.
 
 ### Architecture
 
@@ -192,9 +192,8 @@ Pre-trains a causal language model on English Wikipedia (HuggingFace) or TFDS te
 Token IDs (B, seq_len)
   --> Token Embedding + Learned Positional Embedding
   --> LayerNorm --> Dropout
-  --> Reshape to (B, 1, seq_len, D)
-  --> L x CausalCliffordNetBlock    (left-padded DWConv, causal cumulative mean)
-  --> Squeeze to (B, seq_len, D)
+  --> L x CausalCliffordNetBlock    (B, seq_len, D) throughout;
+                                    left-padded DWConv, causal cumulative mean
   --> LayerNorm --> Dropout --> Dense(vocab_size)
   --> {"logits": (B, seq_len, vocab_size)}
 ```
@@ -435,7 +434,7 @@ for method in ["standard", "power", "max_swap"]:
 **Data prep**: `prepare_cc3m.py`
 **Reference**: Radford, A. et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). arXiv:2103.00020.
 
-A CLIP-style dual encoder where **both towers are built from Clifford blocks** -- no attention anywhere in either the vision or the text path. The vision tower uses bidirectional `CliffordNetBlock`s over 2-D feature maps; the text tower uses `CausalCliffordNetBlock`s over a `(B, 1, seq_len, D)` layout so left-only depthwise context enforces autoregressive compatibility at the feature-extraction stage.
+A CLIP-style dual encoder where **both towers are built from Clifford blocks** -- no attention anywhere in either the vision or the text path. The vision tower uses bidirectional `CliffordNetBlock`s over 2-D feature maps; the text tower uses `CausalCliffordNetBlock`s over `(B, seq_len, D)` so left-only depthwise context enforces autoregressive compatibility at the feature-extraction stage.
 
 ### Architecture
 
@@ -444,12 +443,12 @@ Image (B, H, W, 3)                           Tokens (B, L)
      |                                            |
   Conv2D patch stem + BN                    Token emb + positional emb + LN
      |                                            |
-  L x CliffordNetBlock                      expand to (B, 1, L, D)
+  L x CliffordNetBlock                            |
   (bidirectional 2-D DWConv context)              |
      |                                      L x CausalCliffordNetBlock
   GlobalAvgPool                             (left-padded DWConv context)
      |                                            |
-  LayerNorm                                 squeeze to (B, L, D)
+  LayerNorm                                 (B, L, D) throughout
      |                                            |
   Dense(embed_dim)                          gather last token --> Dense(embed_dim)
      |                                            |
