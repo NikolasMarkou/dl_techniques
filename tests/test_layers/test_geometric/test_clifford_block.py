@@ -1798,5 +1798,368 @@ class TestSequenceModeAndCausalNormSafety:
         assert dy == 0.0, f"max|dY| = {dy} at causal={causal}"
 
 
+# ===========================================================================
+# TestSparseRollingGeometricProductChannelContract
+# ===========================================================================
+
+
+class TestSparseRollingGeometricProductChannelContract:
+    """Coverage for plan-2026-08-11-54118fdd step 4 (D-006, finding F7).
+
+    ``SparseRollingGeometricProduct.build()`` now raises on a channel-axis
+    mismatch. The second test in this class is the GUARD ON THAT GUARD: it
+    pins that the layer stays RANK-AGNOSTIC, because the obvious-looking
+    "completion" of a channel check is an ``InputSpec(ndim=4)``-style rank
+    check, and two shipped consumers run this layer at RANK 2 —
+    ``layers/geometric/clifford_rnn.py`` (per timestep, ``(B, D)``) and
+    ``models/clip/clifford_clip.py``'s ``vision_head_geo`` / ``text_head_geo``
+    (pooled ``(B, D)`` vectors).
+    """
+
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+
+    def test_channel_mismatch_raises_naming_the_contract(self):
+        """A last dim != ``channels`` raises at BUILD time, naming ``channels``.
+
+        Before D-006 this construction reached ``call`` and failed inside the
+        internal ``Dense``: ``Input 0 of layer "proj" is incompatible ...
+        expected axis -1 of input shape to have value 32, but received input
+        with shape (2, 4, 4, 64)`` — legible, but it names a sub-layer and the
+        DOUBLED width ``2 * len(shifts) * channels``, not the contract. The
+        match string below is taken from the wording of the SHIPPED guard, not
+        from the old ``proj`` message.
+        """
+        layer = SparseRollingGeometricProduct(
+            channels=self.CHANNELS, shifts=self.SHIFTS
+        )
+        x = tf.random.normal([2, 4, 4, 2 * self.CHANNELS])
+        with pytest.raises(ValueError, match=r"last dim == channels=8"):
+            layer(x, x)
+
+    def test_dynamic_channel_axis_still_builds(self):
+        """A ``None`` channel axis must NOT trip the guard.
+
+        Both sibling guards short-circuit on ``is not None``; this pins that
+        this one does too, so a functional model with an unknown channel width
+        still builds.
+        """
+        layer = SparseRollingGeometricProduct(
+            channels=self.CHANNELS, shifts=self.SHIFTS
+        )
+        layer.build((None, None, None, None))
+        assert layer.built is True
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (2, 8),
+            (2, 7, 8),
+            (2, 4, 4, 8),
+            (2, 3, 4, 4, 8),
+        ],
+        ids=["rank2", "rank3", "rank4", "rank5"],
+    )
+    def test_layer_is_rank_agnostic(self, shape):
+        """Ranks 2, 3, 4 and 5 all run and are shape-preserving.
+
+        .. warning::
+
+           **Do not "tighten" the D-006 channel guard into a rank check.** This
+           test exists to fail if you do. It was proven RED against exactly
+           that hypothetical — an ``if len(input_shape) != 4: raise`` injected
+           into ``SparseRollingGeometricProduct.build()`` — not merely against
+           the channel guard, because a channel-only injection would leave the
+           rank-4 row green and prove nothing about the point of the test.
+
+        One layer INSTANCE per shape (a single instance would be built at the
+        first rank it saw and its ``proj`` sub-layer would then constrain the
+        others for the wrong reason).
+        """
+        layer = SparseRollingGeometricProduct(
+            channels=self.CHANNELS, shifts=self.SHIFTS
+        )
+        x = tf.random.normal(shape)
+        y = layer(x, x)
+        assert tuple(y.shape) == shape, (
+            f"rank-{len(shape)} input {shape} produced {tuple(y.shape)}; "
+            "SparseRollingGeometricProduct must stay rank-agnostic (D-006)"
+        )
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
+
+
+# ===========================================================================
+# Mixed-precision harness (plan-2026-08-11-54118fdd step 6, T8)
+# ===========================================================================
+#
+# Shape borrowed from `test_supernode_pooling.py:19-64`: a policy corpus, an
+# IMPORT-TIME float32 reference, and the house `dtype_policy` fixture from
+# `tests/test_layers/conftest.py` for the set/restore. The restore lives in
+# that fixture's `finally` and nowhere else — a second copy here is exactly the
+# copy that would forget it, and a leaked global policy silently poisons every
+# later test in the directory.
+
+_MP_POLICIES = ("float32", "mixed_float16")
+
+# Captured at IMPORT, i.e. before any test body has touched the global policy.
+_MP_AMBIENT_POLICY = keras.mixed_precision.global_policy().name
+
+# `_causal_cumulative_mean` accumulates over the sequence axis, so it must NOT
+# be probed at a toy length: MEASURED max relative error of the pre-fix
+# float16 accumulation against a float64 reference is 1.00 at L=128 and 1.59 at
+# L=256, but 17.65 (GPU) / 52.71 (CPU) at L=2048 — and the divisor vector alone
+# is EXACT below 2048, so a short probe cannot see the divisor half of the
+# defect at all. L=2048 is D-005's own recorded reference point. Cost measured
+# at 0.01s for the isolated reduction and ~0.05s for a full block forward, so
+# nothing is bought by shrinking it.
+_MP_SEQ_LEN = 2048
+_MP_CHANNELS = 8
+_MP_SHIFTS = [1, 2]
+
+
+def _mp_causal_float32_reference():
+    """Weights, input and output of a float32 causal block at ``_MP_SEQ_LEN``.
+
+    Computed at import time, under the ambient float32 policy. A ``dtype=``
+    kwarg on the parent would NOT pin the sub-layers, which capture the GLOBAL
+    policy in their own ``__init__``, so the reference has to be taken while
+    the ambient policy really is float32.
+
+    EVERY weight is randomized. At its initializers the block's output has
+    absmax **9.1e-05** (``layer_scale_init`` is 1e-5), and at that amplitude
+    float16 output quantization dominates every other term — a fp16-vs-float32
+    comparison on a freshly-initialized block measured 1.7e-07 both with AND
+    without the D-005 fix, i.e. it was a probe of nothing.
+
+    :return: ``(weights, x, y_float32)``.
+    """
+    assert keras.mixed_precision.global_policy().name == "float32", (
+        "the float32 reference must be captured under the float32 policy"
+    )
+    keras.utils.set_random_seed(5)
+    block = CausalCliffordNetBlock(
+        channels=_MP_CHANNELS, shifts=_MP_SHIFTS, use_global_context=True
+    )
+    block.build((1, 1, _MP_SEQ_LEN, _MP_CHANNELS))
+    rng = np.random.RandomState(1)
+    weights = [
+        rng.normal(size=w.shape).astype("float32") * 0.5 for w in block.weights
+    ]
+    for var, value in zip(block.weights, weights):
+        var.assign(value)
+    x = np.random.RandomState(4).normal(
+        size=(1, 1, _MP_SEQ_LEN, _MP_CHANNELS)
+    ).astype("float32")
+    y = keras.ops.convert_to_numpy(block(x, training=False)).astype("float64")
+    return weights, x, y
+
+
+_MP_REF_WEIGHTS, _MP_REF_INPUT, _MP_REF_OUTPUT = _mp_causal_float32_reference()
+
+
+# ===========================================================================
+# TestCliffordBlockMixedPrecision
+# ===========================================================================
+
+
+class TestCliffordBlockMixedPrecision:
+    """Coverage for plan-2026-08-11-54118fdd step 3 (D-005, finding F9) + F10.
+
+    No class in this module had ANY mixed-precision coverage before this class
+    (F10 gap 3). The three tests are deliberately of different strengths, and
+    the difference is stated rather than glossed:
+
+    * :meth:`test_block_forward_under_policy` and
+      :meth:`test_causal_block_forward_under_mixed_float16` are SMOKE guards.
+      A plain revert of D-005 does NOT fail them — measured at L=2048, the
+      whole-block deviation from the same-weights float32 output is 0.0108
+      (fixed) vs 0.0166 on GPU / 0.0204 on CPU (pre-fix): the same order of
+      magnitude, because the cumulative mean's ABSOLUTE error is bounded by
+      the input ``LayerNormalization`` while its RELATIVE error is not. They
+      are RED-proven by dead-component injection instead (measured 2.19
+      deviation, ~44x the tolerance).
+    * :meth:`test_causal_cumulative_mean_vs_float64_reference` is the test
+      that actually discriminates the D-005 fix, and it asserts on the
+      isolated reduction for exactly that reason.
+    """
+
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+    SEQ = 12
+
+    @pytest.mark.parametrize("dtype_policy", _MP_POLICIES, indirect=True)
+    @pytest.mark.parametrize("input_mode", ["image", "sequence"])
+    def test_block_forward_under_policy(self, dtype_policy, input_mode):
+        """``CliffordNetBlock`` runs finite in BOTH modes under fp16.
+
+        ``float32`` is the no-regression baseline row and is what makes the
+        dtype assertion non-trivial: the same assertion expects ``float32``
+        there and ``float16`` under ``mixed_float16``, so a layer that silently
+        pinned its output to one dtype fails one row or the other.
+
+        Image mode is run at batch 2 because its resolved ``ctx_norm`` is still
+        ``batch_norm`` (D-002 keeps it, deliberately, to preserve the
+        ``video_jepa`` strict xfail).
+        """
+        expected_dtype = keras.mixed_precision.Policy(dtype_policy).compute_dtype
+        keras.utils.set_random_seed(3)
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode=input_mode,
+            use_global_context=True,
+            layer_scale_init=1.0,
+        )
+        shape = (
+            (2, 8, 8, self.CHANNELS)
+            if input_mode == "image"
+            else (2, self.SEQ, self.CHANNELS)
+        )
+        x = np.random.RandomState(21).normal(size=shape).astype("float32")
+        y = block(x, training=False)
+
+        assert tuple(y.shape) == shape, (
+            f"{input_mode} mode under {dtype_policy} returned {tuple(y.shape)},"
+            f" expected {shape}"
+        )
+        assert keras.backend.standardize_dtype(y.dtype) == expected_dtype, (
+            f"{input_mode} mode under {dtype_policy} returned dtype {y.dtype}, "
+            f"expected the policy compute dtype {expected_dtype}"
+        )
+        y_np = keras.ops.convert_to_numpy(y)
+        assert np.all(np.isfinite(y_np)), (
+            f"{input_mode} mode under {dtype_policy} produced "
+            f"{int((~np.isfinite(y_np)).sum())} non-finite values"
+        )
+
+    @pytest.mark.parametrize(
+        "dtype_policy", ["mixed_float16"], indirect=True
+    )
+    def test_causal_block_forward_under_mixed_float16(self, dtype_policy):
+        """A causal block with global context at L=2048 tracks its f32 twin.
+
+        Run at ``_MP_SEQ_LEN`` = 2048 because that is the length at which the
+        D-005 defect is measurable at all (see the constant's comment), and
+        with the IMPORT-TIME float32 reference's weights assigned, because at
+        the initializers ``layer_scale_init=1e-5`` shrinks the output to
+        ~9e-05 where float16 quantization hides everything.
+
+        The tolerance 0.05 sits ~5x above the measured fixed deviation
+        (0.0101 CPU / 0.0108 GPU) and ~44x BELOW a dead global context
+        (2.19). It deliberately does NOT sit inside the pre-fix/post-fix gap:
+        there is no such gap at block level (pre-fix 0.0166 GPU / 0.0204 CPU),
+        which is stated here so that no reader mistakes this test for a guard
+        on the D-005 numerics. That guard is the next test.
+
+        .. note::
+
+           **What this comparison can and cannot see.** The float32 reference
+           is produced by the SAME source file, so an injection that changes
+           the maths for every dtype moves BOTH sides and the difference stays
+           small: zeroing the cumulative sum unconditionally left this test
+           GREEN (measured). It was therefore RED-proven with a dtype-
+           CONDITIONAL dead component (return zeros only when the input dtype
+           is narrower than the accumulator), which is the class of defect a
+           fp16-vs-f32 comparison is actually able to detect — deviation
+           2.1938. Read this assertion as "the reduced-precision path still
+           tracks the full-precision path", never as "the maths is right".
+        """
+        assert keras.mixed_precision.global_policy().name == "mixed_float16"
+        keras.utils.set_random_seed(5)
+        block = CausalCliffordNetBlock(
+            channels=_MP_CHANNELS, shifts=_MP_SHIFTS, use_global_context=True
+        )
+        block.build((1, 1, _MP_SEQ_LEN, _MP_CHANNELS))
+        assert len(block.weights) == len(_MP_REF_WEIGHTS)
+        for var, value in zip(block.weights, _MP_REF_WEIGHTS):
+            var.assign(value)
+
+        y = block(_MP_REF_INPUT, training=False)
+        assert tuple(y.shape) == (1, 1, _MP_SEQ_LEN, _MP_CHANNELS)
+        assert keras.backend.standardize_dtype(y.dtype) == "float16", (
+            f"expected a float16 output under mixed_float16, got {y.dtype}"
+        )
+        y_np = keras.ops.convert_to_numpy(y).astype("float64")
+        assert np.all(np.isfinite(y_np)), (
+            f"{int((~np.isfinite(y_np)).sum())} non-finite values in a causal "
+            f"mixed_float16 forward at L={_MP_SEQ_LEN}"
+        )
+        # DECISION plan-2026-08-11T110821-54118fdd/D-008
+        # Do NOT "sharpen" this tolerance to catch a D-005 revert. The obvious
+        # tightening is 0.015, which does separate pre-fix (0.0166 GPU /
+        # 0.0204 CPU) from post-fix (0.0108 GPU / 0.0101 CPU) — but with only
+        # ~1.4x headroom, in a suite that runs on BOTH CPU and GPU, on a stack
+        # where a process-global TF32 flag set by one test file has been
+        # measured moving another file's float comparisons by ~1500x. That is a
+        # flaky test, not a guard. The D-005 numerics are guarded by
+        # `test_causal_cumulative_mean_vs_float64_reference`, which asserts on
+        # the ISOLATED reduction where the gap is 17.65 -> 7.71e-03. Keep this
+        # one loose and smoke-shaped. See decisions.md D-008.
+        delta = float(np.max(np.abs(y_np - _MP_REF_OUTPUT)))
+        assert delta <= 0.05, (
+            f"mixed_float16 causal forward deviates by {delta} from the "
+            f"same-weights float32 output (reference absmax "
+            f"{np.abs(_MP_REF_OUTPUT).max():.4g}); a zeroed global context "
+            "measures 2.19 here"
+        )
+
+    @pytest.mark.parametrize(
+        "dtype_policy", ["mixed_float16"], indirect=True
+    )
+    def test_causal_cumulative_mean_vs_float64_reference(self, dtype_policy):
+        """The D-005 guard: the fp16 cumulative mean against float64 truth.
+
+        The asserted quantity is the max RELATIVE error, floored at 1e-6 to
+        keep near-zero reference entries from dividing by nothing. The
+        ABSOLUTE error is deliberately NOT asserted: it does not discriminate
+        (measured 7.6e-04 pre-fix vs 2.6e-04 post-fix, a factor of 2.9 that a
+        float16 output-rounding floor could swamp), whereas the relative error
+        moves by three orders of magnitude.
+
+        Measured at L=2048 on this input: **17.65 (GPU) / 52.71 (CPU) before
+        the fix, 7.71e-03 after** — and across a second seed and L=1024 the
+        pre-fix values spanned 3.49..52.71 while the post-fix values spanned
+        9.1e-04..7.71e-03. The tolerance 0.1 therefore sits ON THE FIXED SIDE
+        of the gap: ~13x above the worst post-fix value and ~35x below the
+        SMALLEST pre-fix value seen on any device or seed. The pre-fix
+        magnitude is device-dependent; the tolerance is set against its
+        worst case, not its headline.
+        """
+        rng = np.random.RandomState(3)
+        x16 = rng.normal(size=(1, 1, _MP_SEQ_LEN, _MP_CHANNELS)).astype("float16")
+        reference = (
+            np.cumsum(x16.astype("float64"), axis=2)
+            / np.arange(1, _MP_SEQ_LEN + 1, dtype="float64").reshape(1, 1, -1, 1)
+        )
+
+        got = CliffordNetBlock._causal_cumulative_mean(
+            keras.ops.convert_to_tensor(x16)
+        )
+        assert keras.backend.standardize_dtype(got.dtype) == "float16", (
+            "the reduction must cast back to the INPUT dtype, not leak its "
+            f"float32 accumulator into the caller's graph; got {got.dtype}"
+        )
+        got_np = keras.ops.convert_to_numpy(got).astype("float64")
+        rel = np.abs(got_np - reference) / np.maximum(np.abs(reference), 1e-6)
+        max_rel = float(rel.max())
+        assert max_rel <= 0.1, (
+            f"max relative error {max_rel} at L={_MP_SEQ_LEN} on a float16 "
+            "input: the cumulative mean is being accumulated at the input "
+            "precision again (pre-fix this measured 17.65 on GPU / 52.71 on "
+            "CPU). See decisions.md D-005."
+        )
+
+    def test_global_dtype_policy_was_restored(self):
+        """The policy this module ran under is the one it started with.
+
+        ``keras.mixed_precision.set_global_policy`` is PROCESS-GLOBAL: a test
+        that sets it and fails to restore corrupts every subsequent test in the
+        session, and the signature is a rising failure count in files nobody
+        touched. Placed LAST in the class so it runs after every policy-setting
+        test above in a whole-file run.
+        """
+        assert keras.mixed_precision.global_policy().name == _MP_AMBIENT_POLICY
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
