@@ -242,9 +242,11 @@ from ..norms.factory import create_normalization_layer
 
 CliMode = Literal["inner", "wedge", "full"]
 CtxMode = Literal["diff", "abs"]
+InputMode = Literal["image", "sequence"]
 
 _CLI_MODES: Tuple[str, ...] = ("inner", "wedge", "full")
 _CTX_MODES: Tuple[str, ...] = ("diff", "abs")
+_INPUT_MODES: Tuple[str, ...] = ("image", "sequence")
 
 # Global-branch constants matching the original implementation.
 _GLOBAL_SHIFTS: List[int] = [1, 2]
@@ -944,11 +946,26 @@ class CliffordNetBlock(keras.layers.Layer):
     :param use_global_context: Whether to add a global-average-pool branch.
         Requires ``channels >= 3``. Defaults to ``False``.
     :type use_global_context: bool
-    :param causal: Sequence-safe mode for autoregressive use. Expects 4-D input
-        ``(B, 1, seq_len, D)``; uses ``(1, K)`` valid depthwise convolutions
-        with left-only padding and a causal cumulative mean for the global
-        context. Defaults to ``False``.
+    :param causal: Sequence-safe mode for autoregressive use. IMPLIES
+        ``input_mode="sequence"`` (passing ``input_mode="image"`` alongside it
+        raises); uses ``(1, K)`` valid depthwise convolutions with left-only
+        padding and a causal cumulative mean for the global context. Accepts
+        ``(B, seq_len, D)`` or ``(B, 1, seq_len, D)``. Defaults to ``False``.
     :type causal: bool
+    :param input_mode: Input contract. ``"image"`` accepts rank-4
+        ``(B, H, W, D)`` only and uses ``(K, K)`` same-padded depthwise
+        convolutions. ``"sequence"`` accepts BOTH rank-3 ``(B, L, D)`` and
+        rank-4 ``(B, 1, L, D)`` (the sequence axis is axis 2; axis 1 must be a
+        singleton) and uses ``(1, K)`` depthwise convolutions — same-padded and
+        therefore bidirectional when ``causal=False``, valid-padded with an
+        explicit left pad when ``causal=True``. ``None`` (the default) resolves
+        to ``"sequence"`` when ``causal=True`` and to ``"image"`` otherwise; the
+        RESOLVED value is what ``get_config`` serializes. This is a construction
+        -time choice, not an inference from the input rank, because the two
+        geometries register DIFFERENT depthwise kernel shapes — ``(1, K, D, 1)``
+        vs ``(K, K, D, 1)`` — so an inferred mode would make the saved weight
+        layout a function of the first tensor seen.
+    :type input_mode: Optional[InputMode]
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
     :param use_bias: Whether the detail/projection Dense layers use a bias.
@@ -1008,6 +1025,7 @@ class CliffordNetBlock(keras.layers.Layer):
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
         causal: bool = False,
+        input_mode: Optional[InputMode] = None,
         layer_scale_init: float = 1e-5,
         use_bias: bool = True,
         activation: Any = "silu",
@@ -1038,6 +1056,26 @@ class CliffordNetBlock(keras.layers.Layer):
             raise ValueError(
                 f"ctx_mode must be one of {_CTX_MODES}, got {ctx_mode!r}"
             )
+        if input_mode is not None and input_mode not in _INPUT_MODES:
+            raise ValueError(
+                f"input_mode must be one of {_INPUT_MODES}, got {input_mode!r}"
+            )
+        # `causal` IMPLIES sequence mode. An unspecified input_mode (None)
+        # resolves silently; an explicit "image" is an incoherent request (a
+        # causal block convolves along axis 2 with left-only padding, which is
+        # meaningless for a real H>1 image) and is rejected loudly rather than
+        # overridden behind the caller's back.
+        if causal:
+            if input_mode == "image":
+                raise ValueError(
+                    "input_mode='image' is incompatible with causal=True: "
+                    "causal blocks are sequence blocks (they left-pad and "
+                    "convolve along axis 2 with a (1, K) kernel). Pass "
+                    "input_mode='sequence' or omit it."
+                )
+            resolved_input_mode: str = "sequence"
+        else:
+            resolved_input_mode = input_mode if input_mode is not None else "image"
         if (
             not isinstance(context_kernel_size, numbers.Integral)
             or isinstance(context_kernel_size, bool)
@@ -1074,6 +1112,7 @@ class CliffordNetBlock(keras.layers.Layer):
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
         self.causal = causal
+        self.input_mode = resolved_input_mode
         self.layer_scale_init = layer_scale_init
         self.use_bias = use_bias
         self.activation = _activation_spec(activation)
@@ -1092,16 +1131,21 @@ class CliffordNetBlock(keras.layers.Layer):
         self.input_normalization_type = input_normalization_type
         self.input_normalization_kwargs = dict(input_normalization_kwargs or {})
 
-        # Rank is not negotiable: the causal path pads and convolves along
-        # axis 2 and assumes a singleton axis 1. Declaring it here turns what
-        # used to be an IndexError inside build() into a clear Keras error.
-        if self.causal:
-            self.input_spec = keras.layers.InputSpec(ndim=4, axes={1: 1})
+        # Image mode is rank-4-only. Sequence mode accepts BOTH rank-3
+        # ``(B, L, D)`` and rank-4 ``(B, 1, L, D)``; ``InputSpec`` cannot
+        # express "ndim in {3, 4} AND axis 1 == 1 when ndim == 4" (measured on
+        # Keras 3.8: combining ``axes={1: 1}`` with ``min_ndim=3`` rejects every
+        # rank-3 input), so the singleton-H constraint is enforced in build().
+        if self.input_mode == "sequence":
+            self.input_spec = keras.layers.InputSpec(min_ndim=3, max_ndim=4)
         else:
             self.input_spec = keras.layers.InputSpec(ndim=4)
 
         # Static sequence length captured at build time (causal path only).
         self._causal_seq_len: Optional[int] = None
+        # Rank of the tensor the layer was built on. Rank 3 means call() must
+        # expand to the internal 4-D representation and squeeze on the way out.
+        self._input_rank: Optional[int] = None
 
         _dense_kwargs: Dict[str, Any] = dict(
             use_bias=use_bias,
@@ -1144,32 +1188,45 @@ class CliffordNetBlock(keras.layers.Layer):
         # cumulative mean vs full-image GAP). CausalCliffordNetBlock is a thin
         # subclass; do not duplicate the block body into it, and do not merge
         # these two convolution paths.
-        if self.causal:
-            self.dw_conv = keras.layers.DepthwiseConv2D(
-                kernel_size=(1, self.context_kernel_size),
-                padding="valid",
-                use_bias=False,
-                name="dw_conv",
-            )
-            self.dw_conv2 = keras.layers.DepthwiseConv2D(
-                kernel_size=(1, self.context_kernel_size),
-                padding="valid",
-                use_bias=False,
-                name="dw_conv2",
-            )
+        # DECISION plan-2026-08-11T110821-54118fdd/D-001
+        # The internal representation is ALWAYS 4-D ``(B, H, W, D)``, even when
+        # the public contract is a rank-3 ``(B, L, D)`` sequence. Do NOT replace
+        # these DepthwiseConv2D layers with a native ``DepthwiseConv1D``: that
+        # would change the registered kernels from ``(1, K, D, 1)`` to
+        # ``(K, D, 1)`` and break by-name ``.keras`` loading for EVERY existing
+        # causal checkpoint (cliffordnet/lm.py, the CLIP text tower, the
+        # video_jepa causal blocks). Rank-3 support is therefore a call()-level
+        # expand/squeeze around an unchanged 4-D body.
+        # Image mode deliberately keeps the ``(K, K)`` kernel: on an H=1 input a
+        # ``(K, K)`` same-padded convolution is provably bit-identical to the
+        # ``(1, K)`` middle-row one (measured: max abs diff 0.0), but 2/3 of its
+        # taps then multiply against zero padding and are dead weight -- so
+        # sequence mode uses ``(1, K)`` while image mode must keep ``(K, K)`` to
+        # stay weight-compatible with existing vision checkpoints. This is also
+        # why input_mode is an explicit constructor choice and is never inferred
+        # from the input rank: inferring it would make the saved kernel SHAPE a
+        # function of the first tensor the layer ever saw. See decisions.md
+        # D-001.
+        if self.input_mode == "sequence":
+            _dw_kernel: Any = (1, self.context_kernel_size)
+            # Causal: "valid" + the explicit left-pad in call(). Non-causal
+            # sequence: "same", i.e. a bidirectional 1-D context window.
+            _dw_padding = "valid" if self.causal else "same"
         else:
-            self.dw_conv = keras.layers.DepthwiseConv2D(
-                kernel_size=self.context_kernel_size,
-                padding="same",
-                use_bias=False,
-                name="dw_conv",
-            )
-            self.dw_conv2 = keras.layers.DepthwiseConv2D(
-                kernel_size=self.context_kernel_size,
-                padding="same",
-                use_bias=False,
-                name="dw_conv2",
-            )
+            _dw_kernel = self.context_kernel_size
+            _dw_padding = "same"
+        self.dw_conv = keras.layers.DepthwiseConv2D(
+            kernel_size=_dw_kernel,
+            padding=_dw_padding,
+            use_bias=False,
+            name="dw_conv",
+        )
+        self.dw_conv2 = keras.layers.DepthwiseConv2D(
+            kernel_size=_dw_kernel,
+            padding=_dw_padding,
+            use_bias=False,
+            name="dw_conv2",
+        )
         # Name kept as "ctx_bn" for checkpoint compatibility even though the
         # layer type is configurable.
         self.ctx_norm = create_normalization_layer(
@@ -1231,7 +1288,11 @@ class CliffordNetBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all sub-layers in dependency order.
 
-        :param input_shape: ``(B, H, W, D)``
+        :param input_shape: ``(B, H, W, D)`` in image mode; ``(B, L, D)`` or
+            ``(B, 1, L, D)`` in sequence mode.
+        :raises ValueError: If the rank is unsupported for the configured
+            ``input_mode``, if a rank-4 sequence input has ``H != 1``, or if the
+            channel axis does not equal ``channels``.
         """
         # This block is isotropic in channels. A mismatched D would otherwise
         # produce a cryptic broadcast error at the external residual add.
@@ -1242,7 +1303,41 @@ class CliffordNetBlock(keras.layers.Layer):
                 f"Project the input before the block (e.g. with a 1x1 Conv) "
                 f"or rebuild the block with channels={input_shape[-1]}."
             )
-        spatial_shape = tuple(input_shape)
+
+        rank = len(input_shape)
+        self._input_rank = rank
+        if self.input_mode == "sequence":
+            if rank not in (3, 4):
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"rank-3 (B, L, D) or rank-4 (B, 1, L, D) input, got "
+                    f"rank-{rank} shape {tuple(input_shape)}."
+                )
+            if rank == 4 and input_shape[1] is not None and input_shape[1] != 1:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"singleton axis 1 for rank-4 input (B, 1, L, D): the "
+                    f"sequence axis is axis 2. Got input_shape[1]="
+                    f"{input_shape[1]} in {tuple(input_shape)}."
+                )
+            # Internal representation is always 4-D (D-001).
+            if rank == 3:
+                spatial_shape = (
+                    input_shape[0],
+                    1,
+                    input_shape[1],
+                    input_shape[2],
+                )
+            else:
+                spatial_shape = tuple(input_shape)
+        else:
+            if rank != 4:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='image') expects a "
+                    f"rank-4 (B, H, W, D) input, got rank-{rank} shape "
+                    f"{tuple(input_shape)}."
+                )
+            spatial_shape = tuple(input_shape)
 
         # Step 1: norm
         self.input_norm.build(spatial_shape)
@@ -1291,12 +1386,23 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        :param inputs: Feature tensor ``(B, H, W, D)``.
+        :param inputs: Feature tensor ``(B, H, W, D)``; in sequence mode also
+            ``(B, L, D)`` or ``(B, 1, L, D)``.
         :param training: Whether in training mode.
-        :return: Residual term ``(B, H, W, D)``; the caller adds it to
-            ``inputs``.
+        :return: Residual term with the SAME rank and shape as ``inputs``; the
+            caller adds it to ``inputs``.
         """
-        x_prev = inputs
+        # Rank-3 sequence input is lifted to the internal 4-D representation
+        # (D-001) and squeezed back at the end; the body below always sees
+        # (B, H, W, D). The branch reads the rank of THIS call's input rather
+        # than the rank seen at build time, so a layer built on (B, L, D) still
+        # behaves correctly if the equivalent (B, 1, L, D) is fed later (the
+        # sub-layers are built on the internal 4-D shape either way).
+        call_rank = len(inputs.shape)
+        if call_rank == 3:
+            x_prev = keras.ops.expand_dims(inputs, axis=1)
+        else:
+            x_prev = inputs
 
         # --- Step 1: Normalise ---
         # `training` is passed explicitly: a configurable input normalization
@@ -1350,7 +1456,10 @@ class CliffordNetBlock(keras.layers.Layer):
             g_feat = g_feat + g_glo
 
         # --- Step 5: GGR (transform only; residual add is external) ---
-        return self.ggr(x_norm, g_feat, training=training)
+        h_mix = self.ggr(x_norm, g_feat, training=training)
+        if call_rank == 3:
+            h_mix = keras.ops.squeeze(h_mix, axis=1)
+        return h_mix
 
     # ------------------------------------------------------------------
 
@@ -1403,7 +1512,11 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        :param input_shape: Input shape ``(B, H, W, D)``.
+        Rank-preserving by construction: a rank-3 ``(B, L, D)`` sequence input
+        yields a rank-3 output and a rank-4 input yields a rank-4 output, since
+        the internal H=1 axis is added and removed inside ``call()``.
+
+        :param input_shape: Input shape ``(B, H, W, D)`` or ``(B, L, D)``.
         :return: Same as input shape.
         """
         return input_shape
@@ -1424,6 +1537,9 @@ class CliffordNetBlock(keras.layers.Layer):
                 "ctx_mode": self.ctx_mode,
                 "use_global_context": self.use_global_context,
                 "causal": self.causal,
+                # The RESOLVED mode, never the None sentinel, so a reloaded
+                # config reproduces the DWConv geometry exactly.
+                "input_mode": self.input_mode,
                 "layer_scale_init": self.layer_scale_init,
                 "use_bias": self.use_bias,
                 "activation": _serialize_activation(self.activation),
