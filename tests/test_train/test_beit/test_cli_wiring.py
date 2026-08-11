@@ -39,6 +39,7 @@ import keras
 import pytest
 
 from train.beit.common import load_frozen_tokenizer
+from train.beit import train_classification as cls_trainer
 from train.beit import train_mim as mim_trainer
 from train.beit import train_tokenizer as tok_trainer
 
@@ -116,6 +117,19 @@ MIM_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
     # file on disk (default: None, which itself raises).
 }
 
+CLS_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
+    "image_size": ("--image-size", 64),            # default: 224
+    "patch_size": ("--patch-size", 8),             # default: 16
+    "variant": ("--variant", "tiny"),              # default: base
+    "drop_path_rate": ("--drop-path-rate", 0.2),   # default: 0.1
+    "dropout_rate": ("--dropout-rate", 0.3),       # default: 0.0
+    "num_classes": ("--num-classes", 10),          # default: None
+    "epochs": ("--epochs", 3),                     # default: 100
+    # `pretrained_encoder` is filled in per-test: __post_init__ requires a REAL .keras
+    # file on disk (default: None -- warm start is OPTIONAL here, unlike the MIM
+    # trainer's tokenizer).
+}
+
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -177,7 +191,27 @@ def _mim_case(tmp_path) -> TrainerCase:
     )
 
 
+def _cls_case(tmp_path) -> TrainerCase:
+    return TrainerCase(
+        name="train_classification",
+        module="train.beit.train_classification",
+        parse_arguments=cls_trainer.parse_arguments,
+        config_from_args=cls_trainer.config_from_args,
+        config_cls=cls_trainer.TrainingConfig,
+        spec={
+            **COMMON_SPEC,
+            **CLS_ONLY_SPEC,
+            "output_dir": ("--output-dir", str(tmp_path / "results")),
+            "pretrained_encoder": (
+                "--pretrained-encoder",
+                _write_dummy_checkpoint(tmp_path, "dummy_encoder.keras"),
+            ),
+        },
+    )
+
+
 CASE_BUILDERS: Dict[str, Callable[[Any], TrainerCase]] = {
+    "classification": _cls_case,
     "mim": _mim_case,
     "tokenizer": _tokenizer_case,
 }
@@ -651,3 +685,54 @@ class TestMimGridAlignmentGuard:
         )
         assert tokenizer_fn.grid_size == (4, 4)
         assert tokenizer_fn.model.trainable is False
+
+
+class TestClassificationConfigValidation:
+    """``train_classification.TrainingConfig.__post_init__`` must refuse loudly, early."""
+
+    def test_valid_config_exposes_the_patch_grid(self) -> None:
+        config = cls_trainer.TrainingConfig(image_size=64, patch_size=8)
+        assert config.patch_grid == (8, 8)
+
+    def test_pretrained_encoder_is_optional(self) -> None:
+        """Unlike the MIM trainer's tokenizer, the warm start is OPT-IN: the trainer must
+        be usable from random init, and must SAY so rather than pretend."""
+        config = cls_trainer.TrainingConfig()
+        assert config.pretrained_encoder is None
+
+    def test_non_keras_pretrained_encoder_raises(self, tmp_path) -> None:
+        bogus = tmp_path / "encoder.h5"
+        bogus.write_bytes(b"")
+        with pytest.raises(ValueError, match="must be a .keras checkpoint"):
+            cls_trainer.TrainingConfig(pretrained_encoder=str(bogus))
+
+    def test_absent_pretrained_encoder_raises(self, tmp_path) -> None:
+        with pytest.raises(FileNotFoundError,
+                           match="pretrained_encoder checkpoint not found"):
+            cls_trainer.TrainingConfig(
+                pretrained_encoder=str(tmp_path / "nope.keras"))
+
+    @pytest.mark.parametrize("overrides,pattern", [
+        ({"image_size": 0}, "image_size must be positive"),
+        ({"patch_size": 0}, "patch_size must be positive"),
+        ({"image_size": 100, "patch_size": 16}, "must be divisible by patch_size"),
+        ({"batch_size": 0}, "batch_size must be positive"),
+        ({"epochs": 0}, "epochs must be positive"),
+        ({"drop_path_rate": 1.0}, r"drop_path_rate must be in \[0, 1\)"),
+        ({"dropout_rate": 1.5}, r"dropout_rate must be in \[0, 1\]"),
+        ({"num_classes": 0}, "num_classes must be positive"),
+        ({"max_steps": 0}, "max_steps must be positive"),
+        ({"dataset": "mnist"}, "Unsupported dataset"),
+    ])
+    def test_invalid_field_raises(self, overrides: Dict[str, Any], pattern: str) -> None:
+        with pytest.raises(ValueError, match=pattern):
+            cls_trainer.TrainingConfig(**overrides)
+
+    def test_dataset_default_geometry_is_dataset_dependent(self) -> None:
+        cifar = cls_trainer.config_from_args(
+            cls_trainer.parse_arguments(["--dataset", "cifar10"]))
+        assert (cifar.image_size, cifar.patch_size) == (32, 4)
+
+        nette = cls_trainer.config_from_args(
+            cls_trainer.parse_arguments(["--dataset", "imagenette"]))
+        assert (nette.image_size, nette.patch_size) == (224, 16)
