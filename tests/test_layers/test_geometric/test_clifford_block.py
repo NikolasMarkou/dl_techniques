@@ -2161,5 +2161,234 @@ class TestCliffordBlockMixedPrecision:
         assert keras.mixed_precision.global_policy().name == _MP_AMBIENT_POLICY
 
 
+# ===========================================================================
+# TestCharacterizationWedgeAndActivations
+# ===========================================================================
+
+
+class TestCharacterizationWedgeAndActivations:
+    """Characterization coverage for plan-2026-08-11-54118fdd step 7.
+
+    Unlike every other new class in this file, NOTHING here is a regression
+    guard: both behaviours were already correct before this plan. They are
+    pinned because they are *undocumented-by-test* load-bearing claims:
+
+    * ``ctx_mode`` is inert under ``cli_mode="wedge"`` -- the module
+      docstring's note 2 claim about the upstream paper (arXiv:2601.06793v2),
+      and the justification for the ``__init__`` ``logger.warning``.
+    * the three activation kwargs are actually APPLIED, not merely stored on
+      the layer and serialized by ``get_config()``.
+
+    .. note::
+
+       Because there is no bug to revert, a plain revert cannot prove these
+       RED. Every assertion here was instead proven by DEAD-COMPONENT
+       injection into ``clifford_block.py`` (make the wedge branch respond to
+       ``ctx_mode``; force the wedge to cancel exactly; force one resolved
+       activation callable to identity). The injections and their exact
+       failure messages are recorded in ``decisions.md`` D-009.
+    """
+
+    # DECISION plan-2026-08-11T110821-54118fdd/D-009
+    # Do NOT "simplify" these constructions by dropping `layer_scale_init=1.0`
+    # and letting the layer use its own 1e-5 default. At 1e-5 the block output
+    # absmax is ~9e-05, and at that amplitude BOTH groups below become probes
+    # of float32 rounding: the wedge comparison's ~1e-07 signal is no longer
+    # distinguishable from noise, and the activation deltas fall under any
+    # threshold worth asserting. The identical mistake was made once already in
+    # this plan (D-008: a fp16-vs-float32 probe measured 1.7e-07 with AND
+    # without the fix it claimed to guard). Likewise do NOT replace the
+    # `_twin_outputs` weight copy + equality check with two separately seeded
+    # layers: an "outputs differ" assertion would then be satisfied by two
+    # different initializations and would prove nothing about the kwarg.
+    # channels=8 / shifts=[1,2] are the values the plan's reference
+    # measurement (max |delta| 2.38e-07, relative 1.05e-07) was taken at.
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+    SPATIAL = (2, 8, 8)
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _input(cls, seed: int):
+        rng = np.random.RandomState(seed)
+        return rng.normal(size=(*cls.SPATIAL, cls.CHANNELS)).astype("float32")
+
+    @classmethod
+    def _twin_outputs(cls, seed: int, shared=None, **differing):
+        """Two blocks with IDENTICAL weights, differing only in ``differing``.
+
+        Both are built, then the second is force-fed the first's weights and
+        the equality is VERIFIED before any output comparison -- otherwise a
+        "the outputs differ" assertion would only be re-measuring two
+        independent initializations, and a "the outputs agree" assertion would
+        be an accident of two initializations that happened to match.
+
+        :param seed: Seed for the input draw and both initializations.
+        :param shared: Extra constructor kwargs applied to BOTH blocks.
+        :param differing: Exactly one kwarg, mapped to its ``(a, b)`` values.
+        :return: ``(y_a, y_b)`` as numpy arrays.
+        """
+        (name, (val_a, val_b)), = differing.items()
+        x = cls._input(seed)
+        base = dict(
+            channels=cls.CHANNELS,
+            shifts=cls.SHIFTS,
+            layer_scale_init=1.0,
+            **(shared or {}),
+        )
+
+        keras.utils.set_random_seed(seed)
+        block_a = CliffordNetBlock(**{**base, name: val_a})
+        block_a(x)
+        keras.utils.set_random_seed(seed)
+        block_b = CliffordNetBlock(**{**base, name: val_b})
+        block_b(x)
+
+        w_a = block_a.get_weights()
+        block_b.set_weights(w_a)
+        w_b = block_b.get_weights()
+        assert len(w_a) == len(w_b) == 15, (
+            f"expected 15 weights on both twins, got {len(w_a)} / {len(w_b)}"
+        )
+        for i, (p, q) in enumerate(zip(w_a, w_b)):
+            assert np.array_equal(np.asarray(p), np.asarray(q)), (
+                f"twin weights diverged at index {i} ({name}={val_a!r} vs "
+                f"{val_b!r}); the output comparison below would then be "
+                "measuring two different initializations, not the kwarg"
+            )
+
+        return (
+            keras.ops.convert_to_numpy(block_a(x)),
+            keras.ops.convert_to_numpy(block_b(x)),
+        )
+
+    @staticmethod
+    def _relative_delta(y_a, y_b) -> float:
+        scale = max(float(np.abs(y_a).max()), 1e-12)
+        return float(np.abs(y_a - y_b).max()) / scale
+
+    # ------------------------------------------------------------------
+    # T3 -- ctx_mode is inert under cli_mode="wedge"
+    # ------------------------------------------------------------------
+
+    def test_ctx_mode_is_inert_but_not_bit_identical_under_wedge(self):
+        """``W(det, ctx - det) == W(det, ctx)`` -- mathematically, not in bits.
+
+        The wedge branch computes ``z_det * roll(z_ctx) - z_ctx * roll(z_det)``.
+        Substituting ``z_ctx -> z_ctx - z_det`` leaves the two ``z_det``
+        self-terms, which cancel by antisymmetry, so ``ctx_mode`` cannot reach
+        this branch. The implementation nevertheless forms ``ctx - det`` FIRST
+        and never performs that cancellation symbolically, so the two settings
+        agree only to float32 rounding.
+
+        MEASURED, 40 seeds on GPU 1 plus 7 seeds on CPU
+        (``CUDA_VISIBLE_DEVICES=""``), ``channels=8, shifts=[1, 2],
+        layer_scale_init=1.0``, float32: worst ``max |delta| = 3.58e-07``,
+        worst relative ``1.65e-07``, and ``np.array_equal`` was **False** on
+        every single one of the 47 runs -- never once bit-identical. The
+        module docstring note 2 and the ``__init__`` ``logger.warning`` are
+        worded to match ("mathematically equivalent, ~1e-7 relative, NOT
+        bit-identical"); if either side is ever changed, this test is the
+        other side of that agreement.
+        """
+        y_diff, y_abs = self._twin_outputs(
+            seed=7, shared={"cli_mode": "wedge"}, ctx_mode=("diff", "abs")
+        )
+
+        rel = self._relative_delta(y_diff, y_abs)
+        # (a) mathematically equivalent
+        assert np.allclose(y_diff, y_abs, rtol=1e-6, atol=1e-6), (
+            "ctx_mode reached the wedge branch: cli_mode='wedge' outputs for "
+            f"ctx_mode='diff' vs 'abs' differ by relative {rel} (measured "
+            "1.05e-07 on the plan's reference draw, worst-of-47 1.65e-07)"
+        )
+        # (b) but NOT bit-identical -- the docstring must not claim it is
+        assert not np.array_equal(y_diff, y_abs), (
+            "cli_mode='wedge' produced BIT-IDENTICAL outputs for the two "
+            "ctx_mode settings. That is stronger than what the code does: it "
+            "forms ctx - det first and never cancels symbolically. If this "
+            "assertion starts failing, the implementation changed and the "
+            "docstring's '~1e-7 relative, not bit-identical' wording is now "
+            "the wrong one."
+        )
+
+    @pytest.mark.parametrize("cli_mode", ["full", "inner"])
+    def test_ctx_mode_is_material_when_the_inner_term_is_present(
+        self, cli_mode
+    ):
+        """The contrast that gives the wedge test its meaning.
+
+        Without this, the ~1e-7 agreement above could equally be explained by
+        NOTHING in the layer responding to ``ctx_mode`` at all. The inner term
+        ``z_det * roll(z_ctx)`` has no cancelling self-term, so wherever it is
+        present the two settings must diverge MATERIALLY.
+
+        MEASURED relative delta over 7 seeds x 2 devices: 0.417 .. 1.037 for
+        ``cli_mode="full"`` and 0.554 .. 1.037 for ``"inner"``, versus the
+        1.6e-07 worst case under ``"wedge"`` -- six orders of magnitude apart,
+        so the 0.01 threshold below is not a tuned number.
+        """
+        y_diff, y_abs = self._twin_outputs(
+            seed=7, shared={"cli_mode": cli_mode}, ctx_mode=("diff", "abs")
+        )
+        rel = self._relative_delta(y_diff, y_abs)
+        assert rel > 0.01, (
+            f"cli_mode={cli_mode!r}: ctx_mode='diff' and 'abs' agreed to "
+            f"relative {rel}. The inner term is present in this mode and has "
+            "no cancelling self-term, so they must differ materially "
+            "(measured >= 0.417). If they agree, ctx_mode is inert "
+            "EVERYWHERE and the wedge test above proves nothing."
+        )
+
+    # ------------------------------------------------------------------
+    # T4 -- the activations are APPLIED, not merely stored
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "kwarg",
+        ["activation", "dot_activation", "feature_activation"],
+    )
+    @pytest.mark.parametrize(
+        "values",
+        [("relu", "silu"), (None, "silu")],
+        ids=["relu_vs_silu", "linear_vs_silu"],
+    )
+    def test_activation_kwarg_changes_the_output(self, kwarg, values):
+        """Each activation kwarg reaches the forward pass.
+
+        Before this test, every activation kwarg was covered ONLY by
+        ``get_config()`` round-trip assertions -- which a layer that stored
+        the spec and then never called it would pass perfectly. Each of the
+        three lands at a different site:
+
+        * ``activation`` -> ``CliffordNetBlock._activation_fn``, on the
+          context stream after ``ctx_norm``;
+        * ``dot_activation`` -> ``SparseRollingGeometricProduct``'s inner
+          term (both the local and the global product);
+        * ``feature_activation`` -> ``GatedGeometricResidual``'s identity
+          path.
+
+        ``None`` is included because ``_resolve_activation`` maps it to
+        ``keras.activations.linear``, which is the exact shape of the
+        "resolved but never applied" failure this test exists to exclude.
+
+        MEASURED max |delta| at ``channels=8``, output absmax ~2.2-3.1:
+        relu-vs-silu 0.206 / 0.283 / 0.278 and linear-vs-silu 0.248 / 2.720 /
+        2.302 for ``activation`` / ``dot_activation`` / ``feature_activation``
+        -- the 1e-3 threshold below has >= 200x margin on the smallest.
+        """
+        y_a, y_b = self._twin_outputs(seed=5, **{kwarg: values})
+        delta = float(np.abs(y_a - y_b).max())
+        assert delta > 1e-3, (
+            f"{kwarg}={values[0]!r} and {kwarg}={values[1]!r} produced the "
+            f"same output (max |delta| = {delta}) from IDENTICAL weights. "
+            f"The kwarg is being stored and serialized but never applied "
+            f"(measured delta >= 0.206 for every kwarg/value pair)."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
