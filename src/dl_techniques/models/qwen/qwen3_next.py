@@ -9,7 +9,6 @@ A complete implementation of the Qwen3 Next architecture following the correct b
 """
 
 import keras
-import numpy as np
 from typing import Optional, Union, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -17,6 +16,7 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
@@ -284,10 +284,7 @@ class Qwen3Next(keras.Model):
             )
 
         # Create a linear schedule for the drop path rate
-        if self.stochastic_depth_rate > 0:
-            dpr = [x for x in np.linspace(0.0, self.stochastic_depth_rate, self.num_layers)]
-        else:
-            dpr = [0.0 for _ in range(self.num_layers)]
+        dpr = linear_drop_path_rates(self.num_layers, self.stochastic_depth_rate)
 
         # Create Qwen3Next blocks
         self.blocks = []

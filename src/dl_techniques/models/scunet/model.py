@@ -59,6 +59,7 @@ from typing import List, Optional, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 # ---------------------------------------------------------------------
@@ -124,7 +125,7 @@ class SCUNet(keras.Model):
                     f"window_size: {window_size}, input_resolution: {input_resolution}")
 
         # Calculate drop path rates for each layer
-        dpr = [float(x) for x in np.linspace(0, stochastic_depth_rate, sum(config))]
+        dpr = linear_drop_path_rates(sum(config), stochastic_depth_rate)
 
         # Build network components
         self._build_network(dpr)
