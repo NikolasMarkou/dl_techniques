@@ -6,7 +6,7 @@
 
 An implementation of the **DistilBERT** *architecture* in **Keras 3**, based on the paper *"DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter"* by Sanh et al.
 
-> **No trained weights ship with this package, none can be downloaded, and the `pretrained=` argument does not work in either of its two forms.** Every URL in `DistilBERT.PRETRAINED_WEIGHTS` is an `example.com` placeholder, so `pretrained=True` returns a **randomly initialized** model after logging a warning; and `pretrained="<path>.keras"` **raises `ValueError`** — `load_pretrained_weights` is broken independently of the URLs. Both behaviours are measured in [§8](#8-comprehensive-usage-examples), which also gives the one loading route that does work (`keras.models.load_model`). Everything below describes an architecture you must train yourself.
+> **No trained weights ship with this package and none can be downloaded.** Every URL in `DistilBERT.PRETRAINED_WEIGHTS` is an `example.com` placeholder, so `pretrained=True` returns a **randomly initialized** model after logging a warning — measured in [§8](#8-comprehensive-usage-examples). Loading a local file *does* work: `pretrained="<path>.keras"` (or `keras.models.load_model(path)`, which is simpler). Everything below describes an architecture you must train yourself.
 
 The published DistilBERT checkpoint retains approximately **97% of BERT's performance** while being **40% smaller and 60% faster**, by distilling knowledge from a large "teacher" BERT model into a smaller "student" model during pre-training. Those are the paper's numbers for the paper's checkpoint; nothing in this repo reproduces or measures them.
 
@@ -44,7 +44,7 @@ This implementation provides the core DistilBERT encoder as a **foundation model
 ### Key Innovations of this Implementation
 
 1.  **Foundation Model Design**: The `DistilBERT` class is a pure encoder, decoupled from task-specific heads.
-2.  **Weight loading**: use `keras.models.load_model(path)` on a file you saved (verified to restore every weight exactly). The package's own `pretrained=` / `load_pretrained_weights` machinery is present but non-functional — §8.
+2.  **Weight loading**: `keras.models.load_model(path)` on a file you saved restores it exactly; `load_pretrained_weights(path)` transplants weights into a model you configured yourself. Only the `pretrained=True` *download* is non-functional (placeholder URLs) — §8.
 3.  **Keras 3 Native**: Built as a composite `keras.Model` and fully serializable — a `.keras` save/load round trip with no `custom_objects` reproduces the forward output exactly (measured max abs diff `0.0`). Only the TensorFlow backend is exercised here; other backends are untested.
 4.  **Shared embedding stage**: no DistilBERT-private embedding class exists. The model builds `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings` — the same layer `models/bert/` and `models/fnet/` use — via `create_embedding_layer('bert_embeddings', ...)` with `use_token_type_embeddings=False` (no segment embeddings) and `mask_zero=False`.
 
@@ -325,16 +325,17 @@ Parameter counts are measured with `count_params()` on a built model at the defa
 
 A caller who does not read logs cannot tell this apart from a successful load. The machinery is kept deliberately (it is the wiring a real checkpoint would use); only the URLs are missing.
 
-**`pretrained="<path>.keras"` does not work either — it raises.** `from_variant` forwards it to `load_pretrained_weights`, which fails on both of its two paths (measured with a file written by `model.save(...)`):
+**`pretrained="<path>.keras"` DOES work** (repaired 2026-08-11; it previously raised on both of its paths — the "build the model first" dummy input used `keras.random.uniform` with `dtype="int32"`, which Keras rejects, and the built path forwarded a `by_name=True` that Keras 3's `Model.load_weights` does not accept). `from_variant` forwards the path to `load_pretrained_weights`, which loads into **this** configuration:
 
 | Route | Result |
 |---|---|
-| `from_variant(pretrained="<file>.keras")` on a fresh model | `ValueError: Failed to load weights ...: keras.random.uniform requires a floating point dtype. Received: dtype=int32` — the "build the model first" dummy input is itself invalid |
-| `model(...)` first, then `load_pretrained_weights("<file>.keras")` | `ValueError: Failed to load weights ...: Invalid keyword arguments: {'by_name': True}` — Keras 3's `Model.load_weights` has no `by_name` |
-| same, with a `.weights.h5` file | same `by_name` `ValueError` |
-| **`keras.models.load_model("<file>.keras")`** | **works — all 28/28 weights restored identically for the `tiny` variant** (`len(model.weights)` is variant-dependent: 28 `tiny` / 52 `small` / 76 `base`; re-measured at step 10.2) |
+| `from_variant(pretrained="<file>.keras")` on a fresh model | works — the model is built with a dummy pass first, then every variable is restored; verified by value against the saved model |
+| `model(...)` first, then `load_pretrained_weights("<file>.keras")` | works — same result on an already-built model |
+| `load_pretrained_weights(..., skip_mismatch=True)` with a different `vocab_size`/`max_position_embeddings` | partial by design: the two embedding tables are skipped and the encoder stack is restored. The call logs how many variables actually changed value (measured: 8 of 28) so a partial load cannot look total |
+| a load that restores **nothing** | raises `ValueError` rather than returning successfully — `skip_mismatch=True` would otherwise make a total non-load indistinguishable from success |
+| **`keras.models.load_model("<file>.keras")`** | **works, and is simpler** — restores architecture and weights together with no config to match. All 28/28 weights restored identically for the `tiny` variant (`len(model.weights)` is variant-dependent: 28 `tiny` / 52 `small` / 76 `base`) |
 
-So the loading story for now is: save with `model.save(path)`, load with `keras.models.load_model(path)`.
+Rule of thumb: `keras.models.load_model(path)` to get a saved model back as-is; `load_pretrained_weights(path)` to transplant weights into a model you have configured yourself.
 
 ```python
 import keras

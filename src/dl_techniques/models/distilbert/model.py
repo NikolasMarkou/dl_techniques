@@ -83,12 +83,13 @@ Every statement in the block below is executed as written (verified
 
 ``create_distilbert_with_head`` performs steps 3-4 for you.
 
-Weight loading. Neither form of ``pretrained=`` works; do not use them:
+Weight loading. ``pretrained=<path>`` works; ``pretrained=True`` does not:
 
 .. code-block:: python
 
-    # RAISES ValueError. load_pretrained_weights is broken on both of its
-    # paths -- see DistilBERT.from_variant's warnings.
+    # WORKS (repaired 2026-08-11): loads a local .keras file into THIS
+    # configuration, so the architecture must match. Raises if the file
+    # restores nothing.
     distilbert_encoder = DistilBERT.from_variant("base", pretrained="path/to/weights.keras")
 
     # RETURNS A RANDOMLY INITIALIZED MODEL, silently apart from one logged
@@ -96,7 +97,7 @@ Weight loading. Neither form of ``pretrained=`` works; do not use them:
     # the download fails, and the failure is caught.
     distilbert_encoder = DistilBERT.from_variant("base", pretrained=True)
 
-    # THIS is how to restore a model you saved (verified end to end):
+    # Simplest route to restore a model you saved -- no config to match:
     distilbert_encoder.save("distilbert.keras")
     distilbert_encoder = keras.models.load_model("distilbert.keras")
 
@@ -104,6 +105,7 @@ Weight loading. Neither form of ``pretrained=`` works; do not use them:
 
 import os
 import keras
+import numpy as np
 from typing import Optional, Union, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -626,96 +628,118 @@ class DistilBERT(keras.Model):
     def load_pretrained_weights(
         self,
         weights_path: str,
-        skip_mismatch: bool = True,
-        by_name: bool = True
+        skip_mismatch: bool = False,
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load weights from a ``.keras`` file into this model, in place.
 
-        .. warning::
-           **BROKEN — every measured call raises** (2026-08-11, against a file
-           written by ``model.save``). On an unbuilt model, the dummy input
-           built here uses ``keras.random.uniform(..., dtype="int32")``, which
-           Keras rejects (``requires a floating point dtype``). On a built
-           model, ``self.load_weights(..., by_name=by_name)`` raises
-           ``Invalid keyword arguments: {'by_name': True}`` — Keras 3's
-           ``Model.load_weights`` has no ``by_name`` parameter. Both failures
-           are re-raised from here as ``ValueError``. Use
-           ``keras.models.load_model(path)`` instead, which restores every
-           weight exactly. This method is left in place, unfixed, by the same
-           decision that keeps ``PRETRAINED_WEIGHTS``; fixing it is a code
-           change with its own tests, not a documentation change.
+        Use this when you already have a `DistilBERT` instance configured the
+        way you want it — typically because you are transplanting weights into
+        a *differently sized* model, e.g. loading a 30522-vocab checkpoint into
+        a 50000-vocab model with ``skip_mismatch=True``. If you just want the
+        saved model back exactly as it was, prefer
+        ``keras.models.load_model(path)``, which restores architecture and
+        weights together and needs no configuration to match.
 
-        This method was intended to handle loading weights with smart mismatch
-        handling, useful when the vocabulary size or architecture differs
-        slightly from the pretrained model.
+        The model is built with a dummy forward pass first if it is not built
+        already, since Keras can only restore weights into materialized
+        variables.
 
-        :param weights_path: Path to the weights file (.keras format).
+        .. note::
+           ``skip_mismatch=True`` makes a *partial* load succeed silently — any
+           variable whose shape does not line up is left at its initialized
+           value. To keep that from being indistinguishable from a real load,
+           this method counts the variables whose values actually changed and
+           logs the count, and it raises if *nothing* changed.
+
+        :param weights_path: Path to the weights file (``.keras`` format).
         :type weights_path: str
-        :param skip_mismatch: Whether to skip layers with mismatched shapes.
-            Useful when loading weights with different vocab_size or config.
+        :param skip_mismatch: Skip variables whose shape does not match instead
+            of raising. Defaults to ``False`` (strict) — a mismatch is far more
+            often a bug than an intent.
         :type skip_mismatch: bool
-        :param by_name: Whether to load weights by layer name.
-        :type by_name: bool
-        :raises FileNotFoundError: If weights_path doesn't exist.
-        :raises ValueError: If weights cannot be loaded.
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If the weights cannot be loaded, or if the load
+            completed without changing a single variable.
 
-        Example (RAISES as written — kept only to show what the intended call
-        looked like; see the warning above):
+        Example:
             .. code-block:: python
 
                 model = DistilBERT.from_variant("base", vocab_size=50000)
                 model.load_pretrained_weights(
                     "distilbert_base_uncased.keras",
-                    skip_mismatch=True
+                    skip_mismatch=True,
                 )
         """
-        # DECISION plan-2026-08-10T183739-b007f435/D-012
-        # This method is BROKEN and is knowingly left broken by this plan; the
-        # docstring warning above states it. Two defects, both measured:
-        #   1. the `keras.random.uniform(..., dtype="int32")` dummy input below
-        #      is rejected by Keras (needs a float dtype -- use
-        #      keras.random.randint), so the unbuilt path never reaches
-        #      load_weights;
-        #   2. `self.load_weights(..., by_name=by_name)` -- Keras 3's
-        #      Model.load_weights has NO by_name parameter and raises
-        #      `Invalid keyword arguments: {'by_name': True}`.
-        # Do NOT "just fix" the two lines without tests: nothing in this repo
-        # exercises this method, so a silent partial load (skip_mismatch=True
-        # skips everything that does not line up) would be indistinguishable
-        # from success. See decisions.md D-012.
+        # DECISION plan-2026-08-10T183739-b007f435/D-024
+        # Two things here are deliberate and must not be "simplified":
+        #   1. the dummy input uses keras.random.randint, NOT
+        #      keras.random.uniform(..., dtype="int32") -- Keras rejects an
+        #      integer dtype on uniform ("requires a floating point dtype"),
+        #      which made this whole method raise on every unbuilt model;
+        #   2. there is no `by_name` argument. Keras 3's Model.load_weights has
+        #      NO by_name parameter and raises `Invalid keyword arguments:
+        #      {'by_name': True}`; the old signature accepted one and forwarded
+        #      it, so the built path raised too.
+        # The changed-variable count below is not decoration: with
+        # skip_mismatch=True a load that restores NOTHING is otherwise
+        # indistinguishable from a load that restores everything.
+        # See decisions.md D-012 (the defect) and D-024 (this fix).
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
+            # Build the model if needed -- weights can only be restored into
+            # variables that already exist.
             if not self.built:
                 dummy_input = {
-                    "input_ids": keras.random.uniform(
+                    "input_ids": keras.random.randint(
                         (1, 128), 0, self.vocab_size, dtype="int32"
                     ),
                     "attention_mask": keras.ops.ones((1, 128), dtype="int32")
                 }
                 self(dummy_input, training=False)
 
-            logger.info(f"Loading pretrained weights from {weights_path}")
+            logger.info(f"Loading weights from {weights_path}")
 
-            # Load weights with appropriate settings
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
-            )
-
-            if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. "
-                    "Layers with shape mismatches were skipped (e.g., embedding layer)."
-                )
-            else:
-                logger.info("All weights loaded successfully.")
+            before = [keras.ops.convert_to_numpy(v) for v in self.weights]
+            self.load_weights(weights_path, skip_mismatch=skip_mismatch)
+            after = [keras.ops.convert_to_numpy(v) for v in self.weights]
 
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+
+        changed = sum(
+            1 for b, a in zip(before, after)
+            if b.shape != a.shape or not np.array_equal(b, a)
+        )
+        total = len(self.weights)
+
+        if changed == 0:
+            raise ValueError(
+                f"Loading {weights_path} changed none of this model's {total} "
+                "variables. Nothing was restored -- the file's variable names or "
+                "shapes do not match this model. Check the architecture config, "
+                "or use keras.models.load_model() to load the saved model as-is."
+            )
+
+        if changed == total:
+            logger.info(f"Loaded {weights_path}: all {total} variables changed value.")
+        elif skip_mismatch:
+            logger.warning(
+                f"Loaded {weights_path} with skip_mismatch=True: {changed} of "
+                f"{total} variables changed value. The other {total - changed} were "
+                "either skipped for a shape mismatch or already equal to the stored "
+                "value -- this method cannot tell those two apart, so verify the "
+                "load if a mismatch was not intended."
+            )
+        else:
+            # Strict load: nothing was skipped, so the unchanged variables were
+            # already equal to what the file holds (common for zero/one-init
+            # variables of an untrained checkpoint).
+            logger.info(
+                f"Loaded {weights_path}: {changed} of {total} variables changed "
+                f"value; the other {total - changed} already held the stored value."
+            )
 
     @staticmethod
     def _download_weights(
@@ -801,27 +825,22 @@ class DistilBERT(keras.Model):
            ``load_pretrained_weights`` is invoked 0 times on that path and every
            non-constant weight differs from an independently built model.
 
-        .. warning::
-           ``pretrained="<path>.keras"`` DOES NOT WORK EITHER — it raises.
-           :meth:`load_pretrained_weights` fails on both of its paths (measured
-           2026-08-11 against a file written by ``model.save``): on a fresh
-           model it never gets past its own dummy input
-           (``keras.random.uniform`` with ``dtype="int32"`` is rejected by
-           Keras), and on an already-built model ``self.load_weights(...,
-           by_name=True)`` fails with ``Invalid keyword arguments:
-           {'by_name': True}`` because Keras 3's ``Model.load_weights`` has no
-           such argument. The route that DOES work is plain
-           ``keras.models.load_model(path)`` (verified: 28/28 weights restored
-           identically).
+        .. note::
+           ``pretrained="<path>.keras"`` DOES work — it forwards to
+           :meth:`load_pretrained_weights`, which was repaired 2026-08-11
+           (D-024; it had raised on both of its paths). It loads weights into
+           THIS configuration, so the architecture must match the file. If you
+           just want the saved model back as it was, ``keras.models.load_model(path)``
+           is simpler and needs no matching config.
 
         :param variant: The name of the variant, one of "base", "small", "tiny".
             Measured parameter counts live in one place only, README section 7.
         :type variant: str
         :param pretrained: If a string, a path to a local ``.keras`` weights
-            file — this path currently RAISES ``ValueError``, see the second
-            warning. If ``True``, attempts the placeholder download described
-            above and falls back to random initialization. ``False`` (the
-            default) is the only value that behaves as a reader would expect.
+            file, loaded via :meth:`load_pretrained_weights` into this
+            configuration. If ``True``, attempts the placeholder download
+            described in the warning above and falls back to random
+            initialization — it does NOT give you trained weights.
         :type pretrained: Union[bool, str]
         :param weights_dataset: Dataset/version for pretrained weights.
             Options: "uncased", "cased", "multilingual".
@@ -920,7 +939,6 @@ class DistilBERT(keras.Model):
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
                     skip_mismatch=skip_mismatch,
-                    by_name=True
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")

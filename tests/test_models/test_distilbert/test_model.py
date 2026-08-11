@@ -29,6 +29,7 @@ returns a dict with `last_hidden_state` + `attention_mask`.
 import os
 import keras
 import pytest
+import logging
 import importlib
 import traceback
 import numpy as np
@@ -544,17 +545,18 @@ class TestSerialization:
         assert type(loaded.embeddings.layer_norm).__name__ == "RMSNorm"
 
 
-class TestPretrainedIsBroken:
-    """D-012: pins the MEASURED behaviour. This is NOT an endorsement.
+class TestPretrainedWeightLoading:
+    """D-024: `load_pretrained_weights` was repaired; these pin the repair.
 
-    `from_variant(pretrained=<path>)` raises on BOTH routes (unbuilt:
-    `keras.random.uniform(..., dtype='int32')`; built: `load_weights(...,
-    by_name=True)`), so the whole weight-loading surface is non-functional.
-    The user decision at step 8 was to document, not fix. This test fails
-    loudly the day someone fixes it, which is the point.
+    It previously raised on BOTH routes (unbuilt: `keras.random.uniform(...,
+    dtype='int32')`, which Keras rejects; built: `load_weights(...,
+    by_name=True)`, which Keras 3 does not accept) — D-012. Each test below
+    asserts VALUES restored, never that the call merely returned, because
+    `skip_mismatch` makes a load that restores nothing look like success.
     """
 
-    def test_from_variant_with_a_weights_path_still_raises(self, tmp_path):
+    @staticmethod
+    def _saved_tiny(tmp_path):
         keras.utils.set_random_seed(SEED)
         model = DistilBERT.from_variant(
             "tiny", vocab_size=256, max_position_embeddings=64
@@ -562,20 +564,112 @@ class TestPretrainedIsBroken:
         model(_tokens(), training=False)
         path = os.path.join(str(tmp_path), "weights.keras")
         model.save(path)
+        return model, path
 
-        with pytest.raises(ValueError) as excinfo:
-            DistilBERT.from_variant(
-                "tiny", vocab_size=256, max_position_embeddings=64,
-                pretrained=path,
-            )
-        message = str(excinfo.value)
-        assert "requires a floating point" in message, (
-            "load_pretrained_weights no longer fails the way D-012 measured; "
-            f"re-measure and update D-012 before changing this test: {message}"
+    def test_from_variant_with_a_weights_path_restores_every_value(self, tmp_path):
+        """The route that used to raise on the UNBUILT path (D-012 defect 1)."""
+        model, path = self._saved_tiny(tmp_path)
+
+        # A different seed, so an unloaded model would NOT match by accident.
+        keras.utils.set_random_seed(SEED + 1)
+        loaded = DistilBERT.from_variant(
+            "tiny", vocab_size=256, max_position_embeddings=64, pretrained=path,
         )
 
-        # The documented working route, verified in the same test so the
-        # replacement advice cannot rot: keras.models.load_model.
+        assert len(loaded.weights) == len(model.weights)
+        for a, b in zip(model.weights, loaded.weights):
+            np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+
+        # And the restored model computes what the saved one computed.
+        np.testing.assert_allclose(
+            _np(model(_tokens(), training=False)["last_hidden_state"]),
+            _np(loaded(_tokens(), training=False)["last_hidden_state"]),
+            rtol=0, atol=0,
+        )
+
+    def test_load_into_an_already_built_model(self, tmp_path):
+        """The route that used to raise on the BUILT path (D-012 defect 2)."""
+        model, path = self._saved_tiny(tmp_path)
+
+        keras.utils.set_random_seed(SEED + 1)
+        target = DistilBERT.from_variant(
+            "tiny", vocab_size=256, max_position_embeddings=64
+        )
+        target(_tokens(), training=False)          # built BEFORE the load
+        assert target.built
+
+        before = [_np(w) for w in target.weights]
+        target.load_pretrained_weights(path)
+
+        for a, b in zip(model.weights, target.weights):
+            np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+        # Non-vacuity: the load actually moved something, so an all-no-op
+        # implementation cannot pass the assertion above by luck.
+        assert any(
+            not np.array_equal(b, _np(a))
+            for b, a in zip(before, target.weights)
+        ), "no variable changed -- the comparison above proves nothing"
+
+    def test_partial_load_reports_how_many_variables_it_actually_restored(
+        self, tmp_path, caplog
+    ):
+        """`skip_mismatch=True` succeeds partially — say so, with a count.
+
+        Measured: only the two embedding tables mismatch when the vocab and
+        position sizes change; the encoder stack restores fine. The point of
+        the count is that "8 of 28" is visible instead of the load looking
+        total.
+        """
+        _, path = self._saved_tiny(tmp_path)
+
+        mismatched = DistilBERT.from_variant(
+            "tiny", vocab_size=512, max_position_embeddings=128
+        )
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            mismatched.load_pretrained_weights(path, skip_mismatch=True)
+
+        text = caplog.text
+        assert "skip_mismatch=True" in text
+        assert "of 28 variables changed value" in text, text
+        # The embedding tables are the ones that cannot be restored here.
+        emb = mismatched.embeddings.word_embeddings.embeddings
+        assert emb.shape[0] == 512
+
+    def test_a_load_that_restores_nothing_raises_rather_than_passing_silently(
+        self, tmp_path, monkeypatch
+    ):
+        """The backstop guard, proven to fire by a no-op `load_weights`.
+
+        A real file that restores literally zero variables is hard to
+        construct (a shape-mismatched file still restores the encoder stack —
+        see the test above), so the guard is exercised by neutering the load
+        itself. Without the guard this call would return successfully having
+        done nothing, which is exactly the failure it exists to catch.
+        """
+        _, path = self._saved_tiny(tmp_path)
+        model = DistilBERT.from_variant(
+            "tiny", vocab_size=256, max_position_embeddings=64
+        )
+        model(_tokens(), training=False)
+
+        monkeypatch.setattr(
+            type(model), "load_weights", lambda self, *a, **k: None, raising=True
+        )
+        with pytest.raises(ValueError, match="changed none of this model"):
+            model.load_pretrained_weights(path)
+
+    def test_missing_file_raises_file_not_found(self, tmp_path):
+        model = DistilBERT.from_variant(
+            "tiny", vocab_size=256, max_position_embeddings=64
+        )
+        with pytest.raises(FileNotFoundError):
+            model.load_pretrained_weights(
+                os.path.join(str(tmp_path), "does_not_exist.keras")
+            )
+
+    def test_keras_load_model_remains_the_simpler_route(self, tmp_path):
+        """The documented alternative, verified so the advice cannot rot."""
+        model, path = self._saved_tiny(tmp_path)
         restored = keras.models.load_model(path)
         for a, b in zip(model.weights, restored.weights):
             np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
