@@ -1406,5 +1406,397 @@ class TestUseGateCheckpointLayoutInvariant:
         assert cfg["use_gate"] is use_gate, cfg
 
 
+# ===========================================================================
+# TestSequenceModeAndCausalNormSafety
+# ===========================================================================
+
+
+class TestSequenceModeAndCausalNormSafety:
+    """Coverage for plan-2026-08-11-54118fdd steps 1-2 (D-001, D-002).
+
+    Two behaviours land here:
+
+    * ``input_mode="sequence"`` — a native rank-3 ``(B, L, D)`` contract on top
+      of an UNCHANGED internal 4-D body, so the ``.keras`` weight layout is
+      untouched (D-001).
+    * causal context-norm safety — the sequence-mode default norm became
+      ``"zero_centered_rms_norm"``, and an EXPLICIT sequence-axis-reducing norm
+      under ``causal=True`` now raises (D-002, finding F6).
+
+    .. warning::
+
+       Every causality probe in this class perturbs the future with FRESH
+       NON-DC noise, never with a constant offset. A DC perturbation measured
+       **1.9e-06** against a real leak of **1.067** on the very same code: the
+       input ``LayerNormalization`` removes a per-position DC shift before the
+       context stream ever sees it, so a DC probe is VACUOUS and would pass
+       against the unfixed layer. Each probe additionally asserts that the
+       perturbed region ITSELF moved, so a dead block cannot fake a green.
+    """
+
+    CHANNELS = 16
+    SHIFTS = [1, 2]
+    SEQ = 12
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _future_probe(cls, rank: int, seed: int, split: int):
+        """A pair of inputs identical up to ``split``, NON-DC noise after it.
+
+        :param rank: 3 for ``(B, L, D)``, 4 for ``(B, 1, L, D)``.
+        :param seed: RandomState seed.
+        :param split: First perturbed position; ``0..split-1`` are the "past".
+        :return: ``(x1, x2)`` float32 arrays of the requested rank.
+        """
+        rng = np.random.RandomState(seed)
+        shape = (
+            (4, cls.SEQ, cls.CHANNELS)
+            if rank == 3
+            else (4, 1, cls.SEQ, cls.CHANNELS)
+        )
+        x1 = rng.normal(size=shape).astype("float32")
+        x2 = x1.copy()
+        # Fresh independent draw per (position, channel): a per-position DC
+        # offset would be normalized away and prove nothing.
+        tail = rng.normal(size=x2[..., split:, :].shape).astype("float32") * 3.0
+        x2[..., split:, :] = tail
+        return x1, x2
+
+    @staticmethod
+    def _per_position_delta(out1, out2):
+        """max |delta| per sequence position, reduced over batch and channel."""
+        diff = np.abs(
+            keras.ops.convert_to_numpy(out1) - keras.ops.convert_to_numpy(out2)
+        )
+        # Sequence axis is the SECOND-TO-LAST axis at both ranks (D-001 I-3).
+        axes = tuple(i for i in range(diff.ndim) if i != diff.ndim - 2)
+        return diff.max(axis=axes)
+
+    # ------------------------------------------------------------------
+    # T1 — F6 regression: the causal DEFAULT no longer leaks
+    # ------------------------------------------------------------------
+
+    def test_causal_default_norm_has_no_future_leak(self):
+        """``CliffordNetBlock(causal=True)`` at its DEFAULT norm leaks 0.
+
+        Before D-002 the BASE class kept ``normalization_type="batch_norm"``
+        even under ``causal=True``; ``batch_norm`` reduces over ``(B, H, W)``
+        and on the causal path W IS the sequence axis, so at ``training=True``
+        every position's context normalization saw the whole sequence. Measured
+        leak on this exact probe shape: **0.3302** on a 3.393-scale signal
+        before the fix, **0.0** after.
+        """
+        keras.utils.set_random_seed(7)
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            causal=True,
+            layer_scale_init=1.0,
+        )
+        split = 8
+        x1, x2 = self._future_probe(rank=4, seed=11, split=split)
+
+        out1 = block(x1, training=True)
+        out2 = block(x2, training=True)
+        per_pos = self._per_position_delta(out1, out2)
+
+        # Non-degeneracy FIRST: if the perturbation did nothing, the causality
+        # assertion below is vacuous.
+        assert per_pos[split:].max() > 1e-3, (
+            "the perturbed FUTURE region did not move "
+            f"(max |delta| {per_pos[split:].max()}) — the probe is degenerate "
+            "and the causality assertion below would pass against any layer"
+        )
+        assert per_pos[:split].max() == 0.0, (
+            "future leaked into the past at the causal DEFAULT norm: "
+            f"per-position past deltas {per_pos[:split]} "
+            f"(normalization_type={block.normalization_type!r})"
+        )
+
+    # ------------------------------------------------------------------
+    # T2 — the explicit unsafe-norm raise, positives AND negatives
+    # ------------------------------------------------------------------
+
+    UNSAFE_NORMS = ["batch_norm", "bias_free_batch_norm", "global_response_norm"]
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_unsafe_norm_raises_under_causal(self, norm_type):
+        """All three measured sequence-axis-reducing types are rejected."""
+        with pytest.raises(ValueError, match="sequence axis"):
+            CliffordNetBlock(
+                channels=self.CHANNELS,
+                shifts=self.SHIFTS,
+                causal=True,
+                normalization_type=norm_type,
+            )
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_unsafe_norm_accepted_in_image_mode(self, norm_type):
+        """NEGATIVE case: image mode is allowed to reduce over space.
+
+        ``batch_norm`` is the image-mode DEFAULT and is load-bearing for the
+        ``xfail(strict=True)`` at
+        ``test_video_jepa.py::test_predictor_graph_mode_dropout_zero``. A raise
+        that fired here would break that suite.
+        """
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            normalization_type=norm_type,
+        )
+        assert block.normalization_type == norm_type
+        assert block.input_mode == "image"
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_unsafe_norm_accepted_in_noncausal_sequence(self, norm_type):
+        """NEGATIVE case: a BIDIRECTIONAL encoder may mix across positions."""
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            normalization_type=norm_type,
+        )
+        assert block.normalization_type == norm_type
+        assert block.causal is False
+
+    def test_resolved_default_is_accepted_under_causal(self):
+        """NEGATIVE case: the raise must be reachable only from a caller value.
+
+        The mode-derived default resolves to ``"zero_centered_rms_norm"``, so a
+        raise keyed on the RESOLVED type instead of the SUPPLIED one would make
+        ``CliffordNetBlock(causal=True)`` itself unconstructible.
+        """
+        block = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, causal=True,
+        )
+        assert block.normalization_type == "zero_centered_rms_norm"
+        assert block.input_mode == "sequence"
+        # The subclass must be unaffected too (invariant I-5).
+        assert (
+            CausalCliffordNetBlock(
+                channels=self.CHANNELS, shifts=self.SHIFTS,
+            ).normalization_type
+            == "zero_centered_rms_norm"
+        )
+
+    # ------------------------------------------------------------------
+    # T6a — rank-3 in, rank-3 out
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("factory_name", ["explicit_sequence", "causal_subclass"])
+    def test_rank3_in_rank3_out(self, factory_name):
+        """A rank-3 ``(B, L, D)`` input returns a rank-3 output.
+
+        The internal representation stays 4-D (D-001 / invariant I-2); the H=1
+        axis is added and removed inside ``call()``, so the public rank is
+        preserved and ``compute_output_shape`` agrees.
+        """
+        if factory_name == "explicit_sequence":
+            block = CliffordNetBlock(
+                channels=self.CHANNELS, shifts=self.SHIFTS, input_mode="sequence",
+            )
+        else:
+            block = CausalCliffordNetBlock(
+                channels=self.CHANNELS, shifts=self.SHIFTS,
+            )
+        x = np.random.RandomState(3).normal(
+            size=(2, self.SEQ, self.CHANNELS)
+        ).astype("float32")
+
+        y = block(x, training=False)
+        assert len(y.shape) == 3, f"expected rank-3 output, got {y.shape}"
+        assert tuple(y.shape) == x.shape
+        assert block.compute_output_shape(x.shape) == x.shape
+        assert np.isfinite(keras.ops.convert_to_numpy(y)).all()
+
+    # ------------------------------------------------------------------
+    # T6b — causal rank-3 has zero future leakage
+    # ------------------------------------------------------------------
+
+    def test_causal_rank3_has_no_future_leakage(self):
+        """The rank-3 contract must not lose causality on the way in/out."""
+        keras.utils.set_random_seed(13)
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            causal=True,
+            layer_scale_init=1.0,
+        )
+        split = 8
+        x1, x2 = self._future_probe(rank=3, seed=21, split=split)
+
+        per_pos = self._per_position_delta(
+            block(x1, training=True), block(x2, training=True)
+        )
+        assert per_pos[split:].max() > 1e-3, (
+            f"degenerate probe — future region max |delta| {per_pos[split:].max()}"
+        )
+        assert per_pos[:split].max() == 0.0, (
+            f"future leaked into the past at rank 3: {per_pos[:split]}"
+        )
+
+    # ------------------------------------------------------------------
+    # T6c — the DISCRIMINATION test
+    # ------------------------------------------------------------------
+
+    def test_noncausal_sequence_is_bidirectional_while_causal_is_not(self):
+        """Non-causal sequence mode DOES move the past; causal does not.
+
+        This is what proves the zero-leak assertions above are not vacuous: the
+        same probe, the same shapes, the same assertion machinery, opposite
+        outcomes. Only the DISCRIMINATION is asserted (causal == 0 AND
+        non-causal > 0), never an absolute magnitude — at the class default
+        ``layer_scale_init=1e-5`` the non-causal delta is ~1e-06 purely because
+        the layer scale multiplies the whole output, which says nothing about
+        bidirectionality. ``layer_scale_init=1.0`` is therefore used here so the
+        measured signal is the mechanism, not the scale.
+
+        The perturbation is at the LAST position and the past is probed at the
+        positions immediately before it: the non-causal context is two stacked
+        ``(1, 3)`` same-padded depthwise convolutions, i.e. a 5-position
+        receptive field, so position 0 is legitimately unreachable from
+        position L-1 and asserting on it would be wrong.
+        """
+        split = self.SEQ - 1
+        x1, x2 = self._future_probe(rank=3, seed=31, split=split)
+
+        keras.utils.set_random_seed(5)
+        causal = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            causal=True,
+            layer_scale_init=1.0,
+        )
+        keras.utils.set_random_seed(5)
+        bidir = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            layer_scale_init=1.0,
+        )
+
+        causal_pos = self._per_position_delta(
+            causal(x1, training=True), causal(x2, training=True)
+        )
+        bidir_pos = self._per_position_delta(
+            bidir(x1, training=True), bidir(x2, training=True)
+        )
+
+        # Non-degeneracy: both blocks must react at the perturbed position.
+        assert causal_pos[split] > 1e-3 and bidir_pos[split] > 1e-3, (
+            f"degenerate probe — causal {causal_pos[split]}, "
+            f"non-causal {bidir_pos[split]}"
+        )
+        assert causal_pos[:split].max() == 0.0, (
+            f"causal block leaked backwards: {causal_pos[:split]}"
+        )
+        assert bidir_pos[:split].max() > 0.0, (
+            "non-causal sequence mode did NOT propagate a future change "
+            f"backwards ({bidir_pos[:split]}) — it is not bidirectional, which "
+            "means the causal assertion above cannot discriminate the two modes"
+        )
+
+    # ------------------------------------------------------------------
+    # T6d — rank-3 and rank-4 parity at the SAME weights
+    # ------------------------------------------------------------------
+
+    def test_rank3_and_rank4_are_identical(self):
+        """One layer instance, one weight set, two input ranks, identical out.
+
+        The layer is built on rank 4 and then fed rank 3, which is the ordering
+        that catches keying the expand/squeeze off the BUILD rank instead of the
+        rank of the CURRENT call (D-001 implementation note b).
+        """
+        keras.utils.set_random_seed(17)
+        block = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            layer_scale_init=1.0,
+        )
+        x3 = np.random.RandomState(5).normal(
+            size=(2, self.SEQ, self.CHANNELS)
+        ).astype("float32")
+        x4 = x3.reshape(2, 1, self.SEQ, self.CHANNELS)
+
+        y4 = keras.ops.convert_to_numpy(block(x4, training=False))
+        y3 = keras.ops.convert_to_numpy(block(x3, training=False))
+
+        assert y4.shape == (2, 1, self.SEQ, self.CHANNELS)
+        assert y3.shape == (2, self.SEQ, self.CHANNELS)
+        # Anti-vacuity: an all-zero output would make any delta 0.
+        assert np.abs(y3).max() > 0.0
+        delta = float(np.max(np.abs(y3 - y4.reshape(y3.shape))))
+        assert delta == 0.0, (
+            f"rank-3 and rank-4 outputs differ by {delta} at identical weights"
+        )
+
+    # ------------------------------------------------------------------
+    # T7 — `.keras` round-trip in sequence mode, value-exact
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("causal", [True, False])
+    def test_sequence_round_trip_is_value_exact(self, causal):
+        """Save/load a rank-3 sequence model and compare weights AND outputs.
+
+        Follows :class:`TestUseGateCheckpointLayoutInvariant`: EVERY weight is
+        randomized before saving, because a layer whose weights are silently
+        re-initialized on load round-trips "correctly" when both draws come from
+        the same seeded RNG. The resolved norm here
+        (``zero_centered_rms_norm``) deliberately owns no variance-like weight,
+        so an unsigned-quantity constraint cannot turn the randomization itself
+        into a probe artifact.
+        """
+        kwargs = dict(channels=self.CHANNELS, shifts=self.SHIFTS, name="blk")
+        if causal:
+            block = CliffordNetBlock(causal=True, **kwargs)
+        else:
+            block = CliffordNetBlock(input_mode="sequence", **kwargs)
+        assert block.normalization_type == "zero_centered_rms_norm"
+
+        inputs = keras.Input(shape=(self.SEQ, self.CHANNELS))
+        model = keras.Model(inputs, block(inputs))
+
+        rng = np.random.RandomState(1 if causal else 2)
+        for w in model.weights:
+            w.assign(rng.normal(size=w.shape).astype("float32") * 0.1)
+
+        x = np.random.RandomState(9).normal(
+            size=(2, self.SEQ, self.CHANNELS)
+        ).astype("float32")
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+        assert np.abs(before).max() > 0.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seq_block.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(restored(x, training=False))
+
+        assert len(restored.weights) == len(model.weights)
+        assert restored.get_layer("blk").input_mode == "sequence"
+        dw = max(
+            float(
+                np.max(
+                    np.abs(
+                        keras.ops.convert_to_numpy(a)
+                        - keras.ops.convert_to_numpy(b)
+                    )
+                )
+            )
+            for a, b in zip(model.weights, restored.weights)
+        )
+        assert dw == 0.0, (
+            f"max|dW| = {dw} after a sequence-mode .keras round-trip "
+            f"(causal={causal}); the reloaded block is not carrying the SAVED "
+            "weights"
+        )
+        dy = float(np.max(np.abs(before - after)))
+        assert dy == 0.0, f"max|dY| = {dy} at causal={causal}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
