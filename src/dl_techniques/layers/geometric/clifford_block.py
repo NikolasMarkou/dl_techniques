@@ -300,6 +300,46 @@ Implementation notes, known behaviours and deviations
    default is left alone rather than "corrected", to avoid silently changing
    the behaviour of existing checkpoints.
 
+8. Sequence mode has NO masking support, and a padded batch is NOT equivalent
+   to an unpadded one.  ``supports_masking`` is ``False`` (MEASURED on a
+   constructed block), so a Keras mask arriving from e.g.
+   ``Embedding(mask_zero=True)`` is DESTROYED with a ``UserWarning`` and never
+   reaches this layer; zero padding is then processed as ordinary data.  Two
+   separate effects, measured at ``channels=8``, ``shifts=[1, 2]``,
+   ``layer_scale_init=1.0``, ``training=False``, a 6-token real prefix,
+   output absmax ~2.5::
+
+       use_global_context   pad-to-8 vs pad-to-12, real positions 0..5
+       ------------------   ------------------------------------------
+       False                [0, 0, 0, 0, 0, 0]        (exactly zero)
+       True                 [0.074, 0.116, 0.093, 0.097, 0.061, 0.449]
+
+   * **Boundary effect (always).**  The two stacked same-padded depthwise
+     convolutions pull zero pad into the receptive field of the real positions
+     within (2K-2) of the boundary.  Measured unpadded ``L=6`` vs padded-to-8
+     with ``use_global_context=False``: ``[0, 0, 0, 0, 0, 1.183]`` -- the LAST
+     real position changes by 1.183 on a ~2.4-scale output, everything before
+     it by exactly 0.  Adding *more* pad beyond that margin changes nothing
+     (the pad-to-8 vs pad-to-12 row above is exactly zero), so this effect
+     depends on the PRESENCE of padding, not on its length.
+   * **Global-pool effect (the worst case, ``use_global_context=True``).**
+     The global branch takes ``mean(axis=[1, 2])`` over the WHOLE padded
+     length, so the pad LENGTH itself changes EVERY real position: the same
+     6-token prefix padded to 12 instead of to 8 moves positions 0..3 by up to
+     **0.116** and the whole real prefix by **0.449** (an independent
+     adversarial review measured **0.186** on positions 0..3 from its own
+     draw).  Batch composition therefore changes each sequence's output.
+
+   Masking is deliberately NOT implemented here -- it is a new capability
+   (mask propagation through two convolutions, the pooled branch and the
+   normalizations), not a repair.  Until it is: bucket sequences by length so
+   a batch needs little or no padding, or pool with an EXPLICIT mask outside
+   the block (``models/clip/clifford_clip.py``'s text tower already does
+   exactly this).  Both effects are pinned as known behaviour by
+   ``TestSequencePaddingHazard`` in
+   ``tests/test_layers/test_geometric/test_clifford_block.py``; if masking is
+   ever added, those tests FAIL and this note must be rewritten.
+
 Key primitives
 --------------
 - :class:`SparseRollingGeometricProduct`  -- shifted dot + wedge interaction
@@ -372,6 +412,12 @@ _SEQUENCE_REDUCING_NORMS: FrozenSet[str] = frozenset({
     "bias_free_batch_norm",    # same reduction-axis logic, at training=True
     "global_response_norm",    # reduces over (H, W) UNCONDITIONALLY - not training-gated
 })
+
+# The per-position context norm used for every sequence-mode block, and the
+# substitute `from_config` puts in place of a LEGACY sequence-reducing choice.
+# Single source of truth: the sequence-mode default resolution, the
+# `CausalCliffordNetBlock` setdefault and the legacy-config repair all read it.
+_CAUSAL_SAFE_NORM: str = "zero_centered_rms_norm"
 
 
 # ---------------------------------------------------------------------------
@@ -1115,6 +1161,15 @@ class CliffordNetBlock(keras.layers.Layer):
         geometries register DIFFERENT depthwise kernel shapes — ``(1, K, D, 1)``
         vs ``(K, K, D, 1)`` — so an inferred mode would make the saved weight
         layout a function of the first tensor seen.
+
+        **Sequence mode does NOT support masking, and padded batches are not
+        neutral.** ``supports_masking`` is ``False``, so a Keras mask (e.g.
+        from ``Embedding(mask_zero=True)``) is DESTROYED here with a
+        ``UserWarning``, and zero padding participates in the computation like
+        any other value. Two distinct, measured consequences — see note 8 in
+        the module docstring for the numbers and for what to do instead
+        (bucket by length, or pool with an explicit mask OUTSIDE the block, as
+        ``models/clip/clifford_clip.py`` already does for its text tower).
     :type input_mode: Optional[InputMode]
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
@@ -1166,7 +1221,10 @@ class CliffordNetBlock(keras.layers.Layer):
         together with ``causal=True`` raises ``ValueError``: those types reduce
         over the sequence axis, so the future leaks into the past. The check is
         not gated on ``training`` because ``"global_response_norm"`` reduces
-        unconditionally. Non-causal sequence mode is deliberately NOT
+        unconditionally. The raise is a CONSTRUCTOR-only rule: a LEGACY
+        config carrying that combination is repaired (with a warning) by
+        :meth:`from_config`, so pre-fix checkpoints stay loadable.
+        Non-causal sequence mode is deliberately NOT
         restricted — a bidirectional encoder is allowed to mix across
         positions.
     :type normalization_type: Optional[str]
@@ -1181,6 +1239,11 @@ class CliffordNetBlock(keras.layers.Layer):
     :type input_normalization_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Passed to ``keras.layers.Layer``.
     """
+
+    #: Whether this class pins ``causal=True`` regardless of the config dict.
+    #: Read by :meth:`from_config` so a config that omits the ``causal`` key is
+    #: still recognised as causal for subclasses that force it.
+    _FORCES_CAUSAL: bool = False
 
     def __init__(
         self,
@@ -1250,7 +1313,7 @@ class CliffordNetBlock(keras.layers.Layer):
         # resolved default can never trip it.
         if normalization_type is None:
             resolved_normalization_type: str = (
-                "zero_centered_rms_norm"
+                _CAUSAL_SAFE_NORM
                 if resolved_input_mode == "sequence"
                 else "batch_norm"
             )
@@ -1624,6 +1687,9 @@ class CliffordNetBlock(keras.layers.Layer):
         :param training: Whether in training mode.
         :return: Residual term with the SAME rank and shape as ``inputs``; the
             caller adds it to ``inputs``.
+        :raises ValueError: In sequence mode, if a rank-4 input has a
+            statically-known axis 1 other than 1. This is re-checked per call,
+            not only at build time, because a built layer accepts either rank.
         """
         # Rank-3 sequence input is lifted to the internal 4-D representation
         # (D-001) and squeezed back at the end; the body below always sees
@@ -1632,6 +1698,36 @@ class CliffordNetBlock(keras.layers.Layer):
         # behaves correctly if the equivalent (B, 1, L, D) is fed later (the
         # sub-layers are built on the internal 4-D shape either way).
         call_rank = len(inputs.shape)
+        # DECISION plan-2026-08-11T110821-54118fdd/D-013
+        # The "axis 1 must be a singleton" contract is re-checked HERE, not only
+        # in build(): `InputSpec(min_ndim=3, max_ndim=4)` carries no axis
+        # constraint, so an already-built sequence block otherwise silently
+        # accepts H != 1 -- measured, a block built on (2,12,8) then fed
+        # (2,5,12,8) was ACCEPTED and returned (2,5,12,8). The dangerous case is
+        # the axis-convention mix-up invariant I-3 forbids: a (B, L, 1, D)
+        # tensor (squeeze_excitation.py's opposite mapping) is convolved along a
+        # LENGTH-1 sequence axis, so there is no cross-position mixing at all,
+        # and no error and no warning today.
+        # Do NOT rewrite this as a check on a traced TENSOR shape
+        # (`keras.ops.shape(inputs)[1]`) guarded by a Python `if`: axis 1 is
+        # static by contract, and a data-dependent Python `if` on a traced
+        # tensor is silently turned into a `tf.cond` by AutoGraph (this repo
+        # carries a live strict=True xfail caused by exactly that mistake in
+        # BatchNormalization). The `is not None` short-circuit keeps a fully
+        # dynamic shape building, matching the build()-time guard. See
+        # decisions.md D-013.
+        if self.input_mode == "sequence" and call_rank == 4:
+            static_h = inputs.shape[1]
+            if static_h is not None and static_h != 1:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"singleton axis 1 for rank-4 input (B, 1, L, D): the "
+                    f"sequence axis is axis 2. Got shape {tuple(inputs.shape)} "
+                    f"with axis 1 = {static_h}. If this is a (B, L, 1, D) "
+                    f"tensor, the axes are transposed — pass (B, L, D) or "
+                    f"(B, 1, L, D) instead; a length-1 axis 2 would be "
+                    f"convolved as the sequence and mix nothing."
+                )
         if call_rank == 3:
             x_prev = keras.ops.expand_dims(inputs, axis=1)
         else:
@@ -1831,6 +1927,62 @@ class CliffordNetBlock(keras.layers.Layer):
         )
         return config
 
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CliffordNetBlock":
+        """Reconstruct from a config, REPAIRING legacy causal configs.
+
+        The constructor rejects a ``_SEQUENCE_REDUCING_NORMS`` type under
+        ``causal=True``. That combination is exactly what a PRE-FIX checkpoint
+        serializes: before this plan the base class resolved
+        ``normalization_type`` to ``"batch_norm"`` for every block including a
+        causal one, so ``CliffordNetBlock(causal=True)`` wrote
+        ``{"causal": True, "normalization_type": "batch_norm"}`` into its
+        ``.keras`` file. Deserializing that dict through the constructor raises
+        (Keras re-types the ``ValueError`` to
+        ``TypeError: Error when deserializing class 'CliffordNetBlock'``), which
+        would strand every such checkpoint with no recovery path.
+
+        This override detects that LEGACY combination and substitutes
+        ``_CAUSAL_SAFE_NORM``, logging a warning. The loaded model is therefore
+        NOT numerically identical to the saved one -- it is the saved model with
+        the causality violation removed.
+
+        :param config: Config dict as produced by :meth:`get_config`.
+        :return: A constructed block.
+        """
+        config = dict(config)
+        # DECISION plan-2026-08-11T110821-54118fdd/D-012
+        # Do NOT move this repair into `__init__`, and do NOT relax the
+        # constructor raise to a warning "for symmetry". The two paths are
+        # deliberately asymmetric: fresh code writing
+        # `CliffordNetBlock(causal=True, normalization_type="batch_norm")` is
+        # stating an intent that is measurably wrong (leak 1.067 on a
+        # 4.95-scale signal) and must fail loudly, while a config dict is a
+        # RECORD of a past construction that can no longer be re-decided --
+        # refusing it deletes access to trained weights and fixes nothing.
+        # `cls._FORCES_CAUSAL` is consulted as well as the `causal` key because
+        # `CausalCliffordNetBlock` forces `causal=True` in `__init__`, so a
+        # hand-written config for it need not carry the key at all. See
+        # decisions.md D-012.
+        causal = bool(config.get("causal", False)) or cls._FORCES_CAUSAL
+        legacy_norm = config.get("normalization_type")
+        if causal and legacy_norm in _SEQUENCE_REDUCING_NORMS:
+            config["normalization_type"] = _CAUSAL_SAFE_NORM
+            logger.warning(
+                f"{cls.__name__}: loading a LEGACY causal config whose "
+                f"normalization_type={legacy_norm!r} reduces over the sequence "
+                f"axis. The checkpoint was trained with a context normalizer "
+                f"that leaks the future into the past (measured max |delta| "
+                f"1.067 on a 4.95-scale signal); the loaded model uses "
+                f"{_CAUSAL_SAFE_NORM!r} instead. The loaded model is therefore "
+                f"NOT numerically identical to the saved one — its causality "
+                f"violation has been removed, which changes its outputs. "
+                f"Re-train or re-export to silence this warning."
+            )
+        return super().from_config(config)
+
 
 # ---------------------------------------------------------------------------
 # CausalCliffordNetBlock -- sequence-safe variant for autoregressive LMs
@@ -1867,13 +2019,17 @@ class CausalCliffordNetBlock(CliffordNetBlock):
         ``"zero_centered_rms_norm"``.
     """
 
+    #: This subclass can never be non-causal (``__init__`` forces the flag), so
+    #: ``from_config`` must treat a config that omits ``causal`` as causal too.
+    _FORCES_CAUSAL: bool = True
+
     def __init__(self, **kwargs: Any) -> None:
         # Preserve the causal-specific context-norm default while letting the
         # caller override it explicitly. Redundant since the base class resolves
         # the same value for sequence mode, but kept so this subclass keeps
         # OWNING its documented default rather than inheriting it silently: if
         # the base default ever moves again, this class does not move with it.
-        kwargs.setdefault("normalization_type", "zero_centered_rms_norm")
+        kwargs.setdefault("normalization_type", _CAUSAL_SAFE_NORM)
         # Force causal=True even if a from_config dict carries a `causal` key,
         # so this subclass can never be built non-causal (and never raises a
         # duplicate-kwarg TypeError).

@@ -2390,5 +2390,530 @@ class TestCharacterizationWedgeAndActivations:
         )
 
 
+# ===========================================================================
+# TestLegacyCausalConfigRepair -- plan-2026-08-11-54118fdd iter-1/step-1.1
+# (review concern 1: the D-002 raise made pre-fix checkpoints unloadable)
+# ===========================================================================
+
+
+class TestLegacyCausalConfigRepair:
+    """``from_config`` repairs LEGACY causal configs; the ctor still raises.
+
+    Before this plan the base class resolved ``normalization_type`` to
+    ``"batch_norm"`` for EVERY block, causal included, so a pre-fix
+    ``CliffordNetBlock(causal=True)`` serialized
+    ``{"causal": True, "normalization_type": "batch_norm"}`` -- exactly the
+    combination D-002's new constructor raise rejects. An adversarial review
+    MEASURED the consequence: ``CliffordNetBlock.from_config(<old causal
+    config>)`` raised ``TypeError: Error when deserializing class
+    'CliffordNetBlock'`` (Keras re-types the constructor ``ValueError``), i.e.
+    the fix stranded every such checkpoint.
+
+    D-012 makes the two paths deliberately ASYMMETRIC, and both halves are
+    asserted here:
+
+    * ``from_config`` substitutes ``"zero_centered_rms_norm"`` and warns --
+      a config is a RECORD of a past construction that cannot be re-decided,
+      and refusing it deletes access to trained weights;
+    * the CONSTRUCTOR still raises -- fresh code stating that intent is
+      measurably wrong (leak 1.067 on a 4.95-scale signal) and must fail loud.
+    """
+
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+
+    UNSAFE_NORMS = ["batch_norm", "bias_free_batch_norm", "global_response_norm"]
+
+    @classmethod
+    def _legacy_config(cls, norm_type, causal=True, drop_causal=False, **extra):
+        """A pre-fix causal config: the resolved OLD default + ``causal``."""
+        base = CliffordNetBlock(
+            channels=cls.CHANNELS, shifts=cls.SHIFTS, causal=causal, **extra
+        ).get_config()
+        base["normalization_type"] = norm_type
+        if drop_causal:
+            base.pop("causal")
+        return base
+
+    # ------------------------------------------------------------------
+    # A1 -- the reviewer's exact reproduction, now loadable
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_legacy_causal_config_loads_with_a_safe_norm(self, norm_type):
+        """``from_config`` accepts the legacy combination and substitutes."""
+        block = CliffordNetBlock.from_config(self._legacy_config(norm_type))
+
+        assert block.causal is True
+        assert block.normalization_type == "zero_centered_rms_norm", (
+            f"a LEGACY causal config carrying normalization_type="
+            f"{norm_type!r} must be repaired to 'zero_centered_rms_norm', got "
+            f"{block.normalization_type!r}"
+        )
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_legacy_causal_subclass_config_loads(self, norm_type):
+        """``CausalCliffordNetBlock.from_config`` is repaired too.
+
+        The reviewer measured this class failing identically. It is covered
+        separately because the subclass forces ``causal=True`` in
+        ``__init__``, so the repair must not depend on the ``causal`` key.
+        """
+        cfg = self._legacy_config(norm_type, drop_causal=True)
+        block = CausalCliffordNetBlock.from_config(cfg)
+
+        assert block.causal is True
+        assert block.normalization_type == "zero_centered_rms_norm"
+
+    def test_repaired_legacy_block_runs_and_is_causal(self):
+        """The repaired block is USABLE and no longer leaks the future.
+
+        A config that loads but produces a dead layer would satisfy the two
+        tests above while being worthless, so the repaired block is run: it
+        must forward, and (this being the whole point of the substitution) it
+        must not leak a NON-DC future perturbation into the past.
+        """
+        keras.utils.set_random_seed(13)
+        # layer_scale_init=1.0, never the layer's own 1e-5 default: at 1e-5 the
+        # whole block output is ~1e-05 in scale and a leak probe measures
+        # nothing but rounding (measured future-side movement 2.96e-05).
+        block = CliffordNetBlock.from_config(
+            self._legacy_config("batch_norm", layer_scale_init=1.0)
+        )
+
+        rng = np.random.RandomState(5)
+        x1 = rng.normal(size=(4, 1, 12, self.CHANNELS)).astype("float32")
+        x2 = x1.copy()
+        x2[..., 8:, :] = rng.normal(size=x2[..., 8:, :].shape).astype("float32") * 3.0
+
+        y1 = keras.ops.convert_to_numpy(block(x1, training=True))
+        y2 = keras.ops.convert_to_numpy(block(x2, training=True))
+        per_pos = np.abs(y1 - y2).max(axis=(0, 1, 3))
+
+        assert per_pos[8:].max() > 1e-3, (
+            f"the perturbed FUTURE region did not move ({per_pos[8:].max()}) "
+            "— the causality assertion below would be vacuous"
+        )
+        assert per_pos[:8].max() == 0.0, (
+            f"the REPAIRED legacy block still leaks: {per_pos[:8]}"
+        )
+
+    def test_legacy_repair_warns_that_numerics_changed(self, caplog):
+        """The substitution is LOUD, and says the model changed.
+
+        Silently swapping a normalizer changes what the checkpoint computes.
+        The warning must therefore name all three facts, not merely mention
+        that something was substituted.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            CliffordNetBlock.from_config(self._legacy_config("batch_norm"))
+
+        text = caplog.text
+        assert "batch_norm" in text
+        assert "zero_centered_rms_norm" in text
+        assert "leaks the future into the past" in text, (
+            f"the warning must say WHY the checkpoint's normalizer was "
+            f"rejected; got: {text!r}"
+        )
+        assert "NOT numerically identical" in text, (
+            f"the warning must say the loaded model differs from the saved "
+            f"one; got: {text!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # A2 -- the constructor raise is NOT weakened
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("norm_type", UNSAFE_NORMS)
+    def test_constructor_still_raises_for_fresh_code(self, norm_type):
+        """Only DESERIALIZATION softens; ``__init__`` still refuses.
+
+        This is the half that a "just make from_config work" fix would break
+        by moving the repair into ``__init__``.
+        """
+        with pytest.raises(ValueError, match="sequence axis"):
+            CliffordNetBlock(
+                channels=self.CHANNELS,
+                shifts=self.SHIFTS,
+                causal=True,
+                normalization_type=norm_type,
+            )
+        with pytest.raises(ValueError, match="sequence axis"):
+            CausalCliffordNetBlock(
+                channels=self.CHANNELS,
+                shifts=self.SHIFTS,
+                normalization_type=norm_type,
+            )
+
+    def test_from_config_leaves_safe_and_noncausal_configs_untouched(self):
+        """The repair fires ONLY on the legacy causal combination.
+
+        Without this, a ``from_config`` that rewrote ``normalization_type``
+        unconditionally would pass every test above while silently changing
+        image-mode and non-causal checkpoints.
+        """
+        img = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS
+        ).get_config()
+        assert (
+            CliffordNetBlock.from_config(img).normalization_type == "batch_norm"
+        ), "an IMAGE-mode batch_norm config must not be rewritten"
+
+        seq = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            normalization_type="batch_norm",
+        ).get_config()
+        assert (
+            CliffordNetBlock.from_config(seq).normalization_type == "batch_norm"
+        ), "a NON-CAUSAL sequence config is allowed to mix across positions"
+
+        safe = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, causal=True
+        ).get_config()
+        assert (
+            CliffordNetBlock.from_config(safe).normalization_type
+            == "zero_centered_rms_norm"
+        )
+
+    def test_legacy_repair_survives_a_full_keras_load(self):
+        """End-to-end: a saved model whose config was rewritten to the legacy
+        combination still loads through ``keras.models.load_model``.
+
+        ``from_config`` in isolation is not the path a user takes; this pins
+        the whole deserialization chain (which is where the reviewer's
+        ``TypeError`` was re-typed and surfaced).
+        """
+        keras.utils.set_random_seed(3)
+        inp = keras.Input(shape=(12, self.CHANNELS))
+        block = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, causal=True
+        )
+        model = keras.Model(inp, block(inp))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.keras")
+            model.save(path)
+            # Rewrite the stored config in place to the PRE-FIX combination.
+            import json
+            import zipfile
+
+            cfg_name = "config.json"
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                blobs = {n: zf.read(n) for n in names}
+            cfg = json.loads(blobs[cfg_name].decode("utf-8"))
+            raw = json.dumps(cfg).replace(
+                '"normalization_type": "zero_centered_rms_norm"',
+                '"normalization_type": "batch_norm"',
+            )
+            assert '"normalization_type": "batch_norm"' in raw, (
+                "the test failed to inject the legacy value into the saved "
+                "config — it would then assert nothing"
+            )
+            blobs[cfg_name] = raw.encode("utf-8")
+            with zipfile.ZipFile(path, "w") as zf:
+                for n in names:
+                    zf.writestr(n, blobs[n])
+
+            loaded = keras.models.load_model(path)
+
+        reloaded_block = [
+            lyr for lyr in loaded.layers if isinstance(lyr, CliffordNetBlock)
+        ][0]
+        assert reloaded_block.normalization_type == "zero_centered_rms_norm"
+
+
+# ===========================================================================
+# TestSequenceSingletonAxisAtCallTime -- review concern 4
+# ===========================================================================
+
+
+class TestSequenceSingletonAxisAtCallTime:
+    """The "axis 1 must be a singleton" contract holds per CALL, not per build.
+
+    ``InputSpec(min_ndim=3, max_ndim=4)`` carries no axis constraint and
+    ``call()`` branched only on rank, so an already-built sequence block
+    silently accepted ``H != 1``. MEASURED before this fix: a block built on
+    ``(2, 12, 8)`` then fed ``(2, 5, 12, 8)`` was ACCEPTED and returned
+    ``(2, 5, 12, 8)``; a causal block built on ``(2, 1, 12, 8)`` then fed
+    ``(2, 3, 12, 8)`` was ACCEPTED. The dangerous variant is the axis-convention
+    mix-up invariant I-3 names -- a ``(B, L, 1, D)`` tensor is convolved along a
+    LENGTH-1 sequence axis, mixing nothing, with no error and no warning.
+    """
+
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+    SEQ = 12
+
+    def _built_block(self, build_shape, **kwargs):
+        blk = CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            **kwargs,
+        )
+        blk.build(build_shape)
+        return blk
+
+    def test_rank3_built_block_rejects_nonsingleton_rank4(self):
+        """The reviewer's first reproduction: built ``(2,12,8)``, fed H=5."""
+        blk = self._built_block((2, self.SEQ, self.CHANNELS))
+        x = np.zeros((2, 5, self.SEQ, self.CHANNELS), dtype="float32")
+        with pytest.raises(ValueError, match="singleton axis 1"):
+            blk(x)
+
+    def test_causal_built_block_rejects_nonsingleton_rank4(self):
+        """The reviewer's second reproduction: built ``(2,1,12,8)``, fed H=3."""
+        blk = self._built_block((2, 1, self.SEQ, self.CHANNELS), causal=True)
+        x = np.zeros((2, 3, self.SEQ, self.CHANNELS), dtype="float32")
+        with pytest.raises(ValueError, match="singleton axis 1"):
+            blk(x)
+
+    def test_transposed_axis_convention_is_rejected(self):
+        """The I-3 mix-up: a ``(B, L, 1, D)`` tensor after a rank-3 build.
+
+        This is the silent one -- it has a legal rank, a singleton axis in the
+        WRONG place, and would convolve a length-1 sequence axis, producing no
+        cross-position mixing whatsoever and no complaint.
+        """
+        blk = self._built_block((2, self.SEQ, self.CHANNELS))
+        x = np.zeros((2, self.SEQ, 1, self.CHANNELS), dtype="float32")
+        with pytest.raises(ValueError, match="singleton axis 1"):
+            blk(x)
+
+    def test_singleton_rank4_and_rank3_still_accepted(self):
+        """The guard must not reject the two SHAPES that are contractual."""
+        blk = self._built_block((2, self.SEQ, self.CHANNELS))
+        rng = np.random.RandomState(1)
+        x3 = rng.normal(size=(2, self.SEQ, self.CHANNELS)).astype("float32")
+        x4 = x3.reshape(2, 1, self.SEQ, self.CHANNELS)
+
+        y3 = keras.ops.convert_to_numpy(blk(x3))
+        y4 = keras.ops.convert_to_numpy(blk(x4))
+        assert y3.shape == (2, self.SEQ, self.CHANNELS)
+        assert y4.shape == (2, 1, self.SEQ, self.CHANNELS)
+        assert np.array_equal(y3, y4.reshape(y3.shape))
+
+    def test_image_mode_is_unaffected(self):
+        """Image mode legitimately has H > 1 and must NOT be touched.
+
+        The obvious over-tightening of this guard is to apply it on rank, not
+        on ``input_mode`` -- which would break every image consumer.
+        """
+        blk = CliffordNetBlock(channels=self.CHANNELS, shifts=self.SHIFTS)
+        rng = np.random.RandomState(2)
+        x = rng.normal(size=(2, 8, 8, self.CHANNELS)).astype("float32")
+        y = keras.ops.convert_to_numpy(blk(x))
+        assert y.shape == (2, 8, 8, self.CHANNELS)
+
+    def test_guard_is_graph_safe_and_does_not_fire_under_tracing(self):
+        """The check must survive ``tf.function`` and a DYNAMIC batch dim.
+
+        A data-dependent Python ``if`` on a traced tensor is silently turned
+        into a ``tf.cond`` by AutoGraph rather than raising (this repo carries
+        a live ``strict=True`` xfail caused by exactly that mistake in
+        ``BatchNormalization``), so a graph-unsafe rewrite of this guard would
+        NOT be visible in the eager tests above. Both the rank-3 and the
+        singleton rank-4 contract shapes are traced with an UNKNOWN batch
+        dimension, and a dynamic sequence length as well.
+        """
+        blk = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, input_mode="sequence"
+        )
+        blk.build((None, self.SEQ, self.CHANNELS))
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([None, None, self.CHANNELS], tf.float32)
+            ]
+        )
+        def run3(t):
+            return blk(t)
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([None, 1, None, self.CHANNELS], tf.float32)
+            ]
+        )
+        def run4(t):
+            return blk(t)
+
+        rng = np.random.RandomState(4)
+        x3 = rng.normal(size=(3, self.SEQ, self.CHANNELS)).astype("float32")
+        y3 = run3(tf.constant(x3)).numpy()
+        y4 = run4(
+            tf.constant(x3.reshape(3, 1, self.SEQ, self.CHANNELS))
+        ).numpy()
+
+        assert y3.shape == (3, self.SEQ, self.CHANNELS)
+        assert y4.shape == (3, 1, self.SEQ, self.CHANNELS)
+        assert np.all(np.isfinite(y3)) and np.all(np.isfinite(y4))
+
+    def test_functional_model_with_unknown_axis1_still_builds(self):
+        """A fully dynamic axis 1 must degrade gracefully, not raise.
+
+        The guard short-circuits on ``None`` exactly like the build()-time one;
+        without that, a symbolic input whose axis 1 is unknown would be
+        rejected at trace time.
+        """
+        blk = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, input_mode="sequence"
+        )
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([None, None, None, self.CHANNELS], tf.float32)
+            ]
+        )
+        def run(t):
+            return blk(t)
+
+        rng = np.random.RandomState(6)
+        x = rng.normal(size=(2, 1, self.SEQ, self.CHANNELS)).astype("float32")
+        y = run(tf.constant(x)).numpy()
+        assert y.shape == (2, 1, self.SEQ, self.CHANNELS)
+        assert np.all(np.isfinite(y))
+
+
+# ===========================================================================
+# TestSequencePaddingHazard -- review concern 3 (characterization)
+# ===========================================================================
+
+
+class TestSequencePaddingHazard:
+    """PINS the unmasked-padding hazard of sequence mode as KNOWN behaviour.
+
+    Masking is deliberately NOT implemented (module docstring note 8): it is a
+    new capability, not a repair. These tests exist so the hazard cannot be
+    silently acquired OR silently fixed -- if masking is ever added, they FAIL
+    and force note 8 and the ``input_mode`` parameter docs to be rewritten.
+
+    All numbers below were MEASURED at ``channels=8``, ``shifts=[1, 2]``,
+    ``layer_scale_init=1.0``, ``training=False``, a 6-token real prefix,
+    output absmax ~2.5.
+    """
+
+    CHANNELS = 8
+    SHIFTS = [1, 2]
+    REAL = 6
+
+    def _block(self, use_global_context):
+        keras.utils.set_random_seed(3)
+        return CliffordNetBlock(
+            channels=self.CHANNELS,
+            shifts=self.SHIFTS,
+            input_mode="sequence",
+            use_global_context=use_global_context,
+            layer_scale_init=1.0,
+        )
+
+    def _prefix(self):
+        rng = np.random.RandomState(0)
+        return rng.normal(size=(1, self.REAL, self.CHANNELS)).astype("float32")
+
+    @staticmethod
+    def _padded(prefix, total_len):
+        x = np.zeros(
+            (prefix.shape[0], total_len, prefix.shape[2]), dtype="float32"
+        )
+        x[:, : prefix.shape[1], :] = prefix
+        return x
+
+    def test_masking_is_not_supported(self):
+        """``supports_masking`` is False — a Keras mask is DESTROYED here."""
+        blk = CliffordNetBlock(
+            channels=self.CHANNELS, shifts=self.SHIFTS, input_mode="sequence"
+        )
+        assert blk.supports_masking is False, (
+            "supports_masking became True. Masking is documented as "
+            "UNSUPPORTED in module docstring note 8 and on the input_mode "
+            "parameter; if it has been implemented, update both and replace "
+            "this whole class with real masking tests."
+        )
+
+    def test_pad_length_changes_real_positions_under_global_context(self):
+        """``use_global_context=True``: the pad LENGTH moves EVERY position.
+
+        The global branch takes ``mean(axis=[1, 2])`` over the whole padded
+        length, so an identical 6-token prefix padded to 12 rather than to 8
+        changes even position 0, which no convolution can reach from the pad.
+        MEASURED per-position over 0..5: ``[0.074, 0.116, 0.093, 0.097,
+        0.061, 0.449]`` (an independent review measured 0.186 over positions
+        0..3 on its own draw). This is the WORST case of the hazard.
+        """
+        blk = self._block(use_global_context=True)
+        prefix = self._prefix()
+        y8 = keras.ops.convert_to_numpy(
+            blk(self._padded(prefix, 8), training=False)
+        )[:, : self.REAL, :]
+        y12 = keras.ops.convert_to_numpy(
+            blk(self._padded(prefix, 12), training=False)
+        )[:, : self.REAL, :]
+
+        per_pos = np.abs(y8 - y12).max(axis=(0, 2))
+        early = float(per_pos[:4].max())
+        assert early > 1e-3, (
+            f"padding a 6-token prefix to 8 vs to 12 left positions 0..3 "
+            f"unchanged (max |delta| {early}, per-position {per_pos}). Either "
+            f"the global branch stopped pooling over the pad or masking was "
+            f"implemented — module docstring note 8 quotes 0.116 here and "
+            f"must be rewritten."
+        )
+
+    def test_pad_length_is_irrelevant_without_global_context(self):
+        """``use_global_context=False``: extra pad beyond the receptive field
+        changes NOTHING.
+
+        MEASURED exactly ``[0, 0, 0, 0, 0, 0]``. This is the assertion that
+        localizes the hazard: it proves the effect above is the POOLED branch,
+        not the convolutions, so the documented remedy (pool with an explicit
+        mask outside the block) is the right one.
+        """
+        blk = self._block(use_global_context=False)
+        prefix = self._prefix()
+        y8 = keras.ops.convert_to_numpy(
+            blk(self._padded(prefix, 8), training=False)
+        )[:, : self.REAL, :]
+        y12 = keras.ops.convert_to_numpy(
+            blk(self._padded(prefix, 12), training=False)
+        )[:, : self.REAL, :]
+
+        delta = float(np.abs(y8 - y12).max())
+        assert delta == 0.0, (
+            f"without the global branch, pad LENGTH must not matter, got max "
+            f"|delta| {delta}. Note 8's table says exactly zero here."
+        )
+
+    def test_padding_at_all_changes_the_boundary_position(self):
+        """The convolutional half of the hazard, isolated.
+
+        The two stacked same-padded depthwise convolutions pull zero pad into
+        the receptive field of the real positions near the boundary. MEASURED
+        unpadded ``L=6`` vs padded-to-8, ``use_global_context=False``:
+        ``[0, 0, 0, 0, 0, 1.183]`` — only the LAST real position moves, and it
+        moves by ~48% of the output scale.
+        """
+        blk = self._block(use_global_context=False)
+        prefix = self._prefix()
+        y_bare = keras.ops.convert_to_numpy(blk(prefix, training=False))
+        y_pad = keras.ops.convert_to_numpy(
+            blk(self._padded(prefix, 8), training=False)
+        )[:, : self.REAL, :]
+
+        per_pos = np.abs(y_bare - y_pad).max(axis=(0, 2))
+        assert float(per_pos[-1]) > 1e-3, (
+            f"zero padding no longer reaches the last real position "
+            f"(per-position {per_pos}); note 8 quotes 1.183 here"
+        )
+        assert float(per_pos[:-1].max()) == 0.0, (
+            f"padding reached FURTHER back than the (2K-2) boundary margin "
+            f"note 8 documents: per-position {per_pos}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
