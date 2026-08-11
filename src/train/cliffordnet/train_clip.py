@@ -958,6 +958,9 @@ class _TextLMWrapper(keras.Model):
         x = m.token_embedding(input_ids) + m.position_embedding(positions)
         x = m.text_embed_norm(x)
         x = m.text_embed_dropout(x, training=training)
+        # DECISION plan-2026-08-11T141925-eb34352d/D-003
+        # Do NOT reintroduce the caller-side expand_dims(axis=1)/squeeze(axis=1)
+        # around this loop: the text blocks are sequence-mode and take (B, L, D).
         for block in m.text_blocks:
             x = block(x, training=training)
         x = m.text_head_norm(x)
