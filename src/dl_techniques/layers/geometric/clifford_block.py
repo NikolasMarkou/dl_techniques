@@ -224,7 +224,17 @@ that serialized either registered class name can no longer be loaded.
 from __future__ import annotations
 
 import numbers
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import keras
 from keras import initializers, regularizers
@@ -255,6 +265,15 @@ _GLOBAL_CLI_MODE: CliMode = "full"
 # global branch needs strictly more channels than its largest shift for all of
 # _GLOBAL_SHIFTS to survive.
 _MIN_GLOBAL_CHANNELS: int = max(_GLOBAL_SHIFTS) + 1
+
+# Normalization types measured to reduce over the SEQUENCE axis, i.e. every
+# position's output depends on all positions. Selecting one of these on a causal
+# block silently leaks the future into the past.
+_SEQUENCE_REDUCING_NORMS: FrozenSet[str] = frozenset({
+    "batch_norm",              # reduces over (B, H, W) at training=True
+    "bias_free_batch_norm",    # same reduction-axis logic, at training=True
+    "global_response_norm",    # reduces over (H, W) UNCONDITIONALLY - not training-gated
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1002,9 +1021,20 @@ class CliffordNetBlock(keras.layers.Layer):
     :param bias_regularizer: Bias regularizer for Dense layers.
     :type bias_regularizer: Optional[Any]
     :param normalization_type: Normalization applied to the context stream,
-        resolved by ``create_normalization_layer``. Defaults to
-        ``"batch_norm"``, matching the reference ``BatchNorm2d``.
-    :type normalization_type: str
+        resolved by ``create_normalization_layer``. ``None`` (the default)
+        resolves per MODE: ``"batch_norm"`` in image mode (matching the
+        reference ``BatchNorm2d``) and ``"zero_centered_rms_norm"`` in sequence
+        mode, causal or not. The RESOLVED value is what ``get_config``
+        serializes, so this default is checkpoint-safe. Passing one of
+        ``_SEQUENCE_REDUCING_NORMS`` (``"batch_norm"``,
+        ``"bias_free_batch_norm"``, ``"global_response_norm"``) explicitly
+        together with ``causal=True`` raises ``ValueError``: those types reduce
+        over the sequence axis, so the future leaks into the past. The check is
+        not gated on ``training`` because ``"global_response_norm"`` reduces
+        unconditionally. Non-causal sequence mode is deliberately NOT
+        restricted — a bidirectional encoder is allowed to mix across
+        positions.
+    :type normalization_type: Optional[str]
     :param normalization_kwargs: Extra kwargs for the context normalization.
     :type normalization_kwargs: Optional[Dict[str, Any]]
     :param input_normalization_type: Normalization applied to the block input.
@@ -1038,7 +1068,7 @@ class CliffordNetBlock(keras.layers.Layer):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
-        normalization_type: str = "batch_norm",
+        normalization_type: Optional[str] = None,
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         input_normalization_type: Optional[str] = None,
         input_normalization_kwargs: Optional[Dict[str, Any]] = None,
@@ -1076,6 +1106,53 @@ class CliffordNetBlock(keras.layers.Layer):
             resolved_input_mode: str = "sequence"
         else:
             resolved_input_mode = input_mode if input_mode is not None else "image"
+        # The context-norm DEFAULT is mode-derived: image mode keeps the
+        # reference `BatchNorm2d` equivalent, sequence mode (causal or not) gets
+        # a per-position norm. Only an EXPLICIT caller choice can be unsafe, so
+        # the raise below is reachable only from a caller-supplied value and the
+        # resolved default can never trip it.
+        if normalization_type is None:
+            resolved_normalization_type: str = (
+                "zero_centered_rms_norm"
+                if resolved_input_mode == "sequence"
+                else "batch_norm"
+            )
+        else:
+            # DECISION plan-2026-08-11T110821-54118fdd/D-002
+            # A causal block reshapes its sequence to (B, 1, L, D), so axis 2 IS
+            # the sequence axis -- and `batch_norm`/`bias_free_batch_norm`
+            # reduce over (B, H, W) at training=True while
+            # `global_response_norm` reduces over (H, W) UNCONDITIONALLY (it
+            # leaks at inference too, which is why this raise is NOT gated on
+            # `training`). Measured on a 4x1x12x8 probe with a fresh NON-DC
+            # perturbation of positions 8..11: max |delta| over positions 0..7
+            # was 1.067 on a signal of scale 4.95, i.e. ~22% of the signal
+            # flowing backwards in time. Do NOT "fix" this by probing with a DC
+            # shift -- that probe is VACUOUS (measured leak 1.9e-06) because the
+            # input LayerNorm removes a per-position DC offset before the
+            # context stream ever sees it. Do NOT extend this raise to
+            # non-causal sequence mode (a bidirectional encoder is ALLOWED to
+            # mix across positions) and do NOT change image mode's `batch_norm`
+            # default: it is load-bearing for the strict xfail at
+            # test_video_jepa.py::test_predictor_graph_mode_dropout_zero and for
+            # the batch_size >= 2 guards in the video_jepa data path. See
+            # decisions.md D-002.
+            if causal and normalization_type in _SEQUENCE_REDUCING_NORMS:
+                raise ValueError(
+                    f"normalization_type={normalization_type!r} is incompatible "
+                    f"with causal=True: it reduces over the sequence axis, so "
+                    f"every position's context normalization sees the whole "
+                    f"sequence and the future leaks into the past (measured max "
+                    f"|delta| 1.067 on a 4.95-scale signal). "
+                    f"'batch_norm' and 'bias_free_batch_norm' leak at "
+                    f"training=True; 'global_response_norm' reduces "
+                    f"unconditionally and leaks at inference too. Sequence-axis"
+                    f"-reducing types are "
+                    f"{sorted(_SEQUENCE_REDUCING_NORMS)}; pass a per-position "
+                    f"type such as 'zero_centered_rms_norm' (the causal "
+                    f"default) or omit normalization_type."
+                )
+            resolved_normalization_type = normalization_type
         if (
             not isinstance(context_kernel_size, numbers.Integral)
             or isinstance(context_kernel_size, bool)
@@ -1126,7 +1203,10 @@ class CliffordNetBlock(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
-        self.normalization_type = normalization_type
+        # The RESOLVED string, never the None sentinel: get_config() serializes
+        # this attribute, so a future change to the mode-derived default cannot
+        # silently re-type an existing checkpoint's context norm.
+        self.normalization_type = resolved_normalization_type
         self.normalization_kwargs = dict(normalization_kwargs or {})
         self.input_normalization_type = input_normalization_type
         self.input_normalization_kwargs = dict(input_normalization_kwargs or {})
@@ -1595,7 +1675,10 @@ class CausalCliffordNetBlock(CliffordNetBlock):
 
     def __init__(self, **kwargs: Any) -> None:
         # Preserve the causal-specific context-norm default while letting the
-        # caller override it explicitly.
+        # caller override it explicitly. Redundant since the base class resolves
+        # the same value for sequence mode, but kept so this subclass keeps
+        # OWNING its documented default rather than inheriting it silently: if
+        # the base default ever moves again, this class does not move with it.
         kwargs.setdefault("normalization_type", "zero_centered_rms_norm")
         # Force causal=True even if a from_config dict carries a `causal` key,
         # so this subclass can never be built non-causal (and never raises a
