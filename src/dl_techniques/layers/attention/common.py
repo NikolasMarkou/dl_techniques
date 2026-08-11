@@ -37,11 +37,16 @@ number you see in a sibling module came from here:
     measured at 24.14; it rescues once over the full key axis before its block loop
     instead). A site whose softmax reduces over some other axis must name that axis
     explicitly — the axis is never inferred, for the same reason polarity is never
-    inferred. **EIGHT of the TEN adopters** therefore DERIVE the axis from their own
+    inferred. **EIGHT of the ELEVEN adopters** therefore DERIVE the axis from their own
     ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors) rather
-    than inheriting the ``-1`` default; of the remaining two, ``capsule_routing`` PINS
+    than inheriting the ``-1`` default; of the remaining three, ``capsule_routing`` PINS
     the axis in ``__init__`` (its ``_site_config`` overrides any caller value, so there
-    is nothing to derive) and ``ring`` OPTS OUT per tile (``rescue_axis=None``, D-011).
+    is nothing to derive), ``ring`` OPTS OUT per tile (``rescue_axis=None``, D-011), and
+    ``beit`` passes ``rescue_axis=-1`` as a LITERAL because it has no
+    ``probability_config`` at all — it calls ``ops.softmax(..., axis=-1)`` directly, so
+    there is no config object to derive the axis from. That literal is a necessity of
+    the layer's surface, not an oversight, and it must not be "fixed" by inventing a
+    ``probability_config`` parameter for it.
     A ``keep`` whose extent along every named axis is statically 1 while ``logits`` is
     longer is REJECTED — it cannot mask anything, because softmax is invariant to a
     constant shift of the axis it reduces over (D-017). ``rescue_axis`` may also be a
@@ -51,7 +56,7 @@ number you see in a sibling module came from here:
     **Both counts above are MECHANICAL — re-derive them in one command each, from the
     repository root, and never hand-edit one without the other**::
 
-        # 10 adopters (files calling the module-level helper; excludes this file's
+        # 11 adopters (files calling the module-level helper; excludes this file's
         # own definition and the private `self._apply_attention_mask` wrappers):
         grep -rlE '(^|[^._[:alnum:]])apply_attention_mask\(' \
             src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
@@ -75,6 +80,9 @@ number you see in a sibling module came from here:
     those aliases). Ten modules migrated to ``apply_attention_mask``:
     ``capsule_routing``, ``differential``, ``gated``, ``group_query``, ``hopfield``,
     ``multi_head_cross``, ``multi_head_latent``, ``ring``, ``rpc``, ``single_window``.
+    (``beit`` ADOPTED the helper at birth rather than migrating to it, which is why
+    that migration list is ten while the adopter count above is ELEVEN. The migration
+    list is history and does not move; the adopter count is mechanical and does.)
 
     **Exactly FOUR modules still carry a LOCAL ``-1e9``-family value**, counted
     mechanically with comments and docstrings stripped:

@@ -1023,16 +1023,31 @@ class TestTheAdopterCountsAreMechanical:
                 derivers.append(path.name)
         return adopters, derivers
 
-    def test_there_are_exactly_ten_adopters_and_eight_derive_the_axis(self):
+    def test_there_are_exactly_eleven_adopters_and_eight_derive_the_axis(self):
         adopters, derivers = self._counts()
-        assert len(adopters) == 10, f"adopters drifted: {adopters}"
+        assert len(adopters) == 11, f"adopters drifted: {adopters}"
         assert len(derivers) == 8, f"derivers drifted: {derivers}"
         assert set(derivers) <= set(adopters)
 
-    def test_the_two_non_deriving_adopters_are_the_documented_ones(self):
-        """``capsule_routing`` PINS its axis; ``ring`` OPTS OUT. Nothing else."""
+    def test_the_three_non_deriving_adopters_are_the_documented_ones(self):
+        """``capsule_routing`` PINS its axis; ``ring`` OPTS OUT; ``beit`` has no config.
+
+        Each of the three is non-deriving for its OWN documented reason, and none of
+        them is an oversight:
+
+        * ``capsule_routing_attention.py`` — PINS the axis in ``__init__`` via
+          ``_site_config``, which overrides any caller value, so there is nothing left
+          to derive.
+        * ``ring_attention.py`` — OPTS OUT per tile (``rescue_axis=None``, D-011); a
+          per-tile rescue would un-mask the future under a causal mask.
+        * ``beit_attention.py`` — has **no** ``probability_config`` parameter at all.
+          It calls ``ops.softmax(..., axis=-1)`` directly, so ``rescue_axis=-1`` is a
+          literal *by necessity*, not by oversight. Do not "fix" it by adding a
+          ``probability_config`` to that layer's surface just to make this set smaller.
+        """
         adopters, derivers = self._counts()
         assert set(adopters) - set(derivers) == {
+            "beit_attention.py",
             "capsule_routing_attention.py",
             "ring_attention.py",
         }
@@ -1047,7 +1062,14 @@ class TestTheAdopterCountsAreMechanical:
 
         adopters, derivers = self._counts()
         doc = common_mod.__doc__
-        words = {6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN"}
+        words = {
+            6: "SIX",
+            7: "SEVEN",
+            8: "EIGHT",
+            9: "NINE",
+            10: "TEN",
+            11: "ELEVEN",
+        }
         assert f"**{words[len(derivers)]} of the {words[len(adopters)]} adopters**" in doc, (
             "common.py's module docstring no longer states the mechanically-derived "
             f"counts ({len(derivers)} of {len(adopters)}). Update the "
