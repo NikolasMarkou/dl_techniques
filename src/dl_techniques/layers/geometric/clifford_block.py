@@ -533,8 +533,26 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         (``z_det``), because ``build`` declares a single parameter; both streams
         are required to have the same shape.
 
-        :param input_shape: Shape of a *single* input tensor ``(B, H, W, D)``.
+        :param input_shape: Shape of a *single* input tensor ``(B, ..., D)``.
+        :raises ValueError: If the channel axis does not equal ``channels``.
         """
+        # DECISION plan-2026-08-11T110821-54118fdd/D-006
+        # Guard the CHANNEL AXIS ONLY. NEVER add a rank check here.
+        # This layer is deliberately rank-agnostic and is MEASURED working at
+        # ranks 2, 3, 4 and 5. Two shipped consumers depend on rank 2:
+        # `layers/geometric/clifford_rnn.py` (the RNN cell runs it per timestep
+        # on `(B, D)`), and `models/clip/clifford_clip.py`'s `vision_head_geo` /
+        # `text_head_geo`, which run it on pooled `(B, D)` vectors. An
+        # `InputSpec(ndim=4)`-style tightening here would break both. Inspect
+        # `input_shape[-1]` and nothing else. See decisions.md D-006.
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"{type(self).__name__} expected last dim == channels="
+                f"{self.channels}, got input_shape[-1]={input_shape[-1]}. "
+                f"Both streams (z_det, z_ctx) must already carry "
+                f"{self.channels} channels; project before this layer or "
+                f"rebuild it with channels={input_shape[-1]}."
+            )
         self._input_shape_for_build = tuple(input_shape)
         self.proj.build((*input_shape[:-1], self._proj_input_dim))
         super().build(input_shape)
