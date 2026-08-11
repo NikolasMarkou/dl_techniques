@@ -309,8 +309,10 @@ class BeitAttention(keras.layers.Layer):
         )
 
         # Created in build(): the learnable table and its static integer index.
+        # `_rel_pos_index` is a NUMPY array, not a tensor -- see the D-011 note in
+        # `build()` for why (graph-scope safety under a lazily-built `fit()`).
         self.relative_position_bias_table = None
-        self._rel_pos_index = None
+        self._rel_pos_index: Optional[np.ndarray] = None
 
     @staticmethod
     def _normalize_window_size(
@@ -433,12 +435,21 @@ class BeitAttention(keras.layers.Layer):
                 trainable=True,
                 dtype=self.dtype,
             )
+            # DECISION plan-2026-08-11T012340-f63796dc/D-011
+            # Keep this index as a NUMPY array. Do NOT call `ops.convert_to_tensor`
+            # (or any `keras.ops`/`tf` op) here and store the result: `build()` may
+            # run lazily INSIDE the traced train step, so the tensor would be created
+            # in the inner `one_step_on_data` FuncGraph and be unreachable from the
+            # outer `multi_step_on_iterator` graph -- `model.fit()` on an unbuilt
+            # model then dies with `InaccessibleTensorError`, while every eager
+            # forward pass and every explicitly-built test still passes. The
+            # conversion happens in `call()`, in whatever graph is tracing.
             # A derived, non-trainable constant: it is a pure function of
             # `window_size`, so it is deliberately NOT a weight. It survives
             # serialization because `build()` recomputes it from the restored config.
-            self._rel_pos_index = ops.convert_to_tensor(
+            self._rel_pos_index = np.ascontiguousarray(
                 self._build_relative_position_index().reshape(-1),
-                dtype="int32",
+                dtype=np.int32,
             )
 
         projection_shape = (input_shape[0], self.num_tokens, self.dim)
@@ -500,8 +511,13 @@ class BeitAttention(keras.layers.Layer):
             # learned table to a keep/drop decision, silently and without a shape
             # error. See `common.apply_attention_mask`'s binary-`keep` precondition.
             # (M, heads) gathered by (N+1)^2 indices -> ((N+1)^2, heads)
+            # `_rel_pos_index` is a numpy array (see the D-011 note in `build()`);
+            # it is converted HERE so the constant is materialized in the graph that
+            # is currently tracing, not in whichever graph happened to build it.
             bias = ops.take(
-                self.relative_position_bias_table, self._rel_pos_index, axis=0
+                self.relative_position_bias_table,
+                ops.convert_to_tensor(self._rel_pos_index, dtype="int32"),
+                axis=0,
             )
             bias = ops.reshape(bias, (seq_len, seq_len, self.num_heads))
             # (N+1, N+1, heads) -> (heads, N+1, N+1) -> (1, heads, N+1, N+1)

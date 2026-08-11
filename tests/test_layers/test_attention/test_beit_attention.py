@@ -1076,3 +1076,94 @@ class TestBeitAttentionFactory:
 
         assert Exported is BeitAttention
         assert "BeitAttention" in attention_package.__all__
+
+
+# ==============================================================================
+# 10. Graph scope — the relative-position index must not be born in a stale graph
+# ==============================================================================
+
+class TestBeitAttentionGraphScope:
+    """``fit()`` on a model that is built LAZILY, inside the traced train step.
+
+    Regression guard for the defect measured at step 7 of
+    ``plan-2026-08-11T012340-f63796dc``: ``build()`` used to materialize the
+    relative-position index with ``ops.convert_to_tensor``, so when Keras built the
+    layer lazily inside ``one_step_on_data`` the resulting tensor belonged to that
+    inner ``FuncGraph`` and was unreachable from ``multi_step_on_iterator`` --
+    ``InaccessibleTensorError``. Every eager call and every explicitly-built test
+    passed regardless, which is why nothing caught it.
+
+    These tests must NOT call ``build()`` (nor use a Functional model, which builds
+    at construction): deferring the build into the traced step is the whole point.
+    """
+
+    class _Wrapper(keras.Model):
+        """Subclassed wrapper -- its sub-layer is built inside the train step."""
+
+        def __init__(self, attention: BeitAttention, **kwargs):
+            # An explicit name is required: Keras derives the default from the class
+            # name, and a leading underscore is not a valid TF root scope name.
+            kwargs.setdefault("name", "beit_scope_wrapper")
+            super().__init__(**kwargs)
+            self.attention = attention
+
+        def call(self, inputs, training=None):
+            y = self.attention(inputs, training=training)
+            return keras.ops.mean(y, axis=[1, 2])
+
+    def _fit_unbuilt(self, layer: BeitAttention) -> keras.Model:
+        model = self._Wrapper(layer)
+        assert not layer.built, "the guard is vacuous if the layer is pre-built"
+        model.compile(optimizer="adam", loss="mse")
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(
+            (4, layer.num_tokens, layer.dim)
+        ).astype("float32")
+        y = rng.standard_normal((4,)).astype("float32")
+        model.fit(x, y, batch_size=2, epochs=1, verbose=0)
+        return model
+
+    def test_fit_without_an_explicit_build_does_not_raise(self):
+        layer = BeitAttention(dim=16, num_heads=2, window_size=(2, 2))
+        model = self._fit_unbuilt(layer)
+        assert layer.built
+        assert model.optimizer.iterations.numpy() == 2
+
+    def test_fit_without_an_explicit_build_on_a_non_square_grid(self):
+        layer = BeitAttention(dim=16, num_heads=2, window_size=(2, 3))
+        self._fit_unbuilt(layer)
+
+    def test_fit_without_an_explicit_build_without_relative_position_bias(self):
+        """Control: the no-bias path has no index at all and must also train."""
+        layer = BeitAttention(
+            dim=16, num_heads=2, window_size=(2, 2),
+            use_relative_position_bias=False,
+        )
+        self._fit_unbuilt(layer)
+        assert layer._rel_pos_index is None
+
+    def test_the_index_buffer_is_a_numpy_array_not_a_backend_tensor(self):
+        """The mechanism, pinned: a tensor here is the defect itself."""
+        layer = BeitAttention(dim=16, num_heads=2, window_size=(2, 3))
+        layer.build((2, layer.num_tokens, layer.dim))
+        assert isinstance(layer._rel_pos_index, np.ndarray), (
+            "the relative-position index must stay a numpy array; a backend "
+            "tensor created in build() is scoped to whatever graph built it"
+        )
+        assert layer._rel_pos_index.dtype == np.int32
+        assert layer._rel_pos_index.shape == (layer.num_tokens ** 2,)
+
+    def test_the_bias_still_reaches_the_logits_after_the_numpy_round_trip(self):
+        """The fix must not disconnect the table from the output."""
+        layer = BeitAttention(dim=16, num_heads=2, window_size=(2, 2))
+        x = _build(layer, batch=2)
+        base = keras.ops.convert_to_numpy(layer(x, training=False))
+        layer.relative_position_bias_table.assign(
+            np.arange(
+                layer.num_relative_distance * layer.num_heads, dtype="float32"
+            ).reshape(layer.num_relative_distance, layer.num_heads)
+        )
+        moved = keras.ops.convert_to_numpy(layer(x, training=False))
+        assert not np.allclose(base, moved), (
+            "the relative-position bias table no longer affects the output"
+        )

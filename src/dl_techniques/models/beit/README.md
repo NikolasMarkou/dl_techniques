@@ -362,7 +362,7 @@ import keras
 from dl_techniques.models.beit import create_beit_mim, create_beit_classifier
 
 mim = create_beit_mim("tiny", (64, 64, 3), 16, vocab_size=512)
-mim.build((None, 64, 64, 3))     # ALWAYS build before fit() -- see Issue 6 in section 14
+mim.build((None, 64, 64, 3))     # OPTIONAL -- lets summary()/count_params() run now
 mim.compile(
     optimizer="adamw",
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -555,7 +555,7 @@ print(img_b.shape, mask_b.shape, targets_b.shape, weights_b.shape)
 assert np.array_equal(weights_b.numpy(), mask_b.numpy().astype("float32"))
 
 mim = create_beit_mim("tiny", (64, 64, 3), 16, vocab_size=VOCAB)
-mim.build((None, 64, 64, 3))     # MANDATORY before fit() -- see Issue 6 in section 14
+mim.build((None, 64, 64, 3))     # OPTIONAL before fit() -- see Issue 6 in section 14
 mim.compile(
     optimizer="adamw",
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -799,8 +799,10 @@ stochastic depth.
 - **No custom `train_step`.** The mask is `sample_weight` (§3.4).
 - **Keep the backbone config byte-identical across stages 1 and 2**, or the warm start
   transfers a subset of the trunk and the rest stays random.
-- **Call `model.build((None, H, W, C))` before `compile()`/`fit()`.** Lazy building inside
-  the traced training step raises `InaccessibleTensorError` — see Issue 6 in §14.
+- **An explicit `model.build((None, H, W, C))` is OPTIONAL before `compile()`/`fit()`.** A
+  lazy build inside the traced training step is supported (see Issue 6 in §14). Build
+  explicitly when you want `summary()`/`count_params()` first — and note that the stage-2
+  warm start *does* require a built target (§9.1).
 
 ### 11.3 Masking budget
 
@@ -931,19 +933,20 @@ Guards worth knowing about, because they encode facts rather than shapes:
 - **Solution**: Resize the input, or pick a `patch_size` that divides both dimensions.
   Non-square grids are fine (§8.1).
 
-**Issue 6: `InaccessibleTensorError: ... Cast:0 ... is out of scope` on the first `fit()` step.**
+**Issue 6: is an explicit `model.build(...)` required before `fit()`?**
 
-- **Cause**: You called `fit()` on a model that was never built. Keras then builds it lazily
-  *inside* the traced training step, and `BeitAttention.build()` materializes the
-  relative-position index with `ops.convert_to_tensor`. That tensor is created in the inner
-  `one_step_on_data` FuncGraph and is unreachable from the outer `multi_step_on_iterator`
-  graph, so the trace fails. Measured on both `BeitForMaskedImageModeling` and
-  `BeitForImageClassification`; the message names
-  `<model>/beit_backbone/encoder_layer_0/attention/Cast:0`.
-- **Solution**: **Always call `model.build((None, H, W, C))` before `compile()`/`fit()`.**
-  Every example in this README does. The trainers in `src/train/beit/` do it as an explicit
-  probe, and the warm start requires it anyway (§9.1). Eager forward passes
-  (`model(x)`) are unaffected, because they build eagerly.
+- **No — not any more.** An earlier revision of `BeitAttention.build()` materialized the
+  relative-position index with `ops.convert_to_tensor`, so a lazy build *inside* the traced
+  training step created that constant in the inner `one_step_on_data` FuncGraph, where the
+  outer `multi_step_on_iterator` graph could not reach it. `fit()` on an unbuilt model then
+  died with `InaccessibleTensorError: ... /encoder_layer_0/attention/Cast:0 ... is out of
+  scope`. The index is now kept as a **numpy** array and converted inside `call()`, in
+  whichever graph is tracing, so an unbuilt `fit()` trains normally. Guarded by
+  `TestBeitAttentionGraphScope` (layer) and `TestBeitUnbuiltFit` (both heads).
+- **You may still want to build explicitly** — for `summary()` / `count_params()` before
+  training, and because the warm start **does** require a built target (§9.1): weight
+  transfer into an unbuilt classifier has nothing to write to. Every example in this README
+  builds first for those reasons, not to dodge a defect.
 
 ### Frequently Asked Questions
 
