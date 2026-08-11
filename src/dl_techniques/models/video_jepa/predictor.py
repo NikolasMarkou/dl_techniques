@@ -319,8 +319,9 @@ class VideoJEPAPredictor(keras.layers.Layer):
         for blk in self.attn_blocks:
             blk.build(attn_in)
 
-        # Causal Clifford blocks consume (B*H_p*W_p, 1, T, D).
-        causal_in = (None, 1, z_shape[1], self.embed_dim)
+        # Causal Clifford blocks consume (B*H_p*W_p, T, D) natively — they are
+        # CausalCliffordNetBlock, i.e. sequence mode (see clifford_block.py).
+        causal_in = (None, z_shape[1], self.embed_dim)
         for blk in self.causal_blocks:
             blk.build(causal_in)
 
@@ -377,12 +378,11 @@ class VideoJEPAPredictor(keras.layers.Layer):
             # LayerScale γ=1e-5).
             z_t = self.attn_blocks[i](z_t, training=training)
 
-            # → reshape (B*N, 1, T, D) for CausalCliffordNetBlock.
-            z_t = ops.reshape(z_t, (B * N, 1, T, D))
             # Block is transform-only; residual is external (causal-safe add).
+            # Consumes/returns (B*N, T, D) — sequence mode, no reshape needed.
             z_t = z_t + self.causal_blocks[i](z_t, training=training)
 
-            # → reshape back (B*N, T, D) → (B, H_p, W_p, T, D) →
+            # → reshape (B*N, T, D) → (B, H_p, W_p, T, D) →
             #   transpose to (B, T, H_p, W_p, D).
             z_t = ops.reshape(z_t, (B, Hp, Wp, T, D))
             z = ops.transpose(z_t, (0, 3, 1, 2, 4))
