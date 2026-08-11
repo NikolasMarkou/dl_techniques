@@ -958,10 +958,8 @@ class _TextLMWrapper(keras.Model):
         x = m.token_embedding(input_ids) + m.position_embedding(positions)
         x = m.text_embed_norm(x)
         x = m.text_embed_dropout(x, training=training)
-        x = ops.expand_dims(x, axis=1)
         for block in m.text_blocks:
             x = block(x, training=training)
-        x = ops.squeeze(x, axis=1)
         x = m.text_head_norm(x)
         if m.text_head_dropout is not None:
             x = m.text_head_dropout(x, training=training)
