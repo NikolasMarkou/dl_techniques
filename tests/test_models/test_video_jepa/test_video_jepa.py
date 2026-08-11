@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 import keras
 
+from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.video_jepa.masking import TubeMaskGenerator
 from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
@@ -429,6 +430,54 @@ class TestPredictor:
         reloaded = keras.models.load_model(path)
         y_after = np.asarray(reloaded(z, training=False))
         np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
+
+    # ------------------------------------------------------------------
+    # C6 — Block input rank: temporal pass is rank-3, spatial stays rank-4
+    # ------------------------------------------------------------------
+    def test_block_input_ranks(self, monkeypatch) -> None:
+        """The causal (temporal) blocks must be fed NATIVE rank-3
+        ``(B*N, T, D)``; the spatial blocks must still be fed rank-4
+        ``(B*T, Hp, Wp, D)`` (image mode is untouched).
+
+        ``CausalCliffordNetBlock`` resolves ``input_mode="sequence"`` and takes
+        rank-3 directly, so the caller-side ``(B*N, 1, T, D)`` reshape is
+        redundant. Reintroducing it is numerically inert, so only observing
+        what ARRIVES at the block can catch it.
+        """
+        D, T, Hp, B, depth = 32, 4, 4, 2, 2
+        pred = _make_predictor(embed_dim=D, T=T, Hp=Hp, depth=depth)
+        z = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+
+        seen = []
+        original_call = CliffordNetBlock.call
+
+        def recording_call(self, inputs, training=None):
+            seen.append((self.name, len(inputs.shape)))
+            return original_call(self, inputs, training=training)
+
+        # CausalCliffordNetBlock does not override ``call``, so patching the
+        # base class intercepts both families.
+        monkeypatch.setattr(CliffordNetBlock, "call", recording_call)
+        pred(z, training=False)
+
+        spatial = [(n, r) for n, r in seen if n.startswith("spatial_block_")]
+        causal = [(n, r) for n, r in seen if n.startswith("causal_temp_block_")]
+        assert len(spatial) == depth and len(causal) == depth, (
+            f"recorder saw {len(spatial)} spatial and {len(causal)} causal "
+            f"call(s), expected {depth} each: {seen}. An empty/short recorder "
+            f"means the monkeypatch did not intercept — the guard is vacuous."
+        )
+        bad_causal = [(n, r) for n, r in causal if r != 3]
+        assert not bad_causal, (
+            f"Temporal pass fed its causal blocks non-rank-3 input: "
+            f"{bad_causal}. They take (B*N, T, D) natively — do not "
+            f"reintroduce the caller-side reshape to (B*N, 1, T, D)."
+        )
+        bad_spatial = [(n, r) for n, r in spatial if r != 4]
+        assert not bad_spatial, (
+            f"Spatial pass fed its blocks non-rank-4 input: {bad_spatial}. "
+            f"Image mode must stay (B*T, Hp, Wp, D)."
+        )
 
 
 # ============================================================================
