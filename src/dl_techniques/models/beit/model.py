@@ -1,16 +1,19 @@
-"""BEiT image models — the shared backbone.
+"""BEiT image models — backbone, masked-image-modeling head and classification head.
 
 This module gives the ``BeitAttention`` layer (``layers/attention/beit_attention.py``,
-arXiv:2106.08254) its image-domain trunk, mirroring the file shape of
+arXiv:2106.08254) its image-domain consumers, mirroring the file shape of
 ``models/energy_transformer/``:
 
 * :class:`BeitModel` — the trunk. ``PatchEmbedding2D`` -> (optional ``MaskTokenApply``)
   -> ``ClassTokenPrepend`` -> (optional absolute position embedding) -> ``num_layers x
   TransformerLayer(attention_type='beit')`` -> (optional final ``LayerNormalization``)
   -> ``(B, 1 + N, hidden_size)``.
-
-The two task heads that consume this trunk (``decoder_``-prefixed masked-image-modeling
-and ``head_``-prefixed classification) land in this same module in the next step.
+* :class:`BeitForMaskedImageModeling` — trunk -> ``decoder_``-prefixed LayerNorm +
+  ``Dense(vocab_size)`` -> per-PATCH logits ``(B, N, vocab_size)`` (the cls position is
+  sliced off).
+* :class:`BeitForImageClassification` — the SAME trunk -> ``head_``-prefixed pooling +
+  LayerNorm + Dropout + ``Dense(num_classes)`` **logits**, warm-startable from an MIM
+  checkpoint.
 
 **Architecture**::
 
@@ -32,6 +35,10 @@ and ``head_``-prefixed classification) land in this same module in the next step
                  [final LayerNorm]               (see the `use_mean_pooling` fork below)
                           |
                     (B, N+1, D)
+                    /              \\
+        decoder_norm                head_pool -> head_norm
+        decoder_head                head_dropout -> head_classifier
+        -> (B, N, vocab)            -> (B, num_classes) logits
 
 **Weight-compatibility invariant.** ``MaskTokenApply`` is created AND built by EVERY
 backbone, including the classifier's, which never calls it. That is the authoring
@@ -58,6 +65,7 @@ References:
 
 import keras
 from keras import layers
+from keras.saving import serialize_keras_object, deserialize_keras_object
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -69,6 +77,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
+from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.transformers import TransformerLayer
 
 # ---------------------------------------------------------------------
@@ -81,6 +90,11 @@ BeitScale = Literal['tiny', 'small', 'base', 'large']
 # the MIM model and the classifier MUST name their backbone identically or the
 # warm-start transfers zero layers.
 BACKBONE_NAME = "beit_backbone"
+
+# The DALL-E dVAE codebook size BEiT v1 predicts over; HF's `BeitConfig.vocab_size`.
+# It is a property of the MIM TARGET, not of the trunk, so it lives on the MIM head
+# rather than on the backbone (a backbone field nothing reads is a config-shaped lie).
+DEFAULT_VOCAB_SIZE = 8192
 
 # DECISION plan-2026-08-11T012340-f63796dc/D-003
 # `layer_scale_init_value` DIVERGES between the two primary sources, and the split
@@ -685,6 +699,279 @@ class BeitModel(keras.Model):
 
 
 # ---------------------------------------------------------------------
+
+
+def _coerce_backbone(backbone: Any) -> BeitModel:
+    """Accept a live backbone or its serialized config dict (the ``from_config`` path)."""
+    if isinstance(backbone, BeitModel):
+        return backbone
+    if isinstance(backbone, dict):
+        obj = deserialize_keras_object(backbone)
+        if not isinstance(obj, BeitModel):
+            raise TypeError(
+                f"Deserialized backbone is a {type(obj).__name__}, expected BeitModel"
+            )
+        return obj
+    raise TypeError(
+        "backbone must be a BeitModel (or its serialized config dict), got "
+        f"{type(backbone).__name__}"
+    )
+
+
+@keras.saving.register_keras_serializable()
+class BeitForMaskedImageModeling(keras.Model):
+    """BEiT MIM model: trunk -> ``decoder_norm`` -> ``decoder_head`` -> patch logits.
+
+    **Intent**: BEiT's pre-training objective — predict the frozen tokenizer's discrete
+    visual-token id at every MASKED patch position. The head is a single affine
+    projection over the codebook; the loss is restricted to the masked set by the
+    ``sample_weight`` carried in the ``tf.data`` batch, NOT by anything in this class
+    (no ``train_step``, no ``compute_loss``, and none may be added).
+
+    **The cls position is excluded from the output.** The trunk emits ``N + 1`` tokens;
+    this head slices ``[:, 1:, :]`` before projecting, so the output is ``(B, N, vocab)``
+    and lines up index-for-index with an ``(B, N)`` target-id tensor produced from the
+    patch grid. Emitting ``N + 1`` logits would put every target off by one position
+    with no error anywhere.
+
+    **The head emits LOGITS** (no softmax). Compile with
+    ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
+
+    All head sub-layers carry a ``decoder_`` prefix, disjoint from the classifier's
+    ``head_`` prefix, so ``skip_prefixes=("decoder_", "head_")`` transfers the trunk
+    and nothing else.
+
+    Args:
+        backbone: A :class:`BeitModel` (must be named :data:`BACKBONE_NAME` for the
+            warm start to match by name), or its serialized config dict.
+        vocab_size: Size of the discrete visual-token codebook. Defaults to
+            :data:`DEFAULT_VOCAB_SIZE` (8192, the DALL-E dVAE codebook).
+        name: Model name.
+
+    Raises:
+        ValueError: If ``vocab_size`` is not a positive integer.
+
+    Input shape:
+        ``[(batch, H, W, C), (batch, N) bool]`` — image + patch mask. A bare
+        ``(batch, H, W, C)`` image is also accepted (no tokens are replaced).
+
+    Output shape:
+        ``(batch, N, vocab_size)`` — logits over the codebook, cls position excluded.
+    """
+
+    def __init__(
+            self,
+            backbone: BeitModel,
+            vocab_size: int = DEFAULT_VOCAB_SIZE,
+            name: Optional[str] = "beit_mim",
+            **kwargs: Any,
+    ) -> None:
+        super().__init__(name=name, **kwargs)
+
+        backbone = _coerce_backbone(backbone)
+        if not isinstance(vocab_size, int) or vocab_size <= 0:
+            raise ValueError(f"vocab_size must be a positive integer, got {vocab_size}")
+
+        self.backbone = backbone
+        self.vocab_size = int(vocab_size)
+        self.num_patches = backbone.num_patches
+        self.hidden_size = backbone.hidden_size
+
+        # `decoder_` prefix: distinct from `head_`, so a warm start skips exactly these.
+        self.decoder_norm = layers.LayerNormalization(
+            epsilon=backbone.layer_norm_eps, name="decoder_norm"
+        )
+        self.decoder_head = layers.Dense(
+            self.vocab_size,
+            kernel_initializer=keras.initializers.TruncatedNormal(
+                stddev=backbone.initializer_range
+            ),
+            name="decoder_head",
+        )
+
+    def build(self, input_shape: Any) -> None:
+        if self.built:
+            return
+        self.backbone.build(input_shape)
+        patch_shape = (None, self.num_patches, self.hidden_size)
+        self.decoder_norm.build(patch_shape)
+        self.decoder_head.build(patch_shape)
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: Any,
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        tokens = self.backbone(inputs, training=training)
+        # Drop the cls position BEFORE the head so output index i is patch i.
+        patch_tokens = tokens[:, 1:, :]
+        x = self.decoder_norm(patch_tokens, training=training)
+        return self.decoder_head(x)  # logits — no softmax
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        token_shape = self.backbone.compute_output_shape(input_shape)
+        return (token_shape[0], self.num_patches, self.vocab_size)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "backbone": serialize_keras_object(self.backbone),
+            "vocab_size": self.vocab_size,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BeitForMaskedImageModeling":
+        config = dict(config)
+        config["backbone"] = deserialize_keras_object(config["backbone"])
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class BeitForImageClassification(keras.Model):
+    """BEiT classifier: the SAME trunk -> pool -> LayerNorm -> Dropout -> logits.
+
+    **Intent**: fine-tune a MIM-pre-trained trunk. The backbone is composed under the
+    identical name (:data:`BACKBONE_NAME`) and identical config path, so
+    ``load_weights_from_checkpoint(model, mim_ckpt, skip_prefixes=("decoder_", "head_"))``
+    moves the whole trunk and nothing else.
+
+    **Pooling follows the backbone's ``use_mean_pooling``**, which is BEiT's own
+    classification convention and differs from plain ViT's cls-only default:
+
+    * ``use_mean_pooling=True`` (default): pooled = mean of the final PATCH tokens with
+      the cls position EXCLUDED (``SequencePooling(strategy='mean',
+      exclude_positions=[0])``), followed by this head's own ``head_norm`` — the trunk
+      applies no final norm in this mode (D-007).
+    * ``use_mean_pooling=False``: pooled = the cls hidden state, already normed by the
+      trunk's ``final_norm``; ``head_norm`` is then the reference's no-op and is not
+      created.
+
+    **The head emits LOGITS** (no softmax). Compile with
+    ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
+
+    Args:
+        backbone: A :class:`BeitModel` (named :data:`BACKBONE_NAME`), or its serialized
+            config dict.
+        num_classes: Number of output classes. Must be positive.
+        dropout_rate: Dropout before the final Dense. Defaults to ``0.0``.
+        name: Model name.
+
+    Raises:
+        ValueError: If ``num_classes <= 0`` or ``dropout_rate`` is outside ``[0, 1]``.
+
+    Input shape:
+        ``(batch, H, W, C)``.
+
+    Output shape:
+        ``(batch, num_classes)`` — logits.
+    """
+
+    def __init__(
+            self,
+            backbone: BeitModel,
+            num_classes: int,
+            dropout_rate: float = 0.0,
+            name: Optional[str] = "beit_classifier",
+            **kwargs: Any,
+    ) -> None:
+        super().__init__(name=name, **kwargs)
+
+        backbone = _coerce_backbone(backbone)
+        if not isinstance(num_classes, int) or num_classes <= 0:
+            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
+        if not 0.0 <= float(dropout_rate) <= 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
+
+        self.backbone = backbone
+        self.num_classes = int(num_classes)
+        self.dropout_rate = float(dropout_rate)
+        self.use_mean_pooling = backbone.use_mean_pooling
+        self.seq_len = backbone.seq_len
+        self.hidden_size = backbone.hidden_size
+
+        # `head_` prefix: distinct from `decoder_`, so it is never transferred.
+        self.head_pool = None
+        self.head_norm = None
+        if self.use_mean_pooling:
+            # exclude_positions=[0] drops the cls token before the mean — BEiT pools
+            # the PATCH tokens only. BEiT's patch sequence is fixed-length and
+            # unpadded, so the historical positional-mode leak in SequencePooling is
+            # not reachable here.
+            self.head_pool = SequencePooling(
+                strategy='mean', exclude_positions=[0], name="head_pool"
+            )
+            self.head_norm = layers.LayerNormalization(
+                epsilon=backbone.layer_norm_eps, name="head_norm"
+            )
+
+        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every
+        # rate so the layer structure does not depend on a numeric value.
+        self.head_dropout = layers.Dropout(self.dropout_rate, name="head_dropout")
+        self.head_classifier = layers.Dense(
+            self.num_classes,
+            kernel_initializer=keras.initializers.TruncatedNormal(
+                stddev=backbone.initializer_range
+            ),
+            name="head_classifier",
+        )
+
+    def build(self, input_shape: Any) -> None:
+        if self.built:
+            return
+        self.backbone.build(input_shape)
+        seq_shape = (None, self.seq_len, self.hidden_size)
+        pooled_shape = (None, self.hidden_size)
+        if self.head_pool is not None:
+            self.head_pool.build(seq_shape)
+        if self.head_norm is not None:
+            self.head_norm.build(pooled_shape)
+        self.head_dropout.build(pooled_shape)
+        self.head_classifier.build(pooled_shape)
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: Any,
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        tokens = self.backbone(inputs, training=training)
+
+        if self.use_mean_pooling:
+            pooled = self.head_pool(tokens, training=training)
+            pooled = self.head_norm(pooled, training=training)
+        else:
+            # The trunk's final_norm already normed the sequence in this mode (D-007).
+            pooled = tokens[:, 0, :]
+
+        pooled = self.head_dropout(pooled, training=training)
+        return self.head_classifier(pooled)  # logits — no softmax
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        token_shape = self.backbone.compute_output_shape(input_shape)
+        return (token_shape[0], self.num_classes)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "backbone": serialize_keras_object(self.backbone),
+            "num_classes": self.num_classes,
+            "dropout_rate": self.dropout_rate,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BeitForImageClassification":
+        config = dict(config)
+        config["backbone"] = deserialize_keras_object(config["backbone"])
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
 # Factory functions
 # ---------------------------------------------------------------------
 
@@ -714,6 +1001,86 @@ def create_beit_backbone(
         scale=_resolve_scale(variant),
         name=BACKBONE_NAME,
         **overrides,
+    )
+
+
+def create_beit_mim(
+        variant: str = 'base',
+        input_shape: Tuple[int, int, int] = (224, 224, 3),
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        vocab_size: int = DEFAULT_VOCAB_SIZE,
+        **overrides: Any,
+) -> BeitForMaskedImageModeling:
+    """Create the masked-image-modeling model.
+
+    Args:
+        variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
+        input_shape: ``(H, W, C)``.
+        patch_size: ``int`` or ``(h, w)``.
+        vocab_size: Discrete visual-token codebook size.
+        **overrides: Backbone constructor kwargs.
+
+    Returns:
+        A :class:`BeitForMaskedImageModeling` whose trunk is named
+        :data:`BACKBONE_NAME`.
+
+    Example:
+        >>> model = create_beit_mim('tiny', (224, 224, 3), 16, vocab_size=8192)
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        ... )  # sample_weight in the tf.data element does the masking
+    """
+    backbone = create_beit_backbone(
+        variant=variant,
+        input_shape=input_shape,
+        patch_size=patch_size,
+        **overrides,
+    )
+    return BeitForMaskedImageModeling(backbone=backbone, vocab_size=vocab_size)
+
+
+def create_beit_classifier(
+        variant: str = 'base',
+        input_shape: Tuple[int, int, int] = (224, 224, 3),
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        num_classes: int = 1000,
+        dropout_rate: float = 0.0,
+        **overrides: Any,
+) -> BeitForImageClassification:
+    """Create the classifier (logits head; warm-startable from an MIM checkpoint).
+
+    Args:
+        variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
+        input_shape: ``(H, W, C)``.
+        patch_size: ``int`` or ``(h, w)``.
+        num_classes: Number of classes.
+        dropout_rate: Dropout before the final Dense.
+        **overrides: Backbone constructor kwargs.
+
+    Returns:
+        A :class:`BeitForImageClassification` whose trunk is named
+        :data:`BACKBONE_NAME` and is weight-identical to :func:`create_beit_mim`'s at
+        the same backbone config.
+
+    Example:
+        >>> model = create_beit_classifier('tiny', (224, 224, 3), 16, num_classes=10)
+        >>> model.build((None, 224, 224, 3))   # BEFORE the transfer — H-12
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        ... )
+    """
+    backbone = create_beit_backbone(
+        variant=variant,
+        input_shape=input_shape,
+        patch_size=patch_size,
+        **overrides,
+    )
+    return BeitForImageClassification(
+        backbone=backbone,
+        num_classes=num_classes,
+        dropout_rate=dropout_rate,
     )
 
 

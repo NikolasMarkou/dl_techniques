@@ -33,12 +33,18 @@ from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.models.beit import (
     BACKBONE_NAME,
+    DEFAULT_VOCAB_SIZE,
     MODEL_VARIANTS,
     SCALE_CONFIGS,
+    BeitForImageClassification,
+    BeitForMaskedImageModeling,
     BeitModel,
     create_beit_backbone,
+    create_beit_classifier,
+    create_beit_mim,
 )
 from dl_techniques.models.beit.model import _resolve_scale
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # A 32x32 image at patch 16 -> a 2x2 patch grid -> 4 patches + 1 cls = 5 tokens.
 IMG = (32, 32, 3)
@@ -608,3 +614,375 @@ class TestBeitArchitectureValidation:
         for key in ('hidden_size', 'num_layers', 'num_heads', 'intermediate_size',
                     'layer_scale_init_value', 'scale'):
             assert getattr(a, key) == getattr(b, key)
+
+
+# ==============================================================================
+# 7. The masked-image-modeling head
+# ==============================================================================
+
+VOCAB = 64  # a toy codebook; the real default is DEFAULT_VOCAB_SIZE == 8192
+
+
+def _mim(variant: str = 'tiny', **overrides) -> BeitForMaskedImageModeling:
+    return create_beit_mim(variant, IMG, PATCH, vocab_size=VOCAB, **overrides)
+
+
+def _classifier(variant: str = 'tiny', num_classes: int = 7, **overrides):
+    return create_beit_classifier(
+        variant, IMG, PATCH, num_classes=num_classes, **overrides
+    )
+
+
+class TestBeitForMaskedImageModeling:
+
+    def test_default_vocab_size_is_the_dalle_codebook(self):
+        assert DEFAULT_VOCAB_SIZE == 8192
+        assert _mim().backbone.name == BACKBONE_NAME
+
+    @pytest.mark.parametrize("variant", ['tiny', 'small'])
+    def test_output_shape_excludes_the_cls_position(self, variant):
+        """(B, N, vocab) -- NOT (B, N+1, vocab).
+
+        Why this can fail if the implementation is wrong: forgetting the ``[:, 1:, :]``
+        slice yields ``N + 1`` logits, which still trains against an ``(B, N)`` target
+        only if the loss silently broadcasts -- otherwise it puts every target off by
+        one patch. Either way there is no architectural error to see.
+        """
+        model = _mim(variant)
+        out = model((_images(), _mask()), training=False)
+        assert tuple(out.shape) == (2, NUM_PATCHES, VOCAB)
+        assert model.compute_output_shape(
+            [(2,) + IMG, (2, NUM_PATCHES)]
+        ) == (2, NUM_PATCHES, VOCAB)
+
+    def test_forward_without_a_mask_is_accepted(self):
+        out = _mim()(_images(), training=False)
+        assert tuple(out.shape) == (2, NUM_PATCHES, VOCAB)
+
+    def test_output_is_logits_not_probabilities(self):
+        """BOTH halves: a value outside [0, 1] is reachable AND no softmax exists."""
+        model = _mim()
+        model.build((None,) + IMG)
+        # Zero the kernel and PIN the bias, so the head's output is exactly the bias.
+        # A constant kernel would NOT work: `decoder_norm`'s output is zero-mean over
+        # the feature axis, so a constant kernel maps every token to ~0.0 -- inside
+        # [0, 1] up to float noise, which is a coin flip, not a test.
+        pinned = np.linspace(-5.0, 5.0, VOCAB).astype('float32')
+        model.decoder_head.set_weights([
+            np.zeros_like(ops.convert_to_numpy(model.decoder_head.kernel)),
+            pinned,
+        ])
+        out = ops.convert_to_numpy(model(_images(), training=False))
+        np.testing.assert_allclose(
+            out, np.broadcast_to(pinned, out.shape), atol=1e-5, rtol=0
+        )
+        assert out.min() < 0.0 and out.max() > 1.0, "head does not emit logits"
+        # And structurally: nothing in the head applies a softmax.
+        assert model.decoder_head.activation is keras.activations.linear
+        for layer in model._flatten_layers(include_self=False):
+            assert not isinstance(layer, keras.layers.Softmax), layer.name
+            act = getattr(layer, 'activation', None)
+            assert act is not keras.activations.softmax, layer.name
+        # Nor does the output already sum to 1 over the vocab axis.
+        probs = ops.convert_to_numpy(
+            keras.activations.softmax(model(_images(), training=False))
+        )
+        assert not np.allclose(out.sum(axis=-1), 1.0, atol=1e-3)
+        np.testing.assert_allclose(probs.sum(axis=-1), 1.0, atol=1e-5)
+        assert not np.allclose(out, probs, atol=1e-3), (
+            "the head output is already a probability distribution"
+        )
+
+    def test_head_layers_all_carry_the_decoder_prefix(self):
+        model = _mim()
+        model.build((None,) + IMG)
+        head_names = {l.name for l in model.layers} - {BACKBONE_NAME}
+        assert head_names == {"decoder_norm", "decoder_head"}
+        assert all(n.startswith("decoder_") for n in head_names)
+
+    def test_decoder_norm_uses_the_backbone_epsilon(self):
+        model = _mim()
+        assert model.decoder_norm.epsilon == EPS
+
+    def test_gradients_reach_the_head_and_the_trunk(self):
+        model = _mim(drop_path_rate=0.0)
+        model.build((None,) + IMG)
+        x, m = tf.constant(_images()), tf.constant(_mask())
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_mean(tf.square(model((x, m), training=True)))
+        grads = tape.gradient(loss, model.trainable_variables)
+        dead = [v.path for g, v in zip(grads, model.trainable_variables) if g is None]
+        assert dead == [], f"no gradient reached: {dead}"
+
+    def test_invalid_vocab_size_raises(self):
+        with pytest.raises(ValueError, match="vocab_size must be a positive integer"):
+            BeitForMaskedImageModeling(backbone=_tiny(), vocab_size=0)
+
+    def test_a_non_backbone_is_refused(self):
+        with pytest.raises(TypeError, match="backbone must be a BeitModel"):
+            BeitForMaskedImageModeling(backbone="not a model")
+
+    def test_keras_roundtrip_preserves_values(self):
+        model = _mim()
+        model.build((None,) + IMG)
+        x, m = _images(), _mask()
+        before = ops.convert_to_numpy(model((x, m), training=False))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "beit_mim.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+            after = ops.convert_to_numpy(restored((x, m), training=False))
+        np.testing.assert_allclose(before, after, atol=1e-6, rtol=0)
+        assert restored.vocab_size == VOCAB
+        assert restored.backbone.name == BACKBONE_NAME
+
+
+# ==============================================================================
+# 8. The classification head
+# ==============================================================================
+
+class TestBeitForImageClassification:
+
+    @pytest.mark.parametrize("variant", ['tiny', 'small'])
+    def test_output_shape(self, variant):
+        model = _classifier(variant)
+        out = model(_images(), training=False)
+        assert tuple(out.shape) == (2, 7)
+        assert model.compute_output_shape((2,) + IMG) == (2, 7)
+
+    def test_output_is_logits_not_probabilities(self):
+        model = _classifier()
+        model.build((None,) + IMG)
+        # Same reasoning as the MIM head: `head_norm` is zero-mean over the feature
+        # axis, so a constant kernel produces ~0.0 and the [0,1] check becomes a coin
+        # flip. Zero the kernel and pin the bias instead.
+        pinned = np.linspace(-5.0, 5.0, 7).astype('float32')
+        model.head_classifier.set_weights([
+            np.zeros_like(ops.convert_to_numpy(model.head_classifier.kernel)),
+            pinned,
+        ])
+        out = ops.convert_to_numpy(model(_images(), training=False))
+        np.testing.assert_allclose(
+            out, np.broadcast_to(pinned, out.shape), atol=1e-5, rtol=0
+        )
+        assert out.min() < 0.0 and out.max() > 1.0, "head does not emit logits"
+        assert model.head_classifier.activation is keras.activations.linear
+        for layer in model._flatten_layers(include_self=False):
+            assert not isinstance(layer, keras.layers.Softmax), layer.name
+            act = getattr(layer, 'activation', None)
+            assert act is not keras.activations.softmax, layer.name
+        assert not np.allclose(out.sum(axis=-1), 1.0, atol=1e-3)
+
+    def test_mean_pooling_excludes_the_cls_token(self):
+        """A-7 / BEiT's own convention: pool the PATCH tokens only.
+
+        Why this can fail if the implementation is wrong: pooling over all N+1 tokens
+        is a one-character change (`exclude_positions=[]`) that changes nothing
+        observable in a shape or a loss curve. Here the cls-token weight is perturbed
+        and the pooled representation must NOT move.
+        """
+        model = _classifier(dropout_rate=0.0)
+        model.build((None,) + IMG)
+        assert model.head_pool.exclude_positions == [0]
+        assert model.head_pool.strategy == ['mean']
+
+        x = _images()
+        # Pool the trunk output directly: perturbing position 0 must be invisible.
+        tokens = ops.convert_to_numpy(model.backbone(x, training=False))
+        pooled_a = ops.convert_to_numpy(model.head_pool(tokens))
+        tokens_b = tokens.copy()
+        tokens_b[:, 0, :] += 100.0
+        pooled_b = ops.convert_to_numpy(model.head_pool(tokens_b))
+        np.testing.assert_allclose(pooled_a, pooled_b, atol=1e-5, rtol=0)
+        # Control: perturbing a PATCH position must move it.
+        tokens_c = tokens.copy()
+        tokens_c[:, 1, :] += 100.0
+        assert not np.allclose(
+            pooled_a, ops.convert_to_numpy(model.head_pool(tokens_c)), atol=1e-3
+        )
+
+    def test_cls_pooling_mode_has_no_head_norm(self):
+        """D-007's other branch: use_mean_pooling=False -> the trunk norms, not us."""
+        model = _classifier(use_mean_pooling=False)
+        model.build((None,) + IMG)
+        assert model.head_pool is None
+        assert model.head_norm is None
+        assert model.backbone.final_norm is not None
+        assert tuple(model(_images(), training=False).shape) == (2, 7)
+        names = {l.name for l in model.layers}
+        assert "head_norm" not in names
+        assert "head_pool" not in names
+
+    def test_head_layers_all_carry_the_head_prefix(self):
+        model = _classifier()
+        model.build((None,) + IMG)
+        head_names = {l.name for l in model.layers} - {BACKBONE_NAME}
+        assert head_names == {
+            "head_pool", "head_norm", "head_dropout", "head_classifier"
+        }
+        assert all(n.startswith("head_") for n in head_names)
+
+    def test_head_norm_uses_the_backbone_epsilon(self):
+        assert _classifier().head_norm.epsilon == EPS
+
+    def test_gradients_reach_everything_except_the_dead_mask_token(self):
+        """The mask token is the ONE weight with no gradient here -- by design.
+
+        The classifier never calls ``MaskTokenApply``, so its mask token receives no
+        gradient; it exists only to keep this trunk weight-identical to the MIM trunk.
+        Asserting it is the SOLE exception turns that contract into a positive claim
+        rather than a blanket exemption: any OTHER unreachable weight still fails.
+        """
+        model = _classifier(drop_path_rate=0.0)
+        model.build((None,) + IMG)
+        x = tf.constant(_images())
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_mean(tf.square(model(x, training=True)))
+        grads = tape.gradient(loss, model.trainable_variables)
+        dead = [v.path for g, v in zip(grads, model.trainable_variables) if g is None]
+        assert len(dead) == 1, f"unexpected dead weights: {dead}"
+        assert dead[0].endswith("mask_token/mask_token"), dead
+
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            (dict(num_classes=0), "num_classes must be a positive integer"),
+            (dict(num_classes=3, dropout_rate=1.5), r"dropout_rate must be in \[0, 1\]"),
+        ],
+    )
+    def test_invalid_config_raises(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            BeitForImageClassification(backbone=_tiny(), **kwargs)
+
+    def test_keras_roundtrip_preserves_values(self):
+        model = _classifier()
+        model.build((None,) + IMG)
+        x = _images()
+        before = ops.convert_to_numpy(model(x, training=False))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "beit_classifier.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+            after = ops.convert_to_numpy(restored(x, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-6, rtol=0)
+        assert restored.num_classes == 7
+        assert restored.backbone.name == BACKBONE_NAME
+
+
+# ==============================================================================
+# 9. SC-10 -- the MIM -> classifier warm start
+# ==============================================================================
+
+class TestBeitWarmStart:
+    """The property the whole two-head prefix discipline exists to deliver."""
+
+    def test_the_two_heads_use_disjoint_prefixes(self):
+        """Assert the property DIRECTLY, not via its consequence.
+
+        Why this can fail if the implementation is wrong: any `head_`-prefixed layer
+        inside the MIM model (or `decoder_` inside the classifier) would be silently
+        skipped by the OTHER model's transfer, and the symptom would be a partially
+        random trunk rather than an error.
+        """
+        mim = _mim()
+        clf = _classifier()
+        mim.build((None,) + IMG)
+        clf.build((None,) + IMG)
+
+        mim_head = {l.name for l in mim.layers} - {BACKBONE_NAME}
+        clf_head = {l.name for l in clf.layers} - {BACKBONE_NAME}
+        assert mim_head and clf_head
+        assert mim_head.isdisjoint(clf_head)
+        assert not any(n.startswith("head_") for n in mim_head)
+        assert not any(n.startswith("decoder_") for n in clf_head)
+        # And nothing inside the shared trunk claims either prefix.
+        trunk_names = {l.name for l in mim.backbone.layers}
+        assert not any(
+            n.startswith(("head_", "decoder_")) for n in trunk_names
+        ), trunk_names
+
+    def test_the_trunks_are_weight_identical_in_structure(self):
+        """Including the mask token, which the classifier never calls."""
+        mim = _mim()
+        clf = _classifier()
+        mim.build((None,) + IMG)
+        clf.build((None,) + IMG)
+        mim_w = [tuple(w.shape) for w in mim.backbone.get_weights()]
+        clf_w = [tuple(w.shape) for w in clf.backbone.get_weights()]
+        assert mim_w == clf_w
+        assert clf.backbone.mask_token.built
+        assert clf.backbone.mask_token.mask_token is not None
+
+    def test_mim_to_classifier_transfers_the_trunk_values(self):
+        """SC-10. A ZERO-LAYER transfer must FAIL this test, not pass it."""
+        mim = _mim()
+        mim.build((None,) + IMG)
+
+        clf = _classifier()
+        # H-12: the TARGET must be built BEFORE the transfer.
+        clf.build((None,) + IMG)
+        assert clf.built
+
+        source = [ops.convert_to_numpy(w) for w in mim.backbone.get_weights()]
+        before = [ops.convert_to_numpy(w) for w in clf.backbone.get_weights()]
+        # Precondition: the two trunks start DIFFERENT, otherwise "equal after" is
+        # vacuous (both are randomly initialized, so this is a real check).
+        assert any(
+            not np.allclose(a, b) for a, b in zip(source, before)
+        ), "trunks were already identical -- the transfer assertion would be vacuous"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "beit_mim.keras")
+            mim.save(path)
+            report = load_weights_from_checkpoint(
+                target=clf,
+                ckpt_path=path,
+                skip_prefixes=("decoder_", "head_"),
+            )
+
+        # (b) the report shows the backbone ACTUALLY loaded -- a zero-layer transfer
+        # would leave `loaded` empty and this is what makes the test non-vacuous.
+        assert BACKBONE_NAME in report.loaded, report.summary_string()
+        assert report.num_loaded >= 1
+        assert BACKBONE_NAME not in [name for name, _, _ in report.shape_mismatch]
+        assert BACKBONE_NAME not in report.missing_in_source
+        assert set(report.skipped_by_prefix) == {"decoder_norm", "decoder_head"}
+
+        # (a) trunk weight VALUES are equal post-transfer.
+        after = [ops.convert_to_numpy(w) for w in clf.backbone.get_weights()]
+        assert len(after) == len(source)
+        for i, (a, b) in enumerate(zip(source, after)):
+            np.testing.assert_array_equal(a, b, err_msg=f"trunk weight {i}")
+
+    def test_the_classifier_head_is_not_touched_by_the_transfer(self):
+        mim = _mim()
+        mim.build((None,) + IMG)
+        clf = _classifier()
+        clf.build((None,) + IMG)
+        head_before = ops.convert_to_numpy(clf.head_classifier.kernel)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "beit_mim.keras")
+            mim.save(path)
+            load_weights_from_checkpoint(
+                target=clf, ckpt_path=path, skip_prefixes=("decoder_", "head_")
+            )
+        np.testing.assert_array_equal(
+            head_before, ops.convert_to_numpy(clf.head_classifier.kernel)
+        )
+
+    def test_a_mismatched_backbone_config_is_reported_not_silently_loaded(self):
+        """A trunk of a different width must NOT quietly train from scratch."""
+        mim = _mim('tiny')
+        mim.build((None,) + IMG)
+        clf = _classifier('small')          # 384d trunk vs the checkpoint's 192d
+        clf.build((None,) + IMG)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "beit_mim.keras")
+            mim.save(path)
+            report = load_weights_from_checkpoint(
+                target=clf, ckpt_path=path, skip_prefixes=("decoder_", "head_")
+            )
+        assert BACKBONE_NAME not in report.loaded
+        assert BACKBONE_NAME in [name for name, _, _ in report.shape_mismatch]
