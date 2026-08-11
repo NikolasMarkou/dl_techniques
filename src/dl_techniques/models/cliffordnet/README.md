@@ -91,9 +91,8 @@ Autoregressive language model using causal Clifford blocks.
 ```
 Token IDs (B, seq_len)
   --> Embedding + Positional Embedding
-  --> Reshape to (B, 1, seq_len, D)      H=1 for 2D conv compatibility
-  --> L x CausalCliffordNetBlock          left-only padding, causal cumulative mean
-  --> Squeeze to (B, seq_len, D)
+  --> L x CausalCliffordNetBlock          (B, seq_len, D) throughout;
+                                          left-only padding, causal cumulative mean
   --> LayerNorm --> Dense
   --> {"logits": (B, seq_len, vocab_size)}
 ```

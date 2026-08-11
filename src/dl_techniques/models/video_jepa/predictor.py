@@ -18,9 +18,8 @@ Per predictor "pair", we alternate:
 2. **Temporal pass** — transpose (B, T, H_p, W_p, D) → (B, H_p, W_p, T, D) →
    reshape (B*H_p*W_p, T, D) → ``CausalSelfAttnMLPBlock`` (causal MHA + MLP
    wrapped in LayerScale γ=1e-5 residual for identity-at-init)
-   → reshape (B*H_p*W_p, 1, T, D) → ``CausalCliffordNetBlock``
-   → reshape (B*H_p*W_p, T, D) → reshape/transpose back to
-   (B, T, H_p, W_p, D).
+   → ``CausalCliffordNetBlock`` (consumes (B*H_p*W_p, T, D) natively)
+   → reshape/transpose back to (B, T, H_p, W_p, D).
 
 A learned 1D temporal positional embedding ``pos_t: (1, T_max, D)``
 is added to ``z`` **once** before block 0.
@@ -31,7 +30,8 @@ A perturbation at frame ``k`` must not alter any output at frame ``< k``.
 
 - Spatial pass: trivially independent across ``T``.
 - Temporal attention: ``MultiHeadAttention(use_causal_mask=True)``.
-- CausalCliffordNetBlock: left-padded valid convs over the W (=T) axis.
+- CausalCliffordNetBlock: left-only causal context over the T axis
+  (see ``layers/geometric/clifford_block.py``).
 - Temporal PE: applied once, additive — causal-safe by construction.
 
 See ``tests/test_models/test_video_jepa/test_video_jepa.py::TestPredictor::

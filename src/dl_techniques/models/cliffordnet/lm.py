@@ -2,8 +2,8 @@
 
 Adapts the isotropic CliffordNet geometric algebra backbone
 (arXiv:2601.06793v2) for autoregressive sequence modeling.  Token sequences
-are embedded, reshaped to 4-D ``(B, 1, seq_len, D)`` for
-:class:`CausalCliffordNetBlock` processing, then projected to vocabulary
+are embedded, processed as ``(B, seq_len, D)`` by
+:class:`CausalCliffordNetBlock` layers, then projected to vocabulary
 logits.
 
 The :class:`CausalCliffordNetBlock` layers use left-only padded depthwise
@@ -21,14 +21,8 @@ Architecture:
     ─► LayerNorm ─► Dropout
          │
          ▼
-    Reshape to (B, 1, seq_len, D)
-         │
-         ▼
-    CausalCliffordNetBlock × depth
+    CausalCliffordNetBlock × depth        (B, seq_len, D) throughout
     (causal depthwise conv context + Clifford products + GGR)
-         │
-         ▼
-    Reshape to (B, seq_len, D)
          │
          ▼
     LayerNorm ─► Dropout ─► Dense(vocab_size)
@@ -64,8 +58,8 @@ class CliffordNetLM(keras.Model):
     """CliffordNet language model for causal language modeling.
 
     Adapts the isotropic CliffordNet vision backbone for sequence modeling.
-    Token sequences are embedded, reshaped to 4D ``(B, 1, seq_len, D)`` for
-    :class:`CausalCliffordNetBlock` processing, then projected to vocabulary
+    Token sequences are embedded, processed as ``(B, seq_len, D)`` by
+    :class:`CausalCliffordNetBlock` layers, then projected to vocabulary
     logits.
 
     The causal depthwise convolutions in each block use left-only padding so
