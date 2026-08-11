@@ -355,15 +355,10 @@ class CliffordNetLM(keras.Model):
         x = self.embed_norm(x, training=training)
         x = self.embed_dropout(x, training=training)
 
-        # Reshape to 4D: (B, seq_len, D) -> (B, 1, seq_len, D)
-        x = keras.ops.expand_dims(x, axis=1)
-
-        # Apply CausalCliffordNet blocks (external residual + drop_path)
+        # Apply CausalCliffordNet blocks (external residual + drop_path).
+        # ``x`` stays ``(B, seq_len, D)`` — see ``layers/geometric/clifford_block.py``.
         for block, drop_path in zip(self.clifford_blocks, self.drop_paths):
             x = x + drop_path(block(x, training=training), training=training)
-
-        # Reshape back to 3D: (B, 1, seq_len, D) -> (B, seq_len, D)
-        x = keras.ops.squeeze(x, axis=1)
 
         # Output projection
         x = self.head_norm(x, training=training)
