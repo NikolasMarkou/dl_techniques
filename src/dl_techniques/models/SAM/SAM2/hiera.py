@@ -65,6 +65,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 
 # ---------------------------------------------------------------------
@@ -1084,12 +1085,12 @@ class Hiera(keras.layers.Layer):
             self.block_specs[end]["dim_out"] for end in self.stage_ends[::-1]
         ]
 
-        drop_path_schedule = (
-            [
-                self.drop_path_rate * index / max(self.depth - 1, 1)
-                for index in range(self.depth)
-            ]
-            if self.drop_path_rate > 0.0 else [0.0] * self.depth
+        # Linear stochastic-depth decay across depth. The helper already covers
+        # both branches this used to spell out by hand: at `depth <= 1` it
+        # returns `[0.0] * depth`, and at `drop_path_rate == 0.0` its step is
+        # 0.0 so every element rounds to exactly 0.0 (measured, not assumed).
+        drop_path_schedule = linear_drop_path_rates(
+            self.depth, self.drop_path_rate
         )
 
         # Sub-layers -- created unconditionally, built explicitly in build().
