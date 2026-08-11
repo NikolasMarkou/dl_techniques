@@ -25,6 +25,7 @@ from ..utils.logger import logger
 from .ffn import create_ffn_layer, FFNType
 from .ffn.factory import FFN_REGISTRY
 from .norms import create_normalization_layer, NormalizationType
+from .stochastic_depth import StochasticDepth
 from .attention.fnet_fourier_transform import FNetFourierTransform
 
 # ---------------------------------------------------------------------
@@ -90,6 +91,14 @@ class FNetEncoderBlock(keras.layers.Layer):
     :type ffn_type: FFNType
     :param ffn_kwargs: Optional FFN-specific parameters.
     :type ffn_kwargs: Optional[Dict[str, Any]]
+    :param use_stochastic_depth: Whether to apply stochastic depth (drop-path)
+        to each of the two residual branches. Defaults to False, in which case
+        the block is bit-identical to one built without the parameter at all.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Drop-path probability used by both branches
+        when ``use_stochastic_depth`` is True. Must be in ``[0, 1)``. Defaults
+        to 0.1. Ignored when ``use_stochastic_depth`` is False.
+    :type stochastic_depth_rate: float
     :param kwargs: Additional Layer base class arguments.
     """
 
@@ -102,6 +111,8 @@ class FNetEncoderBlock(keras.layers.Layer):
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         ffn_type: FFNType = 'mlp',
         ffn_kwargs: Optional[Dict[str, Any]] = None,
+        use_stochastic_depth: bool = False,
+        stochastic_depth_rate: float = 0.1,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -120,10 +131,32 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.normalization_kwargs = normalization_kwargs or {}
         self.ffn_type = ffn_type
         self.ffn_kwargs = ffn_kwargs or {}
+        self.use_stochastic_depth = use_stochastic_depth
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.supports_masking = True
 
         # Create Fourier transform layer
         self.fourier_transform = FNetFourierTransform(**self.fourier_config)
+
+        # Stochastic depth (drop-path) layers, one per residual branch.
+        #
+        # TWO INDEPENDENT instances, not one shared instance: this mirrors
+        # `layers/transformers/transformer.py`'s `attention_stochastic_depth` /
+        # `ffn_stochastic_depth` pair, which is the majority pattern in this repo
+        # for a two-residual-branch block. They are built only when the flag is
+        # on, so at the default `use_stochastic_depth=False` the sublayer tree is
+        # unchanged and the block stays bit-identical to the pre-drop-path code.
+        self.fourier_stochastic_depth = None
+        self.ffn_stochastic_depth = None
+        if self.use_stochastic_depth:
+            self.fourier_stochastic_depth = StochasticDepth(
+                drop_path_rate=self.stochastic_depth_rate,
+                name='fourier_stochastic_depth'
+            )
+            self.ffn_stochastic_depth = StochasticDepth(
+                drop_path_rate=self.stochastic_depth_rate,
+                name='ffn_stochastic_depth'
+            )
 
         # Layer creation will be done in build() to ensure proper shape inference
         self.fourier_layer_norm = None
@@ -213,6 +246,12 @@ class FNetEncoderBlock(keras.layers.Layer):
         # Build FFN layer
         self.ffn_layer.build(input_shape)
 
+        # Build stochastic depth layers (weightless, but built for tree parity)
+        if self.fourier_stochastic_depth is not None:
+            self.fourier_stochastic_depth.build(input_shape)
+        if self.ffn_stochastic_depth is not None:
+            self.ffn_stochastic_depth.build(input_shape)
+
         super().build(input_shape)
 
     def call(
@@ -233,15 +272,29 @@ class FNetEncoderBlock(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Fourier mixing with residual connection (pass mask)
+        #
+        # This block is POST-norm: the residual is added FIRST and the sum is
+        # then normalized. Drop-path therefore wraps the BRANCH output
+        # (`fourier_output` / `ffn_output`) before it enters the add -- never the
+        # residual sum and never the normalized result. Dropping the sum would
+        # delete the skip path itself, which is the opposite of stochastic depth.
         fourier_output = self.fourier_transform(
             inputs, attention_mask=attention_mask, training=training
         )
+        if self.fourier_stochastic_depth is not None:
+            fourier_output = self.fourier_stochastic_depth(
+                fourier_output, training=training
+            )
         fourier_output = self.fourier_layer_norm(
             inputs + fourier_output, training=training
         )
 
         # Feed-forward network with residual connection
         ffn_output = self.ffn_layer(fourier_output, training=training)
+        if self.ffn_stochastic_depth is not None:
+            ffn_output = self.ffn_stochastic_depth(
+                ffn_output, training=training
+            )
 
         # Final normalization with residual connection
         return self.output_layer_norm(
@@ -289,6 +342,8 @@ class FNetEncoderBlock(keras.layers.Layer):
             'normalization_kwargs': self.normalization_kwargs,
             'ffn_type': self.ffn_type,
             'ffn_kwargs': self.ffn_kwargs,
+            'use_stochastic_depth': self.use_stochastic_depth,
+            'stochastic_depth_rate': self.stochastic_depth_rate,
         })
         return config
 
