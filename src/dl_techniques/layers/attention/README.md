@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes thirty-one different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes thirty-two different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -13,6 +13,7 @@ The following layers are supported by the factory system with automated paramete
 | Type | Class | Description | Use Case | Input Shape |
 |------|-------|-------------|----------|-------------|
 | `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. | `(batch, seq_len, dim)` |
+| `beit` | `BeitAttention` | BEiT self-attention: learnable relative-position bias over a `(Wh, Ww)` **patch grid** with three extra cls-interaction slots, added pre-softmax, plus asymmetric QKV bias (K has **no** bias parameter). | BEiT / BEiT-style ViTs; any ViT wanting a T5-style 2D relative-position bias instead of absolute position embeddings. | `(batch, Wh*Ww + 1, dim)` |
 | `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. | `(batch, seq_len, dim)` |
 | `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. | `(batch, H, W, channels)` |
 | `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. | `(batch, H, W, channels)` |

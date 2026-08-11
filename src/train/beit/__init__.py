@@ -14,8 +14,10 @@ three-stage pipeline rather than the usual pretrain/finetune pair:
   stage-1 checkpoint via ``load_weights_from_checkpoint(..., skip_prefixes=("decoder_",
   "head_"))`` with the transfer ASSERTED, never merely logged.
 
-``common.py`` holds only what all three genuinely share: the raw-image ``tf.data``
-pipeline, the optimizer block, and the frozen-tokenizer loader. There is deliberately NO
+``common.py`` covers only what all three genuinely share, and AUTHORS only one of the
+three: the raw-image ``tf.data`` pipeline and the optimizer block are RE-EXPORTED from
+``train.energy_transformer.common`` (decision D-008), and the frozen-tokenizer loader is
+the single BEiT-specific helper defined there. There is deliberately NO
 shared ``TrainingConfig`` and NO shared ``train()`` orchestrator — each trainer owns its
 own dataclass, ``parse_arguments()`` and ``config_from_args()`` so that a CLI flag which
 never reaches the config is a LOCAL, greppable, testable defect rather than an inherited

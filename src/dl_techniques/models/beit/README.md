@@ -228,10 +228,10 @@ package, and none may be added.**
  │   ┌──────────────────────────────────────────────────────────┐ │
  │   │ LayerNorm(eps=1e-12) ─► BeitAttention   ◄── THE ONLY NEW  │ │
  │   │                          (rel. pos. bias, q/v-only bias)  │ │
- │   │ ─► LearnableMultiplier (LayerScale γ₁) ─► StochasticDepth │ │
+ │   │ ─► StochasticDepth ─► LearnableMultiplier (LayerScale γ₁) │ │
  │   │ ─► + residual                                             │ │
  │   │ LayerNorm(eps=1e-12) ─► MLP(GELU)                         │ │
- │   │ ─► LearnableMultiplier (LayerScale γ₂) ─► StochasticDepth │ │
+ │   │ ─► StochasticDepth ─► LearnableMultiplier (LayerScale γ₂) │ │
  │   │ ─► + residual                                             │ │
  │   └──────────────────────────────────────────────────────────┘ │
  └──────────┬─────────────────────────────────────────────────────┘
@@ -258,12 +258,20 @@ package, and none may be added.**
 | Stochastic depth | `StochasticDepth` | inside `TransformerLayer` (`use_stochastic_depth=True`) | reused |
 | DropPath ramp | `linear_drop_path_rates` | `utils/drop_path.py` | reused |
 | Norms / FFN | `LayerNormalization`, `MLPBlock` | via `TransformerLayer`'s factories | reused |
-| Classifier pooling | `SequencePooling(strategy='mean', exclude_positions=[0])` | `layers/sequence_pooling.py` | reused |
+| Classifier pooling | `SequencePooling(strategy='mean', exclude_positions=[0])` | `layers/sequence_pooling/sequence_pooling.py` | reused |
 | **Self-attention** | **`BeitAttention`** | **`layers/attention/beit_attention.py`** | **NEW** |
 
 `TransformerLayer`'s signature was **not** changed for BEiT. It gained one `'beit'` case in
 its per-type attention-parameter table, and the attention factory gained one `'beit'`
 registry entry — both purely additive.
+
+> **Order note (measured, not assumed).** `TransformerLayer` applies `StochasticDepth`
+> *before* `LearnableMultiplier`, whereas the BEiT reference writes
+> `x + drop_path(gamma * attn(x))`. The two orders are **numerically identical**:
+> `StochasticDepth` multiplies the whole sample by a scalar (`0` or `1/(1-p)`) and LayerScale
+> multiplies elementwise by `gamma` broadcast over the batch, so the two commute exactly.
+> The diagram above shows the shipped order; do not "fix" the code to match the paper's
+> notation.
 
 ### 4.2 `BeitAttention` — why one new layer was unavoidable
 
@@ -862,18 +870,19 @@ green.
 
 | Suite | Command | Result |
 |:---|:---|:---|
-| Model package | `pytest tests/test_models/test_beit/ -q` | **88 passed / 88 collected** |
-| Attention layer | `pytest tests/test_layers/test_attention/test_beit_attention.py -q` | **92 passed / 92 collected** |
+| Model package | `pytest tests/test_models/test_beit/ -q` | **91 passed / 91 collected** |
+| Attention layer | `pytest tests/test_layers/test_attention/test_beit_attention.py -q` | **97 passed / 97 collected** |
 | Masking + map fn | `pytest tests/test_datasets/test_beit_masking.py -q` | **32 passed / 32 collected** |
 | `TransformerLayer` wiring | `pytest tests/test_layers/test_transformers/test_transformer_beit_integration.py -q` | **31 passed / 31 collected** |
 
 All commands are run from the repo root with the `.venv` interpreter and
 `CUDA_VISIBLE_DEVICES=1`.
 
-`tests/test_models/test_beit/test_model.py` is organized as nine classes:
+`tests/test_models/test_beit/test_model.py` is organized as ten classes:
 `TestBeitScaleConfigs`, `TestBeitModelInitialization`, `TestBeitModelBuild`,
 `TestBeitModelForward`, `TestBeitModelSerialization`, `TestBeitArchitectureValidation`,
-`TestBeitForMaskedImageModeling`, `TestBeitForImageClassification`, `TestBeitWarmStart`.
+`TestBeitForMaskedImageModeling`, `TestBeitForImageClassification`, `TestBeitWarmStart`,
+`TestBeitUnbuiltFit`.
 
 Guards worth knowing about, because they encode facts rather than shapes:
 

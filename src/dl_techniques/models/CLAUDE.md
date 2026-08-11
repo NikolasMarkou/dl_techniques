@@ -15,6 +15,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `vit/` — Vision Transformer
 - `vit_hmlp/` — ViT with hierarchical MLP
 - `vit_siglip/` — ViT with SigLIP
+- `beit/` — BEiT (masked image modeling over discrete visual tokens + classifier; trainers in `src/train/beit/`)
 - `swin_transformer/` — Swin Transformer
 - `dino/` — DINO self-supervised
 - `masked_autoencoder/` — MAE
@@ -135,7 +136,7 @@ Check in this precedence order; only proceed to the next step when nothing fits:
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
    | Normalization | `create_normalization_layer()` in `src/dl_techniques/layers/norms/factory.py` | ~16 |
-   | Attention | `create_attention_layer()` in `src/dl_techniques/layers/attention/factory.py` | ~29 |
+   | Attention | `create_attention_layer()` in `src/dl_techniques/layers/attention/factory.py` | 32 |
    | FFN / MLP | `create_ffn_layer()` in `src/dl_techniques/layers/ffn/factory.py` | ~15 |
    | Embeddings | `create_embedding_layer()` in `src/dl_techniques/layers/embedding/factory.py` | ~13 |
    | Activations | `create_activation_layer()` in `src/dl_techniques/layers/activations/factory.py` | ~22 |
