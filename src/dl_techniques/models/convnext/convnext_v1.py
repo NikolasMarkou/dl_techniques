@@ -44,6 +44,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.stochastic_gradient import StochasticGradient
@@ -292,13 +293,15 @@ class ConvNeXtV1(keras.Model):
         dim = self.dims[stage_idx]
         total_blocks = sum(self.depths)
         block_start_idx = sum(self.depths[:stage_idx])
+        # The drop-path ramp is GLOBAL across stages, not per-stage: the index is
+        # `block_start_idx + block_idx` over `sum(self.depths)` blocks, so stage 0
+        # starts at 0.0 and the last block of the last stage reaches drop_path_rate.
+        # `linear_drop_path_rates` already handles total_blocks <= 1 (all-zero).
+        drop_path_rates = linear_drop_path_rates(total_blocks, self.drop_path_rate)
 
         for block_idx in range(depth):
             current_block_idx = block_start_idx + block_idx
-            if total_blocks > 1:
-                drop_rate = self.drop_path_rate * current_block_idx / (total_blocks - 1)
-            else:
-                drop_rate = 0.0
+            drop_rate = drop_path_rates[current_block_idx]
 
             block = ConvNextV1Block(
                 kernel_size=self.kernel_size,

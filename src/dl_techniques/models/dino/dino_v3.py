@@ -77,7 +77,7 @@ ssl_model = keras.Model(inputs=backbone.input, outputs=head(backbone.output))
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
+from keras import layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 # ---------------------------------------------------------------------
@@ -85,6 +85,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
@@ -411,9 +412,13 @@ class DINOv3(keras.Model):
     def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Creates the stack of transformer encoder layers."""
         self.encoder_layers = []
-        # DECISION plan_2026-06-15_2a23a001/D-004: keras tensors have no .item(); use float(r).
-        # (NumPy-only method, crashes on a linspace tensor under TF backend.)
-        dpr = [float(r) for r in ops.linspace(0., self.stochastic_depth_rate, self.depth)]
+        # DECISION plan-2026-08-11T165740-53dac34a/D-004: use the shared
+        # `linear_drop_path_rates` helper, NOT a hand-rolled `ops.linspace` ramp.
+        # It returns plain Python floats, so this also retires the older
+        # plan_2026-06-15_2a23a001/D-004 hazard (keras tensors have no `.item()`;
+        # that fix spelled the conversion `float(r)`). Do not reintroduce either
+        # a `linspace` call or a `.item()` conversion here.
+        dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         attention_type, attention_args = self._attention_spec()
 

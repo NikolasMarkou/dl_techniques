@@ -44,7 +44,6 @@ Where:
 """
 
 import keras
-import numpy as np
 from keras import layers, initializers
 from typing import Optional, Union, Dict, Any, Tuple, Literal
 
@@ -53,6 +52,7 @@ from typing import Optional, Union, Dict, Any, Tuple, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
@@ -757,7 +757,7 @@ class DINOv2VisionTransformer(keras.Model):
         if self.drop_path_uniform:
             dpr = [self.stochastic_depth_rate] * self.depth
         else:
-            dpr = np.linspace(0, self.stochastic_depth_rate, self.depth).tolist()
+            dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         # Create transformer blocks
         for i in range(self.depth):

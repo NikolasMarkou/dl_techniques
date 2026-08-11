@@ -98,6 +98,7 @@ from dl_techniques.models.dino.common import (
     sync_teacher_to_student,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -677,7 +678,7 @@ class DINOv1(keras.Model):
 
         # Transformer blocks
         self.transformer_blocks = []
-        dpr = [float(x) for x in keras.ops.linspace(0., self.stochastic_depth_rate, self.depth)]
+        dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         for i in range(self.depth):
             # DECISION plan-2026-08-01T105809-dc0c402e/D-010
