@@ -26,6 +26,7 @@ expression agrees by construction and proves nothing. Do NOT "simplify" it by im
 or copying ``BeitAttention._build_relative_position_index``.
 """
 
+import inspect
 import os
 import tempfile
 
@@ -34,7 +35,14 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+import dl_techniques.layers.attention as attention_package
 from dl_techniques.layers.attention.beit_attention import BeitAttention
+from dl_techniques.layers.attention.factory import (
+    ATTENTION_REGISTRY,
+    create_attention_layer,
+    list_attention_types,
+    validate_attention_config,
+)
 
 
 # ==============================================================================
@@ -816,3 +824,255 @@ class TestBeitAttentionEdgeCases:
         np.testing.assert_allclose(
             out, np.repeat(expected, 5, axis=1), atol=1e-3, rtol=1e-2
         )
+
+
+# ==============================================================================
+# 9. Factory registration
+# ==============================================================================
+
+class TestBeitAttentionFactory:
+    """The ``'beit'`` door onto :class:`BeitAttention` in ``attention/factory.py``.
+
+    ``create_attention_layer`` FILTERS the caller's kwargs against
+    ``required_params | optional_params`` and SILENTLY DROPS anything undeclared
+    (``factory.py``; the registry entry is the single source of truth for what
+    reaches the constructor). So the important assertions here are not "a layer came
+    back" but "every value the caller passed is observable on the layer that came
+    back".
+    """
+
+    # -- the registry entry itself ---------------------------------------------
+
+    def test_registry_entry_declares_exactly_the_constructor_signature(self):
+        """No silent drop and no phantom: the declared set IS the ctor's kwarg set.
+
+        Why this can fail if the implementation is wrong: a constructor kwarg absent
+        from the entry is discarded without an error, so the caller gets the class
+        default and believes their value applied. This compares the two sets
+        MECHANICALLY, in both directions, so drift in either one reds -- adding a
+        parameter to ``BeitAttention.__init__`` without declaring it here fails,
+        and declaring a parameter the constructor does not accept fails too.
+        """
+        entry = ATTENTION_REGISTRY["beit"]
+        declared = set(entry["required_params"]) | set(entry["optional_params"])
+
+        signature = inspect.signature(BeitAttention.__init__)
+        accepted = {
+            name
+            for name, param in signature.parameters.items()
+            if param.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        } - {"self", "name", "dtype", "trainable"}
+
+        assert declared == accepted, (
+            f"registry/ctor drift for 'beit': declared-not-accepted="
+            f"{sorted(declared - accepted)}, accepted-not-declared="
+            f"{sorted(accepted - declared)}"
+        )
+
+    def test_registry_entry_targets_the_class_and_pins_the_required_trio(self):
+        entry = ATTENTION_REGISTRY["beit"]
+        assert entry["class"] is BeitAttention
+        assert entry["required_params"] == ["dim", "window_size", "num_heads"]
+        assert "beit" in list_attention_types()
+
+    def test_registry_optional_defaults_equal_the_constructor_defaults(self):
+        """The registry default is INJECTED, so a disagreement is what callers GET."""
+        entry = ATTENTION_REGISTRY["beit"]
+        ctor_defaults = {
+            name: param.default
+            for name, param in inspect.signature(
+                BeitAttention.__init__
+            ).parameters.items()
+        }
+        for param, registry_default in entry["optional_params"].items():
+            assert registry_default == ctor_defaults[param], (
+                f"registry default for {param!r} is {registry_default!r} but the "
+                f"constructor defaults to {ctor_defaults[param]!r}; create_attention_"
+                f"layer injects the registry value, so every caller gets the wrong one"
+            )
+
+    # -- construction through the factory ---------------------------------------
+
+    def test_create_attention_layer_returns_a_beit_attention(self):
+        layer = create_attention_layer(
+            "beit", dim=32, num_heads=4, window_size=(4, 4)
+        )
+        assert isinstance(layer, BeitAttention)
+        assert layer.dim == 32
+        assert layer.num_heads == 4
+        assert layer.window_size == (4, 4)
+        # Defaults survive the trip.
+        assert layer.use_relative_position_bias is True
+        assert layer.qv_bias is True
+
+    def test_int_window_size_is_normalized_to_a_square_grid(self):
+        layer = create_attention_layer("beit", dim=32, num_heads=4, window_size=4)
+        assert layer.window_size == (4, 4)
+        assert layer.num_tokens == 17
+
+    def test_no_optional_kwarg_is_silently_dropped(self):
+        """Every optional param, passed NON-DEFAULT, must be observable on the layer.
+
+        Why this can fail if the implementation is wrong: this is the concrete guard
+        for the registry filter. If any of these names were missing from
+        ``optional_params`` the value would be discarded with no error and the
+        assertion for it would see the class default instead. Each pair below is a
+        DIFFERENT value from the registry default, so a dropped kwarg cannot pass by
+        coincidence.
+        """
+        non_default = {
+            "use_relative_position_bias": False,
+            "qv_bias": False,
+            "use_proj_bias": False,
+            "attn_dropout_rate": 0.25,
+            "proj_dropout_rate": 0.125,
+            "scale": 0.5,
+            "kernel_initializer": "he_normal",
+            "bias_initializer": "ones",
+            "kernel_regularizer": "l2",
+            "bias_regularizer": "l1",
+        }
+        assert set(non_default) == set(
+            ATTENTION_REGISTRY["beit"]["optional_params"]
+        ), "this test must cover every optional param, or the guard has a blind spot"
+
+        layer = create_attention_layer(
+            "beit", dim=32, num_heads=4, window_size=(4, 4), **non_default
+        )
+
+        # Plain flags / floats: read straight back off the layer.
+        assert layer.use_relative_position_bias is False
+        assert layer.qv_bias is False
+        assert layer.use_proj_bias is False
+        assert layer.attn_dropout_rate == 0.25
+        assert layer.proj_dropout_rate == 0.125
+        assert layer.scale == 0.5
+        assert layer._scale_value == 0.5
+
+        # ...and where the flag's REAL effect lives, on the sub-layers it configures.
+        assert layer.q_dense.use_bias is False
+        assert layer.v_dense.use_bias is False
+        assert layer.k_dense.use_bias is False  # structurally absent, always
+        assert layer.proj.use_bias is False
+        assert layer.attn_dropout.rate == 0.25
+        assert layer.proj_dropout.rate == 0.125
+
+        # Initializers/regularizers are resolved objects, so compare by class.
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert isinstance(layer.bias_initializer, keras.initializers.Ones)
+        assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
+        assert isinstance(layer.bias_regularizer, keras.regularizers.L1)
+        assert layer.q_dense.kernel_regularizer is layer.kernel_regularizer
+
+        # And the dropped-kwarg failure is observable structurally too.
+        layer.build((2, layer.num_tokens, 32))
+        assert layer.relative_position_bias_table is None
+        assert _bias_param_count(layer) == 0
+
+    def test_the_drop_guard_is_falsifiable(self):
+        """Control: with `qv_bias` UNDECLARED the value really is discarded.
+
+        Why this can fail if the implementation is wrong: the assertions above pass
+        trivially if `create_attention_layer` did not filter at all, in which case
+        they would prove nothing about the registry. This reproduces the filter with
+        `qv_bias` withheld from the declared set and shows the caller's ``False``
+        vanishing -- i.e. it demonstrates the RED that the entry above prevents.
+        """
+        entry = ATTENTION_REGISTRY["beit"]
+        declared = (
+            set(entry["required_params"]) | set(entry["optional_params"])
+        ) - {"qv_bias"}
+        params = dict(entry["optional_params"])
+        params.update({"dim": 32, "num_heads": 4, "window_size": (4, 4),
+                       "qv_bias": False})
+        filtered = {k: v for k, v in params.items() if k in declared}
+
+        assert "qv_bias" not in filtered
+        dropped = BeitAttention(**filtered)
+        assert dropped.qv_bias is True, (
+            "withholding qv_bias from the declared set must lose the caller's False "
+            "-- if this does not happen the no-silent-drop guard above is inert"
+        )
+        # ...and declaring it (the real entry) keeps it.
+        kept = create_attention_layer(
+            "beit", dim=32, num_heads=4, window_size=(4, 4), qv_bias=False
+        )
+        assert kept.qv_bias is False
+
+    def test_created_layer_forwards_and_round_trips(self):
+        layer = create_attention_layer(
+            "beit", dim=32, num_heads=4, window_size=(3, 5), name="beit_attn"
+        )
+        assert layer.name == "beit_attn"
+        x = _build(layer, batch=2)
+        out = keras.ops.convert_to_numpy(layer(x, training=False))
+        assert out.shape == (2, 16, 32)
+        assert np.all(np.isfinite(out))
+
+        restored = BeitAttention.from_config(layer.get_config())
+        assert restored.window_size == (3, 5)
+        assert restored.num_relative_distance == (2 * 3 - 1) * (2 * 5 - 1) + 3
+
+    # -- validation through the factory door -------------------------------------
+
+    @pytest.mark.parametrize("missing", ["dim", "window_size", "num_heads"])
+    def test_validate_rejects_a_missing_required_param(self, missing):
+        kwargs = {"dim": 32, "window_size": (4, 4), "num_heads": 4}
+        kwargs.pop(missing)
+        with pytest.raises(ValueError, match=f"missing.*{missing}"):
+            validate_attention_config("beit", **kwargs)
+        with pytest.raises(ValueError, match=missing):
+            create_attention_layer("beit", **kwargs)
+
+    def test_tuple_window_size_survives_validation(self):
+        """A ``(Wh, Ww)`` grid must pass the flat positive-value allowlist.
+
+        Why this can fail if the implementation is wrong: the check used to be a bare
+        ``kwargs['window_size'] <= 0``, which raises ``TypeError: '<=' not supported
+        between instances of 'tuple' and 'int'`` for a perfectly valid BEiT grid;
+        ``create_attention_layer`` then catches it and re-raises a ValueError about
+        "parameter compatibility" that names neither the parameter nor the cause.
+        See the D-006 anchor in ``attention/factory.py``.
+        """
+        validate_attention_config("beit", dim=32, window_size=(3, 5), num_heads=4)
+        layer = create_attention_layer(
+            "beit", dim=32, window_size=(3, 5), num_heads=4
+        )
+        assert layer.window_size == (3, 5)
+
+    @pytest.mark.parametrize("bad", [(0, 4), (4, -1), (-2, -2)])
+    def test_tuple_window_size_still_rejects_a_non_positive_component(self, bad):
+        """Componentwise, not waived: the guard must still fire on a bad component."""
+        with pytest.raises(ValueError, match="window_size.*must be positive"):
+            validate_attention_config("beit", dim=32, window_size=bad, num_heads=4)
+
+    def test_scalar_positive_check_is_unchanged(self):
+        """Control for the same edit: scalar behaviour must be byte-for-byte the same."""
+        with pytest.raises(ValueError, match="window_size.*must be positive"):
+            validate_attention_config("beit", dim=32, window_size=0, num_heads=4)
+        with pytest.raises(ValueError, match="dim.*must be positive"):
+            validate_attention_config("beit", dim=-32, window_size=4, num_heads=4)
+        # ...including for the pre-existing scalar-window types.
+        with pytest.raises(ValueError, match="window_size.*must be positive"):
+            validate_attention_config(
+                "single_window", dim=32, window_size=-4, num_heads=4
+            )
+        validate_attention_config(
+            "single_window", dim=32, window_size=4, num_heads=4
+        )
+
+    def test_dim_not_divisible_by_num_heads_raises_through_the_factory(self):
+        with pytest.raises(ValueError, match="divisible|Failed to create"):
+            create_attention_layer(
+                "beit", dim=30, window_size=(4, 4), num_heads=4
+            )
+
+    def test_beit_is_exported_from_the_attention_package(self):
+        from dl_techniques.layers.attention import BeitAttention as Exported
+
+        assert Exported is BeitAttention
+        assert "BeitAttention" in attention_package.__all__

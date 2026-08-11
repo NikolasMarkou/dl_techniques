@@ -10,7 +10,7 @@ and direct access to all layer classes.
 
 Factory coverage of the names exported here
 -------------------------------------------
-`factory.py` registers **31** keys. Of the 35 layer classes re-exported below, 29 are
+`factory.py` registers **32** keys. Of the 36 layer classes re-exported below, 30 are
 reachable through `create_attention_layer(type=...)` and 6 are **direct-import only**:
 
     ProgressiveFocusedAttention, Ideogram4Attention, MMDiTJointAttention,
@@ -65,6 +65,7 @@ from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from .non_local_attention import NonLocalAttention
 from .mobile_mqa import MobileMQA
+from .beit_attention import BeitAttention  # key 'beit'
 from .window_attention import WindowAttention
 from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
 
@@ -122,6 +123,7 @@ __all__ = [
     "SpatialAttention",
     "NonLocalAttention",
     "MobileMQA",
+    "BeitAttention",  # factory key 'beit'
     "WindowAttention",  # no factory key; 'window'/'window_zigzag' use the wrappers
     "TripSE1",
     "TripSE2",

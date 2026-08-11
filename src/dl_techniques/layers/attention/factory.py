@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports thirty-one different attention mechanisms, from standard multi-head attention
+The factory supports thirty-two different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -31,7 +31,7 @@ improved freely; the data above may not.
 
 Registry entries whose 'class' is NOT a class
 ---------------------------------------------
-Two of the 31 entries map to module-level FUNCTIONS rather than layer classes:
+Two of the 32 entries map to module-level FUNCTIONS rather than layer classes:
 
     'window'         -> create_grid_window_attention    (window_attention.py)
     'window_zigzag'  -> create_zigzag_window_attention  (window_attention.py)
@@ -54,10 +54,14 @@ consistency" — that grows the frozen surface above.
 Known shape of `validate_attention_config` (documented, not a defect to fix here)
 --------------------------------------------------------------------------------
 The numeric checks in `validate_attention_config` below are a single flat allowlist of
-parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly to all 31
+parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly to all 32
 types, not per-type schemas. A parameter therefore gets range-checked purely because of
 what it is called, and a type-specific constraint (e.g. one type's `window_size` upper
-bound, or a parameter two types interpret differently) cannot be expressed. Per-type
+bound, or a parameter two types interpret differently) cannot be expressed. The one
+concession to that shape is that the positive-value check compares a sequence value
+COMPONENTWISE, because `window_size` is a scalar edge length for three types and a
+`(Wh, Ww)` grid for 'beit' (D-006); it is still keyed on the NAME, not on the type.
+Per-type
 schemas would be the correct shape; converting is out of scope for a behavior-preserving
 pass and would change raised message text that tests match on.
 """
@@ -72,6 +76,7 @@ from typing import Dict, Any, Literal, Optional, List
 from dl_techniques.utils.logger import logger
 
 from .anchor_attention import AnchorAttention
+from .beit_attention import BeitAttention
 from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
@@ -108,6 +113,7 @@ from .window_attention import (
 
 AttentionType = Literal[
     'anchor',
+    'beit',
     'capsule_routing',
     'cbam',
     'channel',
@@ -178,6 +184,42 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(n√n) vs O(n²) for standard attention',
         'paper': 'Anchored Attention: Efficient Self-Attention for Long Sequences'
+    },
+
+    'beit': {
+        'class': BeitAttention,
+        'description': (
+            'BEiT self-attention: multi-head self-attention over a (Wh, Ww) patch grid '
+            'preceded by a single cls token, with a learnable T5-style relative position '
+            'bias added to the attention logits BEFORE the softmax, and an asymmetric QKV '
+            'bias in which the query and value projections carry a bias and the key '
+            'projection has none at all. The bias table has (2*Wh-1)*(2*Ww-1)+3 rows: one '
+            'per distinct patch-to-patch displacement, plus three dedicated rows for the '
+            'cls-to-token, token-to-cls and cls-to-cls relations. Expects a sequence '
+            'length of exactly Wh*Ww + 1.'
+        ),
+        'required_params': ['dim', 'window_size', 'num_heads'],
+        'optional_params': {
+            'use_relative_position_bias': True,
+            'qv_bias': True,
+            'use_proj_bias': True,
+            'attn_dropout_rate': 0.0,
+            'proj_dropout_rate': 0.0,
+            'scale': None,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'BEiT-style vision transformers — masked image modeling pre-training and '
+            'image-classification fine-tuning — and any ViT variant that wants a learned '
+            'relative position bias over a fixed patch grid with a cls token. Note the '
+            'grid is static config: window_size fixes the expected sequence length, so a '
+            'single instance does not generalize across input resolutions.'
+        ),
+        'complexity': 'O(N^2 * D) over N = Wh*Ww + 1 tokens, plus an (N^2) bias gather',
+        'paper': 'BEiT: BERT Pre-Training of Image Transformers (arXiv:2106.08254)'
     },
 
     'capsule_routing': {
@@ -1238,7 +1280,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # NOTE (documented shape, not fixed here): everything below is a FLAT ALLOWLIST OF
-    # PARAMETER NAMES applied uniformly to all 31 attention types — there are no per-type
+    # PARAMETER NAMES applied uniformly to all 32 attention types — there are no per-type
     # schemas. A parameter is range-checked because of its NAME, wherever it appears, and
     # a type-specific bound cannot be expressed. Per-type schemas would be the right
     # shape; the conversion is out of scope for a behavior-preserving pass because it
@@ -1248,10 +1290,38 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',
         'window_size', 'head_dim', 'kv_latent_dim'
     ]
+    # DECISION plan-2026-08-11T012340-f63796dc/D-006
+    # The components are compared, not the value itself, because a value in this list
+    # may legitimately be a SEQUENCE: `window_size` is a scalar edge length for
+    # 'window'/'window_zigzag'/'single_window' but a `(Wh, Ww)` patch grid for 'beit'.
+    # A bare `kwargs[param] <= 0` raises `TypeError: '<=' not supported between
+    # instances of 'tuple' and 'int'`, which `create_attention_layer` then catches and
+    # re-raises as a ValueError about "parameter compatibility" — an error that names
+    # neither the parameter nor the real cause, for a configuration that is valid.
+    #
+    # WHAT NOT TO DO, and why:
+    #   * Do NOT special-case `'beit'` (or any type) here. This validator is
+    #     deliberately a FLAT allowlist of parameter NAMES applied to every type (see
+    #     the module docstring); adding a per-type branch starts the per-type-schema
+    #     conversion that docstring rules out of scope, one exception at a time.
+    #   * Do NOT drop `window_size` from `positive_int_params` to dodge the TypeError.
+    #     That silently removes the `> 0` guard from the three scalar-window types too.
+    #   * Do NOT "fix" this in `BeitAttention` by renaming its `window_size`. The name
+    #     is what makes it match the 'window'/'single_window' registry precedent, and
+    #     renaming would only move the same hole to the next sequence-valued parameter.
+    # Scalar behaviour is unchanged (a scalar is wrapped in a 1-tuple), and the raised
+    # message still reports the whole value. Pinned by
+    # `TestBeitAttentionFactory::test_tuple_window_size_survives_validation` and
+    # `::test_tuple_window_size_still_rejects_a_non_positive_component`.
+    # See decisions.md D-006 (plan-2026-08-11T012340-f63796dc).
     for param in positive_int_params:
-        if param in kwargs and kwargs[param] <= 0:
+        if param not in kwargs:
+            continue
+        value = kwargs[param]
+        components = value if isinstance(value, (tuple, list)) else (value,)
+        if any(component <= 0 for component in components):
             raise ValueError(
-                f"Parameter '{param}' must be positive, got {kwargs[param]}"
+                f"Parameter '{param}' must be positive, got {value}"
             )
 
     # Validate positive float parameters

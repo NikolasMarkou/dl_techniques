@@ -84,24 +84,24 @@ behavioral, not cosmetic.
 
 HOW MUCH IS ACTUALLY GUARDED (measured, not rounded up)
 -------------------------------------------------------
-The value check visits all **730** `(entry, param)` pairs, but visiting is not pinning. Census on
+The value check visits all **740** `(entry, param)` pairs, but visiting is not pinning. Census on
 this tree::
 
-    MATCH 719 | NON_COMPARABLE 5 | SENTINEL 3 | EXEMPT 3 | DRIFT 0
-    ...of the 719 MATCHes, 231 are `None == None`
+    MATCH 734 | NON_COMPARABLE 0 | SENTINEL 3 | EXEMPT 3 | DRIFT 0
+    ...of the 734 MATCHes, 236 are `None == None`
 
 A `None == None` match asserts nothing: it records that neither side stated a value, not that they
-agree on the resolved one. Subtracting them leaves **494 of 730 (68%) genuinely value-pinned**
-(488 non-vacuous MATCH + 3 SENTINEL + 3 EXEMPT). Quote 494, not 730. An inflated coverage number
+agree on the resolved one. Subtracting them leaves **504 of 740 (68%) genuinely value-pinned**
+(498 non-vacuous MATCH + 3 SENTINEL + 3 EXEMPT). Quote 504, not 740. An inflated coverage number
 is the same defect as an undisclosed limit -- it makes a partial guard read as a total one, so the
 next reader trusts it further than it has earned.
 
 WHAT THIS GUARD DOES **NOT** SEE (stated, not hidden)
 -----------------------------------------------------
-1. **Defaults that are `None` on BOTH sides and resolved later -- 231 pairs, not one.** Both sides
+1. **Defaults that are `None` on BOTH sides and resolved later -- 236 pairs, not one.** Both sides
    say `None`, so the comparison passes trivially. A conservative scan of the constructing class's
    source (`<param> is None` / `<param> or ...` / `if not <param>`) finds a visible downstream
-   resolver for about **54** of the 231 (a looser scan that also counts `is not None` finds ~85) --
+   resolver for about **54** of the 236 (a looser scan that also counts `is not None` finds ~85) --
    so this is a several-dozen-member class, and the exact size depends on how tightly you match.
    `mixtures:rbf.gamma_init` (`mixtures/radial_basis_function.py:282,313,329`, resolved per
    `output_mode` during `build()`) is one INSTANCE of it, not the whole of it; others include
@@ -194,7 +194,7 @@ BASE_PARAMS = {
 
 # Arguments sufficient to construct a wrapper target (and the class it builds) once, for
 # probing. Keyed by parameter NAME, and needed only for parameters with no default. Small
-# by construction: it covers the REQUIRED params of the 2 wrapper entries out of 97.
+# by construction: it covers the REQUIRED params of the 2 wrapper entries out of 98.
 #
 # This table cannot rot silently, which is what separates it from an exemption table: if a
 # new wrapper entry needs a probe argument that is not here, the layer cannot be built and
@@ -584,7 +584,7 @@ def _defaults_equal(registry_value, ctor_default):
     `True == 1` and `False == 0.0` are both true in Python, so a naive `==` would let a registry
     `True` pass against a ctor `1`. That is real drift: the caller gets a bool where the class
     documents an int. Containers compare by value, never by identity, so a mutable default
-    introduced later is still compared meaningfully (none exists across all 730 defaults today).
+    introduced later is still compared meaningfully (none exists across all 740 defaults today).
     """
     if isinstance(registry_value, bool) != isinstance(ctor_default, bool):
         return False
