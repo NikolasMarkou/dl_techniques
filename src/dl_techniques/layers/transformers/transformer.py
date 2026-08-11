@@ -49,9 +49,11 @@ Note the asymmetry, which is deliberate and MEASURED, not a drawing shortcut:
 ONLY -- it is invoked exactly once per forward pass, at both normalization
 positions, and its input is the FFN output. There is NO dropout step after
 attention. ``attention_dropout_rate`` is a different thing entirely: it is
-forwarded to the attention sub-layer's own ``dropout_rate`` constructor
-argument (attention-WEIGHT dropout, applied inside the attention layer), not
-an output dropout applied here. The bracketed steps are optional and present
+forwarded to the attention sub-layer's own attention-weight dropout
+constructor argument -- ``dropout_rate`` for most types, ``attn_dropout_rate``
+for ``attention_type='beit'``, whose layer spells the two dropouts separately
+-- i.e. dropout applied inside the attention layer, not an output dropout
+applied here. The bracketed steps are optional and present
 only when ``use_stochastic_depth`` / ``use_layer_scale`` are enabled.
 
 **Mathematical Operations**:
@@ -244,7 +246,7 @@ def build_transformer_attention_required_params(
         attention_type: str,
         hidden_size: int,
         num_heads: int,
-        window_size: int = _DEFAULT_ATTENTION_WINDOW_SIZE,
+        window_size: Union[int, Tuple[int, int]] = _DEFAULT_ATTENTION_WINDOW_SIZE,
         num_kv_heads: Optional[int] = None,
         lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
 ) -> Dict[str, Any]:
@@ -289,8 +291,10 @@ def build_transformer_attention_required_params(
     :type hidden_size: int
     :param num_heads: The block's head count.
     :type num_heads: int
-    :param window_size: ``'window'`` only. The spatial window edge length.
-    :type window_size: int
+    :param window_size: ``'window'`` and ``'beit'`` only. The spatial window
+        edge length for ``'window'``; the ``(Wh, Ww)`` patch grid for
+        ``'beit'`` (an ``int`` there meaning the square grid ``(W, W)``).
+    :type window_size: Union[int, Tuple[int, int]]
     :param num_kv_heads: ``'group_query'`` only. ``None`` means ``num_heads``
         (i.e. degrade to plain MHA), matching ``TransformerLayer.n_kv_head``.
     :type num_kv_heads: Optional[int]
@@ -299,7 +303,13 @@ def build_transformer_attention_required_params(
     :return: The type-specific required params; possibly empty.
     :rtype: Dict[str, Any]
     """
-    if attention_type == 'window':
+    if attention_type in ('window', 'beit'):
+        # Both require a 'window_size', and this is the SAME table entry on
+        # purpose (D-015) — but the two types read the value differently:
+        # 'window' takes a scalar spatial edge length W and attends within
+        # W*W-token windows, while 'beit' takes the PATCH GRID and expects a
+        # sequence of exactly Wh*Ww + 1 tokens (the +1 being the cls token).
+        # A scalar reaching 'beit' is normalized to the square grid (W, W).
         return {'window_size': window_size}
     if attention_type == 'group_query':
         return {'num_kv_heads': num_kv_heads if num_kv_heads is not None else num_heads}
@@ -415,8 +425,12 @@ class TransformerLayer(keras.layers.Layer):
     :type kernel_regularizer: Optional[regularizers.Regularizer]
     :param bias_regularizer: Bias weight regularizer.
     :type bias_regularizer: Optional[regularizers.Regularizer]
-    :param window_size: Window size for windowed attention. Default: 8.
-    :type window_size: int
+    :param window_size: Window size for ``attention_type='window'`` (the spatial
+        window edge length) and for ``attention_type='beit'`` (the ``(Wh, Ww)``
+        patch grid, an ``int`` meaning the square grid ``(W, W)``; the block's
+        input sequence must then be exactly ``Wh*Ww + 1`` tokens long, cls
+        included). Ignored by every other attention type. Default: 8.
+    :type window_size: Union[int, Tuple[int, int]]
     :param n_kv_head: Number of key/value heads for grouped-query attention.
     :type n_kv_head: Optional[int]
     :param lambda_init: Initial lambda for differential attention.
@@ -477,7 +491,7 @@ class TransformerLayer(keras.layers.Layer):
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
-            window_size: int = _DEFAULT_ATTENTION_WINDOW_SIZE,
+            window_size: Union[int, Tuple[int, int]] = _DEFAULT_ATTENTION_WINDOW_SIZE,
             n_kv_head: Optional[int] = None,
             lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
             use_layer_scale: bool = False,
@@ -698,6 +712,24 @@ class TransformerLayer(keras.layers.Layer):
                 'num_heads': self.num_heads,
                 **self._required_attention_params(),
                 'dropout_rate': self.attention_dropout_rate,
+                'name': name
+            }
+        elif self.attention_type == 'beit':
+            # NOT a copy of the 'window' branch: `BeitAttention` declares no
+            # `dropout_rate`, it declares `attn_dropout_rate` /
+            # `proj_dropout_rate`. `create_attention_layer` FILTERS kwargs to the
+            # registry's declared names and DROPS the rest SILENTLY, so passing
+            # 'dropout_rate' here would look correct, raise nothing, and leave
+            # the attention probabilities undropped at 0.0 forever. The block's
+            # `attention_dropout_rate` is routed to the attention-probability
+            # dropout, matching every other branch's intent; `proj_dropout_rate`
+            # is deliberately left at the layer default so the block's own
+            # `self.dropout` (applied to the residual branch) is not doubled.
+            default_params = {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                **self._required_attention_params(),
+                'attn_dropout_rate': self.attention_dropout_rate,
                 'name': name
             }
         elif self.attention_type == 'group_query':
