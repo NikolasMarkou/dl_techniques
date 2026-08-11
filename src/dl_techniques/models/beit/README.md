@@ -990,8 +990,10 @@ Gumbel-softmax categorical relaxation over an 8192-entry codebook, trained by Op
 this repository does not have. This repository has no Gumbel-softmax codebook mechanism
 anywhere and no dVAE.
 
-`src/train/beit/` therefore trains a **`VQVAERotationTrickModel`** (hard nearest-neighbour
-vector quantization) as stage 0 and uses its `encode_to_indices` output as the MIM target.
+`src/train/beit/` therefore trains a **`VQVAERotationTrick`**
+(`dl_techniques.models.vq_vae_rotation.model`; that package's `__init__.py` is empty, so
+import from the submodule) — hard nearest-neighbour vector quantization — as stage 0, and
+uses its `encode_to_indices` output (a `(B, gh, gw)` int32 code grid) as the MIM target.
 
 **Consequences, stated plainly:**
 
