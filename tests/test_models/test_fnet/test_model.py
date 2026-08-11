@@ -21,6 +21,8 @@ from dl_techniques.models.fnet.model import (
     create_fnet_with_head,
 )
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 
 class TestFNetModel:
@@ -198,6 +200,137 @@ class TestFNetModel:
         model(input_ids)
         # This should not raise any errors
         model.summary()
+
+
+def _fnet_block_reference(block, x):
+    """The pre-drop-path `FNetEncoderBlock.call` body, transcribed from 2e10c29bb.
+
+    An ORACLE, not a re-implementation of the current code: the formula as it
+    stood BEFORE stochastic depth was added, driven through the block's own
+    already-built sublayers. An injection inside `FNetEncoderBlock.call()` or in
+    FNet's block-construction loop moves the MODEL side only, never this side.
+    (Deliberately duplicated from tests/test_layers/test_fnet_encoder_block.py:
+    test oracles are not shared across suites, and this plan adds no new files.)
+    """
+    fourier_output = block.fourier_transform(x, training=False)
+    fourier_output = block.fourier_layer_norm(x + fourier_output, training=False)
+    ffn_output = block.ffn_layer(fourier_output, training=False)
+    return block.output_layer_norm(fourier_output + ffn_output, training=False)
+
+
+class TestFNetStochasticDepth:
+    """The `use_stochastic_depth` / `stochastic_depth_rate` knob reaches blocks."""
+
+    @pytest.fixture
+    def small_config(self) -> Dict[str, Any]:
+        """Small configuration with enough layers for a visible schedule."""
+        return {
+            'vocab_size': 100,
+            'hidden_size': 32,
+            'num_layers': 4,
+            'intermediate_size': 64,
+            'max_position_embeddings': 16,
+            'hidden_dropout_prob': 0.0,
+        }
+
+    @pytest.fixture
+    def sample_inputs(self) -> Dict[str, keras.KerasTensor]:
+        """Fixed token inputs (seeded) so identity probes are repeatable."""
+        return {
+            'input_ids': keras.random.randint(
+                minval=0, maxval=100, shape=(3, 16), seed=11
+            ),
+            'attention_mask': keras.ops.ones((3, 16), dtype="int32"),
+        }
+
+    def test_default_is_inert_and_bit_identical(self, small_config, sample_inputs):
+        """Default `use_stochastic_depth=False` builds no drop-path at all.
+
+        The model's output is compared against the pre-drop-path forward pass
+        replayed through the model's OWN embeddings and block sublayers, so both
+        sides share weights by construction. In-process (dodging cross-process
+        GPU kernel nondeterminism) at explicit `training=False`; EXACT zero.
+        """
+        model = FNet(**small_config)
+        out = model(sample_inputs, training=False)
+
+        for block in model.encoder_layers:
+            assert block.use_stochastic_depth is False
+            assert block.fourier_stochastic_depth is None
+            assert block.ffn_stochastic_depth is None
+
+        ref = model.embeddings(
+            input_ids=sample_inputs['input_ids'],
+            token_type_ids=None,
+            position_ids=None,
+            training=False,
+        )
+        for block in model.encoder_layers:
+            ref = _fnet_block_reference(block, ref)
+
+        delta = float(
+            keras.ops.max(keras.ops.abs(out['last_hidden_state'] - ref))
+        )
+        assert delta == 0.0, f"expected exact bit-identity, got max|delta|={delta!r}"
+
+    def test_schedule_reaches_every_block(self, small_config, sample_inputs):
+        """Each block carries two distinct StochasticDepth at its schedule rate.
+
+        The rate is deliberately NON-ZERO (0.3): an all-zeros schedule is
+        invariant under both shift and reversal, so a zero-rate wiring proof
+        cannot distinguish a correct schedule from a reversed or constant one.
+        """
+        model = FNet(
+            use_stochastic_depth=True, stochastic_depth_rate=0.3, **small_config
+        )
+        _ = model(sample_inputs, training=False)
+
+        expected = linear_drop_path_rates(
+            num_blocks=small_config['num_layers'], max_rate=0.3
+        )
+        # Guard the guard: the schedule itself must not be degenerate.
+        assert len(set(expected)) == len(expected)
+        assert max(expected) > 0.0
+
+        assert len(model.encoder_layers) == len(expected)
+        for i, (block, rate) in enumerate(zip(model.encoder_layers, expected)):
+            assert isinstance(block.fourier_stochastic_depth, StochasticDepth), i
+            assert isinstance(block.ffn_stochastic_depth, StochasticDepth), i
+            assert (
+                block.fourier_stochastic_depth is not block.ffn_stochastic_depth
+            ), f"block {i} shares one StochasticDepth across both branches"
+            assert block.fourier_stochastic_depth.drop_path_rate == rate, (
+                f"block {i}: fourier branch rate "
+                f"{block.fourier_stochastic_depth.drop_path_rate} != {rate}"
+            )
+            assert block.ffn_stochastic_depth.drop_path_rate == rate, (
+                f"block {i}: ffn branch rate "
+                f"{block.ffn_stochastic_depth.drop_path_rate} != {rate}"
+            )
+
+    def test_stochastic_depth_config_round_trip(self, small_config, sample_inputs):
+        """Both keys survive FNet.get_config -> from_config and re-wire blocks."""
+        model = FNet(
+            use_stochastic_depth=True, stochastic_depth_rate=0.2, **small_config
+        )
+        config = model.get_config()
+        assert config['use_stochastic_depth'] is True
+        assert config['stochastic_depth_rate'] == 0.2
+
+        restored = FNet.from_config(config)
+        assert restored.use_stochastic_depth is True
+        assert restored.stochastic_depth_rate == 0.2
+
+        expected = linear_drop_path_rates(
+            num_blocks=small_config['num_layers'], max_rate=0.2
+        )
+        for i, (block, rate) in enumerate(zip(restored.encoder_layers, expected)):
+            assert block.fourier_stochastic_depth is not None, i
+            assert block.ffn_stochastic_depth is not None, i
+            assert block.fourier_stochastic_depth.drop_path_rate == rate, i
+            assert block.ffn_stochastic_depth.drop_path_rate == rate, i
+
+        _ = restored(sample_inputs, training=False)
 
 
 class TestFNetWithHeadFactory:
