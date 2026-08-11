@@ -38,6 +38,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import keras
 import pytest
 
+from train.beit.common import load_frozen_tokenizer
+from train.beit import train_mim as mim_trainer
 from train.beit import train_tokenizer as tok_trainer
 
 # ---------------------------------------------------------------------------
@@ -102,6 +104,18 @@ TOKENIZER_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
     "epochs": ("--epochs", 3),                     # default: 50
 }
 
+MIM_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
+    "image_size": ("--image-size", 64),            # default: 224
+    "patch_size": ("--patch-size", 8),             # default: 16  (-> 8x8 = 64 patches)
+    "num_mask_patches": ("--num-mask-patches", 20),                    # default: 75
+    "min_mask_patches_per_block": ("--min-mask-patches-per-block", 5),  # default: 16
+    "variant": ("--variant", "tiny"),              # default: base
+    "drop_path_rate": ("--drop-path-rate", 0.2),   # default: 0.1
+    "epochs": ("--epochs", 3),                     # default: 100
+    # `tokenizer_checkpoint` is filled in per-test: __post_init__ requires a REAL .keras
+    # file on disk (default: None, which itself raises).
+}
+
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -144,8 +158,35 @@ def _tokenizer_case(tmp_path) -> TrainerCase:
     )
 
 
+def _mim_case(tmp_path) -> TrainerCase:
+    return TrainerCase(
+        name="train_mim",
+        module="train.beit.train_mim",
+        parse_arguments=mim_trainer.parse_arguments,
+        config_from_args=mim_trainer.config_from_args,
+        config_cls=mim_trainer.TrainingConfig,
+        spec={
+            **COMMON_SPEC,
+            **MIM_ONLY_SPEC,
+            "output_dir": ("--output-dir", str(tmp_path / "results")),
+            "tokenizer_checkpoint": (
+                "--tokenizer-checkpoint",
+                _write_dummy_checkpoint(tmp_path, "dummy_tokenizer.keras"),
+            ),
+        },
+    )
+
+
 CASE_BUILDERS: Dict[str, Callable[[Any], TrainerCase]] = {
+    "mim": _mim_case,
     "tokenizer": _tokenizer_case,
+}
+
+# Trainers whose `TrainingConfig` cannot be built from defaults alone (a required
+# checkpoint flag has no usable default). `test_defaults_only_parse_still_builds_a_valid
+# _config` is skipped for these, and the refusal is asserted by its own test instead.
+DEFAULTS_ONLY_RAISES: Dict[str, type] = {
+    "train_mim": ValueError,  # --tokenizer-checkpoint is mandatory
 }
 
 
@@ -281,12 +322,22 @@ def test_output_dir_default_is_repo_root_results(case: TrainerCase) -> None:
         f"{case.name}: TrainingConfig.output_dir default is {field.default!r}, must be "
         f"'results' (repo-root)."
     )
+    if case.name in DEFAULTS_ONLY_RAISES:
+        pytest.skip(f"{case.name} cannot build a config from defaults alone")
     config = case.config_from_args(case.parse_arguments([]))
     assert config.output_dir == "results"
 
 
-def test_defaults_only_parse_still_builds_a_valid_config(case: TrainerCase) -> None:
-    """Sanity floor: the no-flags path must still produce a usable config."""
+def test_defaults_only_parse_behaviour(case: TrainerCase) -> None:
+    """Sanity floor: the no-flags path either produces a usable config, or REFUSES loudly.
+
+    A trainer with a mandatory checkpoint flag must refuse -- silently defaulting to some
+    substitute objective is the failure this whole file exists to prevent.
+    """
+    if case.name in DEFAULTS_ONLY_RAISES:
+        with pytest.raises(DEFAULTS_ONLY_RAISES[case.name]):
+            case.config_from_args(case.parse_arguments([]))
+        return
     config = case.config_from_args(case.parse_arguments([]))
     assert config.experiment_name  # __post_init__ generates one
     assert config.output_dir == "results"
@@ -441,3 +492,162 @@ class TestTokenizerCodeGridIsReal:
         assert config.code_grid == (8, 8)
         with pytest.raises(RuntimeError, match=r"code grid is \(4, 4\), expected \(8, 8\)"):
             tok_trainer.build_tokenizer(config)
+
+
+class TestMimConfigValidation:
+    """``train_mim.TrainingConfig.__post_init__`` must refuse before any data/model work."""
+
+    @staticmethod
+    def _kwargs(tmp_path, **overrides: Any) -> Dict[str, Any]:
+        base: Dict[str, Any] = {
+            "dataset": "cifar10",
+            "image_size": 64,
+            "patch_size": 8,          # -> 8x8 = 64 patches
+            "num_mask_patches": 20,
+            "min_mask_patches_per_block": 5,
+            "tokenizer_checkpoint": _write_dummy_checkpoint(tmp_path, "tok.keras"),
+        }
+        base.update(overrides)
+        return base
+
+    def test_valid_config_exposes_the_patch_grid(self, tmp_path) -> None:
+        config = mim_trainer.TrainingConfig(**self._kwargs(tmp_path))
+        assert config.patch_grid == (8, 8)
+        assert config.num_patches == 64
+
+    def test_missing_tokenizer_checkpoint_raises(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="tokenizer_checkpoint is required"):
+            mim_trainer.TrainingConfig(
+                **self._kwargs(tmp_path, tokenizer_checkpoint=None))
+
+    def test_non_keras_tokenizer_checkpoint_raises(self, tmp_path) -> None:
+        bogus = tmp_path / "tok.h5"
+        bogus.write_bytes(b"")
+        with pytest.raises(ValueError, match="must be a .keras checkpoint"):
+            mim_trainer.TrainingConfig(
+                **self._kwargs(tmp_path, tokenizer_checkpoint=str(bogus)))
+
+    def test_absent_tokenizer_checkpoint_raises(self, tmp_path) -> None:
+        with pytest.raises(FileNotFoundError, match="tokenizer_checkpoint not found"):
+            mim_trainer.TrainingConfig(
+                **self._kwargs(tmp_path,
+                               tokenizer_checkpoint=str(tmp_path / "nope.keras")))
+
+    def test_non_divisible_geometry_raises(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="must be divisible by patch_size"):
+            mim_trainer.TrainingConfig(**self._kwargs(tmp_path, image_size=100))
+
+    def test_mask_budget_larger_than_the_grid_raises(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match=r"num_mask_patches must be in \[1, 64\]"):
+            mim_trainer.TrainingConfig(**self._kwargs(tmp_path, num_mask_patches=65))
+
+    def test_block_minimum_above_the_budget_raises(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="exceeds the mask budget"):
+            mim_trainer.TrainingConfig(
+                **self._kwargs(tmp_path, min_mask_patches_per_block=21))
+
+    @pytest.mark.parametrize("overrides,pattern", [
+        ({"image_size": 0}, "image_size must be positive"),
+        ({"patch_size": 0}, "patch_size must be positive"),
+        ({"batch_size": 0}, "batch_size must be positive"),
+        ({"epochs": 0}, "epochs must be positive"),
+        ({"drop_path_rate": 1.0}, r"drop_path_rate must be in \[0, 1\)"),
+        ({"max_steps": 0}, "max_steps must be positive"),
+        ({"dataset": "mnist"}, "Unsupported dataset"),
+        ({"num_mask_patches": 0}, "num_mask_patches must be in"),
+        ({"min_mask_patches_per_block": 0},
+         "min_mask_patches_per_block must be positive"),
+    ])
+    def test_invalid_field_raises(self, tmp_path, overrides: Dict[str, Any],
+                                  pattern: str) -> None:
+        with pytest.raises(ValueError, match=pattern):
+            mim_trainer.TrainingConfig(**self._kwargs(tmp_path, **overrides))
+
+    def test_dataset_default_geometry_is_dataset_dependent(self, tmp_path) -> None:
+        ckpt = _write_dummy_checkpoint(tmp_path, "geom.keras")
+        cifar = mim_trainer.config_from_args(mim_trainer.parse_arguments(
+            ["--dataset", "cifar10", "--tokenizer-checkpoint", ckpt,
+             "--num-mask-patches", "20", "--min-mask-patches-per-block", "5"]))
+        assert (cifar.image_size, cifar.patch_size) == (32, 4)
+        assert cifar.patch_grid == (8, 8)
+
+        nette = mim_trainer.config_from_args(mim_trainer.parse_arguments(
+            ["--dataset", "imagenette", "--tokenizer-checkpoint", ckpt]))
+        assert (nette.image_size, nette.patch_size) == (224, 16)
+        assert nette.patch_grid == (14, 14)
+
+
+class TestMimGridAlignmentGuard:
+    """The MIM trainer must ABORT on a tokenizer whose code grid is not the patch grid.
+
+    A misaligned tokenizer produces a finite, plausible, completely wrong loss: every
+    target is read from the wrong spatial position and nothing anywhere raises. This is
+    the one guard whose absence is invisible to every other test in this suite, so it is
+    driven end-to-end through ``train_mim()`` -- not through
+    ``load_frozen_tokenizer`` directly, which would prove only that the helper works and
+    not that the trainer CALLS it (and calls it before the data pipeline).
+    """
+
+    @staticmethod
+    def _real_tokenizer(tmp_path, image_size: int, downsample_factor: int) -> str:
+        tok_config = tok_trainer.TrainingConfig(
+            dataset="cifar10",
+            image_size=image_size,
+            downsample_factor=downsample_factor,
+            num_embeddings=64,
+            embedding_dim=8,
+            hidden_channels=16,
+            num_res_blocks=1,
+        )
+        model = tok_trainer.build_tokenizer(tok_config)
+        path = tmp_path / f"tokenizer_{image_size}_{downsample_factor}.keras"
+        model.save(path)
+        return str(path)
+
+    def test_mismatched_code_grid_aborts_the_run(self, tmp_path) -> None:
+        # Tokenizer: 32 / 8 -> (4, 4). Encoder: 32 / 4 -> (8, 8). Misaligned.
+        ckpt = self._real_tokenizer(tmp_path, image_size=32, downsample_factor=8)
+        config = mim_trainer.TrainingConfig(
+            dataset="cifar10",
+            image_size=32,
+            patch_size=4,
+            variant="tiny",
+            num_mask_patches=20,
+            min_mask_patches_per_block=5,
+            epochs=1,
+            max_steps=1,
+            output_dir=str(tmp_path / "results"),
+            tokenizer_checkpoint=ckpt,
+        )
+        with pytest.raises(ValueError, match="code-grid mismatch"):
+            mim_trainer.train_mim(config)
+
+    def test_the_guard_passes_on_an_ALIGNED_tokenizer(self, tmp_path) -> None:
+        """The control: the SAME tokenizer checkpoint, at an ALIGNED patch size, does not
+        raise.
+
+        Without it, the test above would pass just as happily if `train_mim` were raising
+        for some unrelated reason (a bad dataset, a broken checkpoint, an import error).
+        This stops at the guard itself rather than running `fit()`, so what is asserted is
+        that the misalignment -- and only the misalignment -- is what aborts the run.
+        """
+        ckpt = self._real_tokenizer(tmp_path, image_size=32, downsample_factor=8)
+        config = mim_trainer.TrainingConfig(
+            dataset="cifar10",
+            image_size=32,
+            patch_size=8,   # 32 / 8 -> (4, 4): ALIGNED with the tokenizer
+            variant="tiny",
+            num_mask_patches=6,
+            min_mask_patches_per_block=2,
+            epochs=1,
+            max_steps=1,
+            output_dir=str(tmp_path / "results"),
+            tokenizer_checkpoint=ckpt,
+        )
+        tokenizer_fn = load_frozen_tokenizer(
+            config.tokenizer_checkpoint,
+            expected_grid=config.patch_grid,
+            image_shape=(config.image_size, config.image_size, 3),
+        )
+        assert tokenizer_fn.grid_size == (4, 4)
+        assert tokenizer_fn.model.trainable is False
