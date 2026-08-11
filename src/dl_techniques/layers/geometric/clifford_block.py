@@ -11,14 +11,24 @@ CliffordNet block and constituent primitives.
 
        grep -rln "geometric.clifford_block" src/ tests/
 
-   Measured 2026-08-10 (9 source modules across 4 packages, plus 3 test
-   modules): ``models/cliffordnet/{lm,model}.py``,
+   Re-derived 2026-08-11 with exactly that grep: 15 paths, unchanged in
+   substance since 2026-08-10. They are this module itself, **8 importing
+   source modules across 4 packages** (the earlier "9" counted this file):
+   ``models/cliffordnet/{lm,model}.py``,
    ``models/clip/clifford_clip.py``,
    ``models/video_jepa/{encoder,predictor}.py``,
    ``train/cliffordnet/{infer_cliffordnet_nlp,train_cliffordnet_nlp,
-   train_downsampling_techniques}.py``. The corresponding suites are
+   train_downsampling_techniques}.py``; **3 test modules**
+   (``tests/test_layers/test_geometric/test_clifford_block.py`` and
+   ``..._external_residual.py``, ``tests/test_models/test_video_jepa/
+   test_video_jepa.py``); and **3 READMEs** that only name the class
+   (``models/cliffordnet/``, ``train/cliffordnet/``, ``train/video_jepa/``).
+   The corresponding suites are
    ``tests/test_layers/test_geometric/``, ``tests/test_models/test_cliffordnet/``,
-   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``.
+   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``
+   -- note the last two contain no textual match at all: they exercise models
+   whose *modules* import this one, which is precisely why the grep alone is
+   not a sufficient blast-radius estimate.
 
    This warning exists because it was learned the expensive way: an edit to this
    file (plan-2026-08-10-3649c19e/iter-1/step-2) was scored ``radius:MED`` on
@@ -26,7 +36,7 @@ CliffordNet block and constituent primitives.
    adversarial review found a red test in the first unrun one it opened. See
    decisions.md D-033.
 
-Implements the geometric-algebra vision block from
+Implements the geometric-algebra block from
     Zhongping Ji, "CliffordNet: All You Need is Geometric Algebra",
     arXiv:2601.06793v2 (2026).  Reference code: github.com/ParaMind2025/CAN
     (``CliffordInteraction_PyTorch`` / ``CliffordAlgebraBlock`` in ``model.py``).
@@ -79,17 +89,44 @@ Each block derives two streams from the normalized input ``X_norm``:
 * **Context stream** (local aggregation):
   ``Z_ctx = act(Norm(DWConv(DWConv(X_norm))))`` -- two stacked depthwise
   convolutions aggregating local structure.  With the default
-  ``context_kernel_size=3`` the effective receptive field is 5x5.  (The paper
-  states 7x7 in Sec. 5.3; that is an error -- two stacked KxK convolutions give
-  (2K-1)x(2K-1).  The paper also describes the two convolutions as "separated
-  by non-linear activation" in Sec. 3.4, but neither Algorithm 1 nor the
-  reference ``get_context_local`` has an activation between them, so there is
-  none here either.)
+  ``context_kernel_size=3`` the effective receptive field is 5x5 in
+  ``input_mode="image"``; in ``input_mode="sequence"`` the kernels are
+  ``(1, K)``, so it is 5 positions along the sequence axis (and, when
+  ``causal=True``, the 5 positions *ending* at the current one).
+
+  Two footnotes on the paper's own account of this stream.  Both belong to
+  section 3.4, "Context Instantiation: Local-Global Duality" -- NOT section
+  5.3, which is "Hardware-Aware Geometric Approximation":
+
+  - *Receptive field.*  3.4 motivates the factorization with "a large
+    receptive field (e.g., 7x7)" and then defines the local context field as
+    ``C_loc(H) = Conv_3x3(Conv_3x3(H))`` (Eq. 4).  Two stacked KxK depthwise
+    convolutions give (2K-1)x(2K-1), i.e. 5x5, not 7x7.  The paper hedges
+    with "e.g.", so this reads as a motivating target rather than a claim
+    about Eq. 4 -- not a flat error, but do not expect 7x7 from the default.
+    What ships here is Eq. 4.
+
+  - *Activation between the two convolutions.*  The contradiction is INTERNAL
+    to section 3.4: its prose calls the two convolutions "separated by
+    non-linear activation" while its own Eq. (4) shows none.  Algorithm 1
+    cannot settle it either way -- its line 5 has only ONE depthwise
+    convolution (``Z_ctx <- SiLU(BN(DWConv(X_ln)))``), so there is no
+    "between" in Algorithm 1 at all.  The only evidence is the reference
+    ``get_context_local``, which applies no activation between them; this port
+    follows the reference.
 
 An optional *differential* coupling sharpens the interaction::
 
     ctx_mode="diff":  Z_ctx <- Z_ctx - Z_det
     ctx_mode="abs" :  Z_ctx                        (pure aggregation)
+
+Note WHAT is subtracted.  Paper Eq. 5 writes the differential context as
+``C = C_loc(H) - lambda*H``: it subtracts the *state*, which is what makes the
+"discrete Laplacian" reading exact.  Algorithm 1 line 7 and the reference code
+instead subtract ``Z_det = Linear_det(X_ln)``, a *learned projection* of the
+normalized state, and this port follows Algorithm 1 / the code.  The Laplacian
+framing therefore holds only to the extent that ``linear_det`` stays near
+identity.  Do not "fix" this against Eq. 5.
 
 The two streams then interact through the geometric product to produce the
 geometric feature ``G_feat`` that drives the state update.
@@ -135,10 +172,12 @@ Algorithm 1 / the reference; do not "fix" this against Eq. 13.
 
 Global context branch (optional)
 --------------------------------
-A whole-image summary ``C_glo = GlobalAvgPool(X_norm)`` runs the same geometric
+A whole-input summary ``C_glo = GlobalAvgPool(X_norm)`` runs the same geometric
 product (hardcoded ``shifts=[1, 2]``, ``cli_mode="full"``, differential context)
 and is superposed onto the local ``G_feat``, adding multi-scale awareness when
-enabled.
+enabled.  Under ``causal=True`` the pool would see the future, so it is replaced
+by a cumulative mean over positions ``0..i`` -- a summary that grows with the
+sequence instead of a constant one.
 
 Efficiency
 ----------
@@ -159,27 +198,60 @@ Implementation notes, known behaviours and deviations
    reference does ``x = shortcut + drop_path(gamma * x_mixed)`` inside the
    block; the split is deliberate.  Do not re-inline either op here.
 
-2. ``ctx_mode`` has NO EFFECT on the wedge branch.  With
+2. ``ctx_mode`` has NO MATHEMATICAL EFFECT on the wedge branch.  With
    ``W(u, v) = u * T_s(v) - v * T_s(u)`` and ``v = Z_ctx - Z_det``, the
    self-terms cancel exactly by antisymmetry::
 
        W(det, ctx - det) = det*T(ctx) - det*T(det) - ctx*T(det) + det*T(det)
                          = det*T(ctx) - ctx*T(det) = W(det, ctx)
 
-   Consequences: ``cli_mode="wedge"`` makes ``ctx_mode`` completely inert (the
-   two settings produce bit-identical models), and in ``cli_mode="full"`` the
-   differential context only reaches the inner/dot term.  This is inherited
-   from the reference implementation, so the paper's Table 4 "Wedge-Only
-   (Differential Mode)" row is the same model as its absolute-mode counterpart,
-   and the ~1.4% diff-vs-abs gap in Table 3 is attributable to the inner term
-   alone.  The constructor warns for the fully-inert combination.
+   The cancellation is NOT specific to subtracting exactly ``Z_det``: because
+   ``W(u, u) = 0`` for every ``u``, *any* multiple cancels,
+   ``W(det, ctx - k*det) == W(det, ctx)`` for any scalar ``k``.  That is the
+   accurate statement of the property -- a test that tried to break this
+   equality had to destroy the antisymmetry of ``W`` outright; perturbing the
+   subtracted quantity cannot do it.
+
+   Consequences: ``cli_mode="wedge"`` makes ``ctx_mode`` inert, and in
+   ``cli_mode="full"`` the differential context only reaches the inner/dot
+   term.  This is inherited from the reference implementation, so the paper's
+   Table 4 "Wedge-Only (Differential Mode)" row is the same model as its
+   absolute-mode counterpart, and the ~1.4% diff-vs-abs gap in Table 3 is
+   attributable to the inner term alone.  The constructor warns for the fully
+   -inert combination.
+
+   Inert means *mathematically equivalent*, NOT bit-identical.  The
+   implementation forms ``ctx - det`` FIRST and then multiplies, so the
+   cancelling terms are never actually cancelled in floating point: they are
+   computed and then subtracted, leaving rounding residue.  MEASURED over 47
+   independent runs (40 seeds on GPU, 7 on CPU, ``channels=8``,
+   ``shifts=[1,2]``, ``layer_scale_init=1.0``, float32): ``np.array_equal`` is
+   **False in 47 of 47**, worst ``max |delta| = 3.5762787e-07``, worst
+   relative deviation ``1.5468504e-07``.  The weights and the config ARE
+   identical between the two settings; the outputs are not.  Both halves of
+   this claim -- the ~1e-7 agreement and the failure of bit-identity -- are
+   pinned by ``TestCharacterizationWedgeAndActivations`` in
+   ``tests/test_layers/test_geometric/test_clifford_block.py``.
 
 3. Global branch superposition weight.  ``G_feat + G_glo`` uses an implicit
-   beta = 1, matching ``CliffordAlgebraBlock`` in the reference.  The repo's
-   other variant (``gffn.py``, ``gffn_mode="h"``) instead learns
-   ``beta = nn.Parameter([0.5])``, and Eq. 7 of the paper carries beta
-   explicitly.  If a learnable superposition weight is wanted, add it as a new
-   opt-in kwarg rather than changing the default.
+   beta = 1, matching ``CliffordAlgebraBlock`` in the reference -- and that IS
+   Eq. 7 of the paper, not a deviation from it.  Eq. 7 reads
+   ``dH/dt = P_loc(H(C_loc)) + beta * P_glo(H(C_glo))``, "where beta in {0, 1}
+   serves as a structural switch: beta=0 prioritizes extreme parameter
+   efficiency ... beta=1 integrates the global interaction mechanism"
+   (section 3.4).  Eq. 7's beta is therefore exactly this port's
+   ``use_global_context`` flag: ``False`` is beta=0, ``True`` is beta=1.  At
+   ``use_global_context=True`` this block IS Eq. 7 at beta=1.
+
+   The *learnable* ``beta = nn.Parameter([0.5])`` is a deviation from the
+   paper introduced by the REFERENCE repo's other variant -- ``gffn.py``,
+   ``gffn_mode="h"``, in github.com/ParaMind2025/CAN.  There is no ``gffn.py``
+   anywhere in dl_techniques, so do not grep this repo for it; the paper's own
+   section 3.7 defines gFFN-H as ``C = dH + beta*GlobalAvg(H)``.
+   ``research/2026_cliffordnet_gometric_algebra.md`` § 5.4 "Dual-Scale
+   Superposition (gFFN-H)" (line 210 as of 2026-08-11) already states beta's
+   role correctly.  If a learnable superposition weight is wanted here, add it
+   as a new opt-in kwarg rather than changing the default.
 
 4. Weight initialization does not reproduce the paper.  The reference applies
    ``trunc_normal_(std=0.02)`` to every Conv2d/Linear and zeroes biases; the
@@ -201,6 +273,32 @@ Implementation notes, known behaviours and deviations
 6. ``@keras.saving.register_keras_serializable()`` is intentionally left without
    a ``package=`` argument.  Adding one would change the registered name from
    ``Custom>ClassName`` and break by-name loading of existing ``.keras`` files.
+
+7. The image-mode context norm matches ``nn.BatchNorm2d`` in KIND ONLY.  In
+   ``input_mode="image"`` the context normalization defaults to
+   ``"batch_norm"``, i.e. a ``keras.layers.BatchNormalization`` built through
+   ``norms/factory.py::create_normalization_layer``.  Two of its
+   hyperparameters silently differ from the reference ``nn.BatchNorm2d``, and
+   neither is reachable on the default path (both MEASURED on the constructed
+   layer, not read off the docs)::
+
+       parameter   reference nn.BatchNorm2d   this port
+       ---------   -------------------------   ---------------------------
+       epsilon     1e-5                        1e-6   (imposed by the
+                                               factory's
+                                               setdefault('epsilon', 1e-6))
+       momentum    0.1                         0.99   (Keras' own default,
+                                               never set by this module)
+
+   The momentum row is the material one, and the two frameworks' conventions
+   are inverses of each other: torch's 0.1 is Keras' 0.9, so 0.99 is a **10x
+   longer** EMA window on the running statistics.  A short run therefore
+   leaves inference-time statistics lagging the training distribution
+   considerably further behind than the reference would.  Pass
+   ``normalization_kwargs={"epsilon": 1e-5, "momentum": 0.9}`` for
+   reproduction runs (verified to reach the layer).  As with note 4, the
+   default is left alone rather than "corrected", to avoid silently changing
+   the behaviour of existing checkpoints.
 
 Key primitives
 --------------
@@ -909,7 +1007,9 @@ class GatedGeometricResidual(keras.layers.Layer):
 class CliffordNetBlock(keras.layers.Layer):
     """Full isotropic CliffordNet block (no FFN).
 
-    Implements the geometric-algebra vision block from arXiv:2601.06793v2.
+    Implements the geometric-algebra block from arXiv:2601.06793v2 -- a vision
+    block in ``input_mode="image"``, and a 1-D sequence block (bidirectional,
+    or autoregressive with ``causal=True``) in ``input_mode="sequence"``.
     A dual-stream architecture generates detail ``Z_det = Linear(X_norm)`` and
     context ``Z_ctx = act(Norm(DWConv(DWConv(X_norm))))`` streams, optionally
     subtracting the detail stream from the context (``ctx_mode="diff"``). The
@@ -921,9 +1021,13 @@ class CliffordNetBlock(keras.layers.Layer):
     .. note::
 
         ``ctx_mode`` does not affect the wedge branch at all: the self-terms
-        cancel by antisymmetry, so ``cli_mode="wedge"`` makes ``ctx_mode``
-        inert and ``cli_mode="full"`` only differences the inner term. See
-        note 2 in the module docstring.
+        cancel by antisymmetry (for ANY multiple of ``Z_det``, not just
+        ``Z_det`` itself), so ``cli_mode="wedge"`` makes ``ctx_mode`` inert and
+        ``cli_mode="full"`` only differences the inner term. "Inert" is
+        mathematical, not bitwise -- the two settings produce identical weights
+        and configs but float outputs differing by ~1e-7 relative, because the
+        code forms ``ctx - det`` first and never performs the cancellation.
+        See note 2 in the module docstring for the measurements.
 
     .. note::
 
@@ -949,7 +1053,7 @@ class CliffordNetBlock(keras.layers.Layer):
         ┌──────────────┐ ┌──────────────────┐
         │ Detail       │ │ Context          │
         │ Z_det=       │ │ DWConv→DWConv→   │
-        │  Linear(X)   │ │ BN→SiLU→Z_ctx    │
+        │  Linear(X)   │ │ Norm→act→Z_ctx   │
         └──────┬───────┘ └────────┬─────────┘
                │    (diff: Z_ctx -= Z_det)
                ├──────────┬───────┘
@@ -969,6 +1073,15 @@ class CliffordNetBlock(keras.layers.Layer):
         │ residual added externally)     │
         │ [B, H, W, D]                   │
         └────────────────────────────────┘
+
+    The ``[B, H, W, D]`` shapes above are the INTERNAL representation, which is
+    always rank-4.  In ``input_mode="sequence"`` the public contract is
+    ``(B, L, D)`` or ``(B, 1, L, D)`` -- a rank-3 input is expanded to
+    ``(B, 1, L, D)`` on entry to ``call()`` and squeezed back on exit, so the
+    output ALWAYS has the same rank as the input.  ``Norm`` in the context
+    stream is the mode-derived ``normalization_type`` (BatchNormalization in
+    image mode, a per-position norm in sequence mode -- see that parameter
+    below), and ``act`` is the ``activation`` kwarg, default SiLU.
 
     :param channels: Feature dimensionality D (constant throughout).
     :type channels: int
@@ -1027,7 +1140,9 @@ class CliffordNetBlock(keras.layers.Layer):
         ``True``.
     :type use_gate: bool
     :param context_kernel_size: Depthwise kernel size K for the two context
-        convolutions; effective receptive field is (2K-1). Defaults to 3.
+        convolutions; the effective receptive field is (2K-1) positions along
+        each convolved axis -- (2K-1)x(2K-1) in image mode, (2K-1) along the
+        sequence axis in sequence mode. Defaults to 3.
     :type context_kernel_size: int
     :param kernel_initializer: Kernel initializer for Dense layers. See note 4
         in the module docstring regarding reproduction of the paper.
@@ -1040,8 +1155,10 @@ class CliffordNetBlock(keras.layers.Layer):
     :type bias_regularizer: Optional[Any]
     :param normalization_type: Normalization applied to the context stream,
         resolved by ``create_normalization_layer``. ``None`` (the default)
-        resolves per MODE: ``"batch_norm"`` in image mode (matching the
-        reference ``BatchNorm2d``) and ``"zero_centered_rms_norm"`` in sequence
+        resolves per MODE: ``"batch_norm"`` in image mode (the reference's
+        ``BatchNorm2d`` in KIND only -- its ``epsilon`` and ``momentum``
+        deviate; see note 7 in the module docstring) and
+        ``"zero_centered_rms_norm"`` in sequence
         mode, causal or not. The RESOLVED value is what ``get_config``
         serializes, so this default is checkpoint-safe. Passing one of
         ``_SEQUENCE_REDUCING_NORMS`` (``"batch_norm"``,
@@ -1124,9 +1241,11 @@ class CliffordNetBlock(keras.layers.Layer):
             resolved_input_mode: str = "sequence"
         else:
             resolved_input_mode = input_mode if input_mode is not None else "image"
-        # The context-norm DEFAULT is mode-derived: image mode keeps the
-        # reference `BatchNorm2d` equivalent, sequence mode (causal or not) gets
-        # a per-position norm. Only an EXPLICIT caller choice can be unsafe, so
+        # The context-norm DEFAULT is mode-derived: image mode keeps
+        # `batch_norm` (the reference's `BatchNorm2d` in KIND only -- its
+        # epsilon and momentum deviate, module docstring note 7), sequence mode
+        # (causal or not) gets a per-position norm. Only an EXPLICIT caller
+        # choice can be unsafe, so
         # the raise below is reachable only from a caller-supplied value and the
         # resolved default can never trip it.
         if normalization_type is None:
@@ -1194,8 +1313,11 @@ class CliffordNetBlock(keras.layers.Layer):
             logger.warning(
                 "CliffordNetBlock: ctx_mode='diff' has NO effect when "
                 "cli_mode='wedge' (the self-terms cancel by antisymmetry, so "
-                "W(det, ctx - det) == W(det, ctx)). This model is identical "
-                "to ctx_mode='abs'."
+                "W(det, ctx - k*det) == W(det, ctx) for any k). This model is "
+                "MATHEMATICALLY EQUIVALENT to ctx_mode='abs' -- same weights, "
+                "same config -- but its float outputs are not bit-identical "
+                "(measured ~1e-7 relative): the implementation forms "
+                "ctx - det first and never performs the cancellation."
             )
 
         self.channels = channels
@@ -1276,14 +1398,32 @@ class CliffordNetBlock(keras.layers.Layer):
         # both, then `activation` in call(). No activation between the two
         # convolutions, matching the reference `get_context_local`.
         #
-        # The `causal` flag gates the four (and only four) behavioural
-        # differences between the vision and sequence variants: (a) the
-        # depthwise geometry here ((1,K)/valid + explicit left-pad vs
-        # (K,K)/same); (b) the build() shapes (left-padded); (c) the call()
-        # padding before each DWConv; (d) the global-context statistic (causal
-        # cumulative mean vs full-image GAP). CausalCliffordNetBlock is a thin
-        # subclass; do not duplicate the block body into it, and do not merge
-        # these two convolution paths.
+        # Two INDEPENDENT flags gate the differences between the vision and the
+        # sequence variants; re-derive this list from the code before trusting
+        # it, and keep the two axes apart -- an earlier version of this comment
+        # attributed all of it to `causal` alone, which stopped being true when
+        # `input_mode` was introduced.
+        #
+        # `input_mode == "sequence"` (implied by causal=True, but also
+        # selectable on its own for a BIDIRECTIONAL sequence encoder) gates:
+        #   (i)  the depthwise KERNEL geometry, (1,K) vs (K,K) -- right here;
+        #   (ii) the default `normalization_type`, "zero_centered_rms_norm" vs
+        #        "batch_norm" (resolved in __init__ above);
+        #   (iii) the accepted input ranks: {3, 4} via InputSpec/build(), and
+        #        the rank-3 expand/squeeze in call(), vs rank-4 only.
+        #
+        # `causal` gates, on top of the above:
+        #   (a) the depthwise PADDING, "valid" (+ explicit left-pad) vs "same"
+        #       -- also right here;
+        #   (b) the build() shapes (both DWConvs are built left-padded);
+        #   (c) the call() left-pad before each DWConv;
+        #   (d) the global-context statistic (causal cumulative mean vs
+        #       full-image GAP);
+        #   (e) the ValueError on an EXPLICIT sequence-axis-reducing
+        #       normalization_type (see the D-002 anchor in __init__).
+        #
+        # CausalCliffordNetBlock is a thin subclass; do not duplicate the block
+        # body into it, and do not merge these two convolution paths.
         # DECISION plan-2026-08-11T110821-54118fdd/D-001
         # The internal representation is ALWAYS 4-D ``(B, H, W, D)``, even when
         # the public contract is a rank-3 ``(B, L, D)`` sequence. Do NOT replace
@@ -1509,7 +1649,9 @@ class CliffordNetBlock(keras.layers.Layer):
         # Two stacked depthwise convolutions -> norm -> activation. On the
         # causal path each valid convolution is preceded by a left-only pad so
         # position i sees only positions <= i; norm and activation are shared
-        # with the vision path.
+        # with the non-causal path (image mode AND bidirectional sequence
+        # mode), which differ from each other only in the kernel geometry
+        # chosen in __init__.
         if self.causal:
             z_ctx = self._causal_pad(x_norm, self.context_kernel_size)
             z_ctx = self.dw_conv(z_ctx)
@@ -1699,13 +1841,20 @@ class CliffordNetBlock(keras.layers.Layer):
 class CausalCliffordNetBlock(CliffordNetBlock):
     """Causal (autoregressive) variant of :class:`CliffordNetBlock`.
 
-    Equivalent to ``CliffordNetBlock(causal=True)`` with a
-    ``"zero_centered_rms_norm"`` context-norm default: the two context
-    ``DepthwiseConv2D`` layers use ``kernel=(1, K)`` / ``padding="valid"``
-    with explicit left-only zero-padding, and the optional global-context
-    branch uses a causal cumulative mean, so position *i* only sees positions
-    ``<= i``. Expects 4-D input ``(B, 1, seq_len, D)`` (sequence reshaped for
-    2-D convolutions with ``H = 1``).
+    Behaviourally equivalent to ``CliffordNetBlock(causal=True)``: the two
+    context ``DepthwiseConv2D`` layers use ``kernel=(1, K)`` /
+    ``padding="valid"`` with explicit left-only zero-padding, and the optional
+    global-context branch uses a causal cumulative mean, so position *i* only
+    sees positions ``<= i``. Accepts EITHER rank-3 ``(B, seq_len, D)`` or
+    rank-4 ``(B, 1, seq_len, D)`` (the singleton ``H`` axis of the internal
+    4-D representation), and returns the rank it was given.
+
+    The ``"zero_centered_rms_norm"`` context-norm default is no longer unique
+    to this subclass: the base class resolves the SAME value for any
+    ``input_mode="sequence"`` block, causal or not. The ``setdefault`` in
+    ``__init__`` is kept anyway so this class keeps owning its documented
+    default instead of silently tracking a base default that has already moved
+    once.
 
     Kept as a registered subclass (rather than folded away) purely for
     checkpoint / back-compat: the registered class name and the legacy Keras
