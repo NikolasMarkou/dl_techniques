@@ -36,10 +36,14 @@ class FNetEncoderBlock(keras.layers.Layer):
     """
     Complete FNet encoder block with Fourier mixing and feed-forward components.
 
-    Implements a pre-normalization encoder block that replaces self-attention
+    Implements a POST-normalization encoder block that replaces self-attention
     with parameter-free Fourier-based token mixing, followed by a configurable
     feed-forward network. The architecture follows the structure
-    [sublayer -> residual -> norm] for both the Fourier mixing and FFN stages.
+    [sublayer -> residual -> norm] for both the Fourier mixing and FFN stages,
+    i.e. the residual is added FIRST and the sum is then normalized
+    (``x = Norm(input + branch)``, as drawn below and implemented in ``call``).
+    This is the original FNet/BERT arrangement, not the pre-norm
+    ``x = input + branch(Norm(input))`` variant.
     Uses factory patterns for normalization and FFN layer creation, supporting
     all dl_techniques normalization and FFN types.
 
