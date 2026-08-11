@@ -705,7 +705,8 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     # ------------------------------------------------------------------
 
     def get_codebook_indices(
-            self, inputs: keras.KerasTensor
+            self,
+            inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Return discrete indices of nearest codebook entries per head.
 
@@ -735,7 +736,8 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         return keras.ops.reshape(indices, out_shape)
 
     def quantize_from_indices(
-            self, indices: keras.KerasTensor
+            self,
+            indices: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Convert indices back to embedding vectors.
 
@@ -763,3 +765,5 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         d_tensor = keras.ops.convert_to_tensor([self.embedding_dim], dtype="int32")
         out_shape = keras.ops.concatenate([spatial_shape_i32, d_tensor], axis=0)
         return keras.ops.reshape(flat_q, out_shape)
+
+# ---------------------------------------------------------------------
