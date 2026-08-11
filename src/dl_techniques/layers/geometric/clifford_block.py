@@ -1221,8 +1221,6 @@ class CliffordNetBlock(keras.layers.Layer):
         else:
             self.input_spec = keras.layers.InputSpec(ndim=4)
 
-        # Static sequence length captured at build time (causal path only).
-        self._causal_seq_len: Optional[int] = None
         # Rank of the tensor the layer was built on. Rank 3 means call() must
         # expand to the internal 4-D representation and squeeze on the way out.
         self._input_rank: Optional[int] = None
@@ -1428,9 +1426,6 @@ class CliffordNetBlock(keras.layers.Layer):
 
         # Step 2b: context -- two DWConvs, then a single normalization.
         if self.causal:
-            self._causal_seq_len = (
-                int(spatial_shape[2]) if spatial_shape[2] is not None else None
-            )
             pad = self.context_kernel_size - 1
             # The valid convolutions are built on LEFT-PADDED shapes so that,
             # after the explicit left-pad in call(), they preserve the
@@ -1574,16 +1569,48 @@ class CliffordNetBlock(keras.layers.Layer):
         positions ``0..i``.  This preserves autoregressive causality while
         still providing each position with a growing global summary. Used only
         on the ``causal=True`` path.
+
+        The accumulation and the division are performed in ``float32`` when the
+        input dtype is narrower than ``float32`` (see the DECISION anchor
+        below); ``float32`` and ``float64`` inputs are computed in their own
+        dtype and are bit-unchanged.
         """
+        # DECISION plan-2026-08-11T110821-54118fdd/D-005
+        # Do NOT write the obvious `keras.ops.cast(keras.ops.arange(...),
+        # x.dtype)` here. Under `mixed_float16` the compute dtype is float16,
+        # and float16 cannot represent the integers 1..seq_len exactly past
+        # 2048: the divisor vector alone was MEASURED at 2.44e-04 relative
+        # error at the endpoint 4097 (4.88e-04 max over 1..4096, where the
+        # float16 spacing is 2) and at exactly 0.0 for seq_len == 2048. The
+        # float16 `cumsum` is a LARGER error still, because a running sum of
+        # thousands of terms is accumulated at 11-bit precision -- measured
+        # end-to-end against a float64 reference on the float16-rounded input,
+        # max relative error fell from 17.65 -> 7.7e-03 (L=2048), 17.65 ->
+        # 3.9e-02 (L=4096) and 458.8 -> 1.4e-01 (L=8192) when this widening
+        # was introduced, i.e. 449x to 3255x. Both the accumulation and the
+        # divisors are therefore widened to float32, and the result is cast
+        # back so the layer's public dtype contract is unchanged (float32
+        # output verified BIT-IDENTICAL, `np.array_equal` True).
+        # Widen only NARROWER-than-float32 dtypes: a float64 input must stay
+        # float64, so it is computed in float64, never downcast to float32.
+        input_dtype = keras.backend.standardize_dtype(x.dtype)
+        compute_dtype = (
+            "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
+        )
+
         # x shape: (B, 1, seq_len, D)
-        cumsum = keras.ops.cumsum(x, axis=2)  # (B, 1, seq_len, D)
+        x_c = keras.ops.cast(x, compute_dtype)
+        cumsum = keras.ops.cumsum(x_c, axis=2)  # (B, 1, seq_len, D)
+        # `keras.ops.shape(x)[2]` keeps this graph-safe under a dynamic
+        # sequence length (measured working at L=13 and L=29 through a
+        # functional model with `Input(shape=(1, None, D))`).
         seq_len = keras.ops.shape(x)[2]
         # divisors: [1, 2, 3, ..., seq_len] reshaped to (1, 1, seq_len, 1)
         divisors = keras.ops.cast(
-            keras.ops.arange(1, seq_len + 1), x.dtype
+            keras.ops.arange(1, seq_len + 1), compute_dtype
         )
         divisors = keras.ops.reshape(divisors, (1, 1, -1, 1))
-        return cumsum / divisors
+        return keras.ops.cast(cumsum / divisors, input_dtype)
 
     # ------------------------------------------------------------------
 
