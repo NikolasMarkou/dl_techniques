@@ -65,6 +65,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
 )
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
 from train.cliffordnet.train_cliffordnet import (
@@ -365,11 +366,7 @@ def build_variant(
 
     # Linear DropPath schedule across every block in the model.
     total_blocks = sum(n for _, n in stages)
-    if total_blocks <= 1:
-        drop_rates = [0.0] * total_blocks
-    else:
-        step = stochastic_depth_rate / (total_blocks - 1)
-        drop_rates = [round(i * step, 6) for i in range(total_blocks)]
+    drop_rates = linear_drop_path_rates(total_blocks, stochastic_depth_rate)
 
     inputs = keras.layers.Input(shape=input_shape, name="input")
 
