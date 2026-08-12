@@ -52,21 +52,14 @@ class CIFARSOMConfig:
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
 
-    use_progressive_training: bool = False
-    progressive_epochs: List[int] = field(default_factory=lambda: [20, 30, 50])
-    initial_size: int = 16
-
-    reconstruction_loss_type: str = 'mse'
     perceptual_weight: float = 0.5
 
     monitor_every_n_epochs: int = 5
     num_reconstruction_samples: int = 16
-    num_interpolation_samples: int = 8
     save_latent_projections: bool = True
 
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
-    save_checkpoints: bool = True
     checkpoint_frequency: int = 10
 
     def __post_init__(self) -> None:

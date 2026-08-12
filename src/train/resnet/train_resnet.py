@@ -77,7 +77,6 @@ class TrainingConfig:
     # Augmentation
     augment_data: bool = True
     label_smoothing: float = 0.1
-    mixup_alpha: float = 0.0
 
     # Monitoring
     monitor_every_n_epochs: int = 5
@@ -93,8 +92,6 @@ class TrainingConfig:
     # Output
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
-    save_training_samples: bool = True
-    save_model_checkpoints: bool = True
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:

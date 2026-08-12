@@ -181,12 +181,6 @@ class ExperimentConfig:
     epsilon: float = 1e-6
     band_regularizer_l2: Optional[float] = None
 
-    # --- Probe / callback config ------------------------------------------
-    enable_epoch_analyzer: bool = True
-    analyzer_frequency: int = 5
-    grad_norm_sample_every_n_batches: int = 10
-    activation_calibration_batches: int = 2
-
     # --- Output -----------------------------------------------------------
     out_dir: str = "results/rms_variants_train"
     csv_filename: str = "results.csv"
