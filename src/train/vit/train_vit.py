@@ -81,7 +81,6 @@ class TrainingConfig:
 
     # Monitoring
     monitor_every_n_epochs: int = 5
-    save_best_only: bool = True
     early_stopping_patience: int = 15
     validation_steps: Optional[int] = None
 
