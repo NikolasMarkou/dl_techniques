@@ -12,6 +12,7 @@ literal path would re-create exactly the hand-maintained agreement whose failure
 caused the defect. They are the first tests of any kind for `src/train/tree_transformer/`.
 """
 
+import ast
 import inspect
 import os
 
@@ -103,6 +104,47 @@ class TestEncoderHandoff:
                 f"{occurrences} time(s), expected {expected}; a second hand-written "
                 "copy is what allowed the two paths to drift apart (F-24)"
             )
+
+    def test_finetune_declares_no_config_field_it_never_reads(self) -> None:
+        """No silent no-op knobs on `FinetuneConfig`.
+
+        `save_dir` used to be declared and read exactly once -- by an
+        `os.makedirs` that created a directory nothing was ever written into
+        (every artefact goes to the timestamped `results_dir`). A user setting it
+        would have seen an empty directory appear and nothing else change. This
+        guard is deliberately general: it fails for ANY field that is declared and
+        then never read, which is the shape of a knob that silently does nothing.
+        """
+        tree = ast.parse(inspect.getsource(ft))
+        config_cls = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "FinetuneConfig"
+        )
+        declared = [
+            node.target.id for node in config_cls.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        ]
+        assert declared, "found no annotated fields — the parse is wrong, not the code"
+
+        # Only accesses on the CONFIG itself count. A module-wide `node.attr` set
+        # is vacuous here: `_PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir` puts
+        # "save_dir" in it, so a dead `FinetuneConfig.save_dir` reads as live.
+        # Measured — the first draft of this guard passed against exactly that
+        # mutation.
+        config_names = {"config", "cfg", "FinetuneConfig", "self"}
+        read = {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in config_names
+        }
+        dead = sorted(set(declared) - read)
+        assert not dead, (
+            f"FinetuneConfig declares {dead} but never reads them anywhere in the "
+            "module — a config field nothing consumes is a knob that silently does "
+            "nothing when a user sets it"
+        )
 
     def test_the_handoff_directory_is_the_one_pretrain_creates(self) -> None:
         """`makedirs(config.save_dir)` and the hand-off write target agree.

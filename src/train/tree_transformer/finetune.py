@@ -49,7 +49,6 @@ class FinetuneConfig:
     # when they were two hand-written strings they silently disagreed (F-24). Do
     # not inline this back into a literal.
     pretrained_encoder_path: str = _pretrained_encoder_path(_PRETRAIN_SAVE_DIR)
-    save_dir: str = "results/tree_transformer_sentiment_finetune"
 
     # Task
     num_classes: int = 2
@@ -166,7 +165,6 @@ def finetune_sentiment_model(
     logger.info("=" * 60)
 
     set_seeds(42)
-    os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
         config.encoding_name, config.max_seq_length,

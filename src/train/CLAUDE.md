@@ -309,9 +309,13 @@ Same shape, same reason as `sentiment_final_model_filename(model_name)`: if a fi
 
 Guarded by `tests/test_train/test_tree_transformer/test_encoder_handoff.py` (5 tests — the first tests of any kind for `src/train/tree_transformer/`), which EXECUTES the save through a recording stand-in rather than grepping the source. That distinction is load-bearing: the first draft of this guard checked the source for `pretrained_encoder_path(config.save_dir)` and passed against a mutation that computed the path and never wrote to it — the exact shape of the original defect.
 
-#### Known open defects (NOT fixed by the consolidation)
+#### FIXED: `tree_transformer/finetune.py`'s dead `save_dir`
 
-- **`tree_transformer/finetune.py`'s `os.makedirs(config.save_dir, exist_ok=True)` is dead code.** In *`finetune.py`* (not `pretrain.py`, whose identical call is now load-bearing — see above), `config.save_dir` has exactly two references: its declaration and this call. Every artefact is written to `results_dir` instead. Left alone deliberately: removing it is a behaviour change to a non-adopter with no bearing on the hand-off.
+`FinetuneConfig.save_dir` was declared and read exactly once — by an `os.makedirs(config.save_dir, exist_ok=True)` that created `results/tree_transformer_sentiment_finetune/` and never wrote a byte into it. Every artefact goes to the timestamped `results_dir` instead. Setting `save_dir` therefore made an empty directory appear and changed nothing else — a knob that silently does nothing, the same class as the CLI args that silently no-op when `main()` forgets to forward them.
+
+Both the `makedirs` and the field are removed. (`pretrain.py`'s identically-spelled `os.makedirs(config.save_dir)` is *not* dead — it prepares the encoder hand-off directory; see above.)
+
+Guarded generally, not just for this field, by `test_encoder_handoff.py::test_finetune_declares_no_config_field_it_never_reads`: every annotated `FinetuneConfig` field must be read somewhere in the module. **The guard's read-set is scoped to accesses on the config object** (`config.X`, `FinetuneConfig.X`, `self.X`) rather than every `Attribute` node in the module — measured necessity, not caution: the first draft counted module-wide attribute names, so the unrelated `_PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir` at the top of the file put `save_dir` in the read-set and the guard passed against the very mutation it exists to catch.
 
 ---
 
