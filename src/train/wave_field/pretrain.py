@@ -34,14 +34,19 @@ from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
-    load_text_dataset,
-    preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
-    estimate_clm_steps_per_epoch,
     build_clm_metrics,
     prepare_dict_keyed_compile,
     augment_probe_results,
+)
+from train.common.clm_pretrain import (
+    extract_step_from_checkpoint,
+    create_clm_loss_fn,
+    load_train_val_datasets,
+    load_tfds_clm_datasets,
+    load_hf_clm_datasets,
+    make_clm_steps_per_epoch,
 )
 from dl_techniques.models.wave_field.model import (
     WaveFieldLLM,
@@ -54,8 +59,27 @@ from dl_techniques.initializers.identity_plus_noise import (
     IdentityPlusNoise,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
+
+# DECISION plan-2026-08-12T123743-e798a9e1/D-011
+# Backwards-compatible aliases for the private spellings these six functions had
+# while they lived in this module -- plain assignments, so they are the SAME
+# objects and not copies (the general rule is decisions.md D-010).
+# WHAT NOT TO DO: do NOT delete `_extract_step_from_checkpoint` on the grounds
+# that this file no longer uses it under that name. `train.wave_field.train_memory`
+# imports it FROM HERE (`from train.wave_field.pretrain import
+# _extract_step_from_checkpoint`) -- a cross-module coupling that predates this
+# consolidation. train_memory.py has since been repointed at
+# train.common.clm_pretrain directly, so this alias is now belt-and-braces for
+# any importer written against the old path; it is still not dead code, and it is
+# the only reason `train.wave_field.pretrain` may not be reduced to its
+# WaveField-specific surface.
+# See decisions.md D-011 (and D-010 for the alias-block rule it specializes).
+_extract_step_from_checkpoint = extract_step_from_checkpoint
+create_loss_fn = create_clm_loss_fn
+_load_tfds_datasets = load_tfds_clm_datasets
+_load_hf_datasets = load_hf_clm_datasets
+_make_steps_per_epoch = make_clm_steps_per_epoch
 
 
 # ---------------------------------------------------------------------
@@ -143,15 +167,6 @@ class TrainingConfig:
 # ---------------------------------------------------------------------
 
 
-def _extract_step_from_checkpoint(path: str) -> int:
-    import re
-    basename = os.path.basename(path)
-    match = re.search(r"step_(\d+)", basename)
-    if match:
-        return int(match.group(1))
-    return 0
-
-
 def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
     """Load a WaveFieldLLM model from a ``.keras`` checkpoint."""
     logger.info(f"Resuming from checkpoint: {path}")
@@ -215,90 +230,6 @@ def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
 
 
 # ---------------------------------------------------------------------
-# Loss construction
-# ---------------------------------------------------------------------
-
-
-def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
-    if config.loss_type == "focal":
-        loss_fn = FocalCausalLMLoss(
-            gamma=config.focal_gamma,
-            label_smoothing=config.label_smoothing,
-        )
-        logger.info(f"Loss: FocalCausalLMLoss(gamma={config.focal_gamma})")
-    else:
-        loss_fn = MaskedCausalLMLoss(label_smoothing=config.label_smoothing)
-        logger.info("Loss: MaskedCausalLMLoss")
-    return loss_fn
-
-
-# ---------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------
-
-
-def load_train_val_datasets(
-    config: TrainingConfig,
-    preprocessor,
-    data_seed: int,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
-    n_train_articles: Optional[int] = None
-    if config.dataset_source == "tfds":
-        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
-    elif config.dataset_source == "huggingface":
-        train_ds, val_ds, n_train_articles = _load_hf_datasets(
-            config, preprocessor, data_seed,
-        )
-    else:
-        raise ValueError(
-            f"Unknown dataset_source: {config.dataset_source!r}. "
-            f"Use 'tfds' or 'huggingface'."
-        )
-
-    # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    return wrap(train_ds), wrap(val_ds), n_train_articles
-
-
-def _load_tfds_datasets(config, preprocessor):
-    train = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "train", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "test", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    return train, val
-
-
-def _load_hf_datasets(config, preprocessor, data_seed: int):
-    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
-        cache_dir=config.hf_cache_dir,
-        config_name=config.hf_wikipedia_config,
-        min_article_length=config.min_article_length,
-        val_fraction=config.val_fraction,
-        max_train_samples=config.max_train_samples,
-        max_val_samples=config.max_val_samples,
-        seed=data_seed,
-        num_shards=config.shuffle_shards,
-        return_counts=True,
-    )
-    train = preprocess_clm_dataset(
-        train_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        val_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    return train, val, n_train
-
-
-# ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
 
@@ -327,23 +258,6 @@ def compile_model(
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
         f"wd={config.weight_decay}"
-    )
-
-
-def _make_steps_per_epoch(
-    config: TrainingConfig, n_train_articles: Optional[int],
-) -> int:
-    if (
-        config.dataset_source == "tfds"
-        and config.max_samples
-        and config.steps_per_epoch is None
-    ):
-        return max(1, config.max_samples // config.batch_size)
-    return estimate_clm_steps_per_epoch(
-        num_articles=n_train_articles or config.max_train_samples,
-        max_seq_length=config.max_seq_length,
-        batch_size=config.batch_size,
-        override=config.steps_per_epoch,
     )
 
 
