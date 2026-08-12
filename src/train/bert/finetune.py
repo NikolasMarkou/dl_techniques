@@ -10,7 +10,6 @@ import os
 import pickle
 
 import keras
-import numpy as np
 import tensorflow as tf
 from typing import List, Optional, Tuple
 
@@ -20,9 +19,10 @@ from train.common.nlp import (
     load_text_dataset,
     preprocess_classification_dataset,
     create_nlp_callbacks,
+    run_finetune_post_training_analysis,
+    sentiment_final_model_filename,
 )
 
-from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
 from dl_techniques.models.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
@@ -204,7 +204,7 @@ def finetune_sentiment_model(
         )
 
     logger.info("Fine-tuning completed!")
-    final_path = os.path.join(config.save_dir, "bert_sentiment_final_best.keras")
+    final_path = os.path.join(config.save_dir, sentiment_final_model_filename("bert"))
     model.save(final_path)
     logger.info(f"Saved final model to {final_path}")
 
@@ -220,61 +220,18 @@ def finetune_sentiment_model(
 # ---------------------------------------------------------------------
 
 
-def prepare_data_for_analyzer(val_dataset: tf.data.Dataset, num_samples: int) -> DataInput:
-    """Extract samples from validation dataset for ModelAnalyzer."""
-    logger.info(f"Preparing {num_samples} samples for analysis...")
-    val_subset = val_dataset.unbatch().take(num_samples)
-    x_batches, y_list = [], []
-    for x, y in val_subset:
-        x_batches.append(x)
-        y_list.append(y.numpy())
-    x_data = {key: np.array([d[key].numpy() for d in x_batches]) for key in x_batches[0].keys()}
-    return DataInput(x_data=x_data, y_data=np.array(y_list))
-
-
 def post_training_analysis(config: FinetuneConfig) -> None:
-    """Run comprehensive post-training analysis comparing model snapshots."""
-    logger.info("Running Post-Training Analysis")
-    os.makedirs(config.full_analysis_dir, exist_ok=True)
+    """Run comprehensive post-training analysis comparing model snapshots.
 
-    initial_model, _ = create_sentiment_model(config)
-    best_path = os.path.join(config.save_dir, "best_sentiment_model.keras")
-    final_path = os.path.join(config.save_dir, "bert_sentiment_final_best.keras")
-
-    models_to_analyze = {
-        "Initial_Model": initial_model,
-        "Best_Model(ValAcc)": keras.models.load_model(best_path),
-        "Final_Model": keras.models.load_model(final_path),
-    }
-
-    history_path = os.path.join(config.save_dir, "training_history.pkl")
-    with open(history_path, 'rb') as f:
-        history_dict = pickle.load(f)
-    training_histories = {name: history_dict for name in models_to_analyze}
-
-    preprocessor = create_tokenizer(
-        config.encoding_name, config.max_seq_length,
-        config.cls_token_id, config.sep_token_id,
-        config.pad_token_id, config.mask_token_id,
+    The body is shared with ``train/fnet/finetune.py`` -- see
+    ``train.common.nlp.run_finetune_post_training_analysis``, which also
+    carries the D-017 note about the snapshot path this loads.
+    """
+    run_finetune_post_training_analysis(
+        config,
+        model_name="bert",
+        create_initial_model=lambda: create_sentiment_model(config)[0],
     )
-    val_dataset = preprocess_classification_dataset(
-        load_text_dataset(config.dataset_name, "test", config.max_samples, as_supervised=True),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    analysis_data = prepare_data_for_analyzer(val_dataset, config.analysis_n_samples)
-
-    analyzer = ModelAnalyzer(
-        models=models_to_analyze,
-        training_history=training_histories,
-        config=AnalysisConfig(
-            analyze_weights=True, analyze_spectral=True,
-            analyze_calibration=True, analyze_training_dynamics=True,
-            analyze_information_flow=False, verbose=True,
-        ),
-        output_dir=config.full_analysis_dir,
-    )
-    analyzer.analyze(data=analysis_data)
-    logger.info(f"Analysis complete. Results: {config.full_analysis_dir}")
 
 
 def evaluate_model(model: keras.Model, preprocessor: TiktokenPreprocessor, config: FinetuneConfig):
