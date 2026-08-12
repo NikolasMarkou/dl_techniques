@@ -35,19 +35,45 @@ from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
-    load_text_dataset,
-    preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
-    estimate_clm_steps_per_epoch,
     build_clm_metrics,
     prepare_dict_keyed_compile,
     augment_probe_results,
 )
+from train.common.clm_pretrain import (
+    extract_step_from_checkpoint,
+    create_clm_loss_fn,
+    load_train_val_datasets,
+    load_tfds_clm_datasets,
+    load_hf_clm_datasets,
+    make_clm_steps_per_epoch,
+)
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
+
+# DECISION plan-2026-08-12T123743-e798a9e1/D-010
+# Backwards-compatible aliases for the private spellings these six functions had
+# while they lived in this module. They are re-exports (the SAME objects), not
+# copies, so `train.gpt2.pretrain._load_hf_datasets is
+# train.common.clm_pretrain.load_hf_clm_datasets` holds.
+# WHAT NOT TO DO: do NOT delete `_load_tfds_datasets` / `_load_hf_datasets`
+# because "nothing in this file calls them". Nothing does -- that is the point.
+# They are this module's PUBLIC import surface for anything written against the
+# pre-consolidation spelling, and `train.wave_field.train_memory` proves that
+# class of importer exists (it reaches `_extract_step_from_checkpoint` through
+# `train.wave_field.pretrain`, not through the defining module).
+# WHAT NOT TO DO (2): do NOT "tidy" these into re-definitions
+# (`def _load_hf_datasets(...): return load_hf_clm_datasets(...)`). A wrapper is
+# a new object, so the `is`-identity that makes this a re-export rather than a
+# 5th copy would silently stop holding.
+# See decisions.md D-010.
+_extract_step_from_checkpoint = extract_step_from_checkpoint
+create_loss_fn = create_clm_loss_fn
+_load_tfds_datasets = load_tfds_clm_datasets
+_load_hf_datasets = load_hf_clm_datasets
+_make_steps_per_epoch = make_clm_steps_per_epoch
 
 
 # ---------------------------------------------------------------------
@@ -144,20 +170,6 @@ class TrainingConfig:
 # ---------------------------------------------------------------------
 
 
-def _extract_step_from_checkpoint(path: str) -> int:
-    """Extract the training step from a checkpoint filename.
-
-    Handles ``step_0025000.keras`` and ``final.keras`` patterns.
-    Returns 0 if the step cannot be determined.
-    """
-    import re
-    basename = os.path.basename(path)
-    match = re.search(r"step_(\d+)", basename)
-    if match:
-        return int(match.group(1))
-    return 0
-
-
 def load_model_from_checkpoint(
     path: str,
 ) -> Tuple[GPT2, int]:
@@ -214,100 +226,6 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
 
 
 # ---------------------------------------------------------------------
-# Loss Construction
-# ---------------------------------------------------------------------
-
-
-def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
-    """Create the CLM loss function from configuration."""
-    if config.loss_type == "focal":
-        loss_fn = FocalCausalLMLoss(
-            gamma=config.focal_gamma,
-            label_smoothing=config.label_smoothing,
-        )
-        logger.info(f"Loss: FocalCausalLMLoss(γ={config.focal_gamma})")
-    else:
-        loss_fn = MaskedCausalLMLoss(
-            label_smoothing=config.label_smoothing,
-        )
-        logger.info("Loss: MaskedCausalLMLoss")
-    return loss_fn
-
-
-# ---------------------------------------------------------------------
-# Data Loading
-# ---------------------------------------------------------------------
-
-
-def load_train_val_datasets(
-    config: TrainingConfig,
-    preprocessor,
-    data_seed: int,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
-    """Load, preprocess, and wrap train/val datasets for the dict-output model.
-
-    :return: ``(train_ds, val_ds, n_train_articles)``. The article count is
-        the post-filter Wikipedia article count (HF path) or ``None`` (TFDS).
-    """
-    n_train_articles: Optional[int] = None
-    if config.dataset_source == "tfds":
-        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
-    elif config.dataset_source == "huggingface":
-        train_ds, val_ds, n_train_articles = _load_hf_datasets(
-            config, preprocessor, data_seed,
-        )
-    else:
-        raise ValueError(
-            f"Unknown dataset_source: {config.dataset_source!r}. "
-            f"Use 'tfds' or 'huggingface'."
-        )
-
-    # Wrap labels for dict-output model: (x, y) → (x, {"logits": y})
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    return wrap(train_ds), wrap(val_ds), n_train_articles
-
-
-def _load_tfds_datasets(config, preprocessor):
-    """Load train/val from TFDS (e.g. IMDB)."""
-    train = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "train", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "test", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    return train, val
-
-
-def _load_hf_datasets(config, preprocessor, data_seed: int):
-    """Load train/val from Wikipedia with random holdout split."""
-    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
-        cache_dir=config.hf_cache_dir,
-        config_name=config.hf_wikipedia_config,
-        min_article_length=config.min_article_length,
-        val_fraction=config.val_fraction,
-        max_train_samples=config.max_train_samples,
-        max_val_samples=config.max_val_samples,
-        seed=data_seed,
-        num_shards=config.shuffle_shards,
-        return_counts=True,
-    )
-    train = preprocess_clm_dataset(
-        train_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        val_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    return train, val, n_train
-
-
-# ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
 
@@ -337,20 +255,6 @@ def compile_model(
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
         f"wd={config.weight_decay}"
-    )
-
-
-def _make_steps_per_epoch(
-    config: TrainingConfig, n_train_articles: Optional[int],
-) -> int:
-    """Resolve steps_per_epoch via the canonical helper (D-001)."""
-    if config.dataset_source == "tfds" and config.max_samples and config.steps_per_epoch is None:
-        return max(1, config.max_samples // config.batch_size)
-    return estimate_clm_steps_per_epoch(
-        num_articles=n_train_articles or config.max_train_samples,
-        max_seq_length=config.max_seq_length,
-        batch_size=config.batch_size,
-        override=config.steps_per_epoch,
     )
 
 
