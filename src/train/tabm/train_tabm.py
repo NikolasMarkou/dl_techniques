@@ -17,11 +17,7 @@ from dl_techniques.models.tabm import (
 from dl_techniques.datasets.tabular import TabularDataProcessor
 from dl_techniques.utils.logger import logger
 
-# `setup_gpu` is imported INSIDE main(), after argv is parsed. Importing it at
-# module scope pulls in `train.common`'s package __init__, which imports
-# `image_text.py`, which builds a `tf.constant` at module scope -- that
-# initializes TF's eager context and ALLOCATES A GPU. `--help` must not.
-# See plan-2026-08-12T201216-50fc0975 D-006 for the measurement.
+# `setup_gpu` is imported INSIDE main(); see the anchor there.
 
 
 class TabMTrainer:
@@ -644,7 +640,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     """Run the selected examples."""
     args = parse_arguments(argv)
 
-    from train.common import setup_gpu  # deferred: see the note at the imports
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # `setup_gpu` is imported HERE, not at module scope. Do NOT hoist it back
+    # up: `train/common/__init__.py` re-exports `image_text.py`, whose
+    # module-level `tf.constant` (image_text.py:53) initializes TF's eager
+    # context and ALLOCATES a GPU device at import time. A top-level
+    # `from train.common import setup_gpu` therefore makes `--help` allocate a
+    # GPU before argparse ever runs, defeating the point of this whole change.
+    # Measured: `Created device` count 1 -> 0 on `--help` after the move.
+    # Guarded by
+    # tests/test_train/test_tabm/test_cli_contract.py::test_setup_gpu_is_wired_and_imported_lazily.
+    from train.common import setup_gpu
     setup_gpu(args.gpu)
 
     logger.info("TabM Model Examples")
