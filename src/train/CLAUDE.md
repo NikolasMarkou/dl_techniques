@@ -229,7 +229,7 @@ def main():
 | `preprocess_clm_packed_dataset(ds, encoding_name, chunk_length, batch_size, eot_token_id, ...)` | Lower-level packed CLM with `repeat=True` for explicit step-budget loops |
 | `preprocess_classification_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch with labels |
 | `estimate_clm_steps_per_epoch(num_articles, max_seq_length, batch_size, override=None, avg_tokens_per_article=440)` | **Canonical** chunk-aware steps-per-epoch helper (D-001). Use this everywhere — never roll a local `_estimate_steps_per_epoch`. |
-| `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay |
+| `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay. Now defined in `dl_techniques.optimization.schedule` and re-exported here. |
 | `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
 
 **Wikipedia/HF data path conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
@@ -402,7 +402,7 @@ create_callbacks(
 - `setup_gpu(gpu_id)` — GPU memory growth + device selection. Always pass `args.gpu`.
 - `create_callbacks(...)` — standard callbacks. See API reference above.
 - `create_base_argument_parser(description, default_dataset)` — standard argparse. Only for vision/classification scripts that use `load_dataset()`.
-- `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` — cosine, exponential, constant.
+- `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` — cosine, exponential, constant. **Now defined in `dl_techniques.optimization.schedule`** and re-exported from `train.common`; both import paths work and resolve to the same object.
 - `load_dataset(name, batch_size, image_size)` — MNIST, CIFAR-10/100, ImageNet only.
 - `get_class_names(dataset, num_classes)` — human-readable labels.
 - `validate_model_loading(path, sample, expected, custom_objects)` — round-trip serialization check.
@@ -418,7 +418,7 @@ create_callbacks(
 **Use from `dl_techniques` (library-level components):**
 - `dl_techniques.metrics.depth_metrics` — AbsRelMetric, DeltaThresholdMetric, SqRelMetric, RMSEMetric, RMSELogMetric.
 - `dl_techniques.callbacks.depth_visualization` — DepthPredictionGridCallback, DepthMetricsCurveCallback.
-- `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`.
+- `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`, `create_learning_rate_schedule()`, `create_warmup_lr_schedule()`, `WarmupSchedule`. Build optimizers through `optimizer_builder()` rather than calling `keras.optimizers.AdamW(...)` directly: it handles gradient clipping and weight-decay exclusions in the constructor, where Keras requires them. Never set `optimizer.clipnorm` after construction.
 - `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)` — layer-by-layer weight transfer from a saved `.keras` model. Use this (not `model.load_weights(by_name=True)` which is broken in Keras 3.8 for `.keras` files).
 
 **Keep local to each script:**
