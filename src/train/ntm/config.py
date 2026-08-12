@@ -17,14 +17,12 @@ class CopyTaskConfig:
     
     :param sequence_length: Length of the sequence to copy.
     :param vector_size: Dimensionality of each vector in the sequence.
-    :param max_sequence_length: Maximum sequence length for length generalization tests.
     :param num_samples: Number of samples to generate.
     :param delay_length: Number of blank timesteps between input and output.
     :param random_seed: Seed for reproducibility.
     """
     sequence_length: int = 10
     vector_size: int = 8
-    max_sequence_length: int = 20
     num_samples: int = 1000
     delay_length: int = 1
     random_seed: int = 42

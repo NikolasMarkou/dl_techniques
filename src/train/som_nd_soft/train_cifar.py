@@ -52,15 +52,12 @@ class CIFARSOMConfig:
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
 
-    perceptual_weight: float = 0.5
-
     monitor_every_n_epochs: int = 5
     num_reconstruction_samples: int = 16
     save_latent_projections: bool = True
 
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
-    checkpoint_frequency: int = 10
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:

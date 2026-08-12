@@ -183,7 +183,6 @@ class ExperimentConfig:
 
     # --- Output -----------------------------------------------------------
     out_dir: str = "results/rms_variants_train"
-    csv_filename: str = "results.csv"
 
     # --- Misc -------------------------------------------------------------
     # Free-form extras for trainer-specific knobs (e.g. depth_override).
