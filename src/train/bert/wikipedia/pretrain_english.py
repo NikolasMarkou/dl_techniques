@@ -12,6 +12,7 @@ Datasets:
 
 import os
 import keras
+import argparse
 import tensorflow as tf
 import datasets  # Hugging Face datasets
 from typing import Generator, Optional
@@ -219,8 +220,50 @@ def create_tf_dataset(config: PretrainConfig, preprocessor: TiktokenPreprocessor
 # Main Training Loop
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for English-only BERT pre-training.
+
+    Same minimal shape as the sibling `pretrain.py`, plus the one knob this
+    fork actually adds: `--max-non-ascii-ratio`.
+    """
+    parser = argparse.ArgumentParser(
+        description="English-only BERT MLM Pre-training on Wikipedia + BookCorpus"
+    )
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--variant', type=str, default=PretrainConfig.bert_variant,
+                        help='BERT variant')
+    parser.add_argument('--batch-size', type=int, default=PretrainConfig.global_batch_size,
+                        help='Global batch size')
+    parser.add_argument('--total-steps', type=int, default=PretrainConfig.total_steps,
+                        help='Total training steps')
+    parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
+                        help='Peak learning rate')
+    parser.add_argument('--max-non-ascii-ratio', type=float,
+                        default=PretrainConfig.max_non_ascii_ratio,
+                        help='Max fraction of non-ASCII characters allowed per sample')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first -- see the note in the sibling `pretrain.py`: `--help` has
+    # to exit before MirroredStrategy, the streaming dataset build and model
+    # construction.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # Function-scope import on purpose -- do NOT hoist. `train.common`'s
+    # package init allocates a GPU device at import time (see the fuller note
+    # in the sibling `pretrain.py`, and decisions.md D-006).
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = PretrainConfig()
+    config.bert_variant = args.variant
+    config.global_batch_size = args.batch_size
+    config.total_steps = args.total_steps
+    config.learning_rate = args.learning_rate
+    config.max_non_ascii_ratio = args.max_non_ascii_ratio
 
     # Strategy Setup
     try:

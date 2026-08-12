@@ -15,6 +15,7 @@ Features:
 
 import os
 import keras
+import argparse
 import numpy as np
 import tensorflow as tf
 import datasets  # Hugging Face datasets library
@@ -200,8 +201,55 @@ def create_tf_dataset(
 # Training Setup
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for Wikipedia+BookCorpus BERT pre-training.
+
+    Kept deliberately small: one flag per `PretrainConfig` field it overrides,
+    no invented knobs. `--gpu` is interface parity with every other trainer --
+    `setup_gpu`'s `set_memory_growth` is a known repo-wide no-op, so device
+    selection is still the `CUDA_VISIBLE_DEVICES=N` shell prefix.
+    """
+    parser = argparse.ArgumentParser(
+        description="BERT MLM Pre-training on Wikipedia + BookCorpus"
+    )
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--variant', type=str, default=PretrainConfig.bert_variant,
+                        help='BERT variant')
+    parser.add_argument('--batch-size', type=int, default=PretrainConfig.global_batch_size,
+                        help='Global batch size')
+    parser.add_argument('--total-steps', type=int, default=PretrainConfig.total_steps,
+                        help='Total training steps')
+    parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
+                        help='Peak learning rate')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first: `--help` has to exit before MirroredStrategy, before the
+    # dataset build (a live streaming HF Hub fetch) and before model
+    # construction. Anything moved above this line makes `--help` expensive
+    # again -- guarded by tests/test_train/test_bert_wikipedia/.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # `setup_gpu` is imported HERE, not at module scope. Do NOT hoist it back
+    # up: `train/common/__init__.py` re-exports `image_text.py`, whose
+    # module-level `tf.constant` (image_text.py:53) initializes TF's eager
+    # context and ALLOCATES a GPU device at import time. A top-level
+    # `from train.common import setup_gpu` therefore makes `--help` allocate a
+    # GPU before argparse ever runs, defeating the point of this whole change.
+    # Measured: `import train.common` -> 1 "Created device" line; `import
+    # keras, tensorflow`, `dl_techniques.models.bert`, `datasets` and
+    # `tensorflow_datasets` -> 0. See decisions.md D-006.
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = PretrainConfig()
+    config.bert_variant = args.variant
+    config.global_batch_size = args.batch_size
+    config.total_steps = args.total_steps
+    config.learning_rate = args.learning_rate
 
     # 1. Hardware Strategy
     try:

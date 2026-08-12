@@ -10,10 +10,11 @@ Dataset: GLUE/SST-2 (loaded via tensorflow_datasets)
 
 import os
 import keras
+import argparse
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -113,8 +114,40 @@ def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, c
 # Main
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for GLUE/SST-2 fine-tuning.
+
+    One flag per `FinetuneConfig` field it overrides; no invented knobs.
+    """
+    parser = argparse.ArgumentParser(description="BERT fine-tuning on GLUE/SST-2")
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--batch-size', type=int, default=FinetuneConfig.batch_size,
+                        help='Batch size')
+    parser.add_argument('--epochs', type=int, default=FinetuneConfig.epochs,
+                        help='Fine-tuning epochs')
+    parser.add_argument('--learning-rate', type=float, default=FinetuneConfig.learning_rate,
+                        help='Learning rate')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first: `--help` has to exit before `tfds.load` (which materializes
+    # or downloads GLUE) and before any model construction.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # Function-scope import on purpose -- do NOT hoist. `train.common`'s
+    # package init allocates a GPU device at import time (see the fuller note
+    # in `pretrain.py`, and decisions.md D-006).
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = FinetuneConfig()
+    config.batch_size = args.batch_size
+    config.epochs = args.epochs
+    config.learning_rate = args.learning_rate
+
     os.makedirs(config.save_dir, exist_ok=True)
 
     logger.info("Loading GLUE/SST-2 dataset...")
