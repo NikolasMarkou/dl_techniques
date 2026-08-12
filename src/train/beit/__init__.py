@@ -15,8 +15,9 @@ three-stage pipeline rather than the usual pretrain/finetune pair:
   "head_"))`` with the transfer ASSERTED, never merely logged.
 
 ``common.py`` covers only what all three genuinely share, and AUTHORS only one of the
-three: the raw-image ``tf.data`` pipeline and the optimizer block are RE-EXPORTED from
-``train.energy_transformer.common`` (decision D-008), and the frozen-tokenizer loader is
+three: the raw-image ``tf.data`` pipeline is RE-EXPORTED from ``train.common.datasets``
+and the optimizer block from ``train.energy_transformer.common`` (decision D-008; the
+pipeline was later promoted out of the ET package), and the frozen-tokenizer loader is
 the single BEiT-specific helper defined there. There is deliberately NO
 shared ``TrainingConfig`` and NO shared ``train()`` orchestrator — each trainer owns its
 own dataclass, ``parse_arguments()`` and ``config_from_args()`` so that a CLI flag which

@@ -3,10 +3,10 @@
 Deliberately SMALL. It holds exactly three things, and two of them are not written here
 at all:
 
-1. :func:`build_raw_image_dataset` — RE-EXPORTED from ``train.energy_transformer.common``.
+1. :func:`build_raw_image_dataset` — RE-EXPORTED from ``train.common.datasets``.
    The raw-image ``tf.data`` pipeline (imagenette via tfds, cifar10 in-memory) with the
    ``element_map_fn`` hook the MIM trainer needs.
-2. :func:`build_optimizer` — RE-EXPORTED from the same module. The
+2. :func:`build_optimizer` — RE-EXPORTED from ``train.energy_transformer.common``. The
    ``learning_rate_schedule_builder`` / ``optimizer_builder`` block.
 3. :func:`load_frozen_tokenizer` — the only genuinely BEiT-specific helper: load a saved
    VQ-VAE, freeze it, VERIFY its code grid, and hand back a callable that produces the
@@ -37,16 +37,21 @@ import tensorflow as tf
 # `element_map_fn` hook the MIM trainer needs; a copy would be a ~230-line fork of a
 # pipeline that carries THREE load-bearing in-code decision anchors (D-007/D-008/D-040 of
 # two other plans) about branch ordering that a fork would silently drift away from.
-# The cross-trainer import is the house convention, not an exception: `train/dino/
-# train_dino.py:237` imports these same two names from the same module, and
+# The cross-package import is the house convention, not an exception: `train/dino/
+# train_dino.py:237` imports these same two names, and
 # `train/graph_energy_transformer/common.py:24` re-exports `build_optimizer` the same way.
+# The dataset pipeline's HOME is now `train.common.datasets`, not
+# `train.energy_transformer.common`, where it was originally written (it is consumed by
+# four packages, so it was promoted; `train.energy_transformer.common` re-exports it and
+# that path still resolves to the SAME OBJECT). `build_optimizer` still lives in
+# `train.energy_transformer.common`.
 # See decisions.md D-008.
-from train.energy_transformer.common import (  # noqa: F401  (re-exported)
+from train.common.datasets import (  # noqa: F401  (re-exported)
     DATASET_NUM_CLASSES,
     SUPPORTED_DATASETS,
-    build_optimizer,
     build_raw_image_dataset,
 )
+from train.energy_transformer.common import build_optimizer  # noqa: F401  (re-exported)
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
 
