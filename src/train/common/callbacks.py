@@ -20,6 +20,41 @@ from dl_techniques.optimization.schedule import create_learning_rate_schedule  #
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-08-12T123743-e798a9e1/D-021
+# This is the ONE producer of the best-checkpoint path. `create_callbacks`
+# below configures `ModelCheckpoint` with `best_checkpoint_path(results_dir)`
+# and every reader (currently
+# `train.common.nlp.run_finetune_post_training_analysis`) resolves the same
+# way, so a writer and a reader CANNOT disagree about the name.
+# DO NOT re-spell this literal at a read site. That is exactly how F-23
+# happened: a reader hard-coded `best_sentiment_model.keras` while the writer
+# here wrote `best_model.keras`, a filename mismatch (on top of a directory
+# mismatch) that nothing could detect until a real run crashed at the very end.
+# See decisions.md D-021 (which supersedes D-017).
+BEST_CHECKPOINT_FILENAME = 'best_model.keras'
+
+
+def best_checkpoint_path(results_dir: str) -> str:
+    """Path `create_callbacks`' `ModelCheckpoint` writes the best model to.
+
+    Args:
+        results_dir: A run directory -- the SECOND element of the tuple
+            returned by :func:`create_callbacks` (or by
+            :func:`train.common.nlp.create_nlp_callbacks`). It is the
+            timestamped `results/{prefix}_{model}_{timestamp}` directory, NOT a
+            config's static `save_dir`.
+
+    Returns:
+        `os.path.join(results_dir, BEST_CHECKPOINT_FILENAME)`.
+
+    Failure mode: none -- this is pure path arithmetic and never touches the
+    filesystem, so it returns a path for a checkpoint that may not exist yet
+    (e.g. when `fit()` had no validation split and `ModelCheckpoint` never
+    fired). Callers that need the file must check for it themselves.
+    """
+    return os.path.join(results_dir, BEST_CHECKPOINT_FILENAME)
+
+
 def create_callbacks(
         model_name: str,
         results_dir_prefix: str = "model",
@@ -94,7 +129,7 @@ def create_callbacks(
             mode=monitor_mode,
         ),
         keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(results_dir, 'best_model.keras'),
+            filepath=best_checkpoint_path(results_dir),
             monitor=monitor,
             save_best_only=True,
             verbose=1,

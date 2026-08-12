@@ -234,8 +234,9 @@ def main():
 | `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay. Now defined in `dl_techniques.optimization.schedule` and re-exported here. |
 | `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
 | `evaluate_mlm_model(mlm_model, preprocessor, test_texts=None)` | Qualitative MLM probe + `visualize_mlm_predictions`. Defaults to `DEFAULT_MLM_PROBE_TEXTS`. Shared by bert/fnet `pretrain.py`, each of which binds `evaluate_model` to it as a plain alias. |
-| `run_finetune_post_training_analysis(config, model_name, create_initial_model)` | The full `ModelAnalyzer` comparison over Initial/Best/Final snapshots. Shared by bert/fnet `finetune.py`. `create_initial_model` is a zero-arg factory, called after the analysis dir exists. **Carries a known live defect — see "Known open defects" below.** |
+| `run_finetune_post_training_analysis(config, model_name, create_initial_model, results_dir)` | The full `ModelAnalyzer` comparison over Initial/Best/Final snapshots. Shared by bert/fnet `finetune.py`. `create_initial_model` is a zero-arg factory, called after the analysis dir exists. `results_dir` is REQUIRED (the run dir `create_nlp_callbacks` returned) and has no default on purpose — see "FIXED: `best_sentiment_model.keras`" below. |
 | `sentiment_final_model_filename(model_name)` | `f"{model_name}_sentiment_final_best.keras"`. Used at BOTH the save site and the analysis read site so the two cannot drift. |
+| `best_checkpoint_path(results_dir)` (in `train/common/callbacks.py`, not `nlp.py`) | `<results_dir>/best_model.keras` — the ONE producer of the best-checkpoint path, used both by `create_callbacks`' `ModelCheckpoint` and by every reader. |
 
 **Wikipedia/HF data path conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
 
@@ -281,9 +282,22 @@ The `max_seq_length` 256-vs-128 split is the one a shared scaffold is most likel
 
 tree_transformer's inline seeding is weaker than it looks: `set_seeds` also sets `PYTHONHASHSEED`, `random` and `numpy`, which the inline pair does not — so tree_transformer runs are less reproducible than bert/fnet's despite looking equivalent. Its `finetune.py` does use `set_seeds(42)`; only `pretrain.py` rolls its own.
 
+#### FIXED: `best_sentiment_model.keras` was a filename nothing wrote
+
+Recorded here because the fix established a rule worth keeping. **The defect:** `post_training_analysis` loaded `<config.save_dir>/best_sentiment_model.keras`, a name with several READ sites and **zero WRITE sites anywhere in `src/`**, while `ModelCheckpoint` wrote `<results_dir>/best_model.keras` (`train/common/callbacks.py`) — a different DIRECTORY *and* a different FILENAME, `results_dir` being the timestamped run dir `create_nlp_callbacks` returns. `run_post_training_analysis` defaults to `True`, so `train.bert.finetune` and `train.fnet.finetune` raised `ValueError: File not found` at the end of **every** default run, after training had finished and the final model had already been saved. `train/bert/deploy.py` carried a third spelling of the same dead name (with an extra `checkpoints/` component), so `python -m train.bert.deploy` with no arguments could only ever report the model missing.
+
+**The rule that replaced it:** a checkpoint path has exactly ONE producer, and both ends of the contract call it.
+
+- `train/common/callbacks.py` owns `BEST_CHECKPOINT_FILENAME` + `best_checkpoint_path(results_dir)`. `create_callbacks` configures `ModelCheckpoint` with it; `run_finetune_post_training_analysis` reads through it. They cannot disagree.
+- `run_finetune_post_training_analysis` takes `results_dir` as a **required** parameter — deliberately with no `config.save_dir` fallback, since a convenience default is what would make the silent-miss reachable again.
+- `finetune_sentiment_model` returns `(model, history, results_dir)`; `main()` threads the run dir into the analysis call.
+- `deploy.py`'s `--model_path` default is `os.path.join(FinetuneConfig.save_dir, sentiment_final_model_filename("bert"))` — both halves imported from the fine-tuning script's own save site, never re-typed. It points at the FINAL model; the best-val snapshot lives in a timestamped dir `deploy` cannot know, so pass `--model_path` for that.
+- Guarded by `tests/test_train/test_bert_fnet/test_analysis_reads_what_training_writes.py`, which compares the two PRODUCERS (the `ModelCheckpoint`'s configured `filepath` vs the path the analysis hands `keras.models.load_model`) rather than pinning a path literal — a literal would re-create the lockstep invariant that caused this.
+
+Same shape, same reason as `sentiment_final_model_filename(model_name)`: if a filename must be known in two places, it is a function, not a string typed twice.
+
 #### Known open defects (NOT fixed by the consolidation)
 
-- **`best_sentiment_model.keras` is a filename nothing writes.** `run_finetune_post_training_analysis` (`train/common/nlp.py`) loads `<save_dir>/best_sentiment_model.keras`; `train/bert/deploy.py:61` reads the same name. `grep -rn best_sentiment_model src/` returns only those read sites and **zero write sites**. `ModelCheckpoint` writes `<results_dir>/best_model.keras` (`train/common/callbacks.py:97`) — a different DIRECTORY *and* a different FILENAME. Because `run_post_training_analysis` defaults to `True`, `train.bert.finetune` and `train.fnet.finetune` raise `ValueError: File not found` at the end of every default run, after training has finished and the final model has been saved. `--skip-analysis` suppresses it. Do not "fix" this by swapping `save_dir` for the run directory — the filename is wrong too.
 - **tree_transformer's pretrain -> finetune handoff does not work by default.** `tree_transformer/pretrain.py` writes the encoder to `os.path.join(results_dir, "pretrained_tree_transformer_encoder_best.keras")` (`pretrain.py:212-215`), where `results_dir` is the TIMESTAMPED directory returned by `create_nlp_callbacks`. But `finetune.py:39-42` defaults `pretrained_encoder_path` to the STATIC `results/tree_transformer_pretrain/pretrained_tree_transformer_encoder_best.keras`, and `results/tree_transformer_pretrain/` is only ever created — empty — by `pretrain.py:172`'s `os.makedirs(config.save_dir, exist_ok=True)`. Measured 2026-08-12 on a real 1-step run: the encoder landed in the timestamped directory and the static one was empty. Pass `--pretrained-encoder-path` explicitly until this is fixed. Note this is the INVERSE of the folklore that tree_transformer had fixed a run-directory bug bert still has: bert prints and writes through the same `config.save_dir` expression, so bert's handoff is internally consistent.
 - **`tree_transformer/finetune.py:160`'s `os.makedirs(config.save_dir, exist_ok=True)` is dead code.** `config.save_dir` has exactly two references in that file — its declaration (line 43) and this call. Every artefact is written to `results_dir` instead (lines 228, 233).
 

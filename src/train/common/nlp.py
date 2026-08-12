@@ -16,6 +16,7 @@ import tiktoken
 from typing import Any, Callable, List, Optional, Tuple
 
 from train.common import create_callbacks as create_common_callbacks
+from train.common.callbacks import best_checkpoint_path
 from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
@@ -676,28 +677,31 @@ def prepare_data_for_analyzer(val_dataset: tf.data.Dataset, num_samples: int) ->
     return DataInput(x_data=x_data, y_data=np.array(y_list))
 
 
-# DECISION plan-2026-08-12T123743-e798a9e1/D-017
-# `best_path` below points at a file NOTHING IN THIS REPOSITORY EVER WRITES.
-# This is a KNOWN LIVE DEFECT (F-23), moved here verbatim from
-# bert/finetune.py:241 and fnet/finetune.py:241 so that the consolidation
-# commit stays behaviour-preserving -- it is NOT a statement that the path is
-# correct. Measured: `best_sentiment_model.keras` has three READ sites and zero
-# WRITE sites in all of `src/`; `ModelCheckpoint` writes
-# `<results_dir>/best_model.keras` (train/common/callbacks.py:97) -- a
-# different DIRECTORY *and* a different FILENAME. Because
-# `run_post_training_analysis` defaults to True, both `train.bert.finetune` and
-# `train.fnet.finetune` raise `ValueError: File not found` here at the end of
-# every default run, AFTER training has completed and the final model has been
-# saved (reproduced 2026-08-12, evidence/step2-f19/).
-# DO NOT "fix" this by changing `config.save_dir` to the run directory: the
-# FILENAME is wrong too, so that alone still misses. The real checkpoint is
-# `<results_dir>/best_model.keras`, and `results_dir` is returned by
-# `create_nlp_callbacks`, which `post_training_analysis` is not currently given.
-# Tracked as plan step 15b; see decisions.md D-017.
+# DECISION plan-2026-08-12T123743-e798a9e1/D-021  (SUPERSEDES D-017)
+# `results_dir` is a REQUIRED parameter, and the best-checkpoint path is
+# resolved through `best_checkpoint_path` -- the same producer
+# `create_callbacks` configures `ModelCheckpoint` with -- so the reader here
+# and the writer there cannot disagree.
+# DO NOT reintroduce `os.path.join(config.save_dir, "best_sentiment_model.keras")`,
+# and DO NOT give `results_dir` a `config.save_dir` default "for convenience".
+# That was F-23: `best_sentiment_model.keras` had zero write sites anywhere in
+# `src/` while `ModelCheckpoint` wrote `<results_dir>/best_model.keras` -- a
+# different DIRECTORY *and* a different FILENAME -- so both
+# `train.bert.finetune` and `train.fnet.finetune` raised
+# `ValueError: File not found` here at the end of EVERY default run
+# (`run_post_training_analysis` defaults to True), after training had finished
+# and the final model had already been saved. A `save_dir` default would make
+# that silent failure reachable again from a caller that simply forgets to
+# thread the run directory through.
+# Guarded by
+# `tests/test_train/test_bert_fnet/test_analysis_reads_what_training_writes.py`,
+# which compares the two PRODUCERS rather than a hard-coded string.
+# See decisions.md D-021 (supersedes D-017).
 def run_finetune_post_training_analysis(
     config: Any,
     model_name: str,
     create_initial_model: Callable[[], keras.Model],
+    results_dir: str,
 ) -> None:
     """Run comprehensive post-training analysis comparing model snapshots.
 
@@ -718,9 +722,15 @@ def run_finetune_post_training_analysis(
             ``create_sentiment_model``. Called here rather than passed
             pre-built so construction still happens after the analysis
             directory exists, exactly as it did in the per-script copies.
+        results_dir: The RUN directory `create_nlp_callbacks` returned to the
+            training function -- the directory `ModelCheckpoint` wrote the
+            best-validation snapshot into. Required, and deliberately without a
+            default: see the D-021 note above.
 
     Failure mode: raises whatever ``keras.models.load_model`` raises when a
-    snapshot is missing -- see the D-017 note above, which is exactly that.
+    snapshot is missing. That is a real possibility for the best-checkpoint
+    arm: `ModelCheckpoint` never fires if `fit()` ran without a validation
+    split, so the file can legitimately be absent after a (mis-sized) run.
 
     ``custom_objects=`` is deliberately NOT passed: ``BERT``, ``FNet`` and
     ``TreeTransformer`` are all ``@keras.saving.register_keras_serializable()``
@@ -732,7 +742,7 @@ def run_finetune_post_training_analysis(
     os.makedirs(config.full_analysis_dir, exist_ok=True)
 
     initial_model = create_initial_model()
-    best_path = os.path.join(config.save_dir, "best_sentiment_model.keras")
+    best_path = best_checkpoint_path(results_dir)
     final_path = os.path.join(
         config.save_dir, sentiment_final_model_filename(model_name)
     )

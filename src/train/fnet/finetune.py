@@ -140,8 +140,15 @@ def _merge_histories(base, new):
 
 def finetune_sentiment_model(
     config: FinetuneConfig,
-) -> Tuple[keras.Model, keras.callbacks.History]:
-    """Run sentiment analysis fine-tuning with optional two-stage training."""
+) -> Tuple[keras.Model, keras.callbacks.History, str]:
+    """Run sentiment analysis fine-tuning with optional two-stage training.
+
+    Returns ``(model, history, results_dir)``. ``results_dir`` is the
+    TIMESTAMPED run directory ``create_nlp_callbacks`` created and
+    ``ModelCheckpoint`` wrote the best snapshot into; it is returned -- rather
+    than left as a local -- because the post-training analysis has to read that
+    snapshot back. See ``train.common.nlp`` D-021.
+    """
     logger.info("=" * 60)
     logger.info("FNet Sentiment Analysis Fine-tuning")
     logger.info("=" * 60)
@@ -212,7 +219,7 @@ def finetune_sentiment_model(
     with open(history_path, 'wb') as f:
         pickle.dump(final_history.history, f)
 
-    return model, final_history
+    return model, final_history, results_dir
 
 
 # ---------------------------------------------------------------------
@@ -220,17 +227,20 @@ def finetune_sentiment_model(
 # ---------------------------------------------------------------------
 
 
-def post_training_analysis(config: FinetuneConfig) -> None:
+def post_training_analysis(config: FinetuneConfig, results_dir: str) -> None:
     """Run comprehensive post-training analysis comparing model snapshots.
 
-    The body is shared with ``train/bert/finetune.py`` -- see
-    ``train.common.nlp.run_finetune_post_training_analysis``, which also
-    carries the D-017 note about the snapshot path this loads.
+    ``results_dir`` must be the run directory ``finetune_sentiment_model``
+    returned -- the analysis reads the best-validation checkpoint that
+    ``ModelCheckpoint`` wrote there. The body is shared with
+    ``train/bert/finetune.py``; see
+    ``train.common.nlp.run_finetune_post_training_analysis`` and its D-021 note.
     """
     run_finetune_post_training_analysis(
         config,
         model_name="fnet",
         create_initial_model=lambda: create_sentiment_model(config)[0],
+        results_dir=results_dir,
     )
 
 
@@ -278,10 +288,10 @@ def main() -> None:
     config.run_two_stage_finetuning = not args.no_two_stage
     config.run_post_training_analysis = not args.skip_analysis
 
-    model, _ = finetune_sentiment_model(config)
+    model, _, results_dir = finetune_sentiment_model(config)
 
     if config.run_post_training_analysis:
-        post_training_analysis(config)
+        post_training_analysis(config, results_dir)
 
     preprocessor = create_tokenizer(
         config.encoding_name, config.max_seq_length,

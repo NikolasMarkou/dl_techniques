@@ -4,9 +4,20 @@ Sentiment Analysis Inference Tool with Tiktoken.
 A command-line tool to load a fine-tuned BERT model and perform sentiment
 analysis on user-provided sentences in real-time using TiktokenPreprocessor.
 
-This script loads the best-performing model checkpoint saved by the
-fine-tuning script and provides an interactive terminal interface for
-inference.
+This script loads the model saved by the fine-tuning script and provides an
+interactive terminal interface for inference.
+
+Which checkpoint the default points at
+--------------------------------------
+``--model_path`` defaults to the FINAL model ``train.bert.finetune`` writes at
+the end of a run: ``<FinetuneConfig.save_dir>/<sentiment_final_model_filename>``.
+Both halves of that path are imported from the fine-tuning script itself rather
+than re-spelled here, so the default cannot drift away from what a run writes.
+
+The best-VALIDATION snapshot is a different file: ``ModelCheckpoint`` writes it
+to ``<results_dir>/best_model.keras``, where ``results_dir`` is a TIMESTAMPED
+directory this script cannot know. Pass it explicitly with ``--model_path`` if
+you want the best-val checkpoint instead of the final one.
 
 Usage
 -----
@@ -30,8 +41,25 @@ from typing import Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from train.bert.finetune import FinetuneConfig
+from train.common.nlp import sentiment_final_model_filename
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-12T123743-e798a9e1/D-021
+# Derived from the fine-tuning script's OWN save site, never re-typed. Before
+# this, the default was the literal
+# `results/bert_sentiment_finetune/checkpoints/best_sentiment_model.keras` --
+# a third distinct spelling of a file NOTHING in `src/` has ever written (wrong
+# subdirectory AND wrong filename), so `python -m train.bert.deploy` with no
+# arguments could only ever print "Model file not found".
+# DO NOT re-hard-code this path. See decisions.md D-021.
+DEFAULT_MODEL_PATH = os.path.join(
+    FinetuneConfig.save_dir, sentiment_final_model_filename("bert")
+)
 
 # ---------------------------------------------------------------------
 
@@ -56,11 +84,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--model_path",
         type=str,
-        default=(
-            "results/bert_sentiment_finetune/checkpoints/"
-            "best_sentiment_model.keras"
-        ),
-        help="Path to the saved .keras model file."
+        default=DEFAULT_MODEL_PATH,
+        help=(
+            "Path to the saved .keras model file. Defaults to the FINAL model "
+            "train.bert.finetune writes; the best-val snapshot lives in that "
+            "run's timestamped results dir as best_model.keras."
+        )
     )
     parser.add_argument(
         "--max_length",
