@@ -36,6 +36,8 @@ make docs       # generate documentation
 └── imgs/                # Images and assets
 ```
 
+> **NEVER delete anything under `results/`.** Not the tree, not a single run directory, not "test artifacts I just created" — no `rm -rf results/`, and no cleanup step that names `results/` by a relative path. `results/` is gitignored and untracked, so **deletion is unrecoverable**: there is no git history and no backup. If a probe or smoke run creates a run directory, leave it; the user removes them. On 2026-08-12 a badly-scoped cleanup instruction ("delete every `results/` dir you create afterwards") destroyed all 62 run directories at once — including a published paper's subject checkpoint — because the agent's own test had written to a pytest `tmp_path` and the relative paths in its log resolved against the repo root instead. Delete only absolute paths recorded at creation time and verified created, or do not delete at all.
+
 There is no committed documentation directory. `make docs` runs `generate_docs.py`, which generates one on demand; nothing exists at that path until you run it, and the output is not committed.
 
 ### src/dl_techniques/ (core library)
