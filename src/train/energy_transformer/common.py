@@ -8,7 +8,9 @@ Deliberately SMALL (D-005). It holds only the three things both trainers genuine
    It is no longer WRITTEN here: it was promoted to :mod:`train.common.datasets` (four
    packages consume it) and is RE-EXPORTED below, object identity intact.
 2. :func:`build_optimizer` — the ``learning_rate_schedule_builder`` / ``optimizer_builder``
-   block.
+   block. It is no longer WRITTEN here either: it was promoted to
+   :mod:`train.common.optimizer` (four packages consume it) and is RE-EXPORTED below,
+   object identity intact.
 3. :class:`EnergyTraceCallback` — the out-of-graph energy-descent probe.
 
 There is NO shared config dataclass and NO shared ``train()`` orchestrator: each trainer owns
@@ -40,11 +42,14 @@ from train.common.datasets import (  # noqa: F401  (re-exported, D-006)
     SUPPORTED_DATASETS,
     build_raw_image_dataset,
 )
+
+# `build_optimizer` was PROMOTED the same way, to `train.common.optimizer` (4
+# consuming packages, 9 call sites); re-exported here so every existing
+# `train.energy_transformer.common` import path keeps resolving TO THE SAME
+# OBJECT -- see that module's D-007 anchor, and beit's/dino's identity tests.
+from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported, D-007)
+
 from dl_techniques.utils.logger import logger
-from dl_techniques.optimization import (
-    optimizer_builder,
-    learning_rate_schedule_builder,
-)
 
 # Same idiom as `train/graph_energy_transformer/common.py`: `__all__` is what marks
 # the re-exported names above as USED (pyflakes does not honour `# noqa`).
@@ -58,51 +63,6 @@ __all__ = [
     "build_optimizer",
     "EnergyTraceCallback",
 ]
-
-# ---------------------------------------------------------------------
-# optimization
-# ---------------------------------------------------------------------
-
-def build_optimizer(config: Any, steps_per_epoch: int) -> keras.optimizers.Optimizer:
-    """Build the LR schedule + optimizer from a trainer ``TrainingConfig``.
-
-    Reads ``lr_schedule_type``, ``learning_rate``, ``epochs``, ``warmup_epochs``,
-    ``optimizer_type``, ``weight_decay`` and ``gradient_clipping`` off ``config``.
-
-    Double-weight-decay guard (H10 / LESSONS L72): when the optimizer is AdamW, the decay goes
-    through ``optimizer_builder`` ONLY. No model layer in this feature sets a
-    ``kernel_regularizer=L2(...)`` -- setting both inflates the loss with an L2 penalty AND
-    decays the parameters again on the update.
-
-    Args:
-        config: The trainer's ``TrainingConfig``.
-        steps_per_epoch: Optimizer steps per epoch (drives decay/warmup horizons).
-
-    Returns:
-        A configured ``keras.optimizers.Optimizer``.
-    """
-    lr_schedule = learning_rate_schedule_builder({
-        "type": config.lr_schedule_type,
-        "learning_rate": config.learning_rate,
-        "decay_steps": steps_per_epoch * config.epochs,
-        "warmup_steps": steps_per_epoch * config.warmup_epochs,
-        "alpha": 0.01,
-    })
-
-    opt_config: Dict[str, Any] = {
-        "type": config.optimizer_type,
-        "gradient_clipping_by_norm": config.gradient_clipping,
-    }
-    if config.optimizer_type.lower() == "adamw":
-        opt_config["weight_decay"] = config.weight_decay
-
-    logger.info(
-        f"optimizer={config.optimizer_type}, lr={config.learning_rate}, "
-        f"schedule={config.lr_schedule_type}, warmup_steps={steps_per_epoch * config.warmup_epochs}, "
-        f"clip_by_norm={config.gradient_clipping}, weight_decay={config.weight_decay}"
-    )
-    return optimizer_builder(opt_config, lr_schedule)
-
 
 # ---------------------------------------------------------------------
 # energy trace probe

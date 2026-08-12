@@ -6,7 +6,7 @@ at all:
 1. :func:`build_raw_image_dataset` — RE-EXPORTED from ``train.common.datasets``.
    The raw-image ``tf.data`` pipeline (imagenette via tfds, cifar10 in-memory) with the
    ``element_map_fn`` hook the MIM trainer needs.
-2. :func:`build_optimizer` — RE-EXPORTED from ``train.energy_transformer.common``. The
+2. :func:`build_optimizer` — RE-EXPORTED from ``train.common.optimizer``. The
    ``learning_rate_schedule_builder`` / ``optimizer_builder`` block.
 3. :func:`load_frozen_tokenizer` — the only genuinely BEiT-specific helper: load a saved
    VQ-VAE, freeze it, VERIFY its code grid, and hand back a callable that produces the
@@ -40,18 +40,18 @@ import tensorflow as tf
 # The cross-package import is the house convention, not an exception: `train/dino/
 # train_dino.py:237` imports these same two names, and
 # `train/graph_energy_transformer/common.py:24` re-exports `build_optimizer` the same way.
-# The dataset pipeline's HOME is now `train.common.datasets`, not
-# `train.energy_transformer.common`, where it was originally written (it is consumed by
-# four packages, so it was promoted; `train.energy_transformer.common` re-exports it and
-# that path still resolves to the SAME OBJECT). `build_optimizer` still lives in
-# `train.energy_transformer.common`.
+# BOTH functions' HOME is now under `train.common`, not `train.energy_transformer.common`
+# where they were originally written (each is consumed by four packages, so both were
+# promoted: the pipeline to `train.common.datasets`, the optimizer adapter to
+# `train.common.optimizer`). `train.energy_transformer.common` re-exports both and those
+# paths still resolve to the SAME OBJECTS.
 # See decisions.md D-008.
 from train.common.datasets import (  # noqa: F401  (re-exported)
     DATASET_NUM_CLASSES,
     SUPPORTED_DATASETS,
     build_raw_image_dataset,
 )
-from train.energy_transformer.common import build_optimizer  # noqa: F401  (re-exported)
+from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported)
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
 
