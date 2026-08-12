@@ -66,7 +66,15 @@ def create_tokenizer(config: FinetuneConfig) -> TiktokenPreprocessor:
 
 
 def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, config: FinetuneConfig):
-    """Tokenizes GLUE/SST-2 data."""
+    """Tokenizes GLUE/SST-2 data.
+
+    TFDS' GLUE builder has no supervised structure, so its elements are DICTS,
+    not ``(text, label)`` pairs -- ``tfds.load(..., as_supervised=True)`` raises
+    ``ValueError: as_supervised=True but glue does not support a supervised
+    structure``. The feature names read below are the builder's own
+    (``glue/sst2`` 2.0.0: ``sentence`` -> string, ``label`` -> int64 ClassLabel,
+    plus an unused ``idx``).
+    """
 
     def _tokenize(text, label):
         text_str = text.numpy().decode('utf-8')
@@ -78,10 +86,10 @@ def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, c
             label
         )
 
-    def _wrapper(text, label):
+    def _wrapper(example: Dict[str, tf.Tensor]):
         input_ids, attn_mask, type_ids, label = tf.py_function(
             _tokenize,
-            [text, label],
+            [example['sentence'], example['label']],
             [tf.int32, tf.int32, tf.int32, tf.int64]
         )
 
@@ -111,7 +119,9 @@ def main():
 
     logger.info("Loading GLUE/SST-2 dataset...")
     # TFDS handles downloading the GLUE benchmark automatically
-    data, info = tfds.load(f'glue/{config.task_name}', with_info=True, as_supervised=True)
+    # NOTE: no `as_supervised=True` -- GLUE has no supervised structure and TFDS
+    # raises on it. `preprocess_glue` consumes the dict elements instead.
+    data, info = tfds.load(f'glue/{config.task_name}', with_info=True)
 
     tokenizer = create_tokenizer(config)
     train_ds = preprocess_glue(data['train'], tokenizer, config)
