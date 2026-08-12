@@ -14,7 +14,7 @@ from matplotlib import patches
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import learning_rate_schedule_builder
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
@@ -521,8 +521,12 @@ def main():
 
     setup_gpu(gpu_id=args.gpu)
 
-    np.random.seed(args.random_seed)
-    tf.random.set_seed(args.random_seed)
+    # `np.random.seed` + `tf.random.set_seed` alone does NOT make a run
+    # reproducible: Keras draws layer initializers and dropout masks from its
+    # own seed generator, so two same-seed runs produced different weights AND
+    # different dropout masks. `set_seeds` additionally calls
+    # `keras.utils.set_random_seed` (and seeds PYTHONHASHSEED + `random`).
+    set_seeds(args.random_seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = f"{args.save_dir}/yolov12_{args.scale}_coco_pretrain_{timestamp}"
