@@ -1,5 +1,6 @@
 """Training pipeline for TabM models with ensemble evaluation and selection."""
 
+import argparse
 import keras
 import numpy as np
 import pandas as pd
@@ -16,7 +17,11 @@ from dl_techniques.models.tabm import (
 from dl_techniques.datasets.tabular import TabularDataProcessor
 from dl_techniques.utils.logger import logger
 
-from train.common import setup_gpu
+# `setup_gpu` is imported INSIDE main(), after argv is parsed. Importing it at
+# module scope pulls in `train.common`'s package __init__, which imports
+# `image_text.py`, which builds a `tf.constant` at module scope -- that
+# initializes TF's eager context and ALLOCATES A GPU. `--help` must not.
+# See plan-2026-08-12T201216-50fc0975 D-006 for the measurement.
 
 
 class TabMTrainer:
@@ -602,23 +607,51 @@ def example_custom_data_pipeline():
     return results_comparison
 
 
-def main():
-    """Run all examples."""
-    setup_gpu()
+EXAMPLES = {
+    "synthetic-classification": example_synthetic_classification,
+    "real-dataset": example_real_dataset,
+    "regression": example_regression,
+    "ensemble-analysis": example_ensemble_analysis,
+    "custom-pipeline": example_custom_data_pipeline,
+}
+
+
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse the CLI.
+
+    This script had NO parser at all, so `python -m train.tabm.train_tabm
+    --help` ignored the flag, ran every example to completion (minutes of
+    training) and exited 0 without printing a usage line -- the same footgun
+    the three bert/wikipedia scripts carried. Keep this the first thing
+    `main()` does.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run the TabM example pipelines (synthetic + real tabular data)."
+    )
+    parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="GPU id to use. NOTE: repo-wide, this only logs -- device "
+             "selection is the CUDA_VISIBLE_DEVICES=N shell prefix.",
+    )
+    parser.add_argument(
+        "--examples", nargs="+", choices=sorted(EXAMPLES), default=sorted(EXAMPLES),
+        help="Which example pipelines to run (default: all).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Run the selected examples."""
+    args = parse_arguments(argv)
+
+    from train.common import setup_gpu  # deferred: see the note at the imports
+    setup_gpu(args.gpu)
 
     logger.info("TabM Model Examples")
 
-    examples = [
-        ("synthetic classification", example_synthetic_classification),
-        ("real dataset", example_real_dataset),
-        ("regression", example_regression),
-        ("ensemble analysis", example_ensemble_analysis),
-        ("custom pipeline", example_custom_data_pipeline),
-    ]
-
-    for name, fn in examples:
+    for name in args.examples:
         try:
-            fn()
+            EXAMPLES[name]()
         except Exception as e:
             logger.error(f"Error in {name} example: {e}")
 
