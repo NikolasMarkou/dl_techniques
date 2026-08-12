@@ -1,4 +1,4 @@
-"""Guard: a trainer config must not declare a field that nothing consumes.
+r"""Guard: a trainer config must not declare a field that nothing consumes.
 
 The defect class this exists to catch
 ------------------------------------
@@ -26,8 +26,30 @@ assumed:
    `_PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir` line put "save_dir" into the
    read-set, and the guard PASSED against the exact mutation it existed to
    catch. So a read only counts when the receiver plausibly IS the config:
-   `self.X`, `config.X`, `cfg.X`, `<anything>_config.X`, `<ClassName>.X`.
-   Never a bare `<anything>.X`.
+   `self.X`, `config.X`, `cfg.X`, `<anything>_config.X`, `<ClassName>.X`,
+   or through one `.config` / `.cfg` hop. Never a bare `<anything>.X`.
+
+   THE FIRST DRAFT OF *THIS* GUARD REPEATED THAT MISTAKE THROUGH A SIDE DOOR.
+   Its consumption test was a regex over raw lines, and one of its four
+   alternatives -- `\b<field>\s*=[^=]`, meant to catch a kwarg at a
+   construction site -- carried no receiver scoping at all. So
+   `unrelated_object.save_best_only = 5`, or a bare local `save_best_only = 5`,
+   counted as consumption of the config field while the docstring above
+   promised it could not. The consumption test is therefore AST-based, and the
+   four routes are expressed as AST shapes rather than as text:
+
+     - a SCOPED attribute access (`ast.Attribute` under the rule above), in
+       either Load or Store context -- `config.total_steps = args.total_steps`
+       counts, because a CLI override wiring a value onto the config is how
+       several trainers consume a field;
+     - a KEYWORD ARGUMENT named for the field at a call site
+       (`ast.keyword`) -- `ExperimentConfig(csv_filename=...)`, not any line
+       containing `<field> =`;
+     - a string CONSTANT equal to the field name -- dict key / `getattr`;
+     - a string CONSTANT equal to the field's CLI flag (`--field-name`) --
+       an exact literal, not a substring of some longer line.
+
+   `test_an_unscoped_assignment_is_not_consumption` pins the closed hole.
 
 Scope of the search
 -------------------
@@ -71,39 +93,30 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/rms_variants_train/config.py", "ExperimentConfig"),
     ("train/resnet/train_resnet.py", "TrainingConfig"),
     ("train/vit/train_vit.py", "TrainingConfig"),
+    ("train/rms_variants_train/sweep.py", "RunSpec"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
 # guard. Pinned, not ignored: `test_known_dead_fields_are_still_dead` fails if
 # one of them becomes live, which is the signal to delete the exemption (or to
 # delete the field). An empty exemption list is the goal state.
-KNOWN_DEAD: Dict[Tuple[str, str], Set[str]] = {
-    # Missed by the repo-wide name grep because `losses/image_restoration_loss.py`
-    # has an unrelated `self.perceptual_weight` and `blt/train_blt.py` an
-    # unrelated `self.config.checkpoint_frequency`. Both CIFARSOM fields are dead.
-    ("train/som_nd_soft/train_cifar.py", "CIFARSOMConfig"): {
-        "perceptual_weight",
-        "checkpoint_frequency",
-    },
-    # ":param max_sequence_length: Maximum sequence length for length
-    # generalization tests." Length generalization lives in the separate
-    # `LengthGeneralizationConfig` (train_lengths / test_lengths); nothing reads
-    # this one. Same unimplemented-promise shape as the `min_sequence_length`
-    # deleted alongside it.
-    ("train/ntm/config.py", "CopyTaskConfig"): {"max_sequence_length"},
-    # `sweep.py`'s RunSpec has its own, live, identically-named field -- which is
-    # exactly why the repo-wide grep credited this one.
-    ("train/rms_variants_train/config.py", "ExperimentConfig"): {"csv_filename"},
-    # `common/callbacks.py:134` hard-codes `save_best_only=True` on the
-    # ModelCheckpoint, so setting the config field False changed nothing. Same
-    # shape as the `save_model_checkpoints` deleted from both classes.
-    ("train/resnet/train_resnet.py", "TrainingConfig"): {"save_best_only"},
-    ("train/vit/train_vit.py", "TrainingConfig"): {"save_best_only"},
-}
+#
+# IT IS NOW EMPTY, which is that goal state reached, not an exemption list
+# quietly discarded. All seven fields it used to pin were DELETED:
+# `CIFARSOMConfig.perceptual_weight`, `CIFARSOMConfig.checkpoint_frequency`,
+# `CopyTaskConfig.max_sequence_length` (with its `:param:` line),
+# `ExperimentConfig.csv_filename`, `RunSpec.csv_filename`, and
+# `save_best_only` on both resnet's and vit's `TrainingConfig`. Every one of
+# those six classes is in REGISTERED, so `test_config_declares_no_field_it_
+# never_consumes` -- not an exemption -- is what covers them now. Do not add a
+# row here to make a newly-dead field go green; wire it or delete it.
+KNOWN_DEAD: Dict[Tuple[str, str], Set[str]] = {}
 
 # Receivers that plausibly ARE the config object. See trap 2 in the module
-# docstring: a bare `<anything>.field` is NOT accepted.
-_RECEIVER = r"(?:self|config|cfg|args|[A-Za-z_][A-Za-z_0-9]*_(?:config|cfg)|{cls})"
+# docstring: a bare `<anything>.field` is NOT accepted. `<anything>_config` /
+# `<anything>_cfg` / the class name itself are accepted too, via
+# `_is_config_receiver`.
+_BARE_RECEIVERS = frozenset({"self", "config", "cfg", "args"})
 
 _DECL_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z_0-9]*\s*:\s")
 
@@ -189,39 +202,93 @@ def _search_files(rel: str, class_name: str) -> List[Path]:
     return files
 
 
-def _consumption_pattern(field: str, class_name: str) -> re.Pattern:
-    """Lines that plausibly CONSUME `field`.
+def _is_config_receiver(node: ast.expr, class_name: str) -> bool:
+    """True if `node` plausibly evaluates to the config object.
 
-    Same shape as the scratch detector's consumption test -- scoped receiver
-    attribute read, kwarg at a construction site, dict-key / getattr string,
-    CLI flag -- so a field wired by any of those routes counts as live.
+    `self` / `config` / `cfg` / `args` / `<anything>_config` / `<anything>_cfg`
+    / `<ClassName>`, or anything reached through a `.config` / `.cfg`
+    attribute (`self.config.X`, `trainer.cfg.X`). Never a bare
+    `<anything>.X` -- that is trap 2.
     """
-    receiver = _RECEIVER.format(cls=re.escape(class_name))
-    flag = "--" + field.replace("_", "-")
-    return re.compile(
-        "|".join(
-            [
-                rf"{receiver}(?:\.(?:config|cfg))?\.{field}\b",  # scoped attribute read
-                rf"\b{field}\s*=[^=]",                          # kwarg / assignment
-                rf"[\"']{field}[\"']",                          # dict key / getattr string
-                re.escape(flag),                                # CLI flag
-            ]
+    if isinstance(node, ast.Name):
+        name = node.id
+        return (
+            name in _BARE_RECEIVERS
+            or name.endswith(("_config", "_cfg"))
+            or name == class_name
         )
-    )
+    if isinstance(node, ast.Attribute):
+        # `<anything>.config.X` / `<anything>.cfg.X`: the receiver is the
+        # attribute literally named `config`/`cfg`.
+        return node.attr in ("config", "cfg")
+    return False
+
+
+class _Consumption:
+    """AST shapes that plausibly CONSUME `field`.
+
+    Four routes -- scoped attribute access, keyword argument at a call site,
+    string constant (dict key / getattr), CLI flag literal -- so a field wired
+    by any of them counts as live. See the module docstring for why this is an
+    AST walk and not a regex over lines: the regex's kwarg alternative had no
+    receiver scoping, so an unrelated `x.field = 5` counted.
+
+    Contract: `nodes(tree)` yields every consuming node of a parsed module;
+    `search(snippet)` parses a source SNIPPET and returns True if it consumes
+    the field (the probe used by the scoping tests below). A snippet that does
+    not parse yields no consumption rather than raising.
+    """
+
+    def __init__(self, field: str, class_name: str) -> None:
+        self.field = field
+        self.class_name = class_name
+        self.flag = "--" + field.replace("_", "-")
+
+    def _consumes(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == self.field and _is_config_receiver(
+                node.value, self.class_name
+            )
+        if isinstance(node, ast.keyword):
+            return node.arg == self.field
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, str) and node.value in (self.field, self.flag)
+        return False
+
+    def nodes(self, tree: ast.AST) -> List[ast.AST]:
+        return [n for n in ast.walk(tree) if self._consumes(n)]
+
+    def search(self, snippet: str) -> bool:
+        try:
+            tree = ast.parse(snippet)
+        except SyntaxError:
+            return False
+        return bool(self.nodes(tree))
+
+
+def _consumption_pattern(field: str, class_name: str) -> _Consumption:
+    """Kept as the name every scoping test probes through."""
+    return _Consumption(field, class_name)
 
 
 def _consumption_sites(field: str, class_name: str, files: List[Path]) -> List[str]:
-    pattern = _consumption_pattern(field, class_name)
+    consumption = _consumption_pattern(field, class_name)
     sites: List[str] = []
     for path in files:
-        for lineno, text in enumerate(_read_lines(path), start=1):
-            if not pattern.search(text):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        lines = _read_lines(path)
+        for node in consumption.nodes(tree):
+            lineno = getattr(node, "lineno", None)
+            if lineno is None:  # `ast.keyword` has one from 3.9; be safe anyway
                 continue
+            text = lines[lineno - 1] if lineno <= len(lines) else ""
             # `field: type = default` is a DECLARATION, not consumption.
             if _DECL_RE.match(text) and text.strip().startswith(field + ":"):
                 continue
             sites.append(f"{path.relative_to(REPO_ROOT)}:{lineno}  {text.strip()[:100]}")
-    return sites
+    return sorted(set(sites))
 
 
 def _dead_fields(rel: str, class_name: str) -> Dict[str, List[str]]:
@@ -245,7 +312,11 @@ def test_config_declares_no_field_it_never_consumes(rel: str, class_name: str) -
 
 
 @pytest.mark.parametrize(
-    "rel,class_name", sorted(KNOWN_DEAD), ids=lambda v: v.replace("/", ".")
+    "rel,class_name",
+    sorted(KNOWN_DEAD),
+    # KNOWN_DEAD is empty (the goal state), so pytest hands the id-maker its
+    # own placeholder rather than a string -- guard for it.
+    ids=lambda v: v.replace("/", ".") if isinstance(v, str) else "empty",
 )
 def test_known_dead_fields_are_still_dead(rel: str, class_name: str) -> None:
     """Pinned exemptions must stay dead, so they cannot rot unnoticed.
@@ -276,3 +347,28 @@ def test_the_read_set_rejects_an_unscoped_receiver() -> None:
     assert pattern.search("os.makedirs(config.save_dir)")
     assert pattern.search("self.save_dir")
     assert pattern.search("path = FinetuneConfig.save_dir")
+
+
+def test_an_unscoped_assignment_is_not_consumption() -> None:
+    """The scoping applies to WRITES too, not just reads.
+
+    The first draft of this guard tested consumption with a regex whose kwarg
+    alternative was `\\b<field>\\s*=[^=]` -- no receiver at all. So every line
+    below counted as consumption of the config field, and the scoping the
+    module docstring advertises was defeated through a side door for exactly
+    the same reason trap 2 describes. The three lines below were each MEASURED
+    green (counted as a read) under that regex; they are asserted dead here.
+    The third is the same hole in the CLI-flag alternative, which matched
+    `--save-best-only` as a SUBSTRING of any line, prose included.
+
+    A write ONTO the config still counts: a CLI override is a real consumer.
+    """
+    pattern = _consumption_pattern("save_best_only", "TrainingConfig")
+    assert not pattern.search("unrelated_object.save_best_only = 5")
+    assert not pattern.search("save_best_only = 5")
+    assert not pattern.search("logger.info('nothing to do with --save-best-only here')")
+    # ...while the routes that ARE consumption still fire.
+    assert pattern.search("config.save_best_only = args.save_best_only")
+    assert pattern.search("ModelCheckpoint(save_best_only=True)")
+    assert pattern.search("parser.add_argument('--save-best-only')")
+    assert pattern.search("getattr(cfg, 'save_best_only')")

@@ -129,7 +129,6 @@ class RunSpec:
     extra_args: Tuple[str, ...]
     out_dir: str
     regime: str = "default"
-    csv_filename: str = "results.csv"
 
 
 def build_run_specs(
@@ -254,7 +253,7 @@ def build_run_specs(
 
 
 def run_one(
-    spec: RunSpec,
+    run_cfg: RunSpec,
     *,
     python_exe: str,
     cell_timeout_s: int,
@@ -275,9 +274,9 @@ def run_one(
         return False, "global timeout reached before launch"
     timeout = min(cell_timeout_s, remaining)
 
-    os.makedirs(spec.out_dir, exist_ok=True)
-    log_path = os.path.join(spec.out_dir, "cell.log")
-    cmd = [python_exe, "-m", spec.module, *spec.extra_args]
+    os.makedirs(run_cfg.out_dir, exist_ok=True)
+    log_path = os.path.join(run_cfg.out_dir, "cell.log")
+    cmd = [python_exe, "-m", run_cfg.module, *run_cfg.extra_args]
     env = os.environ.copy()
     # DECISION plan_2026-05-18_63121227/D-002: hard-set both env vars below
     # (was ``setdefault``, which silently honoured the parent shell). The
@@ -305,20 +304,20 @@ def run_one(
                 with open(log_path) as f:
                     tail = f.read()[-1500:]
                 logger.error(
-                    f"[sweep] FAIL {spec.experiment}/{spec.norm_type}/{spec.mode}"
-                    f"/seed_{spec.seed} rc={res.returncode} in {wall_s:.1f}s"
+                    f"[sweep] FAIL {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
+                    f"/seed_{run_cfg.seed} rc={res.returncode} in {wall_s:.1f}s"
                 )
                 return False, tail
             logger.info(
-                f"[sweep] OK   {spec.experiment}/{spec.norm_type}/{spec.mode}"
-                f"/seed_{spec.seed} in {wall_s:.1f}s"
+                f"[sweep] OK   {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
+                f"/seed_{run_cfg.seed} in {wall_s:.1f}s"
             )
             return True, ""
         except subprocess.TimeoutExpired:
             wall_s = time.time() - t0
             logger.error(
-                f"[sweep] TIMEOUT {spec.experiment}/{spec.norm_type}/{spec.mode}"
-                f"/seed_{spec.seed} after {wall_s:.1f}s (cap={timeout}s)"
+                f"[sweep] TIMEOUT {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
+                f"/seed_{run_cfg.seed} after {wall_s:.1f}s (cap={timeout}s)"
             )
             return False, f"cell timeout after {timeout}s"
 
@@ -431,10 +430,10 @@ def main() -> int:
     deadline = time.time() + args.global_cap_s
     successes = 0
     failures: List[Tuple[RunSpec, str]] = []
-    for spec in specs:
-        cell_timeout = args.cell_timeout_s or EXPERIMENT_REGISTRY[spec.experiment][1]
+    for run_cfg in specs:
+        cell_timeout = args.cell_timeout_s or EXPERIMENT_REGISTRY[run_cfg.experiment][1]
         ok, tail = run_one(
-            spec,
+            run_cfg,
             python_exe=args.python_exe,
             cell_timeout_s=cell_timeout,
             deadline_s=deadline,
@@ -443,7 +442,7 @@ def main() -> int:
         if ok:
             successes += 1
         else:
-            failures.append((spec, tail))
+            failures.append((run_cfg, tail))
         if time.time() >= deadline:
             logger.error("[sweep] global timeout — aborting remaining cells")
             break
@@ -458,9 +457,9 @@ def main() -> int:
 
     if failures:
         with open(os.path.join(args.out_dir, "failures.log"), "w") as f:
-            for spec, tail in failures:
+            for run_cfg, tail in failures:
                 f.write(
-                    f"=== {spec.experiment}/{spec.norm_type}/{spec.mode}/seed_{spec.seed} ===\n"
+                    f"=== {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}/seed_{run_cfg.seed} ===\n"
                 )
                 f.write(tail + "\n\n")
 
