@@ -32,12 +32,10 @@ Usage:
 """
 
 import gc
-import json
 import time
 import keras
 import argparse
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -48,9 +46,9 @@ from typing import Any, Dict, Optional, Tuple
 from train.common import (
     setup_gpu,
     set_seeds,
-    save_config_json,
     create_callbacks as create_common_callbacks,
 )
+from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.beit.common import (
     SUPPORTED_DATASETS,
     build_optimizer,
@@ -124,8 +122,7 @@ class TrainingConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"beit_cls_{self.dataset}_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("beit_cls", self.dataset, self.variant)
 
         if self.image_size <= 0:
             raise ValueError(f"image_size must be positive, got {self.image_size}")
@@ -337,9 +334,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         f"grid={config.patch_grid} pretrained_encoder={config.pretrained_encoder}"
     )
 
-    run_dir = Path(config.output_dir) / config.experiment_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(run_dir), "config.json")
+    run_dir = prepare_run_dir(config)
 
     # ---- Data ----
     train_ds, val_ds, steps_per_epoch, val_steps, dataset_classes = build_datasets(config)
@@ -422,12 +417,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
     model.save(final_model_path)
     logger.info(f"Saved classifier to {final_model_path}")
 
-    try:
-        history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-        with open(run_dir / "training_history.json", "w") as handle:
-            json.dump(history_dict, handle, indent=2)
-    except Exception as exc:  # pragma: no cover - best-effort artifact
-        logger.warning(f"Failed to save training history: {exc}")
+    save_training_history_json(history, run_dir)
 
     gc.collect()
     return {

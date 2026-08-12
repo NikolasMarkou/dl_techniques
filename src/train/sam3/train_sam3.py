@@ -166,7 +166,6 @@ import argparse
 import json
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -180,8 +179,8 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
     create_learning_rate_schedule,
-    save_config_json,
 )
+from train.common.run_io import default_experiment_name, prepare_run_dir
 from train.common.args import explicitly_set_flags
 
 from dl_techniques.optimization import optimizer_builder
@@ -389,8 +388,7 @@ class Sam3TrainingConfig:
                 f"early_stopping_patience must be > 0; got "
                 f"{self.early_stopping_patience}")
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"sam3_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("sam3", self.variant)
 
     @property
     def steps_per_epoch(self) -> int:
@@ -1351,9 +1349,7 @@ def train_sam3(config: Sam3TrainingConfig
     :return: ``(model, history, final_metrics)``.
     :rtype: Tuple[Sam3TrainingModel, Any, Dict[str, float]]
     """
-    output_dir = resolved_output_dir(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config, output_dir=resolved_output_dir(config))
     logger.info("SAM 3 run '%s' -> %s", config.experiment_name, output_dir)
 
     model = create_training_model(config)

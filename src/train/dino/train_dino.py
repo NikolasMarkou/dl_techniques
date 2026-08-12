@@ -214,7 +214,6 @@ Usage::
 """
 
 import gc
-import json
 import math
 import time
 import keras
@@ -231,10 +230,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from train.common import (
     setup_gpu,
     set_seeds,
-    save_config_json,
     create_callbacks as create_common_callbacks,
 )
 from train.common.args import explicitly_set_flags
+from train.common.run_io import prepare_run_dir, save_training_history_json
 from train.energy_transformer.common import (
     SUPPORTED_DATASETS,
     build_optimizer,
@@ -1017,9 +1016,7 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
         f"views={config.n_views} out_dim={config.dino_out_dim}"
     )
 
-    run_dir = Path(config.output_dir) / config.experiment_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(run_dir), "config.json")
+    run_dir = prepare_run_dir(config)
 
     # ---- Data ----
     train_ds, steps_per_epoch = build_dataset(config)
@@ -1065,15 +1062,7 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
     model.save(str(run_dir / "final_model.keras"))
 
     loss_curve = history.history.get("loss", []) or [float("nan")]
-    try:
-        history_dict = {
-            key: [float(v) for v in values]
-            for key, values in history.history.items()
-        }
-        with open(run_dir / "training_history.json", "w") as handle:
-            json.dump(history_dict, handle, indent=2)
-    except Exception as exc:  # pragma: no cover - best-effort artifact
-        logger.warning(f"Failed to save training history: {exc}")
+    save_training_history_json(history, run_dir)
 
     gc.collect()
     return {

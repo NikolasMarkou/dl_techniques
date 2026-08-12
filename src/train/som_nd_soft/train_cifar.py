@@ -6,11 +6,11 @@ import keras
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
+from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
@@ -71,8 +71,7 @@ class CIFARSOMConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"cifar_softsom_ae_{timestamp}"
+            self.experiment_name = default_experiment_name("cifar_softsom_ae")
         if self.dataset_name not in ['cifar10', 'cifar100']:
             raise ValueError(f"Unknown dataset: {self.dataset_name}")
 

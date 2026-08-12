@@ -78,6 +78,7 @@ from train.common import (
     setup_gpu,
     validate_model_loading,
 )
+from train.common.run_io import save_training_history_json
 
 
 # ---------------------------------------------------------------------
@@ -599,12 +600,7 @@ def train_one_variant(
                 "layer_scale_init": args.layer_scale_init,
                 "parameters": param_count,
             }, f, indent=2)
-        with open(os.path.join(results_dir, "training_history.json"), "w") as f:
-            json.dump(
-                {k: [float(v) for v in vals]
-                 for k, vals in history.history.items()},
-                f, indent=2,
-            )
+        save_training_history_json(history, results_dir)
     except Exception as exc:
         logger.warning(f"  failed to write JSON artifacts: {exc}")
 

@@ -6,12 +6,12 @@ import keras
 import argparse
 import numpy as np
 from pathlib import Path
-from datetime import datetime
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List
 
 from train.common import setup_gpu, create_callbacks, save_config_json
+from train.common.run_io import default_experiment_name, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -38,8 +38,7 @@ class MNISTSOMConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"mnist_softsom_{timestamp}"
+            self.experiment_name = default_experiment_name("mnist_softsom")
 
 
 # =============================================================================
@@ -475,9 +474,7 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
     test_loss, test_acc = model.evaluate(x_test, y_test, verbose=0)
     logger.info(f"Final test accuracy: {test_acc:.4f}")
 
-    history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-    with open(output_dir / "training_history.json", 'w') as f:
-        json.dump(history_dict, f, indent=2)
+    save_training_history_json(history, output_dir)
 
     metrics = {
         'test_loss': float(test_loss),

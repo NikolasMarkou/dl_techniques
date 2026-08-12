@@ -100,7 +100,7 @@ saturation routinely makes it uninformative (LESSONS L61).
 
 ## Statistical inference
 
-All aggregation routes through `train.logic.multiseed_stats` (re-exported
+All aggregation routes through `train.common.stats` (re-exported
 via `train.rms_variants_train.stats`):
 
 - `mean_std` — NaN-tolerant, Bessel-corrected sample std.
@@ -115,7 +115,7 @@ src/train/rms_variants_train/
 ├── __init__.py
 ├── config.py                 ExperimentConfig + build_norm_kwargs + NORM_VARIANTS (8-tuple as of Phase 3)
 ├── seed_utils.py             set_seeds(seed)
-├── stats.py                  re-export from train.logic.multiseed_stats
+├── stats.py                  re-export from train.common.stats
 ├── callbacks.py              6 callbacks: 4 probes + CalibrationCallback + RobustnessProbe (Phase 3)
 ├── sweep.py                  subprocess sweep driver (Phase 3: --gpu CLI hard-sets CUDA_VISIBLE_DEVICES)
 ├── report.py                 summary.md writer + 3 Phase 3 post-hoc derivations

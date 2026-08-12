@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from dl_techniques.utils.logger import logger
-from train.logic.multiseed_stats import (
+from train.common.stats import (
     bootstrap_ci,
     format_mean_std,
     mean_std,

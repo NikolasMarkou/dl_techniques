@@ -18,18 +18,17 @@ Usage:
 import os
 import sys
 import gc
-import json
 import time
 import keras
 import argparse
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -103,8 +102,7 @@ class TrainingConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"vit_{self.dataset}_{self.model_variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("vit", self.dataset, self.model_variant)
 
         if self.image_size <= 0:
             raise ValueError("Invalid image_size: must be positive")
@@ -352,9 +350,7 @@ def train_vit(
     logger.info(f"Dataset: {config.dataset}, Image size: {config.image_size}, "
                 f"Patch size: {config.patch_size}")
 
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config)
 
     # ---- Datasets ----
     if config.dataset in ("cifar10", "cifar100"):
@@ -486,12 +482,7 @@ def train_vit(
     logger.info(f"Training completed in {elapsed_h:.2f} hours")
 
     # ---- Save history ----
-    try:
-        history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-        with open(output_dir / "training_history.json", "w") as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, output_dir)
 
     # Convergence accounting (DECISION plan_2026-05-12_f2d29729/D-007)
     val_acc_curve = history.history.get("val_accuracy", [0.0]) or [0.0]

@@ -74,7 +74,6 @@ import functools
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Iterator, Tuple
 
@@ -82,8 +81,8 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
-    save_config_json,
 )
+from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -211,8 +210,7 @@ class SuperPointConfig:
             raise ValueError("Loss weights must be non-negative")
 
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"superpoint_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("superpoint", self.variant)
 
 
 # ---------------------------------------------------------------------
@@ -806,9 +804,7 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
     """Train SuperPoint jointly (detector + descriptor) on homography pairs."""
     logger.info(f"Starting SuperPoint joint training: {config.experiment_name}")
 
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config)
 
     # Dataset
     train_dataset = create_dataset(config)
@@ -909,14 +905,7 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
     except Exception as e:
         logger.error(f"Failed to save final model: {e}")
 
-    try:
-        history_dict = {
-            k: [float(v) for v in vals] for k, vals in history.history.items()
-        }
-        with open(output_dir / "training_history.json", "w") as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, output_dir)
 
     return backbone
 

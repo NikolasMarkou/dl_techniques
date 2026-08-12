@@ -1,8 +1,10 @@
 """Unit tests for ``train.rms_variants_train.stats`` (Refinement E, step 1).
 
 Covers oracle cases, NaN tolerance, zero-variance degenerate paths, two-sided
-symmetry of the permutation test, determinism under fixed rng, parameter
-validation, and equivalence with the ``train.logic.multiseed_stats`` precedent.
+symmetry of the permutation test, determinism under fixed rng, and parameter
+validation. The module is now a re-export of ``train.common.stats``; the final
+class pins that identity (it previously compared against the
+``train.logic.multiseed_stats`` fork, which no longer exists).
 
 Plan: ``plans/plan_2026-05-18_6776f8ba`` (step 1 gate: 30+ PASS).
 """
@@ -272,42 +274,37 @@ class TestFormatMeanStd:
 
 
 # ---------------------------------------------------------------------------
-# Equivalence with multiseed_stats precedent
+# Identity with the shared implementation
 # ---------------------------------------------------------------------------
 
-class TestEquivalenceWithPrecedent:
-    """The new stats module is API- and behaviour-equivalent to the precedent.
+class TestSharedImplementation:
+    """This module is a re-export of ``train.common.stats``.
 
-    Plan step 1 explicitly references ``train.logic.multiseed_stats`` as the
-    behavioural reference. These tests pin equivalence so future divergence
-    is caught immediately.
+    It used to hold its own character-identical copy of the four helpers, and
+    this class used to assert value-by-value equivalence against the
+    ``train.logic.multiseed_stats`` fork. Both forks were consolidated into
+    ``train.common.stats``, which makes a value comparison tautological -- it
+    would compare a function to itself and pass no matter what.
+
+    What is still worth pinning is that this package's public names really do
+    resolve to the shared implementation, so a future re-fork is caught.
     """
 
-    def test_mean_std_matches_precedent(self) -> None:
-        from train.logic import multiseed_stats as ref
-        v = [0.1, 0.2, 0.3, float("nan"), 0.5]
-        assert st.mean_std(v) == ref.mean_std(v)
+    def test_names_resolve_to_common_stats(self) -> None:
+        from train.common import stats as shared
 
-    def test_bootstrap_ci_matches_precedent(self) -> None:
-        from train.logic import multiseed_stats as ref
-        v = [0.7, 0.71, 0.72, 0.73, 0.74]
-        rng1 = np.random.default_rng(2024)
-        rng2 = np.random.default_rng(2024)
-        a = st.bootstrap_ci(v, rng=rng1, n_boot=300)
-        b = ref.bootstrap_ci(v, rng=rng2, n_boot=300)
-        assert a == b
+        assert st.mean_std is shared.mean_std
+        assert st.bootstrap_ci is shared.bootstrap_ci
+        assert st.paired_permutation_test is shared.paired_permutation_test
+        assert st.format_mean_std is shared.format_mean_std
 
-    def test_paired_permutation_matches_precedent(self) -> None:
-        from train.logic import multiseed_stats as ref
-        a = [1.0, 2.0, 3.0, 4.0]
-        b = [1.1, 1.9, 3.2, 3.8]
-        x = st.paired_permutation_test(a, b, rng=np.random.default_rng(7), n_perm=400)
-        y = ref.paired_permutation_test(a, b, rng=np.random.default_rng(7), n_perm=400)
-        assert x == y
+    def test_logic_sweep_uses_the_same_implementation(self) -> None:
+        """The other former fork's consumer also routes here."""
+        from train.logic import multiseed_sweep
+        from train.common import stats as shared
 
-    def test_format_mean_std_matches_precedent(self) -> None:
-        from train.logic import multiseed_stats as ref
-        assert st.format_mean_std(0.5, 0.1) == ref.format_mean_std(0.5, 0.1)
+        assert multiseed_sweep.mean_std is shared.mean_std
+        assert multiseed_sweep.bootstrap_ci is shared.bootstrap_ci
 
 
 if __name__ == "__main__":
