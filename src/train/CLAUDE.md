@@ -296,12 +296,22 @@ Recorded here because the fix established a rule worth keeping. **The defect:** 
 
 Same shape, same reason as `sentiment_final_model_filename(model_name)`: if a filename must be known in two places, it is a function, not a string typed twice.
 
+#### FIXED: tree_transformer's pretrain -> finetune hand-off
+
+**The defect (F-24, measured 2026-08-12 on a real 1-step run).** `pretrain.py` wrote the encoder ONLY to `os.path.join(results_dir, ...)`, where `results_dir` is the TIMESTAMPED directory `create_nlp_callbacks` returns, while `finetune.py` defaulted `pretrained_encoder_path` to the STATIC `results/tree_transformer_pretrain/...` — a directory `pretrain.py`'s own `os.makedirs(config.save_dir)` created and then left EMPTY. So a plain `pretrain` followed by a plain `finetune` could not work without `--pretrained-encoder-path`. This was the INVERSE of the folklore that tree_transformer had fixed a run-directory bug bert still has: bert's `pretrain` writes its encoder to the static `config.save_dir` precisely so `finetune` can name it, which is why bert's hand-off works.
+
+**The fix.** Same rule as `best_checkpoint_path` above — one producer, both ends call it:
+
+- `pretrain.PRETRAINED_ENCODER_FILENAME` + `pretrained_encoder_path(root)` are the sole producer of the name.
+- `pretrain.save_pretrained_encoder(encoder, results_dir, save_dir)` writes BOTH copies: the timestamped one (that run's own evidence) and the static one (the hand-off `finetune` reads). Keep both — dropping the run copy loses provenance, dropping the static one re-breaks the default.
+- `finetune.FinetuneConfig.pretrained_encoder_path` is DERIVED from `pretrained_encoder_path(TrainingConfig.save_dir)`, not typed as a literal.
+- `os.makedirs(config.save_dir)` in `pretrain.py` is no longer vestigial — it prepares the hand-off directory it always looked like it was preparing.
+
+Guarded by `tests/test_train/test_tree_transformer/test_encoder_handoff.py` (5 tests — the first tests of any kind for `src/train/tree_transformer/`), which EXECUTES the save through a recording stand-in rather than grepping the source. That distinction is load-bearing: the first draft of this guard checked the source for `pretrained_encoder_path(config.save_dir)` and passed against a mutation that computed the path and never wrote to it — the exact shape of the original defect.
+
 #### Known open defects (NOT fixed by the consolidation)
 
-- **tree_transformer's pretrain -> finetune handoff does not work by default.** `tree_transformer/pretrain.py` writes the encoder to `os.path.join(results_dir, "pretrained_tree_transformer_encoder_best.keras")` (`pretrain.py:212-215`), where `results_dir` is the TIMESTAMPED directory returned by `create_nlp_callbacks`. But `finetune.py:39-42` defaults `pretrained_encoder_path` to the STATIC `results/tree_transformer_pretrain/pretrained_tree_transformer_encoder_best.keras`, and `results/tree_transformer_pretrain/` is only ever created — empty — by `pretrain.py:172`'s `os.makedirs(config.save_dir, exist_ok=True)`. Measured 2026-08-12 on a real 1-step run: the encoder landed in the timestamped directory and the static one was empty. Pass `--pretrained-encoder-path` explicitly until this is fixed. Note this is the INVERSE of the folklore that tree_transformer had fixed a run-directory bug bert still has: bert prints and writes through the same `config.save_dir` expression, so bert's handoff is internally consistent.
-- **`tree_transformer/finetune.py:160`'s `os.makedirs(config.save_dir, exist_ok=True)` is dead code.** `config.save_dir` has exactly two references in that file — its declaration (line 43) and this call. Every artefact is written to `results_dir` instead (lines 228, 233).
-
-Deferred deliberately: tree_transformer is a documented non-adopter, so fixing its paths is outside a behaviour-preserving consolidation of bert/fnet. Fix it in its own commit, with its own guard.
+- **`tree_transformer/finetune.py`'s `os.makedirs(config.save_dir, exist_ok=True)` is dead code.** In *`finetune.py`* (not `pretrain.py`, whose identical call is now load-bearing — see above), `config.save_dir` has exactly two references: its declaration and this call. Every artefact is written to `results_dir` instead. Left alone deliberately: removing it is a behaviour change to a non-adopter with no bearing on the hand-off.
 
 ---
 
