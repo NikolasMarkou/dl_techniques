@@ -225,11 +225,16 @@ def main():
     # 4. Model Initialization (Inside Strategy Scope)
     with strategy.scope():
         # Base Encoder
+        # `BERT.__init__` has no `dropout_rate` parameter; it takes the two
+        # separate probabilities below (both already default to 0.1). Passing
+        # `dropout_rate=` raised `ValueError: Unrecognized keyword arguments`.
+        # Call shape matches the working sibling `train/bert/pretrain.py:85-86`.
         bert_encoder = BERT.from_variant(
             variant=config.bert_variant,
             vocab_size=config.vocab_size,
             max_position_embeddings=config.max_seq_length,
-            dropout_rate=0.1
+            hidden_dropout_prob=0.1,
+            attention_probs_dropout_prob=0.1,
         )
 
         # MLM Wrapper
