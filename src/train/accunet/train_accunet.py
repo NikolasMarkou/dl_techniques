@@ -462,13 +462,9 @@ def compile_model(
     )
 
 
-def _seed_everything(seed: int) -> None:
-    set_seeds(seed)
-
-
 def run_training(config: AccUNetTrainingConfig) -> Tuple[keras.Model, str]:
     setup_gpu(config.gpu)
-    _seed_everything(config.seed)
+    set_seeds(config.seed)
 
     # --- Data ---
     val_x_pinned: Optional[np.ndarray] = None

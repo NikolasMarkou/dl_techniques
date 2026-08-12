@@ -30,6 +30,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 from dl_techniques.models.power_mlp.model import PowerMLP
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization import optimizer_builder
 
 from train.common import (
     setup_gpu,
@@ -146,15 +147,20 @@ def create_model_config(
 # ---------------------------------------------------------------------
 
 def create_stable_optimizer(optimizer_name: str, learning_rate: float) -> keras.optimizers.Optimizer:
-    """Create an optimizer with gradient clipping for stable training."""
-    if optimizer_name.lower() == 'adam':
-        return keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0, epsilon=1e-7)
-    elif optimizer_name.lower() == 'adamw':
-        return keras.optimizers.AdamW(learning_rate=learning_rate, clipnorm=1.0, weight_decay=0.01, epsilon=1e-7)
-    elif optimizer_name.lower() == 'sgd':
-        return keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9, clipnorm=1.0)
-    else:
-        return keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
+    """Create an optimizer with gradient clipping for stable training.
+
+    Delegates construction to :func:`optimizer_builder`; this function now only
+    owns the per-name hyperparameter table. An unrecognised name falls back to
+    plain Adam, matching the previous behaviour.
+    """
+    per_optimizer_config = {
+        'adam': {"type": "adam", "epsilon": 1e-7},
+        'adamw': {"type": "adamw", "weight_decay": 0.01, "epsilon": 1e-7},
+        'sgd': {"type": "sgd", "momentum": 0.9},
+    }
+    config = dict(per_optimizer_config.get(optimizer_name.lower(), {"type": "adam"}))
+    config["gradient_clipping_by_norm_local"] = 1.0
+    return optimizer_builder(config, learning_rate)
 
 
 # ---------------------------------------------------------------------

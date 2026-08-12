@@ -16,55 +16,11 @@ import matplotlib.pyplot as plt
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization import learning_rate_schedule_builder
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES as COCO_CLASSES_ORIGINAL
-
-
-@keras.saving.register_keras_serializable()
-class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
-    """Learning rate schedule combining linear warmup and cosine decay."""
-
-    def __init__(self, initial_learning_rate: float, decay_steps: int,
-                 warmup_steps: int, alpha: float = 0.0, name: str = None):
-        super().__init__()
-        self.initial_learning_rate = initial_learning_rate
-        self.decay_steps = decay_steps
-        self.warmup_steps = warmup_steps
-        self.alpha = alpha
-        self.name = name
-        self.cosine_decay = keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=initial_learning_rate,
-            decay_steps=self.decay_steps, alpha=self.alpha
-        )
-
-    def __call__(self, step):
-        with tf.name_scope(self.name or "WarmupCosineDecay"):
-            initial_learning_rate = tf.convert_to_tensor(
-                self.initial_learning_rate, name="initial_learning_rate"
-            )
-            dtype = initial_learning_rate.dtype
-            warmup_steps_tf = tf.cast(self.warmup_steps, dtype)
-            global_step_tf = tf.cast(step, dtype)
-            warmup_percent_done = global_step_tf / warmup_steps_tf
-            warmup_learning_rate = initial_learning_rate * warmup_percent_done
-            is_warmup = global_step_tf < warmup_steps_tf
-            cosine_step = global_step_tf - warmup_steps_tf
-            return tf.cond(
-                is_warmup,
-                lambda: warmup_learning_rate,
-                lambda: self.cosine_decay(cosine_step)
-            )
-
-    def get_config(self):
-        return {
-            "initial_learning_rate": self.initial_learning_rate,
-            "decay_steps": self.decay_steps,
-            "warmup_steps": self.warmup_steps,
-            "alpha": self.alpha,
-            "name": self.name,
-        }
 
 
 def create_coco_model_and_loss(
@@ -610,11 +566,17 @@ def main():
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(total_steps * 0.1)
 
-    lr_schedule = WarmupCosineDecay(
-        initial_learning_rate=args.learning_rate,
-        decay_steps=total_steps - warmup_steps,
-        warmup_steps=warmup_steps, alpha=0.1
-    )
+    # NOTE: `warmup_start_lr=0.0` is required to reproduce the local
+    # WarmupCosineDecay class this replaced, which ramped from ZERO. The
+    # builder's default is 1e-8, so omitting it would change the ramp.
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay",
+        "learning_rate": args.learning_rate,
+        "decay_steps": total_steps - warmup_steps,
+        "alpha": 0.1,
+        "warmup_steps": warmup_steps,
+        "warmup_start_lr": 0.0,
+    })
 
     sample_input = tf.zeros((1, args.img_size, args.img_size, 3))
     _ = model(sample_input, training=False)

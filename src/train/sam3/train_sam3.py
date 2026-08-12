@@ -182,10 +182,9 @@ from train.common import (
     create_learning_rate_schedule,
     save_config_json,
 )
-# `explicitly_set_flags` is NOT re-exported from `train.common`; it lives in
-# `train.common.args`, which is how every other adopter imports it.
 from train.common.args import explicitly_set_flags
 
+from dl_techniques.optimization import optimizer_builder
 from dl_techniques.losses.sam3_detection_loss import (
     Sam3DetectionLoss,
     box_cxcywh_to_xyxy,
@@ -750,17 +749,18 @@ def create_optimizer(config: Sam3TrainingConfig) -> keras.optimizers.Optimizer:
         steps_per_epoch=config.steps_per_epoch,
         warmup_steps=config.warmup_steps,
     )
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=learning_rate,
-        weight_decay=config.weight_decay,
-        global_clipnorm=(config.gradient_clip_norm
-                         if config.gradient_clip_norm > 0.0 else None),
-    )
     # The reference zeroes weight decay on `*bias*` and on LayerNorm modules.
     # Keras spells LayerNorm's two parameters `gamma` and `beta`, and matches
-    # these patterns with `re.search` against the variable name.
-    optimizer.exclude_from_weight_decay(var_names=["bias", "gamma", "beta"])
-    return optimizer
+    # these patterns with `re.search` against the variable name. The builder
+    # applies the exclusion before the optimizer is built, which is the only
+    # point Keras accepts it.
+    return optimizer_builder({
+        "type": "adamw",
+        "weight_decay": config.weight_decay,
+        "gradient_clipping_by_norm": (config.gradient_clip_norm
+                                      if config.gradient_clip_norm > 0.0 else None),
+        "exclude_from_weight_decay": ["bias", "gamma", "beta"],
+    }, learning_rate)
 
 
 def create_training_model(

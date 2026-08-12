@@ -393,14 +393,9 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
 # ---------------------------------------------------------------------
 
 
-def _set_seeds(seed: int) -> None:
-    """Seed Python, NumPy, TensorFlow, and Keras for reproducible init."""
-    set_seeds(seed)
-
-
 def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     """Train DepthAnything for monocular depth estimation on MegaDepth."""
-    _set_seeds(config.seed)
+    set_seeds(config.seed)
     logger.info(
         f"Starting DepthAnything depth estimation training: "
         f"{config.experiment_name}"

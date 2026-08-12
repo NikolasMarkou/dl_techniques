@@ -67,8 +67,6 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     save_config_json,
 )
-# `explicitly_set_flags` is NOT re-exported from `train.common`; it lives in
-# `train.common.args`, which is how the three other adopters import it.
 from train.common.args import explicitly_set_flags
 
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss

@@ -28,7 +28,7 @@ from dl_techniques.models.bert import BERT
 from dl_techniques.models.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.optimization import learning_rate_schedule_builder
 
 
 # ---------------------------------------------------------------------
@@ -247,14 +247,17 @@ def main():
 
         # Optimization
         # Linear warmup then cosine decay
-        lr_schedule = WarmupSchedule(
-            warmup_steps=config.warmup_steps,
-            primary_schedule=keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=config.learning_rate,
-                decay_steps=config.total_steps - config.warmup_steps
-            ),
-            warmup_start_lr=0.0
-        )
+        # NOTE: `alpha` and `warmup_start_lr` are passed explicitly because the
+        # builder's defaults (1e-4 and 1e-8) differ from the Keras/local defaults
+        # this replaced (0.0 and 0.0). Omitting either changes the LR curve.
+        lr_schedule = learning_rate_schedule_builder({
+            "type": "cosine_decay",
+            "learning_rate": config.learning_rate,
+            "decay_steps": config.total_steps - config.warmup_steps,
+            "alpha": 0.0,
+            "warmup_steps": config.warmup_steps,
+            "warmup_start_lr": 0.0,
+        })
 
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,

@@ -82,8 +82,6 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     save_config_json,
 )
-# `explicitly_set_flags` is NOT re-exported from `train.common`; it lives in
-# `train.common.args`, which is how every other adopter imports it.
 from train.common.args import explicitly_set_flags
 
 from dl_techniques.models.SAM.SAM2.hiera import Hiera

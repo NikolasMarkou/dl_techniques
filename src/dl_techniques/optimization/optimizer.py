@@ -18,9 +18,9 @@ Each optimizer supports gradient clipping options:
 - By local norm (clipnorm): Clip each gradient independently by its norm
 - By global norm (global_clipnorm): Clip all gradients by their combined norm
 
-Decay-capable optimizers additionally support an `exclude_from_weight_decay`
-list of name patterns (e.g. ["bias", "gamma", "beta"]) applied after
-construction.
+All optimizers forward `weight_decay` when it is set, and decay-capable ones
+additionally support an `exclude_from_weight_decay` list of name patterns
+(e.g. ["bias", "gamma", "beta"]) applied after construction.
 """
 
 import keras
@@ -101,6 +101,9 @@ def optimizer_builder(
                 - gradient_clipping_by_value: Clip gradients by absolute value
                 - gradient_clipping_by_norm_local: Clip gradients by local norm
                 - gradient_clipping_by_norm: Clip gradients by global norm
+                - weight_decay: Decoupled weight decay. Forwarded to every
+                  optimizer type; when omitted, the Keras default applies
+                  (None for all types except AdamW, which defaults to 0.004).
                 - exclude_from_weight_decay: List of variable-name patterns to
                   exclude from weight decay (matched with ``re.search``). The
                   conventional recipe is ``["bias", "gamma", "beta"]``. Ignored
@@ -245,6 +248,12 @@ def _build_rmsprop_optimizer(
         **base_params
     }
 
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
+
     return keras.optimizers.RMSprop(**optimizer_params)
 
 
@@ -269,6 +278,12 @@ def _build_adam_optimizer(
         "amsgrad": config.get("amsgrad", DEFAULT_ADAM_AMSGRAD),
         **base_params
     }
+
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
 
     return keras.optimizers.Adam(**optimizer_params)
 
@@ -352,6 +367,12 @@ def _build_adadelta_optimizer(
         "epsilon": config.get("epsilon", DEFAULT_ADADELTA_EPSILON),
         **base_params
     }
+
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
 
     return keras.optimizers.Adadelta(**optimizer_params)
 

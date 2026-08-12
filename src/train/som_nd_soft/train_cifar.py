@@ -12,6 +12,7 @@ from typing import Tuple, Optional, Dict, Any, List
 
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization import optimizer_builder
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
 
@@ -574,12 +575,16 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         steps_per_epoch=steps_per_epoch,
     )
 
-    if config.optimizer_type == 'adamw':
-        optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=config.weight_decay)
-    else:
-        optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+    # Build through the factory so clipping is set in the constructor rather
+    # than assigned onto the optimizer afterwards.
+    optimizer_config = (
+        {"type": "adamw", "weight_decay": config.weight_decay}
+        if config.optimizer_type == 'adamw'
+        else {"type": "adam"}
+    )
     if config.gradient_clip_norm > 0:
-        optimizer.clipnorm = config.gradient_clip_norm
+        optimizer_config["gradient_clipping_by_norm_local"] = config.gradient_clip_norm
+    optimizer = optimizer_builder(optimizer_config, lr_schedule)
 
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 
