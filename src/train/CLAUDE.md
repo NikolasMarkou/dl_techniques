@@ -233,6 +233,9 @@ def main():
 | `estimate_clm_steps_per_epoch(num_articles, max_seq_length, batch_size, override=None, avg_tokens_per_article=440)` | **Canonical** chunk-aware steps-per-epoch helper (D-001). Use this everywhere — never roll a local `_estimate_steps_per_epoch`. |
 | `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay. Now defined in `dl_techniques.optimization.schedule` and re-exported here. |
 | `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
+| `evaluate_mlm_model(mlm_model, preprocessor, test_texts=None)` | Qualitative MLM probe + `visualize_mlm_predictions`. Defaults to `DEFAULT_MLM_PROBE_TEXTS`. Shared by bert/fnet `pretrain.py`, each of which binds `evaluate_model` to it as a plain alias. |
+| `run_finetune_post_training_analysis(config, model_name, create_initial_model)` | The full `ModelAnalyzer` comparison over Initial/Best/Final snapshots. Shared by bert/fnet `finetune.py`. `create_initial_model` is a zero-arg factory, called after the analysis dir exists. **Carries a known live defect — see "Known open defects" below.** |
+| `sentiment_final_model_filename(model_name)` | `f"{model_name}_sentiment_final_best.keras"`. Used at BOTH the save site and the analysis read site so the two cannot drift. |
 
 **Wikipedia/HF data path conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
 
@@ -241,6 +244,50 @@ def main():
 - **`return_counts=True`** returns post-filter article counts; pass them to `estimate_clm_steps_per_epoch` for an accurate LR-schedule horizon.
 
 **CLM consumer CLI flag conventions** — every CLM training script must expose the same four flags so users can switch scripts without relearning: `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`. Resume seeding (D-006): when `--resume <ckpt>` is set, derive `data_seed = config.seed + initial_step` so resumed runs see new article ordering instead of replaying the first N chunks.
+
+#### `tree_transformer` is a deliberate NON-ADOPTER of the bert/fnet scaffold
+
+`src/train/tree_transformer/` looks like a third Pattern-3 package and its own README says it "mirrors" bert. **It is not folded into the shared bert/fnet scaffold, on purpose.** Do not "finish the job" by merging it without re-reading this section.
+
+Measured (`diff -u0 A B | grep -c '^[+-][^+-]'`, at the post-consolidation tree; re-derive before quoting):
+
+| Pair | `finetune.py` | `pretrain.py` |
+|---|---|---|
+| bert vs fnet | 56 | 55 |
+| tree vs bert | 209 | 168 |
+| tree vs fnet | 207 | 167 |
+
+tree_transformer is ~4x further from bert than fnet is, and **equidistant from both** — it is its own branch, not a copy-of-bert with the model swapped. The distance is whole features, not naming:
+
+- `tree_transformer/finetune.py` has **no** `post_training_analysis`, no `prepare_data_for_analyzer`, and zero references to `ModelAnalyzer` / `AnalysisConfig` / `DataInput` (grep: 0 hits in the file).
+- `tree_transformer/pretrain.py` has **no** `evaluate_model` and never calls `visualize_mlm_predictions`.
+- Its `FinetuneConfig` declares 18 annotated fields to bert's 24; the **6** it drops are exactly the analysis block's: `full_analysis_dir`, `run_epoch_analysis`, `analysis_start_epoch`, `analysis_epoch_frequency`, `run_post_training_analysis`, `analysis_n_samples`. It adds none.
+
+Folding it in would therefore mean inventing config toggles for code that **does not exist** — an all-or-nothing code-PRESENCE difference cannot be expressed as a flag without first writing the missing features, against a package that had zero test coverage. (bert and fnet are now covered by `tests/test_train/test_bert_fnet/`; tree_transformer still is not.)
+
+#### Drifts between bert / fnet / tree_transformer that were deliberately NOT harmonized
+
+These are real divergences, recorded rather than fixed, because the consolidation that found them was behaviour-preserving. Each is pinned or documented so it cannot change by accident:
+
+| Drift | bert | fnet | tree_transformer |
+|---|---|---|---|
+| `finetune.py` `max_seq_length` default (line 58 in all three) | **256** | **128** | 128 |
+| `finetune.py` `stage1_epochs` / `stage2_epochs` | 5 / 10 | 5 / 10 | **2 / 3** |
+| `finetune.py` optimizer `clipnorm` | absent | absent | **1.0** (`finetune.py:133`) |
+| MLM `steps_per_epoch` fallback | `max_samples // batch_size if max_samples else 1000` | same | **`max(1, (max_samples or 10000) // batch_size)`** |
+| Seeding in `pretrain.py` | `set_seeds(42)` | `set_seeds(42)` | **inline `tf.random.set_seed(42)` + `keras.utils.set_random_seed(42)`** (`pretrain.py:170-171`) |
+
+The `max_seq_length` 256-vs-128 split is the one a shared scaffold is most likely to "tidy away": it doubles or halves bert's fine-tuning input length with no visible justification in either file. It is pinned as a FACT by `tests/test_train/test_bert_fnet/test_finetune_scripts.py::TestArgvToConfig` — harmonizing either value turns that guard RED.
+
+tree_transformer's inline seeding is weaker than it looks: `set_seeds` also sets `PYTHONHASHSEED`, `random` and `numpy`, which the inline pair does not — so tree_transformer runs are less reproducible than bert/fnet's despite looking equivalent. Its `finetune.py` does use `set_seeds(42)`; only `pretrain.py` rolls its own.
+
+#### Known open defects (NOT fixed by the consolidation)
+
+- **`best_sentiment_model.keras` is a filename nothing writes.** `run_finetune_post_training_analysis` (`train/common/nlp.py`) loads `<save_dir>/best_sentiment_model.keras`; `train/bert/deploy.py:61` reads the same name. `grep -rn best_sentiment_model src/` returns only those read sites and **zero write sites**. `ModelCheckpoint` writes `<results_dir>/best_model.keras` (`train/common/callbacks.py:97`) — a different DIRECTORY *and* a different FILENAME. Because `run_post_training_analysis` defaults to `True`, `train.bert.finetune` and `train.fnet.finetune` raise `ValueError: File not found` at the end of every default run, after training has finished and the final model has been saved. `--skip-analysis` suppresses it. Do not "fix" this by swapping `save_dir` for the run directory — the filename is wrong too.
+- **tree_transformer's pretrain -> finetune handoff does not work by default.** `tree_transformer/pretrain.py` writes the encoder to `os.path.join(results_dir, "pretrained_tree_transformer_encoder_best.keras")` (`pretrain.py:212-215`), where `results_dir` is the TIMESTAMPED directory returned by `create_nlp_callbacks`. But `finetune.py:39-42` defaults `pretrained_encoder_path` to the STATIC `results/tree_transformer_pretrain/pretrained_tree_transformer_encoder_best.keras`, and `results/tree_transformer_pretrain/` is only ever created — empty — by `pretrain.py:172`'s `os.makedirs(config.save_dir, exist_ok=True)`. Measured 2026-08-12 on a real 1-step run: the encoder landed in the timestamped directory and the static one was empty. Pass `--pretrained-encoder-path` explicitly until this is fixed. Note this is the INVERSE of the folklore that tree_transformer had fixed a run-directory bug bert still has: bert prints and writes through the same `config.save_dir` expression, so bert's handoff is internally consistent.
+- **`tree_transformer/finetune.py:160`'s `os.makedirs(config.save_dir, exist_ok=True)` is dead code.** `config.save_dir` has exactly two references in that file — its declaration (line 43) and this call. Every artefact is written to `results_dir` instead (lines 228, 233).
+
+Deferred deliberately: tree_transformer is a documented non-adopter, so fixing its paths is outside a behaviour-preserving consolidation of bert/fnet. Fix it in its own commit, with its own guard.
 
 ---
 
@@ -469,3 +516,5 @@ These scripts have legitimate reasons for local callback management:
 | tabm | Custom TabMTrainer class, not standard Keras fit() |
 
 When writing a new script that genuinely can't use `create_callbacks()`, document the reason in a comment at the top of the callbacks section.
+
+A different kind of non-adoption is documented under Pattern 3: `tree_transformer` *does* use `create_nlp_callbacks`, but is deliberately NOT folded into the shared bert/fnet finetune/pretrain scaffold — see "`tree_transformer` is a deliberate NON-ADOPTER of the bert/fnet scaffold" for the measured reasons, the drifts left unharmonized, and three known open defects.
