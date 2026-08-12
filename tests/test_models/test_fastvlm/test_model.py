@@ -658,5 +658,162 @@ class TestFastVLMPerformance:
         gc.collect()
 
 
+class TestFastVLMStochasticDepthWiring:
+    """Stage-3 stochastic depth must be REAL drop-path, independent of dropout.
+
+    `FastVLM._build_model` computes a per-block linear drop-path schedule. It
+    used to hand that schedule to `AttentionBlockVLM(dropout_rate=...)`, i.e.
+    ordinary elementwise Dropout, collapsed with the model-wide dropout rate via
+    `max(...)`. These tests pin the corrected routing: the schedule reaches
+    `StochasticDepth` instances, and `dropout_rate` / `drop_path_rate` are two
+    independent knobs.
+    """
+
+    # Non-zero rates on purpose: an all-zeros schedule is invariant under both
+    # shift and reversal, so a wiring proof at rate 0.0 would be vacuous.
+    DEPTHS = [1, 2, 3]
+    DROP_PATH_RATE = 0.4
+
+    def _build(self, dropout_rate: float, drop_path_rate: float) -> FastVLM:
+        return FastVLM(
+            num_classes=7,
+            embed_dims=[32, 64, 64],
+            depths=self.DEPTHS,
+            num_heads=[2, 2, 4],
+            mlp_ratio=2.0,
+            dropout_rate=dropout_rate,
+            drop_path_rate=drop_path_rate,
+            input_shape=(32, 32, 3),
+        )
+
+    def _expected_rates(self, drop_path_rate: float) -> list:
+        """The per-stage-3-block schedule, recomputed independently here."""
+        total = sum(self.DEPTHS)
+        offset = sum(self.DEPTHS[:2])
+        if total <= 1:
+            return [0.0] * self.DEPTHS[2]
+        return [
+            drop_path_rate * ((offset + i) / (total - 1))
+            for i in range(self.DEPTHS[2])
+        ]
+
+    @staticmethod
+    def _stage3_transformers(model: FastVLM) -> list:
+        return [blk.transformer for blk in model.stages[2].layers]
+
+    def test_stage3_blocks_carry_stochastic_depth_at_schedule_rate(self) -> None:
+        """(a) WIRING PROOF: real StochasticDepth on BOTH residual branches."""
+        from dl_techniques.layers.stochastic_depth import StochasticDepth
+
+        model = self._build(dropout_rate=0.0, drop_path_rate=self.DROP_PATH_RATE)
+        transformers = self._stage3_transformers(model)
+        expected = self._expected_rates(self.DROP_PATH_RATE)
+
+        assert len(transformers) == self.DEPTHS[2]
+        assert max(expected) > 0.0, "schedule must be non-zero or the proof is vacuous"
+
+        for i, (tr, exp) in enumerate(zip(transformers, expected)):
+            attn_sd = tr.attention_stochastic_depth
+            ffn_sd = tr.ffn_stochastic_depth
+
+            assert isinstance(attn_sd, StochasticDepth), (
+                f"stage3 block {i}: attention branch has no StochasticDepth "
+                f"(got {type(attn_sd)})"
+            )
+            assert isinstance(ffn_sd, StochasticDepth), (
+                f"stage3 block {i}: FFN branch has no StochasticDepth "
+                f"(got {type(ffn_sd)})"
+            )
+            assert attn_sd is not ffn_sd, (
+                f"stage3 block {i}: the two branches share ONE StochasticDepth "
+                "instance; they must be independent"
+            )
+            assert attn_sd.drop_path_rate == pytest.approx(exp, abs=1e-12), (
+                f"stage3 block {i}: attention drop_path_rate "
+                f"{attn_sd.drop_path_rate} != expected schedule value {exp}"
+            )
+            assert ffn_sd.drop_path_rate == pytest.approx(exp, abs=1e-12), (
+                f"stage3 block {i}: FFN drop_path_rate "
+                f"{ffn_sd.drop_path_rate} != expected schedule value {exp}"
+            )
+
+    def test_dropout_rate_and_drop_path_rate_are_independent(self) -> None:
+        """(b) INDEPENDENCE: neither knob leaks into the other's mechanism."""
+        # drop-path only
+        model = self._build(dropout_rate=0.0, drop_path_rate=0.3)
+        rates = [
+            tr.attention_stochastic_depth.drop_path_rate
+            for tr in self._stage3_transformers(model)
+        ]
+        assert max(rates) > 0.0, (
+            f"drop_path_rate=0.3 produced an all-zero drop-path schedule: {rates}"
+        )
+        for i, tr in enumerate(self._stage3_transformers(model)):
+            assert tr.dropout.rate == 0.0, (
+                f"stage3 block {i}: dropout_rate=0.0 was requested but the "
+                f"transformer's Dropout has rate {tr.dropout.rate} — the "
+                "drop-path schedule is leaking into ordinary dropout"
+            )
+            assert tr.attention_dropout_rate == 0.0, (
+                f"stage3 block {i}: attention dropout rate is "
+                f"{tr.attention_dropout_rate}, expected 0.0"
+            )
+
+        # dropout only
+        model = self._build(dropout_rate=0.3, drop_path_rate=0.0)
+        for i, tr in enumerate(self._stage3_transformers(model)):
+            assert tr.attention_stochastic_depth.drop_path_rate == 0.0, (
+                f"stage3 block {i}: drop_path_rate=0.0 was requested but the "
+                f"attention StochasticDepth has rate "
+                f"{tr.attention_stochastic_depth.drop_path_rate}"
+            )
+            assert tr.ffn_stochastic_depth.drop_path_rate == 0.0, (
+                f"stage3 block {i}: FFN StochasticDepth has rate "
+                f"{tr.ffn_stochastic_depth.drop_path_rate}, expected 0.0"
+            )
+            assert tr.dropout.rate == pytest.approx(0.3), (
+                f"stage3 block {i}: dropout_rate=0.3 did not reach the "
+                f"transformer's Dropout (rate={tr.dropout.rate})"
+            )
+
+    def test_inference_is_bit_identical_across_regularization_rates(self) -> None:
+        """(c) INFERENCE IDENTITY: both mechanisms are identity at training=False.
+
+        `StochasticDepth.call` short-circuits on `training is False`
+        (stochastic_depth.py:144-146) and `Dropout` likewise, so with the SAME
+        weights a heavily-regularized model and an un-regularized one must agree
+        EXACTLY at inference. This is measured, not assumed.
+        """
+        regularized = self._build(dropout_rate=0.3, drop_path_rate=0.4)
+        plain = self._build(dropout_rate=0.0, drop_path_rate=0.0)
+
+        assert len(regularized.weights) == len(plain.weights)
+
+        # Transplant identical weights, randomized AWAY from initialization.
+        rng = np.random.default_rng(20260811)
+        for w_src, w_dst in zip(regularized.weights, plain.weights):
+            assert w_src.path == w_dst.path, (
+                f"weight tree diverged: {w_src.path} vs {w_dst.path}"
+            )
+            value = np.asarray(w_src.numpy())
+            new = (rng.standard_normal(value.shape) * 0.37 + 0.11).astype(value.dtype)
+            if "variance" in w_src.path:
+                new = np.abs(new) + 0.5
+            w_src.assign(new)
+            w_dst.assign(new)
+
+        x = keras.ops.convert_to_tensor(
+            rng.standard_normal((3, 32, 32, 3)).astype("float32")
+        )
+        a = keras.ops.convert_to_numpy(regularized(x, training=False))
+        b = keras.ops.convert_to_numpy(plain(x, training=False))
+
+        delta = float(np.max(np.abs(a - b)))
+        assert delta == 0.0, (
+            "inference is NOT identical across regularization rates: "
+            f"max|delta| = {delta!r} (expected exactly 0.0)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

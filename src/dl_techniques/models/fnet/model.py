@@ -61,6 +61,7 @@ from typing import Any, Dict, List, Optional, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
@@ -370,6 +371,14 @@ class FNet(keras.Model):
             name="embeddings",
         )
 
+        # Per-block linear drop-path schedule (0 -> stochastic_depth_rate across
+        # the stack). Computed unconditionally because it is pure arithmetic; it
+        # only reaches the blocks as a live rate when use_stochastic_depth is on,
+        # and FNetEncoderBlock ignores the rate entirely when the flag is False.
+        drop_path_rates = linear_drop_path_rates(
+            num_blocks=self.num_layers, max_rate=self.stochastic_depth_rate
+        )
+
         self.encoder_layers: List[FNetEncoderBlock] = []
         for i in range(self.num_layers):
             encoder_layer = FNetEncoderBlock(
@@ -377,6 +386,8 @@ class FNet(keras.Model):
                 dropout_rate=self.hidden_dropout_prob,
                 normalization_type=self.normalization_type,
                 ffn_type=self.ffn_type,
+                use_stochastic_depth=self.use_stochastic_depth,
+                stochastic_depth_rate=drop_path_rates[i],
                 name=f"encoder_layer_{i}",
             )
             self.encoder_layers.append(encoder_layer)

@@ -223,31 +223,6 @@ class CLIPCheckpoint(keras.callbacks.Callback):
                 logger.info(f"Saved checkpoint to {filepath}")
 
 
-class LearningRateLogger(keras.callbacks.Callback):
-    """Callback to log learning rate at each epoch."""
-
-    def __init__(self, verbose: int = 1) -> None:
-        super().__init__()
-        self.verbose = verbose
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
-        if logs is None:
-            logs = {}
-
-        if hasattr(self.model, 'optimizer') and self.model.optimizer is not None:
-            lr = self.model.optimizer.learning_rate
-            if hasattr(lr, 'numpy'):
-                lr_value = float(lr.numpy())
-            elif callable(lr):
-                lr_value = float(lr(self.model.optimizer.iterations))
-            else:
-                lr_value = float(lr)
-
-            logs['learning_rate'] = lr_value
-            if self.verbose > 0:
-                logger.info(f"Epoch {epoch + 1}: learning_rate = {lr_value:.2e}")
-
-
 # ---------------------------------------------------------------------
 # Training Class
 # ---------------------------------------------------------------------

@@ -58,6 +58,16 @@ DEFAULT_ADADELTA_RHO = 0.9  # Decay constant for accumulating squared gradients
 DEFAULT_ADADELTA_EPSILON = 1e-07  # Small constant added for numerical stability
 
 # ---------------------------------------------------------------------
+# SGD Optimizer Defaults
+# ---------------------------------------------------------------------
+# Plain (optionally Nesterov-momentum) stochastic gradient descent. Defaults
+# mirror keras.optimizers.SGD exactly so the factory cannot silently diverge
+# from the Keras class defaults.
+
+DEFAULT_SGD_MOMENTUM = 0.0  # Momentum factor (0.0 = vanilla SGD)
+DEFAULT_SGD_NESTEROV = False  # Whether to apply Nesterov momentum
+
+# ---------------------------------------------------------------------
 # SGLD Optimizer Defaults
 # ---------------------------------------------------------------------
 # SGLD (Stochastic Gradient Langevin Dynamics) augments SGD with Gaussian

@@ -10,8 +10,10 @@ All builders support configuration-driven setup with sensible defaults
 and comprehensive error handling.
 
 Available Functions:
-    - optimizer_builder: Creates optimizers (Adam, AdamW, RMSprop, Adadelta)
+    - optimizer_builder: Creates optimizers (Adam, AdamW, SGD, RMSprop, Adadelta)
     - learning_rate_schedule_builder: Creates LR schedules with warmup
+    - create_learning_rate_schedule: Epoch-facing cosine/exponential/constant LR
+    - create_warmup_lr_schedule: Epoch-facing warmup-ratio + cosine LR
     - deep_supervision_schedule_builder: Creates deep supervision weights
 
 Example Usage:
@@ -46,6 +48,8 @@ Example Usage:
 
 from .optimizer import optimizer_builder
 from .schedule import schedule_builder as learning_rate_schedule_builder
+from .schedule import create_learning_rate_schedule, create_warmup_lr_schedule
+from .warmup_schedule import WarmupSchedule
 from .deep_supervision import schedule_builder as deep_supervision_schedule_builder
 from .muon_optimizer import Muon
 from .sgld_optimizer import SGLD
@@ -56,6 +60,9 @@ from .ww_pgd_optimizer import WWTailConfig, ww_pgd_project, WWPGDProjectionCallb
 __all__ = [
     "optimizer_builder",
     "learning_rate_schedule_builder",
+    "create_learning_rate_schedule",
+    "create_warmup_lr_schedule",
+    "WarmupSchedule",
     "deep_supervision_schedule_builder",
     "Muon",
     "SGLD",

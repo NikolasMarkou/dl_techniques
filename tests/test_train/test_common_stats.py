@@ -1,4 +1,8 @@
-"""Unit tests for ``train.logic.multiseed_stats``.
+"""Unit tests for ``train.common.stats``.
+
+Previously ``tests/test_train/test_logic/test_multiseed_stats.py``; the module
+under test moved to ``train.common.stats`` when the ``train.logic`` and
+``train.rms_variants_train`` forks were consolidated.
 
 Pinned contracts:
 - mean_std uses sample std (ddof=1) and is NaN-tolerant.
@@ -16,7 +20,7 @@ import math
 import numpy as np
 import pytest
 
-from train.logic.multiseed_stats import (
+from train.common.stats import (
     bootstrap_ci,
     format_mean_std,
     mean_std,

@@ -251,11 +251,18 @@ research/papers/**/*.fdb_latexmk
 research/papers/**/*.synctex.gz
 research/papers/**/*.zip
 #
+# DECISION plan-2026-08-11T110821-54118fdd/D-011
 # DO NOT ADD `*.pdf` (or `research/papers/**/*.pdf`). You will be tempted to; don't.
-# Four paper PDFs are TRACKED (band_rms, bfunet, correlations, logical_net) and
-# `research/papers/cliffordnet_extensions/cliffordnet.pdf` is an untracked FIFTH
-# deliverable awaiting commit. Ignoring `*.pdf` would not untrack the four, but it
-# WOULD make cliffordnet.pdf permanently invisible to `git status` and `git add -A`,
-# silently blocking it from ever being committed without `git add -f`. Its visibility
-# as `??` is the feature, not the noise.
+# Four paper PDFs are TRACKED (band_rms, bfunet, correlations, logical_net).
+# `research/papers/cliffordnet_extensions/cliffordnet.pdf` is deliberately NOT tracked
+# and NOT present in the working tree: it was deleted and untracked on explicit
+# instruction, reversing part of commit 3efebe97b which had tracked it. Rebuild it from
+# `cliffordnet.tex` when you need it; the blob also remains in git history at 3efebe97b.
+# Do NOT "fix" this back by re-adding the PDF, and do NOT add a scoped ignore rule for
+# it either: an ignore rule would make a rebuilt cliffordnet.pdf permanently invisible
+# to `git status` and `git add -A`, silently hiding the decision instead of recording
+# it. Its visibility as `??` after a rebuild is the feature, not the noise. (Ignoring
+# `*.pdf` would additionally leave the four tracked siblings in a confusing
+# ignored-but-tracked half-state.) See plans/plan-2026-08-11T110821-54118fdd
+# /decisions.md D-011 and D-004.
 !plans/ANCHORS.md

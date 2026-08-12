@@ -311,7 +311,7 @@ The "Fixed" subsection below records what landed in
     CLAUDE.md convention is `MPLBACKEND=Agg` on the command line. Either is
     fine; both is belt-and-braces and harmless.
 
-12. **No deterministic dataset shuffle seed.** `_set_seed` seeds the
+12. **No deterministic dataset shuffle seed.** `set_seeds` seeds the
     Python/NumPy/TF RNGs, but `synthetic_lewm_dataset` uses
     `np.random.default_rng(seed)` once at construction, then iterates
     deterministically. Fine. `PushTHDF5Dataset` has no shuffle whatsoever —

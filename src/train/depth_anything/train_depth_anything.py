@@ -32,7 +32,6 @@ Usage::
 """
 
 import gc
-import json
 import random
 import time
 import keras
@@ -50,6 +49,7 @@ from train.common import (
     set_seeds,
     save_config_json,
 )
+from train.common.run_io import save_training_history_json
 from train.common.megadepth import (
     discover_megadepth_pairs,
     load_and_process_pair as _load_and_process_pair,
@@ -393,14 +393,9 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
 # ---------------------------------------------------------------------
 
 
-def _set_seeds(seed: int) -> None:
-    """Seed Python, NumPy, TensorFlow, and Keras for reproducible init."""
-    set_seeds(seed)
-
-
 def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     """Train DepthAnything for monocular depth estimation on MegaDepth."""
-    _set_seeds(config.seed)
+    set_seeds(config.seed)
     logger.info(
         f"Starting DepthAnything depth estimation training: "
         f"{config.experiment_name}"
@@ -597,15 +592,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     elapsed = time.time() - start_time
     logger.info(f"Training completed in {elapsed:.2f} seconds")
 
-    try:
-        history_dict = {
-            k: [float(v) for v in vals]
-            for k, vals in history.history.items()
-        }
-        with open(output_dir / "training_history.json", "w") as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, output_dir)
 
     try:
         trained_epochs = len(history.history.get("loss", []))

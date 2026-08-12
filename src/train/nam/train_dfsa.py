@@ -46,7 +46,7 @@ from dl_techniques.models.tree_transformer.model import (
     TreeTransformerBlock,
     PositionalEncoding,
 )
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.optimization import learning_rate_schedule_builder, optimizer_builder
 from dl_techniques.utils.logger import logger
 from train.common import setup_gpu
 from train.nam.data_generator import (
@@ -1121,22 +1121,21 @@ def main():
     param_count = sum(np.prod(v.shape) for v in model.trainable_variables)
     logger.info(f"DFSA model: hidden={args.hidden_size}, act_steps={act_steps}, params={param_count:,}")
 
-    # Optimizer
-    primary = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=args.lr,
-        decay_steps=max(1, args.steps - args.warmup_steps),
-        alpha=0.0,
-    )
-    lr_schedule = WarmupSchedule(
-        warmup_steps=args.warmup_steps,
-        primary_schedule=primary,
-        warmup_start_lr=1e-7,
-    )
-    optimizer = keras.optimizers.Adam(
-        learning_rate=lr_schedule,
-        weight_decay=args.weight_decay,
-        global_clipnorm=args.clip_norm,
-    )
+    # Optimizer. `alpha` and `warmup_start_lr` are passed explicitly: the
+    # builder's defaults (1e-4 and 1e-8) differ from the values used here.
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay",
+        "learning_rate": args.lr,
+        "decay_steps": max(1, args.steps - args.warmup_steps),
+        "alpha": 0.0,
+        "warmup_steps": args.warmup_steps,
+        "warmup_start_lr": 1e-7,
+    })
+    optimizer = optimizer_builder({
+        "type": "adam",
+        "weight_decay": args.weight_decay,
+        "gradient_clipping_by_norm": args.clip_norm,
+    }, lr_schedule)
 
     # Compile
     logger.info("Compiling training graph...")

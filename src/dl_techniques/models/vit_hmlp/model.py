@@ -55,6 +55,7 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
 from dl_techniques.layers.norms import create_normalization_layer
@@ -423,12 +424,14 @@ class ViTHMLP(keras.Model):
 
         # Transformer layers using existing TransformerLayer
         self.transformer_layers = []
+        # Linear stochastic depth schedule across the transformer stack
+        drop_path_rates = linear_drop_path_rates(
+            self.num_layers, self.stochastic_depth_rate
+        )
         for i in range(self.num_layers):
-            # Calculate stochastic depth rate for this layer (linear scaling)
+            # Stochastic depth rate for this layer (gate is outside the schedule)
             layer_drop_rate = (
-                self.stochastic_depth_rate * i / max(1, self.num_layers - 1)
-                if self.use_stochastic_depth
-                else 0.0
+                drop_path_rates[i] if self.use_stochastic_depth else 0.0
             )
 
             layer = TransformerLayer(

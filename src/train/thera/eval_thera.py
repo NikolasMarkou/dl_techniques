@@ -35,6 +35,10 @@ import tensorflow as tf
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.grid_sample import make_grid
 
+# Reuse the recursive image-discovery helper instead of re-implementing rglob
+# (thera/data.py already imports the same one).
+from train.common.datasets import collect_image_paths
+
 # THERA per-channel image statistics. Imported from the trainer so the eval and
 # training paths share one source of truth (DRY); redefined here only if that
 # import is unavailable.
@@ -269,15 +273,26 @@ def evaluate_multiscale(
 
 
 def _collect_image_paths(data_dir: str) -> List[str]:
-    """Recursively collect image files under ``data_dir`` (sorted)."""
+    """Recursively collect image files under ``data_dir`` (sorted).
+
+    Delegates the rglob/extension-filter/sort walk to
+    :func:`train.common.datasets.collect_image_paths` (the same helper
+    ``thera/data.py`` uses) and keeps only the eval-specific guards on top.
+
+    Two details are deliberate:
+
+    - ``_IMAGE_EXTENSIONS`` is passed explicitly rather than relying on the
+      helper's ``DEFAULT_IMAGE_EXTENSIONS``. The two sets are NOT the same --
+      this module accepts ``.tif`` and the default accepts ``.webp`` -- so
+      dropping the argument would silently change which files are evaluated.
+    - The helper does not raise on a missing directory or an empty result (by
+      design, so callers can word their own errors). The ``FileNotFoundError``
+      guards below are therefore kept here.
+    """
     root = Path(data_dir)
     if not root.exists():
         raise FileNotFoundError(f"data-dir does not exist: {data_dir}")
-    paths = sorted(
-        str(p)
-        for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS
-    )
+    paths = collect_image_paths([data_dir], extensions=set(_IMAGE_EXTENSIONS))
     if not paths:
         raise FileNotFoundError(f"No images found under {data_dir}")
     return paths

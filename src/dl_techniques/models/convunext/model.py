@@ -30,6 +30,7 @@ from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.layers.norms.factory import create_normalization_layer
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 
 
 # ---------------------------------------------------------------------
@@ -568,11 +569,13 @@ class ConvUNextModel(keras.Model):
     def _build_encoder(self) -> None:
         """Create encoder stages with downsampling."""
         self.encoder_stages = []
+        self.encoder_drop_paths = []
         self.encoder_downsamples = []
 
         for level in range(self.depth):
             current_filters = self.filter_sizes[level]
             stage_layers = []
+            stage_drop_paths = []
 
             # Create ConvNeXt blocks for this stage
             for block_idx in range(self.blocks_per_level):
@@ -583,18 +586,31 @@ class ConvUNextModel(keras.Model):
                         / (self.depth * self.blocks_per_level)
                 )
 
+                # DECISION plan-2026-08-11T201945-91938f65/D-002: the schedule goes to
+                # StochasticDepth (drop-path on the residual BRANCH), NOT to the block's
+                # dropout_rate. Do NOT pass current_drop_path as dropout_rate= again: that
+                # kwarg is ordinary elementwise dropout INSIDE the block's inverted
+                # bottleneck MLP (convnext_v1_block.py:103-121) and has nothing to do with
+                # stochastic depth. See decisions.md D-002.
                 block = self.ConvNextBlock(
                     kernel_size=self.block_kernel_size,
                     filters=current_filters,
                     activation='gelu',
                     use_bias=self.use_bias,
-                    dropout_rate=current_drop_path,
+                    dropout_rate=0.0,
                     spatial_dropout_rate=0.0,
                     name=f'enc_L{level}_blk{block_idx}'
                 )
                 stage_layers.append(block)
+                stage_drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=current_drop_path,
+                        name=f'enc_L{level}_blk{block_idx}_drop_path'
+                    )
+                )
 
             self.encoder_stages.append(stage_layers)
+            self.encoder_drop_paths.append(stage_drop_paths)
 
             # Create downsampling layer (if not last stage)
             if level < self.depth - 1:
@@ -644,6 +660,7 @@ class ConvUNextModel(keras.Model):
 
         # Bottleneck processing blocks
         self.bottleneck_blocks = []
+        self.bottleneck_drop_paths = []
         for block_idx in range(self.blocks_per_level):
             self.bottleneck_blocks.append(
                 self.ConvNextBlock(
@@ -651,8 +668,17 @@ class ConvUNextModel(keras.Model):
                     filters=bottleneck_filters,
                     activation='gelu',
                     use_bias=self.use_bias,
-                    dropout_rate=self.drop_path_rate,
+                    dropout_rate=0.0,
                     name=f'bn_blk_{block_idx}'
+                )
+            )
+            # The bottleneck uses the FLAT max rate (no depth ramp), unlike the
+            # encoder/decoder. This is deliberate and pre-existing: this change
+            # replaces the drop-path MECHANISM, not the schedule shape.
+            self.bottleneck_drop_paths.append(
+                StochasticDepth(
+                    drop_path_rate=self.drop_path_rate,
+                    name=f'bn_blk_{block_idx}_drop_path'
                 )
             )
 
@@ -660,6 +686,7 @@ class ConvUNextModel(keras.Model):
         """Create decoder stages with upsampling and skip connections."""
         self.decoder_upsamples = []
         self.decoder_blocks = []
+        self.decoder_drop_paths = []
 
         for level in range(self.depth - 1, -1, -1):
             current_filters = self.filter_sizes[level]
@@ -675,8 +702,13 @@ class ConvUNextModel(keras.Model):
 
             # Processing blocks after skip concatenation
             stage_blocks = []
+            stage_drop_paths = []
 
-            # Channel adjustment after concatenation
+            # Channel adjustment after concatenation. NOTE: this Conv2D is
+            # stage_blocks[0] and is the ONLY entry of stage_blocks that is not a
+            # ConvNeXt block; it changes the channel count from the concatenation
+            # width to current_filters, so it is NOT residual-wrapped in call().
+            # decoder_drop_paths[idx] therefore aligns with stage_blocks[1:].
             stage_blocks.append(
                 keras.layers.Conv2D(
                     filters=current_filters,
@@ -703,12 +735,19 @@ class ConvUNextModel(keras.Model):
                         filters=current_filters,
                         activation='gelu',
                         use_bias=self.use_bias,
-                        dropout_rate=current_drop_path,
+                        dropout_rate=0.0,
                         name=f'dec_L{level}_blk_{block_idx}'
+                    )
+                )
+                stage_drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=current_drop_path,
+                        name=f'dec_L{level}_blk_{block_idx}_drop_path'
                     )
                 )
 
             self.decoder_blocks.append(stage_blocks)
+            self.decoder_drop_paths.append(stage_drop_paths)
 
     def _build_deep_supervision(self) -> None:
         """
@@ -954,9 +993,20 @@ class ConvUNextModel(keras.Model):
 
         # Encoder with skip connections
         for level in range(self.depth):
-            # Process through ConvNeXt blocks
-            for layer in self.encoder_stages[level]:
-                x = layer(x, training=training)
+            # Process through ConvNeXt blocks.
+            # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: ConvNextV1Block /
+            # ConvNextV2Block are the residual BRANCH only (they end at gamma(x), no add),
+            # so the caller MUST supply the residual and the drop-path. Do NOT revert to
+            # `x = layer(x, training=training)` — that silently drops the skip connection
+            # and makes stochastic depth meaningless. Written INLINE on purpose: no shared
+            # residual/drop-path helper (I-7). See decisions.md D-002, D-004.
+            for block, drop_path in zip(
+                    self.encoder_stages[level], self.encoder_drop_paths[level]
+            ):
+                residual = x
+                y = block(x, training=training)
+                y = drop_path(y, training=training)
+                x = keras.layers.add([residual, y])
 
             # Save skip connection
             skip_connections.append(x)
@@ -967,8 +1017,13 @@ class ConvUNextModel(keras.Model):
 
         # Bottleneck
         x = self.bottleneck_entry(x, training=training)
-        for layer in self.bottleneck_blocks:
-            x = layer(x, training=training)
+        for block, drop_path in zip(
+                self.bottleneck_blocks, self.bottleneck_drop_paths
+        ):
+            residual = x
+            y = block(x, training=training)
+            y = drop_path(y, training=training)
+            x = keras.layers.add([residual, y])
 
         # Decoder with skip connections
         for idx, level in enumerate(range(self.depth - 1, -1, -1)):
@@ -1006,9 +1061,18 @@ class ConvUNextModel(keras.Model):
             # Concatenate with skip connection
             x = keras.layers.Concatenate(axis=-1)([skip, x])
 
-            # Process through decoder blocks
-            for layer in self.decoder_blocks[idx]:
-                x = layer(x, training=training)
+            # Process through decoder blocks. stage_blocks[0] is the 1x1 channel-adjust
+            # Conv2D: it changes the channel count (concat width -> current_filters), so a
+            # bare residual add around it would be shape-invalid. Only stage_blocks[1:]
+            # (the ConvNeXt blocks) are residual-wrapped.
+            x = self.decoder_blocks[idx][0](x, training=training)
+            for block, drop_path in zip(
+                    self.decoder_blocks[idx][1:], self.decoder_drop_paths[idx]
+            ):
+                residual = x
+                y = block(x, training=training)
+                y = drop_path(y, training=training)
+                x = keras.layers.add([residual, y])
 
             # Deep supervision output (if enabled and not final level)
             if self.enable_deep_supervision and idx < len(self.supervision_heads):

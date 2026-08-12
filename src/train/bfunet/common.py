@@ -11,7 +11,6 @@ import matplotlib
 matplotlib.use("Agg")  # headless: avoid X11 crashes (LESSON)
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -22,11 +21,11 @@ from typing import List, Optional, Tuple
 from train.common import (
     augment_patch,
     create_callbacks as create_common_callbacks,
-    save_config_json,
     set_seeds,
     validate_model_loading,
     collect_image_paths,
 )
+from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
@@ -1165,8 +1164,12 @@ class BFUnetTrainingConfig:
 
     def __post_init__(self):
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"{self.experiment_prefix}{self.variant}_{timestamp}"
+            # NOTE: `experiment_prefix` already ends with "_" (e.g. "denoiser_"),
+            # so prefix and variant are CONCATENATED as one part. Passing them
+            # as two parts would insert a second underscore.
+            self.experiment_name = default_experiment_name(
+                f"{self.experiment_prefix}{self.variant}"
+            )
         if self.curriculum_epochs is None:
             self.curriculum_epochs = self.epochs
         if self.warmup_epochs is None:
@@ -1882,9 +1885,7 @@ def train(
     if config.init_from is not None:
         require_unit_domain_checkpoint(config.init_from)
 
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config)
 
     set_seeds(config.seed)  # reproducible weight init (H8)
 
@@ -2328,14 +2329,7 @@ def train(
     )
     logger.info(f"Training completed in {time.time() - start:.2f}s")
 
-    try:
-        history_dict = {
-            k: [float(v) for v in vals] for k, vals in history.history.items()
-        }
-        with open(output_dir / "training_history.json", "w") as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, output_dir)
 
     if config.expose_bottleneck:
         full_path = output_dir / "final_model_bottleneck.keras"

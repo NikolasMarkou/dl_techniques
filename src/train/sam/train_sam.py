@@ -51,10 +51,8 @@ weights, not the round count.
 """
 
 import argparse
-import json
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Set, Tuple
 
@@ -65,11 +63,9 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
-    save_config_json,
 )
-# `explicitly_set_flags` is NOT re-exported from `train.common`; it lives in
-# `train.common.args`, which is how the three other adopters import it.
 from train.common.args import explicitly_set_flags
+from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
 from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
@@ -238,8 +234,7 @@ class SAMTrainingConfig:
                 f"{self.early_stopping_patience}"
             )
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"sam_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("sam", self.variant)
 
 
 #: argparse ``dest`` -> :class:`SAMTrainingConfig` field. THE wiring, in one
@@ -643,9 +638,7 @@ def train_sam(config: SAMTrainingConfig) -> Tuple[SAMTrainingModel, Any]:
     Returns:
         ``(model, history)``.
     """
-    output_dir = resolved_output_dir(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config, output_dir=resolved_output_dir(config))
     logger.info("SAM training run '%s' -> %s", config.experiment_name, output_dir)
 
     train_dataset, val_dataset = create_dataset(config)
@@ -689,15 +682,7 @@ def train_sam(config: SAMTrainingConfig) -> Tuple[SAMTrainingModel, Any]:
         except Exception as error:  # pragma: no cover - reporting path
             logger.warning("Could not read GPU memory info: %s", error)
 
-    try:
-        history_dict = {
-            key: [float(v) for v in values]
-            for key, values in history.history.items()
-        }
-        with open(output_dir / "training_history.json", "w") as handle:
-            json.dump(history_dict, handle, indent=2)
-    except Exception as error:  # pragma: no cover - reporting path
-        logger.warning("Failed to write training history: %s", error)
+    save_training_history_json(history, output_dir)
 
     try:
         model.save(output_dir / "final_model.keras")

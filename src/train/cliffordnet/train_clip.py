@@ -958,10 +958,19 @@ class _TextLMWrapper(keras.Model):
         x = m.token_embedding(input_ids) + m.position_embedding(positions)
         x = m.text_embed_norm(x)
         x = m.text_embed_dropout(x, training=training)
-        x = ops.expand_dims(x, axis=1)
-        for block in m.text_blocks:
-            x = block(x, training=training)
-        x = ops.squeeze(x, axis=1)
+        # DECISION plan-2026-08-11T141925-eb34352d/D-003
+        # Do NOT reintroduce the caller-side expand_dims(axis=1)/squeeze(axis=1)
+        # around this loop: the text blocks are sequence-mode and take (B, L, D).
+        #
+        # The blocks are TRANSFORM-ONLY: the residual add is external, and each
+        # block is near-zero at init (LayerScale gamma=1e-5). Applying them as
+        # ``x = block(x)`` therefore REPLACES the signal with ~1e-5 of itself per
+        # block instead of augmenting it -- measured 2.76 -> 3.05e-12 over 4
+        # blocks, underflowing to exactly 0.0 at the default depth. This loop
+        # must stay identical to ``CliffordCLIP.encode_text``, reusing that
+        # model's own ``text_drop_paths`` so both phases train one function.
+        for block, drop_path in zip(m.text_blocks, m.text_drop_paths):
+            x = x + drop_path(block(x, training=training), training=training)
         x = m.text_head_norm(x)
         if m.text_head_dropout is not None:
             x = m.text_head_dropout(x, training=training)

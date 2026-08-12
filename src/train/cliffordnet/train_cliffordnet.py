@@ -8,7 +8,6 @@ and random erasing.
 """
 
 import os
-import json
 import math
 import numpy as np
 import tensorflow as tf
@@ -39,6 +38,7 @@ from train.common import (
     CIFAR10_MEAN,
     CIFAR10_STD,
 )
+from train.common.run_io import save_training_history_json
 
 
 # ---------------------------------------------------------------------
@@ -527,15 +527,7 @@ def train_model(args) -> None:
     except Exception as e:
         logger.warning(f"Failed to save config: {e}")
 
-    try:
-        history_dict = {
-            k: [float(v) for v in vals]
-            for k, vals in history.history.items()
-        }
-        with open(os.path.join(results_dir, "training_history.json"), "w") as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, results_dir)
 
     # ---- Save final model & validate ---------------------------------
     test_sample = x_test[:4]

@@ -166,7 +166,6 @@ import argparse
 import json
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -180,12 +179,11 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
     create_learning_rate_schedule,
-    save_config_json,
 )
-# `explicitly_set_flags` is NOT re-exported from `train.common`; it lives in
-# `train.common.args`, which is how every other adopter imports it.
+from train.common.run_io import default_experiment_name, prepare_run_dir
 from train.common.args import explicitly_set_flags
 
+from dl_techniques.optimization import optimizer_builder
 from dl_techniques.losses.sam3_detection_loss import (
     Sam3DetectionLoss,
     box_cxcywh_to_xyxy,
@@ -390,8 +388,7 @@ class Sam3TrainingConfig:
                 f"early_stopping_patience must be > 0; got "
                 f"{self.early_stopping_patience}")
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"sam3_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("sam3", self.variant)
 
     @property
     def steps_per_epoch(self) -> int:
@@ -750,17 +747,18 @@ def create_optimizer(config: Sam3TrainingConfig) -> keras.optimizers.Optimizer:
         steps_per_epoch=config.steps_per_epoch,
         warmup_steps=config.warmup_steps,
     )
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=learning_rate,
-        weight_decay=config.weight_decay,
-        global_clipnorm=(config.gradient_clip_norm
-                         if config.gradient_clip_norm > 0.0 else None),
-    )
     # The reference zeroes weight decay on `*bias*` and on LayerNorm modules.
     # Keras spells LayerNorm's two parameters `gamma` and `beta`, and matches
-    # these patterns with `re.search` against the variable name.
-    optimizer.exclude_from_weight_decay(var_names=["bias", "gamma", "beta"])
-    return optimizer
+    # these patterns with `re.search` against the variable name. The builder
+    # applies the exclusion before the optimizer is built, which is the only
+    # point Keras accepts it.
+    return optimizer_builder({
+        "type": "adamw",
+        "weight_decay": config.weight_decay,
+        "gradient_clipping_by_norm": (config.gradient_clip_norm
+                                      if config.gradient_clip_norm > 0.0 else None),
+        "exclude_from_weight_decay": ["bias", "gamma", "beta"],
+    }, learning_rate)
 
 
 def create_training_model(
@@ -1351,9 +1349,7 @@ def train_sam3(config: Sam3TrainingConfig
     :return: ``(model, history, final_metrics)``.
     :rtype: Tuple[Sam3TrainingModel, Any, Dict[str, float]]
     """
-    output_dir = resolved_output_dir(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config, output_dir=resolved_output_dir(config))
     logger.info("SAM 3 run '%s' -> %s", config.experiment_name, output_dir)
 
     model = create_training_model(config)

@@ -13,7 +13,6 @@ Usage:
 
 import os
 import gc
-import json
 import time
 import keras
 import argparse
@@ -23,7 +22,8 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
@@ -190,10 +190,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     logger.info(f"Experiment: {config.experiment_name}, Variant: {config.model_variant}")
     logger.info(f"Deep Supervision: {'ENABLED (' + config.deep_supervision_schedule_type + ')' if config.enable_deep_supervision else 'DISABLED'}")
 
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    save_config_json(config, str(output_dir), "config.json")
+    output_dir = prepare_run_dir(config)
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
@@ -303,12 +300,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         logger.info("Inference model saved")
 
     # Save history
-    try:
-        history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-        with open(output_dir / "training_history.json", 'w') as f:
-            json.dump(history_dict, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save training history: {e}")
+    save_training_history_json(history, output_dir)
 
     gc.collect()
     return model

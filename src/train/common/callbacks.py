@@ -8,9 +8,14 @@ from typing import Tuple, List, Dict, Optional, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from train.common.config_io import json_numpy_default
 from train.common.evaluation import generate_training_curves
+
+# `create_learning_rate_schedule` now lives in dl_techniques.optimization.schedule
+# alongside the other LR-schedule construction. It is re-exported here so the
+# ~14 existing `from train.common import create_learning_rate_schedule` call
+# sites keep working unchanged.
+from dl_techniques.optimization.schedule import create_learning_rate_schedule  # noqa: F401
 
 
 # ---------------------------------------------------------------------
@@ -139,88 +144,6 @@ def create_callbacks(
 
 # ---------------------------------------------------------------------
 
-def create_learning_rate_schedule(
-        initial_lr: float,
-        schedule_type: str = 'cosine',
-        total_epochs: int = 100,
-        warmup_epochs: int = 5,
-        steps_per_epoch: Optional[int] = None,
-        warmup_steps: int = 0,
-        warmup_start_lr: float = 1e-8,
-) -> keras.optimizers.schedules.LearningRateSchedule:
-    """
-    Create learning rate schedule.
-
-    Parameters
-    ----------
-    initial_lr : float
-        Initial learning rate.
-    schedule_type : str
-        Type of schedule ('cosine', 'exponential', 'constant').
-    total_epochs : int
-        Total number of training epochs.
-    warmup_epochs : int
-        Number of warmup epochs. RESERVED / no-op — kept only for backward
-        positional compatibility. Use ``warmup_steps`` to activate warmup.
-    steps_per_epoch : Optional[int]
-        Steps per epoch (for step-based schedules like ImageNet).
-    warmup_steps : int
-        Active warmup control. When ``> 0`` (cosine schedule only), the cosine
-        decay is wrapped in a :class:`WarmupSchedule` that linearly ramps from
-        ``warmup_start_lr`` to ``initial_lr`` over ``warmup_steps`` steps before
-        decaying. ``0`` (default) means NO warmup — existing callers are
-        unaffected. Requires ``steps_per_epoch`` to be set.
-    warmup_start_lr : float
-        Learning rate at the start of the warmup ramp (only used when
-        ``warmup_steps > 0``). Defaults to ``1e-8``.
-
-    Returns
-    -------
-    Learning rate schedule or float for constant.
-    """
-    if schedule_type == 'cosine':
-        # DECISION plan_2026-06-02_cc4d4e14/D-004: warmup is wired ONLY through the
-        # explicit warmup_steps param (default 0 = no-op). Do NOT activate via
-        # warmup_epochs — dozens of existing callers rely on the plain cosine path
-        # and would silently gain warmup (behavior regression). warmup engages only
-        # when warmup_steps>0, reproducing the inline CosineDecay+WarmupSchedule
-        # block (alpha=0.01, max(1, total_steps-warmup_steps) guard) at the 11 C1
-        # sites. See decisions.md D-004.
-        if warmup_steps > 0:
-            if steps_per_epoch is None:
-                raise ValueError(
-                    "create_learning_rate_schedule: warmup_steps>0 requires steps_per_epoch"
-                )
-            total_steps = total_epochs * steps_per_epoch
-            primary = keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=initial_lr,
-                decay_steps=max(1, total_steps - warmup_steps),
-                alpha=0.01,
-            )
-            return WarmupSchedule(
-                warmup_steps=warmup_steps,
-                warmup_start_lr=warmup_start_lr,
-                primary_schedule=primary,
-            )
-        decay_steps = total_epochs if steps_per_epoch is None else total_epochs * steps_per_epoch
-        return keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=decay_steps,
-            alpha=0.01
-        )
-    elif schedule_type == 'exponential':
-        decay_steps = (total_epochs // 4) if steps_per_epoch is None else (total_epochs // 4) * steps_per_epoch
-        return keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=decay_steps,
-            decay_rate=0.9
-        )
-    else:  # constant
-        return initial_lr
-
-
-# ---------------------------------------------------------------------
-
 # NOT @keras.saving.register_keras_serializable: callbacks are never
 # serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
 class EpochMetricsPlotCallback(keras.callbacks.Callback):
@@ -345,3 +268,59 @@ class EpochMetricsPlotCallback(keras.callbacks.Callback):
                 f"EpochMetricsPlotCallback: failed to create metrics plots: {e}",
                 exc_info=True,
             )
+
+
+# ---------------------------------------------------------------------
+
+def read_current_lr(model: keras.Model) -> float:
+    """Read the current learning rate from ``model``'s live optimizer.
+
+    ``optimizer.learning_rate`` already returns the CURRENT VALUE -- Keras
+    evaluates an attached ``LearningRateSchedule`` at the optimizer's step
+    before handing it back -- so a plain ``float()`` of it tracks the schedule
+    correctly. The isinstance branch below is defensive, for the case where an
+    optimizer hands back the schedule object itself.
+
+    Returns ``float('nan')`` if the optimizer or its learning rate is
+    unavailable (e.g. called before ``compile``), so a logging path can never
+    abort training.
+    """
+    try:
+        optimizer = model.optimizer
+        lr = optimizer.learning_rate
+        if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
+            return float(keras.ops.convert_to_numpy(lr(optimizer.iterations)))
+        return float(keras.ops.convert_to_numpy(lr))
+    except Exception:
+        return float("nan")
+
+
+# NOT @keras.saving.register_keras_serializable: callbacks are never
+# serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
+class LearningRateLogger(keras.callbacks.Callback):
+    """Record the current learning rate into ``logs`` each epoch.
+
+    Consolidates the copies that lived in the power_mlp and capsnet trainers
+    (a third, in ``clip/train_clip.py``, was never instantiated and was
+    deleted). Their bodies were equivalent; this is a de-duplication, NOT a
+    behaviour change -- see :func:`read_current_lr` on why the plain
+    ``float(optimizer.learning_rate)`` they used was already correct.
+
+    ``bfunet/common.py`` keeps its own ``LRLoggerCallback``: it deliberately
+    leaves ``logs['lr']`` UNSET on a non-finite read rather than writing a NaN
+    into the CSV row, and documents a callback-ordering contract.
+
+    Args:
+        log_key: Key written into ``logs``. The default ``'lr'`` matches what
+            the adopting trainers already recorded in their history; changing
+            it renames the series in every downstream plot and CSV column.
+    """
+
+    def __init__(self, log_key: str = "lr") -> None:
+        super().__init__()
+        self.log_key = log_key
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        if logs is None:
+            logs = {}
+        logs[self.log_key] = read_current_lr(self.model)

@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 
 
@@ -633,3 +634,45 @@ def test_attention_pool_hidden_dim_matches_channels():
     # context_vector last dim mirrors hidden_dim — belt-and-suspenders.
     assert v_att.context_vector.shape[-1] == m.vision_channels
     assert t_att.context_vector.shape[-1] == m.text_channels
+
+
+# ---------------------------------------------------------------------
+# Text-tower block input rank
+# ---------------------------------------------------------------------
+
+
+def test_text_blocks_receive_rank_3(tiny_build_shape, tiny_sample, monkeypatch):
+    """Guard: ``encode_text`` must hand its ``CausalCliffordNetBlock``s a
+    NATIVE rank-3 ``(B, L, D_t)`` tensor.
+
+    Those blocks resolve ``input_mode="sequence"`` and consume rank-3 directly,
+    so the caller-side ``expand_dims(axis=1)`` / ``squeeze(axis=1)`` wrap is
+    redundant. Reintroducing it is numerically inert, so no output-value test
+    can catch it; we observe what actually ARRIVES at the block instead.
+    """
+    m = _build_nano()
+    m.build(tiny_build_shape)
+
+    seen = []
+    original_call = CliffordNetBlock.call
+
+    def recording_call(self, inputs, training=None):
+        seen.append((self.name, len(inputs.shape)))
+        return original_call(self, inputs, training=training)
+
+    # ``CausalCliffordNetBlock`` does not override ``call``, so patching the
+    # base class intercepts the text blocks too.
+    monkeypatch.setattr(CliffordNetBlock, "call", recording_call)
+    m.encode_text(tiny_sample["text"], training=False)
+
+    assert len(seen) == len(m.text_blocks), (
+        f"recorder saw {len(seen)} block call(s), expected one per text block "
+        f"({len(m.text_blocks)}): {seen}. An empty/short recorder means the "
+        f"patch did not intercept — the guard would be vacuous."
+    )
+    bad = [(name, rank) for name, rank in seen if rank != 3]
+    assert not bad, (
+        f"CliffordCLIP fed its text blocks non-rank-3 input: {bad}. The text "
+        f"tower is sequence mode — do not reintroduce the caller-side "
+        f"expand_dims(axis=1)/squeeze(axis=1) in encode_text."
+    )

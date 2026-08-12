@@ -45,7 +45,7 @@ import keras
 from keras import ops
 
 from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.optimization import learning_rate_schedule_builder, optimizer_builder
 from train.common import setup_gpu
 from train.nam.train_dfsa import (
     DifferentiableFSA,
@@ -388,22 +388,21 @@ def main():
         f"{sn_am:.3e} (must be > 1e-6 — residual channel live)"
     )
 
-    # Optimizer
-    primary = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=args.lr,
-        decay_steps=max(1, args.steps - args.warmup_steps),
-        alpha=0.0,
-    )
-    lr_schedule = WarmupSchedule(
-        warmup_steps=args.warmup_steps,
-        primary_schedule=primary,
-        warmup_start_lr=1e-7,
-    )
-    optimizer = keras.optimizers.Adam(
-        learning_rate=lr_schedule,
-        weight_decay=args.weight_decay,
-        global_clipnorm=args.clip_norm,
-    )
+    # Optimizer. `alpha` and `warmup_start_lr` are passed explicitly: the
+    # builder's defaults (1e-4 and 1e-8) differ from the values used here.
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay",
+        "learning_rate": args.lr,
+        "decay_steps": max(1, args.steps - args.warmup_steps),
+        "alpha": 0.0,
+        "warmup_steps": args.warmup_steps,
+        "warmup_start_lr": 1e-7,
+    })
+    optimizer = optimizer_builder({
+        "type": "adam",
+        "weight_decay": args.weight_decay,
+        "gradient_clipping_by_norm": args.clip_norm,
+    }, lr_schedule)
 
     # ── Phase 1: Train op_classifier only ────────────────────────────
     if args.phase1_steps > 0:

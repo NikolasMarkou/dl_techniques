@@ -1,15 +1,16 @@
 """CliffordNet NLP Pre-training with Causal Language Modeling.
 
 Adapts the CliffordNet geometric algebra backbone (arXiv:2601.06793v2) for
-causal language modeling. The CausalCliffordNetBlock operates on 4D tensors
-``(B, H, W, D)``; sequences are reshaped to ``(B, 1, seq_len, D)`` so the
-causal (left-padded) depthwise convolutions act as 1D local context
-extractors along the sequence dimension, while the Clifford algebraic
-products provide multi-scale channel interaction.
+causal language modeling. The CausalCliffordNetBlock consumes the token
+sequence as ``(B, seq_len, D)`` directly (the caller does no reshaping; see
+``dl_techniques/layers/geometric/clifford_block.py``), so the causal
+(left-padded) depthwise convolutions act as 1D local context extractors
+along the sequence dimension, while the Clifford algebraic products
+provide multi-scale channel interaction.
 
 The model (CliffordNetLM) wraps:
   1. Token + learned positional embeddings
-  2. L x CausalCliffordNetBlock (operating on ``(B, 1, seq_len, channels)``)
+  2. L x CausalCliffordNetBlock (operating on ``(B, seq_len, channels)``)
   3. LayerNorm + Dense projection to vocabulary logits
 
 Supports Wikipedia (HuggingFace) and TFDS text datasets, step-based

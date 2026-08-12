@@ -15,6 +15,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 
 
 class TestFNetEncoderBlock:
@@ -598,6 +599,132 @@ class TestFNetEncoderBlock:
         """Test that layer properly declares masking support."""
         layer = FNetEncoderBlock(**layer_config)
         assert layer.supports_masking is True
+
+
+def _fnet_block_reference(block, x):
+    """The pre-drop-path `FNetEncoderBlock.call` body, transcribed from 2e10c29bb.
+
+    This is an ORACLE, not a re-implementation of the current code: it is the
+    formula as it stood BEFORE stochastic depth was added, driven through the
+    block's own already-built sublayers. Comparing the block against it is what
+    makes the "default is inert" claim falsifiable -- an injection inside
+    `FNetEncoderBlock.call()` moves the BLOCK side only, never this side.
+    """
+    fourier_output = block.fourier_transform(x, training=False)
+    fourier_output = block.fourier_layer_norm(x + fourier_output, training=False)
+    ffn_output = block.ffn_layer(fourier_output, training=False)
+    return block.output_layer_norm(fourier_output + ffn_output, training=False)
+
+
+class TestFNetEncoderBlockStochasticDepth:
+    """Drop-path (stochastic depth) wiring on FNetEncoderBlock's two branches."""
+
+    @pytest.fixture
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard configuration shared by the drop-path tests."""
+        return {
+            'intermediate_dim': 128,
+            'dropout_rate': 0.0,
+            'normalization_type': 'layer_norm',
+            'ffn_type': 'mlp',
+        }
+
+    @pytest.fixture
+    def sample_input(self) -> keras.KerasTensor:
+        """Sample input for testing - 3D tensor [batch, seq, hidden]."""
+        return keras.random.normal(shape=(4, 16, 32), seed=17)
+
+    def test_default_is_off_and_bit_identical(self, layer_config, sample_input):
+        """At the default the block builds no drop-path and is bit-identical.
+
+        The block's output is compared against `_fnet_block_reference`, the
+        pre-drop-path formula run through the block's OWN sublayers, so the two
+        sides share weights by construction and the only thing that can move them
+        apart is the new code path. In-process (dodging cross-process GPU kernel
+        nondeterminism) at explicit `training=False`, and EXACT zero is required
+        -- the claim is bit-identity, not closeness.
+        """
+        block = FNetEncoderBlock(**layer_config)
+        out = block(sample_input, training=False)
+        ref = _fnet_block_reference(block, sample_input)
+
+        assert block.use_stochastic_depth is False
+        assert block.fourier_stochastic_depth is None
+        assert block.ffn_stochastic_depth is None
+
+        delta = float(keras.ops.max(keras.ops.abs(out - ref)))
+        assert delta == 0.0, f"expected exact bit-identity, got max|delta|={delta!r}"
+
+    def test_two_independent_stochastic_depth_instances(self, layer_config, sample_input):
+        """Enabling drop-path builds TWO DISTINCT StochasticDepth instances.
+
+        The rate used here is deliberately NON-ZERO: a zero rate would make the
+        layer an identity and every wiring error invisible.
+        """
+        block = FNetEncoderBlock(
+            use_stochastic_depth=True, stochastic_depth_rate=0.3, **layer_config
+        )
+        _ = block(sample_input, training=False)
+
+        assert isinstance(block.fourier_stochastic_depth, StochasticDepth)
+        assert isinstance(block.ffn_stochastic_depth, StochasticDepth)
+        assert block.fourier_stochastic_depth is not block.ffn_stochastic_depth
+        assert block.fourier_stochastic_depth.drop_path_rate == 0.3
+        assert block.ffn_stochastic_depth.drop_path_rate == 0.3
+
+    def test_drop_path_wraps_the_branch_not_the_residual(self, layer_config):
+        """At rate ~1.0 both branches are dropped, so the block reduces to norms.
+
+        With every residual branch dropped, the forward pass must collapse to
+        ``output_norm(fourier_norm(inputs))`` -- the skip path SURVIVES. If
+        drop-path were attached to the residual SUM instead of the branch, the
+        signal would be annihilated and the output would be the norm of zeros,
+        which is a constant independent of the input. The test therefore pins
+        the surviving-identity value, not merely "the output changed".
+        """
+        block = FNetEncoderBlock(
+            use_stochastic_depth=True,
+            stochastic_depth_rate=0.999999,
+            **layer_config,
+        )
+        x = keras.random.normal(shape=(64, 8, 32), seed=3)
+        _ = block(x, training=False)
+
+        # Reference: what the block MUST reduce to when both branches vanish.
+        expected = block.output_layer_norm(
+            block.fourier_layer_norm(x, training=False), training=False
+        )
+
+        # Many draws: at rate 0.999999 essentially every sample drops both
+        # branches, so at least one row must match the surviving-skip identity.
+        got = block(x, training=True)
+        per_sample = keras.ops.convert_to_numpy(
+            keras.ops.max(keras.ops.abs(got - expected), axis=(1, 2))
+        )
+        assert float(np.min(per_sample)) < 1e-5, (
+            "no sample reduced to norm(norm(inputs)) with both branches dropped; "
+            "drop-path is not wrapping the branch (max-min delta "
+            f"{float(np.min(per_sample))!r})"
+        )
+
+    def test_stochastic_depth_config_round_trip(self, layer_config, sample_input):
+        """get_config carries both keys and from_config rebuilds the wiring."""
+        block = FNetEncoderBlock(
+            use_stochastic_depth=True, stochastic_depth_rate=0.25, **layer_config
+        )
+        config = block.get_config()
+
+        assert config['use_stochastic_depth'] is True
+        assert config['stochastic_depth_rate'] == 0.25
+
+        restored = FNetEncoderBlock.from_config(config)
+        assert restored.use_stochastic_depth is True
+        assert restored.stochastic_depth_rate == 0.25
+        assert restored.fourier_stochastic_depth is not None
+        assert restored.ffn_stochastic_depth is not None
+        assert restored.fourier_stochastic_depth is not restored.ffn_stochastic_depth
+
+        _ = restored(sample_input, training=False)
 
 
 # Additional integration tests

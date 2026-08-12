@@ -1,24 +1,15 @@
 """
-Optimizer and Learning Rate Schedule Builder Module for Deep Learning Techniques.
+Optimizer Builder Module for Deep Learning Techniques.
 
-This module provides utilities for building optimizers and learning rate schedules
-for training neural networks in Keras. It offers a flexible configuration-based
-approach to setting up common optimization algorithms with various learning rate
-decay strategies.
-
-The module consists of two main components:
-1. learning_rate_schedule_builder: Creates learning rate schedules with optional warmup
-2. optimizer_builder: Creates optimizers with configured learning rate schedules
-
-Available learning rate schedules:
-- exponential_decay: Gradual exponential reduction of learning rate
-- cosine_decay: Cosine-based decay without restarts
-- cosine_decay_restarts: Cosine-based decay with periodic restarts
-- All schedules support warmup periods via WarmupSchedule wrapper
+This module provides `optimizer_builder`, which creates optimizers from a
+configuration dictionary. Learning rate schedules are built separately by
+`schedule.schedule_builder` (exported as `learning_rate_schedule_builder`) and
+passed in.
 
 Supported optimizers:
 - Adam: Adaptive moment estimation optimizer
 - AdamW: Adam with decoupled weight decay
+- SGD: Stochastic gradient descent with optional (Nesterov) momentum
 - RMSprop: Adaptive learning rate with momentum
 - Adadelta: Adaptive learning rate method
 
@@ -26,11 +17,15 @@ Each optimizer supports gradient clipping options:
 - By value (clipvalue): Clip each gradient to a specific range
 - By local norm (clipnorm): Clip each gradient independently by its norm
 - By global norm (global_clipnorm): Clip all gradients by their combined norm
+
+All optimizers forward `weight_decay` when it is set, and decay-capable ones
+additionally support an `exclude_from_weight_decay` list of name patterns
+(e.g. ["bias", "gamma", "beta"]) applied after construction.
 """
 
 import keras
 from enum import Enum
-from typing import Dict, Union, Any
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from keras.api.optimizers import Optimizer
 from keras.api.optimizers.schedules import LearningRateSchedule
@@ -40,7 +35,6 @@ from keras.api.optimizers.schedules import LearningRateSchedule
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .warmup_schedule import WarmupSchedule
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
 from .gefen_optimizer import Gefen
@@ -51,17 +45,11 @@ from .constants import *
 # ---------------------------------------------------------------------
 
 
-class ScheduleType(str, Enum):
-    """Enumeration of available learning rate schedule types."""
-    EXPONENTIAL_DECAY = "exponential_decay"
-    COSINE_DECAY = "cosine_decay"
-    COSINE_DECAY_RESTARTS = "cosine_decay_restarts"
-
-
 class OptimizerType(str, Enum):
     """Enumeration of available optimizer types."""
     ADAM = "adam"
     ADAMW = "adamw"
+    SGD = "sgd"
     RMSPROP = "rmsprop"
     ADADELTA = "adadelta"
     SGLD = "sgld"
@@ -69,41 +57,11 @@ class OptimizerType(str, Enum):
     GEFEN = "gefen"
 
 
-# ---------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------
-
-# Warmup defaults
-DEFAULT_WARMUP_STEPS = 0
-DEFAULT_WARMUP_START_LR = 1e-8
-
-# RMSprop defaults
-DEFAULT_RMSPROP_RHO = 0.9
-DEFAULT_RMSPROP_MOMENTUM = 0.0
-DEFAULT_RMSPROP_EPSILON = 1e-7
-DEFAULT_RMSPROP_CENTERED = False
-
-# Adam defaults
-DEFAULT_ADAM_BETA_1 = 0.9
-DEFAULT_ADAM_BETA_2 = 0.999
-DEFAULT_ADAM_EPSILON = 1e-7
-DEFAULT_ADAM_AMSGRAD = False
-
-# AdamW defaults
-DEFAULT_ADAMW_BETA_1 = 0.9
-DEFAULT_ADAMW_BETA_2 = 0.999
-DEFAULT_ADAMW_EPSILON = 1e-7
-DEFAULT_ADAMW_AMSGRAD = False
-
-# Adadelta defaults
-DEFAULT_ADADELTA_RHO = 0.9
-DEFAULT_ADADELTA_EPSILON = 1e-7
-
-# Schedule defaults
-DEFAULT_COSINE_ALPHA = 0.0001
-DEFAULT_COSINE_RESTARTS_T_MUL = 2.0
-DEFAULT_COSINE_RESTARTS_M_MUL = 0.9
-DEFAULT_COSINE_RESTARTS_ALPHA = 0.001
+# NOTE: this module previously re-declared every DEFAULT_* constant locally,
+# shadowing the identical definitions pulled in by `from .constants import *`
+# above (verified: all 39 names matched by value). The local block has been
+# removed -- `constants.py` is the single source of truth for optimizer
+# defaults.
 
 
 # ---------------------------------------------------------------------
@@ -111,113 +69,14 @@ DEFAULT_COSINE_RESTARTS_ALPHA = 0.001
 # ---------------------------------------------------------------------
 
 
-def learning_rate_schedule_builder(config: Dict[str, Any]) -> LearningRateSchedule:
-    """Build a learning rate schedule from configuration.
+# NOTE: this module previously defined its own `learning_rate_schedule_builder`.
+# It was an unused, behaviourally-divergent duplicate of `schedule.schedule_builder`
+# (it returned a BARE schedule at warmup_steps=0 where schedule_builder returns a
+# WarmupSchedule wrapper; the two are numerically identical otherwise). Nothing
+# imported it except the test suite -- every consumer gets schedule.py's version
+# via `from dl_techniques.optimization import learning_rate_schedule_builder`.
+# It has been deleted; build schedules with `schedule.schedule_builder`.
 
-    Creates a Keras learning rate schedule based on configuration options,
-    with optional warmup period at the beginning of training.
-
-    Args:
-        config: Configuration dictionary containing schedule parameters.
-            Required keys:
-                - type: Schedule type ('exponential_decay', 'cosine_decay', 'cosine_decay_restarts')
-                - learning_rate: Initial learning rate
-                - decay_steps: Steps over which to decay
-            Optional keys:
-                - warmup_steps: Number of warmup steps (default: 0)
-                - warmup_start_lr: Starting learning rate for warmup (default: 1e-8)
-                - Other schedule-specific parameters
-
-    Returns:
-        A Keras LearningRateSchedule instance.
-
-    Raises:
-        ValueError: If config is invalid or schedule type is unknown.
-
-    Example:
-        >>> config = {
-        ...     "type": "cosine_decay",
-        ...     "warmup_steps": 1000,
-        ...     "warmup_start_lr": 1e-8,
-        ...     "learning_rate": 0.001,
-        ...     "decay_steps": 10000,
-        ...     "alpha": 0.0001
-        ... }
-        >>> lr_schedule = learning_rate_schedule_builder(config)
-    """
-    if not isinstance(config, dict):
-        raise ValueError("config must be a dictionary")
-
-    schedule_type = config.get("type")
-    if not schedule_type:
-        raise ValueError("schedule type must be specified in config")
-
-    schedule_type = schedule_type.strip().lower()
-
-    # Extract common parameters
-    learning_rate = config.get("learning_rate")
-    if learning_rate is None:
-        raise ValueError("learning_rate must be specified in config")
-
-    decay_steps = config.get("decay_steps")
-    if decay_steps is None:
-        raise ValueError("decay_steps must be specified in config")
-
-    # Extract warmup parameters
-    warmup_steps = config.get("warmup_steps", DEFAULT_WARMUP_STEPS)
-    warmup_start_lr = config.get("warmup_start_lr", DEFAULT_WARMUP_START_LR)
-
-    logger.info(f"Building schedule: [{schedule_type}] with warmup_steps: {warmup_steps}")
-
-    # Create the base learning rate schedule
-    if schedule_type == ScheduleType.EXPONENTIAL_DECAY:
-        decay_rate = config.get("decay_rate")
-        if decay_rate is None:
-            raise ValueError("decay_rate must be specified for exponential_decay")
-
-        schedule = keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=learning_rate,
-            decay_steps=decay_steps,
-            decay_rate=decay_rate
-        )
-
-    elif schedule_type == ScheduleType.COSINE_DECAY_RESTARTS:
-        t_mul = config.get("t_mul", DEFAULT_COSINE_RESTARTS_T_MUL)
-        m_mul = config.get("m_mul", DEFAULT_COSINE_RESTARTS_M_MUL)
-        alpha = config.get("alpha", DEFAULT_COSINE_RESTARTS_ALPHA)
-
-        schedule = keras.optimizers.schedules.CosineDecayRestarts(
-            initial_learning_rate=learning_rate,
-            first_decay_steps=decay_steps,
-            t_mul=t_mul,
-            m_mul=m_mul,
-            alpha=alpha
-        )
-
-    elif schedule_type == ScheduleType.COSINE_DECAY:
-        alpha = config.get("alpha", DEFAULT_COSINE_ALPHA)
-
-        schedule = keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=learning_rate,
-            decay_steps=decay_steps,
-            alpha=alpha
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown learning_rate schedule_type: [{schedule_type}]. "
-            f"Supported types: {[t.value for t in ScheduleType]}"
-        )
-
-    # Apply warmup wrapper if warmup steps > 0
-    if warmup_steps > 0:
-        schedule = WarmupSchedule(
-            warmup_steps=warmup_steps,
-            warmup_start_lr=warmup_start_lr,
-            primary_schedule=schedule
-        )
-
-    return schedule
 
 # ---------------------------------------------------------------------
 
@@ -234,12 +93,21 @@ def optimizer_builder(
     Args:
         config: Configuration dictionary containing optimizer settings.
             Required keys:
-                - type: Optimizer type ('adam', 'adamw', 'rmsprop', 'adadelta')
+                - type: Optimizer type ('adam', 'adamw', 'sgd', 'rmsprop',
+                       'adadelta', 'sgld', 'vsgd', 'gefen')
             Optional keys:
-                - Optimizer-specific hyperparameters (beta_1, beta_2, rho, etc.)
+                - Optimizer-specific hyperparameters (beta_1, beta_2, rho,
+                  momentum, nesterov, etc.)
                 - gradient_clipping_by_value: Clip gradients by absolute value
                 - gradient_clipping_by_norm_local: Clip gradients by local norm
                 - gradient_clipping_by_norm: Clip gradients by global norm
+                - weight_decay: Decoupled weight decay. Forwarded to every
+                  optimizer type; when omitted, the Keras default applies
+                  (None for all types except AdamW, which defaults to 0.004).
+                - exclude_from_weight_decay: List of variable-name patterns to
+                  exclude from weight decay (matched with ``re.search``). The
+                  conventional recipe is ``["bias", "gamma", "beta"]``. Ignored
+                  (with a warning) on optimizers that do not support it.
         lr_schedule: Learning rate as float or LearningRateSchedule instance.
 
     Returns:
@@ -290,6 +158,8 @@ def optimizer_builder(
         optimizer = _build_adam_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.ADAMW:
         optimizer = _build_adamw_optimizer(config, base_params)
+    elif optimizer_type == OptimizerType.SGD:
+        optimizer = _build_sgd_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.ADADELTA:
         optimizer = _build_adadelta_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.SGLD:
@@ -304,6 +174,8 @@ def optimizer_builder(
             f"Supported types: {[t.value for t in OptimizerType]}"
         )
 
+    _apply_weight_decay_exclusions(optimizer, config.get("exclude_from_weight_decay"))
+
     logger.info(f"Successfully built {optimizer.__class__.__name__} optimizer")
     return optimizer
 
@@ -311,6 +183,47 @@ def optimizer_builder(
 # ---------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------
+
+
+def _apply_weight_decay_exclusions(
+        optimizer: Optimizer,
+        var_names: Optional[Sequence[str]]
+) -> None:
+    """Exclude variables whose names match ``var_names`` from weight decay.
+
+    Keras matches each pattern with ``re.search`` against the variable name, so
+    the conventional no-decay recipe is ``["bias", "gamma", "beta"]`` — biases
+    plus the two LayerNorm/BatchNorm parameters, which Keras spells ``gamma``
+    and ``beta``.
+
+    This is a no-op when ``var_names`` is empty or ``None``. The call is guarded
+    because ``exclude_from_weight_decay`` only exists on decay-capable
+    optimizers and rejects being called after the optimizer has been built;
+    neither condition should abort optimizer construction.
+
+    Args:
+        optimizer: The freshly built optimizer to configure.
+        var_names: Name patterns to exclude from weight decay. ``None`` or an
+            empty sequence means no exclusions.
+    """
+    if not var_names:
+        return
+
+    if not hasattr(optimizer, "exclude_from_weight_decay"):
+        logger.warning(
+            f"{optimizer.__class__.__name__} has no exclude_from_weight_decay(); "
+            f"ignoring exclude_from_weight_decay={list(var_names)}"
+        )
+        return
+
+    try:
+        optimizer.exclude_from_weight_decay(var_names=list(var_names))
+        logger.info(f"Excluded from weight decay: {list(var_names)}")
+    except (ValueError, AttributeError) as e:
+        logger.warning(
+            f"Could not apply exclude_from_weight_decay={list(var_names)} to "
+            f"{optimizer.__class__.__name__}: {e}"
+        )
 
 
 def _build_rmsprop_optimizer(
@@ -334,6 +247,12 @@ def _build_rmsprop_optimizer(
         "centered": config.get("centered", DEFAULT_RMSPROP_CENTERED),
         **base_params
     }
+
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
 
     return keras.optimizers.RMSprop(**optimizer_params)
 
@@ -359,6 +278,12 @@ def _build_adam_optimizer(
         "amsgrad": config.get("amsgrad", DEFAULT_ADAM_AMSGRAD),
         **base_params
     }
+
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
 
     return keras.optimizers.Adam(**optimizer_params)
 
@@ -389,6 +314,40 @@ def _build_adamw_optimizer(
     return keras.optimizers.AdamW(**optimizer_params)
 
 
+def _build_sgd_optimizer(
+        config: Dict[str, Any],
+        base_params: Dict[str, Any]
+) -> keras.optimizers.SGD:
+    """Build SGD optimizer with configuration parameters.
+
+    Plain stochastic gradient descent with optional (Nesterov) momentum. The
+    defaults mirror ``keras.optimizers.SGD`` so that
+    ``optimizer_builder({"type": "sgd"}, lr)`` is equivalent to
+    ``keras.optimizers.SGD(learning_rate=lr)``.
+
+    ``weight_decay`` is passed through only when the caller sets it; when
+    omitted, Keras' own default (``None``, i.e. no decay) applies.
+
+    Args:
+        config: Configuration dictionary with SGD-specific parameters.
+        base_params: Base parameters common to all optimizers.
+
+    Returns:
+        Configured SGD optimizer instance.
+    """
+    optimizer_params = {
+        "name": "SGD",
+        "momentum": config.get("momentum", DEFAULT_SGD_MOMENTUM),
+        "nesterov": config.get("nesterov", DEFAULT_SGD_NESTEROV),
+        **base_params
+    }
+
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
+
+    return keras.optimizers.SGD(**optimizer_params)
+
+
 def _build_adadelta_optimizer(
         config: Dict[str, Any],
         base_params: Dict[str, Any]
@@ -408,6 +367,12 @@ def _build_adadelta_optimizer(
         "epsilon": config.get("epsilon", DEFAULT_ADADELTA_EPSILON),
         **base_params
     }
+
+    # Keras accepts weight_decay on every optimizer, but only forward it when
+    # the caller sets it -- otherwise Keras' own default (None) applies. Without
+    # this, a config carrying weight_decay would have it SILENTLY dropped.
+    if config.get("weight_decay") is not None:
+        optimizer_params["weight_decay"] = config["weight_decay"]
 
     return keras.optimizers.Adadelta(**optimizer_params)
 

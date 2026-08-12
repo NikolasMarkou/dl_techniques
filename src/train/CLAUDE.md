@@ -7,11 +7,13 @@ Production-grade training pipelines for models in `dl_techniques/models/`. Each 
 ```
 src/train/
 ├── common/              # Shared utilities (GPU, datasets, callbacks, evaluation)
-│   ├── gpu.py           # setup_gpu(gpu_id)
+│   ├── gpu.py           # setup_gpu(gpu_id), log_gpu_peak_memory(), setup_mixed_precision()
 │   ├── args.py          # create_base_argument_parser()
 │   ├── datasets.py      # load_dataset(), load_imagenet_dataset(), get_class_names()
 │   ├── callbacks.py     # create_callbacks(), create_learning_rate_schedule()
 │   ├── evaluation.py    # validate_model_loading(), run_model_analysis(), visualizations
+│   ├── run_io.py        # prepare_run_dir(), save_training_history_json(), default_experiment_name()
+│   ├── stats.py         # mean_std(), bootstrap_ci(), paired_permutation_test(), format_mean_std()
 │   ├── nlp.py           # NLP tokenization, text datasets, warmup LR, NLP callbacks
 │   ├── image_text.py    # Image-text dataset loading (COCO, CC3M)
 │   ├── megadepth.py     # MegaDepth RGB+depth dataset pipeline
@@ -229,7 +231,7 @@ def main():
 | `preprocess_clm_packed_dataset(ds, encoding_name, chunk_length, batch_size, eot_token_id, ...)` | Lower-level packed CLM with `repeat=True` for explicit step-budget loops |
 | `preprocess_classification_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch with labels |
 | `estimate_clm_steps_per_epoch(num_articles, max_seq_length, batch_size, override=None, avg_tokens_per_article=440)` | **Canonical** chunk-aware steps-per-epoch helper (D-001). Use this everywhere — never roll a local `_estimate_steps_per_epoch`. |
-| `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay |
+| `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay. Now defined in `dl_techniques.optimization.schedule` and re-exported here. |
 | `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
 
 **Wikipedia/HF data path conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
@@ -402,7 +404,7 @@ create_callbacks(
 - `setup_gpu(gpu_id)` — GPU memory growth + device selection. Always pass `args.gpu`.
 - `create_callbacks(...)` — standard callbacks. See API reference above.
 - `create_base_argument_parser(description, default_dataset)` — standard argparse. Only for vision/classification scripts that use `load_dataset()`.
-- `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` — cosine, exponential, constant.
+- `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` — cosine, exponential, constant. **Now defined in `dl_techniques.optimization.schedule`** and re-exported from `train.common`; both import paths work and resolve to the same object.
 - `load_dataset(name, batch_size, image_size)` — MNIST, CIFAR-10/100, ImageNet only.
 - `get_class_names(dataset, num_classes)` — human-readable labels.
 - `validate_model_loading(path, sample, expected, custom_objects)` — round-trip serialization check.
@@ -412,13 +414,19 @@ create_callbacks(
 - `StepCheckpointCallback(save_dir, save_every_steps, analyze_every_steps=0, max_checkpoints, model_name, initial_step, log_every_steps, plot_every_steps, step_counter=None, gc_on_save=False, csv_fields=None)` — step-indexed CSV logging + rolling `.keras` checkpoint window + optional periodic ModelAnalyzer (`analyze_every_steps=0` disables it) + step-loss plots. Pass an external `step_counter` for resume/shared-counter setups (else an internal counter is used); `gc_on_save=True` runs `gc.collect()` after each save; `csv_fields=None` uses a dynamic schema, a tuple pins a fixed schema. Use instead of a per-trainer step-checkpoint class.
 - `set_seeds(seed)` — canonical reproducible seeding (sets `PYTHONHASHSEED` + `random` + `numpy` + `keras.utils.set_random_seed`). Use instead of an inline RNG-seeding block.
 - `save_config_json(config, results_dir, filename="config.json")` — dump a dataclass / object / dict config to JSON (dataclass-aware, numpy-safe). Returns the written path.
+- `prepare_run_dir(config, output_dir=None)` — create `output_dir/experiment_name`, `mkdir(parents=True)`, and write `config.json` into it; returns the `Path`. Pass `output_dir=` when the trainer resolves the path itself (e.g. the SAM trainers' `resolved_output_dir(config)`). Use instead of the three-line preamble.
+- `save_training_history_json(history, output_dir)` — dump `history.history` (or a raw dict) as `{metric: [floats]}`. **Best-effort**: warns and returns `None` on failure rather than raising, because it runs after the weights are already saved. Use instead of an inline `try/json.dump` block.
+- `default_experiment_name(*parts)` — underscore-join the parts and append the run timestamp. Use in `__post_init__` instead of an inline `strftime("%Y%m%d_%H%M%S")`. Empty/`None` parts are dropped. **Careful**: if a prefix already ends in `_`, concatenate it with the next fragment yourself (`f"{prefix}{variant}"`) — passing them separately inserts a second underscore.
+- `log_gpu_peak_memory()` — log peak/current memory for every visible GPU (reporting only; never raises).
+- `setup_mixed_precision(enabled, policy="mixed_float16") -> bool` — set the global dtype policy (and explicitly reset to `float32` when disabled, since the policy is process-wide). Returns whether it was enabled. Wrap the optimizer in `LossScaleOptimizer` at the call site for `mixed_float16`; `mixed_bfloat16` needs no loss scaling.
+- `mean_std`, `bootstrap_ci`, `paired_permutation_test`, `format_mean_std` (`train.common.stats`) — NaN-tolerant, degenerate-safe sweep statistics. Pass an explicit `rng=np.random.default_rng(SEED)`.
 - `json_numpy_default` — pass as `json.dump(..., default=json_numpy_default)` to serialize numpy scalars / arrays (native numeric, not strings).
 - `CIFAR10_MEAN`, `CIFAR10_STD` — CIFAR-10 per-channel mean/std for normalization. Distinct from the OpenAI-CLIP `IMAGE_MEAN`/`IMAGE_STD` in `image_text.py` — never conflate the two.
 
 **Use from `dl_techniques` (library-level components):**
 - `dl_techniques.metrics.depth_metrics` — AbsRelMetric, DeltaThresholdMetric, SqRelMetric, RMSEMetric, RMSELogMetric.
 - `dl_techniques.callbacks.depth_visualization` — DepthPredictionGridCallback, DepthMetricsCurveCallback.
-- `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`.
+- `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`, `create_learning_rate_schedule()`, `create_warmup_lr_schedule()`, `WarmupSchedule`. Build optimizers through `optimizer_builder()` rather than calling `keras.optimizers.AdamW(...)` directly: it handles gradient clipping and weight-decay exclusions in the constructor, where Keras requires them. Never set `optimizer.clipnorm` after construction.
 - `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)` — layer-by-layer weight transfer from a saved `.keras` model. Use this (not `model.load_weights(by_name=True)` which is broken in Keras 3.8 for `.keras` files).
 
 **Keep local to each script:**

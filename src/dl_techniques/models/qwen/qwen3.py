@@ -14,7 +14,6 @@ Based on the Qwen3 architecture from:
 """
 
 import keras
-import numpy as np
 from typing import Optional, Union, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -22,6 +21,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
@@ -303,10 +303,7 @@ class Qwen3(keras.Model):
             )
 
         # Create a linear schedule for the drop path rate
-        if self.stochastic_depth_rate > 0:
-            dpr = [x for x in np.linspace(0.0, self.stochastic_depth_rate, self.num_layers)]
-        else:
-            dpr = [0.0 for _ in range(self.num_layers)]
+        dpr = linear_drop_path_rates(self.num_layers, self.stochastic_depth_rate)
 
         # Create transformer blocks
         self.blocks = []

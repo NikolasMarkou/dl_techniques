@@ -73,6 +73,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.ffn.factory import create_ffn_layer
@@ -910,10 +911,11 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         ) if self.ln_post else keras.layers.Identity(name="ln_post")
 
         # Linear stochastic-depth decay across depth, `linspace(0, rate, depth)`.
-        per_block_drop_path = [
-            self.drop_path_rate * i / (self.depth - 1) if self.depth > 1 else 0.0
-            for i in range(self.depth)
-        ]
+        # The helper subsumes the `depth > 1` guard this used to carry inline:
+        # at `depth <= 1` it returns `[0.0] * depth` (measured, not assumed).
+        per_block_drop_path = linear_drop_path_rates(
+            self.depth, self.drop_path_rate
+        )
         self.blocks: List[Sam3ViTDetBlock] = [
             Sam3ViTDetBlock(
                 dim=self.embed_dim,

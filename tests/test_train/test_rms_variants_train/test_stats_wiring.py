@@ -1,7 +1,7 @@
 """Sanity check that the stats re-export from train.logic works end-to-end.
 
 Heavy testing of the stats math lives in
-``tests/test_train/test_logic/test_multiseed_stats.py``. Here we only confirm
+``tests/test_train/test_common_stats.py``. Here we only confirm
 that imports resolve and a happy-path call to each function returns sane
 values when invoked through the re-export module.
 """

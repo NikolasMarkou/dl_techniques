@@ -46,6 +46,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
@@ -480,19 +481,15 @@ class SwinTransformer(keras.Model):
         num_heads = self.num_heads[stage_idx]
         stage_dim = self.embed_dim * (2 ** stage_idx)
 
-        # Calculate drop path rates (linear scheduling)
+        # Calculate drop path rates (linear scheduling over ALL blocks of ALL stages)
         total_blocks = sum(self.depths)
         block_start_idx = sum(self.depths[:stage_idx])
+        drop_path_rates = linear_drop_path_rates(total_blocks, self.drop_path_rate)
 
         for block_idx in range(depth):
-            # Calculate drop path rate for this block
+            # Global block index across stages: 0 .. total_blocks - 1
             current_block_idx = block_start_idx + block_idx
-            if total_blocks > 1:
-                current_drop_path_rate = (
-                        self.drop_path_rate * current_block_idx / (total_blocks - 1)
-                )
-            else:
-                current_drop_path_rate = 0.0
+            current_drop_path_rate = drop_path_rates[current_block_idx]
 
             # Alternate between regular and shifted windows
             shift_size = 0 if block_idx % 2 == 0 else self.window_size // 2

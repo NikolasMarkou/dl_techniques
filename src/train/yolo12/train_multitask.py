@@ -17,7 +17,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.sut import OptimizedSUTDataset
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
@@ -996,8 +996,12 @@ def main():
 
     logger.info(f"YOLOv12 Multi-Task Training - Tasks: {args.tasks}, Scale: {args.scale}")
 
-    np.random.seed(args.random_seed)
-    tf.random.set_seed(args.random_seed)
+    # `np.random.seed` + `tf.random.set_seed` alone does NOT make a run
+    # reproducible: Keras draws layer initializers and dropout masks from its
+    # own seed generator, so two same-seed runs produced different weights AND
+    # different dropout masks. `set_seeds` additionally calls
+    # `keras.utils.set_random_seed` (and seeds PYTHONHASHSEED + `random`).
+    set_seeds(args.random_seed)
 
     try:
         train_model(args)

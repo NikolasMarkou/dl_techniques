@@ -7,10 +7,9 @@ are built from isotropic CliffordNet blocks (arXiv:2601.06793v2):
   :class:`CliffordNetBlock` layers (bidirectional depthwise context) ->
   Clifford-aware projection head.
 - **Text tower**: token + positional embedding ->
-  ``LayerNorm`` -> reshape to ``(B, 1, seq_len, D)`` -> *L*
-  :class:`CausalCliffordNetBlock` layers (causal left-only depthwise
-  context, identical to :class:`CliffordNetLM`) -> squeeze ->
-  Clifford-aware projection head.
+  ``LayerNorm`` -> *L* :class:`CausalCliffordNetBlock` layers over
+  ``(B, seq_len, D)`` (causal left-only depthwise context, identical to
+  :class:`CliffordNetLM`) -> Clifford-aware projection head.
 
 The Clifford-aware projection head -- the core distinction from standard
 CLIP -- avoids collapsing the tower output to a single mean-pooled vector.
@@ -55,7 +54,7 @@ Architecture (default head_kind="learned_query_residual"):
         │                                         │
         ▼                                         ▼
     CliffordNetBlock × L_vis                CausalCliffordNetBlock × L_txt
-    (bidirectional)                         (causal, B,1,L,D layout)
+    (bidirectional, B,H,W,D)                (causal, B,L,D)
         │                                         │
         ▼                                         ▼
     z_det = GAP(x)  (B,D)                   z_det = masked-mean(x)
@@ -1183,11 +1182,9 @@ class CliffordCLIP(keras.Model):
         x = self.text_embed_norm(x)
         x = self.text_embed_dropout(x, training=training)
 
-        # Reshape to 4D (B, 1, L, D) for causal depthwise Conv2D.
-        x = ops.expand_dims(x, axis=1)
+        # ``x`` stays ``(B, L, D_t)`` — see ``layers/geometric/clifford_block.py``.
         for block, drop_path in zip(self.text_blocks, self.text_drop_paths):
             x = x + drop_path(block(x, training=training), training=training)
-        x = ops.squeeze(x, axis=1)             # (B, L, D_t)
         x = self.text_head_norm(x)
         if self.text_head_dropout is not None:
             x = self.text_head_dropout(x, training=training)

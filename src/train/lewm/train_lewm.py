@@ -43,10 +43,6 @@ from dl_techniques.datasets.pusht_hdf5 import (
 from dl_techniques.utils.logger import logger
 
 
-def _set_seed(seed: int) -> None:
-    set_seeds(seed)
-
-
 def _build_model(args: argparse.Namespace) -> LeWM:
     # Fail-fast validation: img/patch divisibility and embed_dim vs encoder
     # scale. Without this a wrong combo crashes deep inside ViT/projector with
@@ -235,7 +231,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    _set_seed(args.seed)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     logger.info(f"LeWM smoke-test training — args: {vars(args)}")

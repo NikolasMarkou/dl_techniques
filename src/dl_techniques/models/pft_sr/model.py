@@ -14,6 +14,7 @@ import keras
 from typing import Optional, List, Literal
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 
 @keras.saving.register_keras_serializable()
@@ -119,24 +120,17 @@ class PFTSR(keras.Model):
         # Calculate total number of blocks for stochastic depth
         self.total_blocks = sum(num_blocks)
 
-        # Stochastic depth decay rule
-        if drop_path_rate > 0.0:
-            # `keras.ops.linspace` returns a backend tensor; TF's EagerTensor has
-            # no `.item()`, so the original `x.item()` raised AttributeError and
-            # this whole branch was dead -- the SECOND blocker on
-            # `drop_path_rate > 0`, after the `StochasticDepth(drop_rate=)`
-            # kwarg. Constructor-time only, so numpy here is not a forward-path
-            # rule violation.
-            dpr = [
-                float(x)
-                for x in keras.ops.convert_to_numpy(
-                    keras.ops.linspace(0.0, drop_path_rate, self.total_blocks)
-                )
-            ]
-        else:
-            dpr = [0.0] * self.total_blocks
-
-        self.dpr = dpr
+        # Stochastic depth decay rule.
+        # History: this used to be a `keras.ops.linspace` + `x.item()` list
+        # comprehension. TF's EagerTensor has no `.item()`, so it raised
+        # AttributeError and the whole `drop_path_rate > 0` branch was dead --
+        # the SECOND blocker on that path, after the `StochasticDepth(drop_rate=)`
+        # kwarg. Do NOT reintroduce a backend-tensor linspace here:
+        # `linear_drop_path_rates` returns plain Python floats, so there is no
+        # tensor-to-scalar conversion to get wrong, and it also covers the
+        # `drop_path_rate == 0.0` and `total_blocks <= 1` cases (all zeros),
+        # which is why the old explicit else-branch is gone.
+        self.dpr = linear_drop_path_rates(self.total_blocks, drop_path_rate)
 
     def build(self, input_shape):
         """

@@ -55,7 +55,6 @@ import collections
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -65,6 +64,7 @@ from train.common import (
     save_config_json,
     collect_image_paths,
 )
+from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.homography import sample_homography, warp_image
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
@@ -155,8 +155,7 @@ class HomographicAdaptationConfig:
             self.dataset_weights = [w / total for w in self.dataset_weights]
 
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"ha_selflabel_{self.variant}_{timestamp}"
+            self.experiment_name = default_experiment_name("ha_selflabel", self.variant)
 
 
 # ---------------------------------------------------------------------

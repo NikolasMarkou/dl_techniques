@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 import keras
 
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.models.convunext.model import (
     ConvUNextStem,
     ConvUNextModel,
@@ -974,3 +975,198 @@ class TestConvUNextModelWeightLoading:
         # Both should work after weight transfer
         output = model_without_top(sample_input_small)
         assert output is not None
+
+# ---------------------------------------------------------------------
+# Residual + stochastic-depth wiring
+# ---------------------------------------------------------------------
+
+class _ZeroBranch(keras.layers.Layer):
+    """Stand-in for a ConvNeXt block whose branch output is identically zero.
+
+    Substituting this for every ConvNeXt block turns each block loop into an
+    exact identity *if and only if* the caller adds a residual. Without a
+    residual the signal is annihilated at the first block.
+    """
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: bool = None
+    ) -> keras.KerasTensor:
+        return keras.ops.zeros_like(inputs)
+
+    def compute_output_shape(self, input_shape):
+        return tuple(input_shape)
+
+
+def _zero_all_convnext_branches(model: ConvUNextModel) -> int:
+    """Replace every ConvNeXt block in ``model`` with a zero-output branch.
+
+    The decoder's ``decoder_blocks[idx][0]`` is the 1x1 channel-adjust Conv2D,
+    not a ConvNeXt block, and is deliberately left in place.
+
+    Returns the number of blocks replaced.
+    """
+    replaced = 0
+    for stage in model.encoder_stages:
+        for i in range(len(stage)):
+            stage[i] = _ZeroBranch()
+            replaced += 1
+    for i in range(len(model.bottleneck_blocks)):
+        model.bottleneck_blocks[i] = _ZeroBranch()
+        replaced += 1
+    for stage in model.decoder_blocks:
+        for i in range(1, len(stage)):
+            stage[i] = _ZeroBranch()
+            replaced += 1
+    return replaced
+
+
+class TestConvUNextResidualAndDropPathWiring:
+    """`ConvNextV1Block`/`ConvNextV2Block` are the residual BRANCH only.
+
+    The caller must supply ``residual + StochasticDepth(rate)(block(x))``
+    (``convnext_v1_block.py:103-121``). These tests pin that wiring.
+    """
+
+    @staticmethod
+    def _model(drop_path_rate: float) -> ConvUNextModel:
+        return ConvUNextModel(
+            input_shape=(32, 32, 3),
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=2,
+            convnext_version='v2',
+            drop_path_rate=drop_path_rate,
+            output_channels=1,
+        )
+
+    def test_residual_skip_is_present(self) -> None:
+        """Zeroing every block branch must leave the model input-dependent.
+
+        With all ConvNeXt branches returning exactly zero, the ONLY route from
+        the input to the output is the additive skip inside each block loop
+        (plus the stem / down / up / adjust convs it feeds). Without the
+        residual, ``x`` becomes exactly 0 at the first encoder block, every
+        stored skip connection is 0, and the output degenerates to a constant
+        that does not depend on the input at all -- so the two probe inputs
+        would produce bit-identical outputs.
+        """
+        model = self._model(drop_path_rate=0.0)
+        x1 = np.random.randn(2, 32, 32, 3).astype(np.float32)
+        x2 = np.random.randn(2, 32, 32, 3).astype(np.float32)
+
+        model(x1, training=False)  # build
+
+        replaced = _zero_all_convnext_branches(model)
+        # depth=2, blocks_per_level=2 -> 4 encoder + 2 bottleneck + 4 decoder.
+        assert replaced == 10, f"expected 10 ConvNeXt blocks, replaced {replaced}"
+
+        out1 = np.array(model(x1, training=False))
+        out2 = np.array(model(x2, training=False))
+
+        spread = float(np.max(np.abs(out1 - out2)))
+        assert spread > 1e-4, (
+            "output does not depend on the input once every ConvNeXt branch is "
+            f"zeroed (max|out(x1) - out(x2)| = {spread}); the residual skip is "
+            "missing from at least one block loop"
+        )
+
+    def test_drop_path_layers_carry_the_schedule(self) -> None:
+        """The drop-path schedule must reach StochasticDepth, not dropout_rate."""
+        rate = 0.4  # NON-ZERO: an all-zeros schedule is invariant under
+        # shift and reversal and would make this proof vacuous.
+        model = self._model(drop_path_rate=rate)
+        depth, bpl = model.depth, model.blocks_per_level
+
+        def scheduled(level: int, block_idx: int) -> float:
+            return rate * (level * bpl + block_idx) / (depth * bpl)
+
+        all_drop_paths = []
+
+        # Encoder: linear ramp with depth.
+        assert len(model.encoder_drop_paths) == depth
+        for level, stage in enumerate(model.encoder_drop_paths):
+            assert len(stage) == len(model.encoder_stages[level])
+            for block_idx, dp in enumerate(stage):
+                assert isinstance(dp, StochasticDepth)
+                assert dp.drop_path_rate == pytest.approx(
+                    scheduled(level, block_idx)
+                ), f"encoder L{level} blk{block_idx}"
+                all_drop_paths.append(dp)
+
+        # Bottleneck: deliberately FLAT at the max rate (pre-existing shape).
+        assert len(model.bottleneck_drop_paths) == len(model.bottleneck_blocks)
+        for dp in model.bottleneck_drop_paths:
+            assert isinstance(dp, StochasticDepth)
+            assert dp.drop_path_rate == pytest.approx(rate)
+            all_drop_paths.append(dp)
+
+        # Decoder: mirrors the encoder ramp; index idx corresponds to
+        # level = depth - 1 - idx. decoder_blocks[idx][0] is the channel-adjust
+        # Conv2D and has no drop-path partner.
+        assert len(model.decoder_drop_paths) == depth
+        for idx, stage in enumerate(model.decoder_drop_paths):
+            level = depth - 1 - idx
+            assert len(stage) == len(model.decoder_blocks[idx]) - 1
+            for block_idx, dp in enumerate(stage):
+                assert isinstance(dp, StochasticDepth)
+                assert dp.drop_path_rate == pytest.approx(
+                    scheduled(level, block_idx)
+                ), f"decoder L{level} blk{block_idx}"
+                all_drop_paths.append(dp)
+
+        # Every drop-path is its own instance (no shared object across blocks).
+        assert len({id(dp) for dp in all_drop_paths}) == len(all_drop_paths)
+        # And the schedule is genuinely non-zero somewhere.
+        assert max(dp.drop_path_rate for dp in all_drop_paths) > 0.0
+
+    def test_blocks_own_dropout_rate_is_zero(self) -> None:
+        """The block's own dropout_rate is ordinary MLP dropout, not drop-path."""
+        model = self._model(drop_path_rate=0.4)
+
+        for stage in model.encoder_stages:
+            for block in stage:
+                assert block.dropout_rate == 0.0
+        for block in model.bottleneck_blocks:
+            assert block.dropout_rate == 0.0
+        for stage in model.decoder_blocks:
+            for block in stage[1:]:
+                assert block.dropout_rate == 0.0
+
+    def test_inference_differs_from_pre_fix_wiring(self) -> None:
+        """The residual CHANGES inference. This is deliberate, not a regression.
+
+        This is a CHARACTERIZATION test, not a bit-identity claim. It runs the
+        same built layers with the same weights and the same input under both
+        the pre-fix wiring (``x = block(x)``, the documented bug) and the
+        canonical wiring, at explicit ``training=False``, and pins that they
+        differ. drop_path_rate is 0.0 so StochasticDepth is an exact identity
+        and the measured delta is attributable to the residual alone.
+        """
+        model = self._model(drop_path_rate=0.0)
+        x = np.random.randn(2, 32, 32, 3).astype(np.float32)
+        model(x, training=False)  # build
+
+        h = model.stem(x, training=False)
+
+        # Canonical wiring (current code).
+        new = h
+        for block, drop_path in zip(
+                model.encoder_stages[0], model.encoder_drop_paths[0]
+        ):
+            residual = new
+            y = block(new, training=False)
+            y = drop_path(y, training=False)
+            new = keras.layers.add([residual, y])
+
+        # Pre-fix wiring, verbatim: `x = layer(x, training=training)`.
+        old = h
+        for block in model.encoder_stages[0]:
+            old = block(old, training=False)
+
+        delta = float(np.max(np.abs(np.array(new) - np.array(old))))
+        assert delta > 1e-6, (
+            "encoder stage 0 is unchanged by the residual at training=False "
+            f"(max|delta| = {delta}); the residual is not being applied"
+        )

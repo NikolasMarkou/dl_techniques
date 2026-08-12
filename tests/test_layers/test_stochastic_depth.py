@@ -108,6 +108,56 @@ def test_full_drop_rate(sample_input):
     assert np.allclose(output.numpy(), np.zeros_like(output), atol=1e-6)
 
 
+def test_drop_decision_is_per_sample():
+    """Test that the drop decision is drawn independently per sample.
+
+    The distinguishing observable between the implemented per-sample mask
+    (``noise_shape = (batch, 1, ..., 1)``) and a batch-wide/scalar mask
+    (``noise_shape = (1, 1, ..., 1)``) is a MIXED forward pass: some rows of
+    the batch fully zeroed while others survive, in the SAME call. Under a
+    batch-wide mask every row shares one draw, so a mixed pass has probability
+    exactly 0 and this test fails deterministically.
+
+    The layer draws from ``keras.random.uniform`` without a seed, so a single
+    pass is a coin flip; the multi-trial structure below makes a false failure
+    negligible. With batch=16, rate=0.5, a trial fails to be mixed only if all
+    16 samples are dropped or all 16 are kept:
+        P(trial not mixed) = 2 * 0.5**16 = 3.0518e-05
+    and over 20 independent trials
+        P(no trial is mixed) = (3.0518e-05)**20 ~= 5e-91
+    i.e. negligible. (``keras.utils.set_random_seed`` is deliberately NOT
+    relied upon here: it does not reproduce a later ``keras.random.*`` draw.)
+    """
+    batch_size = 16
+    rate = 0.5
+    trials = 20
+    layer = StochasticDepth(drop_path_rate=rate)
+
+    # All-ones input: no zero entries, so "row is all zeros" unambiguously
+    # means "this sample's path was dropped", never "the data was zero".
+    inputs = tf.ones((batch_size, 4, 4, 8), dtype=tf.float32)
+    reduce_axes = (1, 2, 3)
+
+    saw_mixed_batch = False
+    for _ in range(trials):
+        output = layer(inputs, training=True).numpy()
+        row_is_dropped = np.all(output == 0.0, axis=reduce_axes)
+        if row_is_dropped.any() and not row_is_dropped.all():
+            saw_mixed_batch = True
+            # Surviving rows are scaled by 1 / (1 - rate); free to check here
+            # since the input is exactly 1.0 everywhere.
+            kept = output[~row_is_dropped]
+            assert np.allclose(kept, 1.0 / (1.0 - rate), atol=1e-6)
+            break
+
+    assert saw_mixed_batch, (
+        f"In {trials} training passes with batch={batch_size} and "
+        f"drop_path_rate={rate}, no forward pass ever zeroed SOME samples "
+        f"while keeping OTHERS. That is impossible for a per-sample mask "
+        f"(P ~= 5e-91) and certain for a batch-wide/scalar mask."
+    )
+
+
 # Integration tests
 def test_model_integration():
     """Test integration with Keras model."""

@@ -9,6 +9,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
+from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.models.cliffordnet.lm import CliffordNetLM
 
 
@@ -470,3 +471,48 @@ class TestGlobalContextPeriod:
         assert config["global_context_period"] is None
         restored = CliffordNetLM.from_config(config)
         assert restored.global_context_period is None
+
+
+# ---------------------------------------------------------------------
+# TestBlockInputRank — the blocks must be fed NATIVE rank-3
+# ---------------------------------------------------------------------
+
+
+class TestBlockInputRank:
+    """Guard the rank-3 ``(B, seq_len, D)`` contract at the call site.
+
+    ``CausalCliffordNetBlock`` resolves ``input_mode="sequence"`` and consumes
+    rank-3 natively, so ``CliffordNetLM.call`` must NOT wrap its activations in
+    a ``(B, 1, seq_len, D)`` singleton axis. Reintroducing that wrap is
+    numerically inert, so no output-value test can catch it; this test observes
+    what actually ARRIVES at the block instead.
+    """
+
+    def test_blocks_receive_rank_3(self, tiny_config, monkeypatch):
+        model = CliffordNetLM(**tiny_config)
+        ids = _random_ids((2, 16), tiny_config["vocab_size"])
+        model(ids, training=False)  # build before patching
+
+        seen = []
+        original_call = CliffordNetBlock.call
+
+        def recording_call(self, inputs, training=None):
+            seen.append((self.name, len(inputs.shape)))
+            return original_call(self, inputs, training=training)
+
+        # CausalCliffordNetBlock does not override ``call``, so patching the
+        # base class intercepts every block in the stack.
+        monkeypatch.setattr(CliffordNetBlock, "call", recording_call)
+        model(ids, training=False)
+
+        assert len(seen) == tiny_config["depth"], (
+            f"recorder saw {len(seen)} block call(s), expected one per block "
+            f"(depth={tiny_config['depth']}): {seen}. An empty/short recorder "
+            f"means the monkeypatch did not intercept — the guard is vacuous."
+        )
+        bad = [(name, rank) for name, rank in seen if rank != 3]
+        assert not bad, (
+            f"CliffordNetLM fed its causal blocks non-rank-3 input: {bad}. "
+            f"The blocks take (B, seq_len, D) natively — do not reintroduce "
+            f"the caller-side expand_dims(axis=1)/squeeze(axis=1)."
+        )

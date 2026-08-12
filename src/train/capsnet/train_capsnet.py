@@ -19,6 +19,7 @@ from typing import Tuple, Dict, Any, Optional
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.capsnet import create_capsnet
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common.callbacks import LearningRateLogger
 
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
@@ -390,14 +391,6 @@ def plot_metrics_summary(history: keras.callbacks.History, test_results: Dict[st
 # ---------------------------------------------------------------------
 # Custom callbacks
 # ---------------------------------------------------------------------
-
-class LearningRateLogger(keras.callbacks.Callback):
-    """Log learning rate to history each epoch."""
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is None:
-            logs = {}
-        logs['lr'] = float(self.model.optimizer.learning_rate)
-
 
 class ValidationAccuracyLogger(keras.callbacks.Callback):
     """Manually compute validation accuracy if not provided by model."""

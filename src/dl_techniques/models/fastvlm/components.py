@@ -57,7 +57,16 @@ class AttentionBlockVLM(keras.layers.Layer):
             Defaults to 'multi_head'.
         normalization_position: String, position of normalization layers.
             Options: 'pre', 'post'. Defaults to 'pre'.
-        dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.0.
+        dropout_rate: Float, ordinary elementwise dropout rate applied by the
+            internal TransformerLayer (FFN output + attention probabilities).
+            Must be between 0 and 1. Defaults to 0.0.
+        use_stochastic_depth: Boolean, whether the internal TransformerLayer
+            applies true per-sample stochastic depth (residual-path dropping)
+            on its attention and FFN branches. Independent of `dropout_rate`.
+            Defaults to False (matching TransformerLayer's own default).
+        stochastic_depth_rate: Float, drop-path rate used when
+            `use_stochastic_depth` is True. Must be < 1.0 (StochasticDepth
+            raises otherwise). Defaults to 0.1 (matching TransformerLayer).
         use_layer_scale: Boolean, whether to apply learnable layer scaling.
             Defaults to True.
         layer_scale_init: Float, initial value for layer scale parameters.
@@ -120,6 +129,8 @@ class AttentionBlockVLM(keras.layers.Layer):
             attention_type: str = 'multi_head',
             normalization_position: str = 'pre',
             dropout_rate: float = 0.0,
+            use_stochastic_depth: bool = False,
+            stochastic_depth_rate: float = 0.1,
             use_layer_scale: bool = True,
             layer_scale_init: float = 1e-4,
             **kwargs: Any
@@ -147,6 +158,8 @@ class AttentionBlockVLM(keras.layers.Layer):
         self.attention_type = attention_type
         self.normalization_position = normalization_position
         self.dropout_rate = dropout_rate
+        self.use_stochastic_depth = use_stochastic_depth
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.use_layer_scale = use_layer_scale
         self.layer_scale_init = layer_scale_init
 
@@ -163,6 +176,8 @@ class AttentionBlockVLM(keras.layers.Layer):
             normalization_position=normalization_position,
             dropout_rate=dropout_rate,
             attention_dropout_rate=dropout_rate,
+            use_stochastic_depth=use_stochastic_depth,
+            stochastic_depth_rate=stochastic_depth_rate,
             activation='gelu',
             name='vision_transformer'
         )
@@ -253,6 +268,8 @@ class AttentionBlockVLM(keras.layers.Layer):
             'attention_type': self.attention_type,
             'normalization_position': self.normalization_position,
             'dropout_rate': self.dropout_rate,
+            'use_stochastic_depth': self.use_stochastic_depth,
+            'stochastic_depth_rate': self.stochastic_depth_rate,
             'use_layer_scale': self.use_layer_scale,
             'layer_scale_init': self.layer_scale_init,
         })

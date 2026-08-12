@@ -65,6 +65,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
 )
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
 from train.cliffordnet.train_cliffordnet import (
@@ -77,6 +78,7 @@ from train.common import (
     setup_gpu,
     validate_model_loading,
 )
+from train.common.run_io import save_training_history_json
 
 
 # ---------------------------------------------------------------------
@@ -365,11 +367,7 @@ def build_variant(
 
     # Linear DropPath schedule across every block in the model.
     total_blocks = sum(n for _, n in stages)
-    if total_blocks <= 1:
-        drop_rates = [0.0] * total_blocks
-    else:
-        step = stochastic_depth_rate / (total_blocks - 1)
-        drop_rates = [round(i * step, 6) for i in range(total_blocks)]
+    drop_rates = linear_drop_path_rates(total_blocks, stochastic_depth_rate)
 
     inputs = keras.layers.Input(shape=input_shape, name="input")
 
@@ -602,12 +600,7 @@ def train_one_variant(
                 "layer_scale_init": args.layer_scale_init,
                 "parameters": param_count,
             }, f, indent=2)
-        with open(os.path.join(results_dir, "training_history.json"), "w") as f:
-            json.dump(
-                {k: [float(v) for v in vals]
-                 for k, vals in history.history.items()},
-                f, indent=2,
-            )
+        save_training_history_json(history, results_dir)
     except Exception as exc:
         logger.warning(f"  failed to write JSON artifacts: {exc}")
 

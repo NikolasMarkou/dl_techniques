@@ -373,13 +373,27 @@ class FastVLM(keras.Model):
                     (sum(self.depths[:2]) + i) / (sum(self.depths) - 1)
             ) if sum(self.depths) > 1 else 0.0
 
+            # DECISION plan-2026-08-11T201945-91938f65/D-003
+            # `block_drop_rate` is a STOCHASTIC-DEPTH schedule: it must drive
+            # `stochastic_depth_rate=`, never `dropout_rate=`. Do NOT restore
+            # `dropout_rate=max(self.dropout_rate, block_drop_rate)` — that fed
+            # the drop-path schedule into ordinary elementwise Dropout (FFN
+            # output + attention probabilities) and collapsed two knobs the
+            # docstring and MODEL_VARIANTS treat as independent into one.
+            # The schedule expression above is kept inline rather than replaced
+            # by `utils.drop_path.linear_drop_path_rates`: it already is the
+            # correct GLOBAL linear ramp over all `sum(depths)` blocks (stage 3
+            # is its tail), and the helper rounds to 6 decimals, so adopting it
+            # would silently change the values. See decisions.md D-003.
             stage3_blocks.append(
                 AttentionBlockVLM(
                     dim=self.embed_dims[2],
                     num_heads=self.num_heads[2],
                     mlp_ratio=self.mlp_ratio,
                     attention_type=self.attention_type,
-                    dropout_rate=max(self.dropout_rate, block_drop_rate),
+                    dropout_rate=self.dropout_rate,
+                    use_stochastic_depth=True,
+                    stochastic_depth_rate=block_drop_rate,
                     use_layer_scale=self.use_layer_scale,
                     name=f'stage3_attention_{i}'
                 )

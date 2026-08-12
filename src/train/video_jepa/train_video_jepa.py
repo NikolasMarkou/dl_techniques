@@ -65,10 +65,6 @@ from dl_techniques.callbacks.jepa_visualization import (
 from dl_techniques.utils.logger import logger
 
 
-def _set_seed(seed: int) -> None:
-    set_seeds(seed)
-
-
 def _validate_args(args: argparse.Namespace) -> None:
     """Fail-fast CLI validation. Without these, mismatches crash deep inside
     encoder/predictor build with opaque shape errors far from the CLI.
@@ -395,7 +391,7 @@ def _resolve_output_dir(args: argparse.Namespace) -> Path:
 def main() -> None:
     args = parse_args()
     _validate_args(args)
-    _set_seed(args.seed)
+    set_seeds(args.seed)
     # GPU advisory (Concern 3, plan_2026-05-24_aebd4cbb): setup_gpu hides a
     # GPU selection behind --gpu N but in this trainer it must run BEFORE
     # TF context init to take effect. If the user passes --gpu without

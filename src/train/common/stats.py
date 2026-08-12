@@ -1,7 +1,12 @@
-"""Pure-function statistics utilities for the multi-seed robustness sweep.
+"""Pure-function statistics utilities for multi-seed / multi-run sweeps.
 
 These helpers are deliberately small, NaN-tolerant, and degenerate-case-safe.
 Every public function is deterministic given a fixed `numpy.random.Generator`.
+
+This module was previously forked in two places -- ``train.logic
+.multiseed_stats`` and ``train.rms_variants_train.stats`` -- whose function
+bodies were character-identical (the latter's own docstring described itself as
+"byte-equivalent" to the former). Both forks now import from here.
 
 Public surface
 --------------
@@ -29,6 +34,13 @@ from __future__ import annotations
 from typing import Tuple, Union
 
 import numpy as np
+
+__all__ = [
+    "mean_std",
+    "bootstrap_ci",
+    "paired_permutation_test",
+    "format_mean_std",
+]
 
 ArrayLike = Union[np.ndarray, list, tuple]
 

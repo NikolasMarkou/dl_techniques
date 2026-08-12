@@ -10,7 +10,7 @@ Reads the merged ``all_runs.csv`` produced by ``sweep.py`` and emits
 - An explicit PASS / FAIL / INDISTINGUISHABLE verdict per non-baseline
   variant, derived from a documented decision rule.
 
-All statistical math is delegated to ``train.logic.multiseed_stats`` via the
+All statistical math is delegated to ``train.common.stats`` via the
 local ``stats`` re-export.
 """
 from __future__ import annotations

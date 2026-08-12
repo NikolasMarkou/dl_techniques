@@ -11,14 +11,24 @@ CliffordNet block and constituent primitives.
 
        grep -rln "geometric.clifford_block" src/ tests/
 
-   Measured 2026-08-10 (9 source modules across 4 packages, plus 3 test
-   modules): ``models/cliffordnet/{lm,model}.py``,
+   Re-derived 2026-08-11 with exactly that grep: 15 paths, unchanged in
+   substance since 2026-08-10. They are this module itself, **8 importing
+   source modules across 4 packages** (the earlier "9" counted this file):
+   ``models/cliffordnet/{lm,model}.py``,
    ``models/clip/clifford_clip.py``,
    ``models/video_jepa/{encoder,predictor}.py``,
    ``train/cliffordnet/{infer_cliffordnet_nlp,train_cliffordnet_nlp,
-   train_downsampling_techniques}.py``. The corresponding suites are
+   train_downsampling_techniques}.py``; **3 test modules**
+   (``tests/test_layers/test_geometric/test_clifford_block.py`` and
+   ``..._external_residual.py``, ``tests/test_models/test_video_jepa/
+   test_video_jepa.py``); and **3 READMEs** that only name the class
+   (``models/cliffordnet/``, ``train/cliffordnet/``, ``train/video_jepa/``).
+   The corresponding suites are
    ``tests/test_layers/test_geometric/``, ``tests/test_models/test_cliffordnet/``,
-   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``.
+   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``
+   -- note the last two contain no textual match at all: they exercise models
+   whose *modules* import this one, which is precisely why the grep alone is
+   not a sufficient blast-radius estimate.
 
    This warning exists because it was learned the expensive way: an edit to this
    file (plan-2026-08-10-3649c19e/iter-1/step-2) was scored ``radius:MED`` on
@@ -26,7 +36,7 @@ CliffordNet block and constituent primitives.
    adversarial review found a red test in the first unrun one it opened. See
    decisions.md D-033.
 
-Implements the geometric-algebra vision block from
+Implements the geometric-algebra block from
     Zhongping Ji, "CliffordNet: All You Need is Geometric Algebra",
     arXiv:2601.06793v2 (2026).  Reference code: github.com/ParaMind2025/CAN
     (``CliffordInteraction_PyTorch`` / ``CliffordAlgebraBlock`` in ``model.py``).
@@ -79,17 +89,44 @@ Each block derives two streams from the normalized input ``X_norm``:
 * **Context stream** (local aggregation):
   ``Z_ctx = act(Norm(DWConv(DWConv(X_norm))))`` -- two stacked depthwise
   convolutions aggregating local structure.  With the default
-  ``context_kernel_size=3`` the effective receptive field is 5x5.  (The paper
-  states 7x7 in Sec. 5.3; that is an error -- two stacked KxK convolutions give
-  (2K-1)x(2K-1).  The paper also describes the two convolutions as "separated
-  by non-linear activation" in Sec. 3.4, but neither Algorithm 1 nor the
-  reference ``get_context_local`` has an activation between them, so there is
-  none here either.)
+  ``context_kernel_size=3`` the effective receptive field is 5x5 in
+  ``input_mode="image"``; in ``input_mode="sequence"`` the kernels are
+  ``(1, K)``, so it is 5 positions along the sequence axis (and, when
+  ``causal=True``, the 5 positions *ending* at the current one).
+
+  Two footnotes on the paper's own account of this stream.  Both belong to
+  section 3.4, "Context Instantiation: Local-Global Duality" -- NOT section
+  5.3, which is "Hardware-Aware Geometric Approximation":
+
+  - *Receptive field.*  3.4 motivates the factorization with "a large
+    receptive field (e.g., 7x7)" and then defines the local context field as
+    ``C_loc(H) = Conv_3x3(Conv_3x3(H))`` (Eq. 4).  Two stacked KxK depthwise
+    convolutions give (2K-1)x(2K-1), i.e. 5x5, not 7x7.  The paper hedges
+    with "e.g.", so this reads as a motivating target rather than a claim
+    about Eq. 4 -- not a flat error, but do not expect 7x7 from the default.
+    What ships here is Eq. 4.
+
+  - *Activation between the two convolutions.*  The contradiction is INTERNAL
+    to section 3.4: its prose calls the two convolutions "separated by
+    non-linear activation" while its own Eq. (4) shows none.  Algorithm 1
+    cannot settle it either way -- its line 5 has only ONE depthwise
+    convolution (``Z_ctx <- SiLU(BN(DWConv(X_ln)))``), so there is no
+    "between" in Algorithm 1 at all.  The only evidence is the reference
+    ``get_context_local``, which applies no activation between them; this port
+    follows the reference.
 
 An optional *differential* coupling sharpens the interaction::
 
     ctx_mode="diff":  Z_ctx <- Z_ctx - Z_det
     ctx_mode="abs" :  Z_ctx                        (pure aggregation)
+
+Note WHAT is subtracted.  Paper Eq. 5 writes the differential context as
+``C = C_loc(H) - lambda*H``: it subtracts the *state*, which is what makes the
+"discrete Laplacian" reading exact.  Algorithm 1 line 7 and the reference code
+instead subtract ``Z_det = Linear_det(X_ln)``, a *learned projection* of the
+normalized state, and this port follows Algorithm 1 / the code.  The Laplacian
+framing therefore holds only to the extent that ``linear_det`` stays near
+identity.  Do not "fix" this against Eq. 5.
 
 The two streams then interact through the geometric product to produce the
 geometric feature ``G_feat`` that drives the state update.
@@ -135,10 +172,12 @@ Algorithm 1 / the reference; do not "fix" this against Eq. 13.
 
 Global context branch (optional)
 --------------------------------
-A whole-image summary ``C_glo = GlobalAvgPool(X_norm)`` runs the same geometric
+A whole-input summary ``C_glo = GlobalAvgPool(X_norm)`` runs the same geometric
 product (hardcoded ``shifts=[1, 2]``, ``cli_mode="full"``, differential context)
 and is superposed onto the local ``G_feat``, adding multi-scale awareness when
-enabled.
+enabled.  Under ``causal=True`` the pool would see the future, so it is replaced
+by a cumulative mean over positions ``0..i`` -- a summary that grows with the
+sequence instead of a constant one.
 
 Efficiency
 ----------
@@ -159,27 +198,60 @@ Implementation notes, known behaviours and deviations
    reference does ``x = shortcut + drop_path(gamma * x_mixed)`` inside the
    block; the split is deliberate.  Do not re-inline either op here.
 
-2. ``ctx_mode`` has NO EFFECT on the wedge branch.  With
+2. ``ctx_mode`` has NO MATHEMATICAL EFFECT on the wedge branch.  With
    ``W(u, v) = u * T_s(v) - v * T_s(u)`` and ``v = Z_ctx - Z_det``, the
    self-terms cancel exactly by antisymmetry::
 
        W(det, ctx - det) = det*T(ctx) - det*T(det) - ctx*T(det) + det*T(det)
                          = det*T(ctx) - ctx*T(det) = W(det, ctx)
 
-   Consequences: ``cli_mode="wedge"`` makes ``ctx_mode`` completely inert (the
-   two settings produce bit-identical models), and in ``cli_mode="full"`` the
-   differential context only reaches the inner/dot term.  This is inherited
-   from the reference implementation, so the paper's Table 4 "Wedge-Only
-   (Differential Mode)" row is the same model as its absolute-mode counterpart,
-   and the ~1.4% diff-vs-abs gap in Table 3 is attributable to the inner term
-   alone.  The constructor warns for the fully-inert combination.
+   The cancellation is NOT specific to subtracting exactly ``Z_det``: because
+   ``W(u, u) = 0`` for every ``u``, *any* multiple cancels,
+   ``W(det, ctx - k*det) == W(det, ctx)`` for any scalar ``k``.  That is the
+   accurate statement of the property -- a test that tried to break this
+   equality had to destroy the antisymmetry of ``W`` outright; perturbing the
+   subtracted quantity cannot do it.
+
+   Consequences: ``cli_mode="wedge"`` makes ``ctx_mode`` inert, and in
+   ``cli_mode="full"`` the differential context only reaches the inner/dot
+   term.  This is inherited from the reference implementation, so the paper's
+   Table 4 "Wedge-Only (Differential Mode)" row is the same model as its
+   absolute-mode counterpart, and the ~1.4% diff-vs-abs gap in Table 3 is
+   attributable to the inner term alone.  The constructor warns for the fully
+   -inert combination.
+
+   Inert means *mathematically equivalent*, NOT bit-identical.  The
+   implementation forms ``ctx - det`` FIRST and then multiplies, so the
+   cancelling terms are never actually cancelled in floating point: they are
+   computed and then subtracted, leaving rounding residue.  MEASURED over 47
+   independent runs (40 seeds on GPU, 7 on CPU, ``channels=8``,
+   ``shifts=[1,2]``, ``layer_scale_init=1.0``, float32): ``np.array_equal`` is
+   **False in 47 of 47**, worst ``max |delta| = 3.5762787e-07``, worst
+   relative deviation ``1.5468504e-07``.  The weights and the config ARE
+   identical between the two settings; the outputs are not.  Both halves of
+   this claim -- the ~1e-7 agreement and the failure of bit-identity -- are
+   pinned by ``TestCharacterizationWedgeAndActivations`` in
+   ``tests/test_layers/test_geometric/test_clifford_block.py``.
 
 3. Global branch superposition weight.  ``G_feat + G_glo`` uses an implicit
-   beta = 1, matching ``CliffordAlgebraBlock`` in the reference.  The repo's
-   other variant (``gffn.py``, ``gffn_mode="h"``) instead learns
-   ``beta = nn.Parameter([0.5])``, and Eq. 7 of the paper carries beta
-   explicitly.  If a learnable superposition weight is wanted, add it as a new
-   opt-in kwarg rather than changing the default.
+   beta = 1, matching ``CliffordAlgebraBlock`` in the reference -- and that IS
+   Eq. 7 of the paper, not a deviation from it.  Eq. 7 reads
+   ``dH/dt = P_loc(H(C_loc)) + beta * P_glo(H(C_glo))``, "where beta in {0, 1}
+   serves as a structural switch: beta=0 prioritizes extreme parameter
+   efficiency ... beta=1 integrates the global interaction mechanism"
+   (section 3.4).  Eq. 7's beta is therefore exactly this port's
+   ``use_global_context`` flag: ``False`` is beta=0, ``True`` is beta=1.  At
+   ``use_global_context=True`` this block IS Eq. 7 at beta=1.
+
+   The *learnable* ``beta = nn.Parameter([0.5])`` is a deviation from the
+   paper introduced by the REFERENCE repo's other variant -- ``gffn.py``,
+   ``gffn_mode="h"``, in github.com/ParaMind2025/CAN.  There is no ``gffn.py``
+   anywhere in dl_techniques, so do not grep this repo for it; the paper's own
+   section 3.7 defines gFFN-H as ``C = dH + beta*GlobalAvg(H)``.
+   ``research/2026_cliffordnet_gometric_algebra.md`` § 5.4 "Dual-Scale
+   Superposition (gFFN-H)" (line 210 as of 2026-08-11) already states beta's
+   role correctly.  If a learnable superposition weight is wanted here, add it
+   as a new opt-in kwarg rather than changing the default.
 
 4. Weight initialization does not reproduce the paper.  The reference applies
    ``trunc_normal_(std=0.02)`` to every Conv2d/Linear and zeroes biases; the
@@ -201,6 +273,72 @@ Implementation notes, known behaviours and deviations
 6. ``@keras.saving.register_keras_serializable()`` is intentionally left without
    a ``package=`` argument.  Adding one would change the registered name from
    ``Custom>ClassName`` and break by-name loading of existing ``.keras`` files.
+
+7. The image-mode context norm matches ``nn.BatchNorm2d`` in KIND ONLY.  In
+   ``input_mode="image"`` the context normalization defaults to
+   ``"batch_norm"``, i.e. a ``keras.layers.BatchNormalization`` built through
+   ``norms/factory.py::create_normalization_layer``.  Two of its
+   hyperparameters silently differ from the reference ``nn.BatchNorm2d``, and
+   neither is reachable on the default path (both MEASURED on the constructed
+   layer, not read off the docs)::
+
+       parameter   reference nn.BatchNorm2d   this port
+       ---------   -------------------------   ---------------------------
+       epsilon     1e-5                        1e-6   (imposed by the
+                                               factory's
+                                               setdefault('epsilon', 1e-6))
+       momentum    0.1                         0.99   (Keras' own default,
+                                               never set by this module)
+
+   The momentum row is the material one, and the two frameworks' conventions
+   are inverses of each other: torch's 0.1 is Keras' 0.9, so 0.99 is a **10x
+   longer** EMA window on the running statistics.  A short run therefore
+   leaves inference-time statistics lagging the training distribution
+   considerably further behind than the reference would.  Pass
+   ``normalization_kwargs={"epsilon": 1e-5, "momentum": 0.9}`` for
+   reproduction runs (verified to reach the layer).  As with note 4, the
+   default is left alone rather than "corrected", to avoid silently changing
+   the behaviour of existing checkpoints.
+
+8. Sequence mode has NO masking support, and a padded batch is NOT equivalent
+   to an unpadded one.  ``supports_masking`` is ``False`` (MEASURED on a
+   constructed block), so a Keras mask arriving from e.g.
+   ``Embedding(mask_zero=True)`` is DESTROYED with a ``UserWarning`` and never
+   reaches this layer; zero padding is then processed as ordinary data.  Two
+   separate effects, measured at ``channels=8``, ``shifts=[1, 2]``,
+   ``layer_scale_init=1.0``, ``training=False``, a 6-token real prefix,
+   output absmax ~2.5::
+
+       use_global_context   pad-to-8 vs pad-to-12, real positions 0..5
+       ------------------   ------------------------------------------
+       False                [0, 0, 0, 0, 0, 0]        (exactly zero)
+       True                 [0.074, 0.116, 0.093, 0.097, 0.061, 0.449]
+
+   * **Boundary effect (always).**  The two stacked same-padded depthwise
+     convolutions pull zero pad into the receptive field of the real positions
+     within (2K-2) of the boundary.  Measured unpadded ``L=6`` vs padded-to-8
+     with ``use_global_context=False``: ``[0, 0, 0, 0, 0, 1.183]`` -- the LAST
+     real position changes by 1.183 on a ~2.4-scale output, everything before
+     it by exactly 0.  Adding *more* pad beyond that margin changes nothing
+     (the pad-to-8 vs pad-to-12 row above is exactly zero), so this effect
+     depends on the PRESENCE of padding, not on its length.
+   * **Global-pool effect (the worst case, ``use_global_context=True``).**
+     The global branch takes ``mean(axis=[1, 2])`` over the WHOLE padded
+     length, so the pad LENGTH itself changes EVERY real position: the same
+     6-token prefix padded to 12 instead of to 8 moves positions 0..3 by up to
+     **0.116** and the whole real prefix by **0.449** (an independent
+     adversarial review measured **0.186** on positions 0..3 from its own
+     draw).  Batch composition therefore changes each sequence's output.
+
+   Masking is deliberately NOT implemented here -- it is a new capability
+   (mask propagation through two convolutions, the pooled branch and the
+   normalizations), not a repair.  Until it is: bucket sequences by length so
+   a batch needs little or no padding, or pool with an EXPLICIT mask outside
+   the block (``models/clip/clifford_clip.py``'s text tower already does
+   exactly this).  Both effects are pinned as known behaviour by
+   ``TestSequencePaddingHazard`` in
+   ``tests/test_layers/test_geometric/test_clifford_block.py``; if masking is
+   ever added, those tests FAIL and this note must be rewritten.
 
 Key primitives
 --------------
@@ -224,7 +362,17 @@ that serialized either registered class name can no longer be loaded.
 from __future__ import annotations
 
 import numbers
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import keras
 from keras import initializers, regularizers
@@ -242,9 +390,11 @@ from ..norms.factory import create_normalization_layer
 
 CliMode = Literal["inner", "wedge", "full"]
 CtxMode = Literal["diff", "abs"]
+InputMode = Literal["image", "sequence"]
 
 _CLI_MODES: Tuple[str, ...] = ("inner", "wedge", "full")
 _CTX_MODES: Tuple[str, ...] = ("diff", "abs")
+_INPUT_MODES: Tuple[str, ...] = ("image", "sequence")
 
 # Global-branch constants matching the original implementation.
 _GLOBAL_SHIFTS: List[int] = [1, 2]
@@ -253,6 +403,21 @@ _GLOBAL_CLI_MODE: CliMode = "full"
 # global branch needs strictly more channels than its largest shift for all of
 # _GLOBAL_SHIFTS to survive.
 _MIN_GLOBAL_CHANNELS: int = max(_GLOBAL_SHIFTS) + 1
+
+# Normalization types measured to reduce over the SEQUENCE axis, i.e. every
+# position's output depends on all positions. Selecting one of these on a causal
+# block silently leaks the future into the past.
+_SEQUENCE_REDUCING_NORMS: FrozenSet[str] = frozenset({
+    "batch_norm",              # reduces over (B, H, W) at training=True
+    "bias_free_batch_norm",    # same reduction-axis logic, at training=True
+    "global_response_norm",    # reduces over (H, W) UNCONDITIONALLY - not training-gated
+})
+
+# The per-position context norm used for every sequence-mode block, and the
+# substitute `from_config` puts in place of a LEGACY sequence-reducing choice.
+# Single source of truth: the sequence-mode default resolution, the
+# `CausalCliffordNetBlock` setdefault and the legacy-config repair all read it.
+_CAUSAL_SAFE_NORM: str = "zero_centered_rms_norm"
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +677,26 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         (``z_det``), because ``build`` declares a single parameter; both streams
         are required to have the same shape.
 
-        :param input_shape: Shape of a *single* input tensor ``(B, H, W, D)``.
+        :param input_shape: Shape of a *single* input tensor ``(B, ..., D)``.
+        :raises ValueError: If the channel axis does not equal ``channels``.
         """
+        # DECISION plan-2026-08-11T110821-54118fdd/D-006
+        # Guard the CHANNEL AXIS ONLY. NEVER add a rank check here.
+        # This layer is deliberately rank-agnostic and is MEASURED working at
+        # ranks 2, 3, 4 and 5. Two shipped consumers depend on rank 2:
+        # `layers/geometric/clifford_rnn.py` (the RNN cell runs it per timestep
+        # on `(B, D)`), and `models/clip/clifford_clip.py`'s `vision_head_geo` /
+        # `text_head_geo`, which run it on pooled `(B, D)` vectors. An
+        # `InputSpec(ndim=4)`-style tightening here would break both. Inspect
+        # `input_shape[-1]` and nothing else. See decisions.md D-006.
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"{type(self).__name__} expected last dim == channels="
+                f"{self.channels}, got input_shape[-1]={input_shape[-1]}. "
+                f"Both streams (z_det, z_ctx) must already carry "
+                f"{self.channels} channels; project before this layer or "
+                f"rebuild it with channels={input_shape[-1]}."
+            )
         self._input_shape_for_build = tuple(input_shape)
         self.proj.build((*input_shape[:-1], self._proj_input_dim))
         super().build(input_shape)
@@ -870,7 +1053,9 @@ class GatedGeometricResidual(keras.layers.Layer):
 class CliffordNetBlock(keras.layers.Layer):
     """Full isotropic CliffordNet block (no FFN).
 
-    Implements the geometric-algebra vision block from arXiv:2601.06793v2.
+    Implements the geometric-algebra block from arXiv:2601.06793v2 -- a vision
+    block in ``input_mode="image"``, and a 1-D sequence block (bidirectional,
+    or autoregressive with ``causal=True``) in ``input_mode="sequence"``.
     A dual-stream architecture generates detail ``Z_det = Linear(X_norm)`` and
     context ``Z_ctx = act(Norm(DWConv(DWConv(X_norm))))`` streams, optionally
     subtracting the detail stream from the context (``ctx_mode="diff"``). The
@@ -882,9 +1067,13 @@ class CliffordNetBlock(keras.layers.Layer):
     .. note::
 
         ``ctx_mode`` does not affect the wedge branch at all: the self-terms
-        cancel by antisymmetry, so ``cli_mode="wedge"`` makes ``ctx_mode``
-        inert and ``cli_mode="full"`` only differences the inner term. See
-        note 2 in the module docstring.
+        cancel by antisymmetry (for ANY multiple of ``Z_det``, not just
+        ``Z_det`` itself), so ``cli_mode="wedge"`` makes ``ctx_mode`` inert and
+        ``cli_mode="full"`` only differences the inner term. "Inert" is
+        mathematical, not bitwise -- the two settings produce identical weights
+        and configs but float outputs differing by ~1e-7 relative, because the
+        code forms ``ctx - det`` first and never performs the cancellation.
+        See note 2 in the module docstring for the measurements.
 
     .. note::
 
@@ -910,7 +1099,7 @@ class CliffordNetBlock(keras.layers.Layer):
         ┌──────────────┐ ┌──────────────────┐
         │ Detail       │ │ Context          │
         │ Z_det=       │ │ DWConv→DWConv→   │
-        │  Linear(X)   │ │ BN→SiLU→Z_ctx    │
+        │  Linear(X)   │ │ Norm→act→Z_ctx   │
         └──────┬───────┘ └────────┬─────────┘
                │    (diff: Z_ctx -= Z_det)
                ├──────────┬───────┘
@@ -931,6 +1120,15 @@ class CliffordNetBlock(keras.layers.Layer):
         │ [B, H, W, D]                   │
         └────────────────────────────────┘
 
+    The ``[B, H, W, D]`` shapes above are the INTERNAL representation, which is
+    always rank-4.  In ``input_mode="sequence"`` the public contract is
+    ``(B, L, D)`` or ``(B, 1, L, D)`` -- a rank-3 input is expanded to
+    ``(B, 1, L, D)`` on entry to ``call()`` and squeezed back on exit, so the
+    output ALWAYS has the same rank as the input.  ``Norm`` in the context
+    stream is the mode-derived ``normalization_type`` (BatchNormalization in
+    image mode, a per-position norm in sequence mode -- see that parameter
+    below), and ``act`` is the ``activation`` kwarg, default SiLU.
+
     :param channels: Feature dimensionality D (constant throughout).
     :type channels: int
     :param shifts: Channel-shift offsets for the local interaction.
@@ -944,11 +1142,35 @@ class CliffordNetBlock(keras.layers.Layer):
     :param use_global_context: Whether to add a global-average-pool branch.
         Requires ``channels >= 3``. Defaults to ``False``.
     :type use_global_context: bool
-    :param causal: Sequence-safe mode for autoregressive use. Expects 4-D input
-        ``(B, 1, seq_len, D)``; uses ``(1, K)`` valid depthwise convolutions
-        with left-only padding and a causal cumulative mean for the global
-        context. Defaults to ``False``.
+    :param causal: Sequence-safe mode for autoregressive use. IMPLIES
+        ``input_mode="sequence"`` (passing ``input_mode="image"`` alongside it
+        raises); uses ``(1, K)`` valid depthwise convolutions with left-only
+        padding and a causal cumulative mean for the global context. Accepts
+        ``(B, seq_len, D)`` or ``(B, 1, seq_len, D)``. Defaults to ``False``.
     :type causal: bool
+    :param input_mode: Input contract. ``"image"`` accepts rank-4
+        ``(B, H, W, D)`` only and uses ``(K, K)`` same-padded depthwise
+        convolutions. ``"sequence"`` accepts BOTH rank-3 ``(B, L, D)`` and
+        rank-4 ``(B, 1, L, D)`` (the sequence axis is axis 2; axis 1 must be a
+        singleton) and uses ``(1, K)`` depthwise convolutions — same-padded and
+        therefore bidirectional when ``causal=False``, valid-padded with an
+        explicit left pad when ``causal=True``. ``None`` (the default) resolves
+        to ``"sequence"`` when ``causal=True`` and to ``"image"`` otherwise; the
+        RESOLVED value is what ``get_config`` serializes. This is a construction
+        -time choice, not an inference from the input rank, because the two
+        geometries register DIFFERENT depthwise kernel shapes — ``(1, K, D, 1)``
+        vs ``(K, K, D, 1)`` — so an inferred mode would make the saved weight
+        layout a function of the first tensor seen.
+
+        **Sequence mode does NOT support masking, and padded batches are not
+        neutral.** ``supports_masking`` is ``False``, so a Keras mask (e.g.
+        from ``Embedding(mask_zero=True)``) is DESTROYED here with a
+        ``UserWarning``, and zero padding participates in the computation like
+        any other value. Two distinct, measured consequences — see note 8 in
+        the module docstring for the numbers and for what to do instead
+        (bucket by length, or pool with an explicit mask OUTSIDE the block, as
+        ``models/clip/clifford_clip.py`` already does for its text tower).
+    :type input_mode: Optional[InputMode]
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
     :param use_bias: Whether the detail/projection Dense layers use a bias.
@@ -973,7 +1195,9 @@ class CliffordNetBlock(keras.layers.Layer):
         ``True``.
     :type use_gate: bool
     :param context_kernel_size: Depthwise kernel size K for the two context
-        convolutions; effective receptive field is (2K-1). Defaults to 3.
+        convolutions; the effective receptive field is (2K-1) positions along
+        each convolved axis -- (2K-1)x(2K-1) in image mode, (2K-1) along the
+        sequence axis in sequence mode. Defaults to 3.
     :type context_kernel_size: int
     :param kernel_initializer: Kernel initializer for Dense layers. See note 4
         in the module docstring regarding reproduction of the paper.
@@ -985,9 +1209,25 @@ class CliffordNetBlock(keras.layers.Layer):
     :param bias_regularizer: Bias regularizer for Dense layers.
     :type bias_regularizer: Optional[Any]
     :param normalization_type: Normalization applied to the context stream,
-        resolved by ``create_normalization_layer``. Defaults to
-        ``"batch_norm"``, matching the reference ``BatchNorm2d``.
-    :type normalization_type: str
+        resolved by ``create_normalization_layer``. ``None`` (the default)
+        resolves per MODE: ``"batch_norm"`` in image mode (the reference's
+        ``BatchNorm2d`` in KIND only -- its ``epsilon`` and ``momentum``
+        deviate; see note 7 in the module docstring) and
+        ``"zero_centered_rms_norm"`` in sequence
+        mode, causal or not. The RESOLVED value is what ``get_config``
+        serializes, so this default is checkpoint-safe. Passing one of
+        ``_SEQUENCE_REDUCING_NORMS`` (``"batch_norm"``,
+        ``"bias_free_batch_norm"``, ``"global_response_norm"``) explicitly
+        together with ``causal=True`` raises ``ValueError``: those types reduce
+        over the sequence axis, so the future leaks into the past. The check is
+        not gated on ``training`` because ``"global_response_norm"`` reduces
+        unconditionally. The raise is a CONSTRUCTOR-only rule: a LEGACY
+        config carrying that combination is repaired (with a warning) by
+        :meth:`from_config`, so pre-fix checkpoints stay loadable.
+        Non-causal sequence mode is deliberately NOT
+        restricted — a bidirectional encoder is allowed to mix across
+        positions.
+    :type normalization_type: Optional[str]
     :param normalization_kwargs: Extra kwargs for the context normalization.
     :type normalization_kwargs: Optional[Dict[str, Any]]
     :param input_normalization_type: Normalization applied to the block input.
@@ -1000,6 +1240,11 @@ class CliffordNetBlock(keras.layers.Layer):
     :param kwargs: Passed to ``keras.layers.Layer``.
     """
 
+    #: Whether this class pins ``causal=True`` regardless of the config dict.
+    #: Read by :meth:`from_config` so a config that omits the ``causal`` key is
+    #: still recognised as causal for subclasses that force it.
+    _FORCES_CAUSAL: bool = False
+
     def __init__(
         self,
         channels: int,
@@ -1008,6 +1253,7 @@ class CliffordNetBlock(keras.layers.Layer):
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
         causal: bool = False,
+        input_mode: Optional[InputMode] = None,
         layer_scale_init: float = 1e-5,
         use_bias: bool = True,
         activation: Any = "silu",
@@ -1020,7 +1266,7 @@ class CliffordNetBlock(keras.layers.Layer):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
-        normalization_type: str = "batch_norm",
+        normalization_type: Optional[str] = None,
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         input_normalization_type: Optional[str] = None,
         input_normalization_kwargs: Optional[Dict[str, Any]] = None,
@@ -1038,6 +1284,75 @@ class CliffordNetBlock(keras.layers.Layer):
             raise ValueError(
                 f"ctx_mode must be one of {_CTX_MODES}, got {ctx_mode!r}"
             )
+        if input_mode is not None and input_mode not in _INPUT_MODES:
+            raise ValueError(
+                f"input_mode must be one of {_INPUT_MODES}, got {input_mode!r}"
+            )
+        # `causal` IMPLIES sequence mode. An unspecified input_mode (None)
+        # resolves silently; an explicit "image" is an incoherent request (a
+        # causal block convolves along axis 2 with left-only padding, which is
+        # meaningless for a real H>1 image) and is rejected loudly rather than
+        # overridden behind the caller's back.
+        if causal:
+            if input_mode == "image":
+                raise ValueError(
+                    "input_mode='image' is incompatible with causal=True: "
+                    "causal blocks are sequence blocks (they left-pad and "
+                    "convolve along axis 2 with a (1, K) kernel). Pass "
+                    "input_mode='sequence' or omit it."
+                )
+            resolved_input_mode: str = "sequence"
+        else:
+            resolved_input_mode = input_mode if input_mode is not None else "image"
+        # The context-norm DEFAULT is mode-derived: image mode keeps
+        # `batch_norm` (the reference's `BatchNorm2d` in KIND only -- its
+        # epsilon and momentum deviate, module docstring note 7), sequence mode
+        # (causal or not) gets a per-position norm. Only an EXPLICIT caller
+        # choice can be unsafe, so
+        # the raise below is reachable only from a caller-supplied value and the
+        # resolved default can never trip it.
+        if normalization_type is None:
+            resolved_normalization_type: str = (
+                _CAUSAL_SAFE_NORM
+                if resolved_input_mode == "sequence"
+                else "batch_norm"
+            )
+        else:
+            # DECISION plan-2026-08-11T110821-54118fdd/D-002
+            # A causal block reshapes its sequence to (B, 1, L, D), so axis 2 IS
+            # the sequence axis -- and `batch_norm`/`bias_free_batch_norm`
+            # reduce over (B, H, W) at training=True while
+            # `global_response_norm` reduces over (H, W) UNCONDITIONALLY (it
+            # leaks at inference too, which is why this raise is NOT gated on
+            # `training`). Measured on a 4x1x12x8 probe with a fresh NON-DC
+            # perturbation of positions 8..11: max |delta| over positions 0..7
+            # was 1.067 on a signal of scale 4.95, i.e. ~22% of the signal
+            # flowing backwards in time. Do NOT "fix" this by probing with a DC
+            # shift -- that probe is VACUOUS (measured leak 1.9e-06) because the
+            # input LayerNorm removes a per-position DC offset before the
+            # context stream ever sees it. Do NOT extend this raise to
+            # non-causal sequence mode (a bidirectional encoder is ALLOWED to
+            # mix across positions) and do NOT change image mode's `batch_norm`
+            # default: it is load-bearing for the strict xfail at
+            # test_video_jepa.py::test_predictor_graph_mode_dropout_zero and for
+            # the batch_size >= 2 guards in the video_jepa data path. See
+            # decisions.md D-002.
+            if causal and normalization_type in _SEQUENCE_REDUCING_NORMS:
+                raise ValueError(
+                    f"normalization_type={normalization_type!r} is incompatible "
+                    f"with causal=True: it reduces over the sequence axis, so "
+                    f"every position's context normalization sees the whole "
+                    f"sequence and the future leaks into the past (measured max "
+                    f"|delta| 1.067 on a 4.95-scale signal). "
+                    f"'batch_norm' and 'bias_free_batch_norm' leak at "
+                    f"training=True; 'global_response_norm' reduces "
+                    f"unconditionally and leaks at inference too. Sequence-axis"
+                    f"-reducing types are "
+                    f"{sorted(_SEQUENCE_REDUCING_NORMS)}; pass a per-position "
+                    f"type such as 'zero_centered_rms_norm' (the causal "
+                    f"default) or omit normalization_type."
+                )
+            resolved_normalization_type = normalization_type
         if (
             not isinstance(context_kernel_size, numbers.Integral)
             or isinstance(context_kernel_size, bool)
@@ -1061,8 +1376,11 @@ class CliffordNetBlock(keras.layers.Layer):
             logger.warning(
                 "CliffordNetBlock: ctx_mode='diff' has NO effect when "
                 "cli_mode='wedge' (the self-terms cancel by antisymmetry, so "
-                "W(det, ctx - det) == W(det, ctx)). This model is identical "
-                "to ctx_mode='abs'."
+                "W(det, ctx - k*det) == W(det, ctx) for any k). This model is "
+                "MATHEMATICALLY EQUIVALENT to ctx_mode='abs' -- same weights, "
+                "same config -- but its float outputs are not bit-identical "
+                "(measured ~1e-7 relative): the implementation forms "
+                "ctx - det first and never performs the cancellation."
             )
 
         self.channels = channels
@@ -1074,6 +1392,7 @@ class CliffordNetBlock(keras.layers.Layer):
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
         self.causal = causal
+        self.input_mode = resolved_input_mode
         self.layer_scale_init = layer_scale_init
         self.use_bias = use_bias
         self.activation = _activation_spec(activation)
@@ -1087,21 +1406,27 @@ class CliffordNetBlock(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
-        self.normalization_type = normalization_type
+        # The RESOLVED string, never the None sentinel: get_config() serializes
+        # this attribute, so a future change to the mode-derived default cannot
+        # silently re-type an existing checkpoint's context norm.
+        self.normalization_type = resolved_normalization_type
         self.normalization_kwargs = dict(normalization_kwargs or {})
         self.input_normalization_type = input_normalization_type
         self.input_normalization_kwargs = dict(input_normalization_kwargs or {})
 
-        # Rank is not negotiable: the causal path pads and convolves along
-        # axis 2 and assumes a singleton axis 1. Declaring it here turns what
-        # used to be an IndexError inside build() into a clear Keras error.
-        if self.causal:
-            self.input_spec = keras.layers.InputSpec(ndim=4, axes={1: 1})
+        # Image mode is rank-4-only. Sequence mode accepts BOTH rank-3
+        # ``(B, L, D)`` and rank-4 ``(B, 1, L, D)``; ``InputSpec`` cannot
+        # express "ndim in {3, 4} AND axis 1 == 1 when ndim == 4" (measured on
+        # Keras 3.8: combining ``axes={1: 1}`` with ``min_ndim=3`` rejects every
+        # rank-3 input), so the singleton-H constraint is enforced in build().
+        if self.input_mode == "sequence":
+            self.input_spec = keras.layers.InputSpec(min_ndim=3, max_ndim=4)
         else:
             self.input_spec = keras.layers.InputSpec(ndim=4)
 
-        # Static sequence length captured at build time (causal path only).
-        self._causal_seq_len: Optional[int] = None
+        # Rank of the tensor the layer was built on. Rank 3 means call() must
+        # expand to the internal 4-D representation and squeeze on the way out.
+        self._input_rank: Optional[int] = None
 
         _dense_kwargs: Dict[str, Any] = dict(
             use_bias=use_bias,
@@ -1136,40 +1461,71 @@ class CliffordNetBlock(keras.layers.Layer):
         # both, then `activation` in call(). No activation between the two
         # convolutions, matching the reference `get_context_local`.
         #
-        # The `causal` flag gates the four (and only four) behavioural
-        # differences between the vision and sequence variants: (a) the
-        # depthwise geometry here ((1,K)/valid + explicit left-pad vs
-        # (K,K)/same); (b) the build() shapes (left-padded); (c) the call()
-        # padding before each DWConv; (d) the global-context statistic (causal
-        # cumulative mean vs full-image GAP). CausalCliffordNetBlock is a thin
-        # subclass; do not duplicate the block body into it, and do not merge
-        # these two convolution paths.
-        if self.causal:
-            self.dw_conv = keras.layers.DepthwiseConv2D(
-                kernel_size=(1, self.context_kernel_size),
-                padding="valid",
-                use_bias=False,
-                name="dw_conv",
-            )
-            self.dw_conv2 = keras.layers.DepthwiseConv2D(
-                kernel_size=(1, self.context_kernel_size),
-                padding="valid",
-                use_bias=False,
-                name="dw_conv2",
-            )
+        # Two INDEPENDENT flags gate the differences between the vision and the
+        # sequence variants; re-derive this list from the code before trusting
+        # it, and keep the two axes apart -- an earlier version of this comment
+        # attributed all of it to `causal` alone, which stopped being true when
+        # `input_mode` was introduced.
+        #
+        # `input_mode == "sequence"` (implied by causal=True, but also
+        # selectable on its own for a BIDIRECTIONAL sequence encoder) gates:
+        #   (i)  the depthwise KERNEL geometry, (1,K) vs (K,K) -- right here;
+        #   (ii) the default `normalization_type`, "zero_centered_rms_norm" vs
+        #        "batch_norm" (resolved in __init__ above);
+        #   (iii) the accepted input ranks: {3, 4} via InputSpec/build(), and
+        #        the rank-3 expand/squeeze in call(), vs rank-4 only.
+        #
+        # `causal` gates, on top of the above:
+        #   (a) the depthwise PADDING, "valid" (+ explicit left-pad) vs "same"
+        #       -- also right here;
+        #   (b) the build() shapes (both DWConvs are built left-padded);
+        #   (c) the call() left-pad before each DWConv;
+        #   (d) the global-context statistic (causal cumulative mean vs
+        #       full-image GAP);
+        #   (e) the ValueError on an EXPLICIT sequence-axis-reducing
+        #       normalization_type (see the D-002 anchor in __init__).
+        #
+        # CausalCliffordNetBlock is a thin subclass; do not duplicate the block
+        # body into it, and do not merge these two convolution paths.
+        # DECISION plan-2026-08-11T110821-54118fdd/D-001
+        # The internal representation is ALWAYS 4-D ``(B, H, W, D)``, even when
+        # the public contract is a rank-3 ``(B, L, D)`` sequence. Do NOT replace
+        # these DepthwiseConv2D layers with a native ``DepthwiseConv1D``: that
+        # would change the registered kernels from ``(1, K, D, 1)`` to
+        # ``(K, D, 1)`` and break by-name ``.keras`` loading for EVERY existing
+        # causal checkpoint (cliffordnet/lm.py, the CLIP text tower, the
+        # video_jepa causal blocks). Rank-3 support is therefore a call()-level
+        # expand/squeeze around an unchanged 4-D body.
+        # Image mode deliberately keeps the ``(K, K)`` kernel: on an H=1 input a
+        # ``(K, K)`` same-padded convolution is provably bit-identical to the
+        # ``(1, K)`` middle-row one (measured: max abs diff 0.0), but 2/3 of its
+        # taps then multiply against zero padding and are dead weight -- so
+        # sequence mode uses ``(1, K)`` while image mode must keep ``(K, K)`` to
+        # stay weight-compatible with existing vision checkpoints. This is also
+        # why input_mode is an explicit constructor choice and is never inferred
+        # from the input rank: inferring it would make the saved kernel SHAPE a
+        # function of the first tensor the layer ever saw. See decisions.md
+        # D-001.
+        if self.input_mode == "sequence":
+            _dw_kernel: Any = (1, self.context_kernel_size)
+            # Causal: "valid" + the explicit left-pad in call(). Non-causal
+            # sequence: "same", i.e. a bidirectional 1-D context window.
+            _dw_padding = "valid" if self.causal else "same"
         else:
-            self.dw_conv = keras.layers.DepthwiseConv2D(
-                kernel_size=self.context_kernel_size,
-                padding="same",
-                use_bias=False,
-                name="dw_conv",
-            )
-            self.dw_conv2 = keras.layers.DepthwiseConv2D(
-                kernel_size=self.context_kernel_size,
-                padding="same",
-                use_bias=False,
-                name="dw_conv2",
-            )
+            _dw_kernel = self.context_kernel_size
+            _dw_padding = "same"
+        self.dw_conv = keras.layers.DepthwiseConv2D(
+            kernel_size=_dw_kernel,
+            padding=_dw_padding,
+            use_bias=False,
+            name="dw_conv",
+        )
+        self.dw_conv2 = keras.layers.DepthwiseConv2D(
+            kernel_size=_dw_kernel,
+            padding=_dw_padding,
+            use_bias=False,
+            name="dw_conv2",
+        )
         # Name kept as "ctx_bn" for checkpoint compatibility even though the
         # layer type is configurable.
         self.ctx_norm = create_normalization_layer(
@@ -1231,7 +1587,11 @@ class CliffordNetBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all sub-layers in dependency order.
 
-        :param input_shape: ``(B, H, W, D)``
+        :param input_shape: ``(B, H, W, D)`` in image mode; ``(B, L, D)`` or
+            ``(B, 1, L, D)`` in sequence mode.
+        :raises ValueError: If the rank is unsupported for the configured
+            ``input_mode``, if a rank-4 sequence input has ``H != 1``, or if the
+            channel axis does not equal ``channels``.
         """
         # This block is isotropic in channels. A mismatched D would otherwise
         # produce a cryptic broadcast error at the external residual add.
@@ -1242,7 +1602,41 @@ class CliffordNetBlock(keras.layers.Layer):
                 f"Project the input before the block (e.g. with a 1x1 Conv) "
                 f"or rebuild the block with channels={input_shape[-1]}."
             )
-        spatial_shape = tuple(input_shape)
+
+        rank = len(input_shape)
+        self._input_rank = rank
+        if self.input_mode == "sequence":
+            if rank not in (3, 4):
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"rank-3 (B, L, D) or rank-4 (B, 1, L, D) input, got "
+                    f"rank-{rank} shape {tuple(input_shape)}."
+                )
+            if rank == 4 and input_shape[1] is not None and input_shape[1] != 1:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"singleton axis 1 for rank-4 input (B, 1, L, D): the "
+                    f"sequence axis is axis 2. Got input_shape[1]="
+                    f"{input_shape[1]} in {tuple(input_shape)}."
+                )
+            # Internal representation is always 4-D (D-001).
+            if rank == 3:
+                spatial_shape = (
+                    input_shape[0],
+                    1,
+                    input_shape[1],
+                    input_shape[2],
+                )
+            else:
+                spatial_shape = tuple(input_shape)
+        else:
+            if rank != 4:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='image') expects a "
+                    f"rank-4 (B, H, W, D) input, got rank-{rank} shape "
+                    f"{tuple(input_shape)}."
+                )
+            spatial_shape = tuple(input_shape)
 
         # Step 1: norm
         self.input_norm.build(spatial_shape)
@@ -1253,9 +1647,6 @@ class CliffordNetBlock(keras.layers.Layer):
 
         # Step 2b: context -- two DWConvs, then a single normalization.
         if self.causal:
-            self._causal_seq_len = (
-                int(spatial_shape[2]) if spatial_shape[2] is not None else None
-            )
             pad = self.context_kernel_size - 1
             # The valid convolutions are built on LEFT-PADDED shapes so that,
             # after the explicit left-pad in call(), they preserve the
@@ -1291,12 +1682,56 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        :param inputs: Feature tensor ``(B, H, W, D)``.
+        :param inputs: Feature tensor ``(B, H, W, D)``; in sequence mode also
+            ``(B, L, D)`` or ``(B, 1, L, D)``.
         :param training: Whether in training mode.
-        :return: Residual term ``(B, H, W, D)``; the caller adds it to
-            ``inputs``.
+        :return: Residual term with the SAME rank and shape as ``inputs``; the
+            caller adds it to ``inputs``.
+        :raises ValueError: In sequence mode, if a rank-4 input has a
+            statically-known axis 1 other than 1. This is re-checked per call,
+            not only at build time, because a built layer accepts either rank.
         """
-        x_prev = inputs
+        # Rank-3 sequence input is lifted to the internal 4-D representation
+        # (D-001) and squeezed back at the end; the body below always sees
+        # (B, H, W, D). The branch reads the rank of THIS call's input rather
+        # than the rank seen at build time, so a layer built on (B, L, D) still
+        # behaves correctly if the equivalent (B, 1, L, D) is fed later (the
+        # sub-layers are built on the internal 4-D shape either way).
+        call_rank = len(inputs.shape)
+        # DECISION plan-2026-08-11T110821-54118fdd/D-013
+        # The "axis 1 must be a singleton" contract is re-checked HERE, not only
+        # in build(): `InputSpec(min_ndim=3, max_ndim=4)` carries no axis
+        # constraint, so an already-built sequence block otherwise silently
+        # accepts H != 1 -- measured, a block built on (2,12,8) then fed
+        # (2,5,12,8) was ACCEPTED and returned (2,5,12,8). The dangerous case is
+        # the axis-convention mix-up invariant I-3 forbids: a (B, L, 1, D)
+        # tensor (squeeze_excitation.py's opposite mapping) is convolved along a
+        # LENGTH-1 sequence axis, so there is no cross-position mixing at all,
+        # and no error and no warning today.
+        # Do NOT rewrite this as a check on a traced TENSOR shape
+        # (`keras.ops.shape(inputs)[1]`) guarded by a Python `if`: axis 1 is
+        # static by contract, and a data-dependent Python `if` on a traced
+        # tensor is silently turned into a `tf.cond` by AutoGraph (this repo
+        # carries a live strict=True xfail caused by exactly that mistake in
+        # BatchNormalization). The `is not None` short-circuit keeps a fully
+        # dynamic shape building, matching the build()-time guard. See
+        # decisions.md D-013.
+        if self.input_mode == "sequence" and call_rank == 4:
+            static_h = inputs.shape[1]
+            if static_h is not None and static_h != 1:
+                raise ValueError(
+                    f"{type(self).__name__}(input_mode='sequence') expects a "
+                    f"singleton axis 1 for rank-4 input (B, 1, L, D): the "
+                    f"sequence axis is axis 2. Got shape {tuple(inputs.shape)} "
+                    f"with axis 1 = {static_h}. If this is a (B, L, 1, D) "
+                    f"tensor, the axes are transposed — pass (B, L, D) or "
+                    f"(B, 1, L, D) instead; a length-1 axis 2 would be "
+                    f"convolved as the sequence and mix nothing."
+                )
+        if call_rank == 3:
+            x_prev = keras.ops.expand_dims(inputs, axis=1)
+        else:
+            x_prev = inputs
 
         # --- Step 1: Normalise ---
         # `training` is passed explicitly: a configurable input normalization
@@ -1310,7 +1745,9 @@ class CliffordNetBlock(keras.layers.Layer):
         # Two stacked depthwise convolutions -> norm -> activation. On the
         # causal path each valid convolution is preceded by a left-only pad so
         # position i sees only positions <= i; norm and activation are shared
-        # with the vision path.
+        # with the non-causal path (image mode AND bidirectional sequence
+        # mode), which differ from each other only in the kernel geometry
+        # chosen in __init__.
         if self.causal:
             z_ctx = self._causal_pad(x_norm, self.context_kernel_size)
             z_ctx = self.dw_conv(z_ctx)
@@ -1350,7 +1787,10 @@ class CliffordNetBlock(keras.layers.Layer):
             g_feat = g_feat + g_glo
 
         # --- Step 5: GGR (transform only; residual add is external) ---
-        return self.ggr(x_norm, g_feat, training=training)
+        h_mix = self.ggr(x_norm, g_feat, training=training)
+        if call_rank == 3:
+            h_mix = keras.ops.squeeze(h_mix, axis=1)
+        return h_mix
 
     # ------------------------------------------------------------------
 
@@ -1385,16 +1825,48 @@ class CliffordNetBlock(keras.layers.Layer):
         positions ``0..i``.  This preserves autoregressive causality while
         still providing each position with a growing global summary. Used only
         on the ``causal=True`` path.
+
+        The accumulation and the division are performed in ``float32`` when the
+        input dtype is narrower than ``float32`` (see the DECISION anchor
+        below); ``float32`` and ``float64`` inputs are computed in their own
+        dtype and are bit-unchanged.
         """
+        # DECISION plan-2026-08-11T110821-54118fdd/D-005
+        # Do NOT write the obvious `keras.ops.cast(keras.ops.arange(...),
+        # x.dtype)` here. Under `mixed_float16` the compute dtype is float16,
+        # and float16 cannot represent the integers 1..seq_len exactly past
+        # 2048: the divisor vector alone was MEASURED at 2.44e-04 relative
+        # error at the endpoint 4097 (4.88e-04 max over 1..4096, where the
+        # float16 spacing is 2) and at exactly 0.0 for seq_len == 2048. The
+        # float16 `cumsum` is a LARGER error still, because a running sum of
+        # thousands of terms is accumulated at 11-bit precision -- measured
+        # end-to-end against a float64 reference on the float16-rounded input,
+        # max relative error fell from 17.65 -> 7.7e-03 (L=2048), 17.65 ->
+        # 3.9e-02 (L=4096) and 458.8 -> 1.4e-01 (L=8192) when this widening
+        # was introduced, i.e. 449x to 3255x. Both the accumulation and the
+        # divisors are therefore widened to float32, and the result is cast
+        # back so the layer's public dtype contract is unchanged (float32
+        # output verified BIT-IDENTICAL, `np.array_equal` True).
+        # Widen only NARROWER-than-float32 dtypes: a float64 input must stay
+        # float64, so it is computed in float64, never downcast to float32.
+        input_dtype = keras.backend.standardize_dtype(x.dtype)
+        compute_dtype = (
+            "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
+        )
+
         # x shape: (B, 1, seq_len, D)
-        cumsum = keras.ops.cumsum(x, axis=2)  # (B, 1, seq_len, D)
+        x_c = keras.ops.cast(x, compute_dtype)
+        cumsum = keras.ops.cumsum(x_c, axis=2)  # (B, 1, seq_len, D)
+        # `keras.ops.shape(x)[2]` keeps this graph-safe under a dynamic
+        # sequence length (measured working at L=13 and L=29 through a
+        # functional model with `Input(shape=(1, None, D))`).
         seq_len = keras.ops.shape(x)[2]
         # divisors: [1, 2, 3, ..., seq_len] reshaped to (1, 1, seq_len, 1)
         divisors = keras.ops.cast(
-            keras.ops.arange(1, seq_len + 1), x.dtype
+            keras.ops.arange(1, seq_len + 1), compute_dtype
         )
         divisors = keras.ops.reshape(divisors, (1, 1, -1, 1))
-        return cumsum / divisors
+        return keras.ops.cast(cumsum / divisors, input_dtype)
 
     # ------------------------------------------------------------------
 
@@ -1403,7 +1875,11 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        :param input_shape: Input shape ``(B, H, W, D)``.
+        Rank-preserving by construction: a rank-3 ``(B, L, D)`` sequence input
+        yields a rank-3 output and a rank-4 input yields a rank-4 output, since
+        the internal H=1 axis is added and removed inside ``call()``.
+
+        :param input_shape: Input shape ``(B, H, W, D)`` or ``(B, L, D)``.
         :return: Same as input shape.
         """
         return input_shape
@@ -1424,6 +1900,9 @@ class CliffordNetBlock(keras.layers.Layer):
                 "ctx_mode": self.ctx_mode,
                 "use_global_context": self.use_global_context,
                 "causal": self.causal,
+                # The RESOLVED mode, never the None sentinel, so a reloaded
+                # config reproduces the DWConv geometry exactly.
+                "input_mode": self.input_mode,
                 "layer_scale_init": self.layer_scale_init,
                 "use_bias": self.use_bias,
                 "activation": _serialize_activation(self.activation),
@@ -1448,6 +1927,62 @@ class CliffordNetBlock(keras.layers.Layer):
         )
         return config
 
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CliffordNetBlock":
+        """Reconstruct from a config, REPAIRING legacy causal configs.
+
+        The constructor rejects a ``_SEQUENCE_REDUCING_NORMS`` type under
+        ``causal=True``. That combination is exactly what a PRE-FIX checkpoint
+        serializes: before this plan the base class resolved
+        ``normalization_type`` to ``"batch_norm"`` for every block including a
+        causal one, so ``CliffordNetBlock(causal=True)`` wrote
+        ``{"causal": True, "normalization_type": "batch_norm"}`` into its
+        ``.keras`` file. Deserializing that dict through the constructor raises
+        (Keras re-types the ``ValueError`` to
+        ``TypeError: Error when deserializing class 'CliffordNetBlock'``), which
+        would strand every such checkpoint with no recovery path.
+
+        This override detects that LEGACY combination and substitutes
+        ``_CAUSAL_SAFE_NORM``, logging a warning. The loaded model is therefore
+        NOT numerically identical to the saved one -- it is the saved model with
+        the causality violation removed.
+
+        :param config: Config dict as produced by :meth:`get_config`.
+        :return: A constructed block.
+        """
+        config = dict(config)
+        # DECISION plan-2026-08-11T110821-54118fdd/D-012
+        # Do NOT move this repair into `__init__`, and do NOT relax the
+        # constructor raise to a warning "for symmetry". The two paths are
+        # deliberately asymmetric: fresh code writing
+        # `CliffordNetBlock(causal=True, normalization_type="batch_norm")` is
+        # stating an intent that is measurably wrong (leak 1.067 on a
+        # 4.95-scale signal) and must fail loudly, while a config dict is a
+        # RECORD of a past construction that can no longer be re-decided --
+        # refusing it deletes access to trained weights and fixes nothing.
+        # `cls._FORCES_CAUSAL` is consulted as well as the `causal` key because
+        # `CausalCliffordNetBlock` forces `causal=True` in `__init__`, so a
+        # hand-written config for it need not carry the key at all. See
+        # decisions.md D-012.
+        causal = bool(config.get("causal", False)) or cls._FORCES_CAUSAL
+        legacy_norm = config.get("normalization_type")
+        if causal and legacy_norm in _SEQUENCE_REDUCING_NORMS:
+            config["normalization_type"] = _CAUSAL_SAFE_NORM
+            logger.warning(
+                f"{cls.__name__}: loading a LEGACY causal config whose "
+                f"normalization_type={legacy_norm!r} reduces over the sequence "
+                f"axis. The checkpoint was trained with a context normalizer "
+                f"that leaks the future into the past (measured max |delta| "
+                f"1.067 on a 4.95-scale signal); the loaded model uses "
+                f"{_CAUSAL_SAFE_NORM!r} instead. The loaded model is therefore "
+                f"NOT numerically identical to the saved one — its causality "
+                f"violation has been removed, which changes its outputs. "
+                f"Re-train or re-export to silence this warning."
+            )
+        return super().from_config(config)
+
 
 # ---------------------------------------------------------------------------
 # CausalCliffordNetBlock -- sequence-safe variant for autoregressive LMs
@@ -1458,13 +1993,20 @@ class CliffordNetBlock(keras.layers.Layer):
 class CausalCliffordNetBlock(CliffordNetBlock):
     """Causal (autoregressive) variant of :class:`CliffordNetBlock`.
 
-    Equivalent to ``CliffordNetBlock(causal=True)`` with a
-    ``"zero_centered_rms_norm"`` context-norm default: the two context
-    ``DepthwiseConv2D`` layers use ``kernel=(1, K)`` / ``padding="valid"``
-    with explicit left-only zero-padding, and the optional global-context
-    branch uses a causal cumulative mean, so position *i* only sees positions
-    ``<= i``. Expects 4-D input ``(B, 1, seq_len, D)`` (sequence reshaped for
-    2-D convolutions with ``H = 1``).
+    Behaviourally equivalent to ``CliffordNetBlock(causal=True)``: the two
+    context ``DepthwiseConv2D`` layers use ``kernel=(1, K)`` /
+    ``padding="valid"`` with explicit left-only zero-padding, and the optional
+    global-context branch uses a causal cumulative mean, so position *i* only
+    sees positions ``<= i``. Accepts EITHER rank-3 ``(B, seq_len, D)`` or
+    rank-4 ``(B, 1, seq_len, D)`` (the singleton ``H`` axis of the internal
+    4-D representation), and returns the rank it was given.
+
+    The ``"zero_centered_rms_norm"`` context-norm default is no longer unique
+    to this subclass: the base class resolves the SAME value for any
+    ``input_mode="sequence"`` block, causal or not. The ``setdefault`` in
+    ``__init__`` is kept anyway so this class keeps owning its documented
+    default instead of silently tracking a base default that has already moved
+    once.
 
     Kept as a registered subclass (rather than folded away) purely for
     checkpoint / back-compat: the registered class name and the legacy Keras
@@ -1477,10 +2019,17 @@ class CausalCliffordNetBlock(CliffordNetBlock):
         ``"zero_centered_rms_norm"``.
     """
 
+    #: This subclass can never be non-causal (``__init__`` forces the flag), so
+    #: ``from_config`` must treat a config that omits ``causal`` as causal too.
+    _FORCES_CAUSAL: bool = True
+
     def __init__(self, **kwargs: Any) -> None:
         # Preserve the causal-specific context-norm default while letting the
-        # caller override it explicitly.
-        kwargs.setdefault("normalization_type", "zero_centered_rms_norm")
+        # caller override it explicitly. Redundant since the base class resolves
+        # the same value for sequence mode, but kept so this subclass keeps
+        # OWNING its documented default rather than inheriting it silently: if
+        # the base default ever moves again, this class does not move with it.
+        kwargs.setdefault("normalization_type", _CAUSAL_SAFE_NORM)
         # Force causal=True even if a from_config dict carries a `causal` key,
         # so this subclass can never be built non-causal (and never raises a
         # duplicate-kwarg TypeError).

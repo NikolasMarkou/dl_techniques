@@ -6,12 +6,13 @@ import keras
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
+from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization import optimizer_builder
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
 
@@ -70,8 +71,7 @@ class CIFARSOMConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"cifar_softsom_ae_{timestamp}"
+            self.experiment_name = default_experiment_name("cifar_softsom_ae")
         if self.dataset_name not in ['cifar10', 'cifar100']:
             raise ValueError(f"Unknown dataset: {self.dataset_name}")
 
@@ -574,12 +574,16 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         steps_per_epoch=steps_per_epoch,
     )
 
-    if config.optimizer_type == 'adamw':
-        optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=config.weight_decay)
-    else:
-        optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+    # Build through the factory so clipping is set in the constructor rather
+    # than assigned onto the optimizer afterwards.
+    optimizer_config = (
+        {"type": "adamw", "weight_decay": config.weight_decay}
+        if config.optimizer_type == 'adamw'
+        else {"type": "adam"}
+    )
     if config.gradient_clip_norm > 0:
-        optimizer.clipnorm = config.gradient_clip_norm
+        optimizer_config["gradient_clipping_by_norm_local"] = config.gradient_clip_norm
+    optimizer = optimizer_builder(optimizer_config, lr_schedule)
 
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 

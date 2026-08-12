@@ -17,7 +17,11 @@ from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+# `create_warmup_lr_schedule` now lives in dl_techniques.optimization.schedule
+# alongside the other LR-schedule construction. It is re-exported here so the
+# ~11 existing `from train.common.nlp import create_warmup_lr_schedule` call
+# sites keep working unchanged.
+from dl_techniques.optimization.schedule import create_warmup_lr_schedule  # noqa: F401
 from dl_techniques.metrics.perplexity_metric import Perplexity
 from dl_techniques.metrics.llm_metrics import (
     BitsPerToken,
@@ -409,29 +413,6 @@ def estimate_clm_steps_per_epoch(
     else:
         chunks = (int(num_articles) * int(avg_tokens_per_article)) // max(1, max_seq_length)
     return max(1, chunks // max(1, batch_size))
-
-
-# ---------------------------------------------------------------------
-# Learning Rate Schedule
-# ---------------------------------------------------------------------
-
-
-def create_warmup_lr_schedule(
-    learning_rate: float,
-    num_epochs: int,
-    steps_per_epoch: int,
-    warmup_ratio: float = 0.1,
-) -> WarmupSchedule:
-    """Create warmup + cosine decay learning rate schedule for NLP training."""
-    total_steps = num_epochs * steps_per_epoch
-    warmup_steps = int(warmup_ratio * total_steps)
-    primary = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=learning_rate,
-        decay_steps=total_steps - warmup_steps, alpha=0.0,
-    )
-    return WarmupSchedule(
-        warmup_steps=warmup_steps, primary_schedule=primary, warmup_start_lr=1e-7,
-    )
 
 
 # ---------------------------------------------------------------------
