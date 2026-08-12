@@ -40,6 +40,7 @@ from train.common import (
     create_callbacks,
     run_model_analysis,
 )
+from train.common.callbacks import LearningRateLogger
 
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
@@ -48,15 +49,6 @@ sns.set_palette("husl")
 # ---------------------------------------------------------------------
 # PowerMLP-specific callbacks
 # ---------------------------------------------------------------------
-
-class LearningRateLogger(keras.callbacks.Callback):
-    """Custom callback to log learning rate to history."""
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is None:
-            logs = {}
-        lr = float(self.model.optimizer.learning_rate)
-        logs['lr'] = lr
 
 
 class NaNStoppingCallback(keras.callbacks.Callback):

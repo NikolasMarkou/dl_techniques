@@ -268,3 +268,59 @@ class EpochMetricsPlotCallback(keras.callbacks.Callback):
                 f"EpochMetricsPlotCallback: failed to create metrics plots: {e}",
                 exc_info=True,
             )
+
+
+# ---------------------------------------------------------------------
+
+def read_current_lr(model: keras.Model) -> float:
+    """Read the current learning rate from ``model``'s live optimizer.
+
+    ``optimizer.learning_rate`` already returns the CURRENT VALUE -- Keras
+    evaluates an attached ``LearningRateSchedule`` at the optimizer's step
+    before handing it back -- so a plain ``float()`` of it tracks the schedule
+    correctly. The isinstance branch below is defensive, for the case where an
+    optimizer hands back the schedule object itself.
+
+    Returns ``float('nan')`` if the optimizer or its learning rate is
+    unavailable (e.g. called before ``compile``), so a logging path can never
+    abort training.
+    """
+    try:
+        optimizer = model.optimizer
+        lr = optimizer.learning_rate
+        if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
+            return float(keras.ops.convert_to_numpy(lr(optimizer.iterations)))
+        return float(keras.ops.convert_to_numpy(lr))
+    except Exception:
+        return float("nan")
+
+
+# NOT @keras.saving.register_keras_serializable: callbacks are never
+# serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
+class LearningRateLogger(keras.callbacks.Callback):
+    """Record the current learning rate into ``logs`` each epoch.
+
+    Consolidates the copies that lived in the power_mlp and capsnet trainers
+    (a third, in ``clip/train_clip.py``, was never instantiated and was
+    deleted). Their bodies were equivalent; this is a de-duplication, NOT a
+    behaviour change -- see :func:`read_current_lr` on why the plain
+    ``float(optimizer.learning_rate)`` they used was already correct.
+
+    ``bfunet/common.py`` keeps its own ``LRLoggerCallback``: it deliberately
+    leaves ``logs['lr']`` UNSET on a non-finite read rather than writing a NaN
+    into the CSV row, and documents a callback-ordering contract.
+
+    Args:
+        log_key: Key written into ``logs``. The default ``'lr'`` matches what
+            the adopting trainers already recorded in their history; changing
+            it renames the series in every downstream plot and CSV column.
+    """
+
+    def __init__(self, log_key: str = "lr") -> None:
+        super().__init__()
+        self.log_key = log_key
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        if logs is None:
+            logs = {}
+        logs[self.log_key] = read_current_lr(self.model)
