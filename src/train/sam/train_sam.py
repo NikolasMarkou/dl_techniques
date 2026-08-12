@@ -53,7 +53,6 @@ weights, not the round count.
 import argparse
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Set, Tuple
 
 import keras
@@ -64,7 +63,10 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
 )
-from train.common.args import explicitly_set_flags
+from train.common.args import (
+    config_values_from_args,
+    resolved_run_dir as resolved_output_dir,
+)
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
@@ -402,32 +404,26 @@ def parse_arguments(
         read the process-level dests in :data:`NON_CONFIG_DESTS` (``--gpu``);
         everything else must come from the config.
     """
+    # DECISION plan-2026-08-03T191222-1d751f81/D-041
+    # Apply the preset HERE, in the builder, gated on PROVENANCE. Do NOT
+    # move it into `SAMTrainingConfig.__post_init__` the way
+    # `train/superpoint/train_superpoint.py:174` does: by then the argv
+    # tokens are gone, so `--smoke --epochs 50` (50 being the flag's own
+    # default) is indistinguishable from a bare `--smoke`, and the preset
+    # silently overrides a value the caller really typed. MEASURED: a
+    # value-vs-default reimplementation of `explicit_fields` fires exactly
+    # `test_an_explicitly_typed_DEFAULT_beats_the_preset` (`assert 3 == 50`).
+    # And do NOT add a field to SMOKE_PRESET that changes WHAT is measured
+    # (source, geometry, round count, loss weights, seed) -- only how much;
+    # `test_the_preset_changes_how_much_not_what` pins that list.
+    # The merge itself now lives in `train.common.args.config_values_from_args`
+    # (shared with sam2/sam3, plan-2026-08-12T123743-e798a9e1/D-015); this
+    # decision still governs WHERE it is called from and what SMOKE_PRESET may
+    # contain, both of which are local to this file.
     parser = build_parser()
-    args = parser.parse_args(argv)
-    explicit_dests = explicitly_set_flags(parser, argv)
-    explicit_fields = {
-        CLI_TO_CONFIG[dest] for dest in explicit_dests if dest in CLI_TO_CONFIG
-    }
-
-    values = {
-        field: getattr(args, dest) for dest, field in CLI_TO_CONFIG.items()
-    }
-    if values.get("smoke"):
-        # DECISION plan-2026-08-03T191222-1d751f81/D-041
-        # Apply the preset HERE, in the builder, gated on PROVENANCE. Do NOT
-        # move it into `SAMTrainingConfig.__post_init__` the way
-        # `train/superpoint/train_superpoint.py:174` does: by then the argv
-        # tokens are gone, so `--smoke --epochs 50` (50 being the flag's own
-        # default) is indistinguishable from a bare `--smoke`, and the preset
-        # silently overrides a value the caller really typed. MEASURED: a
-        # value-vs-default reimplementation of `explicit_fields` fires exactly
-        # `test_an_explicitly_typed_DEFAULT_beats_the_preset` (`assert 3 == 50`).
-        # And do NOT add a field to SMOKE_PRESET that changes WHAT is measured
-        # (source, geometry, round count, loss weights, seed) -- only how much;
-        # `test_the_preset_changes_how_much_not_what` pins that list.
-        for field, preset_value in SMOKE_PRESET.items():
-            if field not in explicit_fields:
-                values[field] = preset_value
+    args, values = config_values_from_args(
+        parser, argv, CLI_TO_CONFIG, SMOKE_PRESET
+    )
     return args, SAMTrainingConfig(**values)
 
 
@@ -446,36 +442,12 @@ def config_from_argv(
     return parse_arguments(argv)[1]
 
 
-def resolved_output_dir(config: SAMTrainingConfig) -> Path:
-    """
-    Resolve the run directory, anchoring a relative path at the REPO ROOT.
-
-    `python -m train.sam.train_sam` resolves from any working directory (the
-    editable install puts `<repo>/src` on `sys.path`), so a bare
-    ``results`` would otherwise create a stray results tree wherever the user
-    happened to be standing -- and the repo convention is repo-root
-    ``results/``, never ``src/results/``.
-
-    Args:
-        config: The run's config.
-
-    Returns:
-        ``<repo>/<output_dir>/<experiment_name>`` for a relative
-        ``output_dir``, or ``<output_dir>/<experiment_name>`` for an absolute
-        one.
-    """
-    # DECISION plan-2026-08-03T191222-1d751f81/D-041
-    # Anchor a relative path at the REPO ROOT, never at the cwd. Do NOT
-    # "simplify" this to `Path(config.output_dir) / name`: D-034 measured that
-    # the editable install makes `python -m train.sam.train_sam` resolve from
-    # ANY working directory, so the plain form writes a stray `results/` tree
-    # wherever the user happened to be standing -- including `src/results/`,
-    # which the repo convention names explicitly as the wrong place. Pinned by
-    # `test_the_resolved_path_is_not_under_src`.
-    root = Path(config.output_dir)
-    if not root.is_absolute():
-        root = Path(__file__).resolve().parents[3] / root
-    return root / str(config.experiment_name)
+# `resolved_output_dir` is `train.common.args.resolved_run_dir`, imported under
+# this module's own name at the top of the file (shared with sam2/sam3,
+# plan-2026-08-12T123743-e798a9e1/D-015). The D-041 reasoning it used to carry
+# -- anchor a relative path at the REPO ROOT, never at the cwd; do NOT
+# "simplify" it to `Path(config.output_dir) / name` -- moved with the body and
+# is still pinned here by `test_the_resolved_path_is_not_under_src`.
 
 
 # ---------------------------------------------------------------------------

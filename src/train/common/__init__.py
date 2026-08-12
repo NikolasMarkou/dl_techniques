@@ -2,9 +2,11 @@
 
 from train.common.gpu import setup_gpu, log_gpu_peak_memory, setup_mixed_precision
 from train.common.args import (
+    config_values_from_args,
     create_base_argument_parser,
     create_ts_argument_parser,
     explicitly_set_flags,
+    resolved_run_dir,
 )
 from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
 from train.common.optimizer import build_optimizer
@@ -131,6 +133,7 @@ __all__ = [
     "CIFAR10_MEAN",
     "CIFAR10_STD",
     "collect_image_paths",
+    "config_values_from_args",
     "convert_keras_history_to_training_history",
     "create_base_argument_parser",
     "create_clm_loss_fn",
@@ -196,6 +199,7 @@ __all__ = [
     "preprocess_mlm_dataset",
     "read_decode_resize_uint8",
     "read_tfrecord_dataset",
+    "resolved_run_dir",
     "run_model_analysis",
     "run_timestamp",
     "save_config_json",
