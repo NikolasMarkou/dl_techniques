@@ -68,9 +68,8 @@ class PretrainConfig:
     save_freq: int = 5000
 
     # Data Source Config
-    # If False, streams from internet (requires stable connection)
-    # If True, looks for local arrow files
-    load_from_disk: bool = False
+    # Loading is always streaming (`datasets.load_dataset(..., streaming=True)`);
+    # there is no local-arrow-file branch, so there is no knob to select one.
     wikipedia_date: str = "20220301.en"
 
 
