@@ -19,6 +19,10 @@ from train.common import create_callbacks as create_common_callbacks
 from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
+from dl_techniques.models.masked_language_model import (
+    MaskedLanguageModel,
+    visualize_mlm_predictions,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 # `create_warmup_lr_schedule` now lives in dl_techniques.optimization.schedule
@@ -580,6 +584,50 @@ def prepare_dict_keyed_compile(
 
 
 # ---------------------------------------------------------------------
+# MLM pre-training: qualitative evaluation
+# ---------------------------------------------------------------------
+
+# The four sentences the MLM pre-training scripts probe with. Module-level and
+# shared: a caller that wants different ones passes `test_texts`, rather than
+# forking the function -- forking is how bert's and fnet's copies of this block
+# came to exist in the first place.
+DEFAULT_MLM_PROBE_TEXTS = [
+    "The movie was really good and entertaining.",
+    "I loved the acting and the storyline was amazing.",
+    "This film was terrible and boring.",
+    "The plot was confusing but the effects were great.",
+]
+
+
+def evaluate_mlm_model(
+    mlm_model: MaskedLanguageModel,
+    preprocessor: TiktokenPreprocessor,
+    test_texts: Optional[List[str]] = None,
+) -> None:
+    """Evaluate the trained model with MLM prediction visualization.
+
+    One shared implementation of the block `src/train/bert/pretrain.py` and
+    `src/train/fnet/pretrain.py` carried byte-identically.
+
+    Args:
+        mlm_model: A built `MaskedLanguageModel`.
+        preprocessor: The tokenizer the model was trained with; must expose
+            `batch_encode(texts, return_tensors='np')`.
+        test_texts: Sentences to probe. `None` (default) uses
+            `DEFAULT_MLM_PROBE_TEXTS`, which is what both scripts passed
+            implicitly -- so the default is the behaviour, not a convenience.
+
+    Returns nothing: `visualize_mlm_predictions` prints/plots. `num_samples=4`
+    is passed to match the four default sentences; a caller supplying more
+    texts still visualises only the first four, exactly as before.
+    """
+    texts = DEFAULT_MLM_PROBE_TEXTS if test_texts is None else test_texts
+    test_inputs = preprocessor.batch_encode(texts, return_tensors='np')
+    test_batch = {k: tf.constant(v, dtype=tf.int32) for k, v in test_inputs.items()}
+    visualize_mlm_predictions(mlm_model=mlm_model, inputs=test_batch, tokenizer=preprocessor, num_samples=4)
+
+
+# ---------------------------------------------------------------------
 # Sentiment fine-tuning: post-training analysis
 # ---------------------------------------------------------------------
 
@@ -738,6 +786,8 @@ __all__ = [
     "create_nlp_callbacks",
     "build_clm_metrics",
     "prepare_dict_keyed_compile",
+    "DEFAULT_MLM_PROBE_TEXTS",
+    "evaluate_mlm_model",
     "sentiment_final_model_filename",
     "prepare_data_for_analyzer",
     "run_finetune_post_training_analysis",
