@@ -448,6 +448,16 @@ class TestGPT2UntiedLMHead:
         # ``use_bias=False`` — the head is a bare linear projection.
         assert model.lm_head.bias is None
 
+    # DECISION plan-2026-08-13T091555-230c101d/D-009
+    # Do NOT move this identity assertion back into the rectangular-config
+    # test above and do NOT "simplify" this square config away. At
+    # vocab_size != embed_dim the kernel (D, V) and the embedding table (V, D)
+    # have transposed shapes, so no injection can make them the same object
+    # while the head stays live: three separate attempts were defeated by an
+    # EARLIER guard (Keras' post-build state lock, a BatchMatMul shape error,
+    # and "You must build the layer before accessing `kernel`") rather than by
+    # the assertion. An assertion no injection can turn RED is a tautology, not
+    # a guard. See decisions.md D-009.
     def test_untied_head_kernel_is_not_the_embedding_variable(self):
         """The untied head's kernel must be its OWN variable, not an alias of
         the token-embedding table.
