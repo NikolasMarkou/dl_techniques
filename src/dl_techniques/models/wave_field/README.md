@@ -147,10 +147,10 @@ magnitude ~1.1):
 |---:|---:|---:|---|---|
 | 0.50 | 16 | 0.4839 | 5.46e-04 / 5.50e-04 | **LEAKS** |
 | 0.75 | 24 | 0.7419 | 3.77e-04 / 4.05e-04 | **LEAKS** |
-| 1.00 | 32 | 1.0000 | 6.71e-08 / 0.0 | clean |
+| 1.00 | 32 | 1.0000 | 6.71e-08 / below 1e-5 | clean |
 | 1.50 | 48 | 1.5161 | 4.96e-05 / 1.24e-04 | **LEAKS** |
-| 2.00 | 64 | 2.0323 | 5.96e-08 / 0.0 | clean ← **default** |
-| 4.00 | 128 | 4.0968 | 8.94e-08 / 0.0 | clean |
+| 2.00 | 64 | 2.0323 | 5.96e-08 / below 1e-5 | clean ← **default** |
+| 4.00 | 128 | 4.0968 | 8.94e-08 / below 1e-5 | clean |
 
 Read this table carefully:
 
@@ -163,6 +163,14 @@ Read this table carefully:
 - **Exact numbers are device-dependent** (CPU and GPU differ by up to ~2.5× on
   the leaky rows), so the pin in the test suite is an order-of-magnitude bound,
   not a number.
+- **"clean" does not mean exactly zero.** The clean residue is float32 noise at
+  logits of magnitude ~1.1, and it is *process-history dependent*: the same
+  config and seed measured `0.0` in one process ordering and `1.565e-07` in
+  another; ratio 2.00 gives `0.0` at seeds 1234/7 but `6.109e-07` at seed 99;
+  values up to `1.185e-06` have been seen on GPU with no code change. Rely only
+  on the order of magnitude — clean stays **below 1e-5**, leaky stays above it,
+  and the measurements above separate the two by ~40×. The probe below will
+  print small non-zero numbers on clean rows on some runs, and that is expected.
 - **Change either value and you must re-measure**, with the probe below.
 
 ### Measuring your own configuration
@@ -207,8 +215,10 @@ for field_size in (16, 32, 48, 64):
     print(f"field_size={field_size:4d}  ratio={ratio:4.2f}  worst leak={worst_leak(model):.3e}")
 ```
 
-One observed run (single RTX 4070; expect the leaky rows to move, the clean
-rows to stay at or near zero):
+One observed run (single RTX 4070). The `0.000e+00` rows below are *one
+process's* float32 residue, not a property: expect the leaky rows to move by up
+to ~2.5×, and expect the clean rows to print anything below `1e-5` (they have
+been observed up to `1.185e-06` on this GPU). Judge by the order of magnitude:
 
 ```
 field_size=  16  ratio=0.50  worst leak=5.420e-04

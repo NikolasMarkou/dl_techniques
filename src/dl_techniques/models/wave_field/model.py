@@ -60,12 +60,21 @@ Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressive
     ALL perturbed positions, against logits of magnitude ~1.1)::
 
         ratio  field_size  stride   worst leak (CPU / GPU)
-        0.50    16         0.4839   5.46e-04 / 5.50e-04   LEAKS
-        0.75    24         0.7419   3.77e-04 / 4.05e-04   LEAKS
-        1.00    32         1.0000   6.71e-08 / 0.0        clean
-        1.50    48         1.5161   4.96e-05 / 1.24e-04   LEAKS
-        2.00    64         2.0323   5.96e-08 / 0.0        clean   <- DEFAULT
-        4.00   128         4.0968   8.94e-08 / 0.0        clean
+        0.50    16         0.4839   5.46e-04 / 5.50e-04    LEAKS
+        0.75    24         0.7419   3.77e-04 / 4.05e-04    LEAKS
+        1.00    32         1.0000   6.71e-08 / below 1e-5  clean
+        1.50    48         1.5161   4.96e-05 / 1.24e-04    LEAKS
+        2.00    64         2.0323   5.96e-08 / below 1e-5  clean   <- DEFAULT
+        4.00   128         4.0968   8.94e-08 / below 1e-5  clean
+
+    A "clean" row is NOT an exact zero. The clean residue is float32 noise at
+    logits of magnitude ~1.1, and it is process-history dependent: the same
+    config and seed was measured at 0.0 in one process ordering and 1.565e-07
+    in another, ratio 2.0 gives 0.0 at seeds 1234/7 but 6.109e-07 at seed 99,
+    and values up to 1.185e-06 have been observed on GPU with no code change.
+    What is pinned — and all that should be relied on — is the ORDER OF
+    MAGNITUDE: a clean row stays below 1e-5, a leaky row stays above 1e-5, and
+    the two are separated by ~40x in the measurements above.
 
     ``field_size`` defaults to ``2 * max_seq_len`` (ratio 2.0), which measured
     clean at every configuration tested and whose stride

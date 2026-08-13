@@ -236,10 +236,10 @@ class TestWaveFieldLLMCausalityRatioSweep:
         ratio  field_size  stride   CPU        GPU(4070)   verdict
         0.50    16         0.4839   5.462e-04  5.505e-04   LEAKS
         0.75    24         0.7419   3.767e-04  4.049e-04   LEAKS
-        1.00    32         1.0000   6.706e-08  0.0         clean
+        1.00    32         1.0000   6.706e-08  below 1e-5  clean
         1.50    48         1.5161   4.961e-05  1.235e-04   LEAKS
-        2.00    64         2.0323   5.960e-08  0.0         clean  <- DEFAULT
-        4.00   128         4.0968   8.941e-08  0.0         clean
+        2.00    64         2.0323   5.960e-08  below 1e-5  clean  <- DEFAULT
+        4.00   128         4.0968   8.941e-08  below 1e-5  clean
 
     Exact values are device-dependent (CPU and GPU differ by up to ~2.5x on the
     leaky rows), so the pin is an order-of-magnitude bound, not a number. The
@@ -247,13 +247,31 @@ class TestWaveFieldLLMCausalityRatioSweep:
     silently vanished, a "leak is small" test would pass and the docstring
     table would go stale unnoticed. Note ratio 1.50 leaks while ratio 1.00 does
     not — the property is NOT monotone in the ratio.
+
+    The clean rows are NOT exact zeros, and an earlier revision of this table
+    that printed ``0.0`` in the GPU column was wrong. MEASURED: the same config
+    and seed gives 0.0 in one process ordering and 1.565e-07 in another; ratio
+    2.0 gives 0.0 at seeds 1234/7 but 6.109e-07 at seed 99; and ``[1.0-clean]``
+    and ``[4.0-clean]`` each flaked at ``CLEAN_BOUND = 1e-6`` during
+    whole-directory GPU runs (1.185e-06 observed). The clean residue is float32
+    noise at logits O(1.1) — 1e-6 is only ~8 ulps there — not a property. Only
+    the ORDER OF MAGNITUDE is pinned; see D-017.
     """
 
     MAX_SEQ_LEN = 32
     VOCAB = 256
     SEED = 1234
-    CLEAN_BOUND = 1e-6   # ~11x above the worst CLEAN measurement (8.94e-08)
-    LEAK_BOUND = 1e-5    # ~5x below the smallest LEAKY measurement (4.96e-05)
+    # DECISION plan-2026-08-13T091555-230c101d/D-017 — CLEAN_BOUND is 1e-5, NOT
+    # 1e-6. Do NOT "tighten" it back: at logits O(1.1), 1e-6 is ~8 float32 ulps,
+    # and the clean rows were MEASURED at up to 1.185e-06 on GPU with no code
+    # change (process-history dependent), which flaked [1.0-clean] and
+    # [4.0-clean]. Do NOT lower LEAK_BOUND to "restore a gap" either — the gap
+    # that matters is bound-to-measurement, and it is 5.0x (smallest leaky
+    # 4.961e-05) above and 8.4x (largest clean 1.185e-06) below. The bound is
+    # still falsifiable: the anti-causal-kernel injection drives the clean rows
+    # to ~2.7e-04, 27x above it. See decisions.md D-017.
+    CLEAN_BOUND = 1e-5   # 8.4x above the worst CLEAN measurement (1.185e-06)
+    LEAK_BOUND = 1e-5    # 5.0x below the smallest LEAKY measurement (4.96e-05)
 
     @pytest.mark.parametrize("ratio,expect", [
         (0.5, "leaks"),
