@@ -94,6 +94,11 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/resnet/train_resnet.py", "TrainingConfig"),
     ("train/vit/train_vit.py", "TrainingConfig"),
     ("train/rms_variants_train/sweep.py", "RunSpec"),
+    ("train/common/clm_pretrain.py", "ClmPretrainConfig"),
+    ("train/gpt2/pretrain.py", "TrainingConfig"),
+    ("train/gpt2/pretrain_so.py", "SOTrainingConfig"),
+    ("train/gpt2/finetune.py", "FinetuneConfig"),
+    ("train/wave_field/pretrain.py", "TrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
