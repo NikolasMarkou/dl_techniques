@@ -217,6 +217,13 @@ def _worst_causality_leak(model, max_seq_len, vocab_size):
     return worst
 
 
+# DECISION plan-2026-08-13T091555-230c101d/D-008 — the leaky rows below assert
+# the leak is ABOVE a bound, and the perturbation sweeps EVERY position. Do NOT
+# "simplify" this to a single `leak < small` assertion over all ratios: that
+# passes when the mechanism disappears, leaving the docstring table stale and
+# unfalsifiable. Do NOT perturb only the last token either — that probe measured
+# CLEAN at field_size=35/max_seq_len=32 where the all-positions probe measures
+# 1.96e-04. See decisions.md D-008.
 class TestWaveFieldLLMCausalityRatioSweep:
     """Pins token-level causality as a MEASURED, ratio-dependent property.
 
