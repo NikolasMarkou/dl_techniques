@@ -62,6 +62,37 @@ from .squeeze_excitation import SqueezeExcitation
 
 # ---------------------------------------------------------------------
 
+
+def resolve_num_groups(group_size: int, in_channels: int) -> int:
+    """Resolve timm's ``num_groups(group_size, in_chs)`` mapping.
+
+    Single definition of the grouped-convolution convention shared by
+    :class:`MobileOneBlock` and by the FastViT blocks that must resolve groups the
+    same way (``layers/fastvit/reparam_large_kernel_conv.py``). Callers are
+    responsible for their own ``out_channels`` divisibility check, whose error
+    message differs per layer.
+
+    :param group_size: ``0`` for a dense convolution (``groups = 1``); ``k > 0``
+        for ``groups = in_channels // k``, so ``1`` is DEPTHWISE.
+    :type group_size: int
+    :param in_channels: Number of input channels; only known at build time.
+    :type in_channels: int
+    :return: The convolution group count (always ``>= 1``).
+    :rtype: int
+    :raises ValueError: If ``group_size > 0`` does not divide ``in_channels``.
+    """
+    if group_size == 0:
+        return 1
+    if in_channels % group_size != 0:
+        raise ValueError(
+            f"group_size must divide the input channels: "
+            f"in_channels={in_channels}, group_size={group_size}"
+        )
+    return in_channels // group_size
+
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class MobileOneBlock(keras.layers.Layer):
     """MobileOne building block with structural reparameterization.
@@ -329,15 +360,7 @@ class MobileOneBlock(keras.layers.Layer):
         :raises ValueError: If the group count does not divide both the input and the
             output channel counts.
         """
-        if self.group_size == 0:
-            groups = 1
-        else:
-            if input_channels % self.group_size != 0:
-                raise ValueError(
-                    f"group_size must divide the input channels: "
-                    f"in_channels={input_channels}, group_size={self.group_size}"
-                )
-            groups = input_channels // self.group_size
+        groups = resolve_num_groups(self.group_size, input_channels)
 
         if input_channels % groups != 0 or self.out_channels % groups != 0:
             raise ValueError(

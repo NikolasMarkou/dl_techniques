@@ -18,12 +18,16 @@ Names that are already distinctive in the reference (``ReparamLargeKernelConv``,
 """
 
 from .conv_mlp import FastVitConvMlp
+from .patch_embed import FastVitPatchEmbed
 from .rep_conditional_pos_enc import RepConditionalPosEnc
 from .rep_mixer import FastVitRepMixer, FastVitRepMixerBlock
+from .reparam_large_kernel_conv import ReparamLargeKernelConv
 
 __all__ = [
     "FastVitConvMlp",
+    "FastVitPatchEmbed",
     "RepConditionalPosEnc",
     "FastVitRepMixer",
     "FastVitRepMixerBlock",
+    "ReparamLargeKernelConv",
 ]
