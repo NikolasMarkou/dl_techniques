@@ -288,19 +288,66 @@ class TestFinetuneDataSourceBranch:
 # ---------------------------------------------------------------------
 
 def test_so_config_carries_every_base_field(monkeypatch) -> None:
-    """``_so_config_from_args`` splices the base config in with ``**vars(base)``.
+    """Every base-config VALUE must survive the ``**vars(base)`` splice.
 
-    A field added to ``ClmPretrainConfig`` but not to that call site would be
-    dropped silently. Asserting the field SETS rather than one sampled value is
-    what makes this survive future additions.
+    ``_so_config_from_args`` builds the base config with ``_config_from_args``
+    and splices it in with ``**vars(base)``. Drop that splice and every base
+    field silently reverts to its declared default: the run starts, ``--help``
+    still advertises all 27 CLM flags, and none of them do anything.
+
+    VACUOUS FORM -- DO NOT REINTRODUCE (this plan's third probe defect,
+    plan-2026-08-13T091555-230c101d review item 1). The first version of this
+    test compared FIELD NAMES::
+
+        base_fields = {f.name for f in dataclasses.fields(pt.TrainingConfig())}
+        so_fields = {f.name for f in dataclasses.fields(so_config)}
+        assert base_fields <= so_fields
+        assert so_fields - base_fields == {the 5 SO fields}
+
+    MEASURED: both assertions still PASS with ``**vars(base)`` deleted outright,
+    because ``SOTrainingConfig(TrainingConfig)`` inherits every base field by
+    DECLARATION -- ``dataclasses.fields()`` can never lose one, whatever the
+    call site does. The contract is about values flowing, not names existing.
+
+    So this drives the REAL parser with a NON-DEFAULT value for every base-owned
+    flag (the same ``CLM_PRETRAIN_ROWS`` table the per-flag tests use), builds
+    the base config and the SO config from the SAME namespace, and asserts they
+    agree field by field. The non-default count is asserted too, so the
+    comparison cannot degenerate into defaults == defaults.
     """
     import dataclasses
 
-    monkeypatch.setattr(sys, "argv", ["train.gpt2.pretrain_so"])
-    base_fields = {f.name for f in dataclasses.fields(pt.TrainingConfig())}
-    so_config = so._so_config_from_args(so._build_so_parser().parse_args())
+    argv = [frag for row in CLM_PRETRAIN_ROWS for frag in row.argv]
+    monkeypatch.setattr(sys, "argv", ["train.gpt2.pretrain_so", *argv])
+    args = so._build_so_parser().parse_args()
+
+    base = pt._config_from_args(args)
+    so_config = so._so_config_from_args(args)
+
+    defaults = pt.TrainingConfig()
+    base_field_names = [f.name for f in dataclasses.fields(base)]
+    overridden = [
+        name for name in base_field_names
+        if getattr(base, name) != getattr(defaults, name)
+    ]
+    assert len(overridden) >= 20, (
+        "anti-vacuity: the probe argv only moved "
+        f"{len(overridden)} base fields off their defaults ({overridden}); a "
+        "values comparison over defaults could not detect a dropped splice"
+    )
+
+    dropped = {
+        name: (getattr(base, name), getattr(so_config, name))
+        for name in base_field_names
+        if getattr(so_config, name) != getattr(base, name)
+    }
+    assert not dropped, (
+        "_so_config_from_args did NOT carry these base config values into "
+        f"SOTrainingConfig (field: base -> so): {dropped}. The `**vars(base)` "
+        "splice is broken, so the CLM flags are advertised and inert."
+    )
+
     so_fields = {f.name for f in dataclasses.fields(so_config)}
-    assert base_fields <= so_fields
-    assert so_fields - base_fields == {
+    assert so_fields - set(base_field_names) == {
         "so_lambda", "so_l1", "so_l2", "so_matrix_scaling", "so_skip_embeddings",
     }
