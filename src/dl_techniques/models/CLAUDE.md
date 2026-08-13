@@ -53,6 +53,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 ### Vision-Language
 - `clip/` — CLIP
 - `mobile_clip/` — MobileCLIP
+- `mobile_clip_v2/` — MobileCLIP2 (faithful FastViT MCi image tower + CLIP text tower; architecture only, no pretrained weights)
 - `fastvlm/` — FastVLM
 - `nano_vlm/` — NanoVLM
 - `nano_vlm_world_model/` — NanoVLM world model
