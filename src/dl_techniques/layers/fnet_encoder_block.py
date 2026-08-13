@@ -21,11 +21,10 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .ffn import create_ffn_layer, FFNType
 from .ffn.factory import FFN_REGISTRY
-from .norms import create_normalization_layer, NormalizationType
+from .ffn import create_ffn_layer, FFNType
 from .stochastic_depth import StochasticDepth
+from .norms import create_normalization_layer, NormalizationType
 from .attention.fnet_fourier_transform import FNetFourierTransform
 
 # ---------------------------------------------------------------------

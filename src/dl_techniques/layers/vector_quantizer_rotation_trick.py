@@ -1,110 +1,98 @@
 """
-Rotation Trick Vector Quantizer.
+Vector quantization with the Rotation Trick gradient estimator.
 
-This module implements the Rotation Trick VQ-VAE (Fifty et al., ICLR 2025) as a
-Keras 3 layer. The Rotation Trick replaces the standard straight-through
-estimator with a rotation + scaling that propagates a more informative gradient
-from the discrete codebook lookup back through the quantization step. Forward
-values are identical to a standard VQ (nearest codebook entry); only the
-gradient path differs.
+This layer embodies the principle of gradient reshaping at a discrete
+bottleneck, a design paradigm that decouples the forward quantization
+semantics from the backward gradient path. The core idea is to leave the
+forward computation identical to standard vector quantization, a nearest
+neighbour lookup in a learned codebook, while replacing the coarse
+straight-through estimator with a transformation that carries the geometric
+relationship between the encoder output and its assigned code back into the
+encoder's gradient.
 
-**Architecture Overview:**
+The motivation is a known deficiency of the straight-through estimator. Because
+`argmin` has zero derivative almost everywhere, the standard formulation copies
+the reconstruction gradient at `z_q` directly onto `z_e`:
 
-.. code-block:: text
+`z_q = z_e + stop_gradient(e_k* - z_e)`
 
-    ┌────────────────────────────────────────┐
-    │  Input z_e [B, ..., D]                 │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Reshape → [N, D]  → split into heads  │
-    │  flat: [N, H, D_h]   D_h = D / H       │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Codebook lookup  E: [H, K, D_h]       │
-    │    'euclidean': k* = argmin ||z - e||  │
-    │    'cosine'   : k* = argmax <ẑ, ê>     │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Gradient transform                    │
-    │    'ste'          : z_e + sg(z_q - z_e)│
-    │    'rotation'     : R(z_e) * scale     │
-    │    'reflection'   : Ref(z_e) * scale   │
-    │    'no_grad_scale': R(z_e)             │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Aux losses (training only)            │
-    │    commitment : ||z_e - sg(z_q)||²     │
-    │    codebook   : ||sg(z_e) - z_q||²     │
-    │                  (skipped if use_ema)  │
-    │    diversity  : -H(p_avg)              │
-    │    orthogonal : ||E Eᵀ - I||²          │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  EMA + dead-code (training, optional)  │
-    │    cluster_size ← decay·EMA            │
-    │    embed_avg    ← decay·EMA            │
-    │    reinit codes with hits < τ          │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Reshape to [B, ..., D]                │
-    └────────────────────────────────────────┘
+Every point inside a Voronoi cell therefore receives the same gradient
+regardless of where it sits relative to its centroid. Directional and
+curvature information about the quantization error is discarded, which
+degrades codebook utilization and encoder conditioning.
 
-``sg`` denotes ``stop_gradient``. Very-efficient rotation form:
+The Rotation Trick instead treats the map from `z_e` to `z_q` as a rotation
+composed with a rescaling, and applies that same linear operator to the
+incoming gradient. Writing `x` for the encoder output and `q` for its assigned
+code, the very-efficient Householder form used here is:
 
-.. code-block:: text
+`u_x = x / ||x||`
+`u_q = q / ||q||`
+`w   = (u_x + u_q) / ||u_x + u_q||`
+`R(x) = x - 2 (x . w) w + 2 (x . u_x) u_q`
+`scale = ||q|| / ||x||`
+`output = R(x) * scale`
 
-    û_x = sg(z_e / ||z_e||);    û_q = sg(z_q / ||z_q||)
-    w   = sg((û_x + û_q) / ||û_x + û_q||)
-    R(z_e) = z_e - 2 (z_e · w) w + 2 (z_e · û_x) û_q
-    scale  = sg(||z_q|| / ||z_e||)            # 'rotation' mode
-    quantized = R(z_e) * scale
+The geometric anchors `u_x`, `u_q`, `w`, and by default `scale` are wrapped in
+`stop_gradient`, which makes `R` a constant linear operator with respect to
+backpropagation. Gradients therefore flow through `R(x)` as a fixed rotation of
+the upstream gradient rather than as an identity, preserving the angular
+relationship that the straight-through estimator collapses. Forward values are
+unchanged: applying `R` and then `scale` to `x` reproduces `q` exactly.
 
-``'reflection'`` drkeras.ops the ``+ 2 (z_e · û_x) û_q`` term.
-``'no_grad_scale'`` keeps ``scale`` differentiable.
+Architecturally, a forward pass proceeds through five stages:
+1.  The input is flattened across all non-channel dimensions and split into
+    `num_heads` independent channel groups, giving `[N, H, D/H]` against a
+    codebook of shape `[H, K, D/H]`. Multi-head factorization raises the
+    effective vocabulary to `K^H` at linear cost in memory.
+2.  A per-head nearest neighbour search selects one code per group, using
+    either squared Euclidean distance or cosine similarity. In cosine mode the
+    lookup is purely angular and the input magnitude is restored afterwards,
+    which decouples direction matching from scale.
+3.  The selected codes are combined with the encoder output by the chosen
+    gradient transform: `'rotation'` for the full form above, `'reflection'`
+    for the Householder reflection alone, `'no_grad_scale'` to let the scale
+    factor remain differentiable, or `'ste'` to recover classical
+    straight-through behaviour.
+4.  Auxiliary objectives are accumulated. The codebook and commitment terms
+    follow the original VQ-VAE formulation; optional diversity and orthogonal
+    penalties act directly on the codebook gram matrix to discourage
+    collinear or redundant entries.
+5.  The result is reshaped back to the input geometry, so the layer is a
+    shape-preserving drop-in at any point in a network.
 
-Beyond the rotation gradient, this implementation is a strict superset of the
-existing ``VectorQuantizer`` adding:
+Codebook maintenance is handled by three optional mechanisms, each addressing
+a distinct failure mode of discrete bottlenecks. Exponential moving average
+updates treat the codebook as an online k-means problem, tracking per-code
+assignment counts `N` and assigned-vector sums `m` with decay `gamma` and
+setting `e = m / (N + eps)`, which removes codebook adaptation from the
+optimizer's learning rate and momentum state. Dead-code expiration counts
+consecutive calls in which a code receives no assignments and reinitializes
+entries past a threshold from vectors in the current batch, recovering capacity
+lost to codebook collapse. A one-shot k-means warm start seeds the codebook
+from accumulated encoder statistics on the first training batches, avoiding the
+large initial mismatch between a randomly initialized codebook and the encoder
+distribution.
 
-- ``gradient_mode``: ``'rotation'`` | ``'reflection'`` | ``'no_grad_scale'`` |
-  ``'ste'`` (back-compat).
-- ``distance_mode``: ``'euclidean'`` (default) | ``'cosine'``. Cosine mode does
-  angular nearest neighbour search and restores magnitude via ``||x||``.
-- Multi-head codebooks (``num_heads``) — channel split into independent groups.
-- EMA codebook updates (``use_ema=True``) with multi-head factorisation.
-- Dead-code expiration (``dead_code_threshold`` + ``dead_code_reinit``).
-- K-means warm start (``kmeans_init=True``, deterministic).
-- Diversity penalty + orthogonal regularisation (optional aux losses).
-
-Mathematical formulation (very-efficient rotation form per the paper):
-
-.. math::
-
-    \\hat{u}_x = x / \\|x\\|, \\quad \\hat{u}_q = q / \\|q\\|
-    w_{unnorm} = \\hat{u}_x + \\hat{u}_q,  \\quad w = w_{unnorm} / \\|w_{unnorm}\\|
-    R(x) = x - 2 (x \\cdot w) w + 2 (x \\cdot \\hat{u}_x) \\hat{u}_q
-    scale = \\|q\\| / \\|x\\|
-    quantized = R(x) \\cdot scale
-
-with ``stop_gradient`` applied to ``w``, ``\\hat{u}_x``, ``\\hat{u}_q`` and
-(depending on mode) ``scale``. The reflection variant drkeras.ops the
-``+2(x \\cdot \\hat{u}_x)\\hat{u}_q`` term.
+This implementation is a strict superset of a standard vector quantizer.
+Setting `gradient_mode='ste'` with `num_heads=1`, `distance_mode='euclidean'`,
+and `use_ema=False` reproduces the classical layer's behaviour to within
+floating point tolerance.
 
 References:
-    - Fifty, C., Junkins, R., Duan, D., et al. (2025). Restructuring Vector
-      Quantization with the Rotation Trick. ICLR 2025.
-    - van den Oord, A., Vinyals, O., Kavukcuoglu, K. (2017). Neural Discrete
-      Representation Learning. NeurIPS 2017. arXiv:1711.00937.
-    - Razavi, A., van den Oord, A., Vinyals, O. (2019). Generating Diverse
-      High-Fidelity Images with VQ-VAE-2. NeurIPS 2019.
-    - Yu, J., Li, X., Koh, J. Y., et al. (2022). Vector-quantized Image Modeling
-      with Improved VQGAN. ICLR 2022.
+    - Fifty et al., 2025. Restructuring Vector Quantization with the Rotation
+      Trick. ICLR 2025. (https://arxiv.org/abs/2410.06424)
+    - van den Oord et al., 2017. Neural Discrete Representation Learning.
+      (https://arxiv.org/abs/1711.00937)
+    - Razavi et al., 2019. Generating Diverse High-Fidelity Images with
+      VQ-VAE-2. (https://arxiv.org/abs/1906.00446)
+    - Yu et al., 2022. Vector-quantized Image Modeling with Improved VQGAN.
+      (https://arxiv.org/abs/2110.04627)
+    - Bengio et al., 2013. Estimating or Propagating Gradients Through
+      Stochastic Neurons for Conditional Computation.
+      (https://arxiv.org/abs/1308.3432)
 """
+
 
 import keras
 import numpy as np
@@ -126,6 +114,53 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     A strict superset of ``VectorQuantizer``. Setting ``gradient_mode='ste'``
     and ``num_heads=1, distance_mode='euclidean', use_ema=False`` recovers the
     existing layer's behaviour bit-equivalently (atol<=1e-6).
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────────┐
+        │  Input z_e [B, ..., D]                 │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Reshape → [N, D]  → split into heads  │
+        │  flat: [N, H, D_h]   D_h = D / H       │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Codebook lookup  E: [H, K, D_h]       │
+        │    'euclidean': k* = argmin ||z - e||  │
+        │    'cosine'   : k* = argmax <ẑ, ê>     │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Gradient transform                    │
+        │    'ste'          : z_e + sg(z_q - z_e)│
+        │    'rotation'     : R(z_e) * scale     │
+        │    'reflection'   : Ref(z_e) * scale   │
+        │    'no_grad_scale': R(z_e)             │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Aux losses (training only)            │
+        │    commitment : ||z_e - sg(z_q)||²     │
+        │    codebook   : ||sg(z_e) - z_q||²     │
+        │                  (skipped if use_ema)  │
+        │    diversity  : -H(p_avg)              │
+        │    orthogonal : ||E Eᵀ - I||²          │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  EMA + dead-code (training, optional)  │
+        │    cluster_size ← decay·EMA            │
+        │    embed_avg    ← decay·EMA            │
+        │    reinit codes with hits < τ          │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Reshape to [B, ..., D]                │
+        └────────────────────────────────────────┘
 
     :param num_embeddings: Codebook size per head (``K``).
     :param embedding_dim: Total channel dim ``D``. With multi-head the codebook

@@ -1,29 +1,85 @@
 """
-Sparse Autoencoder (SAE) Module
-===============================
+Sparse autoencoders for monosemantic feature extraction and dictionary learning.
 
-This module provides a comprehensive implementation of Sparse Autoencoders
-for feature extraction, interpretability research, and representation learning.
+This layer embodies the principle of overcomplete sparse dictionary learning, a
+design paradigm that trades a compressive bottleneck for an expansive one
+constrained by sparsity. The core idea addresses superposition: a neural network
+with `d` dimensions represents far more than `d` distinct concepts by packing
+them into non-orthogonal directions, so any single neuron responds to many
+unrelated features and is polysemantic. Projecting the activations into a much
+wider latent space, where only a handful of units may fire at once, recovers the
+packed features as individually interpretable dictionary atoms. Reconstruction
+alone is trivially solvable by the identity map, so the sparsity constraint is
+what carries all of the interpretive weight.
 
-Sparse Autoencoders are designed to learn sparse, interpretable representations
-of neural network activations or other high-dimensional data. They enforce
-sparsity constraints on the latent space to encourage monosemantic features.
+Architecturally, the layer is an encode-sparsify-decode pipeline:
 
-Supported SAE Variants
-----------------------
-- ``relu``: Standard ReLU SAE with L1 sparsity penalty
-- ``topk``: TopK SAE that keeps only the top k activations per sample
-- ``batch_topk``: BatchTopK SAE with batch-level sparsity constraint
-- ``jumprelu``: JumpReLU SAE with learnable threshold for improved reconstruction
-- ``gated``: Gated SAE that separates feature detection from magnitude estimation
+`x' = x - b_pre`
+`z_pre = W_enc x' + b_enc`
+`z = sparsify(z_pre)`
+`x_hat = W_dec z + b_dec + b_pre`
 
-References
-----------
-- Bricken et al. (2023): "Towards Monosemanticity: Decomposing Language Models with Dictionary Learning"
-- Gao et al. (2024): "Scaling and Evaluating Sparse Autoencoders" (OpenAI)
-- Rajamanoharan et al. (2024): "Improving Dictionary Learning with Gated Sparse Autoencoders"
-- Rajamanoharan et al. (2024): "Jumping Ahead: Improving Reconstruction Fidelity with JumpReLU SAEs"
-- Bussmann et al. (2024): "BatchTopK Sparse Autoencoders"
+The pre-encoder bias centers the input and is added back after decoding, so the
+dictionary models deviations from the activation mean rather than spending atoms
+on a constant offset. Decoder rows are optionally renormalized to unit L2 norm,
+which fixes the scale degeneracy between an atom's direction and its coefficient
+and prevents the model from evading a magnitude-based sparsity penalty by
+shrinking latents while growing decoder norms.
+
+Five sparsity mechanisms are provided, differing in how the active set is chosen
+and in what gradient the choice admits:
+
+1.  `'relu'` applies a plain rectifier with an L1 penalty on the activations.
+    Sparsity emerges as a soft tradeoff against reconstruction, which is simple
+    but introduces systematic shrinkage: the penalty biases every surviving
+    coefficient toward zero.
+2.  `'topk'` retains exactly the `k` largest activations per sample and zeros
+    the rest, making L0 an architectural guarantee rather than a tuned penalty
+    and eliminating shrinkage entirely.
+3.  `'batch_topk'` takes the `k * batch_size` largest activations across the
+    whole batch, letting individual samples use variable numbers of latents
+    while holding average sparsity fixed. Because a per-batch threshold would
+    make one example's output depend on its batch-mates, the threshold is
+    tracked as an EMA and used verbatim at inference, seeded on the first step
+    to avoid an under-sparse ramp from zero.
+4.  `'jumprelu'` gates on a learnable per-latent threshold, `f(x) = x * (x >
+    theta)`, decoupling the firing decision from the output magnitude. The
+    comparison blocks gradient to `theta`, so it is trained solely by a sigmoid
+    surrogate for the L0 count.
+5.  `'gated'` splits detection from estimation across two encoders, so the
+    decision of whether a feature is present is learned independently of how
+    strongly it is present. The hard gate mask blocks the reconstruction
+    gradient to the gate encoder, which is instead supplied by a frozen-decoder
+    auxiliary term.
+
+The recurring difficulty across all variants is that hard selection has zero
+derivative, so any latent that stops firing receives no gradient and can never
+recover. These dead latents waste dictionary capacity permanently. The AuxK
+remedy reconstructs the residual `x - x_hat` that the live latents failed to
+explain using the top `aux_k` dead latents, giving them a gradient that pushes
+them toward genuinely unmodeled structure rather than toward duplicating
+existing atoms. Liveness is tracked statefully by a per-latent counter of
+consecutive non-firing steps rather than inferred from a single batch.
+
+Both the sparsity and auxiliary terms are registered via `add_loss` on every
+forward pass, independent of the return-shape flag; the scalar returned
+alongside the latents is the same object, exposed for inspection only.
+
+References:
+    - Bricken et al., 2023. Towards Monosemanticity: Decomposing Language
+      Models With Dictionary Learning. Transformer Circuits Thread.
+    - Gao et al., 2024. Scaling and Evaluating Sparse Autoencoders.
+      (https://arxiv.org/abs/2406.04093)
+    - Rajamanoharan et al., 2024. Improving Dictionary Learning with Gated
+      Sparse Autoencoders. (https://arxiv.org/abs/2404.16014)
+    - Rajamanoharan et al., 2024. Jumping Ahead: Improving Reconstruction
+      Fidelity with JumpReLU Sparse Autoencoders.
+      (https://arxiv.org/abs/2407.14435)
+    - Bussmann et al., 2024. BatchTopK Sparse Autoencoders.
+      (https://arxiv.org/abs/2412.06410)
+    - Elhage et al., 2022. Toy Models of Superposition. Transformer Circuits
+      Thread.
+
 """
 
 import keras

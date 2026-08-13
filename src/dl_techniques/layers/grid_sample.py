@@ -1,17 +1,3 @@
-# DECISION plan_2026-06-11_f662207d/D-003
-# Placed as a pure-function module (NOT a keras.layers.Layer) because make_grid /
-# interpolate_grid are STATELESS pure functions with no weights, no build(), and no
-# serialization state -- wrapping them in a Layer would be a single-use empty shell.
-# Both functions must be callable BARE so the step-9 Jacobian-TV helper can invoke
-# interpolate_grid inside a nested tf.GradientTape (a built Layer would add nothing).
-# TF-native tf.gather + manual lerp is chosen over keras.ops here for the differentiable
-# bilinear (order=1) path: backend-agnosticism is explicitly WAIVED for this op (scope
-# decision Q4) and a hand-written 4-corner lerp gives an auditable gradient path to
-# coords. order=0 (nearest) is THERA's DEFAULT sampling mode; the coordinate Jacobian
-# in THERA flows through the DIRECT `coords` term of rel_coords (= coords -
-# interpolate_grid(...)), NOT through the (a.e. zero-gradient) nearest sampler -- see
-# decisions.md D-003. We still implement a fully differentiable order=1 path for
-# completeness and future use.
 """TF-native coordinate-grid helpers ported from THERA (`model/utils.py`).
 
 This module provides two stateless pure functions used by the THERA neural heat

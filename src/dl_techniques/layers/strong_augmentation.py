@@ -1,4 +1,5 @@
-"""Apply strong data augmentations for consistency-based regularization.
+"""
+Apply strong data augmentations for consistency-based regularization.
 
 This layer implements a sequence of aggressive data augmentations, specifically
 color jittering and CutMix, which are fundamental to consistency regularization

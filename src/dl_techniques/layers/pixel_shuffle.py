@@ -54,6 +54,12 @@ from keras import ops
 from typing import Optional, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
@@ -117,7 +123,8 @@ class PixelShuffle(keras.layers.Layer):
         compatibility at build time.
     :type validate_spatial_dims: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
-    :type kwargs: Any"""
+    :type kwargs: Any
+    """
 
     def __init__(
         self,

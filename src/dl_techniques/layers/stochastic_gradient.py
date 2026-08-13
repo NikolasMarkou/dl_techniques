@@ -1,37 +1,54 @@
 """
-This module implements the Stochastic Gradient regularization technique.
+Stochastic gradient blocking as a regularization mechanism.
 
-Stochastic Gradient is a regularization method that randomly blocks the gradient
-flow during the backward pass. Unlike Stochastic Depth, which drops the entire
-residual block in the forward pass, this layer only affects the gradient computation.
-The forward pass remains an identity function at all times.
+This layer embodies the principle of asymmetric forward and backward
+computation, a design paradigm that leaves the network's activations entirely
+untouched while injecting stochasticity into the gradient signal alone. The
+core idea is that regularization does not require perturbing what the network
+computes; it is sufficient to perturb what the network learns from. By randomly
+severing gradient paths, the optimizer sees a different subgraph on each step,
+which discourages downstream layers from developing rigid co-dependencies on
+any single upstream path.
 
-Key features and behavior of this `StochasticGradient` implementation:
+The distinction from Stochastic Depth is the essential point. Stochastic Depth
+removes a residual branch from the forward pass, so activations, batch
+statistics, and the effective network depth all change from step to step, and
+an expectation correction is needed at inference time to compensate. This layer
+changes none of them. The forward map is the identity under all conditions, in
+both training and inference, so activation magnitudes, normalization statistics,
+and the deterministic input-output behaviour of the model are preserved exactly.
+Only the Jacobian seen by backpropagation is stochastic.
 
-1.  **Gradient Dropping during Training (`training=True`):**
-    - With a probability `drop_path_rate`, the gradient is stopped from flowing
-      backward through this layer. This is achieved by applying `keras.ops.stop_gradient`
-      to the input tensor, effectively treating the layer's output as a constant
-      with respect to its input for that training step.
-    - If the gradient is not dropped, the layer acts as an identity function in both
-      the forward and backward passes, allowing the gradient to flow through unchanged.
+Mechanically, with keep probability `p = 1 - drop_path_rate`, a single scalar
+`u ~ U(0, 1)` is drawn per call and the layer resolves to one of two branches:
 
-2.  **Identity Forward Pass:**
-    - The layer always returns the input tensor unmodified during the forward pass,
-      regardless of whether it's in training or inference mode. This ensures that the
-      network's activations are not directly altered.
+`u < p   ->  y = x`                    (gradient flows unchanged)
+`u >= p  ->  y = stop_gradient(x)`     (gradient is severed)
 
-3.  **No-Op during Inference (`training=False`):**
-    - During inference, the layer is an identity function and has no effect on the
-      gradient, as gradients are not computed.
+Both branches emit the same value, so the choice is invisible in the forward
+direction. In the first case the local Jacobian is the identity and upstream
+parameters receive their gradient normally. In the second, `stop_gradient`
+makes the output a constant with respect to the input, so the local Jacobian is
+zero and every parameter reachable only through this path receives no update on
+that step. The decision is a single scalar rather than a per-example or
+per-element mask, so an entire path is either live or dead for the whole batch,
+which mirrors the path-level granularity of drop-path methods.
 
-By randomly preventing gradient updates for certain paths, Stochastic Gradient can
-encourage the network to learn more robust and less co-dependent features. It can be
-seen as a way to regularize the training process by introducing noise into the
-gradient updates.
+Because gradient computation does not occur outside of training, the layer is a
+strict no-op at inference: no scaling correction, no branch selection, and no
+runtime cost beyond passing the tensor through. The selection is expressed with
+`keras.ops.cond` rather than Python control flow so that the branch remains a
+traceable graph operation under compiled and graph-mode execution rather than
+being frozen at trace time.
 
-Reference:
--   `keras.ops.stop_gradient` for the underlying mechanism.
+References:
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
+    - Srivastava et al., 2014. Dropout: A Simple Way to Prevent Neural Networks
+      from Overfitting. JMLR 15(56).
+    - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
+      Residuals. (https://arxiv.org/abs/1605.07648)
+
 """
 
 import keras
@@ -41,7 +58,7 @@ from typing import Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 
 
 # ---------------------------------------------------------------------

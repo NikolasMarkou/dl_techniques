@@ -1,6 +1,72 @@
+"""
+Vector quantization layer for learning discrete latent representations.
+
+This layer embodies the principle of discrete representation learning, a design
+paradigm that replaces a continuous latent space with a finite set of learned
+prototype vectors. The core idea is to constrain the encoder's output to lie on
+a discrete codebook, which yields compact, index-addressable latents that can
+be modeled autoregressively by a downstream prior, while avoiding the posterior
+collapse commonly observed in continuous variational autoencoders.
+
+Architecturally, the layer maintains a learnable codebook `e` of `K` embedding
+vectors, each of dimension `D`. During the forward pass:
+1.  The input tensor `z_e` is flattened across all non-channel dimensions to
+    shape `[N, D]`.
+2.  Squared Euclidean distances to every codebook entry are computed, and the
+    nearest entry is selected per position via an `argmin`.
+3.  The selected embeddings are gathered and reshaped back to the original
+    input shape, producing the quantized output `z_q`.
+
+The central difficulty of this construction is that `argmin` has zero gradient
+almost everywhere, so the encoder receives no learning signal through the
+quantization step. This is resolved with the straight-through estimator, which
+decouples the forward and backward computations:
+
+`z_q = z_e + stop_gradient(e_k* - z_e)`
+
+The forward pass emits the codebook vector, while the backward pass sees the
+identity map and therefore copies the gradient of the reconstruction loss
+directly onto `z_e`. Because gradients bypass the codebook entirely, the
+embeddings must be trained by auxiliary objectives. Two terms are added, each
+using `stop_gradient` to route its gradient to exactly one operand:
+
+`L_codebook   = ||stop_gradient(z_e) - e||²`
+`L_commit     = β * ||z_e - stop_gradient(e)||²`
+
+The codebook loss pulls the selected embeddings toward the encoder outputs
+assigned to them, while the commitment loss, weighted by `β`, pulls the encoder
+outputs toward their assigned embeddings and prevents the latent magnitudes
+from growing without bound.
+
+As an alternative to gradient-based codebook updates, the layer supports
+exponential moving average estimation, which treats the codebook as an online
+k-means problem rather than a set of trainable parameters. Per-embedding
+assignment counts `N` and assigned-vector sums `m` are tracked with decay `γ`,
+and each embedding is set to their ratio:
+
+`N⁽ᵗ⁾ = γ * N⁽ᵗ⁻¹⁾ + (1 - γ) * n⁽ᵗ⁾`
+`m⁽ᵗ⁾ = γ * m⁽ᵗ⁻¹⁾ + (1 - γ) * Σ z_e⁽ᵗ⁾`
+`e⁽ᵗ⁾ = m⁽ᵗ⁾ / (N⁽ᵗ⁾ + ε)`
+
+This decouples codebook adaptation from the optimizer's learning rate and
+momentum state, which typically gives more stable convergence and better
+codebook utilization. In this mode the embeddings are marked non-trainable and
+the codebook loss no longer drives them. The epsilon term guards against
+division by zero for embeddings that receive no assignments in recent batches.
+
+References:
+    - van den Oord et al., 2017. Neural Discrete Representation Learning.
+      (https://arxiv.org/abs/1711.00937)
+    - Razavi et al., 2019. Generating Diverse High-Fidelity Images with
+      VQ-VAE-2. (https://arxiv.org/abs/1906.00446)
+    - Bengio et al., 2013. Estimating or Propagating Gradients Through
+      Stochastic Neurons for Conditional Computation.
+      (https://arxiv.org/abs/1308.3432)
+
+"""
+
 import keras
 from typing import Optional, Tuple, Dict, Any, Union
-
 
 # ---------------------------------------------------------------------
 

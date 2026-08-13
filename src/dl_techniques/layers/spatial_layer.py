@@ -1,47 +1,63 @@
 """
-Inject explicit spatial coordinate information into feature maps.
+Explicit spatial coordinate injection for convolutional feature maps.
 
-This layer addresses a fundamental property of standard convolutional neural
-networks: translation equivariance. While this property is a powerful
-inductive bias for many tasks, it makes CNNs agnostic to the absolute
-spatial location of features. This layer provides a simple, non-trainable
-mechanism to explicitly encode coordinate information, making the network
-"aware" of where features are located within the input grid. This technique
-is a core component of architectures like CoordConv.
+This layer embodies the principle of breaking translation equivariance on
+demand, a design paradigm that supplies a network with information its
+architecture is structurally incapable of representing. A convolution applies
+the same kernel at every position, so its response depends on what a feature
+looks like but not on where it sits in the grid. That invariance is a valuable
+inductive bias for recognition, and a hard failure mode for any task whose
+answer is a position: coordinate regression, rendering from a latent, spatially
+conditioned generation. Supplying the coordinates as ordinary input channels
+lets the network learn to use absolute position where it helps and ignore it
+where it does not, without altering the convolution operator itself. This is the
+mechanism introduced as CoordConv.
 
-Architecturally, the layer functions as a deterministic coordinate generator.
-It does not learn any parameters. Instead, its operation is two-fold:
-1.  **Build Phase:** A low-resolution "prototype" coordinate grid is created
-    and stored internally. This grid represents the normalized `x` and `y`
-    coordinates for a small feature map.
-2.  **Call Phase:** During the forward pass, this prototype grid is
-    dynamically resized to match the spatial dimensions of the input
-    feature map using interpolation. The resized grid is then tiled to match
-    the batch size.
+Architecturally, the layer is a deterministic generator with no learnable
+parameters; `trainable` is forced to `False` at construction. Its operation
+splits across two phases:
 
-The final output is a tensor of shape `(batch, height, width, 2)` that can
-be concatenated with the input feature map, effectively adding two new
-channels that explicitly state the `(x, y)` position of each feature vector.
+1.  **Build phase.** A low-resolution prototype grid of shape
+    `(1, res_h, res_w, 2)` is constructed once. Two coordinate matrices are
+    formed by `linspace` over the interval `[-0.5, 0.5]` and combined with a
+    row-major `meshgrid`, then standardized and stacked into the two channels.
+2.  **Call phase.** The prototype is resized to the input's spatial extent by
+    nearest or bilinear interpolation, then repeated along the batch axis. The
+    input tensor's values are never read; only its shape is.
 
-The mathematical process involves two key steps. First, a base grid is
-formed by creating two matrices for the normalized `x` and `y` coordinates,
-typically spanning the interval `[-0.5, 0.5]`. The second, and more critical,
-step is the standardization of these coordinate grids. Each grid is
-independently normalized to have a mean of zero and a standard deviation of
-one:
+The output is a tensor of shape `(batch, height, width, 2)` holding the `x` and
+`y` position of every spatial location. The layer emits the grid alone rather
+than a modified input, leaving the caller to concatenate it onto the feature map
+and thereby widen the following convolution's input by two channels.
 
-`z = (x - μ) / σ`
+The mathematically significant step is not the choice of coordinate range but
+the per-channel standardization that follows it:
 
-This standardization is crucial for training stability. It ensures that the
-coordinate features have a similar statistical distribution to typical
-learned feature activations. Without it, the large, unshuffled values of the
-coordinates could dominate the initial learning process when concatenated
-with activations that are often centered around zero.
+`z = (x - mu) / (sigma + eps)`
+
+Concatenating raw coordinates alongside learned activations mixes two
+distributions with unrelated scales, and the coordinate channels, being large
+and perfectly structured, can dominate the gradient signal early in training
+before the network has learned to weight them appropriately. Standardizing to
+zero mean and unit variance places the coordinate features on the same
+statistical footing as typical activations. A useful consequence is that the
+initial interval becomes irrelevant: any affine reparameterization of the
+`linspace` span collapses to the same standardized values, so `[-0.5, 0.5]` is a
+convention rather than a tuned constant. The epsilon guards the degenerate case
+of a single-element axis, where the coordinate has zero variance.
+
+Generating a fixed prototype and resizing it, rather than computing coordinates
+directly at the input resolution, keeps the grid construction outside the
+forward path and makes the layer robust to dynamic spatial shapes that are not
+known until call time. The tradeoff is that interpolation only approximately
+preserves the standardization when the target resolution differs substantially
+from the prototype, and that `'nearest'` resampling produces piecewise-constant
+coordinate steps rather than a smooth ramp. Choosing `'bilinear'` and a
+prototype resolution near the expected feature map size minimizes both effects.
 
 References:
-    - Liu et al., 2018. An intriguing failing of convolutional neural
-      networks and the CoordConv solution.
-      (https://arxiv.org/abs/1807.03247)
+    - Liu et al., 2018. An Intriguing Failing of Convolutional Neural Networks
+      and the CoordConv Solution. (https://arxiv.org/abs/1807.03247)
 
 """
 

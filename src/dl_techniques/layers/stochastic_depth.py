@@ -1,46 +1,58 @@
 """
-Stochastic Depth is a regularization method primarily used in very deep neural networks,
-particularly those with residual connections (e.g., ResNets, Vision Transformers). Its
-purpose is to improve training stability and generalization by randomly dropping
-entire residual blocks (or paths) during training.
+Stochastic Depth regularization via per-sample residual path dropping.
 
-Key features and behavior of this `StochasticDepth` implementation:
+This layer embodies the principle of implicit network ensembling, a design
+paradigm that treats a single very deep network as a distribution over shallower
+networks rather than as one fixed architecture. The core idea is that in a
+residual network each block contributes an additive correction to an identity
+path, so an individual block can be removed without breaking the forward
+signal. Randomly removing blocks during training therefore samples a different
+effective depth on every step, and the network learns a representation that no
+single block is indispensable to.
 
-1.  **Per-sample Dropping:** The drop decision is drawn independently for each
-    *sample* in the batch. The noise shape is `(batch_size, 1, ..., 1)`, so every
-    batch element gets its own Bernoulli draw, broadcast across that sample's
-    remaining dimensions. These are the same semantics as DropPath in timm. The
-    sibling `StochasticGradient` layer (`stochastic_gradient.py`) is the batch-wide
-    one: it draws `keras.random.uniform(shape=[])`, a single scalar shared by the
-    whole batch.
+Architecturally, the layer guards a residual branch and is applied to that
+branch's output before it is added back to the shortcut. During training, a
+Bernoulli decision is drawn and the branch is either kept or zeroed:
 
-2.  **During Training (`training=True`):**
-    - Each sample's residual path is zeroed with probability `drop_path_rate`,
-      effectively "dropping" or bypassing, for that sample only, the residual
-      connection that this layer guards.
-    - Samples whose path is not dropped are scaled by `1 / (1 - drop_path_rate)`.
-      This scaling is crucial for maintaining the expected magnitude of activations
-      across dropped paths, ensuring that the expected output during training matches
-      the output during inference.
+`mask ~ Bernoulli(p)` with `p = 1 - drop_path_rate`
+`y = x * mask / p`
 
-3.  **During Inference (`training=False`):**
-    - The layer acts as an identity function; the input tensor is passed through
-      unchanged. No paths are dropped, and no scaling is applied, as the scaling factor
-      from training ensures the expected output magnitude is preserved.
+The decision is drawn independently per sample. The noise shape is
+`(batch_size, 1, ..., 1)`, one draw per batch element broadcast across all of
+that element's remaining dimensions, which makes the drop an all-or-nothing
+event for a given sample's entire path while leaving different samples in the
+batch on different effective depths. This matches the semantics of DropPath as
+implemented in timm. The sibling `StochasticGradient` layer takes the batch-wide
+alternative, drawing `keras.random.uniform(shape=[])`, a single scalar shared
+across the whole batch.
 
-4.  **Dynamic Noise Shape:**
-    The noise shape is calculated dynamically from the input rank as
-    `(batch_size, 1, ..., 1)`, so the mask is constant across all spatial or feature
-    dimensions of a given sample. This is what makes the "drop" an all-or-nothing
-    decision for that sample's entire path, while leaving the decision independent
-    between samples.
+The division by `p` is what makes the layer consistent between the two regimes.
+Since the mask is Bernoulli with mean `p`, the inverted-dropout scaling gives
+`E[y] = x`, so the expected activation magnitude entering downstream layers,
+along with the running statistics accumulated by any normalization that follows,
+matches what those layers will see when nothing is dropped. Consequently
+inference requires no correction at all: the layer becomes a pure identity, the
+full depth of the network is used, and the model's output is deterministic.
 
-By randomly dropping residual paths, Stochastic Depth helps mitigate the vanishing
-gradient problem in very deep networks, reduces co-adaptation between layers, and
-encourages individual blocks to learn more robust features.
+The distinction from a gradient-only regularizer is that this layer alters the
+forward computation. Activations, normalization statistics, and effective depth
+all vary from step to step, and the backward pass follows from that change
+rather than being manipulated directly: a dropped branch has zero output and
+therefore contributes no gradient to its own parameters, while the shortcut
+still carries the gradient onward. This is precisely the mechanism that
+shortens the effective backpropagation path, mitigating vanishing gradients in
+networks too deep to train reliably at full depth, reducing co-adaptation
+between adjacent blocks, and acting as a strong regularizer at essentially no
+inference cost.
 
-Reference:
--   "Deep Networks with Stochastic Depth" by Gao Huang et al. (https://arxiv.org/abs/1603.09382)
+References:
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
+    - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
+      Shallow Networks. (https://arxiv.org/abs/1605.06431)
+    - Srivastava et al., 2014. Dropout: A Simple Way to Prevent Neural Networks
+      from Overfitting. JMLR 15(56).
+
 """
 
 import keras
