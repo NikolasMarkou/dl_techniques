@@ -434,11 +434,11 @@ class TestGPT2UntiedLMHead:
         embeddings = model.decoder.word_embeddings.embeddings
         kernel = model.lm_head.kernel
 
-        # Object identity: no shared variable between the two.
-        assert kernel is not embeddings
-        assert all(w is not embeddings for w in model.lm_head.weights)
         # Shapes are transposes of each other, so a shape check alone would
-        # not distinguish them; pin the orientation too.
+        # not distinguish them; pin the orientation too. (The `is not` identity
+        # check lives in the square-config test below: at this config the two
+        # shapes differ, so aliasing is structurally impossible and an identity
+        # assertion here would be a tautology that no injection can turn RED.)
         assert tuple(kernel.shape) == (
             tiny_config["embed_dim"], tiny_config["vocab_size"],
         )
@@ -447,6 +447,30 @@ class TestGPT2UntiedLMHead:
         )
         # ``use_bias=False`` — the head is a bare linear projection.
         assert model.lm_head.bias is None
+
+    def test_untied_head_kernel_is_not_the_embedding_variable(self):
+        """The untied head's kernel must be its OWN variable, not an alias of
+        the token-embedding table.
+
+        Deliberately run at ``vocab_size == embed_dim`` (64/64). At the normal
+        rectangular config the two variables have transposed shapes, so an
+        alias is structurally impossible and this assertion could not be made
+        to fail by ANY injection — a tautology, not a guard. At a square config
+        the alias IS shape-legal (it is the classic transposed-tie defect), so
+        the assertion becomes falsifiable and was RED-proven by injecting
+        exactly that alias.
+        """
+        square_config = {
+            "vocab_size": 64, "embed_dim": 64, "depth": 2, "num_heads": 4,
+            "max_seq_len": 32, "dropout_rate": 0.0,
+            "attention_dropout_rate": 0.0,
+        }
+        model = self._untied_model(square_config)
+        model(_random_ids((2, 8), 64), training=False)
+
+        embeddings = model.decoder.word_embeddings.embeddings
+        assert model.lm_head.kernel is not embeddings
+        assert all(w is not embeddings for w in model.lm_head.weights)
 
     def test_untied_logits_are_not_the_tied_computation(self, tiny_config):
         """BEHAVIORAL untiedness: the logits must NOT equal
