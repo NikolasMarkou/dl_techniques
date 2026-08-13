@@ -8,7 +8,6 @@ through factory-based component creation.
 
 import os
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -16,14 +15,11 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.deep_supervision import (
-    create_inference_model_from_training_model,
-)
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -250,10 +246,10 @@ class ViT(keras.Model):
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: NormalizationType = "layer_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             normalization_position: Literal['pre', 'post'] = "post",
@@ -326,9 +322,9 @@ class ViT(keras.Model):
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = bias_regularizer
         self.normalization_type = str(normalization_type)
         # DECISION plan_2026-05-18_6776f8ba/D-003
@@ -418,9 +414,9 @@ class ViT(keras.Model):
         self.head = None
         if self.include_top:
             if self.dropout_rate > 0.0:
-                self.head_dropout = layers.Dropout(self.dropout_rate, name="head_dropout")
+                self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
 
-            self.head = layers.Dense(
+            self.head = keras.layers.Dense(
                 self.num_classes,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -519,9 +515,9 @@ class ViT(keras.Model):
         x = self.patch_embed(inputs, training=training)
 
         # 2. Prepend the CLS token
-        batch_size = ops.shape(x)[0]
-        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        batch_size = keras.ops.shape(x)[0]
+        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)
 
         # 3. Add learned positional embeddings
         x = self.pos_embed(x, training=training)
@@ -594,10 +590,10 @@ class ViT(keras.Model):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "pos_dropout_rate": self.pos_dropout_rate,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
             "normalization_position": self.normalization_position,
@@ -885,10 +881,10 @@ def create_vit(
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_initializer: Union[str, initializers.Initializer] = "zeros",
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         normalization_type: NormalizationType = "layer_norm",
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         normalization_position: Literal['pre', 'post'] = "post",
