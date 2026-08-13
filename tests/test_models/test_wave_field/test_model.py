@@ -175,6 +175,14 @@ class TestWaveFieldLLMForward:
 class TestWaveFieldLLMCausality:
 
     def test_future_does_not_affect_past(self, tiny_config):
+        """Short-sequence (8 of 32) probe at the DEFAULT ratio 2.0.
+
+        This is the weak instrument: it perturbs only the last token. The
+        general one is ``TestWaveFieldLLMCausalityRatioSweep`` below, which
+        perturbs every position — a last-token-only probe measured CLEAN at
+        field_size=35/max_seq_len=32 while the all-positions probe measured a
+        1.96e-04 leak at the very same config.
+        """
         model = WaveFieldLLM(**tiny_config)
         seq1 = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
         seq2 = np.array([[1, 2, 3, 4, 5, 6, 7, 99]], dtype=np.int32)
@@ -188,6 +196,99 @@ class TestWaveFieldLLMCausality:
                 l1[0, pos], l2[0, pos], atol=1e-5,
                 err_msg=f"position {pos} changed when only position 7 changed",
             )
+
+
+def _worst_causality_leak(model, max_seq_len, vocab_size):
+    """Worst future-token leak over ALL (perturbed, observed) position pairs.
+
+    Substitutes one token at position ``j`` and returns the largest absolute
+    logit change induced at any position ``< j``, maximised over every ``j``.
+    Perturbing only the LAST position is a blind instrument (see the docstring
+    of ``test_future_does_not_affect_past``).
+    """
+    ids = (np.arange(1, max_seq_len + 1, dtype=np.int32)[None, :]) % vocab_size
+    base = keras.ops.convert_to_numpy(model(ids, training=False)["logits"])[0]
+    worst = 0.0
+    for j in range(1, max_seq_len):
+        ids2 = ids.copy()
+        ids2[0, j] = (ids2[0, j] + 137) % vocab_size
+        out = keras.ops.convert_to_numpy(model(ids2, training=False)["logits"])[0]
+        worst = max(worst, float(np.abs(base[:j] - out[:j]).max()))
+    return worst
+
+
+class TestWaveFieldLLMCausalityRatioSweep:
+    """Pins token-level causality as a MEASURED, ratio-dependent property.
+
+    ``WaveFieldAttention`` guarantees causality on the FIELD GRID only, and its
+    own docstring refuses to offer a sufficient condition on
+    ``field_size`` / ``max_seq_len``. This sweep pins what was actually
+    measured at ``max_seq_len=32, embed_dim=64, depth=2``, seed 1234, random
+    init, logits of magnitude ~1.1 (worst leak over all position pairs)::
+
+        ratio  field_size  stride   CPU        GPU(4070)   verdict
+        0.50    16         0.4839   5.462e-04  5.505e-04   LEAKS
+        0.75    24         0.7419   3.767e-04  4.049e-04   LEAKS
+        1.00    32         1.0000   6.706e-08  0.0         clean
+        1.50    48         1.5161   4.961e-05  1.235e-04   LEAKS
+        2.00    64         2.0323   5.960e-08  0.0         clean  <- DEFAULT
+        4.00   128         4.0968   8.941e-08  0.0         clean
+
+    Exact values are device-dependent (CPU and GPU differ by up to ~2.5x on the
+    leaky rows), so the pin is an order-of-magnitude bound, not a number. The
+    leaky rows are asserted to leak ABOVE a bound on purpose: if the mechanism
+    silently vanished, a "leak is small" test would pass and the docstring
+    table would go stale unnoticed. Note ratio 1.50 leaks while ratio 1.00 does
+    not — the property is NOT monotone in the ratio.
+    """
+
+    MAX_SEQ_LEN = 32
+    VOCAB = 256
+    SEED = 1234
+    CLEAN_BOUND = 1e-6   # ~11x above the worst CLEAN measurement (8.94e-08)
+    LEAK_BOUND = 1e-5    # ~5x below the smallest LEAKY measurement (4.96e-05)
+
+    @pytest.mark.parametrize("ratio,expect", [
+        (0.5, "leaks"),
+        (0.75, "leaks"),
+        (1.0, "clean"),
+        (1.5, "leaks"),
+        (2.0, "clean"),
+        (4.0, "clean"),
+    ])
+    def test_leak_per_field_size_ratio(self, ratio, expect):
+        keras.utils.set_random_seed(self.SEED)
+        field_size = int(round(ratio * self.MAX_SEQ_LEN))
+        model = WaveFieldLLM(
+            vocab_size=self.VOCAB, embed_dim=64, depth=2, num_heads=4,
+            max_seq_len=self.MAX_SEQ_LEN, field_size=field_size,
+            dropout_rate=0.0, attention_dropout_rate=0.0,
+        )
+        leak = _worst_causality_leak(model, self.MAX_SEQ_LEN, self.VOCAB)
+
+        if expect == "clean":
+            assert leak < self.CLEAN_BOUND, (
+                f"ratio {ratio} (field_size={field_size}, "
+                f"max_seq_len={self.MAX_SEQ_LEN}) was measured CLEAN but now "
+                f"leaks {leak:.3e} >= {self.CLEAN_BOUND:.0e}; the module "
+                f"docstring's Causality table is stale"
+            )
+        else:
+            assert leak > self.LEAK_BOUND, (
+                f"ratio {ratio} (field_size={field_size}, "
+                f"max_seq_len={self.MAX_SEQ_LEN}) was measured LEAKY but now "
+                f"leaks only {leak:.3e} <= {self.LEAK_BOUND:.0e}; either "
+                f"causality was fixed (update the docstring table and this "
+                f"pin) or the probe stopped measuring anything"
+            )
+
+    def test_default_field_size_lands_on_a_clean_ratio(self):
+        """The class default ``field_size = 2 * max_seq_len`` is ratio 2.0."""
+        model = WaveFieldLLM(
+            vocab_size=self.VOCAB, embed_dim=64, depth=2, num_heads=4,
+            max_seq_len=self.MAX_SEQ_LEN, field_size=None,
+        )
+        assert model.field_size == 2 * self.MAX_SEQ_LEN
 
 
 # ---------------------------------------------------------------------

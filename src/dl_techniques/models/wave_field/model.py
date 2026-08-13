@@ -1,6 +1,7 @@
 """WaveFieldLLM — decoder-only LM with WaveFieldAttention.
 
-A decoder-only causal language model that drops :class:`WaveFieldAttention`
+A decoder-only language model, trained with a causal LM objective, that drops
+:class:`WaveFieldAttention`
 into a GPT-2-style pre-norm transformer stack in place of dot-product
 multi-head attention. The architecture mirrors :class:`GPT2` (token + learned
 positional embeddings, pre-norm transformer blocks, weight-tied LM head) but
@@ -23,7 +24,7 @@ Architecture::
     WaveFieldDecoderBlock × depth
        │
        ├─ pre-norm
-       ├─ WaveFieldAttention   (causal by construction)
+       ├─ WaveFieldAttention   (no causal mask — see Causality below)
        ├─ residual
        ├─ pre-norm
        ├─ FFN: Dense(4D, gelu) -> Dense(D) -> Dropout
@@ -38,8 +39,43 @@ Architecture::
          ▼
     {"logits": (B, N, V), "last_hidden_state": (B, N, D)}
 
-Causality is provided by :class:`WaveFieldAttention` (its left-aligned damped
-wave kernel); no explicit causal mask is constructed in this module.
+Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressively):
+    This module builds NO explicit causal mask. Whatever token-level causality
+    the stack has comes entirely from :class:`WaveFieldAttention`'s
+    left-aligned damped wave kernel, and that layer explicitly refuses to
+    guarantee it: the kernel is causal on the FIELD GRID only, while the
+    bilinear scatter/gather spans two grid cells, so a later token can deposit
+    into a cell an earlier token gathers from. See the "Causality" section of
+    ``src/dl_techniques/layers/attention/wave_field_attention.py`` — "no
+    sufficient condition on ``field_size`` / ``max_seq_len`` is offered here",
+    "Do NOT rely on this layer for autoregressive decoding".
+
+    Whether a leak occurs is a property of the exact
+    ``(field_size, max_seq_len)`` PAIR — through the field stride
+    ``(field_size - 1) / (max_seq_len - 1)`` — and the ratio
+    ``field_size / max_seq_len`` is only a lossy summary of it. Measured
+    end-to-end on this model (``max_seq_len=32``, ``embed_dim=64``,
+    ``depth=2``, seeded, random init, one token substituted; the reported
+    value is the worst absolute logit change over ALL earlier positions and
+    ALL perturbed positions, against logits of magnitude ~1.1)::
+
+        ratio  field_size  stride   worst leak (CPU / GPU)
+        0.50    16         0.4839   5.46e-04 / 5.50e-04   LEAKS
+        0.75    24         0.7419   3.77e-04 / 4.05e-04   LEAKS
+        1.00    32         1.0000   6.71e-08 / 0.0        clean
+        1.50    48         1.5161   4.96e-05 / 1.24e-04   LEAKS
+        2.00    64         2.0323   5.96e-08 / 0.0        clean   <- DEFAULT
+        4.00   128         4.0968   8.94e-08 / 0.0        clean
+
+    ``field_size`` defaults to ``2 * max_seq_len`` (ratio 2.0), which measured
+    clean at every configuration tested and whose stride
+    ``(2M - 1) / (M - 1) > 2`` keeps consecutive tokens more than one grid
+    cell apart. That is evidence, not a proof, and it is NOT a ratio
+    threshold: ratio 1.50 leaks while ratio 1.00 does not, so the property is
+    not monotone in the ratio, and any change to ``field_size`` or
+    ``max_seq_len`` must be re-measured rather than reasoned about. The pin is
+    ``TestWaveFieldLLMCausalityRatioSweep`` in
+    ``tests/test_models/test_wave_field/test_model.py``.
 
 References:
     - Radford et al., "Language Models are Unsupervised Multitask Learners",
@@ -73,9 +109,12 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
     1. ``attn_norm`` -> :class:`WaveFieldAttention` -> residual
     2. ``ffn_norm``  -> Dense(4D, gelu) -> Dense(D) -> Dropout -> residual
 
-    Causality is provided by the wave-field kernel (left-aligned, damped),
-    so no explicit causal mask is built. Only an optional padding mask
-    ``(B, N)`` is forwarded to attention.
+    No causal mask is built here: the ONLY mask this block forwards to
+    attention is the optional padding mask ``(B, N)``. Token-level causality
+    is therefore whatever :class:`WaveFieldAttention` happens to provide,
+    which is a MEASURED property of the ``(field_size, max_seq_len)`` pair and
+    is not guaranteed — see the "Causality" section of this module's docstring
+    for the measured table.
 
     :param embed_dim: Hidden dim (must be divisible by ``num_heads``).
     :param num_heads: Number of attention heads.
@@ -248,8 +287,11 @@ class WaveFieldLLM(keras.Model):
     Mirrors the public surface of :class:`GPT2` so it slots into the same
     training pipeline. The two notable differences are:
 
-    1. Attention is :class:`WaveFieldAttention` (FFT damped-wave field) which
-       is causal-by-construction; no explicit causal mask is required.
+    1. Attention is :class:`WaveFieldAttention` (FFT damped-wave field). No
+       explicit causal mask is constructed anywhere in this module, and
+       token-level causality is a MEASURED property of the
+       ``(field_size, max_seq_len)`` pair rather than a guarantee — see the
+       "Causality" section of this module's docstring.
     2. A new hyperparameter ``field_size`` (defaults to ``2 * max_seq_len``,
        see ``DECISION plan_2026-05-07_1519e34f/D-002``).
 
@@ -264,7 +306,10 @@ class WaveFieldLLM(keras.Model):
     :param num_heads: Number of attention heads. Default 12.
     :param max_seq_len: Maximum sequence length. Default 1024.
     :param field_size: Wave field grid resolution. ``None`` -> ``2 * max_seq_len``
-        (see DECISION ``D-002``).
+        (see DECISION ``D-002``). This value and ``max_seq_len`` jointly decide
+        whether the stack leaks future tokens; do not change either without
+        re-running the ratio sweep named in the module docstring's "Causality"
+        section.
     :param dropout_rate: Dropout for embedding and FFN paths. Default 0.0.
     :param attention_dropout_rate: Dropout on attention output. Default 0.0.
     :param initializer_range: Stddev for TruncatedNormal weight init.
