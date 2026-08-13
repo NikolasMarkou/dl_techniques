@@ -558,6 +558,38 @@ class WaveFieldLLM(keras.Model):
         })
         return config
 
+    # DECISION plan-2026-08-13T091555-230c101d/D-005
+    # _download_weights raises NotImplementedError instead of falling back to
+    # random-init. The prior behaviour (logger.warning + return model) handed a
+    # caller who asked for pretrained=True an untrained model with no
+    # exception. Do NOT reinstate a warn-and-return branch here or in
+    # from_variant. No public WaveFieldLLM weights are distributed with
+    # dl_techniques; users must pass a local path via
+    # pretrained="/path/to/file.keras" or pretrained=False (default).
+    @staticmethod
+    def _download_weights(
+        variant: str,
+        cache_dir: Optional[str] = None,
+    ) -> str:
+        """Resolve a local path for pretrained weights of ``variant``.
+
+        Not implemented: no public WaveFieldLLM weights are distributed with
+        ``dl_techniques``. Always raises ``NotImplementedError``. This method
+        exists to mirror the BERT / GPT-2 factory recipe and to provide an
+        explicit failure mode in place of a silent random-init fallback.
+
+        :param variant: Variant name (unused).
+        :type variant: str
+        :param cache_dir: Cache directory (unused).
+        :type cache_dir: Optional[str]
+        :raises NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            "Pretrained WaveFieldLLM weights are not distributed with "
+            "dl_techniques. Pass pretrained=<local_path> to load a local "
+            "checkpoint, or pretrained=False to random-init."
+        )
+
     @classmethod
     def from_variant(
         cls,
@@ -569,10 +601,16 @@ class WaveFieldLLM(keras.Model):
 
         :param variant: Variant name: ``'tiny'``, ``'small'``, ``'medium'``,
             ``'large'``, ``'xl'``.
-        :param pretrained: Reserved for parity with :class:`GPT2`; if a
-            string path is supplied, the model is built (with a dummy
-            forward pass) and weights are loaded with ``skip_mismatch=True``.
+        :param pretrained: If ``True``, raises ``NotImplementedError`` (no
+            public WaveFieldLLM weights are distributed by this library). If a
+            string path is supplied, the model is built (with a dummy forward
+            pass) and weights are loaded with ``skip_mismatch=True``. If
+            ``False`` (default), returns a random-initialized model.
         :param kwargs: Override any variant parameter.
+        :raises ValueError: If the variant name is not recognized.
+        :raises NotImplementedError: If ``pretrained=True``.
+        :raises FileNotFoundError: If ``pretrained`` is a path that does not
+            exist.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -603,11 +641,84 @@ class WaveFieldLLM(keras.Model):
                 model.load_weights(weights_path, skip_mismatch=True)
                 logger.info(f"Loaded weights from {weights_path}")
             else:
-                logger.warning(
-                    "pretrained=True but no weights URL configured. "
-                    "Model initialized with random weights."
-                )
+                # DECISION plan-2026-08-13T091555-230c101d/D-005
+                # Do NOT broaden this except clause to `Exception`: that would
+                # swallow the NotImplementedError from _download_weights and
+                # return a random-init model masquerading as pretrained, which
+                # is the exact bug this branch replaced. Only concrete I/O
+                # errors (a missing/corrupt local mirror) are caught.
+                try:
+                    resolved_path = cls._download_weights(variant)
+                except (IOError, OSError, ValueError) as e:
+                    logger.warning(
+                        f"Failed to download pretrained weights: {e}. "
+                        f"Continuing with random initialization."
+                    )
+                    resolved_path = None
+                if resolved_path is not None:
+                    if not model.built:
+                        import numpy as np
+                        dummy = np.random.randint(
+                            0, model.vocab_size, (1, 32),
+                        ).astype("int32")
+                        model(dummy, training=False)
+                    model.load_weights(resolved_path, skip_mismatch=True)
+                    logger.info(f"Loaded weights from {resolved_path}")
 
         return model
+
+# ---------------------------------------------------------------------
+# Module-level Factory
+# ---------------------------------------------------------------------
+
+
+def create_wave_field_llm(
+    variant: str = "small",
+    vocab_size: Optional[int] = None,
+    pretrained: Union[bool, str] = False,
+    **kwargs: Any,
+) -> "WaveFieldLLM":
+    """Convenience factory that mirrors ``create_bert`` / ``create_gpt2``.
+
+    Thin wrapper around :meth:`WaveFieldLLM.from_variant` exposing the most
+    common construction arguments at module level. Behaves identically to
+    calling ``WaveFieldLLM.from_variant(...)`` directly.
+
+    :param variant: Variant name (``"tiny"``, ``"small"``, ``"medium"``,
+        ``"large"``, ``"xl"``). Defaults to ``"small"``.
+    :type variant: str
+    :param vocab_size: Optional vocabulary size override. If ``None``
+        (default), the variant's own vocabulary size is used. If provided, it
+        is forwarded as ``vocab_size=...`` in ``kwargs``.
+    :type vocab_size: Optional[int]
+    :param pretrained: If ``True``, raises ``NotImplementedError`` — no public
+        WaveFieldLLM weights are distributed by this library. If a string path,
+        loads local weights from that path. If ``False`` (default), random
+        init.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Additional keyword arguments forwarded to
+        :meth:`WaveFieldLLM.from_variant` (e.g. ``dropout_rate``,
+        ``tie_word_embeddings``).
+    :type kwargs: Any
+
+    :returns: Configured ``WaveFieldLLM`` instance.
+    :rtype: WaveFieldLLM
+
+    :raises NotImplementedError: If ``pretrained=True`` (no public weights).
+    :raises FileNotFoundError: If ``pretrained`` is a string path that does
+        not exist.
+    :raises ValueError: If ``variant`` is not a recognized variant.
+
+    Example:
+        >>> model = create_wave_field_llm("small")
+        >>> model = create_wave_field_llm("tiny", vocab_size=200)
+    """
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return WaveFieldLLM.from_variant(
+        variant,
+        pretrained=pretrained,
+        **kwargs,
+    )
 
 # ---------------------------------------------------------------------

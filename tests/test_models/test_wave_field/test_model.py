@@ -16,7 +16,9 @@ import tensorflow as tf
 from dl_techniques.models.wave_field.model import (
     WaveFieldLLM,
     WaveFieldDecoderBlock,
+    create_wave_field_llm,
 )
+import dl_techniques.models.wave_field as wave_field_pkg
 from dl_techniques.losses import MaskedCausalLMLoss
 
 
@@ -335,3 +337,122 @@ class TestWaveFieldLLMCLMLoss:
         loss = MaskedCausalLMLoss()(labels, out["logits"])
         loss_val = float(keras.ops.convert_to_numpy(loss))
         assert np.isfinite(loss_val)
+
+
+# ---------------------------------------------------------------------
+# pretrained=True error contract (D-005)
+# ---------------------------------------------------------------------
+
+
+class TestWaveFieldLLMPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract existed, ``from_variant(..., pretrained=True)``
+    logged a warning and returned an untrained model, so a caller asking
+    for trained weights silently received random ones.
+    """
+
+    def test_download_weights_raises_not_implemented(self):
+        with pytest.raises(NotImplementedError, match="not distributed"):
+            WaveFieldLLM._download_weights("tiny")
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="not distributed"):
+            WaveFieldLLM.from_variant("tiny", pretrained=True)
+
+    def test_create_wave_field_llm_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="not distributed"):
+            create_wave_field_llm("tiny", pretrained=True)
+
+    def test_pretrained_missing_path_raises_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            WaveFieldLLM.from_variant(
+                "tiny", pretrained="/nonexistent/wave_field.keras",
+            )
+
+    def test_pretrained_false_returns_model(self, tiny_config):
+        model = WaveFieldLLM.from_variant("tiny", pretrained=False)
+        assert isinstance(model, WaveFieldLLM)
+
+
+# ---------------------------------------------------------------------
+# Public API surface (package-root exports)
+# ---------------------------------------------------------------------
+
+
+class TestWaveFieldPublicAPI:
+    """Both import forms must resolve to the SAME objects (`is`-identity)."""
+
+    def test_package_root_exports_model_class(self):
+        assert wave_field_pkg.WaveFieldLLM is WaveFieldLLM
+
+    def test_package_root_exports_block_class(self):
+        assert wave_field_pkg.WaveFieldDecoderBlock is WaveFieldDecoderBlock
+
+    def test_package_root_exports_factory(self):
+        assert wave_field_pkg.create_wave_field_llm is create_wave_field_llm
+
+    def test_all_declares_exactly_the_public_surface(self):
+        assert set(wave_field_pkg.__all__) == {
+            "WaveFieldLLM",
+            "WaveFieldDecoderBlock",
+            "create_wave_field_llm",
+        }
+
+
+# ---------------------------------------------------------------------
+# Module-level factory
+# ---------------------------------------------------------------------
+
+
+class TestCreateWaveFieldLLM:
+
+    @pytest.mark.parametrize(
+        "variant", sorted(WaveFieldLLM.MODEL_VARIANTS.keys()),
+    )
+    def test_builds_each_variant(self, variant):
+        """Every named variant builds through the factory.
+
+        ``embed_dim``/``depth``/``num_heads``/``vocab_size`` are overridden to
+        keep the xl/large/medium variants constructible in a unit test; the
+        wave-field-specific ``max_seq_len``/``field_size`` come from the
+        variant table untouched and are what is asserted.
+        """
+        expected = WaveFieldLLM.MODEL_VARIANTS[variant]
+        model = create_wave_field_llm(
+            variant,
+            vocab_size=64,
+            embed_dim=32,
+            depth=1,
+            num_heads=2,
+        )
+        assert isinstance(model, WaveFieldLLM)
+        assert model.vocab_size == 64
+        assert model.max_seq_len == expected["max_seq_len"]
+        assert model.field_size == expected["field_size"]
+
+    def test_default_variant_is_small(self):
+        model = create_wave_field_llm(
+            vocab_size=64, embed_dim=32, depth=1, num_heads=2,
+        )
+        small = WaveFieldLLM.MODEL_VARIANTS["small"]
+        assert model.max_seq_len == small["max_seq_len"]
+        assert model.field_size == small["field_size"]
+
+    def test_vocab_size_none_keeps_class_default(self):
+        model = create_wave_field_llm(
+            "tiny", vocab_size=None, embed_dim=32, depth=1, num_heads=2,
+        )
+        assert model.vocab_size == WaveFieldLLM.DEFAULT_VOCAB_SIZE
+
+    def test_forward_pass_of_factory_built_model(self):
+        model = create_wave_field_llm(
+            "tiny", vocab_size=64, embed_dim=32, depth=1, num_heads=2,
+        )
+        ids = _random_ids((2, 8), 64)
+        out = model(ids, training=False)
+        assert out["logits"].shape == (2, 8, 64)
+
+    def test_unknown_variant_raises(self):
+        with pytest.raises(ValueError, match="Unknown variant"):
+            create_wave_field_llm("nonexistent")
