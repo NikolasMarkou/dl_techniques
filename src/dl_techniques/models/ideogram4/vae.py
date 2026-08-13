@@ -72,7 +72,7 @@ def _check_div32(value: int, what: str) -> None:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class ResnetBlock(keras.layers.Layer):
     """Flux2 residual block: (GroupNorm32 + swish + Conv3x3) x2 + skip.
 
@@ -187,7 +187,7 @@ class ResnetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class AttnBlock(keras.layers.Layer):
     """Spatial self-attention block (Flux2 mid-block only).
 
@@ -292,7 +292,7 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
 
@@ -362,7 +362,7 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 
@@ -431,7 +431,7 @@ class Upsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Encoder(keras.layers.Layer):
     """Flux2 KL-VAE encoder: image -> ``2 * z_channels`` latent params.
 
@@ -617,7 +617,7 @@ class Encoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Decoder(keras.layers.Layer):
     """Flux2 KL-VAE decoder: ``z_channels`` latent -> reconstructed image.
 
@@ -805,7 +805,7 @@ class Decoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class AutoEncoder(keras.Model):
     """Flux2 KL-VAE: Encoder + KL ``Sampling`` reparameterization + Decoder.
 

@@ -94,7 +94,7 @@ def _resolve_act(act_fn: str):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class CLIPTextEncoder(keras.Model):
     """OpenAI-CLIP text tower (from-scratch, token-id input, causal-masked).
 
@@ -398,7 +398,7 @@ class CLIPTextEncoder(keras.Model):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class OpenCLIPTextEncoder(CLIPTextEncoder):
     """OpenCLIP (ViT-bigG) text tower: larger dims, standard GELU.
 
@@ -460,7 +460,7 @@ class OpenCLIPTextEncoder(CLIPTextEncoder):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class T5Encoder(keras.Model):
     """T5-v1.1 encoder (from-scratch, relative-position-bucket bias).
 

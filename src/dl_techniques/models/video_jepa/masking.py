@@ -34,7 +34,7 @@ import keras
 from keras import ops, random
 
 
-@keras.saving.register_keras_serializable(package="video_jepa")
+@keras.saving.register_keras_serializable()
 class TubeMaskGenerator(keras.layers.Layer):
     """Sample a per-sample spatial tube mask.
 

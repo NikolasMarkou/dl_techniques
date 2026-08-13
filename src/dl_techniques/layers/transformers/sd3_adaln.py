@@ -129,7 +129,7 @@ def _modulate(
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class AdaLayerNormZero(keras.layers.Layer):
     """SD3 6-way AdaLN-Zero modulation (attention + MLP shift/scale/gate).
 
@@ -257,7 +257,7 @@ class AdaLayerNormZero(keras.layers.Layer):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class AdaLayerNormZeroX(keras.layers.Layer):
     """SD3 9-way AdaLN-Zero modulation with a dual (second) attention path.
 
@@ -395,7 +395,7 @@ class AdaLayerNormZeroX(keras.layers.Layer):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class AdaLayerNormContinuous(keras.layers.Layer):
     """SD3 2-way AdaLN modulation (scale + shift, NO gate).
 

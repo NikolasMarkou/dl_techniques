@@ -29,7 +29,7 @@ from keras import ops
 from typing import Any, Dict, List, Optional, Union
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@keras.saving.register_keras_serializable()
 class PrimaryOutputAccuracy(keras.metrics.Metric):
     """Classification accuracy for the primary output of multi-output models.
 
@@ -105,7 +105,7 @@ class PrimaryOutputAccuracy(keras.metrics.Metric):
         return super().get_config()
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@keras.saving.register_keras_serializable()
 class PrimaryOutputTopKAccuracy(keras.metrics.Metric):
     """Top-K accuracy for the primary output of multi-output models.
 

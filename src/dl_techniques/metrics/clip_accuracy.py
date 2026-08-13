@@ -181,7 +181,7 @@ import keras
 from keras import ops
 
 
-@keras.saving.register_keras_serializable(package="CLIPMetrics")
+@keras.saving.register_keras_serializable()
 class CLIPAccuracy(keras.metrics.Metric):
     """
     Accuracy metric for CLIP contrastive learning.
@@ -427,7 +427,7 @@ class CLIPAccuracy(keras.metrics.Metric):
         return config
 
 
-@keras.saving.register_keras_serializable(package="CLIPMetrics")
+@keras.saving.register_keras_serializable()
 class CLIPRecallAtK(keras.metrics.Metric):
     """
     Recall@K metric for CLIP contrastive learning.

@@ -99,7 +99,7 @@ WIKI_ARTICLES_DEFAULT = 10_000
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="rms_variants_train")
+@keras.saving.register_keras_serializable()
 class TinyCLM(keras.Model):
     """4-layer / d=192 / 4-head causal transformer with dict-keyed output.
 

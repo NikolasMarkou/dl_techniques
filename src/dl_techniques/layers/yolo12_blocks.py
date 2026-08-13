@@ -51,7 +51,7 @@ from typing import Optional, Tuple, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.yolo12")
+@keras.saving.register_keras_serializable()
 class ConvBlock(keras.layers.Layer):
     """
     Standard YOLOv12 convolution block: Conv2D, BatchNorm, SiLU.

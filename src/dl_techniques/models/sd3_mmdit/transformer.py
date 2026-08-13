@@ -150,7 +150,7 @@ def _1d_sincos(dim: int, pos: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class SD3MMDiT(keras.Model):
     """Stable Diffusion 3 MMDiT dual-stream velocity predictor.
 
