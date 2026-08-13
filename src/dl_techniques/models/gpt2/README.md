@@ -634,9 +634,11 @@ have **zero adoptable sites**:
   vocabulary projection — it is not an attention, FFN, normalization,
   embedding or activation primitive — so there is nothing to adopt.
 
-A `grep create_*_layer src/dl_techniques/models/gpt2/` returning zero is
-therefore **not** evidence of a problem: it measures the wrong thing. The
-question is whether the model reaches the factories at some level, and it does.
+So `grep -rn "create_.*_layer" src/dl_techniques/models/gpt2/ --include="*.py"`
+returns 0 — and that is **not** evidence of a problem, it measures the wrong
+thing. The question is whether the model reaches the factories at some level,
+and it does, through `TextDecoder`. (Keep the `--include="*.py"`: without it
+this very section is counted as a hit.)
 
 ### Pre-norm
 
