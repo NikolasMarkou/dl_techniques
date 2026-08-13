@@ -93,7 +93,6 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `pw_fnet/` — Patchwise FNet
 - `power_mlp/` — Power MLP
 - `mothnet/` — MothNet (bio-inspired)
-- `ccnets/` — CCNets
 - `coshnet/` — CoshNet
 - `latent_gmm_registration/` — Latent GMM registration
 - `mini_vec2vec/` — Mini Vec2Vec

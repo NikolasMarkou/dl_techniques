@@ -12,8 +12,8 @@ structural contracts defined here:
 - :data:`LogitsFn` — a callable mapping a token-id array to a single logit vector
   for the target position, letting any causal LM/VLM be injected as a closure.
 
-Keeping these as ``typing.Protocol`` interfaces (idiom mirrored from
-``models/ccnets/base.py``) means callers pass plain duck-typed objects with no
+Keeping these as ``typing.Protocol`` interfaces means callers pass plain
+duck-typed objects with no
 inheritance requirement, and the package stays free of TensorFlow/tiktoken
 imports at module load (constraint C6).
 """

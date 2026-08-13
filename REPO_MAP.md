@@ -379,7 +379,7 @@ Three named places break that rule, and each has cost someone a search:
   the wrong one.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model
   gets a `tests/test_models/test_<name>/` directory — e.g.
-  `tests/test_models/test_ccnets/`. Any directory-to-directory comparison
+  `tests/test_models/test_vit/`. Any directory-to-directory comparison
   reports `lewm` as untested. It is not.
 
 And one place that only *looks* broken: `src/dl_techniques/layers/sequence_pooling/`
