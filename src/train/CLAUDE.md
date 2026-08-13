@@ -577,7 +577,7 @@ These scripts have legitimate reasons for local callback management:
 | yolo12/train_multitask | Per-task callbacks, per-task loss tracking, per-task visualization |
 | tabm | Custom TabMTrainer class, not standard Keras fit() |
 
-**This table is about CALLBACKS and nothing else.** It is not a licence to skip the CLI. Every entry point still owes a `parse_arguments()`/`main(argv)` whose FIRST statement parses argv, so `--help` exits 0 with a `usage:` line and allocates nothing. `bert/wikipedia/*` had no parser at all, so `--help` ran `main()` for real (reaching `MirroredStrategy`, and for `finetune.py` a full TFDS dataset build) before crashing; all three are fixed. A repo-wide sweep of all 115 `src/train/` entry points found exactly one further offender, `train.tabm.train_tabm`, whose failure mode was worse than a crash: it ignored `--help`, ran all five example pipelines to completion and exited **0** with no `usage:` line, so an exit-code-only sweep read it as healthy. Also fixed, and both packages now have their first tests (`tests/test_train/test_bert_wikipedia/`, `tests/test_train/test_tabm/`).
+**This table is about CALLBACKS and nothing else.** It is not a licence to skip the CLI. Every entry point still owes a `parse_arguments()`/`main(argv)` whose FIRST statement parses argv, so `--help` exits 0 with a `usage:` line and allocates nothing. `bert/wikipedia/*` had no parser at all, so `--help` ran `main()` for real (reaching `MirroredStrategy`, and for `finetune.py` a full TFDS dataset build) before crashing; all three are fixed. A repo-wide sweep of all `src/train/` entry points (125 under the filter given in "Consolidation candidates measured and REFUSED (2026-08-13)" below; this sentence used to say 115, a figure no filter reproduces) found exactly one further offender, `train.tabm.train_tabm`, whose failure mode was worse than a crash: it ignored `--help`, ran all five example pipelines to completion and exited **0** with no `usage:` line, so an exit-code-only sweep read it as healthy. Also fixed, and both packages now have their first tests (`tests/test_train/test_bert_wikipedia/`, `tests/test_train/test_tabm/`).
 
 Two traps that sweep exposed, worth knowing before adding a parser:
 - **`argparse` is not enough on its own** — and this one is now FIXED at the root, but the lesson is the point. `train.common`'s package `__init__` imports `image_text.py`, whose `IMAGE_MEAN`/`IMAGE_STD` used to be built with `tf.constant(...)` at MODULE scope. A module-level eager op initializes TF's eager context and creates a GPU device, so `from train.common import setup_gpu` at module scope made `--help` allocate a GPU no matter where you parsed — on all 125 entry points — and once produced a false 12-error test "regression" that was really `cudaSetDevice()` self-contention between concurrent suites. **The rule that survives the fix: never run an eager TF op at module scope anywhere under `train/common/`.** The package `__init__` re-exports it, so the cost is paid by every importer of every submodule, not just yours.
@@ -588,3 +588,102 @@ Two traps that sweep exposed, worth knowing before adding a parser:
 When writing a new script that genuinely can't use `create_callbacks()`, document the reason in a comment at the top of the callbacks section.
 
 A different kind of non-adoption is documented under Pattern 3: `tree_transformer` *does* use `create_nlp_callbacks`, but is deliberately NOT folded into the shared bert/fnet finetune/pretrain scaffold — see "`tree_transformer` is a deliberate NON-ADOPTER of the bert/fnet scaffold" for the measured reasons, the drifts left unharmonized, and three known open defects.
+
+## Consolidation candidates measured and REFUSED (2026-08-13)
+
+Five `src/train/` consolidation candidates were measured on 2026-08-13. Two were acted on (the `image_text.py` import-time GPU allocation, and the seven inline RNG seeders — both documented above). The rest were **measured and refused**, and the measurement is recorded here so the next sweep reads it instead of re-deriving it.
+
+**This section is a DIFFERENT axis from the "Scripts That Don't Use `train.common` Callbacks" table above.** That table is about adoption of the generic `create_callbacks()` scaffold; none of its four packages (`bert/wikipedia`, `blt`, `yolo12/train_multitask`, `tabm`) appears anywhere in the seven-class schedule family below. Do not merge the two lists.
+
+Every path below was resolved with `test -e` and every count re-derived with the command shown, at the commit that added this section. Where a symbol is unambiguous, it is cited *by symbol* — line numbers in this file have drifted twice before.
+
+### (a) The schedule-callback family — no shared `_interp` helper
+
+**Seven** classes interpolate a scalar over training progress and assign it somewhere. Not twelve: the "12" figure is not reconstructible under any definition tried. The reproducible base counts are **68** classes with a `*Callback` base across 51 files under `src/dl_techniques/` + `src/train/` (AST walk over `ClassDef.bases`; a `grep -c "^class .*Callback"` gives 67 and misses indented definitions), and **11** `.py` files under `src/dl_techniques/callbacks/` (10 plus `__init__.py`).
+
+| Class | Path |
+|---|---|
+| `NoiseSigmaCurriculumCallback` | `src/dl_techniques/callbacks/noise_sigma_curriculum.py` |
+| `TemperatureAnnealingCallback` | `src/dl_techniques/callbacks/temperature_annealing.py` |
+| `TeacherEMACallback` | `src/dl_techniques/models/depth_anything/teacher_ema.py` |
+| `KLWarmupCallback` | `src/train/vae/train_vae.py` |
+| `DeepSupervisionWeightScheduler` | `src/train/resnet/train_resnet.py` |
+| `WWPGDProjectionCallback` | `src/dl_techniques/optimization/ww_pgd_optimizer.py` |
+| `PhaseScheduler` | `src/dl_techniques/models/memory_bank/phase_scheduler.py` — a **discrete phase lookup**, not an interpolator; listed for completeness |
+
+Three of the seven live OUTSIDE `dl_techniques/callbacks/` (under `models/` and `optimization/`), which is why enumerating only that directory undercounts. `ScheduledDropout` (`src/dl_techniques/layers/scheduled_dropout.py`) is **a `Layer`, not a `Callback`** — it reuses `keras.optimizers.schedules.LearningRateSchedule` as its decay engine and belongs to neither list.
+
+**The measured ceiling: ~18 executable lines.** Only two of the seven share identical math — `NoiseSigmaCurriculumCallback._interp` and `TemperatureAnnealingCallback._temperature_at`, both **11** AST-counted executable statements (docstring stripped), both the same `clamp(epoch)/total` fraction fed through linear / cosine / exp-in-log-space branches. Collapsing just those two into a shared helper leaves ~2 lines at each call site, so it saves **~18 executable lines net** — below the ~20-line threshold at which a consolidation is worth its indirection. The rest have nothing to give: `TeacherEMACallback` is already factored into 3-line standalone schedule functions, `KLWarmupCallback`'s math is 2 lines and linear-only, and `WWPGDProjectionCallback._compute_hardness` uses a structurally different two-stage warmup+ramp offset that a shared `(start, end, frac)` signature would change rather than refactor.
+
+**Why the ceiling is so low: the bulk of each class is plumbing, not math.** `keras.Variable`-vs-plain-attribute resolution, per-class `get_config`/`from_config` contracts that all round-trip differently, fail-soft guards, and embedded `# DECISION` anchors recording load-bearing history. `noise_sigma_curriculum.py` is 159 lines around an 11-line kernel; `ww_pgd_optimizer.py` is 644 lines around an 8-line hardness ramp plus a ~400-line SVD/Cayley pipeline that has nothing to do with progress interpolation.
+
+**The primitive already exists — point at it instead of building a second one.** `schedule_builder` in `src/dl_techniques/optimization/deep_supervision.py` (`schedule_builder(config, no_outputs, invert_order=False) -> Callable[[float], np.ndarray]`) is already a generalized progress→value factory with **10** registered shapes (`ScheduleType`: `constant_equal`, `constant_low_to_high`, `constant_high_to_low`, `linear_low_to_high`, `non_linear_low_to_high`, `custom_sigmoid_low_to_high`, `scale_by_scale_low_to_high`, `cosine_annealing`, `curriculum`, `step_wise`). `DeepSupervisionWeightScheduler` already consumes it. Its return contract is an `np.ndarray` of per-output weights, not a scalar, so it does not fit the scalar consumers without adaptation — which is the work any future consolidation would actually be signing up for.
+
+### (b) `plot_training_history` — 3 definitions, deliberately not merged
+
+`grep -rn "def plot_training_history" src/ --include="*.py"` → exactly 3, one caller each, each caller in the same file as its definition (no cross-file callers).
+
+| Definition | Length | Shape |
+|---|---|---|
+| `capsnet/train_capsnet.py:215-283` | 69 lines | hand-rolled 2x2 Matplotlib grid, direct `plt.savefig` |
+| `power_mlp/train_power_mlp.py:162-224` | 63 lines | hand-rolled 2x2 grid **plus** a `pandas.Series.rolling` moving-average stability panel |
+| `vae/train_vae.py:240-257` | 18 lines | shim: aliases `total_loss`→`loss` / `val_total_loss`→`val_loss`, then delegates to the shared `generate_training_curves` (`train/common/evaluation.py`) |
+
+A merge would have to **invent 3-4 toggles for code that does not exist as a toggle today**:
+1. moving-average panel on/off — power_mlp only, and it drags in a `pandas` dependency the other two do not have;
+2. a per-model conditional metric key — `capsule_accuracy` / `reconstruction_loss` / `margin_loss` vs plain `accuracy` vs none;
+3. "Not Available" placeholder text — capsnet only (3 sites);
+4. vae's metric-key aliasing, or else leaving vae routed through `generate_training_curves` and not merging it at all, which reduces "3 definitions" to "2 to merge, 1 legitimately separate".
+
+That is the same anti-pattern this document already forbids in the tree_transformer non-adoption section under Pattern 3 ("Folding it in would therefore mean inventing config toggles for code that **does not exist**"). These are three diagnostic contracts, not three styles of one function.
+
+**The narrower win that IS available**, if someone wants one: capsnet and power_mlp end with byte-identical `plt.tight_layout()` / `plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=150, bbox_inches='tight')` / `plt.close()` boilerplate. That is safely mergeable without touching any diagnostic content.
+
+### (c) Corrected counts, each with the command that MEASURES it
+
+| Claim | Command | Value |
+|---|---|---|
+| Schedule interpolators | classification of the 68 `*Callback`-based classes above — see (a) | **7**, not 12 |
+| Canonical `set_seeds` users | `grep -rl "set_seeds(" src/train/ \| grep -v "common/seed.py\|common/__init__.py\|README.md\|CLAUDE.md" \| wc -l` | **72** (was **65** before the 7 inline seeders were migrated on 2026-08-13; never 70) |
+| `src/train/` entry points | `grep -rl '__name__ == .__main__.' src/train/ --include="*.py" \| grep -v "/common/\|/__init__\.py$\|/test_"` | **125**. The often-quoted **115 is not reproducible under any filter tried** — the raw guard grep gives 127, and 125 after excluding `common/`, `__init__.py` and `test_*`. State your filter whenever you quote this. |
+| Direct `keras.optimizers.*` calls | `grep -rn -E "keras\.optimizers\.(Adam\|AdamW\|SGD\|RMSprop)\(" --include="*.py" src/train/` | **63 across 49 files** — CONFIRMED exactly. The `--include="*.py"` filter is **required**: without it you get 66, and the three extra hits are prose mentions inside this very file. |
+
+### (d) The optimizer ruling — `optimizer_builder()` adoption REFUSED for the AdamW-pretrain cluster
+
+Adoption of `optimizer_builder()` for the 9-file AdamW-pretrain cluster was measured against a **rule pre-registered before the probe ran**: ADOPT only if (i) all 9 sites are config-equivalent under a comparator that also checks post-construction weight-decay exclusions, AND (ii) the AST-stripped executable-statement delta over the 9 files is **≤ −9**.
+
+**Measured delta: +7.** Composition: **+0 body** — every site is exactly one statement before and one statement after (5 are an `optimizer = …` assignment; 4 are an inline `optimizer=` kwarg inside an existing `model.compile(…)` call, which is 0 statements of its own on both sides) — and **+7 imports** (7 of 9 files need a new `from dl_techniques.optimization import optimizer_builder`; the 2 `bert/wikipedia` files already have such a line to absorb the name). The apparent multi-line saving is line-wrapping, not statements: raw physical lines move **+3** (58 → 61). Condition (i) also fails. **Ruling: DOCUMENT.** No `src/` edit was made.
+
+Three sites are excluded on their own merits, independent of the arithmetic:
+
+- `coshnet/train_coshnet.py:99` — `epsilon=1e-8`, a non-default. `optimizer_builder` defaults to `1e-7` and would change it **silently**.
+- `thera/train_thera.py:451` — `global_clipnorm=None` set **deliberately**, because clipping happens manually inside a custom `train_step` (D-012). Reflexively filling clipping in would double-clip.
+- `vae/train_vae.py:336` — a `keras.optimizers.get()` fallback for arbitrary optimizer names. `optimizer_builder` raises on an unknown `type`, so migrating this site would REMOVE functionality, not refactor it.
+
+Separately, **16 bare one-liners** are excluded as a class: 15 sites pass only `learning_rate=` (AST-verified) plus `convunext/train_convunext.py:229`, which passes the LR positionally. Routing any of these through the builder replaces one line with a dict-literal plus a call — it is net line-**positive**. "Consolidate all 63 optimizer sites" is not a supportable framing.
+
+> **Scope note for a future sweep:** the 3-kwarg `AdamW(learning_rate=…, weight_decay=…, clipnorm=…)` signature actually occurs at **17** sites, not 9 (AST scan over `keras.optimizers.AdamW` calls whose kwargs are a superset of those three). The nine measured above are the NLP-pretrain subset. Do not assume 9 bounds the surface.
+
+**Two traps the probe surfaced — these are more valuable than the ruling itself.**
+
+- **`optimizer_builder` silently ignores a literal `"clipnorm"` config key.** Its keys are RENAMED: `gradient_clipping_by_value` → `clipvalue`, `gradient_clipping_by_norm_local` → `clipnorm`, `gradient_clipping_by_norm` → `global_clipnorm` (`src/dl_techniques/optimization/optimizer.py:140-152`). All 9 cluster sites pass `clipnorm=1.0`. A naive migration that copies that key straight into the config dict **drops gradient clipping on all 9 with no error and no warning**. This is a live trap for anyone adopting the builder today, not a historical note. Measured directly: a control writing the literal key fired the comparator's config check with `config[clipnorm]: actual=1.0 builder=None`.
+- **`optimizer_builder` hard-codes `"name": "AdamW"`** (`src/dl_techniques/optimization/optimizer.py:305`) against Keras' own `"adamw"` default, so every AdamW built through it differs from a directly-constructed one on the `name` key. Cosmetic for numerics, but the name is the optimizer's **variable scope** — a checkpoint-compatibility consideration that already applies to the **23** files under `src/train/` that use `build_optimizer` today (`grep -rl "build_optimizer" src/train/`).
+
+**A REAL BUG, not a consolidation note — the highest-value known open defect in `src/train/`:**
+
+`src/train/bert/wikipedia/pretrain.py:318` and `src/train/bert/wikipedia/pretrain_english.py:321` pass **`jit_compile=True` to a Keras 3 optimizer CONSTRUCTOR**. Keras 3 optimizers have no such parameter; the call raises `ValueError: Argument(s) not recognized: {'jit_compile': True}`. It sits on an unconditional path inside `with strategy.scope():` immediately before `model.compile(...)`, so **both scripts crash the moment they reach model compilation, on every run**. It is invisible to the `--help` gate (a train-time raise, and all 125 entry points exit 0) and invisible to the test suite.
+
+**UNFIXED, and deliberately out of scope of the consolidation plan that found it**: the correct repair routes XLA to `model.compile(jit_compile=True)`, which enables a code path that has never once executed and cannot be validated by a consolidation plan's gates. Migrating these two sites to `optimizer_builder` would incidentally stop the crash — but by silently discarding the intended XLA compilation, which is a bug fix wearing a refactor's clothes. Fix it in its own change, with its own guard.
+
+### (e) The 3 numpy/`random`-only seeders are deliberately NOT migrated
+
+- `src/train/tabm/train_tabm.py:518` — `np.random.seed(42)`
+- `src/train/nam/eval_dfsa.py:18-19` — `random.seed(42)` + `np.random.seed(42)`
+- `src/train/nam/train_dfsa_ste.py:267` — `random.seed(42)`
+
+Routing these through `set_seeds` would **ADD** TF and Keras seeding they do not have today, changing the model-init RNG stream. That is a behaviour change, not a refactor, and belongs to a plan that can measure it. The contrast is the whole point: the 7 files that WERE migrated on 2026-08-13 were provably bit-identical before and after (`random` / NumPy / TF / Keras draws all matched, comparator RED-proven with a different-seed control), which is exactly why they were safe and these three are not.
+
+### (f) Known test-coverage gaps — recorded, not fixed
+
+- **`DeepSupervisionWeightScheduler`** (`src/train/resnet/train_resnet.py:134`) has **zero** test coverage: `grep -rn "DeepSupervisionWeightScheduler" tests/` → 0 hits. It is the only one of the seven schedule callbacks in (a) that is untested; any consolidation touching it is unguarded and should add a test as a precondition, not a side-effect.
+- **Of the 7 files whose seeding was migrated on 2026-08-13, only `tree_transformer/pretrain.py` is exercised by any test.** No test references `logic/train_e4_monks.py`, `logic/train_e4_lowdata_mux.py`, `wave_field/train_memory.py`, `wave_field/pretrain.py`, `vae/evaluate_samplers.py` or `cliffordnet/train_cliffordnet_nlp.py`. Neither `tests/test_train/test_wave_field/` nor `tests/test_train/test_vae/` exists at all. `tests/test_train/test_logic/` and `tests/test_train/test_cliffordnet/` DO exist but cover other modules — `test_logic/` covers `train_benchmark`, `train_boolean_circuit`, `train_e1_image` and `train_e3_faithfulness` but neither `e4` script, and `test_cliffordnet/` contains only `test_train_clip_textlm.py`. A directory bearing a package's name is not coverage of that package.
