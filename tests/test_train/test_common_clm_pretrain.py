@@ -25,6 +25,8 @@ CPU-only, no GPU, no dataset download.
 """
 
 import logging
+import dataclasses
+
 import pytest
 
 import keras
@@ -350,8 +352,15 @@ class TestLoadTrainValDatasets:
 
 
 class TestModuleSurface:
-    def test_all_six_canonical_names_are_exported(self):
+    # This set is EXACT on purpose -- it is what makes an accidental widening of
+    # this module's surface visible. `ClmPretrainConfig` was added deliberately
+    # (decisions.md D-002/D-010): the shared CLM config is the config half of
+    # the same concern the six functions own, and it lives here rather than in a
+    # new `clm_config.py`. Do not relax this to a subset check when adding a
+    # name; add the name and say why.
+    def test_the_canonical_names_are_exported(self):
         assert set(cp.__all__) == {
+            "ClmPretrainConfig",
             "extract_step_from_checkpoint",
             "create_clm_loss_fn",
             "load_train_val_datasets",
@@ -361,6 +370,9 @@ class TestModuleSurface:
         }
         for name in cp.__all__:
             assert callable(getattr(cp, name))
+        # A class is callable, so the loop above cannot tell the config apart
+        # from the functions. Pin what it actually is.
+        assert dataclasses.is_dataclass(cp.ClmPretrainConfig)
 
     def test_the_package_hub_re_exports_the_same_objects_not_copies(self):
         import train.common as hub
