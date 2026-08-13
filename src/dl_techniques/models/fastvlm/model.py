@@ -7,7 +7,6 @@ components for high-performance image classification and feature extraction.
 """
 
 import keras
-from keras import layers, initializers
 from typing import Optional, Union, List, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
@@ -217,7 +216,7 @@ class FastVLM(keras.Model):
             attention_type: AttentionType = 'multi_head',
             use_layer_scale: bool = True,
             activation: Union[str, callable] = 'gelu',
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs: Any
@@ -326,7 +325,7 @@ class FastVLM(keras.Model):
         x = stage1(x, training=None)
 
         # Downsample 1->2
-        downsample_1_2 = layers.Conv2D(
+        downsample_1_2 = keras.layers.Conv2D(
             filters=self.embed_dims[1],
             kernel_size=3,
             strides=2,
@@ -354,7 +353,7 @@ class FastVLM(keras.Model):
         x = stage2(x, training=None)
 
         # Downsample 2->3
-        downsample_2_3 = layers.Conv2D(
+        downsample_2_3 = keras.layers.Conv2D(
             filters=self.embed_dims[2],
             kernel_size=3,
             strides=2,
@@ -405,8 +404,8 @@ class FastVLM(keras.Model):
         # Classification head
         if self.include_top and self.num_classes > 0:
             head_layers = [
-                layers.GlobalAveragePooling2D(name='gap'),
-                layers.Dense(
+                keras.layers.GlobalAveragePooling2D(name='gap'),
+                keras.layers.Dense(
                     self.num_classes,
                     kernel_initializer=self.kernel_initializer,
                     name='classifier'
@@ -414,7 +413,7 @@ class FastVLM(keras.Model):
             ]
 
             if self.dropout_rate > 0.0:
-                head_layers.insert(-1, layers.Dropout(self.dropout_rate, name='head_dropout'))
+                head_layers.insert(-1, keras.layers.Dropout(self.dropout_rate, name='head_dropout'))
 
             self.head = keras.Sequential(head_layers, name='classification_head')
             x = self.head(x, training=None)
@@ -565,8 +564,8 @@ class FastVLM(keras.Model):
             'activation': keras.activations.serialize(
                 keras.activations.get(self.activation)
             ),
-            'kernel_initializer': initializers.serialize(
-                initializers.get(self.kernel_initializer)
+            'kernel_initializer': keras.initializers.serialize(
+                keras.initializers.get(self.kernel_initializer)
             ),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
@@ -585,7 +584,7 @@ class FastVLM(keras.Model):
         """
         # Deserialize initializer if present
         if 'kernel_initializer' in config:
-            config['kernel_initializer'] = initializers.deserialize(
+            config['kernel_initializer'] = keras.initializers.deserialize(
                 config['kernel_initializer']
             )
 

@@ -34,15 +34,17 @@ References
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any, List, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.losses.capsule_margin_loss import CapsuleMarginLoss
 from dl_techniques.layers.capsules import PrimaryCapsule
 from dl_techniques.layers.attention.attention_routing_capsule import (
-    AttentionRoutingCapsule,
     CapsuleBlockV2,
 )
 from dl_techniques.optimization import learning_rate_schedule_builder
@@ -382,15 +384,15 @@ class CapsNetV2(keras.Model):
         digit = self.get_capsules(inputs, training=False)
         lengths = length(digit)
         if mask is None:
-            mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
+            mask = keras.ops.one_hot(keras.ops.argmax(lengths, axis=1), num_classes=self.num_classes)
         else:
             if mask.shape[-1] != self.num_classes:
                 raise ValueError(
                     f"mask last-dim must be num_classes={self.num_classes}, "
                     f"got {mask.shape[-1]}"
                 )
-        masked = digit * ops.expand_dims(mask, -1)
-        flat = ops.reshape(masked, (-1, self.num_classes * self.digit_capsule_dim))
+        masked = digit * keras.ops.expand_dims(mask, -1)
+        flat = keras.ops.reshape(masked, (-1, self.num_classes * self.digit_capsule_dim))
         return self.decoder(flat)
 
     # ------------------------------------------------------------------

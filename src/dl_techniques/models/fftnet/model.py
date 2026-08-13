@@ -61,7 +61,6 @@ Task-Specific Outputs
 
 import keras
 import tensorflow as tf
-from keras import ops, layers, initializers
 from typing import Optional, Dict, Any, Tuple, Literal
 
 # ---------------------------------------------------------------------
@@ -78,7 +77,7 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class FFTMixer(layers.Layer):
+class FFTMixer(keras.layers.Layer):
     """
     Adaptive spectral filtering layer implementing the core FFTNet mechanism.
 
@@ -139,11 +138,11 @@ class FFTMixer(layers.Layer):
 
         # Adaptive filter MLP: c -> ΔW
         self.filter_mlp = keras.Sequential([
-            layers.Dense(mlp_hidden_dim, activation='gelu', name='mlp_hidden'),
-            layers.Dense(embed_dim, name='mlp_out')
+            keras.layers.Dense(mlp_hidden_dim, activation='gelu', name='mlp_hidden'),
+            keras.layers.Dense(embed_dim, name='mlp_out')
         ], name='filter_mlp')
 
-        self.dropout = layers.Dropout(dropout_p)
+        self.dropout = keras.layers.Dropout(dropout_p)
 
         # Will be created in build()
         self.modrelu_bias = None
@@ -156,7 +155,7 @@ class FFTMixer(layers.Layer):
         self.W_base = self.add_weight(
             name='W_base',
             shape=(seq_len, embed_dim),
-            initializer=initializers.Ones(),
+            initializer=keras.initializers.Ones(),
             trainable=True,
             dtype="float32"
         )
@@ -166,7 +165,7 @@ class FFTMixer(layers.Layer):
             self.modrelu_bias = self.add_weight(
                 name='modrelu_bias',
                 shape=(embed_dim,),
-                initializer=initializers.Constant(-0.1),
+                initializer=keras.initializers.Constant(-0.1),
                 trainable=True,
                 dtype="float32"
             )
@@ -183,14 +182,14 @@ class FFTMixer(layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass implementing adaptive spectral filtering."""
         # 1. Fourier Transform
-        F = tf.signal.fft(ops.cast(inputs, dtype="complex64"))
+        F = tf.signal.fft(keras.ops.cast(inputs, dtype="complex64"))
 
         # 2. Adaptive Spectral Filtering
-        c = ops.mean(inputs, axis=1)
+        c = keras.ops.mean(inputs, axis=1)
         delta_W = self.filter_mlp(c)
-        delta_W_expanded = ops.expand_dims(delta_W, axis=1)
+        delta_W_expanded = keras.ops.expand_dims(delta_W, axis=1)
         W = self.W_base + delta_W_expanded
-        W_complex = ops.cast(W, dtype="complex64")
+        W_complex = keras.ops.cast(W, dtype="complex64")
         F_filtered = F * W_complex
 
         # 3. Nonlinear Activation: modReLU
@@ -198,7 +197,7 @@ class FFTMixer(layers.Layer):
 
         # 4. Inverse Fourier Transform
         Y_complex = tf.signal.ifft(F_activated)
-        Y = ops.real(Y_complex)
+        Y = keras.ops.real(Y_complex)
 
         # 5. Apply dropout
         Y = self.dropout(Y, training=training)
@@ -207,20 +206,20 @@ class FFTMixer(layers.Layer):
 
     def _apply_modrelu(self, z: keras.KerasTensor) -> keras.KerasTensor:
         """Apply modReLU activation to complex tensor."""
-        magnitude = ops.abs(z)
+        magnitude = keras.ops.abs(z)
 
         if self.modrelu_bias is not None:
             magnitude_biased = magnitude + self.modrelu_bias
         else:
             magnitude_biased = magnitude
 
-        magnitude_activated = ops.relu(magnitude_biased)
+        magnitude_activated = keras.ops.relu(magnitude_biased)
 
-        eps = ops.convert_to_tensor(1e-8, dtype="float32")
-        magnitude_safe = ops.maximum(magnitude, eps)
+        eps = keras.ops.convert_to_tensor(1e-8, dtype="float32")
+        magnitude_safe = keras.ops.maximum(magnitude, eps)
         scale = magnitude_activated / magnitude_safe
 
-        scale_complex = ops.cast(scale, dtype="complex64")
+        scale_complex = keras.ops.cast(scale, dtype="complex64")
         return z * scale_complex
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -244,7 +243,7 @@ class FFTMixer(layers.Layer):
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class FFTNetBlock(layers.Layer):
+class FFTNetBlock(keras.layers.Layer):
     """
     Complete Transformer-style block using FFTMixer for token mixing.
 
@@ -540,7 +539,7 @@ class FFTNet(keras.Model):
         self.pos_embed = None
 
         # Dropout after embeddings
-        self.pos_drop = layers.Dropout(self.dropout_p)
+        self.pos_drop = keras.layers.Dropout(self.dropout_p)
 
         # Stack of FFTNet blocks
         self.blocks = [
@@ -564,7 +563,7 @@ class FFTNet(keras.Model):
         self.cls_token = self.add_weight(
             name='cls_token',
             shape=(1, 1, self.embed_dim),
-            initializer=initializers.RandomNormal(stddev=0.02),
+            initializer=keras.initializers.RandomNormal(stddev=0.02),
             trainable=True
         )
 
@@ -572,7 +571,7 @@ class FFTNet(keras.Model):
         self.pos_embed = self.add_weight(
             name='pos_embed',
             shape=(1, self.num_patches + 1, self.embed_dim),
-            initializer=initializers.RandomNormal(stddev=0.02),
+            initializer=keras.initializers.RandomNormal(stddev=0.02),
             trainable=True
         )
 
@@ -608,14 +607,14 @@ class FFTNet(keras.Model):
             - `patch_features`: Features for patches only (excluding CLS).
               Shape: (batch, num_patches, embed_dim).
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
 
         # 1. Patch embedding
         x = self.patch_embed(inputs)  # (B, N, D)
 
         # 2. Prepend class token
-        cls_tokens = ops.tile(self.cls_token, [batch_size, 1, 1])  # (B, 1, D)
-        x = ops.concatenate([cls_tokens, x], axis=1)  # (B, N+1, D)
+        cls_tokens = keras.ops.tile(self.cls_token, [batch_size, 1, 1])  # (B, 1, D)
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)  # (B, N+1, D)
 
         # 3. Add positional embeddings
         x = x + self.pos_embed
@@ -776,10 +775,10 @@ def create_fftnet_with_head(
         # Simple classification head
         head_dropout = head_config_overrides.get("dropout", 0.0)
         classification_head = keras.Sequential([
-            layers.Dropout(head_dropout) if head_dropout > 0 else layers.Lambda(lambda x: x),
-            layers.Dense(
+            keras.layers.Dropout(head_dropout) if head_dropout > 0 else keras.layers.Lambda(lambda x: x),
+            keras.layers.Dense(
                 num_classes,
-                kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+                kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
                 name="classifier"
             )
         ], name="classification_head")

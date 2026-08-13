@@ -132,14 +132,14 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
 1. **The relevant layer factory** — each factory exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
 
-   | Domain | Factory entry point | Registered types |
-   |--------|---------------------|------------------|
-   | Normalization | `create_normalization_layer()` in `src/dl_techniques/layers/norms/factory.py` | ~16 |
-   | Attention | `create_attention_layer()` in `src/dl_techniques/layers/attention/factory.py` | 32 |
-   | FFN / MLP | `create_ffn_layer()` in `src/dl_techniques/layers/ffn/factory.py` | ~15 |
-   | Embeddings | `create_embedding_layer()` in `src/dl_techniques/layers/embedding/factory.py` | ~13 |
-   | Activations | `create_activation_layer()` in `src/dl_techniques/layers/activations/factory.py` | ~22 |
-   | Transformer blocks | `TransformerLayer` in `src/dl_techniques/layers/transformers/transformer.py` (direct import) | n/a |
+   | Domain | Factory entry point |
+   |--------|---------------------|
+   | Normalization | `create_normalization_layer()` in `src/dl_techniques/layers/norms/factory.py` |
+   | Attention | `create_attention_layer()` in `src/dl_techniques/layers/attention/factory.py` |
+   | FFN / MLP | `create_ffn_layer()` in `src/dl_techniques/layers/ffn/factory.py` |
+   | Embeddings | `create_embedding_layer()` in `src/dl_techniques/layers/embedding/factory.py` |
+   | Activations | `create_activation_layer()` in `src/dl_techniques/layers/activations/factory.py` |
+   | Transformer blocks | `TransformerLayer` in `src/dl_techniques/layers/transformers/transformer.py` (direct import) |
 
    > **Note on transformer blocks**: `transformers/` has no `create_*_layer` factory. Use `TransformerLayer` directly — it is highly configurable (selectable attention / FFN / normalization types and normalization position via its config) and composes the factories above internally, so it covers most cases without a custom block. The package also offers higher-level `create_*_encoder` builders (`vision_encoder.py`, `text_encoder.py`).
 
