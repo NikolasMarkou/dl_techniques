@@ -17,6 +17,9 @@ Promoted from four verbatim copies (``train.gpt2.pretrain``,
 ``train.wave_field.pretrain``, ``train.wave_field.train_memory``,
 ``train.cliffordnet.train_cliffordnet_nlp``); each of those keeps a module-level alias
 under its old private name so every import path live before the move still resolves.
+``train.wave_field.train_memory`` was DELETED on user instruction (2026-08-13), so
+three of the four copies survive; the measurements taken against the fourth are kept
+below because they are what several of the rules here were derived from.
 """
 
 import os
@@ -61,14 +64,19 @@ __all__ = [
 # here is read either by a function in this module or by the shared
 # `train.common.nlp` scaffolding those functions delegate to.
 #
-# WHAT NOT TO DO (1): do NOT widen this base to cover
-# `train.wave_field.train_memory`. Measured 2026-08-13: that config LACKS
-# `num_layers` and `num_heads` (`grep -n "num_layers\|num_heads"
-# src/train/wave_field/train_memory.py` -> 0 hits), so inheriting this base
-# would ADD two fields no code there reads and no CLI flag there sets -- the
-# dead-knob class `tests/test_train/test_config_fields_are_live.py` exists to
-# prevent. It also overrides `learning_rate` 3e-4 -> 1e-5 and adds eight fields
-# of its own. It is a feature fork, not a subclass.
+# WHAT NOT TO DO (1): do NOT widen this base to cover a FEATURE FORK. The
+# worked example was `train.wave_field.train_memory`, which was measured against
+# this base on 2026-08-13 and REFUSED, then DELETED outright on user instruction
+# later the same day -- so the file is gone, but the rule it produced is not.
+# What the measurement found: that config LACKED `num_layers` and `num_heads`
+# entirely (`grep -n "num_layers\|num_heads" src/train/wave_field/train_memory.py`
+# -> 0 hits at commit 9f3208319, the last commit that contained the file), so
+# inheriting this base would have ADDED two fields no code there read and no CLI
+# flag there set -- the dead-knob class
+# `tests/test_train/test_config_fields_are_live.py` exists to prevent. It also
+# overrode `learning_rate` 3e-4 -> 1e-5 and added eight fields of its own.
+# The rule: a config that LACKS fields this base declares is a fork, not a
+# subclass, and "just add the two fields" is the wrong repair.
 #
 # WHAT NOT TO DO (2): do NOT add a field here "because a trainer might want
 # it". A field earns its place by being read by the shared CLM layer at both
@@ -205,10 +213,12 @@ def extract_step_from_checkpoint(path: str) -> int:
 # DECISION plan-2026-08-12T123743-e798a9e1/D-008
 # The two `logger.info` lines below are LOAD-BEARING for this consolidation, not
 # decoration: they are the 3-of-4 majority spelling of a function that existed in four
-# copies, and `train.wave_field.train_memory`'s copy had silently dropped them.
+# copies, and one copy -- `train.wave_field.train_memory`, since DELETED (user
+# instruction, 2026-08-13; last present at commit 9f3208319) -- had silently
+# dropped them.
 # WHAT NOT TO DO: do NOT "simplify" this into `return FocalCausalLMLoss(...)` /
-# `return MaskedCausalLMLoss(...)` early returns. That is exactly the shape
-# train_memory.py had drifted into, and collapsing back to it re-removes the loss
+# `return MaskedCausalLMLoss(...)` early returns. That is exactly the shape the
+# dropped copy had drifted into, and collapsing back to it re-removes the loss
 # provenance line from all four CLM trainers' logs -- an observability regression that
 # no test can see, because the returned loss object is identical either way.
 # WHAT NOT TO DO (2): do NOT restore gpt2's unicode `γ` in the f-string. ASCII `gamma`
@@ -255,8 +265,9 @@ def create_clm_loss_fn(config: Any) -> keras.losses.Loss:
 # ordering on resume -- a resumed run would quietly replay the first N chunks.
 # WHAT NOT TO DO (2): do NOT shorten the ValueError message below to just
 # `f"Unknown dataset_source: {config.dataset_source!r}"`. That truncated form is
-# `train.wave_field.train_memory`'s drifted copy; the 3-of-4 majority names the two
-# legal values, which is the only part of the message a user can act on.
+# the drifted copy in `train.wave_field.train_memory` (since DELETED, user
+# instruction 2026-08-13); the 3-of-4 majority names the two legal values, which is
+# the only part of the message a user can act on.
 # See decisions.md D-009.
 def load_train_val_datasets(
     config: Any,

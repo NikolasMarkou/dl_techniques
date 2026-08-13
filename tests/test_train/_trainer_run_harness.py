@@ -21,7 +21,13 @@ Interface contract
 - `results_dir`: the directory `create_nlp_callbacks` is made to return; the
   adopted calls must write into exactly this directory.
 - Keyword flags select the per-module extras (`compile_attr`, `dataset_loader`,
-  `steps_attr`, `phase_scheduler`, `plot_callback`, `model_loader`).
+  `steps_attr`, `plot_callback`, `model_loader`).
+
+A `phase_scheduler: bool` flag lived here too, stubbing out `PhaseScheduler` for
+`train.wave_field.train_memory`. That trainer was DELETED on user instruction
+(2026-08-13) and it was the flag's only caller, so the flag was removed with it
+rather than left as a knob nothing sets. Re-add it (2 lines) if a memory-bank
+trainer is ever written again.
 
 Returns the trainer's own return value. Raises whatever the trainer raises --
 failures are NOT swallowed, because a swallowed failure is how a vacuous guard
@@ -93,7 +99,6 @@ def run_trainer(
         compile_attr: str = "compile_model",
         dataset_loader: str = "load_train_val_datasets",
         steps_attr: Optional[str] = "_make_steps_per_epoch",
-        phase_scheduler: bool = False,
         plot_callback: bool = False,
         model_loader: Optional[str] = None,
         model: Optional[_StubModel] = None,
@@ -129,8 +134,6 @@ def run_trainer(
     for name in ("StepCheckpointCallback", "GenerationProbeCallback"):
         if hasattr(module, name):
             monkeypatch.setattr(module, name, _stub_callback_factory)
-    if phase_scheduler:
-        monkeypatch.setattr(module, "PhaseScheduler", _stub_callback_factory)
     if plot_callback:
         monkeypatch.setattr(module, "StepPlotCallback", _stub_callback_factory)
     if hasattr(module, "generate_training_curves"):

@@ -148,4 +148,10 @@ wave_field_memory_llm.py # WaveFieldMemoryLLM, split_trainable_by_prefix, linear
 __init__.py              # Re-exports memory_llm_custom_objects, MemoryStats
 ```
 
-Trainer: `src/train/wave_field/train_memory.py`. Tests: `tests/test_models/test_memory_bank/`.
+Trainer: **none ships with this package.** `src/train/wave_field/train_memory.py` used to
+train it and was DELETED on user instruction on 2026-08-13 (last present at commit
+`9f3208319`); nothing replaced it. The model package itself is untouched and fully
+tested — write your own trainer, or recover the old one from git history, but do not
+assume a runnable `python -m train.…` entry point exists for `WaveFieldMemoryLLM`.
+
+Tests: `tests/test_models/test_memory_bank/`.

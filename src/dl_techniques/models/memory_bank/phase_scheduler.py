@@ -22,8 +22,11 @@ non-trainable ``add_weight`` int64 counter) and writes the new phase to
 Both are managed by :class:`WaveFieldMemoryLLM` so that the values
 survive ``model.save`` / ``load_model`` round-trips.
 
-The ``--init-from`` flag in ``train_memory.py`` sets ``phase1_steps=0``
-to skip Phase 1 entirely.
+Skipping Phase 1 entirely is done by setting ``phase1_steps=0``. The trainer
+that did this behind an ``--init-from`` flag, ``src/train/wave_field/train_memory.py``,
+was DELETED on user instruction on 2026-08-13 (last present at commit ``9f3208319``);
+no trainer ships for this package now, so ``phase1_steps=0`` is something a caller
+sets directly.
 """
 
 from typing import Any, Dict, Optional

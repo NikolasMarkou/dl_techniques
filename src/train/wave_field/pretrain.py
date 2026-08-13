@@ -71,15 +71,16 @@ from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 # Backwards-compatible aliases for the private spellings these six functions had
 # while they lived in this module -- plain assignments, so they are the SAME
 # objects and not copies (the general rule is decisions.md D-010).
-# WHAT NOT TO DO: do NOT delete `_extract_step_from_checkpoint` on the grounds
-# that this file no longer uses it under that name. `train.wave_field.train_memory`
-# imports it FROM HERE (`from train.wave_field.pretrain import
-# _extract_step_from_checkpoint`) -- a cross-module coupling that predates this
-# consolidation. train_memory.py has since been repointed at
-# train.common.clm_pretrain directly, so this alias is now belt-and-braces for
-# any importer written against the old path; it is still not dead code, and it is
-# the only reason `train.wave_field.pretrain` may not be reduced to its
-# WaveField-specific surface.
+# WHAT NOT TO DO: do NOT delete `_extract_step_from_checkpoint`. This file calls
+# it under that name (in `_resolve_resume` and in `train_wave_field_llm`), so it
+# is live code, and it is additionally this module's public import surface for
+# anything written against the pre-consolidation spelling (D-010).
+# HISTORY, so the next reader is not confused by an older comment: the alias was
+# originally justified by a cross-module importer -- `train.wave_field.train_memory`
+# did `from train.wave_field.pretrain import _extract_step_from_checkpoint`, was
+# later repointed at `train.common.clm_pretrain` directly, and was then DELETED
+# outright on user instruction (2026-08-13; last present at commit 9f3208319).
+# That importer is gone; the in-file call sites and the D-010 rule are not.
 # See decisions.md D-011 (and D-010 for the alias-block rule it specializes).
 _extract_step_from_checkpoint = extract_step_from_checkpoint
 create_loss_fn = create_clm_loss_fn

@@ -230,8 +230,9 @@ class TestCreateClmLossFn:
         assert isinstance(loss, keras.losses.Loss)
 
     # D-008: the two logger.info lines are the 3-of-4 majority behaviour and are
-    # what train_memory.py's copy had silently dropped. Nothing else can see them --
-    # the returned loss object is identical with or without them.
+    # what one copy -- train_memory.py, since deleted (user instruction 2026-08-13,
+    # last present at 9f3208319) -- had silently dropped. Nothing else can see them
+    # -- the returned loss object is identical with or without them.
     def test_focal_branch_logs_the_loss_provenance_line_with_ASCII_gamma(self, caplog):
         with caplog.at_level(logging.INFO):
             cp.create_clm_loss_fn(

@@ -67,9 +67,11 @@ from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 # WHAT NOT TO DO: do NOT delete `_load_tfds_datasets` / `_load_hf_datasets`
 # because "nothing in this file calls them". Nothing does -- that is the point.
 # They are this module's PUBLIC import surface for anything written against the
-# pre-consolidation spelling, and `train.wave_field.train_memory` proves that
-# class of importer exists (it reaches `_extract_step_from_checkpoint` through
-# `train.wave_field.pretrain`, not through the defining module).
+# pre-consolidation spelling, and that class of importer is not hypothetical:
+# `train.wave_field.train_memory` reached `_extract_step_from_checkpoint`
+# through `train.wave_field.pretrain` rather than through the defining module.
+# (That trainer was DELETED on user instruction, 2026-08-13 -- the example is
+# now historical, but it is what the rule was derived from.)
 # WHAT NOT TO DO (2): do NOT "tidy" these into re-definitions
 # (`def _load_hf_datasets(...): return load_hf_clm_datasets(...)`). A wrapper is
 # a new object, so the `is`-identity that makes this a re-export rather than a
