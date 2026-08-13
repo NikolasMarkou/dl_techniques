@@ -56,6 +56,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
 )
@@ -426,10 +427,24 @@ class WaveFieldLLM(keras.Model):
             embeddings_initializer=kernel_init,
             name="token_embeddings",
         )
-        self.position_embeddings = keras.layers.Embedding(
-            self.max_seq_len,
-            self.embed_dim,
-            embeddings_initializer=kernel_init,
+        # DECISION plan-2026-08-13T091555-230c101d/D-006
+        # `PositionalEmbedding` owns the slice + broadcast-add, so the manual
+        # `ops.arange` / `token_emb + pos_emb` pair is gone. Its own dropout is
+        # deliberately DISABLED (`dropout_rate=0.0`) and `embed_dropout` is kept
+        # as a separate layer applied AFTER `embed_norm`: this model's order is
+        # add -> norm -> dropout, while `PositionalEmbedding.call` would give
+        # add -> dropout -> norm. Under an IDENTICAL dropout mask those two
+        # orders differ by max |delta| 0.395 on unit-variance activations at the
+        # model's own default dropout_rate=0.1 (~38% of signal RMS), so folding
+        # `embed_dropout` into this call is a behaviour change, not a cleanup.
+        # Do NOT "simplify" by passing dropout_rate=self.dropout_rate here and
+        # deleting `embed_dropout`. See decisions.md D-006.
+        self.position_embeddings = create_embedding_layer(
+            'positional_learned',
+            max_seq_len=self.max_seq_len,
+            dim=self.embed_dim,
+            dropout_rate=0.0,
+            scale=self.initializer_range,
             name="position_embeddings",
         )
         self.embed_norm = keras.layers.LayerNormalization(
@@ -480,7 +495,7 @@ class WaveFieldLLM(keras.Model):
             None, self.max_seq_len, self.embed_dim,
         )
         self.token_embeddings.build((None, self.max_seq_len))
-        self.position_embeddings.build((self.max_seq_len,))
+        self.position_embeddings.build(block_input_shape)
         self.embed_norm.build(block_input_shape)
         for block in self.blocks:
             block.build(block_input_shape)
@@ -504,13 +519,12 @@ class WaveFieldLLM(keras.Model):
         else:
             input_ids = inputs
 
-        seq_len = ops.shape(input_ids)[1]
-        positions = ops.arange(seq_len, dtype="int32")
-
-        token_emb = self.token_embeddings(input_ids)
-        pos_emb = self.position_embeddings(positions)
-        # Broadcast (N, D) over batch dim of (B, N, D).
-        x = token_emb + pos_emb
+        # `position_embeddings` slices its table to the incoming seq_len and
+        # adds it to the token embeddings (see D-006 for why its own dropout
+        # is off and `embed_dropout` stays a separate post-norm layer).
+        x = self.position_embeddings(
+            self.token_embeddings(input_ids), training=training,
+        )
 
         x = self.embed_norm(x)
         x = self.embed_dropout(x, training=training)
