@@ -90,7 +90,7 @@ class TrainingConfig:
     """
 
     # Model
-    gpt2_variant: str = "small"
+    model_variant: str = "small"
     vocab_size: int = 50261
     max_seq_length: int = 512
     num_layers: Optional[int] = None
@@ -197,7 +197,7 @@ def load_model_from_checkpoint(
 
 def create_gpt2_model(config: TrainingConfig) -> GPT2:
     """Create and build a GPT-2 model from the training configuration."""
-    logger.info(f"Creating GPT-2-{config.gpt2_variant.upper()}...")
+    logger.info(f"Creating GPT-2-{config.model_variant.upper()}...")
 
     # Build variant kwargs, only overriding if explicitly set
     variant_kwargs = dict(
@@ -212,7 +212,7 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
     if config.num_heads is not None:
         variant_kwargs["num_heads"] = config.num_heads
 
-    model = GPT2.from_variant(config.gpt2_variant, **variant_kwargs)
+    model = GPT2.from_variant(config.model_variant, **variant_kwargs)
 
     # Build with a dummy forward pass to initialize weights
     dummy = np.random.randint(
@@ -314,7 +314,7 @@ def train_gpt2(
 
     # Callbacks: standard NLP callbacks + step-based checkpointing
     callbacks, results_dir = create_nlp_callbacks(
-        model_name=f"GPT2-{config.gpt2_variant}",
+        model_name=f"GPT2-{config.model_variant}",
         results_dir_prefix="gpt2_pretrain",
         include_analyzer=False,
     )
@@ -323,7 +323,7 @@ def train_gpt2(
         save_every_steps=config.checkpoint_every_steps,
         analyze_every_steps=config.analyze_every_steps,
         max_checkpoints=config.max_checkpoints,
-        model_name=f"GPT2-{config.gpt2_variant}",
+        model_name=f"GPT2-{config.model_variant}",
         initial_step=initial_step,
     ))
 
@@ -481,7 +481,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
     """Map parsed CLI args to a TrainingConfig."""
     return TrainingConfig(
-        gpt2_variant=args.variant,
+        model_variant=args.variant,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         tie_word_embeddings=args.tie_word_embeddings,
@@ -517,7 +517,7 @@ def main() -> None:
 
     config = _config_from_args(args)
     logger.info(
-        f"Config: variant={config.gpt2_variant}, "
+        f"Config: variant={config.model_variant}, "
         f"epochs={config.num_epochs}, batch={config.batch_size}, "
         f"lr={config.learning_rate}, loss={config.loss_type}, "
         f"source={config.dataset_source}"
