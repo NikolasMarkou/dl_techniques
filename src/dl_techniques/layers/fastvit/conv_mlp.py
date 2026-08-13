@@ -45,6 +45,10 @@ from .reference import REFERENCE_NORM_EPSILON
 #: Single definition of the reference epsilon lives in :mod:`.reference`.
 _REFERENCE_BN_EPSILON = REFERENCE_NORM_EPSILON
 
+#: timm's ``_init_weights`` uses ``trunc_normal_(std=.02)`` for every ConvMlp
+#: kernel. Stored as a STDDEV, not as a built Initializer — see ``__init__``.
+_REFERENCE_KERNEL_INIT_STDDEV = 0.02
+
 
 @keras.saving.register_keras_serializable()
 class FastVitConvMlp(keras.layers.Layer):
@@ -115,10 +119,10 @@ class FastVitConvMlp(keras.layers.Layer):
     :param dropout_rate: Dropout rate applied after the activation and again
         after the projecting 1x1 convolution. Must be in ``[0, 1)``. Defaults to 0.0.
     :type dropout_rate: float
-    :param kernel_initializer: Initializer for every convolution kernel.
-        Defaults to ``TruncatedNormal(stddev=0.02)``, matching timm's
-        ``_init_weights``.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Initializer for every convolution kernel. ``None``
+        (the default) means a FRESH ``TruncatedNormal(stddev=0.02)`` per
+        instance, matching timm's ``_init_weights``.
+    :type kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param bias_initializer: Initializer for the 1x1 convolution biases.
         Defaults to ``'zeros'``.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
@@ -148,9 +152,8 @@ class FastVitConvMlp(keras.layers.Layer):
             kernel_size: int = 7,
             activation: Union[str, callable] = 'gelu',
             dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = (
-                    initializers.TruncatedNormal(stddev=0.02)
-            ),
+            kernel_initializer: Optional[
+                Union[str, initializers.Initializer]] = None,
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
@@ -191,7 +194,14 @@ class FastVitConvMlp(keras.layers.Layer):
         self.kernel_size = kernel_size
         self.activation = activations.get(activation)
         self.dropout_rate = dropout_rate
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        # CONSTRUCTED PER INSTANCE, never as a default argument. A default
+        # argument is evaluated ONCE at import time, so every FastVitConvMlp in
+        # the process would share ONE Initializer object — harmless while
+        # `seed=None`, silently correlating the moment a seed is added.
+        self.kernel_initializer = initializers.get(
+            initializers.TruncatedNormal(stddev=_REFERENCE_KERNEL_INIT_STDDEV)
+            if kernel_initializer is None else kernel_initializer
+        )
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)

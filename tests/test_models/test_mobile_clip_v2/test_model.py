@@ -6,6 +6,10 @@ The ten mandated pins:
 1.  `test_variant_table_transcription` — all 6 rows, all fields, against literals
     written HERE. Includes `use_causal_mask`, which is the ONLY reason both the
     `mobileclip2_*` and the `mobileclip_*` families are in the table.
+1b. `test_model_variants_match_supplied_json_configs` — the same 6 rows against
+    the COMMITTED upstream open_clip JSONs at
+    `research/mobileclip2_reference/model_configs/`, read with `json.load`. That
+    is the REAL oracle; pin 1 above is only a second transcription.
 2.  `test_output_dict_contract` — keys and shapes.
 3.  `test_features_are_l2_normalized` — and that `normalize=False` differs.
 4.  `test_logit_scale_is_clipped` — a raw weight of 50.0 must yield exactly
@@ -19,10 +23,27 @@ The ten mandated pins:
     text-tower weights, so the difference can only come from the flag.
 10. `test_text_tower_widths` — 768/12/3072 and 512/8/2048.
 
-Every model except the pure-config ones (1, 6) uses a REDUCED-DEPTH image tower:
+Every model except the pure-config ones (1, 1b, 6) uses a REDUCED image tower:
 a full mci4 does not fit on a 12GB GPU alongside other work.
+
+WHAT THE REDUCTION PRESERVES, and what it does not
+--------------------------------------------------
+Reduced: block DEPTH (1 per stage), channel WIDTH (8, 16, 32, ...), text depth,
+vocabulary, sequence length and the joint embedding width.
+
+NOT reduced, because reducing them would make the mechanism under test
+structurally unobservable:
+
+* The number of STAGES, the per-stage token mixers, the downsampling pattern and
+  the positional-embedding pattern — all taken from the real variant, so a
+  5-stage model still ends in two real attention stages.
+* The spatial GRID. `_IMG` is chosen per stage count (`_IMG_4STAGE` /
+  `_IMG_5STAGE`) so the deepest attention stage keeps more than one token. At a
+  single token, softmax is identically 1.0 and attention degenerates.
+* Text DEPTH for the causal-mask pin: 2 layers, not 1 (measured vacuous at 1).
 """
 
+import inspect
 import os
 import tempfile
 
@@ -40,6 +61,9 @@ from dl_techniques.models.mobile_clip_v2.model import (
     MobileClipV2Model,
     _resolve_model_variant,
     create_mobile_clip_v2,
+)
+from tests.test_models.test_mobile_clip_v2.reference_oracle import (
+    load_supplied_json,
 )
 
 
@@ -107,13 +131,47 @@ _FIVE_STAGE_BACKBONES = ('mci3', 'mci4')
 # Cheap-model constants.
 _VOCAB = 64
 _SEQ = 8
-_IMG = 64
 _EMBED = 16
 _BATCH = 4
 
+# Input resolution, per stage count. The tower halves the grid in the stem (x2)
+# and once per DOWNSAMPLING stage, so the token count of the DEEPEST stage is
+# `(img / 4 / 2**(num_stages - 1))**2`.
+#
+# These numbers are chosen so the deepest ATTENTION stage still has more than
+# one token. MEASURED: at 64px the 5-stage ladder is 16/8/4/2/1, i.e. the last
+# attention stage runs on a SINGLE token — a softmax over an axis of size 1 is
+# identically 1.0 and the token mixer degenerates to a per-token linear map, so
+# every pin in this module would exercise a DEAD last stage (Keras says so out
+# loud: "UserWarning: You are using a softmax over axis -1 of a tensor of shape
+# (2, 4, 1, 1)"). This is the same "a reduced config makes the mechanism
+# structurally unobservable" defect already recorded for `text_layers=1` in
+# `test_causal_mask_flag_changes_text_output`. Do not lower these to save time;
+# reduce WIDTH (`_tiny_image_kwargs`) instead, which does not collapse the grid.
+_IMG_4STAGE = 64    # ladder 16 / 8 / 4 / 2  -> deepest attention stage: 4 tokens
+_IMG_5STAGE = 128   # ladder 32 / 16 / 8 / 4 / 2 -> deepest stage: 4 tokens
+
+#: Default for the 4-stage models the majority of the pins use.
+_IMG = _IMG_4STAGE
+
+
+def _num_stages(variant: str) -> int:
+    backbone = MODEL_VARIANTS[variant]['image_backbone']
+    return 5 if backbone in _FIVE_STAGE_BACKBONES else 4
+
+
+def _image_size(num_stages: int) -> int:
+    return _IMG_5STAGE if num_stages == 5 else _IMG_4STAGE
+
 
 def _tiny_image_kwargs(num_stages: int) -> dict:
-    """Reduced-depth overrides for the image tower (1 block per stage)."""
+    """Reduced-depth overrides for the image tower (1 block per stage).
+
+    DEPTH and WIDTH are reduced; the number of stages, the token mixers, the
+    downsampling pattern and the positional-embedding pattern are NOT — those
+    come from the variant, so the reduced tower still runs a real attention
+    stage on a real 2-D grid.
+    """
     return {
         'layers': (1,) * num_stages,
         'embed_dims': tuple(8 * 2 ** i for i in range(num_stages)),
@@ -122,10 +180,9 @@ def _tiny_image_kwargs(num_stages: int) -> dict:
 
 def _tiny_model(variant: str = 'mobileclip2_s0', **overrides) -> MobileClipV2Model:
     """A cheap but structurally faithful model for the behavioural pins."""
-    backbone = MODEL_VARIANTS[variant]['image_backbone']
-    num_stages = 5 if backbone in _FIVE_STAGE_BACKBONES else 4
+    num_stages = _num_stages(variant)
     config = dict(
-        image_size=_IMG,
+        image_size=_image_size(num_stages),
         vocab_size=_VOCAB,
         context_length=_SEQ,
         text_width=32,
@@ -139,9 +196,12 @@ def _tiny_model(variant: str = 'mobileclip2_s0', **overrides) -> MobileClipV2Mod
     return MobileClipV2Model.from_variant(variant, **config)
 
 
-def _images(batch: int = _BATCH, seed: int = 11) -> np.ndarray:
+def _images(
+        batch: int = _BATCH, seed: int = 11, image_size: int = _IMG
+) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    return rng.standard_normal((batch, _IMG, _IMG, 3)).astype('float32')
+    return rng.standard_normal(
+        (batch, image_size, image_size, 3)).astype('float32')
 
 
 def _tokens(batch: int = _BATCH, seed: int = 23) -> np.ndarray:
@@ -158,8 +218,11 @@ def _tokens(batch: int = _BATCH, seed: int = 23) -> np.ndarray:
     return tokens
 
 
-def _inputs(batch: int = _BATCH) -> dict:
-    return {'image': _images(batch), 'text': _tokens(batch)}
+def _inputs(batch: int = _BATCH, image_size: int = _IMG) -> dict:
+    return {
+        'image': _images(batch, image_size=image_size),
+        'text': _tokens(batch),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -190,6 +253,63 @@ class TestModelVariants:
                 )
             # A bool that is really an int (or vice versa) compares equal above.
             assert isinstance(actual['use_causal_mask'], bool)
+
+    def test_model_variants_match_supplied_json_configs(self):
+        """PIN 1b: all six rows vs the COMMITTED upstream open_clip JSONs.
+
+        The oracle is the third-party config files themselves, at
+        `research/mobileclip2_reference/model_configs/`, read with `json.load`.
+        Nothing is restated here.
+
+        `MODEL_VARIANTS` is deliberately thin — `image_size`, `vocab_size`,
+        `context_length` and the FFN width are constants shared by every row and
+        live outside the table — so those four are resolved the way a caller
+        gets them, through `from_variant(...).get_config()`. That also makes the
+        pin cover the table AND the constants AND the wiring between them.
+        """
+        for name, row in MODEL_VARIANTS.items():
+            family, _, size = name.partition('_')
+            json_name = (
+                f"{'MobileCLIP2' if family == 'mobileclip2' else 'MobileCLIP'}"
+                f"-{size.upper()}"
+            )
+            supplied = load_supplied_json(json_name)
+            config = MobileClipV2Model.from_variant(name).get_config()
+
+            vision = supplied['vision_cfg']
+            text = supplied['text_cfg']
+            backbone = vision['timm_model_name']
+            assert backbone.startswith('fastvit_'), (
+                f"{json_name}: timm_model_name is {backbone!r}, expected a "
+                f"`fastvit_*` name"
+            )
+
+            expected = {
+                'embed_dim': supplied['embed_dim'],
+                'image_backbone': backbone[len('fastvit_'):],
+                'image_size': vision['image_size'],
+                'text_width': text['width'],
+                'text_heads': text['heads'],
+                'text_layers': text['layers'],
+                'context_length': text['context_length'],
+                'vocab_size': text['vocab_size'],
+                'use_causal_mask': not text['no_causal_mask'],
+                'text_intermediate': 4 * text['width'],
+            }
+            for field, expected_value in expected.items():
+                assert config[field] == expected_value, (
+                    f"{name}.{field} DISAGREES with the supplied "
+                    f"{json_name}.json: port has {config[field]!r}, the config "
+                    f"file gives {expected_value!r}."
+                )
+
+            # The six tabulated fields must ALSO agree, so a row that is right
+            # only because `from_variant` overrode it is caught.
+            for field in row:
+                assert row[field] == expected[field], (
+                    f"MODEL_VARIANTS[{name!r}][{field!r}] is {row[field]!r} but "
+                    f"{json_name}.json gives {expected[field]!r}"
+                )
 
     def test_causal_mask_splits_the_two_families(self):
         """The flag is the WHOLE reason both families are tabulated.
@@ -466,6 +586,44 @@ class TestMobileClipV2Model:
     # PIN 8 — serialization
     # ------------------------------------------------------------------
 
+    def test_get_config_names_every_constructor_parameter(self):
+        """`get_config()` must be COMPLETE, checked by introspection.
+
+        Not a patch for one missing field: the parameter list is read off
+        `__init__` with `inspect.signature`, so a field added to the constructor
+        tomorrow and forgotten in `get_config()` fails here without anyone
+        remembering to extend a hand-written list. `self` and `**kwargs` are
+        skipped; nothing else is exempt.
+        """
+        model = _tiny_model()
+        config = model.get_config()
+
+        signature = inspect.signature(MobileClipV2Model.__init__)
+        expected = [
+            name for name, parameter in signature.parameters.items()
+            if name != 'self'
+            and parameter.kind is not inspect.Parameter.VAR_KEYWORD
+            and parameter.kind is not inspect.Parameter.VAR_POSITIONAL
+        ]
+        assert len(expected) > 10, (
+            f"introspection found only {expected} — the guard would be vacuous"
+        )
+
+        missing = [name for name in expected if name not in config]
+        assert not missing, (
+            f"get_config() omits {missing}; every constructor parameter of "
+            f"MobileClipV2Model must appear in its config (H-1). Add the "
+            f"field(s) to get_config(), do not shorten this list."
+        )
+
+        # And the one the adversarial review found is really carried, by VALUE:
+        # the reduced tower's overrides, not an empty dict.
+        assert config['image_encoder_kwargs'] == model.image_encoder_kwargs
+        assert config['image_encoder_kwargs'], (
+            "this fixture builds a REDUCED tower, so image_encoder_kwargs must "
+            "be non-empty — an empty dict would make the check above vacuous"
+        )
+
     def test_keras_roundtrip_preserves_values(self):
         """PIN 8: value round trip, plus an ELEMENTWISE weight check per tower.
 
@@ -564,8 +722,10 @@ class TestMobileClipV2Model:
         assert non_causal.use_causal_mask is False
 
         tokens = _tokens()
-        causal.build({'image': (None, _IMG, _IMG, 3), 'text': (None, _SEQ)})
-        non_causal.build({'image': (None, _IMG, _IMG, 3), 'text': (None, _SEQ)})
+        img = causal.image_size
+        assert img == _IMG_5STAGE and non_causal.image_size == img
+        causal.build({'image': (None, img, img, 3), 'text': (None, _SEQ)})
+        non_causal.build({'image': (None, img, img, 3), 'text': (None, _SEQ)})
 
         source = [
             ops.convert_to_numpy(w) for w in causal.text_encoder.weights
@@ -618,7 +778,7 @@ class TestMobileClipV2Model:
         assert model.text_encoder.num_heads == text_heads
         assert model.text_encoder.intermediate_size == text_intermediate
 
-        out = model(_inputs(2), training=False)
+        out = model(_inputs(2, image_size=model.image_size), training=False)
         assert tuple(out['logits_per_image'].shape) == (2, 2)
 
     def test_default_text_intermediate_is_four_times_width(self):

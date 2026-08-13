@@ -56,9 +56,17 @@ from dl_techniques.models.mobile_clip_v2.image_encoder import (
     FastVitImageEncoder,
 )
 
+# DECISION plan-2026-08-13T183738-24486492/D-001
 # The text tower is IMPORTED from the v1 package rather than re-implemented.
 # Cross-package precedent: `models/lewm/model.py` imports `ViT` from
 # `models/vit/model.py`.
+#
+# DO NOT re-implement a text transformer in this package, and do not copy
+# `MobileClipTextEncoder` here "to remove the cross-package import". Either move
+# would create a THIRD block->keep causal-mask adapter site, which SYSTEM.md:171
+# records as a mandatory trigger for promoting that adapter into a keep-polarity
+# `MaskFactory` variant — an unrelated refactor with its own blast radius.
+# See decisions.md D-001.
 #
 # WHY AN IMPORT AND NOT A COPY: `MobileClipTextEncoder` owns one of exactly TWO
 # block->keep causal-mask adapter sites in `src/` (the other is
@@ -647,6 +655,11 @@ class MobileClipV2Model(keras.Model):
             'logit_scale_max': self.logit_scale_max,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
+            # Kept even though the serialized towers below already carry the
+            # architecture it produced: `get_config()` must name EVERY
+            # constructor parameter, so a reader can reconstruct the call that
+            # was made, not merely a network that behaves like it.
+            'image_encoder_kwargs': dict(self.image_encoder_kwargs),
             'variant': self.variant,
             # The towers are reconstructed from their OWN serialized configs
             # rather than from this model's scalars, so a reduced-depth or

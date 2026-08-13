@@ -64,6 +64,34 @@ class TestFastVitConvMlp:
         assert layer.kernel_initializer.stddev == pytest.approx(0.02)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
 
+    def test_default_kernel_initializer_is_per_instance(self):
+        """Two instances must NOT share one Initializer object.
+
+        A default argument like `kernel_initializer=TruncatedNormal(0.02)` is
+        evaluated ONCE at import time, so every FastVitConvMlp in the process
+        would hold the SAME object. That is harmless while `seed=None` but
+        silently correlates every layer's draws the moment a seed is set, and it
+        makes one layer's `set_config`-style mutation reach all the others.
+        """
+        a = FastVitConvMlp(dim=8)
+        b = FastVitConvMlp(dim=8)
+        assert a.kernel_initializer is not b.kernel_initializer, (
+            "both FastVitConvMlp instances hold the SAME kernel_initializer "
+            "object — the default argument is being evaluated at import time"
+        )
+        # Both are still the reference initializer.
+        for layer in (a, b):
+            assert isinstance(
+                layer.kernel_initializer, keras.initializers.TruncatedNormal)
+            assert layer.kernel_initializer.stddev == pytest.approx(0.02)
+
+        # An EXPLICIT initializer is still honoured as-is (shared on purpose).
+        shared = keras.initializers.TruncatedNormal(stddev=0.05)
+        c = FastVitConvMlp(dim=8, kernel_initializer=shared)
+        d = FastVitConvMlp(dim=8, kernel_initializer=shared)
+        assert c.kernel_initializer is shared
+        assert d.kernel_initializer is shared
+
     def test_config_completeness(self, basic_config):
         layer = FastVitConvMlp(**basic_config, kernel_size=3, dropout_rate=0.1)
         config = layer.get_config()

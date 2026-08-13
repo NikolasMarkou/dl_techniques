@@ -9,9 +9,10 @@ The nine mandated pins:
    validate the transcription itself. `timm` is not installed (constraint H-7), so
    there is no local oracle for the mci0/mci1/mci2 rows at all.
 2. `test_mci3_mci4_match_supplied_source` — the ONLY local cross-check that exists:
-   mci3/mci4 against the user-supplied `mobileclip2/mobileclip2.py` values as
-   reproduced verbatim in the plan's finding F-1. (The supplied file itself is not
-   checked into this repo, so the oracle is F-1's reproduction of it.) This is the
+   mci3/mci4 PARSED OUT OF the committed upstream source at
+   `research/mobileclip2_reference/mobileclip2.py`. The oracle is the third-party
+   file itself, not a transcription of it. `mci0`/`mci1`/`mci2` are NOT defined in
+   that file and still have no local oracle (H-7, deviation X-3). This is the
    falsification test for the plan's assumption A-1.
 3. `test_per_stage_geometry_at_256` — the REAL 256px geometry for a 4-stage and a
    5-stage variant, asserted on the actual forward intermediates, with reduced
@@ -40,12 +41,18 @@ from dl_techniques.models.mobile_clip_v2.image_encoder import (
     _resolve_mci_variant,
     create_fastvit_image_encoder,
 )
+from tests.test_models.test_mobile_clip_v2.reference_oracle import (
+    parse_supplied_mci_model_args,
+)
 
 
 # ---------------------------------------------------------------------
 # The reference tables, transcribed a SECOND time, independently of the module.
-# mci0/mci1/mci2: timm upstream `timm/models/fastvit.py` (no local oracle, H-7).
-# mci3/mci4: the user-supplied `mobileclip2/mobileclip2.py`.
+# mci0/mci1/mci2: timm upstream `timm/models/fastvit.py` (no local oracle, H-7)
+#   -- for those three rows this transcription is all there is.
+# mci3/mci4: ALSO covered by a real oracle -- see
+#   `test_mci3_mci4_match_supplied_source`, which parses the committed
+#   `research/mobileclip2_reference/mobileclip2.py` instead of restating it.
 # ---------------------------------------------------------------------
 
 _REFERENCE_TABLE = {
@@ -167,47 +174,31 @@ class TestMciVariantTable:
                 )
 
     def test_mci3_mci4_match_supplied_source(self):
-        """PIN 2: mci3/mci4 vs the USER-SUPPLIED `mobileclip2.py`.
+        """PIN 2: mci3/mci4 vs the COMMITTED upstream `mobileclip2.py`.
 
         This is the only local cross-check that exists (H-7: `timm` is not
-        installed). The values below are the supplied source's `fastvit_mci3` /
-        `fastvit_mci4` model_args as reproduced verbatim in finding F-1, written
-        out here in the supplied file's own vocabulary rather than restructured,
-        so a restructuring error in the port is visible.
-        """
-        # From the supplied `mobileclip2.py`, `fastvit_mci3`:
-        #   layers=(2, 12, 24, 4, 2)
-        #   embed_dims=(96, 192, 384, 768, 1536)
-        #   mlp_ratios=(4, 4, 4, 4, 4)
-        #   downsamples=(False, True, True, True, True)
-        #   pos_embs=(None, None, None, RepCPE(7x7), RepCPE(7x7))
-        #   token_mixers=("repmixer", "repmixer", "repmixer", "attention",
-        #                 "attention")
-        #   se_downsamples: none  ->  all False
-        #   stem: monkey-patched `convolutional_stem_timm(use_scale_branch=False)`
-        #   norm_layer: LayerNormChannel  ->  channels-last 'layer_norm'
-        supplied_mci3 = {
-            'layers': (2, 12, 24, 4, 2),
-            'embed_dims': (96, 192, 384, 768, 1536),
-            'mlp_ratios': (4.0, 4.0, 4.0, 4.0, 4.0),
-            'se_downsamples': (False,) * 5,
-            'downsamples': (False, True, True, True, True),
-            'pos_embs': (None, None, None, (7, 7), (7, 7)),
-            'token_mixers': (
-                'repmixer', 'repmixer', 'repmixer', 'attention', 'attention'),
-            'stem_use_scale_branch': False,
-            'norm_layer': 'layer_norm',
-            'lkc_use_act': True,
-        }
-        # `fastvit_mci4` differs from mci3 in EXACTLY two fields: the last
-        # stage's depth (2 -> 4) and the widths (4/3 of mci3, i.e. 128/256/512/
-        # 1024/2048).
-        supplied_mci4 = dict(supplied_mci3)
-        supplied_mci4['layers'] = (2, 12, 24, 4, 4)
-        supplied_mci4['embed_dims'] = (128, 256, 512, 1024, 2048)
+        installed, so mci0/mci1/mci2 have no oracle at all — deviation X-3).
 
-        for name, supplied in (('mci3', supplied_mci3), ('mci4', supplied_mci4)):
+        The oracle is the third-party file itself, at
+        `research/mobileclip2_reference/mobileclip2.py`, PARSED with `ast` — not
+        imported, because it is PyTorch/timm code that this environment cannot
+        execute. Every value compared below is read out of that file at test
+        time; nothing here restates it. Editing the reference file to make this
+        test pass defeats its entire purpose.
+        """
+        supplied_table = parse_supplied_mci_model_args()
+        assert set(supplied_table) == {'mci3', 'mci4'}, (
+            f"the supplied source should yield exactly mci3 and mci4, got "
+            f"{sorted(supplied_table)}"
+        )
+
+        for name in ('mci3', 'mci4'):
+            supplied = supplied_table[name]
             actual = MCI_VARIANTS[name]
+            assert set(supplied) <= set(actual), (
+                f"{name}: fields present in the supplied source but absent from "
+                f"MCI_VARIANTS: {sorted(set(supplied) - set(actual))}"
+            )
             for field, expected_value in supplied.items():
                 actual_value = actual[field]
                 if isinstance(expected_value, tuple):
@@ -218,13 +209,18 @@ class TestMciVariantTable:
                     f"has {expected_value!r}."
                 )
 
-        # mci4 is mci3 scaled: assert the structural relationship too, so a
-        # copy-paste that duplicates mci3's widths into mci4 is caught even if
-        # both literals above were edited together.
-        assert MCI_VARIANTS['mci4']['embed_dims'] != MCI_VARIANTS['mci3']['embed_dims']
+        # Guard against a DEGENERATE oracle: if the parser ever returned the
+        # same row twice (a copy-paste in the reader, or a source in which the
+        # two factories became identical), the field loop above would still
+        # pass for one of them by accident. In the real source mci4 is mci3
+        # scaled, so the widths differ while the first four depths agree.
         assert (
-            MCI_VARIANTS['mci4']['layers'][:4]
-            == MCI_VARIANTS['mci3']['layers'][:4]
+            supplied_table['mci4']['embed_dims']
+            != supplied_table['mci3']['embed_dims']
+        ), "the parsed oracle gave mci3 and mci4 the SAME widths"
+        assert (
+            supplied_table['mci4']['layers'][:4]
+            == supplied_table['mci3']['layers'][:4]
         )
 
     def test_resolve_accepts_timm_prefix_and_rejects_unknown(self):
@@ -640,15 +636,20 @@ class TestFastVitImageEncoder:
         The assertion is on the HISTOGRAM, so it fails on the first call site that
         forgets to pass ``norm_epsilon``, not merely on a wholesale regression.
         """
-        for variant, dims in (
-                ('mci0', (32, 64, 128, 256)),
-                ('mci3', (32, 64, 128, 256, 512)),
+        # The input size is chosen PER STAGE COUNT. The grid is halved in the
+        # stem (x2) and once per downsampling stage, so a 5-stage tower at 64px
+        # ends on a 1x1 grid — a softmax over an axis of size 1, i.e. a DEAD
+        # last attention stage (Keras warns out loud). 128px keeps it at 2x2.
+        # Same reduced-config-hides-the-mechanism rule as `test_model.py`.
+        for variant, dims, img in (
+                ('mci0', (32, 64, 128, 256), 64),
+                ('mci3', (32, 64, 128, 256, 512), 128),
         ):
             encoder = FastVitImageEncoder(
                 variant=variant, layers=(1,) * len(dims), embed_dims=dims,
-                input_shape=(64, 64, 3), projection_dim=32,
+                input_shape=(img, img, 3), projection_dim=32,
             )
-            encoder(np.zeros((1, 64, 64, 3), dtype='float32'), training=False)
+            encoder(np.zeros((1, img, img, 3), dtype='float32'), training=False)
 
             offenders = {}
             histogram = {}

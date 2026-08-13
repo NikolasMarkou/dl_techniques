@@ -253,8 +253,11 @@ the **negation** of the JSON config's `no_causal_mask` field.
 | `mobileclip_s3`  | 768 | `mci3` | 768 | 12 | 12 | `True`  |
 | `mobileclip_s4`  | 768 | `mci4` | 768 | 12 | 12 | `True`  |
 
-Each row is keyed by the name of the supplied JSON config file it transcribes, so
-it is checkable rather than re-derived.
+Each row is keyed by the name of the supplied JSON config file it transcribes,
+and `test_model_variants_match_supplied_json_configs` checks it field by field
+against the committed copy of that file at
+`research/mobileclip2_reference/model_configs/` — so this table is verified, not
+re-derived.
 
 To count parameters for a variant, derive the number rather than trusting a
 number written here:
@@ -479,24 +482,34 @@ silently.
 
 ### X-3 — `mci0` / `mci1` / `mci2` have no local oracle
 
+> **Narrowed on 2026-08-14.** `mci3` / `mci4` now have a REAL committed oracle
+> (see below). X-3 applies to `mci0` / `mci1` / `mci2` only.
+
 Those three stage tables are transcribed from **timm upstream**
 (`timm/models/fastvit.py`, fetched 2026-08-13), **not** from the supplied
 `mobileclip2.py`, which defines only `fastvit_mci3` and `fastvit_mci4`. `timm` is
 **not installed** in this environment, so nothing here can check those three rows
 against timm itself — only against a second hand transcription of the same fetch.
 
-`mci3` / `mci4` are cross-checked against a **transcription** of the supplied
-`mobileclip2.py`, not against the file itself: the supplied file is **not on this
-filesystem** and is not checked into the repo, so
-`test_mci3_mci4_match_supplied_source` compares `MCI_VARIANTS` against the
-values reproduced verbatim in the plan's finding F-1. Both sides of that
-comparison were written by the same effort, so it can catch a restructuring error
-in the port but cannot validate the transcription itself. What it is worth: the
-mci3/mci4 rows were verified field-by-field against the user's original paste
-during review. The same caveat applies to any statement that a variant table
-"transcribes the supplied JSON configs" — those JSONs are also absent from this
-filesystem. Commit the supplied `mobileclip2.py` and the six JSONs under
-`research/` if you want these oracles to become real.
+`mci3` / `mci4` **do** have a real oracle. The upstream `mobileclip2.py` and the
+six open_clip JSON configs are committed verbatim at
+[`research/mobileclip2_reference/`](../../../../research/mobileclip2_reference/),
+and two tests read those files directly rather than restating them:
+
+| Test | Oracle | Covers |
+| --- | --- | --- |
+| `test_image_encoder.py::test_mci3_mci4_match_supplied_source` | `mobileclip2.py`, parsed with `ast` | `MCI_VARIANTS['mci3']`, `['mci4']`, every field |
+| `test_model.py::test_model_variants_match_supplied_json_configs` | the six `model_configs/*.json`, via `json.load` | all six `MODEL_VARIANTS` rows + the shared constants |
+
+The source is PARSED, not imported: it is PyTorch/`timm` code and this
+environment has neither. Both tests were RED-proven by perturbing a value in the
+committed reference files and confirming the failure names the field.
+
+This does **not** extend to `mci0` / `mci1` / `mci2`. The supplied source does
+not define them, and the JSON configs merely NAME `fastvit_mci0` /
+`fastvit_mci2` without giving their architecture — so those three rows remain
+transcription-only, exactly as stated above. Vendoring `timm` is the only thing
+that would change that.
 
 Anyone changing an `mci0`/`mci1`/`mci2`
 row must re-derive it from timm upstream and say so — and must not reason from

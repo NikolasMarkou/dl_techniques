@@ -1,7 +1,8 @@
 """FastViT (MCi) image tower of MobileCLIP2.
 
-This module assembles the eight ``layers/fastvit/`` primitives into the image
-encoder that MobileCLIP / MobileCLIP2 use as their vision branch, a faithful
+This module assembles the ``layers/fastvit/`` primitives (enumerated once and
+only once, in that package's ``__all__``) into the image encoder that
+MobileCLIP / MobileCLIP2 use as their vision branch, a faithful
 channels-last transcription of timm's ``FastVit`` class restricted to the five
 ``MCi`` configurations.
 
@@ -113,14 +114,22 @@ _REFERENCE_POS_EMB_SPATIAL_SHAPE = (7, 7)
 # variant table
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-08-13T183738-24486492/D-004
 # PROVENANCE OF THIS TABLE — read before changing a single number.
 #
+# DO NOT "fix" an mci0/mci1/mci2 row by reasoning from the mci3/mci4 rows, and
+# do not edit the committed reference files to make a test pass. The two groups
+# have DIFFERENT provenance and different levels of evidence; conflating them is
+# the deviation X-3 this block exists to keep visible. See decisions.md D-004.
+#
 # (i)   `mci3` and `mci4` are transcribed from the USER-SUPPLIED
-#       `mobileclip2/mobileclip2.py`, which defines `fastvit_mci3` and
-#       `fastvit_mci4` and nothing else. They are the only two rows with a local
-#       provenance, and `tests/test_models/test_mobile_clip_v2/
-#       test_image_encoder.py::test_mci3_mci4_match_supplied_source` is the
-#       cross-check against that source.
+#       `mobileclip2.py`, which defines `fastvit_mci3` and `fastvit_mci4` and
+#       nothing else. They are the only two rows with a local provenance. That
+#       file is COMMITTED VERBATIM at `research/mobileclip2_reference/`, and
+#       `tests/test_models/test_mobile_clip_v2/
+#       test_image_encoder.py::test_mci3_mci4_match_supplied_source` PARSES it
+#       (with `ast` — it is PyTorch/timm code and cannot be imported here) and
+#       cross-checks these two rows field by field. That is a real oracle.
 #
 # (ii)  `mci0`, `mci1` and `mci2` are transcribed from TIMM UPSTREAM
 #       (`timm/models/fastvit.py`, fetched 2026-08-13), NOT from the supplied
