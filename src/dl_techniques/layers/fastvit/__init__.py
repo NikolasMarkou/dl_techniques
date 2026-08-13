@@ -11,8 +11,7 @@ Names that are already distinctive in the reference (``ReparamLargeKernelConv``,
 ``RepConditionalPosEnc``) are kept unprefixed.
 
 .. note::
-   ``FastVitRepMixerBlock`` (added by a later step of this subpackage) is NOT
-   the same class as the pre-existing standalone
+   ``FastVitRepMixerBlock`` is NOT the same class as the pre-existing standalone
    ``dl_techniques.layers.repmixer_block.RepMixerBlock``. The two are different
    architectures that happen to share a name; the standalone one is consumed by
    ``models/fastvlm/`` and is left untouched.
@@ -20,8 +19,11 @@ Names that are already distinctive in the reference (``ReparamLargeKernelConv``,
 
 from .conv_mlp import FastVitConvMlp
 from .rep_conditional_pos_enc import RepConditionalPosEnc
+from .rep_mixer import FastVitRepMixer, FastVitRepMixerBlock
 
 __all__ = [
     "FastVitConvMlp",
     "RepConditionalPosEnc",
+    "FastVitRepMixer",
+    "FastVitRepMixerBlock",
 ]
