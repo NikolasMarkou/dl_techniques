@@ -650,6 +650,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     # Measured: `Created device` count 1 -> 0 on `--help` after the move.
     # Guarded by
     # tests/test_train/test_tabm/test_cli_contract.py::test_setup_gpu_is_wired_and_imported_lazily.
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: the root
+    # cause above is FIXED. `IMAGE_MEAN`/`IMAGE_STD` are plain Python lists now
+    # (image_text.py:53 is that decision's anchor), and `import train.common`
+    # emits 0 `Created device` lines. This deferred import is therefore
+    # HARMLESS but no longer load-bearing. The original text is kept because
+    # the history is the point: do not re-derive the module-scope eager-op
+    # trap. The test above still pins the pattern.
     from train.common import setup_gpu
     setup_gpu(args.gpu)
 

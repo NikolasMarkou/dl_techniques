@@ -241,6 +241,14 @@ def main(argv: Optional[list] = None):
     # Measured: `import train.common` -> 1 "Created device" line; `import
     # keras, tensorflow`, `dl_techniques.models.bert`, `datasets` and
     # `tensorflow_datasets` -> 0. See decisions.md D-006.
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: the root
+    # cause above is FIXED. `IMAGE_MEAN`/`IMAGE_STD` are plain Python lists now
+    # (image_text.py:53 is that decision's anchor), and `import train.common`
+    # emits 0 `Created device` lines. This deferred import is therefore
+    # HARMLESS but no longer load-bearing. The original text is kept because
+    # the history is the point: do not re-derive the module-scope eager-op
+    # trap.
     from train.common import setup_gpu
 
     setup_gpu(gpu_id=args.gpu)

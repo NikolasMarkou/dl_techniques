@@ -139,6 +139,11 @@ def main(argv: Optional[list] = None):
     # Function-scope import on purpose -- do NOT hoist. `train.common`'s
     # package init allocates a GPU device at import time (see the fuller note
     # in `pretrain.py`, and decisions.md D-006).
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: that root
+    # cause is FIXED (`image_text.py`'s constants are plain lists; `import
+    # train.common` emits 0 `Created device` lines). This deferred import is
+    # now harmless, not load-bearing. Kept for the history.
     from train.common import setup_gpu
 
     setup_gpu(gpu_id=args.gpu)
