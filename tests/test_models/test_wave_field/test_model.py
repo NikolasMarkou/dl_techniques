@@ -564,3 +564,196 @@ class TestCreateWaveFieldLLM:
     def test_unknown_variant_raises(self):
         with pytest.raises(ValueError, match="Unknown variant"):
             create_wave_field_llm("nonexistent")
+
+
+# ---------------------------------------------------------------------
+# WaveFieldDecoderBlock in isolation (plan-2026-08-13-230c101d / F-05)
+# ---------------------------------------------------------------------
+
+
+def _zero_layer(layer):
+    """Zero every weight of ``layer`` in place — a ZEROED TRANSFORM control.
+
+    This zeroes the TRANSFORM (the branch's output projection), never the
+    block's input. That distinction is the whole point: the repo's known bug
+    shape is a transform-only block invoked as ``x = block(x)`` with no
+    external residual, which annihilates the signal ~1e-5 per block. With the
+    transform zeroed, a block that HAS its residual is the identity and a block
+    that has lost it emits zeros.
+    """
+    for weight in layer.weights:
+        weight.assign(keras.ops.zeros_like(weight))
+
+
+class TestWaveFieldDecoderBlockIsolation:
+    """``WaveFieldDecoderBlock`` constructed standalone (no ``WaveFieldLLM``).
+
+    The block has TWO external residuals (``WaveFieldDecoderBlock.call``):
+    ``x = inputs + h`` after attention, and ``return x + h`` after the FFN.
+    Nothing tested either one — the block was only ever reached through the
+    model, where an ``isinstance`` check was the extent of the coverage.
+
+    Measured with the SHIPPED initializers at ``keras.utils.set_random_seed``
+    in {7, 11, 23}, ``embed_dim=32, num_heads=4, max_seq_len=16, field_size=32``,
+    input ``(2, 16, 32)`` standard normal, ``training=False``, GPU:1:
+
+    | control                        | max abs(out - x)  | norm ratio       |
+    |--------------------------------|-------------------|------------------|
+    | shipped weights (live)         | 3.58/3.95/3.31e-2 | 0.9994/1.0004/1.0001 |
+    | both transforms zeroed         | exactly 0.0       | 1.000000         |
+    | attention transform zeroed     | -                 | 0.9994/1.0004/1.0001 |
+    | FFN transform zeroed           | -                 | 1.0000           |
+
+    The ``> 0.5`` norm-ratio bars below are MAGNITUDE assertions (the detector
+    that survives an adversarial injection), not equality-vs-reference checks:
+    dropping either residual collapses the ratio to exactly 0.0, not to 0.49.
+    """
+
+    B, N, D = 2, 16, 32
+
+    @classmethod
+    def _block(cls, seed=1234):
+        keras.utils.set_random_seed(seed)
+        block = WaveFieldDecoderBlock(
+            embed_dim=cls.D,
+            num_heads=4,
+            max_seq_len=cls.N,
+            field_size=2 * cls.N,
+            dropout_rate=0.0,
+            attention_dropout_rate=0.0,
+        )
+        block.build((None, cls.N, cls.D))
+        return block
+
+    @classmethod
+    def _inputs(cls):
+        # Varied, full-rank, non-DC signal: a constant or L2-normalized probe
+        # would be blind here (a constant survives a LayerNorm as zeros).
+        return np.random.default_rng(0).normal(
+            size=(cls.B, cls.N, cls.D),
+        ).astype(np.float32)
+
+    @staticmethod
+    def _ratio(out, x):
+        return float(np.linalg.norm(out) / np.linalg.norm(x))
+
+    def test_block_is_the_identity_when_both_transforms_are_zeroed(self):
+        """Both residuals present <=> a block whose two transforms are zeroed
+        reproduces its input EXACTLY. Losing either residual emits zeros.
+
+        Measured: max |out - x| = 0.0 exactly, norm ratio 1.000000. Bar: 1e-6.
+        """
+        block = self._block()
+        x = self._inputs()
+        _zero_layer(block.attention.output_proj)
+        _zero_layer(block.ffn_dense_2)
+
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        delta = np.abs(out - x).max()
+        assert delta < 1e-6, (
+            f"block with both transforms zeroed is not the identity "
+            f"(max |out - x| = {delta:.4e}); an external residual is missing"
+        )
+        assert abs(self._ratio(out, x) - 1.0) < 1e-6
+
+    def test_block_is_not_trivially_the_identity(self):
+        """Non-vacuity guard for the test above: with the SHIPPED weights the
+        block is NOT the identity, so the zeroed-transform control is testing
+        the residuals rather than a block that ignores its sub-layers.
+
+        Measured max |out - x| across seeds {7, 11, 23}: 3.58e-2 / 3.95e-2 /
+        3.31e-2 (the shipped ``initializer_range=0.02`` keeps the branches
+        small at init). Bar: > 1e-3.
+        """
+        block = self._block()
+        x = self._inputs()
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        delta = np.abs(out - x).max()
+        assert delta > 1e-3, (
+            f"block with shipped weights is indistinguishable from the "
+            f"identity (max |out - x| = {delta:.4e}); the zeroed-transform "
+            f"control would then be vacuous"
+        )
+
+    def test_attention_residual_carries_the_signal(self):
+        """Attention-branch residual, per site: zero ONLY the attention
+        transform and leave the FFN live. With ``x = inputs + h`` present the
+        signal passes through at full magnitude; with ``x = h`` the block
+        emits zeros (the FFN of a zero vector is itself zero here, since the
+        LayerNorm beta and the Dense biases both initialize to zero).
+
+        Measured norm ratio across seeds {7, 11, 23}: 0.9994 / 1.0004 / 1.0001.
+        Bar: > 0.5 (the failure value is 0.0, so the bar is not delicate).
+        """
+        block = self._block()
+        x = self._inputs()
+        _zero_layer(block.attention.output_proj)
+
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        ratio = self._ratio(out, x)
+        assert ratio > 0.5, (
+            f"signal annihilated with the attention transform zeroed "
+            f"(||out|| / ||x|| = {ratio:.6f}); the attention residual "
+            f"'x = inputs + h' is missing"
+        )
+
+    def test_ffn_residual_carries_the_signal(self):
+        """FFN-branch residual, per site: zero ONLY the FFN transform and leave
+        attention live. With ``return x + h`` present the signal passes through;
+        with ``return h`` the block emits zeros.
+
+        Measured norm ratio across seeds {7, 11, 23}: 1.0000 in all three.
+        Bar: > 0.5 (the failure value is 0.0).
+        """
+        block = self._block()
+        x = self._inputs()
+        _zero_layer(block.ffn_dense_2)
+
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        ratio = self._ratio(out, x)
+        assert ratio > 0.5, (
+            f"signal annihilated with the FFN transform zeroed "
+            f"(||out|| / ||x|| = {ratio:.6f}); the FFN residual "
+            f"'return x + h' is missing"
+        )
+
+    def test_padding_mask_reaches_attention(self):
+        """The ``(B, N)`` padding mask the block forwards must actually change
+        the result. ``WaveFieldAttention`` multiplies its output by the mask,
+        so masking the tail changes the block output at those positions.
+
+        Measured max |delta| between an all-ones mask and a half-zero mask:
+        7.463e-4 (against a block whose live branch contributes ~3.6e-2 at
+        init). Bar: > 1e-5. The all-ones mask is separately pinned to be a
+        no-op vs. passing no mask at all (measured exactly 0.0).
+        """
+        block = self._block()
+        x = self._inputs()
+
+        ones = np.ones((self.B, self.N), dtype=np.float32)
+        half = ones.copy()
+        half[:, self.N // 2:] = 0.0
+
+        out_none = keras.ops.convert_to_numpy(block(x, training=False))
+        out_ones = keras.ops.convert_to_numpy(
+            block(x, attention_mask=ones, training=False)
+        )
+        out_half = keras.ops.convert_to_numpy(
+            block(x, attention_mask=half, training=False)
+        )
+
+        assert out_half.shape == (self.B, self.N, self.D)
+        assert np.isfinite(out_half).all()
+        assert np.abs(out_ones - out_none).max() < 1e-6, (
+            "an all-ones mask is not a no-op"
+        )
+        delta = np.abs(out_ones - out_half).max()
+        assert delta > 1e-5, (
+            f"the padding mask does not reach WaveFieldAttention "
+            f"(max |delta| between an all-ones and a half-zero mask = "
+            f"{delta:.4e})"
+        )
