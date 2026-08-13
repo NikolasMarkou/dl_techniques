@@ -510,6 +510,11 @@ class TestFastVitRepMixerBlock:
         * ``training=False`` must be deterministic AND equal to an identically
           weighted block built at ``drop_path_rate=0.0``.
         """
+        # StochasticDepth draws ONE Bernoulli per SAMPLE, so with the fixture's
+        # batch of 2 two consecutive draws coincide with probability 1/4 — a 25%
+        # flake that showed up only once another module's RNG consumption shifted
+        # the global state. A 16-sample batch drops that to 2**-16.
+        sample_input = np.repeat(sample_input, 8, axis=0)
         block = FastVitRepMixerBlock(dim=16, mlp_ratio=2.0,
                                      layer_scale_init_value=0.5,
                                      drop_path_rate=0.5)
