@@ -102,7 +102,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 72 | vit_siglip | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_vit_siglip/` |
 | 73 | vq_vae | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_vq_vae/` |
 | 74 | vq_vae_rotation | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_vq_vae_rotation/` |
-| 75 | wave_field_llm | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_wave_field_llm/` |
+| 75 | wave_field | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_wave_field/`; package + test dir renamed from `wave_field_llm` / `test_wave_field_llm` after this sweep |
 | 76 | yolo12 | PASS | PASS | new smoke test (this plan) | `create_yolov12_feature_extractor()` |
 
 **Non-forward-breaking known-broken items (NOT regressions, do NOT block any forward pass):**
