@@ -39,7 +39,12 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import setup_gpu, set_seeds
+from train.common import (
+    setup_gpu,
+    set_seeds,
+    save_config_json,
+    save_training_history_json,
+)
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -317,6 +322,7 @@ def train_memory_llm(
         results_dir_prefix="wave_field_memory_llm",
         include_analyzer=False,
     )
+    save_config_json(config, results_dir)
 
     # Phase scheduler (warmup dataset = first N batches of train).
     phase_cb = PhaseScheduler(
@@ -373,6 +379,7 @@ def train_memory_llm(
         verbose=1,
     )
     logger.info("Training completed.")
+    save_training_history_json(history, results_dir)
 
     generate_training_curves(history, results_dir)
 

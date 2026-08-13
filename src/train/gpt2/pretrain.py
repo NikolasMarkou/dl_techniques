@@ -30,7 +30,12 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import setup_gpu, set_seeds
+from train.common import (
+    setup_gpu,
+    set_seeds,
+    save_config_json,
+    save_training_history_json,
+)
 from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
@@ -253,6 +258,7 @@ def train_gpt2(
         results_dir_prefix="gpt2_pretrain",
         include_analyzer=False,
     )
+    save_config_json(config, results_dir)
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=config.checkpoint_every_steps,
@@ -298,6 +304,7 @@ def train_gpt2(
         verbose=1,
     )
     logger.info("Training completed!")
+    save_training_history_json(history, results_dir)
 
     # Plot training curves (loss + all metrics incl. so_loss when present)
     generate_training_curves(history, results_dir)
