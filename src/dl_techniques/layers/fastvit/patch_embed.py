@@ -50,6 +50,7 @@ from keras import initializers, regularizers, activations
 
 from .reparam_large_kernel_conv import ReparamLargeKernelConv
 from ..mobile_one_block import MobileOneBlock
+from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 
 # ---------------------------------------------------------------------
 
@@ -199,6 +200,8 @@ class FastVitPatchEmbed(keras.layers.Layer):
             stride=1,
             use_se=False,
             activation=self.activation,
+            norm_epsilon=REFERENCE_NORM_EPSILON,
+            padding_mode=REFERENCE_PADDING_MODE,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='proj_mobileone',

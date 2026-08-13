@@ -27,6 +27,21 @@ from dl_techniques.layers.fastvit.reparam_large_kernel_conv import (
 )
 
 
+
+def _branch_bn(branch):
+    """The single BatchNormalization inside a Conv-BN branch ``Sequential``.
+
+    Indexed BY TYPE, not by position: under the reference padding convention the
+    branch starts with an explicit ``ZeroPadding2D``, so ``layers[1]`` is the
+    convolution, not the norm.
+    """
+    norms = [
+        l for l in branch.layers
+        if isinstance(l, keras.layers.BatchNormalization)
+    ]
+    assert len(norms) == 1, f"expected one BatchNormalization, got {len(norms)}"
+    return norms[0]
+
 class TestReparamLargeKernelConv:
     """Comprehensive test suite for ReparamLargeKernelConv."""
 
@@ -407,7 +422,7 @@ class TestReparamLargeKernelConv:
             self, sample_input, basic_config):
         layer = ReparamLargeKernelConv(**basic_config)
         layer.build(sample_input.shape)
-        bn = layer.large_conv.layers[1]
+        bn = _branch_bn(layer.large_conv)
         before = ops.convert_to_numpy(bn.moving_mean).copy()
 
         layer(sample_input, training=True)
@@ -430,8 +445,8 @@ class TestReparamLargeKernelConv:
         layer = ReparamLargeKernelConv(**basic_config)
         layer.build((None, 16, 16, 16))
 
-        assert layer.large_conv.layers[1].epsilon == pytest.approx(1e-5)
-        assert layer.small_conv.layers[1].epsilon == pytest.approx(1e-5)
+        assert _branch_bn(layer.large_conv).epsilon == pytest.approx(1e-5)
+        assert _branch_bn(layer.small_conv).epsilon == pytest.approx(1e-5)
 
     # ------------------------------------------------------------------
     # gradients

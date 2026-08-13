@@ -153,9 +153,30 @@ Two further contracts worth knowing:
   missing bias vector of length `dim` per attention block, whereas `use_bias=True`
   would add a spurious `3 * dim` qkv bias the reference does not have. Pinned by a
   weight-inventory test so it cannot drift silently.
-* **Normalization epsilon.** `create_normalization_layer` `setdefault`s
-  `epsilon=1e-6`; the reference uses `1e-5`. Every call site here passes it
-  explicitly.
+* **Normalization epsilon.** Three different defaults are wrong here:
+  `create_normalization_layer` `setdefault`s `epsilon=1e-6`, Keras'
+  `BatchNormalization` defaults to `1e-3`, and the reference uses `1e-5`. The
+  value is defined ONCE, as `reference.py::REFERENCE_NORM_EPSILON`, and passed
+  explicitly at every construction site — including through
+  `MobileOneBlock(norm_epsilon=...)`, whose own default stays at Keras' `1e-3`
+  because `models/fastvlm/` shares that block. Pinned tower-wide by
+  `test_all_batchnorms_use_reference_epsilon`, which asserts the epsilon
+  HISTOGRAM of a built mci0 and mci3 tower is a single `1e-05` bucket.
+  *(This bullet previously claimed every call site already passed it. It did not:
+  MEASURED on a built mci0 tower, the histogram was `{0.001: 86, 1e-05: 28}`.
+  Fixed, and the claim is now the assertion of a test.)*
+* **Padding grid at stride > 1.** PyTorch pads symmetrically by `kernel_size // 2`;
+  Keras' `padding='same'` pads asymmetrically (extra row/column at the
+  bottom/right), so at stride 2 the sampled grid depends on the kernel size.
+  MEASURED with Dirac kernels on `arange(16).reshape(1, 4, 4, 1)` at stride 2:
+  `'same'` gives `[[0, 2], [8, 10]]` for `k=1` but `[[5, 7], [13, 15]]` for `k=3`,
+  while symmetric `k//2` padding gives `[[0, 2], [8, 10]]` for both. Every
+  convolution authored here therefore uses `padding_mode='reference'`
+  (`ZeroPadding2D(k // 2)` + a `'valid'` convolution). Applied UNIFORMLY, not only
+  at stride > 1: for an odd kernel at stride 1 the two conventions are
+  value-identical, which is measured by
+  `test_reference_mode_stride_one_odd_kernel_is_value_identical`, and the 256px
+  geometry table above is unchanged (measured).
 * **LayerScale constraint.** `LearnableMultiplier` defaults to
   `constraint='non_neg'`, which would clamp a legitimately negative gamma at zero
   during optimization. `constraint=None` is load-bearing here, not cosmetic.

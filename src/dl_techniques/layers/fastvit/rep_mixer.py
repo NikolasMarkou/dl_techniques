@@ -63,6 +63,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 from .conv_mlp import FastVitConvMlp
 from ..layer_scale import LearnableMultiplier
 from ..mobile_one_block import MobileOneBlock
+from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 from ..stochastic_depth import StochasticDepth
 
 # ---------------------------------------------------------------------
@@ -241,6 +242,8 @@ class FastVitRepMixer(keras.layers.Layer):
             use_act=False,
             use_scale_branch=False,
             num_conv_branches=0,
+            norm_epsilon=REFERENCE_NORM_EPSILON,
+            padding_mode=REFERENCE_PADDING_MODE,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='norm',
@@ -251,6 +254,8 @@ class FastVitRepMixer(keras.layers.Layer):
             stride=1,
             group_size=1,
             use_act=False,
+            norm_epsilon=REFERENCE_NORM_EPSILON,
+            padding_mode=REFERENCE_PADDING_MODE,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='mixer',

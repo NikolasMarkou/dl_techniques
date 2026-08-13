@@ -66,6 +66,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.mobile_one_block import MobileOneBlock
 from dl_techniques.layers.fastvit import FastVitStage
+from dl_techniques.layers.fastvit.reference import (
+    REFERENCE_NORM_EPSILON,
+    REFERENCE_PADDING_MODE,
+)
 
 # ---------------------------------------------------------------------
 # reference constants
@@ -461,6 +465,8 @@ class FastVitImageEncoder(keras.Model):
                 stride=2,
                 use_scale_branch=self.stem_use_scale_branch,
                 activation=self.activation,
+                norm_epsilon=REFERENCE_NORM_EPSILON,
+                padding_mode=REFERENCE_PADDING_MODE,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name='stem_0',
@@ -472,6 +478,8 @@ class FastVitImageEncoder(keras.Model):
                 group_size=1,  # depthwise
                 use_scale_branch=self.stem_use_scale_branch,
                 activation=self.activation,
+                norm_epsilon=REFERENCE_NORM_EPSILON,
+                padding_mode=REFERENCE_PADDING_MODE,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name='stem_1',
@@ -482,6 +490,8 @@ class FastVitImageEncoder(keras.Model):
                 stride=1,
                 use_scale_branch=self.stem_use_scale_branch,
                 activation=self.activation,
+                norm_epsilon=REFERENCE_NORM_EPSILON,
+                padding_mode=REFERENCE_PADDING_MODE,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name='stem_2',
@@ -538,6 +548,8 @@ class FastVitImageEncoder(keras.Model):
             se_position=_FINAL_CONV_SE_POSITION,
             num_conv_branches=1,
             activation=self.activation,
+            norm_epsilon=REFERENCE_NORM_EPSILON,
+            padding_mode=REFERENCE_PADDING_MODE,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='final_conv',

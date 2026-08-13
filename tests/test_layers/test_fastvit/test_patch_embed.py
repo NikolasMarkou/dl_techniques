@@ -27,6 +27,21 @@ from dl_techniques.layers.fastvit.reparam_large_kernel_conv import (
 from dl_techniques.layers.mobile_one_block import MobileOneBlock
 
 
+
+def _branch_bn(branch):
+    """The single BatchNormalization inside a Conv-BN branch ``Sequential``.
+
+    Indexed BY TYPE, not by position: under the reference padding convention the
+    branch starts with an explicit ``ZeroPadding2D``, so ``layers[1]`` is the
+    convolution, not the norm.
+    """
+    norms = [
+        l for l in branch.layers
+        if isinstance(l, keras.layers.BatchNormalization)
+    ]
+    assert len(norms) == 1, f"expected one BatchNormalization, got {len(norms)}"
+    return norms[0]
+
 class TestFastVitPatchEmbed:
     """Comprehensive test suite for FastVitPatchEmbed."""
 
@@ -299,7 +314,7 @@ class TestFastVitPatchEmbed:
             self, sample_input, basic_config):
         layer = FastVitPatchEmbed(**basic_config)
         layer.build(sample_input.shape)
-        bn = layer.proj_lkc.large_conv.layers[1]
+        bn = _branch_bn(layer.proj_lkc.large_conv)
         before = ops.convert_to_numpy(bn.moving_mean).copy()
 
         layer(sample_input, training=True)

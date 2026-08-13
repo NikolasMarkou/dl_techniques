@@ -57,7 +57,7 @@ legitimately writes a trainer path as `train/vit/` rather than `src/train/vit/`.
 
 ## src/dl_techniques/ — the 13 subpackages
 
-Weighting matters more than completeness here: layers and models together are 560 of the
+Weighting matters more than completeness here: layers and models together are 561 of the
 library's Python files, i.e. 55% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
@@ -68,15 +68,17 @@ combined are smaller than either one.
 > multi-package deletion pass** (`convnext_patch_vae`, `cliffordnet` submodules,
 > `bfcliffordunet`, `anomaly_detection`, `qwen3_som`, two `modern_bert` modules). Every
 > `.py` FILE-COUNT digit in this section and in the corresponding Numbers-table rows moved
-> in one edit together with the `560` / `55%` prose above — that is the row-group rule for
-> this section: never half-correct it. (`560` and `55%` did NOT move on 2026-08-14: `layers`
-> gained 8 files and `models` lost 8 in the same pass.) The directory-COUNT rows (model
+> in one edit together with the `561` / `55%` prose above — that is the row-group rule for
+> this section: never half-correct it. (`561` and `55%` moved on 2026-08-14: `layers` gained 8
+> files and `models` lost 8 in the whole-table pass, leaving the pair at `560`/55%, and a
+> later same-day completion fix added `layers/fastvit/reference.py`, taking `layers` to 294
+> and the pair to `561`; 561/1006 is still 55%.) The directory-COUNT rows (model
 > packages, trainer dirs, test dirs, applications) were re-derived in the same pass and are
 > current. The 2026-08-14 pass also absorbed 17 rows that had already been stale at HEAD.
 
 | Subpackage | `.py` | Role |
 |---|---|---|
-| **`src/dl_techniques/layers/`** | 293 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
+| **`src/dl_techniques/layers/`** | 294 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
 | **`src/dl_techniques/models/`** | 267 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. About a third (26 of 73) bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
@@ -529,11 +531,11 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1005 | `find src -name '*.py' \| wc -l` |
+| Python files under `src/` | 1006 | `find src -name '*.py' \| wc -l` |
 | Python files under `tests/` | 772 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| `.py` in `src/dl_techniques/layers/` | 293 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/layers/` | 294 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/models/` | 267 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 42 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 39 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
@@ -546,7 +548,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 560 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in layers + models | 561 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
 | layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 74 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |

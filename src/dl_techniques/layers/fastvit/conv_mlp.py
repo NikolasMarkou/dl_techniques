@@ -38,13 +38,12 @@ from keras import layers, initializers, regularizers, activations
 # ---------------------------------------------------------------------
 
 from ..norms.factory import create_normalization_layer
+from .reference import REFERENCE_NORM_EPSILON
 
 # ---------------------------------------------------------------------
 
-#: BatchNormalization epsilon used by the reference implementation. The norms
-#: factory ``setdefault``s ``epsilon=1e-6``, so it must be passed EXPLICITLY or
-#: the block silently gets a different value than the reference.
-_REFERENCE_BN_EPSILON = 1e-5
+#: Single definition of the reference epsilon lives in :mod:`.reference`.
+_REFERENCE_BN_EPSILON = REFERENCE_NORM_EPSILON
 
 
 @keras.saving.register_keras_serializable()

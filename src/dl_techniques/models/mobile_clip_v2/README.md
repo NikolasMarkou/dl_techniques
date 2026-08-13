@@ -446,9 +446,20 @@ that is silently absorbed makes the port unauditable.
 ### X-1 — No structural reparameterization
 
 Train-time multi-branch form only. There is no `reparameterize()` / conv-fusion
-path. The reference release passes `inference_mode=False` everywhere, i.e. it too
-runs the multi-branch form, and the fused form is **mathematically identical** to
-it. This is therefore a **speed deviation, not an accuracy one**.
+path, and none is tested. The reference release passes `inference_mode=False`
+everywhere, i.e. it too runs the multi-branch form, so this port matches what the
+reference actually executes.
+
+**No claim of numerical identity to a fused form is made or tested here.** An
+earlier version of this section claimed the fused form is "mathematically
+identical", making X-1 "a speed deviation, not an accuracy one". That was wrong
+as shipped: fusing parallel branches requires them to sample the same input
+pixels, and under Keras' asymmetric `padding='same'` the strided `k x k` and
+`1 x 1` branches did not — MEASURED, a one-pixel offset at stride 2. The padding
+convention has since been fixed to the reference's symmetric `kernel_size // 2`
+(see the `layers/fastvit/README.md` deviation list), so the branches **are** now
+fusible in principle; but no fusion code exists, so "the fused form is identical"
+remains an unexecuted claim and is not asserted anywhere.
 
 ### X-2 — One `use_bias` for both qkv and the output projection
 
@@ -474,8 +485,20 @@ Those three stage tables are transcribed from **timm upstream**
 **not installed** in this environment, so nothing here can check those three rows
 against timm itself — only against a second hand transcription of the same fetch.
 
-`mci3` / `mci4` **are** cross-checked against the supplied source
-(`test_mci3_mci4_match_supplied_source`). Anyone changing an `mci0`/`mci1`/`mci2`
+`mci3` / `mci4` are cross-checked against a **transcription** of the supplied
+`mobileclip2.py`, not against the file itself: the supplied file is **not on this
+filesystem** and is not checked into the repo, so
+`test_mci3_mci4_match_supplied_source` compares `MCI_VARIANTS` against the
+values reproduced verbatim in the plan's finding F-1. Both sides of that
+comparison were written by the same effort, so it can catch a restructuring error
+in the port but cannot validate the transcription itself. What it is worth: the
+mci3/mci4 rows were verified field-by-field against the user's original paste
+during review. The same caveat applies to any statement that a variant table
+"transcribes the supplied JSON configs" — those JSONs are also absent from this
+filesystem. Commit the supplied `mobileclip2.py` and the six JSONs under
+`research/` if you want these oracles to become real.
+
+Anyone changing an `mci0`/`mci1`/`mci2`
 row must re-derive it from timm upstream and say so — and must not reason from
 the `mci3`/`mci4` rows, which differ structurally (5 stages, no SE, LayerNorm,
 `mlp_ratio` 4).

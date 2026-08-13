@@ -65,14 +65,17 @@ from ..squeeze_excitation import SqueezeExcitation
 # Do NOT re-implement it here: the two layers must resolve `group_size`
 # identically or a FastViT block and the MobileOneBlock beside it would disagree
 # about what `group_size=1` means.
-from ..mobile_one_block import resolve_num_groups
+from ..mobile_one_block import (
+    resolve_num_groups,
+    resolve_conv_padding,
+    conv_output_size,
+)
+from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 
 # ---------------------------------------------------------------------
 
-#: BatchNormalization epsilon used by the reference implementation. The norms
-#: factory ``setdefault``s ``epsilon=1e-6``, so it must be passed EXPLICITLY or
-#: the block silently gets a different value than the reference.
-_REFERENCE_BN_EPSILON = 1e-5
+#: Single definition of the reference epsilon lives in :mod:`.reference`.
+_REFERENCE_BN_EPSILON = REFERENCE_NORM_EPSILON
 
 #: Squeeze-and-Excitation bottleneck ratio used by the reference AT THIS CALL SITE
 #: (``rd_ratio=0.25``). Deliberately different from timm's ``SqueezeExcite``
@@ -214,6 +217,15 @@ class ReparamLargeKernelConv(keras.layers.Layer):
                     f"small_kernel must not exceed kernel_size: "
                     f"small_kernel={small_kernel}, kernel_size={kernel_size}"
                 )
+            if small_kernel % 2 != kernel_size % 2:
+                raise ValueError(
+                    f"kernel_size and small_kernel must have the same parity: the "
+                    f"branches pad symmetrically by their own kernel_size // 2 "
+                    f"(the reference convention), so an odd and an even kernel "
+                    f"produce output maps that differ by one pixel and cannot be "
+                    f"summed. Got kernel_size={kernel_size}, "
+                    f"small_kernel={small_kernel}"
+                )
 
         # ---- store configuration ---------------------------------------
         self.out_channels = out_channels
@@ -277,16 +289,26 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         :type groups: int
         :param name: Sub-layer name; the inner conv/BN names are derived from it.
         :type name: str
-        :return: A ``Sequential`` of ``Conv2D(use_bias=False)`` then
-            ``BatchNormalization(epsilon=1e-5)``.
+        :return: A ``Sequential`` of an optional symmetric ``ZeroPadding2D``, a
+            ``Conv2D(use_bias=False)`` and ``BatchNormalization(epsilon=1e-5)``.
         :rtype: keras.Sequential
         """
-        return keras.Sequential([
+        # The reference pads SYMMETRICALLY by `kernel_size // 2`. Keras'
+        # `padding='same'` pads asymmetrically, so at stride > 1 the k=7 and k=3
+        # branches summed below would sample a grid whose offset depends on the
+        # kernel size — MEASURED, a one-pixel shift that no shape assertion sees.
+        pad, keras_padding = resolve_conv_padding(
+            kernel_size, 'same', REFERENCE_PADDING_MODE)
+        padding_layers = (
+            [] if pad == 0
+            else [layers.ZeroPadding2D(padding=pad, name=f'{name}_pad')]
+        )
+        return keras.Sequential(padding_layers + [
             layers.Conv2D(
                 filters=self.out_channels,
                 kernel_size=kernel_size,
                 strides=self.stride,
-                padding='same',
+                padding=keras_padding,
                 use_bias=False,
                 groups=groups,
                 kernel_initializer=self.kernel_initializer,
@@ -395,23 +417,25 @@ class ReparamLargeKernelConv(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape from stored config alone (works pre-build).
 
-        Both branches use ``padding='same'`` at the same stride, so the spatial
-        reduction is ``ceil(size / stride)`` independently of either kernel size.
+        Both branches pad symmetrically by their own ``kernel_size // 2`` and run
+        at the same stride, so for ODD kernels the spatial reduction is
+        ``ceil(size / stride)`` independently of either kernel size — the same
+        figure Keras' ``'same'`` would give. For an EVEN kernel the reference
+        convention loses one pixel, which is why the size is derived rather than
+        assumed.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple ``(B, ceil(H/stride), ceil(W/stride), out_channels)``.
+        :return: Output shape tuple ``(B, H', W', out_channels)``.
         :rtype: Tuple[Optional[int], ...]
         """
         input_shape = tuple(input_shape)
-        height = (
-            None if input_shape[1] is None
-            else (input_shape[1] + self.stride - 1) // self.stride
-        )
-        width = (
-            None if input_shape[2] is None
-            else (input_shape[2] + self.stride - 1) // self.stride
-        )
+        height = conv_output_size(
+            input_shape[1], self.kernel_size, self.stride,
+            'same', REFERENCE_PADDING_MODE)
+        width = conv_output_size(
+            input_shape[2], self.kernel_size, self.stride,
+            'same', REFERENCE_PADDING_MODE)
         return (input_shape[0], height, width, self.out_channels)
 
     def get_config(self) -> Dict[str, Any]:

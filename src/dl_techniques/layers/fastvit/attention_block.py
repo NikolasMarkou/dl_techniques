@@ -83,12 +83,12 @@ from .rep_mixer import _create_layer_scale, _REFERENCE_LAYER_SCALE_INIT
 from ..stochastic_depth import StochasticDepth
 from ..attention.factory import create_attention_layer
 from ..norms.factory import create_normalization_layer
+from .reference import REFERENCE_NORM_EPSILON
 
 # ---------------------------------------------------------------------
 
-#: Normalization epsilon used by the reference. ``create_normalization_layer``
-#: ``setdefault``s ``1e-6``, so this MUST be passed explicitly (MEASURED).
-_REFERENCE_NORM_EPSILON = 1e-5
+#: Single definition of the reference epsilon lives in :mod:`.reference`.
+_REFERENCE_NORM_EPSILON = REFERENCE_NORM_EPSILON
 
 #: Reference per-head width. ``num_heads`` is derived as ``dim // head_dim``,
 #: exactly as timm's ``Attention`` does.

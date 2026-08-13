@@ -627,3 +627,48 @@ class TestFastVitImageEncoder:
         )
         assert all(isinstance(s, keras.layers.Layer) for s in encoder.stages)
         assert all(isinstance(b, keras.layers.Layer) for b in encoder.stem)
+
+    def test_all_batchnorms_use_reference_epsilon(self):
+        """Every normalization in the tower must carry the reference epsilon 1e-5.
+
+        This is the exact probe that caught the defect: on a built mci0 tower the
+        epsilon histogram was ``{0.001: 86, 1e-05: 28}`` — 86 BatchNormalizations
+        silently on Keras' 1e-3 default, a 100x divergence from the reference,
+        including the ``FastVitRepMixer.norm`` arm whose ENTIRE content is that
+        one BatchNormalization. No shape assertion can see it.
+
+        The assertion is on the HISTOGRAM, so it fails on the first call site that
+        forgets to pass ``norm_epsilon``, not merely on a wholesale regression.
+        """
+        for variant, dims in (
+                ('mci0', (32, 64, 128, 256)),
+                ('mci3', (32, 64, 128, 256, 512)),
+        ):
+            encoder = FastVitImageEncoder(
+                variant=variant, layers=(1,) * len(dims), embed_dims=dims,
+                input_shape=(64, 64, 3), projection_dim=32,
+            )
+            encoder(np.zeros((1, 64, 64, 3), dtype='float32'), training=False)
+
+            offenders = {}
+            histogram = {}
+            for layer in encoder._flatten_layers():
+                if isinstance(layer, (keras.layers.BatchNormalization,
+                                      keras.layers.LayerNormalization)):
+                    histogram[layer.epsilon] = histogram.get(layer.epsilon, 0) + 1
+                    if abs(layer.epsilon - 1e-5) > 1e-12:
+                        offenders[layer.name] = layer.epsilon
+
+            assert not offenders, (
+                f"{variant}: {len(offenders)} normalization layer(s) do not use "
+                f"the reference epsilon 1e-5. Histogram: {histogram}. "
+                f"Offenders (first 10): {dict(list(offenders.items())[:10])}"
+            )
+            assert set(histogram) == {1e-5}, (
+                f"{variant}: epsilon histogram is {histogram}, expected a single "
+                f"1e-05 bucket"
+            )
+            assert sum(histogram.values()) > 20, (
+                f"{variant}: only {sum(histogram.values())} normalization layers "
+                f"were reached — the walk is not seeing the tower"
+            )
