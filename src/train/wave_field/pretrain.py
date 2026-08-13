@@ -22,8 +22,8 @@ Usage::
 import os
 import glob
 import argparse
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, List
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
 
 import keras
 import numpy as np
@@ -41,6 +41,7 @@ from train.common.nlp import (
     augment_probe_results,
 )
 from train.common.clm_pretrain import (
+    ClmPretrainConfig,
     extract_step_from_checkpoint,
     create_clm_loss_fn,
     load_train_val_datasets,
@@ -87,79 +88,35 @@ _make_steps_per_epoch = make_clm_steps_per_epoch
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-08-13T091555-230c101d/D-011
+# `field_size` used to be declared 6th, between `num_heads` and `dropout_rate`.
+# Dataclass inheritance appends subclass-only fields AFTER the inherited ones,
+# so it is now LAST. That is a positional-construction contract change and it
+# was accepted deliberately: measured 2026-08-13, this class is constructed by
+# KEYWORD at every site in the repo (`_config_from_args` here, and
+# `SOTrainingConfig(**vars(base), ...)` for the gpt2 sibling), so no caller is
+# sensitive to it.
+# WHAT NOT TO DO: do NOT "restore" the old position by re-declaring
+# `field_size` in the base class. It is WaveField-specific -- `train.gpt2`
+# has no such concept -- and putting it in the base would add a dead field to
+# every GPT-2 config, which is the exact defect class
+# `tests/test_train/test_config_fields_are_live.py` exists to catch.
+# See decisions.md D-011.
 @dataclass
-class TrainingConfig:
-    """Configuration for WaveFieldLLM CLM pre-training."""
+class TrainingConfig(ClmPretrainConfig):
+    """Configuration for WaveFieldLLM CLM pre-training.
 
-    # Model
-    model_variant: str = "small"
-    vocab_size: int = 50261
-    max_seq_length: int = 512
-    num_layers: Optional[int] = None
-    num_heads: Optional[int] = None
-    field_size: Optional[int] = None  # None -> 2 * max_seq_length per variant
-    dropout_rate: float = 0.0
-    attention_dropout_rate: float = 0.0
-    tie_word_embeddings: bool = True
-
-    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
-    encoding_name: str = "gpt2"
-    cls_token_id: int = 50257
-    sep_token_id: int = 50258
-    pad_token_id: int = 50259
-    mask_token_id: int = 50260
-
-    # Training
-    batch_size: int = 8
-    num_epochs: int = 3
-    learning_rate: float = 3e-4
-    warmup_ratio: float = 0.1
-    weight_decay: float = 0.01
-
-    # Loss: "ce" (default) or "focal"
-    loss_type: str = "ce"
-    focal_gamma: float = 1.0
-    label_smoothing: float = 0.0
+    Inherits the 43 shared CLM fields from
+    :class:`train.common.clm_pretrain.ClmPretrainConfig` -- the single
+    definition also used by :mod:`train.gpt2.pretrain` -- and adds only what is
+    WaveField-specific.
+    """
 
     # Paths
     save_dir: str = "results/wave_field_llm_pretrain"
 
-    # Data source: "huggingface" or "tfds"
-    dataset_source: str = "huggingface"
-
-    # TFDS settings
-    dataset_name: str = "imdb_reviews"
-    max_samples: Optional[int] = 10000
-
-    # HuggingFace / Wikipedia settings
-    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
-    hf_wikipedia_config: str = "20231101.en"
-    min_article_length: int = 0
-    val_fraction: float = 0.02
-    max_val_samples: int = 5000
-    max_train_samples: Optional[int] = None
-    shuffle_shards: int = 4
-
-    # Checkpointing & analysis (step-based for large datasets)
-    checkpoint_every_steps: int = 25000
-    analyze_every_steps: int = 50000
-    max_checkpoints: int = 3
-    steps_per_epoch: Optional[int] = None
-
-    # Resume from checkpoint
-    resume_from: Optional[str] = None
-    seed: int = 42
-
-    # Generation probes (run before each checkpoint)
-    probe_prompts: List[str] = field(default_factory=lambda: [
-        "The United States of America is a",
-        "In mathematics, a prime number is",
-        "Albert Einstein was born in",
-    ])
-    probe_max_tokens: int = 100
-    probe_temperature: float = 0.85
-    probe_top_p: float = 0.92
-    probe_repetition_penalty: float = 1.3
+    # Model (WaveField-specific)
+    field_size: Optional[int] = None  # None -> 2 * max_seq_length per variant
 
 
 # ---------------------------------------------------------------------

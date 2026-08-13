@@ -23,8 +23,8 @@ Usage::
 import os
 import glob
 import argparse
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, List
+from dataclasses import dataclass
+from typing import Callable, Tuple
 
 import keras
 import numpy as np
@@ -42,6 +42,7 @@ from train.common.nlp import (
     augment_probe_results,
 )
 from train.common.clm_pretrain import (
+    ClmPretrainConfig,
     extract_step_from_checkpoint,
     create_clm_loss_fn,
     load_train_val_datasets,
@@ -82,87 +83,21 @@ _make_steps_per_epoch = make_clm_steps_per_epoch
 
 
 @dataclass
-class TrainingConfig:
+class TrainingConfig(ClmPretrainConfig):
     """Configuration for GPT-2 CLM pre-training.
 
-    All fields have sensible defaults for Wikipedia pre-training
-    with a GPT-2 small model on a single GPU.
+    Every field lives in :class:`train.common.clm_pretrain.ClmPretrainConfig`,
+    the single definition shared with :mod:`train.wave_field.pretrain`. This
+    subclass exists to pin GPT-2's own ``save_dir`` default; re-declaring the
+    field keeps its inherited position, so the field ORDER of this class is
+    byte-for-byte what it was before the extraction.
+
+    All defaults suit Wikipedia pre-training with a GPT-2 small model on a
+    single GPU.
     """
-
-    # Model
-    model_variant: str = "small"
-    vocab_size: int = 50261
-    max_seq_length: int = 512
-    num_layers: Optional[int] = None
-    num_heads: Optional[int] = None
-    dropout_rate: float = 0.0
-    attention_dropout_rate: float = 0.0
-    tie_word_embeddings: bool = True
-
-    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
-    encoding_name: str = "gpt2"
-    cls_token_id: int = 50257
-    sep_token_id: int = 50258
-    pad_token_id: int = 50259
-    mask_token_id: int = 50260
-
-    # Training
-    batch_size: int = 8
-    num_epochs: int = 3
-    learning_rate: float = 3e-4
-    warmup_ratio: float = 0.1
-    weight_decay: float = 0.01
-
-    # Loss: "ce" (default) or "focal"
-    loss_type: str = "ce"
-    focal_gamma: float = 1.0
-    label_smoothing: float = 0.0
 
     # Paths
     save_dir: str = "results/gpt2_pretrain"
-
-    # Data source: "huggingface" or "tfds"
-    dataset_source: str = "huggingface"
-
-    # TFDS settings
-    dataset_name: str = "imdb_reviews"
-    max_samples: Optional[int] = 10000
-
-    # HuggingFace / Wikipedia settings
-    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
-    hf_wikipedia_config: str = "20231101.en"
-    # 0 → packed CLM uses every token; pass 500+ only for
-    # per-doc consumers (MLM, classification).
-    min_article_length: int = 0
-    val_fraction: float = 0.02
-    max_val_samples: int = 5000
-    max_train_samples: Optional[int] = None
-    # Parallel tokenization shards + per-epoch reshuffle.
-    shuffle_shards: int = 4
-
-    # Checkpointing & analysis (step-based for large datasets)
-    checkpoint_every_steps: int = 25000
-    analyze_every_steps: int = 50000
-    max_checkpoints: int = 3
-    # Optional override of LR-schedule horizon (overrides chunk-aware estimate).
-    steps_per_epoch: Optional[int] = None
-
-    # Resume from checkpoint
-    resume_from: Optional[str] = None
-    # End-to-end seed plumbing. On --resume, data seed is
-    # shifted by initial_step so resumed runs see new article ordering.
-    seed: int = 42
-
-    # Generation probes (run before each checkpoint)
-    probe_prompts: List[str] = field(default_factory=lambda: [
-        "The United States of America is a",
-        "In mathematics, a prime number is",
-        "Albert Einstein was born in",
-    ])
-    probe_max_tokens: int = 100
-    probe_temperature: float = 0.85
-    probe_top_p: float = 0.92
-    probe_repetition_penalty: float = 1.3
 
 
 # ---------------------------------------------------------------------

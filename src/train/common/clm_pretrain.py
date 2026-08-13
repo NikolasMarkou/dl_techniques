@@ -21,7 +21,8 @@ under its old private name so every import path live before the move still resol
 
 import os
 import re
-from typing import Any, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
 
 import keras
 import tensorflow as tf
@@ -37,6 +38,7 @@ from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
 __all__ = [
+    "ClmPretrainConfig",
     "extract_step_from_checkpoint",
     "create_clm_loss_fn",
     "load_train_val_datasets",
@@ -44,6 +46,131 @@ __all__ = [
     "load_hf_clm_datasets",
     "make_clm_steps_per_epoch",
 ]
+
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
+
+
+# DECISION plan-2026-08-13T091555-230c101d/D-010
+# This base carries EXACTLY the 43 fields that `train.gpt2.pretrain` and
+# `train.wave_field.pretrain` were measured to share, with identical defaults,
+# identical `default_factory` VALUES and identical declaration ORDER. It is the
+# config half of the same concern the functions below already own: every field
+# here is read either by a function in this module or by the shared
+# `train.common.nlp` scaffolding those functions delegate to.
+#
+# WHAT NOT TO DO (1): do NOT widen this base to cover
+# `train.wave_field.train_memory`. Measured 2026-08-13: that config LACKS
+# `num_layers` and `num_heads` (`grep -n "num_layers\|num_heads"
+# src/train/wave_field/train_memory.py` -> 0 hits), so inheriting this base
+# would ADD two fields no code there reads and no CLI flag there sets -- the
+# dead-knob class `tests/test_train/test_config_fields_are_live.py` exists to
+# prevent. It also overrides `learning_rate` 3e-4 -> 1e-5 and adds eight fields
+# of its own. It is a feature fork, not a subclass.
+#
+# WHAT NOT TO DO (2): do NOT add a field here "because a trainer might want
+# it". A field earns its place by being read by the shared CLM layer at both
+# concrete sites, not by being plausible. Subclass-only state belongs in the
+# subclass -- that is what `field_size` in `train.wave_field.pretrain` is.
+#
+# WHAT NOT TO DO (3): do NOT reorder these declarations to tidy them. Dataclass
+# field order is the positional-construction contract, and it is pinned against
+# the pre-extraction classes.
+#
+# `save_dir` below is a PLACEHOLDER: both concrete subclasses re-declare it, so
+# this value never reaches a run. It exists because every field of a dataclass
+# that follows a defaulted field must itself be defaulted.
+# See decisions.md D-010.
+@dataclass
+class ClmPretrainConfig:
+    """Fields shared by the CLM trainers that dispatch through this module.
+
+    Concrete trainers subclass this and override ONLY their own defaults
+    (``save_dir``) plus their own additive fields (for example ``field_size``
+    in :mod:`train.wave_field.pretrain`). Re-declaring a field in a subclass
+    keeps its position in the inherited order, so overriding a default does not
+    move it.
+
+    :ivar model_variant: Named size variant of the model being pre-trained.
+    :ivar save_dir: Placeholder root; every concrete subclass overrides it.
+    """
+
+    # Model
+    model_variant: str = "small"
+    vocab_size: int = 50261
+    max_seq_length: int = 512
+    num_layers: Optional[int] = None
+    num_heads: Optional[int] = None
+    dropout_rate: float = 0.0
+    attention_dropout_rate: float = 0.0
+    tie_word_embeddings: bool = True
+
+    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
+    encoding_name: str = "gpt2"
+    cls_token_id: int = 50257
+    sep_token_id: int = 50258
+    pad_token_id: int = 50259
+    mask_token_id: int = 50260
+
+    # Training
+    batch_size: int = 8
+    num_epochs: int = 3
+    learning_rate: float = 3e-4
+    warmup_ratio: float = 0.1
+    weight_decay: float = 0.01
+
+    # Loss: "ce" (default) or "focal"
+    loss_type: str = "ce"
+    focal_gamma: float = 1.0
+    label_smoothing: float = 0.0
+
+    # Paths — placeholder, overridden by every concrete subclass.
+    save_dir: str = "results/clm_pretrain"
+
+    # Data source: "huggingface" or "tfds"
+    dataset_source: str = "huggingface"
+
+    # TFDS settings
+    dataset_name: str = "imdb_reviews"
+    max_samples: Optional[int] = 10000
+
+    # HuggingFace / Wikipedia settings
+    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
+    hf_wikipedia_config: str = "20231101.en"
+    # 0 → packed CLM uses every token; pass 500+ only for
+    # per-doc consumers (MLM, classification).
+    min_article_length: int = 0
+    val_fraction: float = 0.02
+    max_val_samples: int = 5000
+    max_train_samples: Optional[int] = None
+    # Parallel tokenization shards + per-epoch reshuffle.
+    shuffle_shards: int = 4
+
+    # Checkpointing & analysis (step-based for large datasets)
+    checkpoint_every_steps: int = 25000
+    analyze_every_steps: int = 50000
+    max_checkpoints: int = 3
+    # Optional override of LR-schedule horizon (overrides chunk-aware estimate).
+    steps_per_epoch: Optional[int] = None
+
+    # Resume from checkpoint
+    resume_from: Optional[str] = None
+    # End-to-end seed plumbing. On --resume, data seed is
+    # shifted by initial_step so resumed runs see new article ordering.
+    seed: int = 42
+
+    # Generation probes (run before each checkpoint)
+    probe_prompts: List[str] = field(default_factory=lambda: [
+        "The United States of America is a",
+        "In mathematics, a prime number is",
+        "Albert Einstein was born in",
+    ])
+    probe_max_tokens: int = 100
+    probe_temperature: float = 0.85
+    probe_top_p: float = 0.92
+    probe_repetition_penalty: float = 1.3
 
 
 # ---------------------------------------------------------------------

@@ -33,6 +33,7 @@ from train.common.nlp import (
     GenerationProbeCallback,
 )
 from train.common.clm_pretrain import (
+    ClmPretrainConfig,
     extract_step_from_checkpoint,
     create_clm_loss_fn,
     load_train_val_datasets,
@@ -153,6 +154,7 @@ __all__ = [
     "EpochMetricsPlotCallback",
     "estimate_clm_steps_per_epoch",
     "explicitly_set_flags",
+    "ClmPretrainConfig",
     "extract_step_from_checkpoint",
     "_fill_nans",
     "float_feature",
