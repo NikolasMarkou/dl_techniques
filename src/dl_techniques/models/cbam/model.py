@@ -1,37 +1,72 @@
 """
-CBAMNet Model Implementation with Pretrained Support
-==================================================
+Attention-augmented CNN backbone built on the Convolutional Block Attention Module.
 
-A complete implementation of a CNN architecture featuring the Convolutional
-Block Attention Module (CBAM), structured following modern Keras 3 best
-practices for robust and serializable models.
+This model embodies the principle of sequential attention refinement, a design
+paradigm that treats feature recalibration as two separable questions applied in
+order rather than one joint reweighting. The core idea is that a convolutional
+feature map is over-complete in two independent senses: not every channel is
+informative for a given input, and not every spatial location is informative
+either. Asking both questions at once requires a 3-D attention tensor whose cost
+scales with `C x H x W`; asking them one at a time factorizes the problem into a
+`C`-dimensional and an `H x W`-dimensional decision, which is dramatically
+cheaper and, empirically, more effective.
 
-Based on: "CBAM: Convolutional Block Attention Module" (Woo et al., 2018)
-https://arxiv.org/abs/1807.06521
+CBAM composes the two in sequence:
 
-Model Variants:
---------------
-- CBAMNet-T (Tiny): [64, 128] dims
-- CBAMNet-S (Small): [64, 128, 256] dims
-- CBAMNet-B (Base): [128, 256, 512] dims
+`F' = M_c(F) (*) F`
+`F'' = M_s(F') (*) F'`
 
-Usage Examples:
--------------
-```python
-# Create a model for CIFAR-10
-model = CBAMNet(num_classes=10, dims=[64, 128], input_shape=(32, 32, 3))
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+where `(*)` is element-wise multiplication with broadcasting. Channel attention
+`M_c` pools each feature map to a scalar (both average and max pooling, whose
+descriptors are complementary), passes them through a shared bottleneck MLP with
+reduction ratio `r`, and sums the results before a sigmoid. The bottleneck is what
+forces the module to learn inter-channel relationships rather than per-channel
+gains. Spatial attention `M_s` pools across the channel axis instead, producing a
+two-channel descriptor that a single large convolution (kernel size 7 by default)
+maps to a spatial mask; the large receptive field matters here because deciding
+whether a location is salient requires context beyond that location. Both masks
+pass through a sigmoid, so attention can only attenuate or preserve, never invert
+or amplify beyond the original magnitude.
 
-# Create from variant
-model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+Architecturally, the backbone is a stack of uniform stages, one per entry in
+`dims`:
 
-# Load pretrained model as a feature extractor
-model = CBAMNet.from_variant("small", include_top=False)
+`Conv2D(dim, 3x3, relu) -> BatchNormalization -> CBAM(dim) -> MaxPooling2D(2x2)`
 
-# Load from a local weights file
-model = CBAMNet(num_classes=10, dims=[64, 128])
-model.load_weights("path/to/cbamnet_weights.keras")
-```
+Placing CBAM after normalization and before pooling is deliberate: attention
+operates on normalized activations, and downsampling then acts on an already
+refined map, so the pooling decision is made over features whose salience has
+been accounted for. The head is a global average pool followed by a softmax
+`Dense`, and is omitted entirely when `include_top=False`, in which case the
+model returns the final stage's feature maps and serves as a backbone for
+detection, segmentation, or transfer learning.
+
+Three preset variants trade capacity against cost: tiny (`[64, 128]`), small
+(`[64, 128, 256]`), and base (`[128, 256, 512]`). Because each stage halves the
+spatial resolution, depth is bounded below by input size; a 32x32 input supports
+at most five stages before the feature map degenerates.
+
+The implementation follows the Keras 3 subclassed-model contract. All sub-layers
+are instantiated in `__init__` so that they exist before the first call and are
+therefore captured correctly by serialization; no custom `build()` is required
+because Keras builds sub-layers on the first invocation. `get_config` carries
+every constructor argument, and `from_config` deserializes the initializer and
+regularizer objects, so a saved model round-trips without reconstruction code.
+Weight loading via `from_variant(pretrained=...)` tolerates a classifier shape
+mismatch by name-matching and skipping the head, which is the common case when
+fine-tuning an ImageNet checkpoint onto a different label set.
+
+References:
+    - Woo et al., 2018. CBAM: Convolutional Block Attention Module. ECCV 2018.
+      (https://arxiv.org/abs/1807.06521)
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+    - Park et al., 2018. BAM: Bottleneck Attention Module.
+      (https://arxiv.org/abs/1807.06514)
+    - Ioffe and Szegedy, 2015. Batch Normalization: Accelerating Deep Network
+      Training by Reducing Internal Covariate Shift.
+      (https://arxiv.org/abs/1502.03167)
+
 """
 
 import keras
