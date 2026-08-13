@@ -45,7 +45,7 @@ import tensorflow as tf
 import tiktoken
 from keras import initializers, regularizers
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
@@ -320,8 +320,7 @@ def train_cliffordnet_nlp(
     logger.info("CliffordNet NLP Causal LM Pre-training")
     logger.info("=" * 60)
 
-    tf.random.set_seed(config.seed)
-    keras.utils.set_random_seed(config.seed)
+    set_seeds(config.seed)
 
     # Tokenizer
     preprocessor = create_tokenizer(

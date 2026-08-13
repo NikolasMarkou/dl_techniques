@@ -42,6 +42,7 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from train.common import set_seeds
 from train.logic.monks_data import load_monks
 from train.logic.rule_recovery import MONKS_RULES, rule_equivalence_score
 from train.logic.train_benchmark import (
@@ -111,8 +112,7 @@ def run_cell(
 ) -> Dict[str, Any]:
     logger.info(f"--- Monks-{problem_id} / {model_name} / seed={seed} ---")
     t0 = time.time()
-    keras.utils.set_random_seed(seed)
-    np.random.seed(seed)
+    set_seeds(seed)
 
     d = load_monks(problem_id)
     x_tr, y_tr = d["x_train_onehot"], d["y_train"].astype(np.float32)

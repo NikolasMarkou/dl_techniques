@@ -276,11 +276,19 @@ These are real divergences, recorded rather than fixed, because the consolidatio
 | `finetune.py` `stage1_epochs` / `stage2_epochs` | 5 / 10 | 5 / 10 | **2 / 3** |
 | `finetune.py` optimizer `clipnorm` | absent | absent | **1.0** (`finetune.py:133`) |
 | MLM `steps_per_epoch` fallback | `max_samples // batch_size if max_samples else 1000` | same | **`max(1, (max_samples or 10000) // batch_size)`** |
-| Seeding in `pretrain.py` | `set_seeds(42)` | `set_seeds(42)` | **inline `tf.random.set_seed(42)` + `keras.utils.set_random_seed(42)`** (`pretrain.py:170-171`) |
+| Seeding in `pretrain.py` | `set_seeds(42)` | `set_seeds(42)` | `set_seeds(42)` — **drift RESOLVED 2026-08-13**; was inline `tf.random.set_seed(42)` + `keras.utils.set_random_seed(42)` in `train_tree_transformer_mlm()` |
 
 The `max_seq_length` 256-vs-128 split is the one a shared scaffold is most likely to "tidy away": it doubles or halves bert's fine-tuning input length with no visible justification in either file. It is pinned as a FACT by `tests/test_train/test_bert_fnet/test_finetune_scripts.py::TestArgvToConfig` — harmonizing either value turns that guard RED.
 
-tree_transformer's inline seeding is weaker than it looks: `set_seeds` also sets `PYTHONHASHSEED`, `random` and `numpy`, which the inline pair does not — so tree_transformer runs are less reproducible than bert/fnet's despite looking equivalent. Its `finetune.py` does use `set_seeds(42)`; only `pretrain.py` rolls its own.
+**CORRECTED (2026-08-13): the seeding row is no longer a drift, and the reason it was recorded as one was wrong.** This section used to claim "tree_transformer's inline seeding is weaker than it looks: `set_seeds` also sets `PYTHONHASHSEED`, `random` and `numpy`, which the inline pair does not — so tree_transformer runs are less reproducible than bert/fnet's despite looking equivalent." That claim is **REFUTED by measurement**, and it is kept here rather than deleted so a reader who remembers it knows it was tested:
+
+- `keras.utils.set_random_seed` *already* seeds Python `random`, NumPy and TF — it is literally `random.seed(s); np.random.seed(s); tf.random.set_seed(s)` (installed `keras/src/utils/rng_utils.py`). The explicit `random`/`numpy` calls inside `set_seeds` are redundant with its own last line; `src/train/common/seed.py:7-10` says so in its docstring.
+- The only real difference, `os.environ.setdefault("PYTHONHASHSEED", ...)`, is a **documented no-op after process start** — `src/train/common/seed.py:26` states this in a comment. It buys no reproducibility at all.
+- Measured A/B, two fresh subprocesses per site, drawing `random.random()`, `np.random.rand(3)`, `tf.random.uniform((3,))` and `keras.random.normal((3,))`: the two routes are **bit-identical** at every one of the 7 migrated sites (`0.6394267984578837` / `0.3745401188473625` / `0.6645621061325073` / `0.08454562723636627`). The comparator was RED-proven — a different seed on one side fires `ASSERT-DRAWS-BIT-IDENTICAL` at all 7.
+
+So the two routes were always equally reproducible; the divergence was cosmetic, not behavioural. It is now gone anyway: `pretrain.py` calls `set_seeds(42)` inside `train_tree_transformer_mlm()` (cited by enclosing function, not by line number — the previous citation, `pretrain.py:170-171`, had drifted to `:221-222` before anyone noticed). `finetune.py` already used `set_seeds(42)`.
+
+Six sibling files were migrated in the same change for the same measured reason: `cliffordnet/train_cliffordnet_nlp.py`, `logic/train_e4_monks.py`, `logic/train_e4_lowdata_mux.py`, `wave_field/train_memory.py`, `wave_field/pretrain.py`, `vae/evaluate_samplers.py`. The two `logic/` calls stay **inside** `run_cell()`, which the `for seed in seeds:` sweep calls once per seed — hoisting them to `main()` is a behaviour change, not a tidy-up, and the probe's second control confirms it (hoisting changes the per-iteration draw sequence, firing `ASSERT-LOOP-PER-ITERATION-SEQUENCE-UNCHANGED`).
 
 #### FIXED: `best_sentiment_model.keras` was a filename nothing wrote
 

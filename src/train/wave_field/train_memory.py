@@ -39,7 +39,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -272,8 +272,7 @@ def train_memory_llm(
     logger.info("WaveFieldMemoryLLM CLM Curriculum Training")
     logger.info("=" * 60)
 
-    tf.random.set_seed(config.seed)
-    keras.utils.set_random_seed(config.seed)
+    set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(

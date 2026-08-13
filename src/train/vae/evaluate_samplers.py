@@ -83,6 +83,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.vae.model import VAE
 from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 
+from train.common import set_seeds
+
 # Reuse the trainer's plot helpers + custom-objects so the eval stays in lockstep
 # with how the model was trained/serialized (DRY: do not redefine these).
 from train.vae.train_vae import (
@@ -777,8 +779,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Base RNG seed.")
     args = parser.parse_args()
 
-    keras.utils.set_random_seed(args.seed)
-    np.random.seed(args.seed)
+    set_seeds(args.seed)
 
     run_dirs = args.runs if args.runs else discover_runs()
     if not run_dirs:
