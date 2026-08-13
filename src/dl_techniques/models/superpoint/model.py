@@ -1,19 +1,78 @@
 """
-SuperPoint Model Implementation (ConvNeXt V2 encoder, dual heads)
-=================================================================
+Joint interest-point detection and description in a single forward pass.
 
-A Keras 3 subclassed implementation of SuperPoint: a self-supervised interest-point
-detector and descriptor. This implementation swaps the original VGG-style encoder for a
-nested 3-stage ConvNeXt V2 backbone and exposes two heads from a shared 1x1 neck:
+This model embodies the principle of shared-encoder multi-task prediction, a
+design paradigm that computes two structurally different outputs from one
+representation rather than running separate detection and description pipelines.
+The core idea addresses a redundancy in classical feature matching: a detector
+(Harris, DoG, FAST) and a descriptor (SIFT, ORB) traditionally operate as
+independent stages, with the descriptor recomputing local image structure that
+the detector has already measured. Predicting both from a common encoder makes
+the two tasks share their evidence, and, more importantly, allows them to be
+trained jointly under a single self-supervised objective derived from homographic
+warps rather than from human-annotated keypoints.
 
-- a **detector** head emitting raw 65-class logits per 8x8 cell (8x8 grid + 1 dustbin), and
-- a **descriptor** head emitting a 256-D semi-dense descriptor map, bicubically upsampled to
-  full resolution and L2-normalized along channels.
+The detector's formulation is the non-obvious part. Rather than regressing a
+dense per-pixel score, the detection map is treated as classification over an
+8x8 cell:
 
-Based on: "SuperPoint: Self-Supervised Interest Point Detection and Description"
-(DeTone, Malisiewicz, Rabinovich, 2018), https://arxiv.org/abs/1712.07629
-Encoder: "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders"
-(Woo et al., 2023), https://arxiv.org/abs/2301.00808
+`logits in R^65 = 64 pixel positions + 1 dustbin`
+
+Each cell at resolution `H/8 x W/8` predicts which of its 64 pixels holds an
+interest point, or, via the dustbin class, that it holds none. This buys three
+things. Detection is resolved at full pixel resolution without any decoder or
+upsampling path, since the channel index encodes sub-cell position. Non-maximum
+suppression within a cell is implicit, because softmax over the 65 classes forces
+competition. And the "no keypoint here" case has an explicit representation
+rather than being expressed as a low score, which is what makes the classification
+framing well-posed on mostly-featureless images. The head emits raw logits; the
+softmax lives in the loss, per repo convention.
+
+The descriptor head is semi-dense by construction. It predicts a
+`descriptor_dim`-channel field at `H/8 x W/8` and interpolates bicubically to full
+resolution, then normalizes along channels at every location:
+
+`d(x, y) = f(x, y) / (||f(x, y)||_2 + eps)`
+
+Interpolating a coarse field rather than predicting a dense one keeps memory and
+compute tractable while relying on the fact that descriptors vary smoothly in
+space. Unit-L2 normalization means descriptor similarity reduces to a dot
+product, so matching is a single matrix multiply and the cosine and Euclidean
+orderings coincide.
+
+Architecturally, this implementation replaces the original VGG-style encoder with
+a nested three-stage ConvNeXt V2 backbone, followed by a shared 1x1 projection
+neck that both heads consume:
+
+`encoder -> proj (1x1) -> {detector_head (1x1), descriptor_head (1x1)}`
+
+The neck is where the two tasks diverge; everything before it is shared. One
+constraint is load-bearing: the encoder must run at `strides=2`, not the ConvNeXt
+default of 4. At stride 4 three stages produce `/4, /16, /64` and never the `H/8`
+the 8x8 cell decomposition requires; at stride 2 they produce exactly `H/8` at
+`dims[-1]`. The encoder is held as a whole nested `ConvNeXtV2` model rather than
+hand-walked stage by stage, which reuses its tested `get_config`/`from_config`
+path.
+
+Sublayers are built explicitly in forward order rather than lazily on first call.
+This matters for serialization: weights created lazily during a deferred first
+call may not exist when a `.keras` restore runs, and the resulting mismatch is
+silent rather than an error. Similarly, the bicubic resize targets the static
+input dimensions, which keeps the operation graph-safe under compilation. The
+consequence is that `H` and `W` should be divisible by 8 so the semi-dense maps
+land exactly on `H/8 x W/8`.
+
+References:
+    - DeTone et al., 2018. SuperPoint: Self-Supervised Interest Point Detection
+      and Description. CVPR 2018 Workshops.
+      (https://arxiv.org/abs/1712.07629)
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. CVPR 2023. (https://arxiv.org/abs/2301.00808)
+    - Sarlin et al., 2020. SuperGlue: Learning Feature Matching with Graph
+      Neural Networks. CVPR 2020. (https://arxiv.org/abs/1911.11763)
+    - Lowe, 2004. Distinctive Image Features from Scale-Invariant Keypoints.
+      IJCV 60(2).
+
 """
 
 import keras
