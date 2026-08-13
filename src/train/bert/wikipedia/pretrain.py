@@ -319,14 +319,52 @@ def main(argv: Optional[list] = None):
             "warmup_start_lr": 0.0,
         })
 
+        # DECISION plan-2026-08-13T045759-fde437ba/D-004
+        # Do NOT pass `jit_compile=` to a Keras 3 optimizer constructor, and do
+        # NOT "fix" that by moving it to `mlm_model.compile(jit_compile=True)`.
+        #
+        # This line used to read `jit_compile=True  # XLA Compilation for speed`.
+        # Keras 3 optimizers have no such parameter, so it raised
+        # `ValueError: Argument(s) not recognized: {'jit_compile': True}` on an
+        # unconditional path -- this script and `pretrain_english.py` crashed at
+        # model compilation on EVERY run, and had since they were written. The
+        # `--help` gate never saw it (train-time raise) and neither did the suite.
+        #
+        # The obvious repair is wrong. XLA cannot compile this training step
+        # under a distribution strategy, MEASURED 2026-08-13 on TF 2.18 / Keras
+        # 3.8, one GPU, tiny BERT + this exact MaskedLanguageModel:
+        #   * `MaskedLanguageModel.train_step` calls `optimizer.apply_gradients`,
+        #     which under ANY strategy emits `CollectiveGatherV2`. There is no
+        #     `CollectiveGatherV2` OpKernel for XLA_GPU_JIT, so tf2xla conversion
+        #     fails hard: `InvalidArgumentError: Detected unsupported operations`.
+        #     Reproduced in BOTH float32 and mixed_float16 -- it is architectural,
+        #     not a precision problem.
+        #   * Under mixed_float16 there is a second, independent blocker:
+        #     `LossScaleOptimizer`'s finite-gradient `Cond` triggers
+        #     `merge_call called while defining a new graph or a tf.function`.
+        # A single-replica `MirroredStrategy` fails identically -- and step 1 of
+        # this script builds `MirroredStrategy()` unconditionally, falling back
+        # only if construction throws. So on any GPU host the XLA path is
+        # unreachable by construction; `model.compile(jit_compile=True)` would
+        # merely move the guaranteed crash from compile time to step 1.
+        #
+        # A `--jit-compile` flag was considered and rejected: it could only ever
+        # refuse on the hardware this script targets, i.e. a knob that does
+        # nothing -- the dead-config-field class that
+        # `tests/test_train/test_config_fields_are_live.py` exists to prevent.
+        #
+        # What DOES work (all measured, same probe): fp16 + XLA with NO strategy;
+        # fp16 + strategy with NO XLA (the configuration below). If XLA here ever
+        # becomes worth the effort, the prerequisite is removing the collective
+        # from the training step, not re-adding a keyword.
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
-            jit_compile=True  # XLA Compilation for speed
         )
 
-        # Mixed precision loss scaling is handled automatically by Keras in modern TF
+        # Mixed precision loss scaling is handled automatically by Keras in modern TF.
+        # No `jit_compile=` here either -- see the DECISION note above.
         mlm_model.compile(optimizer=optimizer)
 
     # 5. Callbacks

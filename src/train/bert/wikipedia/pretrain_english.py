@@ -319,11 +319,23 @@ def main(argv: Optional[list] = None):
             "warmup_start_lr": 0.0,
         })
 
+        # DECISION plan-2026-08-13T045759-fde437ba/D-004
+        # Do NOT pass `jit_compile=` to a Keras 3 optimizer constructor, and do
+        # NOT "fix" that by moving it to `mlm_model.compile(jit_compile=True)`.
+        # This line used to read `jit_compile=True`; Keras 3 optimizers have no
+        # such parameter, so it raised `ValueError: Argument(s) not recognized`
+        # on an unconditional path and this script crashed at model compilation
+        # on EVERY run. XLA also cannot compile this step under a distribution
+        # strategy at all (`CollectiveGatherV2` has no XLA_GPU_JIT kernel; under
+        # fp16 `LossScaleOptimizer`'s `Cond` additionally trips `merge_call`),
+        # so moving the keyword to `compile()` would only relocate the crash.
+        # Full measurement and the rejected `--jit-compile` alternative are
+        # recorded once, at the sibling site in `pretrain.py`. Read that note
+        # before changing either file.
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
-            jit_compile=True
         )
 
         mlm_model.compile(optimizer=optimizer)
