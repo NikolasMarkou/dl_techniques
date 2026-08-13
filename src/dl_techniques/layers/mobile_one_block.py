@@ -118,8 +118,36 @@ class MobileOneBlock(keras.layers.Layer):
     :type padding: str
     :param use_se: Whether to include Squeeze-and-Excitation. Defaults to False.
     :type use_se: bool
-    :param num_conv_branches: Number of Conv-BN branches. Must be positive. Defaults to 1.
+    :param num_conv_branches: Number of Conv-BN branches. Must be non-negative.
+        ``0`` creates no ``k x k`` branch at all, which — combined with
+        ``use_scale_branch=False``, ``stride=1`` and ``out_channels == in_channels`` —
+        reduces the block to exactly the identity BatchNormalization. Defaults to 1.
     :type num_conv_branches: int
+    :param group_size: Grouped-convolution control using timm's ``num_groups``
+        semantics: ``0`` means ``groups = 1`` (a dense convolution, the default);
+        ``k > 0`` means ``groups = in_channels // k``, so ``group_size=1`` is a
+        DEPTHWISE convolution. ``in_channels`` is only known at build time, so the
+        resolved group count is computed in :meth:`build` and exposed as ``self.groups``.
+        The group count is applied to the ``k x k`` branches AND to the 1x1 scale
+        branch. Defaults to 0.
+    :type group_size: int
+    :param use_act: Whether to apply ``activation`` in :meth:`call`. Defaults to True.
+    :type use_act: bool
+    :param use_scale_branch: Whether to create the 1x1 scale branch when
+        ``kernel_size > 1``. When False no scale branch is created regardless of
+        kernel size. Defaults to True.
+    :type use_scale_branch: bool
+    :param se_reduction_ratio: Bottleneck ratio forwarded to
+        :class:`SqueezeExcitation`. Defaults to 0.25.
+    :type se_reduction_ratio: float
+    :param se_use_bias: Whether the Squeeze-and-Excitation convolutions use bias
+        vectors. Forwarded to :class:`SqueezeExcitation`. Defaults to False.
+    :type se_use_bias: bool
+    :param se_position: Where the Squeeze-and-Excitation block sits relative to the
+        activation. ``'post_act'`` (the default, and this layer's historical
+        behaviour) computes ``se(act(x))``; ``'pre_act'`` computes ``act(se(x))``,
+        which is the FastViT/timm reference order. Defaults to ``'post_act'``.
+    :type se_position: str
     :param activation: Activation function to use. Defaults to ``'gelu'``.
     :type activation: Union[str, callable]
     :param kernel_initializer: Initializer for conv kernels. Defaults to ``'he_normal'``.
@@ -132,9 +160,15 @@ class MobileOneBlock(keras.layers.Layer):
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional keyword arguments for Layer base class.
 
-    :raises ValueError: If out_channels, kernel_size, stride, or num_conv_branches
-        are not positive, or padding is invalid.
+    :raises ValueError: If out_channels, kernel_size or stride are not positive, if
+        num_conv_branches or group_size are negative, if padding is invalid, or if
+        se_position is not one of ``'post_act'`` / ``'pre_act'``. At build time, also
+        if the resolved group count does not divide both the input and the output
+        channel counts.
     """
+
+    #: Accepted values for ``se_position``.
+    _SE_POSITIONS = ('post_act', 'pre_act')
 
     def __init__(
             self,
@@ -144,6 +178,12 @@ class MobileOneBlock(keras.layers.Layer):
             padding: str = 'same',
             use_se: bool = False,
             num_conv_branches: int = 1,
+            group_size: int = 0,
+            use_act: bool = True,
+            use_scale_branch: bool = True,
+            se_reduction_ratio: float = 0.25,
+            se_use_bias: bool = False,
+            se_position: str = 'post_act',
             activation: Union[str, callable] = 'gelu',
             kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
@@ -160,10 +200,16 @@ class MobileOneBlock(keras.layers.Layer):
             raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         if stride <= 0:
             raise ValueError(f"stride must be positive, got {stride}")
-        if num_conv_branches <= 0:
-            raise ValueError(f"num_conv_branches must be positive, got {num_conv_branches}")
+        if num_conv_branches < 0:
+            raise ValueError(f"num_conv_branches must be non-negative, got {num_conv_branches}")
+        if group_size < 0:
+            raise ValueError(f"group_size must be non-negative, got {group_size}")
         if padding not in ['same', 'valid']:
             raise ValueError(f"padding must be 'same' or 'valid', got {padding}")
+        if se_position not in self._SE_POSITIONS:
+            raise ValueError(
+                f"se_position must be 'post_act' or 'pre_act', got {se_position!r}"
+            )
 
         # Store configuration
         self.out_channels = out_channels
@@ -172,6 +218,12 @@ class MobileOneBlock(keras.layers.Layer):
         self.padding = padding
         self.use_se = use_se
         self.num_conv_branches = num_conv_branches
+        self.group_size = group_size
+        self.use_act = use_act
+        self.use_scale_branch = use_scale_branch
+        self.se_reduction_ratio = se_reduction_ratio
+        self.se_use_bias = se_use_bias
+        self.se_position = se_position
         self.activation = activations.get(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -181,17 +233,59 @@ class MobileOneBlock(keras.layers.Layer):
         # State management
         self.inference_mode = False
 
-        # CREATE all sub-layers in __init__ (unbuilt)
+        # Resolved group count. Depends on the input channel count, so it can only be
+        # finalised in build(); `group_size == 0` is knowable up front and is the
+        # historical dense path.
+        self.groups = 1 if self.group_size == 0 else None
+
+        # CREATE all sub-layers in __init__ (unbuilt).
+        #
+        # Exception, deliberate: `groups` must be passed to Conv2D at CONSTRUCTION
+        # time, but timm's `num_groups` semantics derive it from `in_channels`, which
+        # is unknown until build(). So the convolutional branches are constructed here
+        # ONLY for the `group_size == 0` (groups == 1) case — the historical default
+        # path, which is left bit-for-bit as it was — and are otherwise constructed in
+        # build() once `in_channels` is known. Construction is still driven purely by
+        # config flags plus the channel count, and sub-layer names are deterministic,
+        # so `.keras` round-tripping is unaffected (Keras calls build() from
+        # `build_from_config` before restoring weights).
+        self.conv_branches = []
+        self.scale_branch = None
+        if self.groups is not None:
+            self._create_conv_branches(self.groups)
+            self.scale_branch = self._create_scale_branch(self.groups)
+
+        # Skip branch (will be created in build if applicable)
+        self.skip_branch = None
+
+        # SE block if requested - reuse dl_techniques implementation
+        if use_se:
+            self.se_block = SqueezeExcitation(
+                reduction_ratio=self.se_reduction_ratio,
+                use_bias=self.se_use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name='se_block'
+            )
+        else:
+            self.se_block = None
+
+    def _create_conv_branches(self, groups: int) -> None:
+        """Populate ``self.conv_branches`` with ``num_conv_branches`` Conv-BN branches.
+
+        :param groups: Number of convolution groups to use.
+        :type groups: int
+        """
         self.conv_branches = []
         for i in range(self.num_conv_branches):
             conv_branch = keras.Sequential([
                 layers.Conv2D(
-                    filters=out_channels,
-                    kernel_size=kernel_size,
-                    strides=stride,
-                    padding=padding,
+                    filters=self.out_channels,
+                    kernel_size=self.kernel_size,
+                    strides=self.stride,
+                    padding=self.padding,
                     use_bias=False,
-                    groups=1,
+                    groups=groups,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     name=f'conv_branch_{i}_conv'
@@ -200,37 +294,57 @@ class MobileOneBlock(keras.layers.Layer):
             ], name=f'conv_branch_{i}')
             self.conv_branches.append(conv_branch)
 
-        # Scale branch (1x1 conv) if main kernel is larger
-        if kernel_size > 1:
-            self.scale_branch = keras.Sequential([
-                layers.Conv2D(
-                    filters=out_channels,
-                    kernel_size=1,
-                    strides=stride,
-                    padding=padding,
-                    use_bias=False,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name='scale_branch_conv'
-                ),
-                layers.BatchNormalization(name='scale_branch_bn')
-            ], name='scale_branch')
-        else:
-            self.scale_branch = None
+    def _create_scale_branch(self, groups: int) -> Optional[keras.Sequential]:
+        """Build the optional 1x1 scale branch.
 
-        # Skip branch (will be created in build if applicable)
-        self.skip_branch = None
-
-        # SE block if requested - reuse dl_techniques implementation
-        if use_se:
-            self.se_block = SqueezeExcitation(
-                reduction_ratio=0.25,
+        :param groups: Number of convolution groups to use.
+        :type groups: int
+        :return: The scale branch, or ``None`` when it is not applicable.
+        :rtype: Optional[keras.Sequential]
+        """
+        if not (self.use_scale_branch and self.kernel_size > 1):
+            return None
+        return keras.Sequential([
+            layers.Conv2D(
+                filters=self.out_channels,
+                kernel_size=1,
+                strides=self.stride,
+                padding=self.padding,
+                use_bias=False,
+                groups=groups,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                name='se_block'
-            )
+                name='scale_branch_conv'
+            ),
+            layers.BatchNormalization(name='scale_branch_bn')
+        ], name='scale_branch')
+
+    def _resolve_groups(self, input_channels: int) -> int:
+        """Resolve timm's ``num_groups(group_size, in_chs)`` at build time.
+
+        :param input_channels: Number of input channels.
+        :type input_channels: int
+        :return: The convolution group count.
+        :rtype: int
+        :raises ValueError: If the group count does not divide both the input and the
+            output channel counts.
+        """
+        if self.group_size == 0:
+            groups = 1
         else:
-            self.se_block = None
+            if input_channels % self.group_size != 0:
+                raise ValueError(
+                    f"group_size must divide the input channels: "
+                    f"in_channels={input_channels}, group_size={self.group_size}"
+                )
+            groups = input_channels // self.group_size
+
+        if input_channels % groups != 0 or self.out_channels % groups != 0:
+            raise ValueError(
+                f"resolved groups={groups} must divide both in_channels="
+                f"{input_channels} and out_channels={self.out_channels}"
+            )
+        return groups
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create weights and build sub-layers.
@@ -241,6 +355,14 @@ class MobileOneBlock(keras.layers.Layer):
         input_channels = input_shape[-1]
         if input_channels is None:
             raise ValueError("Input channels dimension must be defined")
+
+        # Resolve the grouped-convolution count now that in_channels is known, and
+        # create the grouped branches if __init__ could not (see the note there).
+        resolved_groups = self._resolve_groups(input_channels)
+        if self.groups is None:
+            self.groups = resolved_groups
+            self._create_conv_branches(resolved_groups)
+            self.scale_branch = self._create_scale_branch(resolved_groups)
 
         # Create skip branch if input/output channels match and stride is 1
         if input_channels == self.out_channels and self.stride == 1:
@@ -257,8 +379,9 @@ class MobileOneBlock(keras.layers.Layer):
             self.skip_branch.build(input_shape)
 
         if self.se_block is not None:
-            # SE block needs output shape after conv
-            conv_output_shape = self.conv_branches[0].compute_output_shape(input_shape)
+            # SE block needs output shape after conv. Resolved via
+            # compute_output_shape so it also works with zero conv branches.
+            conv_output_shape = self.compute_output_shape(input_shape)
             self.se_block.build(conv_output_shape)
 
         super().build(input_shape)
@@ -276,28 +399,52 @@ class MobileOneBlock(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor.
         :rtype: keras.KerasTensor
+        :raises ValueError: If the configuration leaves the block with no branch at
+            all (no conv branches, no scale branch and no identity skip).
         """
         x = None
 
-        # Conv branches
+        # Conv branches. `x` stays None when num_conv_branches == 0, so every
+        # subsequent branch must handle the "first contribution" case too.
         for branch in self.conv_branches:
             branch_out = branch(inputs, training=training)
             x = branch_out if x is None else x + branch_out
 
         # Scale branch
         if self.scale_branch is not None:
-            x = x + self.scale_branch(inputs, training=training)
+            scale_out = self.scale_branch(inputs, training=training)
+            x = scale_out if x is None else x + scale_out
 
         # Skip branch
         if self.skip_branch is not None:
-            x = x + self.skip_branch(inputs, training=training)
+            skip_out = self.skip_branch(inputs, training=training)
+            x = skip_out if x is None else x + skip_out
 
-        # Apply activation
-        x = self.activation(x)
+        if x is None:
+            raise ValueError(
+                "MobileOneBlock has no active branch: num_conv_branches=0 with no "
+                "scale branch and no identity skip branch produces no output. "
+                "Set num_conv_branches > 0, use_scale_branch=True, or use a "
+                "configuration where stride == 1 and out_channels == in_channels."
+            )
 
-        # Apply SE block if present
-        if self.se_block is not None:
-            x = self.se_block(x, training=training)
+        # DECISION plan-2026-08-13T183738-24486492/D-002
+        # SE ordering. `'post_act'` — se(act(x)) — is this layer's HISTORICAL order and
+        # MUST remain the default: `models/fastvlm/` (via layers/repmixer_block.py's
+        # ConvolutionalStem) ships trained-against numerics that depend on it. Do NOT
+        # "fix" the default to match timm. `'pre_act'` — act(se(x)) — is the
+        # FastViT/timm reference order and is available opt-in for the faithful port.
+        # See decisions.md D-002 (the divergence is DISCLOSED, not repaired in place).
+        if self.se_position == 'pre_act':
+            if self.se_block is not None:
+                x = self.se_block(x, training=training)
+            if self.use_act:
+                x = self.activation(x)
+        else:
+            if self.use_act:
+                x = self.activation(x)
+            if self.se_block is not None:
+                x = self.se_block(x, training=training)
 
         return x
 
@@ -341,6 +488,12 @@ class MobileOneBlock(keras.layers.Layer):
             'padding': self.padding,
             'use_se': self.use_se,
             'num_conv_branches': self.num_conv_branches,
+            'group_size': self.group_size,
+            'use_act': self.use_act,
+            'use_scale_branch': self.use_scale_branch,
+            'se_reduction_ratio': self.se_reduction_ratio,
+            'se_use_bias': self.se_use_bias,
+            'se_position': self.se_position,
             'activation': activations.serialize(self.activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
