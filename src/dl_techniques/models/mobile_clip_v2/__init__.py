@@ -10,17 +10,22 @@ port of that image tower, built from the ``layers/fastvit/`` primitives.
    tower (its own in-file decision D-001). It is shipped and tested and is left
    untouched; the two packages coexist on purpose.
 
-Two facts about the image tower that are easy to get wrong:
+Three facts that are easy to get wrong:
 
-* **The head ``Dense`` IS the CLIP image projection.** MobileCLIP's open_clip
-  configs use ``timm_pool="avg"`` with ``timm_proj=null``, so the trunk's own
-  classifier linear projects into the joint embedding space. Do not stack a
-  second projection on top of :class:`FastVitImageEncoder`.
+* **The image tower's terminal ``Dense`` IS the CLIP image projection.**
+  MobileCLIP's open_clip configs use ``timm_pool="avg"`` with
+  ``timm_proj=null``, so the trunk's own classifier linear projects into the
+  joint embedding space. Do not stack a second projection on top of
+  :class:`FastVitImageEncoder`.
 * **The stochastic-depth ramp is GLOBAL**, computed once over every block of
   every stage and then sliced stagewise — not recomputed per stage.
+* **``MODEL_VARIANTS`` deliberately holds two families.** The four
+  ``mobileclip2_s*`` rows set ``use_causal_mask=False`` (their JSON configs say
+  ``"no_causal_mask": true``); the two earlier ``mobileclip_s3``/``mobileclip_s4``
+  rows are causal. Same image backbones, different text-tower attention.
 
-This ``__init__`` currently exports the image tower only; the dual-encoder model
-is added in the next step.
+The text tower is :class:`MobileClipTextEncoder`, imported from the v1 package
+rather than re-implemented — see the comment at that import in :mod:`.model`.
 """
 
 from .image_encoder import (
@@ -28,9 +33,17 @@ from .image_encoder import (
     FastVitImageEncoder,
     create_fastvit_image_encoder,
 )
+from .model import (
+    MODEL_VARIANTS,
+    MobileClipV2Model,
+    create_mobile_clip_v2,
+)
 
 __all__ = [
     "MCI_VARIANTS",
+    "MODEL_VARIANTS",
     "FastVitImageEncoder",
+    "MobileClipV2Model",
     "create_fastvit_image_encoder",
+    "create_mobile_clip_v2",
 ]
