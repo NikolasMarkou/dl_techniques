@@ -609,8 +609,8 @@ divisibility and dropout-range errors.
 this package's explicit `build()` calls exist to prevent. If you refactor the
 block or the model's architecture builder, keep the explicit sub-layer builds.
 
-**Loading a checkpoint from before 2026-08-13 fails on the positional table.**
-The positional path moved to the shared factory: the variable is now
+**A checkpoint written before 2026-08-13 will not restore its positional
+table.** The positional path moved to the shared factory: the variable is now
 `position_embeddings/pos_embedding` with shape `(1, M, D)` instead of
 `position_embeddings/embeddings` with shape `(M, D)`. The layer name and every
 other weight path are unchanged. No checkpoint existed in `results/` when the
