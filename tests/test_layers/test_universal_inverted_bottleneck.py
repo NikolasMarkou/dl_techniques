@@ -52,8 +52,9 @@ class TestUniversalInvertedBottleneck:
     @pytest.mark.parametrize("stride", [1, 2])
     @pytest.mark.parametrize("use_dw2", [True, False])
     @pytest.mark.parametrize("use_dw1", [True, False])
+    @pytest.mark.parametrize("use_start_dw", [True, False])
     def test_stride_is_applied_for_every_depthwise_combination(
-        self, sample, use_dw1, use_dw2, stride
+        self, sample, use_start_dw, use_dw1, use_dw2, stride
     ):
         """The stride must not depend on which optional depthwise convs exist.
 
@@ -63,9 +64,15 @@ class TestUniversalInvertedBottleneck:
         Both assertions run on every arm on purpose: the first pins the two
         surfaces against each other, the second pins them to the independently
         computed value, so an arm where both are wrong the same way still fails.
+
+        ``use_start_dw`` is crossed in here rather than pinned by a second test
+        because the pre-expansion depthwise took over the HEAD of the stride
+        precedence: it is a new opportunity for exactly the same defect, on a
+        sub-layer that is built on a different shape than every other one.
         """
         layer = UniversalInvertedBottleneck(
-            filters=16, stride=stride, use_dw1=use_dw1, use_dw2=use_dw2
+            filters=16, stride=stride, use_start_dw=use_start_dw,
+            use_dw1=use_dw1, use_dw2=use_dw2,
         )
         declared = tuple(layer.compute_output_shape((B, H, W, C)))
         actual = tuple(layer(sample).shape)
@@ -101,3 +108,46 @@ class TestUniversalInvertedBottleneck:
         layer = UniversalInvertedBottleneck(filters=C, expansion_factor=6, use_dw2=True)
         rebuilt = UniversalInvertedBottleneck.from_config(layer.get_config())
         assert rebuilt.filters == C and rebuilt.use_dw2 is True
+
+    def test_start_dw_params_survive_the_config_round_trip(self):
+        """A parameter missing from ``get_config`` is restored at its DEFAULT.
+
+        That is a silent pass, not a failure: ``from_config`` would happily
+        return a block with ``use_start_dw=False`` and the reader would see an
+        IB where an ExtraDW was saved. Both new values are therefore asserted
+        against non-default values, so neither can be satisfied by the default.
+        """
+        layer = UniversalInvertedBottleneck(
+            filters=C, use_start_dw=True, start_dw_kernel_size=7, use_dw1=False
+        )
+        config = layer.get_config()
+        assert config["use_start_dw"] is True
+        assert config["start_dw_kernel_size"] == 7
+
+        rebuilt = UniversalInvertedBottleneck.from_config(config)
+        assert rebuilt.use_start_dw is True
+        assert rebuilt.start_dw_kernel_size == 7
+        assert rebuilt.start_dw is not None
+
+    def test_start_dw_is_pre_expansion_and_middle_dw_is_post_expansion(self):
+        """The two positions differ ONLY in the channel count they see.
+
+        A count of depthwise layers cannot tell a ConvNext block from an IB —
+        both own exactly one. The built kernel's input-channel dimension can:
+        the start DW is built on the layer input, the middle DW on the expanded
+        tensor. That is a structural fact no parameter-count coincidence fakes.
+        """
+        expansion = 4
+        start_only = UniversalInvertedBottleneck(
+            filters=16, expansion_factor=expansion,
+            use_start_dw=True, use_dw1=False,
+        )
+        middle_only = UniversalInvertedBottleneck(
+            filters=16, expansion_factor=expansion,
+            use_start_dw=False, use_dw1=True,
+        )
+        start_only.build((B, H, W, C))
+        middle_only.build((B, H, W, C))
+
+        assert start_only.start_dw.kernel.shape[2] == C
+        assert middle_only.dw1.kernel.shape[2] == C * expansion

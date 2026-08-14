@@ -18,22 +18,30 @@ spatially before attending, so the score matrix is `N x N/4` instead of `N x N`,
 and it enters the residual through a learnable scalar, `x + lambda * Attn(x)`,
 initialized to one.
 
-**What this module actually builds is a simplification of that, and the gap is
-worth stating plainly before the tables below are read as the paper's.** Two
-things are true of the code and not of the paper:
+The per-stage `block_types` entries — `"IB"`, `"ConvNext"`, `"ExtraDW"`, `"FFN"` —
+select real structure. `_build_stage` maps each one to which of the block's two
+optional depthwise POSITIONS is occupied: `IB` takes the middle depthwise only,
+`ConvNext` the pre-expansion start depthwise only (with a `7x7` kernel, the
+convention that position exists for), `ExtraDW` both, `FFN` neither. **The
+selector is the position, not the count** — `IB` and `ConvNext` each own exactly
+one depthwise convolution and are different architectures, distinguishable only
+by the channel count it operates on (`ConvNext`'s sees the unexpanded input,
+`IB`'s the expanded tensor).
 
-First, the per-stage `block_types` entries — `"IB"`, `"ConvNext"`, `"ExtraDW"`,
-`"FFN"` — are validated by the constructor, stored, and serialized, but they are
-**structurally inert**. `UniversalInvertedBottleneck` accepts `block_type` only as
-a label for its own config; the flags that actually select the variant
-(`use_dw1`, `use_dw2`, `kernel_size`, `expansion_factor`) are never derived from
-it and are left at their defaults here. Every block in every stage is therefore
-the same inverted bottleneck: one depthwise, `3x3`, expansion factor 4. A variant
-whose table reads `ExtraDW` does not get a second depthwise convolution. To
-genuinely vary block structure per stage, the `use_dw1` / `use_dw2` /
-`kernel_size` arguments must be passed through to the block in `_build_stage`.
+This was worth doing carefully because the obvious mapping is wrong. These entries
+used to be inert labels, and the fix this docstring itself prescribed was to pass
+`use_dw1` / `use_dw2` through from `_build_stage`. That would not have produced the
+paper's structures: both of those depthwise convolutions sit AFTER the expansion,
+so toggling them varies how many *middle* depthwise convs a block has (0, 1 or 2)
+and can never place one before the expansion. Implementing `ConvNext` and
+`ExtraDW` faithfully required a genuinely new third slot on
+`UniversalInvertedBottleneck` (`use_start_dw`, with its own `start_dw_kernel_size`),
+which is what `_build_stage` now drives. `use_dw2` — a second middle depthwise —
+survives as a layer-level knob but is no longer any block type's meaning.
 
-Second, the stage tables in `MODEL_VARIANTS` are hand-written depth/width ladders,
+**What this module builds is still a simplification of the paper, and the
+remaining gap is worth stating plainly before the tables below are read as the
+paper's.** The stage tables in `MODEL_VARIANTS` are hand-written depth/width ladders,
 not the NAS-found MNv4-Conv-S/M/L specifications: there are no per-block kernel
 sizes and no per-block expansion ratios, which is exactly the freedom the UIB
 search space exists to exploit. Accuracy or latency numbers from the paper should
@@ -61,8 +69,8 @@ by 8 raises; `width_multiplier` values that break that divisibility on
 `dims[5]`/`dims[6]` will fail at construction rather than silently degrade.
 
 `pretrained=True` on `create_mobilenetv4` logs a warning and returns a randomly
-initialized model. No checkpoints ship with this package; combined with the two
-structural gaps above, this model should be treated as an architecture sketch to
+initialized model. No checkpoints ship with this package; combined with the
+hand-written stage tables above, this model should be treated as an architecture sketch to
 train from scratch, not as a MobileNetV4 reimplementation. Newer packages here
 (see `resnet/model.py`) raise on `pretrained=True` rather than returning random
 weights, and this module predates that contract. The mutable list defaults on
@@ -339,6 +347,27 @@ class MobileNetV4(keras.Model):
             f"type={block_type}, stride={stage_stride}"
         )
 
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-011
+        # `block_type` used to be passed to the block as a LABEL only, so every
+        # stage — whatever its table said — got the layer's defaults and built a
+        # plain IB. What selects a structure is which of the two optional
+        # depthwise POSITIONS is occupied, so that is what this maps to. Do NOT
+        # "simplify" this to `use_dw1`/`use_dw2`, as this module's own docstring
+        # used to advise: both of those are POST-expansion, so that mapping
+        # varies the number of middle depthwise convs and cannot express a
+        # pre-expansion start DW at all. `use_dw2` is deliberately absent here —
+        # a second middle DW is the layer's own extra axis, not one of the four
+        # named structures. See decisions.md D-011.
+        block_structure = {
+            "IB": dict(use_start_dw=False, use_dw1=True, use_dw2=False),
+            "ConvNext": dict(
+                use_start_dw=True, start_dw_kernel_size=7,
+                use_dw1=False, use_dw2=False,
+            ),
+            "ExtraDW": dict(use_start_dw=True, use_dw1=True, use_dw2=False),
+            "FFN": dict(use_start_dw=False, use_dw1=False, use_dw2=False),
+        }[block_type]
+
         for block_idx in range(depth):
             block_stride = stage_stride if block_idx == 0 else 1
             block = UniversalInvertedBottleneck(
@@ -347,7 +376,8 @@ class MobileNetV4(keras.Model):
                 block_type=block_type,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                name=f"stage_{stage_idx}_block_{block_idx}"
+                name=f"stage_{stage_idx}_block_{block_idx}",
+                **block_structure
             )
             stage_layers.append(block)
 

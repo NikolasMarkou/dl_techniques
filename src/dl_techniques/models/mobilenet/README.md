@@ -473,9 +473,31 @@ The innovation in the MobileNet family can be seen by comparing the structure of
     (Also uses `h-swish` and different kernel sizes found by NAS)
 
 -   **MobileNetV4 Block (Universal Inverted Bottleneck)**:
-    The UIB is highly flexible. For example, the `"ExtraDW"` variant looks like this:
-    `Input -> 1x1 Conv (Expand) -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 5x5 DWConv -> BN -> Act -> 1x1 Conv (Project) -> ...`
+    The UIB is highly flexible. It has an optional depthwise convolution on *either
+    side* of the expansion, and which of the two positions is occupied is what
+    names the block:
+
+    | `block_type` | start DW (pre-expansion) | middle DW (post-expansion) |
+    |---|---|---|
+    | `"FFN"`      | –       | –   |
+    | `"IB"`       | –       | 3x3 |
+    | `"ConvNext"` | 7x7     | –   |
+    | `"ExtraDW"`  | 3x3     | 3x3 |
+
+    So `"ExtraDW"` is:
+    `Input -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Expand) -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Project) -> ...`
     This adds more spatial mixing capability compared to the V2/V3 blocks.
+
+    **What matters is the position, not the count.** `"IB"` and `"ConvNext"` both
+    own exactly one depthwise convolution and are different architectures: the
+    start DW mixes space at the *unexpanded* channel count, before the block goes
+    wide, which is the ConvNeXt ordering and the reason it conventionally uses a
+    larger kernel. An earlier version of this section described `"ExtraDW"` as
+    `Expand -> 3x3 DWConv -> 5x5 DWConv -> Project`, with *both* depthwise convs
+    after the expansion. That is not the paper's ExtraDW — it is an inverted
+    bottleneck with two stacked middle depthwise convs. The layer can still build
+    that shape (`use_dw1=True, use_dw2=True`), but it is an extra degree of freedom
+    this implementation offers, not one of the four named structures.
 
 ---
 
