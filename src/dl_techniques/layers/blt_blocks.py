@@ -701,6 +701,7 @@ class DynamicPatcher(keras.layers.Layer):
     def warn_if_segmentation_is_degenerate(
             self,
             entropy: keras.KerasTensor,
+            mask: Optional[keras.KerasTensor] = None,
     ) -> bool:
         """Report a degenerate segmentation MEASURED on a concrete batch.
 
@@ -708,6 +709,18 @@ class DynamicPatcher(keras.layers.Layer):
         warning was emitted, so a caller (or a test) asserts on the decision
         rather than on log text. Never raises and never changes behaviour.
         Requires an EAGER tensor — it reads the entropy values.
+
+        **Pass a ``mask`` whenever the batch is padded.** The rate is a MEAN
+        over positions, so padding dilutes it toward the padding's own
+        behaviour and can put the informative end structurally out of reach: a
+        batch that is 87.5% right-padding (a 256-byte cap padded to a
+        2048-position window — the shipped ``large`` BLT preset) caps the
+        observed rate at ~0.125 even when EVERY real byte is a boundary, so the
+        ``rate == 1.0`` arm can never fire. Measured on that shape with
+        all-boundary real content: **0.1250 unmasked** (silent) against
+        **1.0000 masked** (warns). A trained entropy model drives pad-after-pad
+        to near-zero entropy, which is why the dilution is systematic rather
+        than incidental.
 
         Degenerate means one of the two ends, and only those:
 
@@ -726,7 +739,15 @@ class DynamicPatcher(keras.layers.Layer):
 
         :param entropy: Concrete (eager) entropy tensor, ``(batch, seq_len)``,
             in nats — the same tensor ``call`` consumes.
-        :return: ``True`` if a warning was logged.
+        :param mask: Optional concrete (eager) tensor broadcastable to
+            ``entropy``, non-zero at REAL positions and zero at padding. When
+            given, the rate is computed over the non-zero positions only. When
+            omitted, every position counts — correct only for an unpadded
+            batch.
+        :return: ``True`` if a warning was logged. Note this includes the
+            no-real-positions case (an all-zero ``mask``), which is a defect in
+            the CALLER's probe rather than a degenerate segmentation, and is
+            reported as such.
         """
         # DECISION plan-2026-08-14T183218-f4c612aa/D-018
         # This is an EXPLICIT, opt-in diagnostic and it is deliberately NOT
@@ -746,14 +767,46 @@ class DynamicPatcher(keras.layers.Layer):
         # vocab_size=260), including the one D-015 argues is probably right.
         # Do NOT reintroduce a construction-time variant: at construction there
         # is no entropy to measure. See decisions.md D-018.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-024
+        # The rate is computed over REAL positions when a mask is supplied, and
+        # the only shipped caller supplies one. Do NOT drop the mask parameter
+        # "because the unmasked mean is the same thing": it is not. Padding is
+        # not a neutral filler here -- a trained entropy model predicts
+        # pad-after-pad with near-zero entropy, so padded positions are
+        # systematically NON-boundaries, and the mean over them is an average of
+        # the signal with a constant. MEASURED on the shipped `large` shape
+        # (256 real bytes padded to 2048) with every real byte a boundary:
+        # unmasked 0.1250 -> silent; masked 1.0000 -> warns. The informative arm
+        # of this diagnostic was unreachable at its own call site. See
+        # decisions.md D-024.
         is_boundary = ops.cast(entropy > self.entropy_threshold, 'float32')
-        rate = float(ops.convert_to_numpy(ops.mean(is_boundary)))
+
+        if mask is None:
+            rate = float(ops.convert_to_numpy(ops.mean(is_boundary)))
+            scope = "this batch"
+        else:
+            weights = ops.cast(ops.cast(mask, 'bool'), 'float32')
+            counted = float(ops.convert_to_numpy(ops.sum(weights)))
+            if counted == 0.0:
+                logger.warning(
+                    f"{type(self).__name__}: the supplied mask selects NO "
+                    f"positions, so no boundary rate could be measured and this "
+                    f"diagnostic saw nothing. Check the caller's mask."
+                )
+                return True
+            rate = float(
+                ops.convert_to_numpy(ops.sum(is_boundary * weights))
+            ) / counted
+            scope = (
+                f"this batch (measured over its {int(counted)} non-padding "
+                f"positions; padding excluded)"
+            )
 
         if rate == 1.0:
             logger.warning(
                 f"{type(self).__name__}: entropy_threshold="
                 f"{self.entropy_threshold:.4g} nats is below the entropy at "
-                f"EVERY position of this batch (observed boundary rate 1.0), "
+                f"EVERY position of {scope} (observed boundary rate 1.0), "
                 f"so patch 0 is empty, each patch after it holds one byte, and "
                 f"the whole remaining sequence collapses into the final patch "
                 f"of max_patches={self.max_patches}. Raise the threshold, or "
@@ -766,7 +819,7 @@ class DynamicPatcher(keras.layers.Layer):
             logger.warning(
                 f"{type(self).__name__}: entropy_threshold="
                 f"{self.entropy_threshold:.4g} nats is above the entropy at "
-                f"every position of this batch (observed boundary rate 0.0), "
+                f"every position of {scope} (observed boundary rate 0.0), "
                 f"so the whole sequence is a single patch and "
                 f"max_patches={self.max_patches} is inert. Lower the threshold."
             )

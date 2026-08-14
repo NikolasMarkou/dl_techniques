@@ -395,6 +395,64 @@ class TestObservedDegeneracyWarning:
         )
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
+    def test_padding_dilutes_the_rate_until_the_mask_excludes_it(self, caplog):
+        """On the shipped ``large`` shape the rate-1.0 arm is UNREACHABLE unmasked.
+
+        ``train_blt.py`` pads every sample to ``max_sequence_length`` (2048 on
+        the ``large`` preset) from a cap of ``max_text_length=256``, so 87.5% of
+        every probed position is padding, and a trained entropy model puts
+        pad-after-pad near zero entropy. The rate is a MEAN, so it is capped at
+        0.125 no matter what the real bytes do — this reproduces exactly that
+        shape with EVERY real byte a boundary.
+
+        MEASURED here: unmasked **0.1250** (silent), masked **1.0000** (warns).
+        """
+        seq_len, real = 2048, 256  # the shipped `large` preset's shape
+        tokens = np.zeros((2, seq_len), dtype="int32")
+        tokens[:, :real] = 5  # real bytes; pad id is 0
+        values = np.zeros((2, seq_len), dtype="float32")
+        values[:, :real] = 5.5  # untrained-model entropy at EVERY real byte
+        entropy = keras.ops.convert_to_tensor(values)
+
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
+
+        # Control: the batch really is dilution-dominated, and the unmasked
+        # reading really is silent — the assertion below would be vacuous if the
+        # unmasked call already warned for some other reason.
+        with caplog.at_level(logging.WARNING):
+            diluted = patcher.warn_if_segmentation_is_degenerate(entropy)
+        assert diluted is False, (
+            "the unmasked probe warned on a batch whose observed rate is 0.125; "
+            "this test no longer demonstrates the dilution it exists to pin"
+        )
+        assert real / seq_len == 0.125
+
+        caplog.clear()
+        mask = keras.ops.convert_to_tensor((tokens != 0).astype("float32"))
+        with caplog.at_level(logging.WARNING):
+            masked = patcher.warn_if_segmentation_is_degenerate(entropy, mask=mask)
+        assert masked is True, (
+            "every REAL byte is a boundary and the probe stayed silent: the "
+            "rate-1.0 arm is still being averaged against padding"
+        )
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "1.0" in text and "512" in text, (
+            f"the warning does not name the observed rate or the number of real "
+            f"positions it was measured over: {text}"
+        )
+
+    def test_an_empty_mask_is_reported_as_a_caller_defect(self, caplog):
+        # Silently returning False here would make a broken probe look like a
+        # healthy segmentation — the exact failure this whole check exists for.
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
+        entropy = self._entropy([5.5] * 12)
+        with caplog.at_level(logging.WARNING):
+            warned = patcher.warn_if_segmentation_is_degenerate(
+                entropy, mask=keras.ops.zeros_like(entropy)
+            )
+        assert warned is True
+        assert "mask" in " ".join(r.getMessage() for r in caplog.records).lower()
+
     def test_it_does_not_change_the_segmentation(self):
         # Diagnostic, not validation: calling it must leave `call` untouched.
         patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)

@@ -369,6 +369,15 @@ class BLTTrainer:
         # this trainer's own entropy_threshold=1.3 and on the library default of
         # 1.5, i.e. on every run ever made. This call fires only when the trained
         # entropy model puts a boundary at every position, or at none.
+        # The probe MUST be masked to real bytes. `prepare_training_data` pads
+        # every sample to max_sequence_length (64/512/2048 by preset) from a cap
+        # of max_text_length=256, so at least 50% (small) and 87.5% (large) of
+        # every probed position is padding, whose entropy a trained model drives
+        # to ~0. Unmasked, the observed rate is capped at ~0.125 on the `large`
+        # preset and the `rate == 1.0` arm cannot fire even when every real byte
+        # is a boundary -- the exact regime this check exists to catch. Pad id is
+        # 0 (`ByteTokenizer.pad_id`); bos=1/eos=2 are real positions and are
+        # correctly kept.
         probe_batch = train_x[: min(len(train_x), max(self.config.batch_size, 8))]
         probe_entropy = self.entropy_model.compute_entropy(
             self.entropy_model(keras.ops.convert_to_tensor(probe_batch), training=False)
@@ -376,7 +385,10 @@ class BLTTrainer:
         DynamicPatcher(
             entropy_threshold=self.config.entropy_threshold,
             max_patches=self.config.max_patches,
-        ).warn_if_segmentation_is_degenerate(probe_entropy)
+        ).warn_if_segmentation_is_degenerate(
+            probe_entropy,
+            mask=keras.ops.convert_to_tensor((probe_batch != 0).astype("float32")),
+        )
 
         entropy_path = Path(self.config.output_dir) / "entropy_model.keras"
         entropy_train_model.save(str(entropy_path))
