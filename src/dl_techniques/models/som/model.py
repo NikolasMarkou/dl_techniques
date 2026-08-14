@@ -417,10 +417,23 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Configure total training iterations for decay schedules
-        total_iterations = epochs * (len(x_train) // batch_size)
-        if total_iterations == 0 and len(x_train) > 0:
-            total_iterations = epochs  # Handle case where batch_size > dataset size
+        # Configure total training iterations for decay schedules.
+        #
+        # This MUST be in the same units the layer counts in. SOMLayer.call does
+        # ``iterations.assign_add(shape(inputs)[0])`` -- it counts SAMPLES
+        # (presentations). This used to write ``epochs * (len(x) // batch_size)``
+        # -- BATCHES -- so the counter outran its own budget by a factor of
+        # batch_size**2 / len(x) per epoch.
+        #
+        # Measured with the repo's own test config (64 samples, batch 32,
+        # 5 epochs): max_iterations was 10 while iterations reached 32 after the
+        # first batch, so the learning rate went NEGATIVE from the second batch
+        # (+0.1000, then -0.2200, -0.5400, ... -2.7800) and sigma sat pinned at
+        # its 1e-4 floor. A negative rate moves every neuron AWAY from its
+        # input, so the map anti-organised for 9 of 10 batches.
+        total_iterations = epochs * len(x_train)
+        if total_iterations == 0:
+            total_iterations = epochs  # Degenerate case: empty training set.
         self.som_layer.max_iterations.assign(float(total_iterations))
 
         # Initialize training history

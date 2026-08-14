@@ -1121,3 +1121,104 @@ class TestSOMIntegration:
 if __name__ == '__main__':
     # Run tests with: pytest test_som.py -v --tb=short
     pytest.main([__file__, '-v', '--tb=short'])
+
+# ---------------------------------------------------------------------
+
+
+class TestSOMDecayUnitsAndBatchUpdate:
+    """The decay budget must be in the counter's units, and updates must not overshoot."""
+
+    def test_iteration_budget_is_in_the_same_units_as_the_counter(self):
+        """After training, the counter must not have blown past its budget.
+
+        SOMLayer.call counts SAMPLES (``iterations += shape(inputs)[0]``) while
+        SOMModel.train used to write ``epochs * (len(x) // batch_size)`` --
+        BATCHES. The counter then outran the budget by batch_size**2/len(x) per
+        epoch, driving the linear decay negative.
+
+        This is the unit-consistency invariant itself, so it cannot be satisfied
+        by accident the way a loose quantization-error bound can.
+        """
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(64, 4)).astype("float32")
+
+        model = SOMModel(map_size=(4, 4), input_dim=4,
+                         initial_learning_rate=0.1, sigma=1.0)
+        model.train(x, epochs=5, batch_size=32, shuffle=False, verbose=0)
+
+        iters = float(keras.ops.convert_to_numpy(model.som_layer.iterations))
+        budget = float(keras.ops.convert_to_numpy(model.som_layer.max_iterations))
+
+        assert iters <= budget, (
+            f"iteration counter ({iters:.0f}) exceeded its decay budget "
+            f"({budget:.0f}); the two are in different units, so the learning "
+            f"rate goes negative partway through training")
+
+    def test_learning_rate_never_goes_negative(self):
+        """Past the budget the rate must clamp at 0, never invert.
+
+        A negative rate moves every neuron AWAY from its input. Sigma was
+        already floored here and the rate was not, which is what turned a unit
+        mismatch into silent anti-learning instead of a visible error.
+
+        This is asserted BEHAVIOURALLY, through the layer's own update path.
+        Recomputing the clamp in the test and asserting it is >= 0 would only
+        test ``ops.maximum`` -- it passes whether or not the layer applies it,
+        and the first version of this test did exactly that.
+        """
+        layer = SOMLayer(grid_shape=(4, 4), input_dim=4,
+                         initial_learning_rate=0.1, sigma=1.0)
+        layer.build((None, 4))
+        layer.max_iterations.assign(10.0)
+
+        target = np.full((8, 4), 5.0, dtype="float32")
+
+        # Push the counter far PAST its budget, where the raw linear decay is
+        # strongly negative (at iterations=500, budget=10 it is -4.9).
+        layer.iterations.assign(500.0)
+
+        before = keras.ops.convert_to_numpy(layer.get_weights_map()).copy()
+        layer(target, training=True)
+        after = keras.ops.convert_to_numpy(layer.get_weights_map())
+
+        moved_away = float((np.abs(after - 5.0) - np.abs(before - 5.0)).max())
+        assert moved_away <= 1e-6, (
+            f"past the decay budget a neuron moved AWAY from the input by "
+            f"{moved_away:.4f}; the learning rate has gone negative and the map "
+            f"is anti-organising")
+
+    def test_batch_update_does_not_overshoot_the_input(self):
+        """A batch of identical inputs must move the BMU TOWARD that input.
+
+        Kohonen's rule is stable for eta*h <= 1. Summing the per-sample deltas
+        over a batch of B makes the effective coefficient eta*sum_b h_b, which
+        for B=32, eta=0.1 exceeds 1 for any neuron near several BMUs -- the
+        update then lands PAST the input and oscillates. Averaging bounds it by
+        eta regardless of batch size.
+
+        Asserting only that the weights CHANGED would be vacuous: they change
+        either way, just in the wrong place.
+        """
+        layer = SOMLayer(grid_shape=(4, 4), input_dim=4,
+                         initial_learning_rate=0.5, sigma=1.0)
+        layer.build((None, 4))
+        layer.max_iterations.assign(1000.0)
+
+        target = np.full((32, 4), 5.0, dtype="float32")  # 32 identical inputs
+
+        before = keras.ops.convert_to_numpy(layer.get_weights_map()).copy()
+        layer(target, training=True)
+        after = keras.ops.convert_to_numpy(layer.get_weights_map())
+
+        # Every weight starts below the target, so an update with a coefficient
+        # <= 1 must leave them all still below it. Crossing means overshoot.
+        assert before.max() < 5.0, "precondition: all weights start below the target"
+
+        d_before = np.abs(before - 5.0).min()
+        d_after = np.abs(after - 5.0).min()
+        assert d_after < d_before, "the closest neuron did not move toward the input"
+
+        overshoot = float(after.max() - 5.0)
+        assert overshoot <= 0.0, (
+            f"a weight crossed the input by {overshoot:.4f}: the batch update "
+            f"coefficient exceeded 1, so it landed PAST the target")

@@ -413,8 +413,18 @@ class SOMLayer(keras.layers.Layer):
         :param bmu_indices: BMU coordinates of shape ``(batch_size, grid_dim)``.
         :type bmu_indices: keras.KerasTensor
         """
-        # Update learning rate and sigma based on iteration
+        # Update learning rate and sigma based on iteration.
+        #
+        # The learning rate is floored at 0 for the same reason sigma is floored
+        # below: the default linear decay is unbounded downward, so once
+        # `iterations` passes `max_iterations` it goes NEGATIVE and every update
+        # pushes neurons AWAY from their inputs -- anti-learning that is
+        # invisible to a quantization-error check with a loose tolerance. Sigma
+        # was already clamped here and the learning rate was not; that asymmetry
+        # is what let a unit mismatch between the layer and SOMModel.train turn
+        # into silent divergence rather than a visible error.
         current_learning_rate = self.decay_function(self.iterations, self.max_iterations)
+        current_learning_rate = ops.maximum(current_learning_rate, 0.0)
         current_sigma = self.sigma * (1.0 - self.iterations / self.max_iterations)
         current_sigma = ops.maximum(current_sigma, 1e-4)  # Prevent division by zero
 
@@ -444,8 +454,15 @@ class SOMLayer(keras.layers.Layer):
         )
         delta_per_input = neighborhood_expanded * (inputs_expanded - ops.expand_dims(self.weights_map, 0))
 
-        # Sum the deltas over the batch and apply learning rate
-        weight_update = current_learning_rate * ops.sum(delta_per_input, axis=0)
+        # AVERAGE the deltas over the batch, then apply the learning rate.
+        #
+        # Kohonen's rule is w += eta*h*(x-w), which is stable for eta*h <= 1.
+        # Summing over a batch of B gives an effective coefficient of
+        # eta * sum_b h_b, which for B=32 and eta=0.1 exceeds 1 for any neuron
+        # near several BMUs -- the update then overshoots PAST the inputs and
+        # oscillates. Averaging is the mini-batch analogue of the online rule
+        # and bounds the coefficient by eta, independently of batch size.
+        weight_update = current_learning_rate * ops.mean(delta_per_input, axis=0)
         self.weights_map.assign_add(weight_update)
 
     def get_weights_map(self) -> keras.KerasTensor:
