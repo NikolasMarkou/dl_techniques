@@ -1,8 +1,51 @@
 """
-This module implements the Gemma 3 Transformer Block, a fundamental component of
-the Gemma 3 language model architecture. It encapsulates the dual normalization
-pattern, attention mechanism, and feed-forward network into a reusable Keras
-layer.
+The Gemma 3 transformer block: sandwich-normalized grouped-query attention and a
+GeGLU feed-forward network, with the attention window selected per block.
+
+The block's distinguishing feature is that normalization brackets each sublayer
+rather than merely preceding it — `x = x + PostNorm(Attn(PreNorm(x)))`, and likewise
+for the FFN, four RMSNorm layers in all. The pre-norm half is the familiar
+conditioning fix. The post-norm half addresses something pre-norm alone does not: in
+a pure pre-norm transformer nothing ever rescales what a branch contributes, so the
+residual stream's variance accumulates monotonically with depth. Normalizing the
+branch *output* before the addition bounds each block's contribution while leaving
+the residual path itself free of any normalization, so gradients still reach layer
+zero unattenuated.
+
+Masking is built here rather than at the model, because it depends on this block's
+own `attention_type`. `_create_attention_mask` works in *block* semantics
+(`True` = suppress): `j > i` for causality, OR-ed with `(i - j) >= sliding_window_size`
+when the block is windowed, so a windowed block sees a band rather than a full
+triangle. The result is inverted once to the *attend* semantics the attention layer
+expects, and then explicitly expanded to `(1, q, k)`. That leading axis is
+load-bearing and not decorative broadcasting: a rank-2 mask is interpreted
+downstream as a padding mask rather than a full attention bias, which would
+silently discard causality. A caller-supplied `attention_mask` (1 = attend,
+0 = pad) is cast to boolean and AND-ed in as `(batch, 1, k)`, masking padded *keys*
+only — padded query rows still produce output, which the loss is expected to ignore.
+
+Attention and the FFN come from the library factories (`group_query` and `geglu`)
+rather than being implemented here. Two consequences follow that a reader comparing
+against the published model should know. The grouped-query layer supports
+`qk_norm_type`, but this block does not pass it, so there is no QK normalization.
+And `rope_theta` is left at the attention layer's default for every block, whereas
+the report uses a much larger RoPE base in the global-attention layers specifically
+so they stay usable at long context; the interleaved pattern here therefore does not
+reproduce the paper's long-context behaviour.
+
+References:
+    - Gemma Team, 2025. Gemma 3 Technical Report.
+      (https://arxiv.org/abs/2503.19786)
+    - Gemma Team, 2024. Gemma 2: Improving Open Language Models at a Practical Size.
+      (https://arxiv.org/abs/2408.00118)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
+      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
+      (https://arxiv.org/abs/2004.05150)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
 """
 
 from typing import Any, Dict, Literal, Optional, Tuple, Union

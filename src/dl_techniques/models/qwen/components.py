@@ -1,13 +1,50 @@
 """
-Qwen3 Next Model Implementation
-============================================
+Shared building blocks for the Qwen decoders: the causal mask constructor used by
+both `qwen3.py` and `qwen3_next.py`, and the hybrid `Qwen3NextBlock`.
 
-A complete implementation of the Qwen3 Next architecture following the correct block structure:
-- Each block contains 3x Gated DeltaNet layers + 1x Gated Attention layer
-- Each layer has its own Zero-Centered RMSNorm and MoE
-- Proper residual connections throughout
+`build_causal_attention_mask` exists because nothing further down the stack
+manufactures causality on its own. `TransformerLayer` defaults its `attention_mask`
+to `None`, and `GroupQueryAttention` and `GatedAttention` mask only with what they
+are handed, so a decoder that forwards just the caller's padding mask — which is
+what both Qwen models did before this helper — lets every token attend to its own
+future. The helper works entirely in *block* semantics (`True` = suppress),
+OR-combining the lower-triangular causal mask with the padding mask derived from
+`attention_mask == 0`, and inverts once at the very end to the *attend* semantics
+(`True` = may attend) the attention layers expect. Doing the inversion once on the
+combined mask rather than per component is what keeps the polarity tractable; the
+GPT-2 path in `layers/transformers/text_decoder.py` follows the same discipline, and
+its causality is pinned in both directions by a positive and a negative test.
 
-Based on the architectural diagram showing the precise layer arrangement and connections.
+`Qwen3NextBlock` is four residual updates, not one: three gated linear-attention
+sublayers followed by one gated softmax-attention sublayer, each with its own
+pre-normalization, its own optional mixture-of-experts FFN, and its own optional
+stochastic-depth gate. The asymmetry is deliberate — the linear sublayers summarize
+the past into a fixed-size recurrent state at `O(L)` cost, and the single attention
+sublayer supplies the exact global lookup a bounded summary cannot. Only that
+sublayer holds a KV cache, so the 3:1 ratio is what caps cache memory at roughly a
+quarter of a uniformly attentive stack.
+
+The mask reaches only the attention sublayer. The three linear-attention sublayers
+are called without it, and that is not an omission to be repaired: a gated linear
+scan is a strictly left-to-right recurrence over causal depthwise convolutions and
+cannot read forward, so causality holds there structurally. What does *not* hold is
+padding exclusion — padded positions still enter the recurrent state — so with
+left-padded batches the summary a token sees is contaminated, while right-padding
+leaves every valid prefix's state correct.
+
+Normalization defaults to `zero_centered_rms_norm`. Plain RMS normalization divides
+by the root-mean-square without removing a mean, so a persistent additive offset in
+the residual stream survives every layer and consumes dynamic range the scale
+weights are calibrated against; the zero-centered variant subtracts it.
+
+References:
+    - Qwen Team, 2025. Qwen3 Technical Report.
+    - Yang et al., 2024. Gated Linear Attention Transformers with Hardware-Efficient
+      Training. (https://arxiv.org/abs/2312.06635)
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive
+      Transformers with Linear Attention. (https://arxiv.org/abs/2006.16236)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
 """
 
 import keras
