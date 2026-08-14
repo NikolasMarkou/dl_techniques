@@ -61,8 +61,9 @@ The fusion configuration has a signature hazard worth stating explicitly.
 ``MultiModalFusion`` takes ``dim`` plus ``attention_config={'num_heads': N}``; it
 does *not* take ``embed_dim`` or a top-level ``num_heads``. Because the config
 dict is splatted into the constructor, a stale key is not ignored — it is
-forwarded to the base ``Layer`` and raises. The ``create_modern_nanovlm`` helper
-at the bottom of this module still writes the older spelling.
+forwarded to the base ``Layer`` and raises. Both factories in this module write
+the current spelling; the older ``embed_dim``/``num_heads`` form was removed from
+``create_modern_nanovlm`` in commit ``fd35976cb``.
 
 Generation is a plain sampling loop with no KV cache: the image is encoded once
 and reused, but the text tower re-reads the entire prefix at every step, so cost
