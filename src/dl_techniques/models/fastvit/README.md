@@ -327,7 +327,7 @@ and two tests read those files directly rather than restating them:
 | Test | Oracle | Covers |
 | --- | --- | --- |
 | `test_models/test_fastvit/test_model.py::test_mci3_mci4_match_supplied_source` | `mobileclip2.py`, parsed with `ast` | `MCI_VARIANTS['mci3']`, `['mci4']`, every field |
-| `test_models/test_mobile_clip/test_mobile_clip_v2.py::test_model_variants_match_supplied_json_configs` | the six `model_configs/*.json`, via `json.load` | all six `MODEL_VARIANTS` rows + the shared constants |
+| `test_models/test_mobile_clip/test_mobile_clip_v2.py::test_model_variants_match_supplied_json_configs` | the six `model_configs/*.json`, via `json.load` | all ten fields of all six `MobileClipV2Model.MODEL_VARIANTS` rows, on both the raw table and `get_config()` |
 
 The source is PARSED, not imported: it is PyTorch/`timm` code and this
 environment has neither. Both tests were RED-proven by perturbing a value in the

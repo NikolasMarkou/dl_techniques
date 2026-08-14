@@ -17,21 +17,35 @@ side. They are not interchangeable and neither deprecates the other:
 Both use :class:`~.components.MobileClipTextEncoder`, which is faithful for
 both: v1's substitution is confined to the image branch.
 
+Both models share one shape: a nested ``MODEL_VARIANTS`` **class attribute**
+whose rows are ``{'embed_dim': int, 'image_config': {...}, 'text_config': {...}}``,
+a constructor taking those two sub-dicts, ``output_dict``, and ``from_variant``.
+Reach either table the same way — ``MobileClipModel.MODEL_VARIANTS`` /
+``MobileClipV2Model.MODEL_VARIANTS``. Neither is re-exported at package level,
+because the two are different objects with disjoint keys (``b``/``s0``/``s1``/
+``s2`` versus ``mobileclip2_s0``/``s2``/``s3``/``s4`` and ``mobileclip_s3``/``s4``).
+
 .. warning::
-   **``MODEL_VARIANTS`` is deliberately NOT re-exported here — the two tables
-   are different objects with disjoint keys and incompatible meanings.**
+   **Three names mean different things depending on where you read them.**
 
-   * v1's is the class attribute ``MobileClipModel.MODEL_VARIANTS``, keyed
-     ``b``/``s0``/``s1``/``s2``.
-   * v2's is the module-level ``mobile_clip_v2.MODEL_VARIANTS``, keyed
-     ``mobileclip2_s0``/``s2``/``s3``/``s4`` and ``mobileclip_s3``/``s4``.
+   * ``mci0``/``mci1``/``mci2`` name real MCi rows in v2
+     (``models.fastvit.MCI_VARIANTS``); in v1 they are keys of
+     ``components._BACKBONE_ALIASES`` resolving to ``keras.applications``
+     MobileNet stand-ins. Same string, opposite meaning.
+   * ``text_config['embed_dim']`` is the TEXT WIDTH. The joint image-text space
+     is the row's own top-level ``embed_dim``.
+   * v2's ``image_config['variant']`` (``'mci0'``) is FastViT's kwarg name and is
+     a DIFFERENT "variant" from the row key (``'mobileclip2_s0'``).
 
-   The same trap applies to the backbone strings ``mci0``/``mci1``/``mci2``:
-   in v2 they name real MCi rows (``models.fastvit.MCI_VARIANTS``); in v1 they
-   are keys of ``components._BACKBONE_ALIASES`` that resolve to
-   ``keras.applications`` MobileNet stand-ins. Same string, opposite meaning.
+.. note::
+   ``from_variant`` overrides at the TOP level, so passing ``text_config=``
+   replaces the row's sub-dict wholesale. To change one field, merge::
 
-Import each table from its own module, explicitly.
+       row = MobileClipV2Model.MODEL_VARIANTS['mobileclip2_s0']
+       model = MobileClipV2Model.from_variant(
+           'mobileclip2_s0',
+           text_config={**row['text_config'], 'num_layers': 2},
+       )
 """
 
 from .mobile_clip_v1 import MobileClipModel, create_mobile_clip_model

@@ -56,8 +56,10 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `mobile_clip/` — MobileCLIP: **both generations in one package**. `mobile_clip_v1.py` is
   deliberately non-faithful on the image side (`keras.applications` substitutes, its own
   D-001); `mobile_clip_v2.py` is the faithful MobileCLIP2 (architecture only, no pretrained
-  weights, no accuracy claim). They share `components.py`'s text tower. Neither deprecates
-  the other — see the package README §17
+  weights, no accuracy claim). They share `components.py`'s text tower AND one structure:
+  a nested `MODEL_VARIANTS` CLASS attribute (`embed_dim` + `image_config` + `text_config`)
+  and a constructor over those two sub-dicts. Neither deprecates the other — see the
+  package README §17
 - `fastvlm/` — FastVLM
 - `nano_vlm/` — NanoVLM
 - `nano_vlm_world_model/` — NanoVLM world model

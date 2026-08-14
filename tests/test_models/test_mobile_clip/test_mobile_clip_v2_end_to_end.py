@@ -96,19 +96,42 @@ def _tower_kwargs(num_stages: int) -> dict:
     }
 
 
-def _model(variant: str, num_stages: int, **overrides) -> MobileClipV2Model:
-    config = dict(
-        image_size=_IMG,
-        vocab_size=_VOCAB,
-        context_length=_SEQ,
-        text_width=64,
-        text_heads=4,
-        # >= 2: at text_layers=1 a text-tower mechanism can be structurally
+def _model(
+        variant: str,
+        num_stages: int,
+        image: dict = None,
+        text: dict = None,
+        **overrides,
+) -> MobileClipV2Model:
+    """Build a reduced model, MERGING per-field overrides onto the variant row.
+
+    `from_variant` overrides at the TOP level, so handing it `text_config=`
+    would replace the row's sub-dict wholesale. `image=` / `text=` are merged
+    here instead — the idiom the class docstring documents for callers.
+    """
+    row = MobileClipV2Model.MODEL_VARIANTS[variant]
+    image_config = {
+        **row['image_config'],
+        'input_shape': (_IMG, _IMG, 3),
+        **_tower_kwargs(num_stages),
+        **(image or {}),
+    }
+    text_config = {
+        **row['text_config'],
+        'vocab_size': _VOCAB,
+        'max_seq_len': _SEQ,
+        'embed_dim': 64,
+        'num_heads': 4,
+        # >= 2: at num_layers=1 a text-tower mechanism can be structurally
         # unobservable (MEASURED during step 8).
-        text_layers=2,
-        text_intermediate=128,
+        'num_layers': 2,
+        'intermediate_size': 128,
+        **(text or {}),
+    }
+    config = dict(
         embed_dim=_EMBED,
-        image_encoder_kwargs=_tower_kwargs(num_stages),
+        image_config=image_config,
+        text_config=text_config,
     )
     config.update(overrides)
     return MobileClipV2Model.from_variant(variant, **config)
