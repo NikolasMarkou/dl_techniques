@@ -70,12 +70,19 @@ channels upstream.
 forecast alone. The residual is the part of the input the whole stack failed to
 explain, and exposing it lets a training loop penalize it directly to force a
 complete decomposition. Keras returns only the first element from `predict()`, so
-inference is unaffected by the extra output. Two constructor arguments are carried
-for configuration only and have no effect inside this module:
-`reconstruction_weight` is stored and serialized but never applied here (no
-`add_loss`, no custom `train_step`) — an external trainer must consume it — and
-`share_weights_in_stack` is threaded down to the blocks, which record it without
-ever tying parameters, so blocks within a stack always hold independent weights.
+inference is unaffected by the extra output. Penalizing that residual is the
+trainer's job and is done by compiling a second loss against the second output with
+its own `loss_weights` entry — see `src/train/time_series/nbeats/train_nbeats.py`.
+The model used to accept a `reconstruction_weight` of its own, which it stored and
+serialized and never read; it has been removed rather than left to imply that
+setting it did anything.
+
+`share_weights_in_stack` ties the blocks within a stack by reusing one block object
+at every position, so a stack of `n` blocks holds one set of weights and applies it
+`n` times to successively cleaner residuals. It is genuine sharing, not tied copies:
+`len({id(b) for b in stack}) == 1`. This trades capacity for parameters and for a
+recurrent reading of the stack, and it is off by default because the paper's headline
+configuration does not use it.
 
 References:
     - Oreshkin et al., 2019. N-BEATS: Neural basis expansion analysis for
@@ -107,9 +114,8 @@ class NBeatsNet(keras.Model, ForecastMixin):
     """
     Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
 
-    This implementation follows modern Keras 3 patterns with proper normalization,
-    serialization, and optional reconstruction loss for regularization. It fully
-    supports multivariate inputs and outputs.
+    This implementation follows modern Keras 3 patterns with proper normalization
+    and serialization. It fully supports multivariate inputs and outputs.
 
     **Intent**: Provide a production-ready N-BEATS implementation for time series
     forecasting with proper residual connections, normalization, and serialization
@@ -146,9 +152,10 @@ class NBeatsNet(keras.Model, ForecastMixin):
             of stack_types. Auto-calculated by factory if not provided.
         hidden_layer_units: Integer, number of hidden units in each block's MLP.
             Larger values increase capacity but also memory/compute. Defaults to 256.
-        share_weights_in_stack: Boolean, whether blocks in same stack share weights.
-            Weight sharing reduces parameters but may limit expressiveness.
-            Defaults to False.
+        share_weights_in_stack: Boolean, whether blocks in the same stack share
+            weights. When True the stack holds a single block object applied
+            `nb_blocks_per_stack` times, dividing the stack's parameter count by
+            that factor at the cost of expressiveness. Defaults to False.
         use_normalization: Boolean, whether to use instance normalization on input.
             Recommended for series with varying scales. Defaults to True.
         kernel_regularizer: Optional regularizer for block weights. Use for
@@ -165,9 +172,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
             time series. Defaults to 1.
         output_dim: Integer, dimensionality of output features. Defaults to 1.
         use_bias: Boolean, whether to use bias terms in linear layers. Defaults to True.
-        reconstruction_weight: Float, weight for reconstruction loss. If > 0, adds
-            penalty on final residual, forcing model to fully explain input signal.
-            Use 0.001-0.01 for interpretable decomposition. Defaults to 0.0.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -210,7 +214,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
         - For optimal performance, use backcast_length >= 3 × forecast_length
         - The model returns (forecast, residual) during training but only forecast
           during inference via predict()
-        - Use reconstruction_weight > 0 for interpretable signal decomposition
         - Stack order matters: trend → seasonality → generic is recommended
     """
 
@@ -241,7 +244,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
             input_dim: int = 1,
             output_dim: int = 1,
             use_bias: bool = True,
-            reconstruction_weight: float = 0.0,
             **kwargs: Any
     ) -> None:
         """
@@ -276,7 +278,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.use_bias = use_bias
-        self.reconstruction_weight = reconstruction_weight
 
         # CREATE all sub-layers in __init__ (Golden Rule #1)
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
@@ -357,7 +358,18 @@ class NBeatsNet(keras.Model, ForecastMixin):
             stack_blocks = []
 
             for block_id in range(self.nb_blocks_per_stack):
-                block_name = f"stack_{stack_id}_block_{block_id}_{stack_type}"
+                if self.share_weights_in_stack and stack_blocks:
+                    # Sharing is realized by reusing the *same layer object* at
+                    # every position in the stack, which is what makes the
+                    # weights literally one set rather than tied copies.
+                    stack_blocks.append(stack_blocks[0])
+                    continue
+
+                block_name = (
+                    f"stack_{stack_id}_shared_{stack_type}"
+                    if self.share_weights_in_stack
+                    else f"stack_{stack_id}_block_{block_id}_{stack_type}"
+                )
 
                 # Common block configuration
                 block_kwargs = {
@@ -367,7 +379,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
                     'forecast_length': self.forecast_length,
                     'input_dim': self.input_dim,
                     'output_dim': self.output_dim,
-                    'share_weights': self.share_weights_in_stack,
                     'activation': self.activation,
                     'use_bias': self.use_bias,
                     'kernel_initializer': self.kernel_initializer,
@@ -420,7 +431,10 @@ class NBeatsNet(keras.Model, ForecastMixin):
         # This ensures weight variables exist before loading saved weights
         for stack_blocks in self.blocks:
             for block in stack_blocks:
-                block.build(block_input_shape)
+                # Under share_weights_in_stack the same object appears at every
+                # position; building it twice would add a second set of weights.
+                if not block.built:
+                    block.build(block_input_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -610,7 +624,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
             'use_bias': self.use_bias,
-            'reconstruction_weight': self.reconstruction_weight,
         })
         return config
 
@@ -690,7 +703,6 @@ def create_nbeats_model(
         activation: str = "relu",
         use_normalization: bool = True,
         dropout_rate: float = 0.0,
-        reconstruction_weight: float = 0.0,
         input_dim: int = 1,
         output_dim: int = 1,
         **kwargs: Any
@@ -723,7 +735,6 @@ def create_nbeats_model(
     - **Regularization**: For small datasets, use:
 
       - dropout_rate: 0.1-0.3
-      - reconstruction_weight: 0.001-0.01
 
     Args:
         backcast_length: Length of input sequence. Defaults to 96.
@@ -744,8 +755,6 @@ def create_nbeats_model(
             Recommended for series with varying scales. Defaults to True.
         dropout_rate: Dropout rate for regularization. Use 0.1-0.3 for small
             datasets. Defaults to 0.0.
-        reconstruction_weight: Weight for reconstruction loss. Use 0.001-0.01
-            for interpretable decomposition. Defaults to 0.0.
         input_dim: Integer, dimensionality of input features. Defaults to 1.
         output_dim: Integer, dimensionality of output features. Defaults to 1.
         **kwargs: Additional arguments passed to NBeatsNet constructor.
@@ -809,7 +818,6 @@ def create_nbeats_model(
         activation=activation,
         use_normalization=use_normalization,
         dropout_rate=dropout_rate,
-        reconstruction_weight=reconstruction_weight,
         input_dim=input_dim,
         output_dim=output_dim,
         **kwargs
@@ -833,8 +841,6 @@ def create_nbeats_model(
 
     if dropout_rate > 0.0:
         logger.info(f"  - Dropout: {dropout_rate}")
-    if reconstruction_weight > 0.0:
-        logger.info(f"  - Reconstruction weight: {reconstruction_weight}")
 
     if ratio < 3.0:
         logger.warning(

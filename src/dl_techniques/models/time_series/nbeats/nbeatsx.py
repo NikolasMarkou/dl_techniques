@@ -148,8 +148,9 @@ class NBeatsXNet(keras.Model):
         nb_blocks_per_stack: Integer, blocks per stack.
         thetas_dim: List of basis-expansion dims, one per stack.
         hidden_layer_units: Integer, hidden width of each block's FC trunk.
-        share_weights_in_stack: Boolean, share FC weights across blocks in a
-            stack (threaded to each block as ``share_weights``).
+        share_weights_in_stack: Boolean, share weights across the blocks of a
+            stack by reusing one block object at every position, dividing the
+            stack's parameter count by ``nb_blocks_per_stack``.
         use_normalization: Boolean, apply reversible instance norm to target.
         dropout_rate: Float in [0, 1), residual-stream dropout probability.
         activation: Activation for block hidden layers.
@@ -280,7 +281,25 @@ class NBeatsXNet(keras.Model):
             stack_blocks = []
 
             for block_id in range(self.nb_blocks_per_stack):
-                block_name = f"stack_{stack_id}_block_{block_id}_{stack_type}"
+                if self.share_weights_in_stack and stack_blocks:
+                    # Sharing is realized by reusing the *same layer object* at
+                    # every position in the stack, which is what makes the
+                    # weights literally one set rather than tied copies.
+                    stack_blocks.append(stack_blocks[0])
+                    if self.dropout_rate > 0.0:
+                        self.dropout_layers.append(
+                            layers.Dropout(
+                                self.dropout_rate, name=f"dropout_{dropout_counter}"
+                            )
+                        )
+                        dropout_counter += 1
+                    continue
+
+                block_name = (
+                    f"stack_{stack_id}_shared_{stack_type}"
+                    if self.share_weights_in_stack
+                    else f"stack_{stack_id}_block_{block_id}_{stack_type}"
+                )
 
                 # Base args for standard N-BEATS blocks
                 base_kwargs = {
@@ -290,7 +309,6 @@ class NBeatsXNet(keras.Model):
                     'forecast_length': self.forecast_length,
                     'input_dim': 1,  # Endogenous target is usually univariate
                     'output_dim': 1,
-                    'share_weights': self.share_weights_in_stack,
                     'use_normalization': self.use_normalization,
                     'activation': self.activation,
                     'use_bias': self.use_bias,
@@ -340,7 +358,10 @@ class NBeatsXNet(keras.Model):
         # materializes all TCN Conv1D children, so no eager dummy forward is needed.
         for stack in self.blocks:
             for block in stack:
-                block.build(dummy_resid_shape)
+                # Under share_weights_in_stack the same object appears at every
+                # position; building it twice would add a second set of weights.
+                if not block.built:
+                    block.build(dummy_resid_shape)
 
         super().build(input_shape)
 

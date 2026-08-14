@@ -65,7 +65,6 @@ def default_generic_params() -> Dict[str, Any]:
         "thetas_dim": 8,
         "backcast_length": 24,
         "forecast_length": 12,
-        "share_weights": False,
         "activation": "silu",
         "use_bias": True,
         "kernel_initializer": "he_normal",
@@ -85,7 +84,6 @@ def default_trend_params() -> Dict[str, Any]:
         "thetas_dim": 4,  # Polynomial degree 3
         "backcast_length": 24,
         "forecast_length": 12,
-        "share_weights": False,
         "activation": "silu",
         "use_bias": True,
         "kernel_initializer": "he_normal",
@@ -104,7 +102,6 @@ def default_seasonality_params() -> Dict[str, Any]:
         "thetas_dim": 8,  # 4 harmonics (sin/cos pairs)
         "backcast_length": 24,
         "forecast_length": 12,
-        "share_weights": False,
         "activation": "silu",
         "use_bias": True,
         "kernel_initializer": "he_normal",
@@ -162,7 +159,6 @@ def test_generic_block_initialization(default_generic_params: Dict[str, Any]) ->
     assert block.thetas_dim == default_generic_params["thetas_dim"]
     assert block.backcast_length == default_generic_params["backcast_length"]
     assert block.forecast_length == default_generic_params["forecast_length"]
-    assert block.share_weights == default_generic_params["share_weights"]
     assert block.activation == default_generic_params["activation"]
     assert block.use_bias == default_generic_params["use_bias"]
 
@@ -175,7 +171,6 @@ def test_generic_block_minimal_initialization(minimal_generic_params: Dict[str, 
     assert block.thetas_dim == minimal_generic_params["thetas_dim"]
     assert block.backcast_length == minimal_generic_params["backcast_length"]
     assert block.forecast_length == minimal_generic_params["forecast_length"]
-    assert block.share_weights is False  # default
     assert block.activation == "relu"  # default
     assert block.use_bias is False  # default
 

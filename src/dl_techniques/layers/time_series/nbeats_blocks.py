@@ -126,9 +126,6 @@ class NBeatsBlock(keras.layers.Layer):
     :type input_dim: int
     :param output_dim: Number of output features (channels).
     :type output_dim: int
-    :param share_weights: Whether to share weights across blocks in the same
-        stack. Currently stored but not implemented.
-    :type share_weights: bool
     :param dropout_rate: Dropout rate (0 to 1) applied after each dense layer.
     :type dropout_rate: float
     :param activation: Activation function for hidden layers.
@@ -160,7 +157,6 @@ class NBeatsBlock(keras.layers.Layer):
             forecast_length: int,
             input_dim: int = 1,
             output_dim: int = 1,
-            share_weights: bool = False,
             dropout_rate: float = 0.0,
             activation: Union[str, callable] = 'relu',
             use_bias: bool = False,
@@ -203,7 +199,6 @@ class NBeatsBlock(keras.layers.Layer):
         self.forecast_length = forecast_length
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.share_weights = share_weights
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.use_bias = use_bias
@@ -435,7 +430,6 @@ class NBeatsBlock(keras.layers.Layer):
             'forecast_length': self.forecast_length,
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
-            'share_weights': self.share_weights,
             'dropout_rate': self.dropout_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,
