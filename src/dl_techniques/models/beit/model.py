@@ -1,66 +1,99 @@
-"""BEiT image models — backbone, masked-image-modeling head and classification head.
+"""A BEiT image trunk with a masked-image-modeling head and a classification head.
 
-This module gives the ``BeitAttention`` layer (``layers/attention/beit_attention.py``,
-arXiv:2106.08254) its image-domain consumers, mirroring the file shape of
-``models/energy_transformer/``:
+BEiT asks what BERT's pre-training objective becomes when the input is an image.
+Masking a word and predicting it works because language arrives pre-discretized:
+the target is one symbol out of a finite vocabulary, and the loss is a clean
+classification. Pixels have neither property. Regressing raw pixels at masked
+positions spends the model's capacity on exactly the high-frequency detail that
+carries the least semantic content, and short-range pixel correlation makes much
+of the task solvable by interpolation rather than understanding. BEiT's answer is
+to borrow a vocabulary: a discrete variational autoencoder, trained separately
+and frozen, maps every patch to one code id out of 8192, and the model predicts
+*that* id at each masked position. The objective becomes classification over a
+codebook, the targets sit at the abstraction level of appearance rather than
+intensity, and the pixel-interpolation shortcut disappears because neighbouring
+patches do not determine each other's code.
 
-* :class:`BeitModel` — the trunk. ``PatchEmbedding2D`` -> (optional ``MaskTokenApply``)
-  -> ``ClassTokenPrepend`` -> (optional absolute position embedding) -> ``num_layers x
-  TransformerLayer(attention_type='beit')`` -> (optional final ``LayerNormalization``)
-  -> ``(B, 1 + N, hidden_size)``.
-* :class:`BeitForMaskedImageModeling` — trunk -> ``decoder_``-prefixed LayerNorm +
-  ``Dense(vocab_size)`` -> per-PATCH logits ``(B, N, vocab_size)`` (the cls position is
-  sliced off).
-* :class:`BeitForImageClassification` — the SAME trunk -> ``head_``-prefixed pooling +
-  LayerNorm + Dropout + ``Dense(num_classes)`` **logits**, warm-startable from an MIM
-  checkpoint.
+The tokenizer is deliberately not part of this module. Code ids are targets, and
+they arrive as tensors in the ``tf.data`` pipeline alongside the patch mask. Nor
+is the masking part of the loss computation here: the objective is restricted to
+masked positions by the ``sample_weight`` carried in the batch, so these models
+define no ``train_step`` and no ``compute_loss``, and none may be added.
 
-**Architecture**::
+Three classes share one trunk. :class:`BeitModel` is the encoder: patch embedding,
+optional mask-token substitution, a prepended class token, ``num_layers``
+transformer blocks with BEiT attention, and a full ``(B, N + 1, D)`` sequence out.
+:class:`BeitForMaskedImageModeling` puts a ``decoder_``-prefixed norm and a single
+affine projection over the codebook on top. :class:`BeitForImageClassification`
+puts a ``head_``-prefixed pool, norm, dropout and classifier on top, and emits
+logits (compile with ``from_logits=True``). Masked positions are replaced *before*
+the class token is prepended and before any block runs — BEiT processes the whole
+sequence and never drops tokens, which is the structural difference from MAE and
+the reason the mask is a substitution rather than a gather.
 
-    image (B, H, W, 3)              bool_mask (B, N)   [MIM only]
-          |                               |
-    PatchEmbedding2D  -------------------+
-          |                               |
-          v                               v
-    (B, N, D)  ----------------->  MaskTokenApply   (skipped when no mask is passed,
-          |                               |         but ALWAYS created AND built)
-          +-------------------------------+
-                          |
-                  ClassTokenPrepend  -> (B, N+1, D)
-                          |
-              [absolute position embedding]      (off by default — BEiT uses RELATIVE)
-                          |
-              num_layers x TransformerLayer(attention_type='beit')
-                          |
-                 [final LayerNorm]               (see the `use_mean_pooling` fork below)
-                          |
-                    (B, N+1, D)
-                    /              \\
-        decoder_norm                head_pool -> head_norm
-        decoder_head                head_dropout -> head_classifier
-        -> (B, N, vocab)            -> (B, num_classes) logits
+Position information is relative, not absolute. Each block owns a learnable
+relative-position-bias table indexed by the patch grid, so
+``use_absolute_position_embeddings`` defaults to ``False`` and the absolute
+embedding is not even created when it is off — an unread ``(1, N+1, D)`` weight
+in every checkpoint would be pure dead weight. The shared-table variant
+(one bias table for all blocks, a pre-training-only mode) is not implemented and
+raises rather than silently falling back to per-layer tables: supporting it would
+require threading a per-forward bias tensor through ``TransformerLayer.call()``.
 
-**Weight-compatibility invariant.** ``MaskTokenApply`` is created AND built by EVERY
-backbone, including the classifier's, which never calls it. That is the authoring
-guide's §9 "ALWAYS CREATE / CONDITIONALLY USE" rule, and it is what keeps the MIM trunk
-and the classification trunk weight-identical so that
-``load_weights_from_checkpoint(target, mim_ckpt, skip_prefixes=("decoder_", "head_"))``
-transfers the trunk 1:1. Deleting the "dead" mask token from the classifier would
-silently break the warm start.
+Two details of this implementation exist to protect things that fail silently
+when they are "cleaned up".
 
-**Deviations from the reference** (also stated in this package's ``README.md``):
+``MaskTokenApply`` is created *and built* by every backbone, including the
+classifier's, which never calls it. Removing that apparently dead weight from the
+classifier would leave the two trunks with different weight sets, and the warm
+start ``load_weights_from_checkpoint(target, mim_ckpt,
+skip_prefixes=("decoder_", "head_"))`` — which matches by name, hence the fixed
+``BACKBONE_NAME`` — would quietly transfer a different set of layers with no
+error anywhere.
 
-* ``layer_scale_init_value`` is ``0.1`` for tiny/small/base and ``1e-5`` for large —
-  timm's split, not HF's uniform ``0.1``. See :data:`SCALE_CONFIGS` (X-2 / D-003).
-* ``tiny`` and ``small`` are repo-convention inventions for cheap tests. Neither the
-  paper, nor HF, nor timm defines a BEiT at those sizes (X-3 / D-003).
+The trunk's final ``LayerNormalization`` exists only when ``use_mean_pooling`` is
+``False``. That is BEiT's own fork, not a simplification: at the default the
+pooler applies its own norm to the mean of the patch tokens, so a trunk-level
+norm would insert an extra normalization in front of both heads that the
+reference does not have — no error, no shape change, and a perfectly plausible
+loss curve. Likewise the MIM head slices ``[:, 1:, :]`` to drop the class
+position before projecting, so output index ``i`` is patch ``i``; every other
+length-``N`` window of the sequence produces the same output shape and the same
+finite logits while attributing every code-id target to the wrong patch.
+
+``layer_norm_eps`` defaults to ``1e-12`` (HF's ``BeitConfig``), six orders of
+magnitude tighter than a generic ViT's ``1e-6``, and is passed explicitly at
+every normalization site rather than inherited from any factory default.
+Stochastic depth is a linear ramp from ``0`` to ``drop_path_rate`` across the
+blocks, computed at model level because a block holds only its own rate.
+
+Two deliberate deviations, also recorded in this package's ``README.md``:
+``layer_scale_init_value`` follows timm's split (``0.1`` for tiny/small/base,
+``1e-5`` for large) rather than HF's uniform ``0.1`` — the two ports of the same
+official checkpoints disagree, and layer-scale init is training-time-only, so
+neither is wrong but the pick is pinned. And ``tiny`` and ``small`` are repo
+inventions for cheap tests; no BEiT of either size exists in the paper, in HF or
+in timm, while ``base`` and ``large`` reproduce the fetched HF configs verbatim.
 
 References:
-    - Bao, H., Dong, L., Piao, S., & Wei, F. (2022). "BEiT: BERT Pre-Training of Image
-      Transformers". ICLR. arXiv:2106.08254.
+    - Bao et al., 2022. BEiT: BERT Pre-Training of Image Transformers. ICLR.
+      (https://arxiv.org/abs/2106.08254)
+    - Devlin et al., 2019. BERT: Pre-training of Deep Bidirectional Transformers
+      for Language Understanding. (https://arxiv.org/abs/1810.04805)
+    - Ramesh et al., 2021. Zero-Shot Text-to-Image Generation. (the DALL-E dVAE
+      whose 8192-entry codebook supplies the visual tokens)
+      (https://arxiv.org/abs/2102.12092)
+    - Dosovitskiy et al., 2021. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Shaw et al., 2018. Self-Attention with Relative Position Representations.
+      (https://arxiv.org/abs/1803.02155)
+    - Touvron et al., 2021. Going Deeper with Image Transformers (CaiT).
+      (LayerScale) (https://arxiv.org/abs/2103.17239)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
     - ``microsoft/beit-base-patch16-224`` / ``microsoft/beit-large-patch16-224``
-      ``config.json`` (the authoritative hyperparameters reproduced in
-      :data:`SCALE_CONFIGS` and the constructor defaults).
+      ``config.json`` — the hyperparameters reproduced in :data:`SCALE_CONFIGS`
+      and the constructor defaults.
 """
 
 import keras

@@ -1,33 +1,97 @@
 """
-CliffordNet isotropic vision model.
+An isotropic image classifier built from geometric-algebra blocks and no FFN.
 
-Implements the full classification backbone from arXiv:2601.06793v2.
+Every mainstream vision backbone factors a block into two engineered halves: a
+token mixer (attention or convolution) that moves information across space, and a
+channel mixer (an MLP, usually the majority of the parameters) that recombines
+features in place. CliffordNet's claim is that this factorization is unnecessary
+because one algebraic operation already does both jobs. For two per-pixel channel
+vectors `u` and `v` the Clifford geometric product decomposes as
+`u v = u . v + u ^ v`. The symmetric inner part measures coherence — how much the
+local context agrees with the pixel's own features — and is exactly the quantity
+a dot-product attention score keeps. The antisymmetric wedge part is the oriented
+bivector spanned by the two vectors; it measures *structural disagreement* and
+fires on edges and texture where context diverges from the centre. Attention
+discards it. Retaining both halves is what the paper calls algebraic
+completeness, and it is why a block with no FFN can still mix channels: the
+product is bilinear in the two streams, so channel `c` of the output already
+depends on products of different input channels.
 
-Architecture: patch embedding -> L x CliffordNetBlock
--> GlobalAvgPool -> LayerNorm -> Dense classifier head.
+Each block derives a detail stream (a pointwise projection, no spatial mixing)
+and a context stream (two stacked depthwise 3x3 convolutions, a 5x5 effective
+field), optionally coupled differentially as `ctx <- ctx - det`. The full
+channel-pairwise product would cost `O(D^2)`; instead only a few diagonals of
+that interaction matrix are sampled by cyclically rolling the context stream by
+each offset in `shifts`, giving `O(N * D * |shifts|)` — linear in both pixels and
+channels. Exponentially spaced offsets `[1, 2, 4, 8, 16]` impose a ring topology
+whose mixing range grows logarithmically, which is the entire difference between
+the `nano` and `lite` variants. The block closes with a gated geometric residual,
+an Euler step `H + gamma * (SiLU(H_norm) + alpha * G_feat)` in which LayerScale
+`gamma` starts near zero so a deep stack begins as near-identity.
 
-The patch embedding follows the original ``GeometricStem`` design:
+The model is isotropic in the MetaFormer sense: one patch-embedding stem, then
+`depth` identical blocks at a constant width with no downsampling and no stage
+structure. The stem shape depends on `patch_size` — a single 3x3 stride-2
+convolution at `patch_size=2` (the CIFAR-scale default), two-stage
+`Conv + BN + SiLU + Conv` at 1 and 4, and a generic `kernel=stride=patch_size`
+convolution otherwise — with a `BatchNormalization` after every variant. Note
+that the two-stage stems force `use_bias=False` on their convolutions regardless
+of the model-level `use_bias`, since a bias immediately preceding a BatchNorm is
+redundant; the single-conv stems honour the flag.
 
-- ``patch_size=1``: two-stage ``Conv2D(C//2) + BN + SiLU + Conv2D(C)``
-  (no downsampling).
-- ``patch_size=2``: single ``Conv2D(C, kernel=3, stride=2)`` (efficient
-  for CIFAR-scale, matches the original single-conv stem).
-- ``patch_size=4``: two-stage ``Conv2D(C//2, stride=2) + BN + SiLU +
-  Conv2D(C, stride=2)`` (ImageNet-scale).
-- other: generic ``Conv2D(C, kernel=patch_size, stride=patch_size)``.
+The one thing a reader must not get wrong is that `CliffordNetBlock` is
+transform-only. It returns just the gamma-scaled update, *not* `x + update`. The
+residual addition and the stochastic-depth gate live in this model's `call()` as
+`x = x + drop_path(block(x))`. The split is deliberate — it keeps the graph
+explicit — but it also means that rewriting the loop as the innocuous-looking
+`x = block(x)` does not merely remove a skip connection: with `layer_scale_init`
+at `1e-5` it annihilates the signal by roughly five orders of magnitude per
+block, silently. The per-block drop-path rates are the shared linear ramp from
+`utils/drop_path.py`, and `StochasticDepth(0.0)` is exactly the identity, so at
+the default rate the loop is precisely `x + block(x)`.
 
-All stems are followed by ``BatchNormalization`` (matching the original
-``GeometricStem.norm``).
+The head pools before it normalizes: `GlobalAveragePooling2D` first, then
+`LayerNormalization` over the pooled `(B, channels)` vector. This is the
+reference's order and the inverse of the usual norm-then-pool convention; the
+norm therefore standardizes across channels of one image-level descriptor rather
+than across tokens.
 
-The classification head applies ``GlobalAveragePooling2D`` **first**, then
-``LayerNormalization`` on the pooled ``(B, D)`` vector (matching the
-original ``forward()`` order).
+Two reproduction caveats are worth stating as choices. The constructor's
+`kernel_initializer` default is Keras' `glorot_uniform`, while every entry of
+`MODEL_VARIANTS` overrides it with the reference's `TruncatedNormal(0.02)` — so a
+directly constructed `CliffordNet(...)` is not initialized like a
+`from_variant(...)` one, and because the block's output is quadratic in its
+activations, initialization scale matters more here than in a linear-in-`x`
+block. Separately, this model leaves the block's context normalization at its
+image-mode default (`BatchNormalization`), which reaches the layer with Keras'
+`momentum=0.99` and the norm factory's `epsilon=1e-6` rather than the reference's
+`0.9`/`1e-5`; pass `normalization_kwargs` through to change that.
 
-Pre-defined variants
---------------------
-- ``CliffordNet.nano``   -- ~1.4 M params  (channels=128, depth=12, shifts=[1,2])
-- ``CliffordNet.lite``   -- ~2.6 M params  (channels=128, depth=12, shifts=[1,2,4,8,16])
-- ``CliffordNet.lite_g`` -- ~3.4 M params  (Lite + global-context branch)
+No pretrained weights are distributed. `_download_weights` raises
+`NotImplementedError`, and `from_variant`'s fallback only catches `IOError`,
+`OSError` and `ValueError` — so `pretrained=True` propagates the error instead of
+warning and handing back a randomly initialized model that the caller would have
+no way to distinguish from a real one. Local checkpoints load by path via
+`pretrained='/path/to/weights.keras'`, with classifier weights skipped by name
+when `num_classes` differs from the 100 the weights are assumed to have.
+
+Measured parameter counts, `num_classes=100`: `nano` 1.44M (`shifts=[1, 2]`),
+`lite` 2.62M (`shifts=[1, 2, 4, 8, 16]`), `lite_g` 3.40M (`lite` plus the
+global-average-pool context branch).
+
+References:
+    - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
+      (https://arxiv.org/abs/2601.06793)
+    - Brandstetter et al., 2023. Clifford Neural Layers for PDE Modeling.
+      (https://arxiv.org/abs/2209.04934)
+    - Ruhe et al., 2023. Geometric Clifford Algebra Networks.
+      (https://arxiv.org/abs/2302.06594)
+    - Yu et al., 2022. MetaFormer Is Actually What You Need for Vision.
+      (https://arxiv.org/abs/2111.11418)
+    - Touvron et al., 2021. Going Deeper with Image Transformers (CaiT).
+      (LayerScale) (https://arxiv.org/abs/2103.17239)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 from __future__ import annotations

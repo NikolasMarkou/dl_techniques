@@ -1,55 +1,78 @@
 """
-CoShNet (Complex Shearlet Network) Implementation
-================================================================
+A complex-valued classifier over a fixed shearlet frontend, in six size variants.
 
-This module implements  CoShNet architecture, following modern Keras 3 patterns
-and best practices. CoShNet is a hybrid complex-valued neural network that combines
-fixed shearlet transforms with learnable complex-valued layers for efficient image
-classification.
+The design question CoShNet answers is which part of a vision model actually has
+to be learned. The first layers of a trained CNN reliably converge to oriented,
+band-limited edge detectors — a filter bank that harmonic analysis can write down
+in closed form and that costs nothing to fit. Shearlets are the principled choice
+for that bank: built from anisotropic scaling paired with shearing rather than
+the isotropic dilation of wavelets, their elements are elongated and oriented,
+and under parabolic scaling (support `~2^j` along one axis, `~2^(j/2)` along the
+other) they are provably optimal at sparsifying cartoon-like images — piecewise
+smooth with curved discontinuities, which is a fair caricature of natural images.
+Fixing the frontend removes those parameters from the optimization entirely and
+hands the network a strong geometric prior instead of asking it to rediscover
+one.
 
-Key Features:
-------------
-1. Hybrid Architecture:
-   - Fixed shearlet transform frontend for multi-scale feature extraction
-   - Learnable complex-valued convolutional and dense layers
-   - Global Average Pooling for spatial dimension reduction
-   - Efficient parameter usage through fixed transform
-   - Built-in multi-scale and directional sensitivity
+The transform is applied as a non-trainable filter bank in the frequency domain:
+FFT, elementwise multiply against `1 + scales * (directions + 1)` filters, and an
+inverse FFT per filter. At the defaults (`scales=4`, `directions=8`) that is 37
+filters, so a 3-channel input leaves the frontend with 111 channels at unchanged
+spatial resolution. The filter bank is built for one static `(height, width)`;
+this frontend cannot be traced with unknown spatial dims.
 
-2. Technical Advantages:
-   - Fewer parameters than traditional CNNs
-   - Faster training convergence
-   - Better gradient flow through complex-valued operations
-   - Natural handling of phase information
-   - Self-regularizing behavior
+What follows is complex-valued, and it is worth being precise about where the
+complexity comes from, because the layer names invite the wrong reading. The
+transform returns the *real part* of the inverse FFT, so the phase of the
+shearlet coefficients is not propagated; the model casts that real tensor to
+`complex64` with an identically zero imaginary part. The imaginary channel is
+populated only by the first complex convolution, whose kernel is genuinely
+complex — so phase here is a learned quantity mixed by complex multiplication,
+not the analytic phase of the transform. Complex multiplication is what makes the
+layer more than two real convolutions: it couples the two components
+(`(a + ib)(c + id)`), and that coupling is the architecture's stated source of
+parameter efficiency.
 
-Architecture Variants:
----------------------
-- CoShNet-Nano: Minimal model for resource-constrained environments
-- CoShNet-Tiny: Small model (~50k parameters)
-- CoShNet-Base: Standard model (~800k parameters)
-- CoShNet-Large: Larger model for complex datasets
-- CoShNet-CIFAR10: Optimized for CIFAR-10 classification
-- CoShNet-ImageNet: Scaled for ImageNet-style inputs
+The body is two (or three, at `large`/`imagenet`) complex convolutions with
+stride 2, each followed by a split ReLU applied independently to the real and
+imaginary parts — the simplest complex activation, and not a modulus-based one
+such as modReLU. Global average pooling over the spatial axes then collapses the
+feature map before the dense stack, a deliberate substitution for flattening: it
+drops the first dense layer's parameter count by the spatial area and makes the
+dense widths independent of input resolution, at the cost of discarding where in
+the image a response occurred. The dense stack alternates complex dense,
+activation and complex dropout.
 
-Performance Characteristics:
--------------------------
-1. Model Efficiency:
-   - Reduced parameters compared to traditional CNNs
-   - Fast convergence in 20-50 epochs
-   - Memory efficient through global pooling
-   - Optimal for small to medium-sized datasets
+The classifier head takes `ops.abs` of the final complex vector before a real
+`Dense`, so the phase learned through the network reaches the decision only
+through the magnitude it produces. That Dense applies `softmax` itself: the model
+emits probabilities, not logits, and must be compiled with `from_logits=False`.
+With `include_top=False` the model returns the `complex64` convolutional feature
+map instead, which most downstream real-valued Keras layers will refuse.
 
-2. Computational Benefits:
-   - Reduced FLOPs through fixed shearlet transform
-   - Efficient forward pass
-   - Lower memory footprint
+Six variants ladder the same shape rather than changing it, and measure (at
+`(32, 32, 3)`, 10 classes) ~55k parameters for `nano`, ~102k for `tiny` and
+~928k for `base`. `imagenet` restates `conv_strides=2`, which is already the
+constructor default, so that entry is inert.
+
+Construction is functional, not subclassed: `__init__` traces the graph and hands
+`inputs`/`outputs` to `keras.Model.__init__`, which is what registers the
+weights. The `self.conv_layers` / `self.dense_layers` attribute lists the
+builders leave behind are for introspection; the functional graph is the
+authority. The model name is fixed to `"coshnet"` at that call, so a `name=`
+kwarg cannot be threaded through the constructor.
 
 References:
-----------
-1. "CoShNet: A Hybrid Complex Valued Neural Network Using Shearlets"
-2. "Deep Complex Networks" (Trabelsi et al., 2018)
-3. "CoShRem: Faithful Digital Shearlet Transforms based on Compactly Supported Shearlets"
+    - Ko, Panchal, Andrade-Loarca & Mendez-Vazquez, 2022. CoShNet: A Hybrid
+      Complex Valued Neural Network using Shearlets.
+    - Trabelsi et al., 2018. Deep Complex Networks. ICLR 2018.
+      (https://arxiv.org/abs/1705.09792)
+    - Guo, Kutyniok & Labate, 2006. Sparse Multidimensional Representations
+      using Anisotropic Dilation and Shear Operators.
+    - Kutyniok & Labate, 2012. Shearlets: Multiscale Analysis for Multivariate
+      Data. Birkhauser.
+    - Reisenhofer et al., 2016. Shearlab 3D / CoShREM: Faithful Digital Shearlet
+      Transforms Based on Compactly Supported Shearlets.
 """
 
 import keras

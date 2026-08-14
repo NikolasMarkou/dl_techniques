@@ -1,54 +1,88 @@
 """
-ACC-UNet: A Completely Convolutional UNet model for the 2020s.
+A segmentation U-Net whose convolutional blocks carry transformer-like context.
 
-This module implements the complete ACC-UNet architecture from the paper
-"ACC-UNet: A Completely Convolutional UNet model for the 2020s" by Ibtehaz & Kihara (MICCAI 2023).
-ACC-UNet combines the benefits of convolutional networks with transformer-inspired design decisions,
-achieving state-of-the-art performance on medical image segmentation while using significantly
-fewer parameters than transformer-based alternatives.
+The architecture starts from an observation about why transformer U-Nets win on
+medical segmentation. Their advantage is usually attributed to attention itself,
+but two more prosaic properties travel with it: every position sees the whole
+image, and features are exchanged *across* scales rather than only within a
+matched encoder-decoder pair. ACC-UNet's thesis is that both properties can be
+obtained with pooling and 1x1 convolutions alone, and therefore without paying
+attention's `O(N^2)` cost in the number of pixels `N` — which at segmentation
+resolutions is the dominant term.
 
-Key Innovations:
-    1. **HANC Blocks**: Hierarchical Aggregation of Neighborhood Context blocks replace standard
-       convolution blocks, providing transformer-like long-range dependencies through multi-scale
-       pooling operations (2x2, 4x4, 8x8, 16x16 patches).
+Long-range context comes from hierarchical neighborhood aggregation. For a block
+with `k` levels, the feature map is average- and max-pooled at strides
+`2, 4, ..., 2^(k-1)`, each summary is resized back to full resolution, all of
+them are concatenated with the untouched input to give `C * (2k - 1)` channels,
+and a 1x1 convolution learns how to weigh them. Each pixel is thus compared not
+to every other pixel but to the mean and the peak of its neighborhood at several
+radii, which costs `O(N * k)`. The mean carries texture, the max carries the
+salient activation, and their difference at a given radius is what tells a pixel
+whether it sits inside a homogeneous region or on a boundary.
 
-    2. **MLFC Layers**: Multi-Level Feature Compilation layers in skip connections enable
-       cross-level feature fusion by aggregating information from all encoder levels,
-       enriching features with multi-scale semantic information.
+`k` shrinks with depth: `[3, 3, 3, 2, 1]` down the encoder and `[2, 2, 3, 3]` up
+the decoder. This is deliberate — a stride-4 pool at the bottleneck already spans
+a large fraction of the image, so extra levels there summarize nearly the same
+thing. The endpoint is worth stating plainly, because it is easy to misread as a
+milder version of the same block: at `k = 1` the HANC layer pools nothing at all
+and degenerates to a 1x1 projection of the input. The bottleneck level therefore
+carries no hierarchical context whatsoever; its receptive field is what the two
+stacked depthwise convolutions give it.
 
-    3. **Enhanced Skip Connections**: ResPath layers with residual blocks reduce the semantic
-       gap between encoder and decoder features, improving information flow.
+Each block itself is an inverted bottleneck — 1x1 expansion by `inv_factor`,
+depthwise 3x3, the HANC aggregation, a 1x1 projection to the requested width, and
+squeeze-excitation. The residual shortcut exists only when input and output width
+agree, which in practice means the second block of every level; the first block
+of a level changes width and runs without one. Decoder level 3 uses
+`inv_factor=4` where every other block uses 3.
 
-    4. **Efficient Design**: Purely convolutional architecture with inverted bottlenecks,
-       depthwise convolutions, and squeeze-excitation for parameter efficiency.
+Skip connections get two stages of treatment, both aimed at the semantic gap
+between a shallow encoder feature and the deep decoder feature it is concatenated
+with. ResPath first passes each of the four pre-bottleneck levels through a stack
+of residual conv-SE blocks, `[4, 3, 2, 1]` of them from the shallowest level
+down — most refinement where the gap is widest. MLFC then resizes all four levels
+to each level's resolution in turn, concatenates, compiles back down with 1x1
+convolutions and adds the result residually, so a shallow feature acquires deep
+semantics and a deep feature reacquires spatial detail. The bottleneck bypasses
+both stages and goes straight into the decoder.
 
-Architecture Overview:
-    - **Encoder**: 5 levels with [32, 64, 128, 256, 512] filters (configurable base_filters)
-    - **Decoder**: 4 levels with transposed convolutions for upsampling
-    - **Skip Connections**: ResPath + MLFC processing for enhanced feature compilation
-    - **Context Aggregation**: HANC layers with hierarchical k values [3, 3, 3, 2, 1]
-    - **Parameter Count**: ~16.8M parameters (comparable to standard U-Net)
+Two implementation choices are not what the parameter names suggest.
+`mlfc_iterations` does not set `MLFCLayer.num_iterations`; it creates that many
+*separate* single-iteration MLFC layers applied in sequence. The two forms are
+not equivalent, because `MLFCLayer` applies its per-level squeeze-excitation once
+after its internal loop — stacking three layers therefore recalibrates channels
+three times, not once. And `input_channels` is a constructor argument rather than
+something inferred at build time because `HANCBlock` fixes its expansion width
+from the channel count at construction; the model must know the input depth
+before it ever sees a tensor.
 
-Performance Characteristics:
-    - Outperforms Swin-UNet by 2.64±2.54% dice score with 59.26% fewer parameters
-    - Outperforms UCTransNet by 0.45±1.61% dice score with 24.24% fewer parameters
-    - Maintains computational efficiency comparable to standard U-Net
-    - Supports both binary and multi-class segmentation tasks
-    - Handles variable input sizes (dynamic shape support)
+Spatial dimensions must be divisible by 16. Four stride-2 pools and four
+stride-2 transposed convolutions cannot round-trip an odd dimension, and the
+decoder's concatenate is where that shows up, so the model raises at the first
+call with a static shape rather than failing deeper with a shape mismatch.
+Dynamic (`None`) dimensions are accepted and unchecked — the divisibility
+contract still holds at run time, it just cannot be verified at trace time.
 
-Model Components:
-    - **HANCBlock**: Core building block with hierarchical context aggregation
-    - **ResPath**: Enhanced skip connection processing with residual blocks
-    - **MLFCLayer**: Multi-level feature compilation for cross-scale fusion
-    - **AccUNet**: Complete model implementation with factory functions
+The head applies its activation: sigmoid for `num_classes == 1`, softmax
+otherwise. The model therefore emits probabilities, not logits, and must be
+compiled with `from_logits=False`. At the default `base_filters=32` a 3-channel
+binary model has ~13.4M parameters.
 
 References:
-    Ibtehaz, N., & Kihara, D. (2023). ACC-UNet: A Completely Convolutional UNet
-    model for the 2020s. In International Conference on Medical Image Computing
-    and Computer-Assisted Intervention (pp. 1-11). Springer.
-
-    Original paper: https://arxiv.org/abs/2308.13680
-    GitHub: https://github.com/kiharalab/ACC-UNet
+    - Ibtehaz & Kihara, 2023. ACC-UNet: A Completely Convolutional UNet Model
+      for the 2020s. MICCAI 2023.
+      (https://arxiv.org/abs/2308.13680)
+    - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical
+      Image Segmentation. (https://arxiv.org/abs/1505.04597)
+    - Ibtehaz & Rahman, 2020. MultiResUNet: Rethinking the U-Net Architecture
+      for Multimodal Biomedical Image Segmentation. Neural Networks.
+      (the origin of the ResPath skip refinement)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks. (https://arxiv.org/abs/1801.04381)
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+    - Zhao et al., 2017. Pyramid Scene Parsing Network.
+      (https://arxiv.org/abs/1612.01105)
 """
 
 import keras
