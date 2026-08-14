@@ -38,9 +38,14 @@ is intended to be advanced as a Mean-Teacher exponential moving average through
 module calls it: the driver is `TeacherEMACallback` in this package's
 `teacher_ema.py`, attached by the trainer in `src/train/depth_anything/`. Without
 that callback the teacher stays pinned at the student's initial weights forever.
-Third, `AffineInvariantLoss` is imported here but never used in this module —
-the affine-invariant objective is supplied by the training script, and
-`compile()` defaults to plain mean-squared error if no loss is passed.
+Third, `compile()` with no `loss=` defaults to `AffineInvariantLoss`, not to
+mean-squared error. This is the objective the whole recipe is built around: the
+supervision is relative, so a prediction that is structurally correct but
+globally scaled or shifted is *right*, and an MSE default would penalize it for
+choosing its own scale — which also contradicts the decoder's deliberately
+linear, unclamped output. The default is only what a caller who compiles with an
+optimizer alone gets; the trainer in `src/train/depth_anything/` passes its own
+`DepthEstimationLoss` explicitly and is unaffected by it.
 
 The decoder is named `DPTDecoder` but is not the DPT of the paper. It performs no
 multi-scale "reassemble" from intermediate transformer layers and has no residual
@@ -581,13 +586,15 @@ class DepthAnything(keras.Model):
 
         Args:
             optimizer: Keras optimizer instance.
-            loss: Primary loss function. If None, uses mean squared error.
+            loss: Primary loss function. If None, uses `AffineInvariantLoss` —
+                depth is supervised only up to an unknown affine transform, so
+                that is the objective this recipe is built around.
             loss_weights: Optional custom loss weights to override defaults.
             **kwargs: Additional arguments passed to parent compile method.
         """
         # Set default loss if none provided
         if loss is None:
-            loss = keras.losses.MeanSquaredError()
+            loss = AffineInvariantLoss()
 
         super().compile(optimizer=optimizer, loss=loss, **kwargs)
 

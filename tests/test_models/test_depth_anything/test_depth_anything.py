@@ -6,6 +6,8 @@ Covers:
 - DPTDecoder default activation is `'linear'`.
 - Save/load round-trip equality (the SC-6 fix from
   `plan_2026-05-10_bd098beb` — D-004 save_own_variables override).
+- `compile(loss=None)` installs an affine-invariant objective (asserted
+  behaviourally, with a liveness arm on `MeanSquaredError`).
 - `train_step` labeled-only smoke (1-step CPU `model.fit`).
 - `train_step` semi-supervised smoke (1-step CPU `model.fit` on
   `((x_lab, x_unlab), y_lab)`).
@@ -162,6 +164,70 @@ class TestDepthAnything:
         history = m.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
         loss = float(history.history["loss"][0])
         assert np.isfinite(loss), f"non-finite semi-sup loss: {loss}"
+
+    def test_default_compile_loss_is_affine_invariant(self, small_image_shape):
+        """The `loss=None` branch of `compile()` must install an objective that
+        is invariant to an affine transform of the prediction.
+
+        Asserted BEHAVIOURALLY, not by `isinstance`: the identity that defines
+        the objective is `L(y_true, y_pred) == L(y_true, a * y_pred + b)` for
+        `a > 0`. Three arms, because each alone is defeatable:
+          1. invariance  — the compiled default does not move under the transform;
+          2. liveness    — `MeanSquaredError` under the SAME probe DOES move, so
+                           a passing arm 1 is not just an undetectable transform;
+          3. non-degeneracy — the default is not a constant function (a loss that
+                           returns the same number for everything passes arm 1).
+
+        MEASURED at implementation time (CPU, seed 0, float32,
+        `y_aff = 2 * y_pred + 3`):
+          - default (AffineInvariantLoss): base=1.40321493 affine=1.40321493,
+            relative delta = 0.00000000 (exactly 0.0) -> bound 1e-4
+          - MeanSquaredError:              base=2.04218149 affine=13.38036346,
+            relative delta = 5.55199526                 -> bound 1.0
+          - non-degeneracy: L(y_true, y_true) = 0.0 vs L(y_true, y_pred) = 1.40321493
+        """
+        m = DepthAnything(
+            encoder_kind="placeholder",
+            encoder_type="vit_s",
+            image_shape=small_image_shape,
+        )
+        _ = m(keras.ops.zeros((1,) + small_image_shape))  # build
+        m.compile(optimizer=keras.optimizers.AdamW(1e-4))
+
+        rng = np.random.default_rng(0)
+        y_true = rng.normal(size=(2, 8, 8, 1)).astype("float32")
+        y_pred = rng.normal(size=(2, 8, 8, 1)).astype("float32")
+        y_aff = (2.0 * y_pred + 3.0).astype("float32")
+
+        def relative_delta(loss_fn) -> float:
+            base = float(np.asarray(loss_fn(y_true, y_pred)))
+            affine = float(np.asarray(loss_fn(y_true, y_aff)))
+            return abs(affine - base) / max(abs(base), 1e-12)
+
+        default_delta = relative_delta(m.loss)
+        mse_delta = relative_delta(keras.losses.MeanSquaredError())
+
+        # Arm 1: the compiled default is affine-invariant.
+        assert default_delta < 1e-4, (
+            "compile()'s default loss is not affine-invariant: relative delta "
+            f"under y_pred -> 2*y_pred+3 was {default_delta:.8f} (measured "
+            "0.0 for AffineInvariantLoss, 5.552 for MeanSquaredError)"
+        )
+        # Arm 2 (liveness): the same probe DOES move a non-invariant loss.
+        assert mse_delta > 1.0, (
+            "liveness arm failed: MeanSquaredError should move a lot under the "
+            f"same affine probe but its relative delta was {mse_delta:.8f} — "
+            "the probe itself is broken, arm 1 proves nothing"
+        )
+        # Arm 3 (non-degeneracy): the default is not a constant function.
+        self_loss = float(np.asarray(m.loss(y_true, y_true)))
+        other_loss = float(np.asarray(m.loss(y_true, y_pred)))
+        assert other_loss - self_loss > 1e-3, (
+            "non-degeneracy arm failed: the default loss returns effectively "
+            f"the same value for y_pred==y_true ({self_loss:.8f}) and for an "
+            f"unrelated prediction ({other_loss:.8f}) — it is constant, so arm "
+            "1 is vacuous"
+        )
 
     def test_get_config_roundtrip(self, real_vit_small_model):
         """SC-13: from_config rebuilds without error."""
