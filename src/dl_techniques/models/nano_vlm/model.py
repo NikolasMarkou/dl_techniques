@@ -817,7 +817,7 @@ def create_modern_nanovlm(
         vision_config={
             'img_size': 224, 'patch_size': 16, 'embed_dim': embed_dim,
             'depth': 12, 'num_heads': embed_dim // 64,
-            'attention_type': 'differential_attention',
+            'attention_type': 'differential',
             'normalization_type': 'rms_norm',
             'normalization_position': 'pre',
             'ffn_type': 'swiglu',
