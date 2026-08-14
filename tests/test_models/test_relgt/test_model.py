@@ -156,7 +156,26 @@ class TestBlockChaining:
         )
 
     def test_no_trainable_variable_is_gradient_less(self):
-        """Every parameter of every block must reach the loss.
+        """Every parameter of every block must reach the loss with NON-ZERO gradient.
+
+        Two assertions, because ``g is None`` alone is too weak: a change that
+        makes a block's contribution vanish numerically (a zero-initialized
+        scale, a stop-gradient, a multiply by 0) leaves the graph path intact
+        and every gradient non-``None`` while the parameters are just as dead.
+        The second assertion therefore requires a gradient norm above 1e-9.
+
+        MEASURED (``num_transformer_blocks=3``, 107 trainable variables): the
+        smallest LIVE gradient norm across three unseeded runs was 2.1e-06 /
+        9.3e-06 / 1.9e-05 (always a ``GlobalAttention/query/bias``), so the
+        floor sits about three orders of magnitude below the real signal.
+
+        Three variables are ALLOW-LISTED at 2e-12..3e-11, i.e. zero plus float
+        noise: ``TransformerBlock_{0,1,2}/GlobalAttention/key/bias``. That is
+        structural, not a defect — in scaled dot-product attention a key bias
+        shifts every logit for a given query by the same amount, and softmax is
+        shift-invariant, so it cancels exactly. Keras' ``MultiHeadAttention``
+        creates it regardless. Widening this allow-list is almost certainly the
+        wrong response to a failure here.
 
         Chaining only the LOCAL token pathway is not enough: a block's global
         module (``global_centroids``, ``GlobalAttention``, ``ResidualProjection``,
@@ -194,6 +213,20 @@ class TestBlockChaining:
             f"{len(no_grad)} of {len(model.trainable_variables)} trainable variables "
             f"receive NO gradient with num_transformer_blocks=3, so their blocks' "
             f"computation never reaches the output: {no_grad}"
+        )
+
+        # A key bias cancels in the softmax — see the docstring. Matched by
+        # suffix so it covers every block without naming them.
+        structurally_zero = "/GlobalAttention/key/bias"
+        dead = [
+            (v.path, float(tf.norm(g)))
+            for v, g in zip(model.trainable_variables, grads)
+            if not v.path.endswith(structurally_zero) and float(tf.norm(g)) <= 1e-9
+        ]
+        assert not dead, (
+            f"{len(dead)} of {len(model.trainable_variables)} trainable variables "
+            f"have a gradient that is present but numerically ZERO (<= 1e-9), so "
+            f"they are dead despite reaching the loss on paper: {dead}"
         )
 
     def test_the_broadcast_summary_does_not_swamp_the_token_signal(self):
