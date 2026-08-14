@@ -1,107 +1,69 @@
 """
-DistilBERT Model Implementation
-===============================
+DistilBERT, a BERT encoder compressed by knowledge distillation rather than by
+retraining a smaller model from scratch.
 
-A complete implementation of the DistilBERT (Distilled BERT) architecture.
-DistilBERT is a smaller, faster, cheaper and lighter version of BERT that,
-as reported by its authors, retains 97% of BERT's language understanding
-capabilities while being 40% smaller and 60% faster. Those are the *paper's*
-numbers for the *published checkpoint*; this module builds the architecture and
-ships no trained weights, so nothing here reproduces them (see
-``DistilBERT.PRETRAINED_WEIGHTS``).
+This model embodies the principle that a large pre-trained encoder's value is
+concentrated in its output distribution, not in its depth. A small model
+trained from scratch on the same corpus sees only hard targets -- one correct
+token per masked position -- and must rediscover from data which of the wrong
+answers were nearly right. A distilled model instead fits the teacher's full
+soft distribution, which carries that near-miss structure directly, and so
+extracts far more supervision from each example. The published result is a
+6-layer student retaining roughly 97% of BERT-base's GLUE score at 40% fewer
+parameters and 60% faster inference. Those are the *paper's* numbers for the
+*published checkpoint*; this module builds the architecture and ships no
+trained weights, so nothing here reproduces them.
 
-Based on: "DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter"
-(Sanh et al., 2019) https://arxiv.org/abs/1910.01108
+The compression is entirely in the depth: layers are halved (6 instead of 12
+for base) while hidden size, head count and FFN width are left at BERT's
+values. That choice is deliberate and worth understanding. Width is what a
+student initialized from the teacher can inherit -- every other one of the
+teacher's layers can be copied verbatim -- whereas narrowing would leave no
+tensor the right shape to copy. Halving depth also halves the sequential work
+per token, which is what the latency claim rests on; halving width would mainly
+reduce memory.
 
-Key Architectural Differences from BERT:
-    - Number of layers reduced by half (6 vs 12 for base)
-    - Token type embeddings removed
-    - Pooler layer removed
-    - Optional sinusoidal position embeddings
-
+Two components of BERT are removed rather than shrunk. Token type embeddings go
+because DistilBERT is trained on single-segment input, so the second segment
+they encode never occurs. The pooler goes because it exists only to serve
+BERT's next-sentence-prediction objective, which distillation drops; a
+downstream head that needs a sentence vector pools `last_hidden_state` itself.
 The embedding stage is NOT a DistilBERT-private layer: it is the shared
-``dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings``, built through
-``create_embedding_layer('bert_embeddings', ...)`` with
-``use_token_type_embeddings=False`` and ``mask_zero=False``. See
-``DistilBERT._build_architecture``.
+`layers.embedding.bert_embeddings.BertEmbeddings`, constructed through
+`create_embedding_layer('bert_embeddings', ...)` with
+`use_token_type_embeddings=False` and `mask_zero=False` (see
+`DistilBERT._build_architecture`), so a change to that layer is felt by three
+packages. Sinusoidal position embeddings are available as an option.
 
-Usage Examples:
---------------
+The class is a pure foundation model, emitting `{"last_hidden_state",
+"attention_mask"}` with no head attached, and `create_distilbert_with_head`
+wires it to a task head from `layers.heads.nlp`. Note that such a head returns
+a DICT (e.g. `{'logits', 'probabilities'}`), not a single tensor. Three preset
+variants: base (the paper's configuration), small and tiny.
 
-Every statement in the block below is executed as written (verified
-2026-08-11); it needs no checkpoint and no network access.
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, so a
+caller who did not read logs could not tell an unavailable checkpoint from a
+successful load. `pretrained="<path>.keras"` does work, loading into THIS
+configuration, so the architecture must match; `keras.models.load_model(path)`
+is simpler when you only want a model you saved back as it was. A load that
+restores nothing raises rather than succeeding quietly. Worked examples and
+measured parameter counts are in the package README.
 
-.. code-block:: python
-
-    import keras
-    import numpy as np
-    from dl_techniques.models.distilbert import DistilBERT
-    from dl_techniques.layers.heads.nlp import (
-        create_nlp_head,
-        NLPTaskConfig,
-        NLPTaskType,
-    )
-
-    # 1. Create a DistilBERT encoder from a named variant (randomly initialized)
-    distilbert_encoder = DistilBERT.from_variant("base")
-
-    # 2. Create one with configuration overrides
-    distilbert_encoder = DistilBERT.from_variant("base", vocab_size=50000)
-
-    # 3. Combine with a task-specific head
-    sentiment_config = NLPTaskConfig(
-        name="sentiment",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=3
-    )
-    sentiment_head = create_nlp_head(
-        task_config=sentiment_config,
-        input_dim=distilbert_encoder.hidden_size
-    )
-
-    # 4. Build the complete model. The head consumes a dict keyed
-    #    'hidden_states' / 'attention_mask'; the encoder emits
-    #    'last_hidden_state' / 'attention_mask', so the two are wired
-    #    explicitly rather than passed straight through.
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
-    }
-    distilbert_outputs = distilbert_encoder(inputs)
-    task_outputs = sentiment_head({
-        "hidden_states": distilbert_outputs["last_hidden_state"],
-        "attention_mask": distilbert_outputs["attention_mask"],
-    })
-    sentiment_model = keras.Model(inputs, task_outputs)
-
-    # 5. Run it. The head returns a DICT, not a single tensor.
-    batch = {
-        "input_ids": np.zeros((2, 16), dtype="int32"),
-        "attention_mask": np.ones((2, 16), dtype="int32"),
-    }
-    outputs = sentiment_model.predict(batch, verbose=0)   # {'logits', 'probabilities'}
-
-``create_distilbert_with_head`` performs steps 3-4 for you.
-
-Weight loading. ``pretrained=<path>`` works; ``pretrained=True`` does not:
-
-.. code-block:: python
-
-    # WORKS (repaired 2026-08-11): loads a local .keras file into THIS
-    # configuration, so the architecture must match. Raises if the file
-    # restores nothing.
-    distilbert_encoder = DistilBERT.from_variant("base", pretrained="path/to/weights.keras")
-
-    # RETURNS A RANDOMLY INITIALIZED MODEL, silently apart from one logged
-    # WARNING: every URL in PRETRAINED_WEIGHTS is an example.com placeholder,
-    # the download fails, and the failure is caught.
-    distilbert_encoder = DistilBERT.from_variant("base", pretrained=True)
-
-    # Simplest route to restore a model you saved -- no config to match:
-    distilbert_encoder.save("distilbert.keras")
-    distilbert_encoder = keras.models.load_model("distilbert.keras")
-
+References:
+    - Sanh et al., 2019. DistilBERT, a distilled version of BERT: smaller,
+      faster, cheaper and lighter. (https://arxiv.org/abs/1910.01108)
+    - Hinton et al., 2015. Distilling the Knowledge in a Neural Network.
+      (https://arxiv.org/abs/1503.02531)
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding.
+      (https://arxiv.org/abs/1810.04805)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
+
 
 import os
 import keras
@@ -255,10 +217,9 @@ class DistilBERT(keras.Model):
             print(outputs["last_hidden_state"].shape)
             # (2, 128, 768)
 
-        For ``pretrained=True`` / ``pretrained="path/to/weights.keras"`` see
-        :meth:`from_variant` — neither is runnable out of the box (no
-        checkpoint ships with this repo, and every ``PRETRAINED_WEIGHTS`` URL
-        is a placeholder).
+        ``pretrained="path/to/weights.keras"`` loads a local checkpoint; see
+        :meth:`from_variant`. ``pretrained=True`` raises
+        ``NotImplementedError`` — no checkpoint ships with this repo.
 
     """
 
@@ -284,26 +245,6 @@ class DistilBERT(keras.Model):
             "num_heads": 4,
             "intermediate_size": 1024,
             "description": "DistilBERT-Tiny: Ultra-lightweight for mobile/edge deployment"
-        },
-    }
-
-    # PLACEHOLDER URLs. Not one of these hosts a checkpoint -- they are all
-    # example.com. Any call that reaches them fails; `from_variant` catches the
-    # failure, emits a single logger.warning and returns a RANDOMLY INITIALIZED
-    # model (measured 2026-08-11: `load_pretrained_weights` is invoked 0 times).
-    # Kept, rather than deleted, by explicit user decision; the honest wiring is
-    # the documentation, not a raise.
-    PRETRAINED_WEIGHTS = {
-        "base": {
-            "uncased": "https://example.com/distilbert_base_uncased.keras",
-            "cased": "https://example.com/distilbert_base_cased.keras",
-            "multilingual": "https://example.com/distilbert_base_multilingual.keras",
-        },
-        "small": {
-            "uncased": "https://example.com/distilbert_small_uncased.keras",
-        },
-        "tiny": {
-            "uncased": "https://example.com/distilbert_tiny_uncased.keras",
         },
     }
 
@@ -748,67 +689,43 @@ class DistilBERT(keras.Model):
                 f"value; the other {total - changed} already held the stored value."
             )
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
+    # a non-existent host; `from_variant` caught the download failure, logged a
+    # warning and continued with random initialization, so `pretrained=True`
+    # silently returned an untrained model (measured 2026-08-11:
+    # `load_pretrained_weights` was invoked 0 times on that path). Do NOT
+    # reinstate the table or a warn-and-return branch here or in
+    # `from_variant`. No public DistilBERT weights are distributed with
+    # dl_techniques; pass a local path via `pretrained="/path/to/file.keras"`
+    # or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
         variant: str,
         dataset: str = "uncased",
         cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from the URL registered for a variant.
+        """Resolve a download path for pretrained weights; always raises.
 
-        .. warning::
-           Every URL in :attr:`PRETRAINED_WEIGHTS` is an ``example.com``
-           placeholder, so this method CANNOT return real weights. Calling it
-           directly raises (measured: ``Exception: URL fetch failure on
-           https://example.com/distilbert_tiny_uncased.keras``). It is reached
-           only from :meth:`from_variant`, which catches the failure, warns, and
-           returns a randomly initialized model.
+        Not implemented: no public DistilBERT weights ship with
+        ``dl_techniques``. Pass a local ``.keras`` path to
+        :meth:`from_variant` instead.
 
-        :param variant: Model variant name.
+        :param variant: Model variant name (unused).
         :type variant: str
-        :param dataset: Dataset/version the weights were trained on.
-            Options: "uncased", "cased", "multilingual".
+        :param dataset: Dataset/version identifier (unused).
         :type dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-            If None, uses default Keras cache directory.
+        :param cache_dir: Cache directory (unused).
         :type cache_dir: Optional[str]
-        :return: Path to the downloaded weights file. In practice unreachable —
-            the fetch always fails first, see the warning.
-        :rtype: str
-        :raises ValueError: If variant or dataset is not available.
-
-        Example (RAISES as written — the URL is a placeholder):
-            .. code-block:: python
-
-                weights_path = DistilBERT._download_weights("base", "uncased")
+        :raises NotImplementedError: Always.
         """
-        if variant not in DistilBERT.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(DistilBERT.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in DistilBERT.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(DistilBERT.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = DistilBERT.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading DistilBERT-{variant} ({dataset}) weights...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"distilbert_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/distilbert"
+        raise NotImplementedError(
+            f"No pretrained DistilBERT weights are distributed with "
+            f"dl_techniques (requested variant '{variant}', dataset "
+            f"'{dataset}'). Pass a local checkpoint instead: "
+            f"DistilBERT.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -822,15 +739,10 @@ class DistilBERT(keras.Model):
         """Create a DistilBERT model from a predefined variant.
 
         .. warning::
-           ``pretrained=True`` DOES NOT GIVE YOU TRAINED WEIGHTS. The URLs in
-           :attr:`PRETRAINED_WEIGHTS` are ``example.com`` placeholders; the
-           download fails, the failure is caught here, a single
-           ``logger.warning`` ("Failed to download pretrained weights: ...
-           Continuing with random initialization.") is emitted, and a
-           RANDOMLY INITIALIZED model is returned. Nothing raises, so a caller
-           who ignores logs cannot tell the difference. Measured 2026-08-11:
-           ``load_pretrained_weights`` is invoked 0 times on that path and every
-           non-constant weight differs from an independently built model.
+           ``pretrained=True`` raises ``NotImplementedError``. No public
+           DistilBERT checkpoint ships with this repo. It used to warn and
+           return a RANDOMLY INITIALIZED model, which a caller who ignores logs
+           could not distinguish from a successful load.
 
         .. note::
            ``pretrained="<path>.keras"`` DOES work — it forwards to
@@ -845,9 +757,8 @@ class DistilBERT(keras.Model):
         :type variant: str
         :param pretrained: If a string, a path to a local ``.keras`` weights
             file, loaded via :meth:`load_pretrained_weights` into this
-            configuration. If ``True``, attempts the placeholder download
-            described in the warning above and falls back to random
-            initialization — it does NOT give you trained weights.
+            configuration. If ``True``, raises ``NotImplementedError``. If
+            ``False`` (default), the model is randomly initialized.
         :type pretrained: Union[bool, str]
         :param weights_dataset: Dataset/version for pretrained weights.
             Options: "uncased", "cased", "multilingual".
@@ -860,6 +771,7 @@ class DistilBERT(keras.Model):
         :return: A DistilBERT model instance configured for the specified variant.
         :rtype: DistilBERT
         :raises ValueError: If the specified variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is True.
 
         Example:
             .. code-block:: python
@@ -871,8 +783,13 @@ class DistilBERT(keras.Model):
                 # Custom vocabulary
                 model = DistilBERT.from_variant("base", vocab_size=50000)
 
-                # To restore a model you saved yourself, do NOT use
-                # pretrained= (it raises); use Keras directly:
+                # Warm-start from a local checkpoint
+                model = DistilBERT.from_variant(
+                    "base", pretrained="path/to/weights.keras"
+                )
+
+                # To restore a model you saved yourself, Keras is simpler --
+                # it needs no matching config:
                 #   model.save("distilbert.keras")
                 #   model = keras.models.load_model("distilbert.keras")
         """
@@ -888,32 +805,20 @@ class DistilBERT(keras.Model):
         logger.info(f"Creating DistilBERT-{variant.upper()} model")
         logger.info(f"Configuration: {description}")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
-                # Load from local file path
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
-            # Determine if we need to skip mismatches
-            # Check if vocab_size differs from default
             pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
             custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
 
@@ -924,7 +829,6 @@ class DistilBERT(keras.Model):
                     f"({pretrained_vocab_size}). Will skip embedding layer weights."
                 )
 
-            # Check if other architectural parameters differ
             pretrained_config_keys = ["hidden_size", "num_layers", "num_heads", "intermediate_size"]
             for key in pretrained_config_keys:
                 if key in kwargs and kwargs[key] != config.get(key):
@@ -934,13 +838,9 @@ class DistilBERT(keras.Model):
                         f"Will skip layers with shape mismatches."
                     )
 
-        # Override defaults with kwargs
         config.update(kwargs)
-
-        # Create model
         model = cls(**config)
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -1047,11 +947,9 @@ def create_distilbert_with_head(
 ) -> keras.Model:
     """Factory function to create a DistilBERT model with a task-specific head.
 
-    This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational `DistilBERT` model (optionally pretrained).
-    2. Instantiate a task-specific head from the
-       `dl_techniques.layers.heads.nlp` factory.
-    3. Combine them into a single, end-to-end `keras.Model`.
+    It instantiates a foundational `DistilBERT` model, a task-specific head
+    from the `dl_techniques.layers.heads.nlp` factory, and combines them into a
+    single end-to-end `keras.Model`.
 
     The returned model's output is whatever the head returns — for a
     classification head a DICT (e.g. ``{'logits', 'probabilities'}``), not a
@@ -1061,10 +959,10 @@ def create_distilbert_with_head(
     :type distilbert_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
     :type task_config: NLPTaskConfig
-    :param pretrained: Forwarded to :meth:`DistilBERT.from_variant`. Leave it
-        ``False``: ``True`` attempts a placeholder download that always fails
-        and falls back, with a logged warning, to random initialization, and a
-        string path raises ``ValueError``. See that method's two warnings.
+    :param pretrained: Forwarded to :meth:`DistilBERT.from_variant`. A string
+        path loads a local ``.keras`` checkpoint into this configuration;
+        ``True`` raises ``NotImplementedError``; ``False`` (default) gives
+        random initialization.
     :type pretrained: Union[bool, str]
     :param weights_dataset: Dataset for pretrained weights ("uncased", "cased", etc.).
     :type weights_dataset: str
@@ -1078,6 +976,7 @@ def create_distilbert_with_head(
     :type head_config_overrides: Optional[Dict[str, Any]]
     :return: A complete `keras.Model` ready for the specified task.
     :rtype: keras.Model
+    :raises NotImplementedError: If ``pretrained`` is True.
 
     Example:
         .. code-block:: python
@@ -1106,7 +1005,6 @@ def create_distilbert_with_head(
         f"Creating DistilBERT-{distilbert_variant} with a '{task_config.name}' head."
     )
 
-    # 1. Create the foundational DistilBERT model (with optional pretrained weights)
     distilbert_encoder = DistilBERT.from_variant(
         distilbert_variant,
         pretrained=pretrained,
@@ -1115,15 +1013,13 @@ def create_distilbert_with_head(
         **distilbert_config_overrides
     )
 
-    # 2. Create the task head
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=distilbert_encoder.hidden_size,
         **head_config_overrides,
     )
 
-    # 3. Define inputs and build the end-to-end model
-    # Note: DistilBERT doesn't use token_type_ids
+    # DistilBERT has no token_type_ids input.
     inputs = {
         "input_ids": keras.Input(
             shape=(None,), dtype="int32", name="input_ids"
