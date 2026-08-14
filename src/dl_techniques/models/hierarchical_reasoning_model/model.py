@@ -629,14 +629,36 @@ class HierarchicalReasoningModel(keras.Model):
             Final outputs dictionary.
         """
         carry = self.initial_carry(batch)
-        outputs = None
 
-        # Run steps until all sequences halt
-        max_iterations = self.halt_max_steps * 2  # Safety limit
-        for _ in range(max_iterations):
-            carry, outputs, all_finished = self._forward_step(carry, batch, training=training)
-            if all_finished:
-                break
+        # The trip count is STATIC and the early exit is a tensor-valued freeze,
+        # not a Python ``break``.
+        #
+        # The previous form was ``for _ in range(halt_max_steps * 2): ... if
+        # all_finished: break``. ``all_finished`` is ``ops.all(halted)`` — a
+        # symbolic scalar — so the ``if`` raises OperatorNotAllowedInGraphError
+        # the moment this runs under ``tf.function``, which is the regime
+        # ``fit()`` uses. It only ever worked eagerly.
+        #
+        # ``is_last_step`` forces every sequence to halt by ``halt_max_steps``,
+        # so that is the true bound (the ``* 2`` safety factor was dead). Once
+        # ``done`` goes true we freeze both carry and outputs, which reproduces
+        # the old break exactly: continuing to step would otherwise RESET the
+        # halted sequences (``_forward_step`` resets on ``halted``) and restart
+        # their reasoning, silently returning a different answer.
+        carry, outputs, done = self._forward_step(carry, batch, training=training)
+
+        for _ in range(self.halt_max_steps - 1):
+            next_carry, next_outputs, next_done = self._forward_step(
+                carry, batch, training=training)
+
+            # ``done`` is a scalar bool and broadcasts against every leaf.
+            carry = keras.tree.map_structure(
+                lambda held, fresh: keras.ops.where(done, held, fresh),
+                carry, next_carry)
+            outputs = keras.tree.map_structure(
+                lambda held, fresh: keras.ops.where(done, held, fresh),
+                outputs, next_outputs)
+            done = done | next_done
 
         return outputs
 
@@ -691,38 +713,64 @@ class HierarchicalReasoningModel(keras.Model):
             # Halt if q_halt > q_continue
             halted = halted | (q_halt > q_continue)
 
-            # Exploration: random minimum halt steps
+            # Exploration: random minimum halt steps.
+            # ``keras.random.uniform`` REQUIRES a floating point dtype and raises
+            # unconditionally on an integer one (keras/src/random/random.py:121),
+            # so the integer draw must come from ``keras.random.randint``. This
+            # mirrors tiny_recursive_model/model.py:341, which has always been
+            # correct; HRM was the un-migrated copy.
             if self.halt_exploration_prob > 0:
                 explore_mask = keras.random.uniform(keras.ops.shape(q_halt)) < self.halt_exploration_prob
-                min_steps = keras.random.uniform(
+                min_steps = keras.random.randint(
                     keras.ops.shape(new_steps),
                     minval=2,
-                    maxval=self.halt_max_steps + 1,
-                    dtype="int32"
+                    maxval=self.halt_max_steps + 1
                 )
                 min_halt_steps = keras.ops.where(explore_mask, min_steps, 1)
                 halted = halted & (new_steps >= min_halt_steps)
 
-            # Compute target Q for bootstrapping (as in original)
-            if not is_last_step:
-                # Get next step Q values for target computation
-                next_inner_carry, next_outputs = self.core(
-                    new_inner_carry,
-                    {"token_ids": new_current_data["token_ids"],
-                     "puzzle_ids": new_current_data["puzzle_ids"]},
-                    training=training
-                )
+            # Compute target Q for bootstrapping (as in original).
+            # NOTE: there is deliberately no ``if not is_last_step:`` guard here.
+            # ``is_last_step`` is a per-sequence ``(batch,)`` bool tensor, so a
+            # Python truth-test on it raises (ambiguous truth value eagerly,
+            # OperatorNotAllowedInGraphError under tf.function). The per-sequence
+            # branch is already expressed by the ``ops.where`` below, which is
+            # what the guard was trying and failing to do.
+            #
+            # The lookahead runs with ``training=False`` and the target is
+            # ``stop_gradient``-ed, so the Bellman target is neither stochastic
+            # nor differentiable — otherwise the TD loss can be minimised by
+            # dragging the target toward the prediction (standard target-network
+            # collapse). Ported from tiny_recursive_model/model.py:346-363 (B-3).
+            next_inner_carry, next_outputs = self.core(
+                new_inner_carry,
+                {"token_ids": new_current_data["token_ids"],
+                 "puzzle_ids": new_current_data["puzzle_ids"]},
+                training=False
+            )
 
-                next_q_halt = next_outputs["q_halt_logits"]
-                next_q_continue = next_outputs["q_continue_logits"]
+            next_q_halt = next_outputs["q_halt_logits"]
+            next_q_continue = next_outputs["q_continue_logits"]
 
-                # Target Q: if last step, use halt; otherwise use max
-                target_q = keras.ops.where(
-                    is_last_step,
-                    keras.ops.sigmoid(next_q_halt),
-                    keras.ops.sigmoid(keras.ops.maximum(next_q_halt, next_q_continue))
-                )
-                outputs["target_q_continue"] = target_q
+            # Target Q: if last step, use halt; otherwise use max
+            target_q = keras.ops.where(
+                is_last_step,
+                keras.ops.sigmoid(next_q_halt),
+                keras.ops.sigmoid(keras.ops.maximum(next_q_halt, next_q_continue))
+            )
+            outputs["target_q_continue"] = keras.ops.stop_gradient(target_q)
+
+        if not training and self.halt_max_steps > 1:
+            # Inference: halt on the learned signal OR max-steps, mirroring
+            # training-mode halting minus the exploration branch. Previously
+            # ``halted`` was ``is_last_step`` alone at inference, so ACT always
+            # ran the full budget and the trained q_head was inert — which
+            # contradicts the module docstring at :133 and the "Adaptive
+            # Computation" claim at :45. Ported from
+            # tiny_recursive_model/model.py:365-382 (B-5).
+            halted = is_last_step | (
+                outputs["q_halt_logits"] > outputs["q_continue_logits"]
+            )
 
         # Create new carry
         new_carry = {
