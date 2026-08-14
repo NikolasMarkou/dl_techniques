@@ -27,8 +27,15 @@ network designs:
         channel independently, capturing spatial patterns without the high
         computational cost of standard convolutions.
     -   The UIB can be configured to use zero, one (`use_dw1=True`), or two
-        (`use_dw1=True` and `use_dw2=True`) of these depthwise layers. The first one
-        can optionally perform spatial downsampling via its `stride`.
+        (`use_dw1=True` and `use_dw2=True`) of these depthwise layers.
+
+    -   Spatial downsampling is a property of the BLOCK, not of any one of these
+        optional layers. The `stride` is carried by the first spatial operator
+        that actually exists — `dw1`, else `dw2`, else the `1x1` projection —
+        so the output resolution is the same whichever depthwise convolutions
+        are enabled. It used to sit on `dw1` alone, which meant a block built
+        with `use_dw1=False` silently returned the input resolution while its
+        `compute_output_shape` reported the strided one.
 
 3.  **Projection Phase:**
     -   After the spatial processing, the high-dimensional feature map is projected
@@ -128,7 +135,10 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     :param expanded_channels: Exact number of expansion channels (overrides
         ``expansion_factor``). Defaults to None.
     :type expanded_channels: int or None
-    :param stride: Stride for the first depthwise convolution. Defaults to 1.
+    :param stride: Spatial stride of the block. It is applied by the first
+        spatial operator present — ``dw1``, else ``dw2``, else the ``1x1``
+        projection — so it takes effect for every combination of ``use_dw1``
+        and ``use_dw2``. Defaults to 1.
     :type stride: int
     :param kernel_size: Kernel size for depthwise convolutions. Defaults to 3.
     :type kernel_size: int
@@ -270,6 +280,25 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "use_bias": self.use_bias
         }
 
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-010
+        # The stride belongs to the BLOCK, not to one optional sub-layer. It used
+        # to live only on `dw1`, so `use_dw1=False, stride=2` returned the input
+        # resolution while `compute_output_shape` claimed the strided one, with
+        # no error anywhere (MEASURED: call() (1,16,16,16) vs declared (1,8,8,16)).
+        # Do NOT move the stride to a single always-present site such as
+        # `expand_conv` or `project_conv` unconditionally: that would change what
+        # every currently-shipped block computes. Instead the stride is handed to
+        # the FIRST spatial op that exists, walking this fixed precedence, so the
+        # `use_dw1=True` blocks every shipped variant builds stay bit-identical.
+        # Step 6b inserts a pre-expansion start DW at the HEAD of this list.
+        # See decisions.md D-010.
+        if self.use_dw1:
+            self._stride_owner = 'dw1'
+        elif self.use_dw2:
+            self._stride_owner = 'dw2'
+        else:
+            self._stride_owner = 'project_conv'
+
         # CREATE all sub-layers in __init__ (they remain unbuilt)
         # Expansion phase
         self.expand_conv = layers.Conv2D(
@@ -286,7 +315,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         if self.use_dw1:
             self.dw1 = layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
-                strides=self.stride,
+                strides=self.stride if self._stride_owner == 'dw1' else 1,
                 name='dw1',
                 **self.depth_conv_config
             )
@@ -308,7 +337,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         if self.use_dw2:
             self.dw2 = layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
-                strides=1,
+                strides=self.stride if self._stride_owner == 'dw2' else 1,
                 name='dw2',
                 **self.depth_conv_config
             )
@@ -348,10 +377,16 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.se_activation1 = None
             self.se_activation2 = None
 
-        # Projection phase
+        # Projection phase. This is the stride's fallback owner: when neither
+        # depthwise conv exists (the FFN structure) a strided 1x1 projection is
+        # the only spatial op left, and it decimates rather than filters. That
+        # is the honest cost of asking a block with no spatial operator to
+        # downsample; the alternative — silently ignoring the stride — is the
+        # defect D-010 closes.
         self.project_conv = layers.Conv2D(
             filters=self.filters,
             kernel_size=1,
+            strides=self.stride if self._stride_owner == 'project_conv' else 1,
             name='project_conv',
             **self.conv_config
         )

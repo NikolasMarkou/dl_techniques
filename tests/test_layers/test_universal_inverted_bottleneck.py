@@ -49,6 +49,36 @@ class TestUniversalInvertedBottleneck:
         layer = UniversalInvertedBottleneck(filters=16, stride=2)
         assert layer.compute_output_shape((B, H, W, C)) == (B, 4, 4, 16)
 
+    @pytest.mark.parametrize("stride", [1, 2])
+    @pytest.mark.parametrize("use_dw2", [True, False])
+    @pytest.mark.parametrize("use_dw1", [True, False])
+    def test_stride_is_applied_for_every_depthwise_combination(
+        self, sample, use_dw1, use_dw2, stride
+    ):
+        """The stride must not depend on which optional depthwise convs exist.
+
+        This crosses ``use_dw1=False`` with ``stride>1`` — a crossing no other
+        test in this file makes, which is why the block used to return the
+        UNSTRIDED map while ``compute_output_shape`` claimed the strided one.
+        Both assertions run on every arm on purpose: the first pins the two
+        surfaces against each other, the second pins them to the independently
+        computed value, so an arm where both are wrong the same way still fails.
+        """
+        layer = UniversalInvertedBottleneck(
+            filters=16, stride=stride, use_dw1=use_dw1, use_dw2=use_dw2
+        )
+        declared = tuple(layer.compute_output_shape((B, H, W, C)))
+        actual = tuple(layer(sample).shape)
+
+        assert actual == declared, (
+            f"call() returned {actual} but compute_output_shape() declared "
+            f"{declared} for use_dw1={use_dw1}, use_dw2={use_dw2}, "
+            f"stride={stride}"
+        )
+
+        expected_hw = (H + stride - 1) // stride
+        assert actual == (B, expected_hw, expected_hw, 16)
+
     def test_serialization_round_trip(self, sample, tmp_path):
         inp = keras.Input(shape=(H, W, C))
         out = UniversalInvertedBottleneck(
