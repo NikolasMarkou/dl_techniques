@@ -356,7 +356,6 @@ class TextDecoder(keras.layers.Layer):
             self.positional_embeddings = create_embedding_layer(
                 'continuous_sincos',
                 dim=self.embed_dim,
-                max_seq_len=self.max_seq_len,
                 ndim=1,
                 name="positional_embeddings"
             )

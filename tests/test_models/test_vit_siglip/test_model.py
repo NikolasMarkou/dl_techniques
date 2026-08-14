@@ -1141,5 +1141,38 @@ class TestSigLIPArchitectureValidation:
         assert spatial_features.shape == expected_spatial_shape
 
 
+class TestSigLIPPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `SigLIPVisionTransformer.build` used to call
+    `create_embedding_layer('positional_learned', ..., dropout=...)` while
+    the registry and `PositionalEmbedding.__init__` both declare
+    `dropout_rate`; the factory silently drops unknown keys, so positional
+    dropout was unconditionally 0.0.
+
+    Asserting `model.pos_dropout_rate` would be VACUOUS (that attribute was
+    always correct). This reads the real `keras.layers.Dropout` instance.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer(self):
+        model = SigLIPVisionTransformer(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="tiny",
+            patch_size=8,
+            pos_dropout_rate=0.5,
+        )
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+
+        pos_dropout = model.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(create_embedding_layer silently drops an unknown kwarg name)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

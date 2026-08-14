@@ -1034,5 +1034,40 @@ class TestViTNormalizationKwargs:
         assert model_a.norm.get_config().get("name") == "norm"
 
 
+class TestViTPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `ViT.build` used to call `create_embedding_layer('positional_learned',
+    ..., dropout=...)`, but the registry and `PositionalEmbedding.__init__`
+    both declare `dropout_rate`. `create_embedding_layer` silently filters
+    unknown keys out, so positional dropout was unconditionally 0.0 for
+    every caller.
+
+    Asserting `model.pos_dropout_rate` here would be VACUOUS — the model's
+    own stored attribute was always correct and was never the bug. This
+    reads the real `keras.layers.Dropout` instance's `.rate`.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer(self):
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            pos_dropout_rate=0.5,
+        )
+        # Build via a real forward pass so every sub-layer exists.
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+
+        pos_dropout = model.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(create_embedding_layer silently drops an unknown kwarg name)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

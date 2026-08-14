@@ -1081,3 +1081,53 @@ class TestPositionalModesIsolateOffPrefix:
             ops.convert_to_tensor(images), attention_mask=mask, training=False
         ))
         np.testing.assert_allclose(base, sequence[:, 0, :], rtol=0, atol=0)
+
+
+class TestVisionEncoderPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `VisionEncoder.__init__` used to call
+    `create_embedding_layer('positional_learned', ..., dropout=...)` while the
+    registry and `PositionalEmbedding.__init__` both declare `dropout_rate`;
+    `create_embedding_layer` silently filters unknown keys out, so positional
+    dropout was unconditionally 0.0 for every consumer of the three public
+    builders that route through this one call site.
+
+    Asserting `encoder.pos_dropout_rate` here would be VACUOUS — that stored
+    attribute was always correct and was never the bug. This reads the real
+    `keras.layers.Dropout` instance's `.rate`.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer_direct(self):
+        encoder = VisionEncoder(
+            img_size=32, patch_size=8, embed_dim=64, depth=1, num_heads=4,
+            pos_dropout_rate=0.5,
+        )
+        _ = encoder(ops.convert_to_tensor(
+            np.zeros((1, 32, 32, 3), dtype='float32')), training=False)
+
+        pos_dropout = encoder.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(create_embedding_layer silently drops an unknown kwarg name)"
+        )
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer_via_public_builder(self):
+        """Same assertion through `create_vit_encoder`, one of the three public
+        builders that all funnel into the single fixed call site."""
+        encoder = create_vit_encoder(
+            img_size=32, patch_size=8, embed_dim=64, depth=1, num_heads=4,
+            pos_dropout_rate=0.5,
+        )
+        _ = encoder(ops.convert_to_tensor(
+            np.zeros((1, 32, 32, 3), dtype='float32')), training=False)
+
+        pos_dropout = encoder.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout via "
+            f"create_vit_encoder: got rate={pos_dropout.rate}, expected 0.5"
+        )

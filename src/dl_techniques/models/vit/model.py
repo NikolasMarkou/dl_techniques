@@ -371,7 +371,7 @@ class ViT(keras.Model):
             'positional_learned',
             max_seq_len=self.max_seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout_rate,
+            dropout_rate=self.pos_dropout_rate,
             name="pos_embed"
         )
 
