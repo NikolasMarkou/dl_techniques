@@ -358,7 +358,9 @@ def train_score_vlm(
         epochs: int = 100,
         optimizer_config: Optional[Dict] = None,
         checkpoint_dir: str = 'checkpoints/',
-        log_frequency: int = 100
+        log_frequency: int = 100,
+        sample_every_n_epochs: int = 5,
+        num_sample_steps: int = 50
 ) -> None:
     """
     Main training loop for Score-Based nanoVLM.
@@ -370,6 +372,8 @@ def train_score_vlm(
         optimizer_config: Optimizer configuration
         checkpoint_dir: Directory for checkpoints
         log_frequency: Log every N steps
+        sample_every_n_epochs: Generate monitoring samples every N epochs.
+        num_sample_steps: Reverse-diffusion steps used for those samples.
     """
     logger.info("Starting Score-Based nanoVLM training")
 
@@ -406,8 +410,9 @@ def train_score_vlm(
         logger.info(f"Epoch {epoch + 1}/{epochs}")
         trainer.reset_metrics()
 
+        last_text_tokens = None
         for step, (images, text_tokens) in enumerate(train_dataset):
-            # Training step
+            last_text_tokens = text_tokens
             metrics = trainer.train_step(images, text_tokens)
 
             global_step += 1
@@ -427,10 +432,22 @@ def train_score_vlm(
         inference_model.save(checkpoint_path)
         logger.info(f"Saved checkpoint: {checkpoint_path}")
 
-        # Generate samples for monitoring
-        if epoch % 5 == 0:
-            logger.info("Generating samples...")
-            # TODO: Add sample generation
+        # Generate samples for monitoring. Guarded because generation needs the
+        # vision denoiser, which a text-only configuration does not build; a
+        # monitoring hook must never be able to abort a training run.
+        if epoch % sample_every_n_epochs == 0 and last_text_tokens is not None:
+            try:
+                text_features = inference_model.text_encoder(
+                    {'input_ids': last_text_tokens}, training=False
+                )
+                samples = inference_model.generate_from_text(
+                    text_features, num_inference_steps=num_sample_steps
+                )
+                logger.info(
+                    f"Generated monitoring samples with shape {tuple(samples.shape)}"
+                )
+            except Exception as e:
+                logger.warning(f"Sample generation skipped: {e}")
 
     logger.info("Training completed!")
 

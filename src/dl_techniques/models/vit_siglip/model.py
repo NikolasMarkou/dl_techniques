@@ -229,6 +229,12 @@ class SigLIPVisionTransformer(keras.Model):
         "huge": (1280, 16, 32, 4.0),  # SigLIP ViT-Huge
     }
 
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
+    # definition because the `scale=` constructor argument and the tests already
+    # name it; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
+
     def __init__(
             self,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
@@ -641,6 +647,46 @@ class SigLIPVisionTransformer(keras.Model):
                 return (batch_size, self.embed_dim)
             else:
                 return (batch_size, self.max_seq_len, self.embed_dim)
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            **kwargs: Any
+    ) -> "SigLIPVisionTransformer":
+        """
+        Create a SigLIP vision transformer from a predefined variant.
+
+        Args:
+            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
+            num_classes: Number of output classes.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            SigLIPVisionTransformer model instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> model = SigLIPVisionTransformer.from_variant("base", num_classes=1000)
+            >>> model = SigLIPVisionTransformer.from_variant(
+            ...     "small", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            scale=variant,
+            **kwargs
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """

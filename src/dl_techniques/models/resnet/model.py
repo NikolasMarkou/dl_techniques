@@ -1,38 +1,72 @@
 """
-ResNet Model Implementation with Deep Supervision
-=================================================
+Residual networks with configurable blocks and optional deep supervision.
 
-The ResNet architecture with optional deep supervision. With deep supervision
-enabled the model returns `[final_output, stage3, stage2, stage1]`; otherwise a
-single tensor.
+This model embodies the principle of residual learning, a design paradigm that
+reformulates what each layer is asked to learn rather than changing its capacity.
+The core idea addresses the degradation problem: beyond a certain depth, adding
+layers to a plain convolutional stack makes *training* error worse, not merely
+test error. Since a deeper network can always represent a shallower one by setting
+the extra layers to identity, the failure is one of optimization rather than
+expressiveness. Making the identity the default instead of something the layers
+must discover resolves it:
 
-Based on: "Deep Residual Learning for Image Recognition" (He et al., 2015)
-https://arxiv.org/abs/1512.03385
+`y = F(x) + x`
 
-Model Variants:
---------------
-- ResNet-18: [2, 2, 2, 2] blocks, [64, 128, 256, 512] filters, BasicBlock
-- ResNet-34: [3, 4, 6, 3] blocks, [64, 128, 256, 512] filters, BasicBlock
-- ResNet-50: [3, 4, 6, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
-- ResNet-101: [3, 4, 23, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
-- ResNet-152: [3, 8, 36, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
+A block now learns only the residual `F(x)`, and driving `F` toward zero is far
+easier for gradient descent than fitting an identity map through a stack of
+nonlinear convolutions. The additive shortcut also gives gradients an unobstructed
+path to earlier layers, so signal reaches the network's start without being
+attenuated by every intervening weight matrix.
 
-No pretrained ResNet weights are distributed with `dl_techniques`; `pretrained=True`
-raises `NotImplementedError`. Pass a local path instead: `pretrained="/path/to.keras"`.
+Two block designs trade depth against width. The basic block stacks two 3x3
+convolutions and is used for the shallower variants. The bottleneck block
+sandwiches a 3x3 convolution between 1x1 projections that reduce and then restore
+channel count, which cuts the cost of the spatial convolution by roughly a factor
+of the reduction ratio and is what makes 101 and 152 layer configurations
+tractable. Five preset variants span the standard family, from ResNet-18
+(`[2, 2, 2, 2]`, basic) through ResNet-152 (`[3, 8, 36, 3]`, bottleneck), all over
+the same `[64, 128, 256, 512]` filter progression.
 
-Usage Examples:
--------------
-```python
-# Create model with deep supervision for training
-model = ResNet.from_variant("resnet50", num_classes=1000, enable_deep_supervision=True)
+Architecturally the model is a 7x7 stride-2 stem with max pooling, followed by
+four stages that each halve resolution and double width. Shortcut projections are
+inserted only where the identity cannot be taken verbatim: at the first block of
+every stage after the first, where the stride-2 shortcut changes spatial shape,
+and additionally at stage 0's first block under the bottleneck design, where the
+channel count must widen even though the stride is 1. Everywhere else the shortcut
+is parameter-free, which is what keeps the identity path exactly an identity.
 
-# Feature extractor from a local checkpoint
-model = create_resnet("resnet34", pretrained="/path/to.keras", include_top=False)
+Deep supervision is available as an optional training aid. Intermediate stages are
+given their own pooling and classification heads, so gradient enters the network
+at several depths rather than only at the output. This shortens the effective
+backpropagation distance for early layers and pressures intermediate
+representations to be linearly discriminative on their own. Stage 0 is skipped as
+too shallow to supervise usefully, and the final stage is served by the main head.
+When enabled the model returns `[final_output, stage3, stage2, stage1]`, reversed
+so the deepest supervision head comes first; inference typically consumes index 0
+alone.
 
-# Fine-tune on CIFAR-10 with deep supervision
-model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
-                      enable_deep_supervision=True)
-```
+Normalization and activation are supplied through factories rather than
+hard-coded, and an optional `normalization_kwargs` dict is forwarded to every
+construction site in both the stem and each block. Its default of `None` resolves
+to an empty dict, leaving all factory calls byte-identical to the pre-plumbing
+version so existing checkpoints remain bit-exact.
+
+No pretrained weights are distributed with this package. `pretrained=True` raises
+`NotImplementedError` rather than warning and returning a randomly initialized
+model, which is a deliberate choice: the previous behaviour made an unavailable
+download silently indistinguishable from a successful one. Local checkpoints are
+loaded by path, with shape mismatches in the classifier or input-dependent layers
+skipped by name when the target task differs from the checkpoint's.
+
+References:
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+    - He et al., 2016. Identity Mappings in Deep Residual Networks.
+      (https://arxiv.org/abs/1603.05027)
+    - Lee et al., 2015. Deeply-Supervised Nets. AISTATS 2015.
+      (https://arxiv.org/abs/1409.5185)
+    - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
+      Shallow Networks. (https://arxiv.org/abs/1605.06431)
 """
 
 import os
@@ -56,54 +90,148 @@ from dl_techniques.layers.standard_blocks import (
 
 @keras.saving.register_keras_serializable()
 class ResNet(keras.Model):
-    """ResNet model implementation with pretrained support and deep supervision.
+    """
+    Deep residual network with configurable blocks and optional deep supervision.
 
-    A deep residual learning framework that enables training of very deep
-    networks by using shortcut connections that skip one or more layers.
-    This implementation supports all standard ResNet variants and can adapt
-    to different input sizes.
+    Implements the ResNet family, in which each block learns a residual
+    ``F(x)`` added to an identity shortcut (``y = F(x) + x``) so that depth does
+    not obstruct optimization. A 7x7 stride-2 stem feeds four stages that each
+    halve spatial resolution and double channel width, built from either
+    ``BasicBlock`` (two 3x3 convolutions) or ``BottleneckBlock`` (1x1 reduce,
+    3x3, 1x1 expand). Shortcut projections are inserted only where the identity
+    cannot be taken verbatim: at the first block of every stage after the first
+    (stride-2 shape change), plus stage 0's first block under the bottleneck
+    design (channel widening at stride 1). With ``enable_deep_supervision=True``
+    intermediate stages receive their own GAP + Dense heads, and the model
+    returns ``[final_output, stage3, stage2, stage1]``.
 
-    During training with deep supervision enabled, the model outputs multiple predictions:
-    - Output 0: Final inference output (after final stage, primary output)
-    - Output 1: Supervision output after stage 3
-    - Output 2: Supervision output after stage 2
-    - Output 3: Supervision output after stage 1
+    **Architecture Overview:**
 
-    During inference, only the final output (index 0) is typically used.
+    .. code-block:: text
 
-    Args:
-        num_classes: Integer, number of output classes for classification.
-            Only used if include_top=True.
-        blocks_per_stage: List of integers, number of residual blocks in each stage.
-            Default is [3, 4, 6, 3] for ResNet-50.
-        filters_per_stage: List of integers, number of base filters in each stage.
-            Default is [64, 128, 256, 512].
-        block_type: String, type of residual block. Either "basic" or "bottleneck".
-            Default is "bottleneck" for deeper networks.
-        kernel_regularizer: Regularizer function applied to kernels.
-        normalization_type: String, type of normalization. Default is "batch_norm".
-        activation_type: String, type of activation. Default is "relu".
-        include_top: Boolean, whether to include the classification head.
-        enable_deep_supervision: Boolean, whether to add deep supervision outputs.
-            Default is False.
-        input_shape: Tuple, input shape. If None and include_top=True,
-            uses (224, 224, 3) for ImageNet.
-        **kwargs: Additional keyword arguments for the Model base class.
+        ┌──────────────────────────────────────┐
+        │       Input [B, H, W, C_in]          │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stem: Conv 7×7 /2 → Norm → Act      │
+        │        → MaxPool 3×3 /2              │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 1: N₁ × Block(f₁, stride 1)   │──────┐
+        └───────────────┬──────────────────────┘      │
+                        ▼                             │
+        ┌──────────────────────────────────────┐      │
+        │  Stage 2: N₂ × Block(f₂, stride 2)   │───┐  │
+        └───────────────┬──────────────────────┘   │  │
+                        ▼                          │  │
+        ┌──────────────────────────────────────┐   │  │
+        │  Stage 3: N₃ × Block(f₃, stride 2)   │┐  │  │
+        └───────────────┬──────────────────────┘│  │  │
+                        ▼                       │  │  │
+        ┌──────────────────────────────────────┐│  │  │
+        │  Stage 4: N₄ × Block(f₄, stride 2)   ││  │  │
+        └───────────────┬──────────────────────┘│  │  │
+                        │                       │  │  │
+            ┌───────────┴──────────┐            │  │  │
+            │  Block (residual)    │            │  │  │
+            │  x ──► F(x) ──► (+)  │            │  │  │
+            │  └──── shortcut ──┘  │            │  │  │
+            └───────────┬──────────┘            │  │  │
+                        ▼                       ▼  ▼  ▼ (deep supervision)
+        ┌──────────────────────────────────────┐ ┌──────────────┐
+        │  GAP → Dense(num_classes)            │ │ GAP → Dense  │
+        │  (if include_top)                    │ │ per stage    │
+        └───────────────┬──────────────────────┘ └──────┬───────┘
+                        │                               │
+                        ▼                               ▼
+        ┌───────────────────────────────────────────────────────┐
+        │  Output: [B, num_classes]                             │
+        │   include_top=False        → [B, H', W', f₄·expansion]│
+        │   deep_supervision=True    → [final, s3, s2, s1]      │
+        └───────────────────────────────────────────────────────┘
 
-    Raises:
-        ValueError: If blocks_per_stage and filters_per_stage have different lengths.
-        ValueError: If block_type is not "basic" or "bottleneck".
+    **Variants:**
+
+    .. code-block:: text
+
+        resnet18   [2, 2, 2, 2]   [64, 128, 256, 512]   basic
+        resnet34   [3, 4, 6, 3]   [64, 128, 256, 512]   basic
+        resnet50   [3, 4, 6, 3]   [64, 128, 256, 512]   bottleneck
+        resnet101  [3, 4, 23, 3]  [64, 128, 256, 512]   bottleneck
+        resnet152  [3, 8, 36, 3]  [64, 128, 256, 512]   bottleneck
+
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``. A value of 0 returns pooled features from the head.
+    :type num_classes: int
+    :param blocks_per_stage: Number of residual blocks in each stage. Must have
+        the same length as ``filters_per_stage``. Defaults to ``[3, 4, 6, 3]``.
+    :type blocks_per_stage: Optional[List[int]]
+    :param filters_per_stage: Base filter count per stage. Defaults to
+        ``[64, 128, 256, 512]``.
+    :type filters_per_stage: Optional[List[int]]
+    :param block_type: Residual block design, ``'basic'`` or ``'bottleneck'``.
+        Defaults to ``'bottleneck'``.
+    :type block_type: Literal['basic', 'bottleneck']
+    :param kernel_regularizer: Optional regularizer applied to all convolution
+        and dense kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization layer identifier passed to
+        ``create_normalization_layer``. Defaults to ``'batch_norm'``.
+    :type normalization_type: str
+    :param normalization_kwargs: Optional kwargs forwarded to every
+        normalization factory call in the stem and in every block. ``None``
+        resolves to ``{}``, keeping all calls byte-identical to the
+        pre-plumbing version so existing checkpoints stay bit-exact.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param activation_type: Activation identifier passed to
+        ``create_activation_layer``. Defaults to ``'relu'``.
+    :type activation_type: str
+    :param include_top: Whether to include the classification head. When False
+        the final stage's feature maps are returned. Defaults to True.
+    :type include_top: bool
+    :param enable_deep_supervision: Whether to attach auxiliary classification
+        heads to intermediate stages. Requires ``include_top=True``. Stage 0 is
+        skipped as too shallow to supervise. Defaults to False.
+    :type enable_deep_supervision: bool
+    :param input_shape: Input shape ``(height, width, channels)`` excluding the
+        batch dimension. Defaults to ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, ...]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+
+    :raises ValueError: If ``blocks_per_stage`` and ``filters_per_stage`` differ
+        in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, or
+        if ``input_shape`` is not 3D.
+
+    Input shape:
+        4D tensor with shape ``(batch_size, height, width, channels)``.
+
+    Output shape:
+        - ``include_top=True``: 2D tensor ``(batch_size, num_classes)``.
+        - ``include_top=False``: 4D tensor ``(batch_size, H', W', channels)``.
+        - ``enable_deep_supervision=True``: list of 2D tensors, ordered
+          ``[final_output, stage3, stage2, stage1]`` (reversed, matching the
+          BFUNet output convention). Inference typically uses index 0 alone.
 
     Example:
-        >>> # Create ResNet-50 model for ImageNet
+        >>> # ResNet-50 for ImageNet
         >>> model = ResNet.from_variant("resnet50", num_classes=1000)
         >>>
-        >>> # Create with deep supervision for training
+        >>> # Deep supervision for training
         >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
         >>>
-        >>> # Load as feature extractor from a local checkpoint
+        >>> # Feature extractor from a local checkpoint
         >>> model = ResNet.from_variant("resnet34", pretrained="/path/to.keras",
         ...                             include_top=False)
+
+    Note:
+        No pretrained ResNet weights are distributed with ``dl_techniques``.
+        ``pretrained=True`` raises ``NotImplementedError`` rather than warning
+        and returning a randomly-initialized model; pass a local checkpoint via
+        ``pretrained='/path/to/weights.keras'`` instead.
     """
 
     MODEL_VARIANTS = {

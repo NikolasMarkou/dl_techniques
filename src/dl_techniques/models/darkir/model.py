@@ -376,7 +376,7 @@ class FreMLP(keras.layers.Layer):
 
         # 4. Reconstruct with the original phase: scale the unit phasor
         # (freq / |freq|) by the processed magnitude. Guard the divide.
-        denom = ops.maximum(mag, keras.backend.epsilon())
+        denom = ops.maximum(mag, keras.config.epsilon())
         out_real = mag_proc * (freq_real / denom)
         out_imag = mag_proc * (freq_imag / denom)
 

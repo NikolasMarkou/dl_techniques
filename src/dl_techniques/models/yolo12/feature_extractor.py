@@ -50,6 +50,43 @@ class YOLOv12FeatureExtractor(keras.Model):
         "x": [1.00, 1.50],  # extra-large
     }
 
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
+    # definition because `multitask.py` and the tests already read it by that
+    # name; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            input_shape: Tuple[int, int, int] = (640, 640, 3),
+            **kwargs: Any
+    ) -> "YOLOv12FeatureExtractor":
+        """
+        Create a YOLOv12 feature extractor from a predefined scale variant.
+
+        Args:
+            variant: Scale key, one of 'n', 's', 'm', 'l', 'x'.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            YOLOv12FeatureExtractor instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> backbone = YOLOv12FeatureExtractor.from_variant("s")
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(input_shape=input_shape, scale=variant, **kwargs)
+
     def __init__(
             self,
             input_shape: Tuple[int, int, int] = (640, 640, 3),

@@ -524,7 +524,7 @@ class MobileClipTextEncoder(keras.layers.Layer):
             # graph-safety change and does not alter mixed-precision behaviour.
             causal_mask = ops.cast(
                 ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
-                keras.backend.floatx(),
+                keras.config.floatx(),
             )
             causal_mask = ops.expand_dims(causal_mask, axis=0)
 

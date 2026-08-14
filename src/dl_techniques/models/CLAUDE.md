@@ -166,27 +166,36 @@ is a target, not a universal law: see "When the shape does not apply" at the end
 
 ### Axis 1 — module skeleton
 
+**The module docstring is substantive prose, not a template.** `models/resnet/model.py`
+is the exemplar. Its shape:
+
+1. **One opening sentence** naming the architecture and its distinguishing options —
+   a sentence, not a title with an `====` underline.
+2. **Prose explaining the principle**: what problem the architecture solves and *why its
+   mechanism resolves it*, not just what the layers are. Inline math in backticks
+   (`` `y = F(x) + x` ``) where an equation carries the idea.
+3. **Prose on the architecture itself**: the stage/block structure, the design trade-offs,
+   and — importantly — the places where the code does something non-obvious and why
+   (ResNet's docstring explains exactly which shortcuts need a projection and which stay
+   parameter-free, because that is the part a reader would otherwise get wrong).
+4. **Any deliberate behavioural choice**, stated as a choice with its reason (e.g. why
+   `pretrained=True` raises rather than warning and returning a random model).
+5. **A `References:` section** listing papers as `- Author et al., YEAR. Title. (url)`.
+   Include the papers the design actually draws on, not only the headline one.
+
+What this replaces: terse `Model Variants:` / `Usage Examples:` boilerplate blocks that
+restate the `MODEL_VARIANTS` dict and the factory signature. Those are already in the
+code directly below; the docstring's job is the reasoning that is *not* in the code.
+
+Read `models/resnet/model.py`'s docstring before writing one. Length follows the
+architecture — ResNet's is ~70 lines because that much is genuinely worth saying. Do not
+pad, and do not move real explanation to the README to hit a line budget; benchmark
+tables and usage walkthroughs are what belongs in the README.
+
+After the docstring: imports, the `# local imports` banner, `# -----` separator bars,
+`@keras.saving.register_keras_serializable()`.
+
 ```python
-"""
-<Model> Model Implementation
-============================
-
-Two to five sentences on what the architecture is and what `call` returns.
-
-Based on: "<Paper Title>" (Author et al., YEAR)
-https://arxiv.org/abs/XXXX.XXXXX
-
-Model Variants:
---------------
-- <variant>: <the numbers that distinguish it>
-
-Usage Examples:
--------------
-```python
-model = create_<name>("<variant>", num_classes=10, input_shape=(32, 32, 3))
-```
-"""
-
 import os
 import keras
 from typing import List, Optional, Union, Tuple, Dict, Any, Literal
@@ -200,9 +209,6 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 ```
-
-Architecture essays, benchmark tables and design rationale belong in the package
-`README.md`, not the module docstring. Keep the module docstring under ~50 lines.
 
 ### Axis 2 — class API
 
