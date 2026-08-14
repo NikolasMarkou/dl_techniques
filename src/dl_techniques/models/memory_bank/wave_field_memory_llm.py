@@ -54,9 +54,6 @@ from dl_techniques.models.memory_bank.read_controller import (
 )
 from dl_techniques.models.memory_bank.phase_scheduler import (
     PHASE_WARMUP,
-    PHASE_FREEZE_BACKBONE,
-    PHASE_FULL,
-    PHASE_EXTEND,
 )
 
 
@@ -805,6 +802,19 @@ class WaveFieldMemoryLLM(keras.Model):
         config.update(overrides)
         return cls(**config)
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "WaveFieldMemoryLLM":
+        """Rebuild from a ``get_config()`` dict.
+
+        Every value ``get_config`` emits is a plain scalar, so this is a
+        straight ``cls(**config)``. It is spelled out rather than inherited to
+        record the one constructor argument that deliberately does NOT survive
+        a round-trip: ``top_k_schedule`` is a Python callable, is therefore
+        absent from ``get_config``, and a reloaded model runs with the fixed
+        ``top_k``. Re-attach it after loading if you were using one.
+        """
+        return cls(**config)
+
 
 # ---------------------------------------------------------------------
 
@@ -843,3 +853,30 @@ def memory_llm_custom_objects() -> Dict[str, Any]:
         MemoryReadController,
     )
     return {keras.saving.get_registered_name(cls): cls for cls in classes}
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_wave_field_memory_llm(
+    variant: str = "small",
+    **overrides: Any,
+) -> WaveFieldMemoryLLM:
+    """Create a :class:`WaveFieldMemoryLLM` from a named variant.
+
+    :param variant: One of ``WaveFieldMemoryLLM.MODEL_VARIANTS``
+        ("tiny", "small", "medium", "large", "xl").
+    :param overrides: Constructor arguments overriding the variant's entries.
+    :returns: A configured :class:`WaveFieldMemoryLLM`.
+    :raises ValueError: If ``variant`` is not a known variant name.
+
+    Example::
+
+        model = create_wave_field_memory_llm("tiny", vocab_size=128)
+        logits = model(token_ids)
+    """
+    return WaveFieldMemoryLLM.from_variant(variant, **overrides)
+
+# ---------------------------------------------------------------------

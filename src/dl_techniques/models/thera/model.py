@@ -50,7 +50,7 @@ Reference:
 """
 
 import keras
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -450,5 +450,36 @@ def build_thera(
         k_init=k_init,
         components_init_scale=components_init_scale,
     )
+
+# ---------------------------------------------------------------------
+
+
+def create_thera(
+    variant: str = "edsr-pro",
+    **overrides: Any,
+) -> Thera:
+    """Create a THERA model from one of the six named configs.
+
+    House-shape alias over :meth:`Thera.from_variant`. ``build_thera`` is the
+    older, still-supported entry point taking ``backbone``/``size`` keys
+    separately and has existing callers; this factory names the same six
+    combinations as single variant strings.
+
+    Args:
+        variant: One of ``Thera.MODEL_VARIANTS`` (``edsr-air``, ``edsr-plus``,
+            ``edsr-pro``, ``rdn-air``, ``rdn-plus``, ``rdn-pro``).
+        **overrides: Forwarded to :func:`build_thera` (e.g. ``out_dim``,
+            ``k_init``, ``components_init_scale``).
+
+    Returns:
+        A constructed :class:`Thera` model.
+
+    Raises:
+        ValueError: If ``variant`` is not a known config name.
+
+    Example:
+        >>> model = create_thera("edsr-air", out_dim=3)
+    """
+    return Thera.from_variant(variant, **overrides)
 
 # ---------------------------------------------------------------------

@@ -30,8 +30,6 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 from keras import ops
 
-from dl_techniques.utils.logger import logger
-
 
 _NEG_INF = -1.0e9
 
