@@ -91,7 +91,7 @@ from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.match_channels import MatchChannels
 from dl_techniques.layers.attention.factory import create_attention_layer
 
-from .common import _downsample_and_skip
+from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -898,18 +898,20 @@ def create_convunext_denoiser(
         # Skip connection + downsample for this level. Under the Laplacian pyramid
         # path this is ONE channel-preserving split (high -> skip, low -> next level);
         # otherwise the original raw-skip + MaxPooling2D. The last encoder level's
-        # downsample is the bottleneck downsample (preserved name for checkpoint compat).
-        downsample_name = (
+        # downsample is the bottleneck downsample (preserved name). The junction Layer
+        # WRAPS the pooling/pyramid op, so the caller-visible name now belongs to the
+        # wrapper and the inner op is named '<name>_pool' / '<name>_pyramid' (accepted
+        # graph change C-1). The returned order is (skip, downsampled) on both paths --
+        # do NOT swap it; both outputs are rank-4 and a shape check cannot see the swap.
+        junction_name = (
             f'encoder_downsample_{level}' if level < depth - 1 else 'bottleneck_downsample'
         )
-        skip, x = _downsample_and_skip(
-            x,
-            use_laplacian_pyramid,
-            laplacian_kernel_size,
-            downsample_name=downsample_name,
-            pyramid_name=f'encoder_pyramid_{level}',
+        skip, x = DownsampleAndSkip(
+            use_laplacian_pyramid=use_laplacian_pyramid,
+            laplacian_kernel_size=laplacian_kernel_size,
             pool_type=downsample_pool_type,
-        )
+            name=junction_name,
+        )(x)
 
         # DECISION plan_2026-07-10_be906be8/D-002: optionally process the Laplacian
         # high-frequency band with N bias-free ConvNeXt blocks before it becomes the

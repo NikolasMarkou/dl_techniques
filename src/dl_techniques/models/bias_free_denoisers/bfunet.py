@@ -37,7 +37,7 @@ from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidu
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.match_channels import MatchChannels
 
-from .common import _downsample_and_skip
+from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations
@@ -341,22 +341,23 @@ def create_bfunet_denoiser(
                         name=f'encoder_level_{level}_conv_{block_idx}'
                     )(x)
 
-        # Skip connection + downsample. ALL levels route through the helper so the
-        # pool-type / Laplacian-pyramid swap lives in one place. The last level's pool
-        # feeds the bottleneck and keeps the original name 'bottleneck_downsample', so the
-        # OFF path is byte-identical (skip = pre-pool x, MaxPooling2D at the same names).
-        if level < depth - 1:
-            skip, x = _downsample_and_skip(
-                x, use_laplacian_pyramid, laplacian_kernel_size,
-                f'encoder_downsample_{level}', f'encoder_pyramid_{level}',
-                downsample_pool_type,
-            )
-        else:
-            skip, x = _downsample_and_skip(
-                x, use_laplacian_pyramid, laplacian_kernel_size,
-                'bottleneck_downsample', 'bottleneck_pyramid',
-                downsample_pool_type,
-            )
+        # Skip connection + downsample. ALL levels route through the DownsampleAndSkip
+        # Layer so the pool-type / Laplacian-pyramid swap lives in one place. The last
+        # level's pool feeds the bottleneck and keeps the original name
+        # 'bottleneck_downsample'. The junction Layer WRAPS the pooling/pyramid op, so
+        # the caller-visible name now belongs to the wrapper and the inner op is named
+        # '<name>_pool' / '<name>_pyramid' (accepted graph change C-2). The returned
+        # order is (skip, downsampled) on both paths -- do NOT swap it.
+        junction_name = (
+            f'encoder_downsample_{level}' if level < depth - 1
+            else 'bottleneck_downsample'
+        )
+        skip, x = DownsampleAndSkip(
+            use_laplacian_pyramid=use_laplacian_pyramid,
+            laplacian_kernel_size=laplacian_kernel_size,
+            pool_type=downsample_pool_type,
+            name=junction_name,
+        )(x)
 
         # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
         # high-frequency band with N bias-free residual blocks before it becomes the
