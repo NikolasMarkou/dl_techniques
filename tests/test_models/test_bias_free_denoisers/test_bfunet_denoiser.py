@@ -825,5 +825,40 @@ class TestBiasFreeUNetParameterized:
         assert not np.any(np.isinf(output.numpy()))
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `BFUNET_PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `create_bfunet_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_create_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained BFUNet weights"):
+            create_bfunet_variant("tiny", (32, 32, 1), pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = create_bfunet_variant("tiny", (32, 32, 1), pretrained=False)
+        assert isinstance(model, keras.Model)
+
+    def test_local_path_still_works(self, tmp_path):
+        src = create_bfunet_variant("tiny", (32, 32, 1))
+        path = str(tmp_path / "bfunet.keras")
+        src.save(path)
+        loaded = create_bfunet_variant("tiny", (32, 32, 1), pretrained=path)
+        x = np.random.rand(1, 32, 32, 1).astype("float32")
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(src(x)),
+            keras.ops.convert_to_numpy(loaded(x)),
+            atol=1e-6,
+        )
+
+    def test_no_placeholder_weight_table(self):
+        import dl_techniques.models.bias_free_denoisers.bfunet as mod
+        assert not hasattr(mod, "BFUNET_PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
