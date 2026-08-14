@@ -1,12 +1,81 @@
 """
-Causal Language Model (CLM) Pre-training Framework
-====================================================
+Causal language model pre-trainer that wraps a decoder backbone, shifts inputs against
+labels by one position, and projects hidden states to vocabulary logits through an
+output head whose weights are tied to the backbone's embedding matrix when one can be
+found.
 
-A flexible and model-agnostic framework for pre-training Autoregressive (Causal)
-NLP foundation models using the Next Token Prediction objective.
+Next-token prediction is the exact chain-rule factorization of the sequence likelihood,
+`log p(x) = sum_t log p(x_t | x_<t)`, which is what makes it both a valid density model
+and unusually efficient supervision: a single forward pass over a length-`T` sequence
+produces `T - 1` scored predictions, against roughly `0.15 * T` for masked language
+modelling. Nothing is held out of the input, so no capacity is spent reconstructing
+deliberately destroyed tokens.
 
-This module is designed to work with any Keras-based transformer backbone that
-supports causal masking (e.g., GPT-2, LLaMA, Mistral).
+That efficiency rests entirely on one structural condition: the representation at
+position `t` must not depend on `x_{>t}`. **This module does not enforce it.** It never
+constructs a causal attention mask. The only mask it touches is the caller's
+`attention_mask`, which it treats purely as a padding indicator - slicing it to the
+input length and later reusing it as loss weights - and forwards to the backbone
+unchanged. Causality is the backbone's responsibility. Attach a bidirectionally
+attending encoder here and position `t` reads the very token it is asked to predict;
+the failure is silent and looks like spectacular success, with the loss collapsing
+toward zero and accuracy toward one within a handful of steps. A pre-training run that
+converges implausibly fast is evidence about the mask, not about the data.
+
+The shift convention is `x = input_ids[:, :-1]` and `y = input_ids[:, 1:]`, applied
+inside `train_step`/`test_step` so that datasets stay unshifted and the training and
+evaluation paths cannot drift apart. One consequence is worth stating because it is
+easy to misread: the sample weights are the *input*-position slice
+`attention_mask[:, :-1]`, not a label-aligned mask. At the last real token the input
+mask is 1 while the label is the first padding id, so that transition is scored and
+learned, and every position after it is weighted 0. This is the right behaviour when
+the padding id doubles as an end-of-sequence marker and the wrong one otherwise; to
+suppress it, hand in a mask already zeroed at the final real position.
+
+The output head is `logits = h @ E^T + b` when weight tying succeeds. Tying rests on the
+observation that the input and output vocabularies index the same objects, so a single
+matrix can serve both directions; it removes `hidden_size * vocab_size` parameters,
+which for a large vocabulary is a substantial fraction of the model, and typically
+improves perplexity. Locating `E` in an arbitrary backbone is necessarily heuristic and
+is attempted in order: an explicit `get_embedding_matrix()` method, a `token_embeddings`
+sublayer (searched for a variable of shape `(vocab_size, hidden_size)`, then
+`.embeddings`, then `.weight`), and finally a HuggingFace-shaped
+`embeddings.word_embeddings.weight` or `embeddings.weight`. If none matches, the model
+falls back to an untied `Dense` instead of failing; the warning only fires once the
+model is already built, so a tying request that quietly did not take is visible in the
+logs but does not stop the run. A zero-initialized bias is added in the tied path even
+though the tied kernel carries no bias of its own, because tying fixes the projection
+directions but leaves the per-token frequency prior unmodelled.
+
+Two construction-order choices are deliberate. With `tie_weights=False` the `Dense` head
+is created in `__init__` rather than in `build`, so that `load_model()` always finds an
+existing layer to restore weights into; in the tied path there is no kernel to restore
+and only the bias needs to exist, so it is created in `build`. And `build` wraps the
+backbone's own `build` in a bare `except`, because a backbone taking a dict of inputs
+will often reject a single `input_shape`; proceeding is safe since the first real call
+builds it anyway, whereas raising would break tying for every dict-input backbone.
+`_apply_output_head` re-enters `build` if the head components are still missing, so a
+direct `call()` without an explicit `build()` works.
+
+The perplexity tracker averages `exp(batch_loss)` over batches rather than exponentiating
+the averaged loss. By Jensen's inequality the reported figure is an upper bound on the
+true corpus perplexity and is not comparable with a perplexity computed from an
+aggregated loss; for reporting, exponentiate the tracked loss instead.
+
+The backbone contract mirrors the masked-language-model wrapper: it must expose a
+`hidden_size` attribute (a missing one raises `ValueError`) and return a mapping
+containing `last_hidden_state`. `train_step` uses `tf.GradientTape` directly, so this
+model is TensorFlow-backend only.
+
+References:
+    - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language Models.
+      (https://arxiv.org/abs/1608.05859)
+    - Inan et al., 2016. Tying Word Vectors and Word Classifiers: A Loss Framework for
+      Language Modeling. (https://arxiv.org/abs/1611.01462)
 """
 
 import keras

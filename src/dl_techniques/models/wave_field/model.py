@@ -1,51 +1,59 @@
-"""WaveFieldLLM — decoder-only LM with WaveFieldAttention.
+"""
+Decoder-only language model that substitutes :class:`WaveFieldAttention` for
+dot-product multi-head attention inside a GPT-2-style pre-norm stack, with a
+weight-tied LM head and a `field_size` hyperparameter that jointly with
+`max_seq_len` decides whether the stack is actually causal.
 
-A decoder-only language model, trained with a causal LM objective, that drops
-:class:`WaveFieldAttention`
-into a GPT-2-style pre-norm transformer stack in place of dot-product
-multi-head attention. The architecture mirrors :class:`GPT2` (token + learned
-positional embeddings, pre-norm transformer blocks, weight-tied LM head) but
-assembles its own decoder block locally (``WaveFieldDecoderBlock``) so it can
-forward an attention mask of shape ``(B, N)`` — the shape WaveFieldAttention
-expects — without touching the shared attention factory or
-``TransformerLayer`` (which expect ``(B, N, N)``).
+The mechanism being explored is a replacement for pairwise attention's quadratic
+mixing. Softmax attention computes an `N x N` interaction matrix, which is both its
+expressive strength and its cost. Wave-field attention instead routes information
+through a shared medium: each token is mapped to an absolute position on a 1-D field
+grid of `field_size` cells and *deposits* its value there, weighted by the magnitude
+of its key, using a bilinear split across the two cells its real-valued position
+falls between. The field is then convolved with a per-head damped-wave kernel
+`k(t) = exp(-alpha * t) * cos(omega * t + phi)` for `t >= 0`, evaluated by FFT; a
+learnable coupling matrix mixes heads at each grid position; and every token
+*gathers* back from the convolved field at its own position. Tokens never see each
+other directly -- they see what the medium carries -- so cost is `O(N*D +
+G log G * H * D_h)` rather than `O(N^2 * D)`. The damping sets an effective
+interaction range and the oscillation a preferred phase relationship, which is the
+sense in which the kernel is a learned, structured, infinitely-long convolution
+rather than a fixed local window. Two multiplicative gates then restore some
+content-dependence that a pure convolution lacks: `sigmoid(Q / sqrt(d_h))` modulates
+the gathered field per token, and a projection of the block input gates the output.
 
-Architecture::
+The model wrapped around that layer is deliberately conventional, so the attention
+is the only variable under test: learned token and positional embeddings, a
+LayerNorm and dropout on the embedding output, `depth` pre-norm blocks each running
+attention and a `4D` GELU FFN over residual connections, a final LayerNorm, and a
+head that by default reuses the transposed token embedding matrix rather than
+learning its own `V x D` projection. The block is defined locally as
+`WaveFieldDecoderBlock` rather than assembled from `TransformerLayer` or the
+attention factory for one concrete reason: those expect a `(B, N, N)` attention mask,
+while `WaveFieldAttention` takes a `(B, N)` padding mask (it has no pairwise matrix
+to mask), and bending either side to fit would have meant changing shared code for a
+single consumer.
 
-    Input IDs (B, N)
-         │
-         ▼
-    Token Embedding + Positional Embedding
-         │
-         ▼
-    Embed LayerNorm + Dropout
-         │
-         ▼
-    WaveFieldDecoderBlock × depth
-       │
-       ├─ pre-norm
-       ├─ WaveFieldAttention   (no causal mask — see Causality below)
-       ├─ residual
-       ├─ pre-norm
-       ├─ FFN: Dense(4D, gelu) -> Dense(D) -> Dropout
-       └─ residual
-         │
-         ▼
-    Final LayerNorm
-         │
-         ▼
-    LM Head: tied -> hidden @ E.T  |  untied -> Dense(vocab, no bias)
-         │
-         ▼
-    {"logits": (B, N, V), "last_hidden_state": (B, N, D)}
+Two build-time details are not optional. Sub-layers are built EAGERLY in
+`_build_architecture` and again explicitly in the block's `build`, because
+`WaveFieldAttention` creates weights through an initializer that calls
+`keras.random.normal`; under Keras 3's symbolic tracing of a subclassed
+`keras.Model`, nested build can be skipped, and the failure mode is not an error but
+an initializer that re-fires on every forward pass with no backing variable. And the
+embedding pipeline is ordered add -> norm -> dropout: `PositionalEmbedding`'s own
+dropout is disabled and `embed_dropout` is kept as a separate post-norm layer,
+because the layer's internal order would give add -> dropout -> norm, which under an
+identical dropout mask differs by up to ~38% of signal RMS at this model's default
+dropout rate. That is a behaviour change, not a cleanup (D-006).
 
 Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressively):
     This module builds NO explicit causal mask. Whatever token-level causality
     the stack has comes entirely from :class:`WaveFieldAttention`'s
     left-aligned damped wave kernel, and that layer explicitly refuses to
-    guarantee it: the kernel is causal on the FIELD GRID only, while the
-    bilinear scatter/gather spans two grid cells, so a later token can deposit
-    into a cell an earlier token gathers from. See the "Causality" section of
+    guarantee it: the kernel is causal on the FIELD GRID only (output at grid
+    cell `g` depends only on cells `<= g`), while the bilinear scatter/gather
+    spans two grid cells, so a later token can deposit into a cell an earlier
+    token gathers from. See the "Causality" section of
     ``src/dl_techniques/layers/attention/wave_field_attention.py`` — "no
     sufficient condition on ``field_size`` / ``max_seq_len`` is offered here",
     "Do NOT rely on this layer for autoregressive decoding".
@@ -76,8 +84,8 @@ Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressive
     MAGNITUDE: a clean row stays below 1e-5, a leaky row stays above 1e-5, and
     the two are separated by ~40x in the measurements above.
 
-    ``field_size`` defaults to ``2 * max_seq_len`` (ratio 2.0), which measured
-    clean at every configuration tested and whose stride
+    ``field_size`` defaults to ``2 * max_seq_len`` (ratio 2.0, D-002), which
+    measured clean at every configuration tested and whose stride
     ``(2M - 1) / (M - 1) > 2`` keeps consecutive tokens more than one grid
     cell apart. That is evidence, not a proof, and it is NOT a ratio
     threshold: ratio 1.50 leaks while ratio 1.00 does not, so the property is
@@ -86,10 +94,38 @@ Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressive
     ``TestWaveFieldLLMCausalityRatioSweep`` in
     ``tests/test_models/test_wave_field/test_model.py``.
 
+Other deliberate choices:
+
+- No pretrained weights are distributed with this package. `pretrained=True` reaches
+  `_download_weights`, which raises `NotImplementedError` naming the local-path
+  alternative, rather than warning and returning a randomly initialized model — the
+  behaviour it replaced handed a caller who asked for pretrained weights an untrained
+  model with no exception (D-005). The surrounding `except` clause is narrowed to
+  concrete I/O errors for the same reason; broadening it to `Exception` would swallow
+  that `NotImplementedError` and reinstate the bug. A local checkpoint is loaded by
+  passing `pretrained="/path/to/file.keras"`, with `skip_mismatch=True` so a differing
+  vocabulary does not block the rest of the weights.
+- The class default `vocab_size` is 50261 — tiktoken `gpt2`'s 50257 plus 4 special
+  tokens — matching the training script's default so direct instantiation cannot
+  silently disagree with the trainer (D-005).
+- `call` returns a dict `{"logits", "last_hidden_state"}` rather than a bare tensor,
+  so the shared causal-LM loss and data wrappers that key on `"logits"` work unchanged.
+
 References:
-    - Radford et al., "Language Models are Unsupervised Multitask Learners",
-      2019 (GPT-2 reference architecture).
-    - Internal: ``src/dl_techniques/layers/attention/wave_field_attention.py``.
+    - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
+      (GPT-2 reference architecture; OpenAI technical report, no arXiv id)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Gu et al., 2022. Efficiently Modeling Long Sequences with Structured State
+      Spaces. (https://arxiv.org/abs/2111.00396)
+    - Poli et al., 2023. Hyena Hierarchy: Towards Larger Convolutional Language
+      Models. (https://arxiv.org/abs/2302.10866)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer Architecture.
+      (https://arxiv.org/abs/2002.04745)
+    - Press & Wolf, 2017. Using the Output Embedding to Improve Language Models.
+      (https://arxiv.org/abs/1608.05859)
+    - Cooley & Tukey, 1965. An Algorithm for the Machine Calculation of Complex
+      Fourier Series. Mathematics of Computation 19(90).
 """
 
 import keras

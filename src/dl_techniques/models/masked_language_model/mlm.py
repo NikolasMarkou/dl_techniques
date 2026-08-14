@@ -1,49 +1,81 @@
 """
-Masked Language Model (MLM) Pre-training Framework
-====================================================
+Masked language model pre-trainer that wraps an arbitrary encoder and corrupts its
+input on the fly, with a configurable mask/random/unchanged corruption split.
 
-A flexible and model-agnostic framework for pre-training NLP foundation models
-using the Masked Language Modeling (MLM) objective, as introduced in BERT.
-This module is designed to work with any Keras-based transformer encoder.
+Autoregressive factorization conditions each token only on its left context, which
+forces every representation in the network to be one-sided. Masked language modelling
+removes that constraint by changing the objective rather than the architecture: delete
+a random subset `S` of positions and maximize `sum_{i in S} log p(x_i | x_notS)`. Because
+the target is held out of the input, attention can be fully bidirectional without the
+prediction becoming trivial, and each position's representation is free to use both
+sides of the sentence. The price is supervision density: only the selected positions
+produce any signal, so a sequence yields roughly `mask_ratio * T` training targets
+instead of `T`. That is why the ratio is a tuned quantity, and why the corruption is
+drawn fresh inside `train_step`/`test_step` rather than baked into the dataset - the
+same example is masked differently on every epoch, which multiplies the effective
+number of distinct training examples at no storage cost.
 
-Based on: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"
-(Devlin et al., 2018) https://arxiv.org/abs/1810.04805
+The corruption itself is not a plain deletion, and the reason is a train/deploy
+mismatch: the `[MASK]` id is an artifact of pre-training and never appears in the
+downstream inputs the encoder will eventually see. Conditioning entirely on it would
+let the encoder learn a representation that is only correct in the presence of a token
+it will never meet again. So of the selected positions a fraction
+`1 - random_token_ratio - unchanged_ratio` (0.8 by default) becomes `[MASK]`,
+`random_token_ratio` (0.1) becomes a uniformly drawn vocabulary id, and
+`unchanged_ratio` (0.1) is left verbatim. All three groups are scored. The unchanged
+group is the important one: since the model cannot tell a scored-but-unchanged position
+from an ordinary one, it must keep a predictive representation at *every* position
+rather than only where a mask token flags one. The random-token group additionally
+stops the model from assuming the observed id is always correct.
 
-Usage Examples:
---------------
+Selection and corruption are independent per-token uniform draws
+(`dl_techniques.utils.masking.strategies.apply_mlm_masking`), not quotas: 15/80/10/10
+are expectations, and the number of masked positions varies from batch to batch.
+Positions whose id appears in `special_token_ids` are excluded by value equality.
+Padding is excluded only when an `attention_mask` is supplied; call this without one
+and pad positions are eligible for masking and are scored like any other token.
 
-.. code-block:: python
+Labels are the full uncorrupted id tensor, so the per-position cross entropy is dense
+and the restriction to masked positions happens in the reduction: the boolean selection
+mask is passed as `sample_weight`, and the loss is
+`sum(CE * mask) / max(sum(mask), 1)`. Unselected positions are multiplied by exactly
+zero, so they contribute neither loss nor gradient, and normalizing by the number of
+selected tokens rather than by the sequence length makes the loss scale independent of
+how many tokens the Bernoulli draw happened to select. The `max(..., 1)` floor keeps a
+batch in which nothing was selected finite instead of producing `0/0`.
 
-    import keras
-    import tensorflow as tf
-    from bert import BERT
-    from transformers import BertTokenizer
+The prediction head is `Dense(hidden_size, gelu) -> Dropout -> LayerNorm ->
+Dense(vocab_size)`. Two things about it diverge from BERT's and are deliberate. First,
+the output projection is an independent `hidden_size x vocab_size` matrix and is *not*
+tied to the encoder's input embedding table. The wrapper accepts any encoder and cannot
+assume that an embedding matrix is exposed, or under what attribute, so tying would make
+the model-agnostic contract conditional on encoder internals; the cost is an extra
+`hidden_size * vocab_size` parameters and the loss of the regularization that tying
+provides. Second, BERT places LayerNorm directly after the activation and uses no
+dropout in the head, whereas here dropout sits between them.
 
-    # 1. Create a foundation model to be pretrained
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    encoder = BERT.from_variant("base", vocab_size=tokenizer.vocab_size)
+"Model-agnostic" is a contract, not an absence of one. The encoder must expose a
+`hidden_size` attribute (a missing one raises `ValueError` at construction) and its
+`call` must return a mapping containing `last_hidden_state`.
 
-    # 2. Create the MLM pre-training model
-    mlm_pretrainer = MaskedLanguageModel(
-        encoder=encoder,
-        vocab_size=tokenizer.vocab_size,
-        mask_ratio=0.15,
-        mask_token_id=tokenizer.mask_token_id,
-        special_token_ids=tokenizer.all_special_ids,
-    )
+`train_step` and `test_step` are hand-written over `tf.GradientTape`, so this model is
+TensorFlow-backend only. The `metrics` property is overridden to return the two internal
+trackers, which means metrics passed to `compile()` are never updated and will not
+appear in the logs. Validation masking is dynamic as well, so `val_loss` carries the
+noise of a fresh corruption draw and an epoch-to-epoch comparison mixes model change
+with sampling noise. `call()` deliberately does no masking at all: it runs the encoder
+on the inputs as given and returns logits for every position, which is what makes
+`predict()` usable for scoring an already-masked sequence prepared by the caller.
 
-    # 3. Compile the model
-    mlm_pretrainer.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=5e-5)
-    )
-
-    # 4. Start pre-training
-    mlm_pretrainer.fit(train_dataset, epochs=5)
-
-    # 5. Extract the pretrained encoder for downstream tasks
-    pretrained_encoder = mlm_pretrainer.encoder
-    pretrained_encoder.save("pretrained_bert_encoder.keras")
-
+References:
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional Transformers for
+      Language Understanding. (https://arxiv.org/abs/1810.04805)
+    - Liu et al., 2019. RoBERTa: A Robustly Optimized BERT Pretraining Approach.
+      (https://arxiv.org/abs/1907.11692)
+    - Taylor, 1953. "Cloze Procedure": A New Tool for Measuring Readability.
+      Journalism Quarterly.
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language Models.
+      (https://arxiv.org/abs/1608.05859)
 """
 
 import keras

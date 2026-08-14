@@ -1,58 +1,111 @@
 """
-SD3 MMDiT dual-stream diffusion transformer model (Keras 3 port).
+Stable Diffusion 3 MMDiT: a dual-stream text-and-image diffusion transformer that
+predicts a rectified-flow velocity field over a VAE latent, with an optional
+second self-attention path on selected blocks (the SD3.5-medium variant).
 
-This module assembles the Stable Diffusion 3 MMDiT ``SD3Transformer2DModel`` from
-the already-built, separately-tested step-1..5 primitives into a single
-``keras.Model``:
+The generative principle is rectified flow rather than the usual noise-prediction
+diffusion. Training draws a clean latent `x0` and a noise sample `x1` and defines
+the transport path as the straight line `x_t = (1 - t) * x0 + t * x1`. Because the
+path is a line, its velocity `dx/dt = x1 - x0` is *constant in t*, and that constant
+is what the network regresses. Straightness is the whole point: with the true
+velocity a single Euler step from `t = 1` to `t = 0` recovers `x0` exactly, so the
+number of sampling steps is limited by how well the network approximates the
+velocity, not by curvature of the probability-flow path. This package's
+`scheduler.py` pins the convention -- `t = 0` is clean data, `t = 1` is pure noise,
+and reverse sampling descends `t: 1 -> 0` with a *signed* step `dt = t_next - t`
+that is therefore negative (D-007). The model itself sees the time rescaled to
+`[0, 1000]` (`ScalarSinusoidalEmbedding(input_range=(0.0, 1000.0))`), so the trainer
+must pass `t * 1000`; a raw `[0, 1]` value would land in the flattest corner of the
+sinusoidal basis and make the network effectively time-blind.
 
-- :class:`~dl_techniques.layers.embedding.patch_embedding.PatchEmbedding2D`
-  -- Conv2D patchify of the ``(B, H, W, in_channels)`` latent into
-  ``(B, N, embedding_size)`` patch tokens.
-- a FIXED (non-trainable) 2D sin-cos positional embedding cropped to the actual
-  patch grid (D-006, see below) -- added to the patch tokens.
-- ``context_embedder`` (Dense) -- projects ``encoder_hidden_states
-  (B, L, joint_attention_dim)`` to ``(B, L, embedding_size)``.
-- a combined timestep + pooled-text conditioning
-  (:class:`~dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding`
-  for the scalar timestep, plus a 2-layer SiLU MLP for the pooled projection)
-  summed into a single ``(B, embedding_size)`` vector fed to every block + head.
-- a stack of :class:`~dl_techniques.models.sd3_mmdit.blocks.MMDiTBlock` blocks
-  (the last is ``context_pre_only`` and drops the text stream; selected indices
-  use the dual-attention path).
-- :class:`~dl_techniques.models.sd3_mmdit.blocks.MMDiTFinalLayer` -- AdaLN +
-  Dense projecting tokens to ``out_channels * patch_size**2``, then unpatchify
-  back to ``(B, H, W, out_channels)``.
+The conditioning problem MMDiT solves is that text tokens and image patch tokens are
+different modalities that nevertheless have to interact at every depth. A
+single-stream DiT forces both through the same projection, normalization and FFN
+weights; a cross-attention UNet keeps them apart and lets them interact only through
+a narrow one-directional bottleneck. MMDiT takes the third option: the two streams
+get *separate weights everywhere* -- their own AdaLN modulation, their own Q/K/V
+projections, their own output projection, their own FFN -- but their Q, K and V are
+concatenated along the sequence axis before the softmax, so a single joint attention
+spans both. Image tokens therefore attend to text and text attends back to image
+inside one attention operation, with no cross-attention layer anywhere in the model,
+while neither modality is forced to share a representation space with the other.
 
-**Intent**
+Conditioning that is not sequence-shaped -- the diffusion time and a pooled summary
+of the caption -- enters by modulation instead. The scalar timestep goes through a
+sinusoidal embedding and the pooled text vector through a Dense-SiLU-Dense
+projection; the two are *summed* into one `(B, embedding_size)` vector that every
+block and the output head consumes. Inside a block an AdaLN projects that vector to
+per-stream `(shift, scale, gate)` groups. The LayerNorms are affine-free
+(`center=False, scale=False`) precisely so the conditioning vector supplies the only
+affine parameters: the attention branch is normalized and shifted/scaled inside the
+AdaLN layer and then gated on the residual, while the MLP branch is modulated by the
+block itself as `x * (1 + scale) + shift` and gated on its residual. Gating the
+residual branch (rather than the pre-norm input) is what allows a zero-initialized
+gate to make a fresh block an exact identity, so depth can be added without
+destabilizing an already-trained trunk.
 
-Given a packed latent ``(B, H, W, in_channels)``, text sequence features
-``encoder_hidden_states (B, L, joint_attention_dim)``, a pooled text vector
-``pooled_projections (B, pooled_projection_dim)`` and a scalar diffusion
-``timestep (B,)`` in ``[0, 1000]``, predict a rectified-flow velocity field of
-shape ``(B, H, W, out_channels)`` (= the latent shape, since
-``in_channels == out_channels``).
+Two structural flags vary across the stack, and both exist for a concrete reason.
+The LAST block is built with `context_pre_only=True`: nothing downstream ever reads
+the text stream again, so its AdaLN degrades to the gate-free
+`AdaLayerNormContinuous`, the joint attention never creates a text output
+projection, and the block returns a single tensor rather than a pair. The model's
+call loop mirrors that with an explicit `i < depth - 1` branch, since the block's
+return arity -- not just its value -- changes. Separately, block indices listed in
+`dual_attention_layers` gain a second, plain self-attention over the image stream
+whose gate comes from the 9-way `AdaLayerNormZeroX`.
 
-**Positional embedding (DECISION D-006).** SD3's ``PatchEmbed`` precomputes a
-2D sin-cos positional grid of side ``pos_embed_max_size`` and CROP-centers it to
-the actual patch grid at forward time (``cropped_pos_embed``). This port mirrors
-that exactly: a non-trainable weight of shape
-``(pos_embed_max_size**2, embedding_size)`` is materialized once at ``build()``
-(numpy 2D sincos), then center-cropped to ``(h*w, embedding_size)`` at call
-time and added to the patch tokens. This was chosen over reusing
-``PositionEmbeddingSine2D`` (whose NCHW output needs an error-prone reshape;
-pre-mortem risk 5 / assumption-2 fallback). See decisions.md D-006.
+Positional information is absolute and fixed, not learned. At `build()` a
+non-trainable weight of shape `(pos_embed_max_size**2, embedding_size)` is filled
+with a numpy 2D sin-cos grid; at call time it is reshaped to
+`(max, max, embedding_size)` and CENTER-cropped to the actual `(h, w)` patch grid
+before being flattened row-major and added to the tokens. Center-cropping a single
+oversized grid, rather than generating a fresh grid per resolution, is what lets one
+checkpoint run at several latent sizes while a given image region keeps roughly the
+same positional code; the coordinate normalization by
+`base_size = sample_size // patch_size` keeps the absolute scale of the signal
+independent of the grid actually being used. The row-major flatten is load-bearing:
+it must match the token order `PatchEmbedding2D` produces, or every token receives
+another token's position. Config invariant 4 (`pos_embed_max_size >=
+sample_size // patch_size`) guards the crop from running off the grid.
 
-PyTorch reference (faithfully ported)::
+Deliberate choices and divergences from the reference:
 
-    # SD3Transformer2DModel.forward(hidden_states, encoder_hidden_states,
-    #                               pooled_projections, timestep)
-    hidden = self.pos_embed(hidden_states)          # patchify + cropped pos embed
-    temb   = self.time_text_embed(timestep, pooled_projections)  # (B, dim)
-    enc    = self.context_embedder(encoder_hidden_states)
-    for block in self.transformer_blocks:
-        enc, hidden = block(hidden, enc, temb)      # last block: enc discarded
-    hidden = self.norm_out(hidden, temb)            # MMDiTFinalLayer
-    output = self.unpatchify(hidden)                # (B, H, W, out_channels)
+- The 2D sin-cos table is a non-trainable `add_weight` computed in numpy rather
+  than a reuse of `PositionEmbeddingSine2D`, whose NCHW output would need an
+  error-prone reshape/transpose to `(B, N, dim)` (D-006). The non-trainable-weight
+  form also survives a `.keras` round-trip, which a plain stored tensor would not.
+- The dual self-attention path uses `keras.layers.MultiHeadAttention` rather than a
+  fourth bespoke attention class, which OMITS the per-head QK-RMSNorm that
+  SD3.5-medium applies on that path (D-005). The main joint attention does apply
+  QK-RMSNorm when `qk_norm` is set. This is a knowing fidelity gap, not an oversight.
+- The joint attention accepts NO attention mask on any code path, and the PyTorch
+  source's paging / KV-cache machinery is dropped. Padded caption tokens are
+  therefore attended to as ordinary content; callers must supply text features whose
+  padding is already neutral rather than expecting a mask to suppress it.
+- The timestep is reshaped to `(B, 1)` before the sinusoidal embedding.
+  `ScalarSinusoidalEmbedding` squeezes a trailing size-1 axis, so passing the raw
+  `(B,)` tensor would be ambiguous at `B == 1`, where the batch axis itself would be
+  squeezed away to a scalar.
+- `SD3MMDiTConfig` is a plain frozen dataclass, not a Keras-serializable object, so
+  `from_config` reconstructs it via `SD3MMDiTConfig.from_dict` rather than
+  `deserialize_keras_object`.
+- This is an architecture port. No pretrained SD3 weights are distributed with
+  `dl_techniques` and there is no torch-to-Keras parameter map, so a model built
+  here is randomly initialized and must be trained.
+
+References:
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for High-Resolution
+      Image Synthesis. (https://arxiv.org/abs/2403.03206)
+    - Peebles & Xie, 2023. Scalable Diffusion Models with Transformers.
+      (https://arxiv.org/abs/2212.09748)
+    - Lipman et al., 2023. Flow Matching for Generative Modeling.
+      (https://arxiv.org/abs/2210.02747)
+    - Liu et al., 2022. Flow Straight and Fast: Learning to Generate and Transfer
+      Data with Rectified Flow. (https://arxiv.org/abs/2209.03003)
+    - Perez et al., 2018. FiLM: Visual Reasoning with a General Conditioning Layer.
+      (https://arxiv.org/abs/1709.07871)
+    - Dehghani et al., 2023. Scaling Vision Transformers to 22 Billion Parameters.
+      (https://arxiv.org/abs/2302.05442)
 """
 
 import keras

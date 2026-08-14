@@ -1,35 +1,90 @@
 """
-Byte Latent Transformer (BLT): Patches Scale Better Than Tokens
+Byte Latent Transformer (BLT): a tokenizer-free byte-level language model built as a
+three-stage hierarchy -- a local byte encoder, a wide global transformer over pooled
+patch representations, and a local byte decoder that reads patch context back down to
+per-byte logits.
 
-This module implements the Byte Latent Transformer (BLT), a revolutionary byte-level
-large language model architecture that, for the first time, matches tokenization-based
-LLM performance at scale while achieving significant improvements in inference efficiency
-and robustness.
+The problem BLT addresses is the cost structure of operating on raw bytes. Dropping
+the tokenizer removes a whole class of failures -- vocabulary bias toward
+high-resource languages, brittleness under typos and adversarial spellings, the
+inability to spell or count characters -- but a byte sequence is roughly four times
+longer than its token sequence, and a transformer that pays full width on every byte
+is priced out. The resolution is to spend width where information is, not where
+symbols are: bytes are grouped into *patches*, the expensive stack runs once per
+patch rather than once per byte, and only thin local stacks touch individual bytes.
+The paper's grouping criterion is the entropy of a small next-byte model, so that
+predictable runs collapse into long patches and surprising regions get short ones,
+giving patches of roughly uniform information content rather than uniform length.
 
-Architecture Overview
-====================
+Architecturally the forward pass is a funnel and a fan-out. `LocalEncoder` embeds
+bytes, runs a few transformer layers over them, and pools each patch's byte states
+into one vector of `global_dim` width; with the default `patch_pooling_method
+='attention'` the pooling is a small set of learnable queries cross-attending to the
+patch's (masked) byte states, with `'mean'` and `'max'` as cheaper alternatives.
+`GlobalTransformer` then runs `num_global_layers` at `global_dim` over the patch
+sequence, and is where the bulk of the FLOPs live. `LocalDecoder` re-embeds the bytes
+and alternates its own self-attention with a cross-attention that injects patch
+context, projecting to `vocab_size` logits at every byte position. Cross-attention
+keys and values are built by a gather: `patch_ids` selects, for each byte position,
+the global vector of the patch that byte belongs to, so the key sequence is
+byte-length rather than patch-length. Note that no mask then restricts a byte's
+query to its own slot, so a byte still attends across the whole gathered sequence
+rather than only to its own patch's representation.
 
-BLT introduces a paradigm shift from fixed-vocabulary tokenization to dynamic, learnable
-byte grouping through three core innovations:
+This implementation diverges from the paper in ways that matter, and they are stated
+here rather than left for a reader to discover:
 
-1. **Dynamic Entropy-Based Patching**: Instead of static tokens, BLT segments bytes into
-   patches based on the entropy of next-byte predictions, allocating more compute where
-   data complexity demands it. This allows for contextual groupings with uniform
-   information density.
+- **There is no causal mask anywhere in the model.** Every transformer stack -- the
+  entropy model, the local encoder, the global transformer and the local decoder's
+  self-attention -- invokes `TransformerLayer(x, training=...)` with no
+  `attention_mask` and no causal option, so all attention is bidirectional. Under the
+  next-byte objective implemented by `train_step`, position `i` can see the very byte
+  it is asked to predict, so training loss is not a meaningful measure of language
+  modelling here and `generate()` will not behave as an autoregressive sampler. Fixing
+  this requires plumbing a causal mask into all four stacks; nothing in the current
+  code approximates one.
+- **Patching is not entropy-based.** `DynamicPatcher.call` ignores the entropy tensor
+  it is handed and emits fixed, equal-length patches (`seq_len // max_patches`, with
+  the remainder in the last patch). `entropy_threshold` is validated, stored and
+  serialized but never consulted. The `EntropyModel` still runs on every forward and
+  its Shannon entropy is still computed, so the compute is paid and then discarded.
+  The adaptive-compute claim of the paper does not hold for this code.
+- **There are no hash n-gram byte embeddings.** The paper augments byte
+  representations with rolling-hash n-gram embeddings; this implementation uses a
+  plain learned byte embedding plus positional embeddings.
+- Efficiency and quality figures from the paper (inference-FLOP savings, parity with
+  token-based models at scale) describe the reference model. Nothing here has been
+  measured against them, and the two divergences above would have to be closed before
+  such a comparison would mean anything.
 
-2. **Hierarchical Processing Architecture**:
-   - **Local Encoder**: Lightweight transformer that efficiently maps byte sequences
-     into expressive patch representations using cross-attention pooling
-   - **Global Latent Transformer**: Computationally intensive autoregressive model
-     operating on patch representations (consumes bulk of FLOPs)
-   - **Local Decoder**: Lightweight transformer decoding patch representations back
-     to raw bytes using cross-attention mechanisms
+Behavioural choices worth knowing:
 
-3. **Enhanced Byte Representations**: Incorporates hash n-gram embeddings (n=3-8) to
-   capture contextual byte patterns and improve representation quality.
+- `train_step` is overridden rather than relying on stock `fit`, because the loss
+  masks out padded positions (byte id 0) and normalizes by the count of unmasked
+  positions instead of by sequence length. A caller who compiles a plain
+  `sparse_categorical_crossentropy` gets the masked version regardless.
+- `call` accepts either a bare token tensor or a dict. Supplying `patch_ids` in the
+  dict skips the entropy model and the patcher entirely, which is the intended path
+  for training where patch boundaries can be precomputed once.
+- `generate`, `_top_k_filtering` and `_top_p_filtering` are eager-only. They use
+  Python loops over the batch and vocabulary with `slice_update`, and `generate` calls
+  `.numpy()` and compares a tensor to the EOS id in Python control flow; none of this
+  survives `tf.function` tracing.
+- The attention pooling path also loops in Python over `num_patches`, so `max_patches`
+  must be statically known and the pooling cost grows linearly in it.
+- `get_build_config` / `build_from_config` record and replay the input shape so a
+  `.keras` reload rebuilds every sub-layer before weights are restored; without this
+  the lazily built sub-layers would silently come back randomly initialized.
 
-Based on "Byte Latent Transformer: Patches Scale Better Than Tokens"
-by Pagnoni et al. (2024), arXiv:2412.09871v1 [cs.CL] 13 Dec 2024
+References:
+    - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better Than
+      Tokens. (https://arxiv.org/abs/2412.09871)
+    - Yu et al., 2023. MEGABYTE: Predicting Million-byte Sequences with Multiscale
+      Transformers. (https://arxiv.org/abs/2305.07185)
+    - Xue et al., 2022. ByT5: Towards a Token-Free Future with Pre-trained
+      Byte-to-Byte Models. (https://arxiv.org/abs/2105.13626)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
