@@ -52,7 +52,7 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 ### Code Style
 - Python 3.11+ with comprehensive type hints
 - Docstrings carry mathematical formulations where relevant. **Two styles are in use — match the package you are editing, do not convert files wholesale:**
-  - **Sphinx/reST (`:param:` / `:type:` / `:raises:`)** is the convention in `layers/` (248 of 285 modules, re-derived 2026-08-11 with `grep -rl ":param " src/dl_techniques/layers --include=*.py | wc -l` over `find src/dl_techniques/layers -name '*.py' | wc -l`; the previous "245 of 283" was already 2 / 1 low before `beit_attention.py` landed), and is *mandatory* in `layers/attention/`, where all 35 modules use it and `channel_attention.py` is the reference exemplar (the count moved 33 -> 34 when `common.py` was added, and 34 -> 35 when `beit_attention.py` was added).
+  - **Sphinx/reST (`:param:` / `:type:` / `:raises:`)** is the convention in `layers/` (255 of 294 modules, re-derived 2026-08-14 with `grep -rl ":param " src/dl_techniques/layers --include=*.py | wc -l` over `find src/dl_techniques/layers -name '*.py' | wc -l`; the previous "248 of 285" was correct when written on 2026-08-11 and went stale when the `layers/fastvit/` package landed), and is *mandatory* in `layers/attention/`, where 34 of the 35 modules use it — the sole exception is the package `__init__.py` — and `channel_attention.py` is the reference exemplar.
   - **Google-style (`Args:`)** remains the convention in `models/`, `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/`, and `visualization/`.
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 - `__init__.py` files either export a curated public API (with `__all__`) or are empty (in which case import from submodules directly) — see `layers/CLAUDE.md` for which is which in `layers/`
@@ -70,8 +70,9 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 - **Framework**: pytest (with `conftest.py` adding `src/` to path and silencing TF logging)
 - **Run**: `make test` or `python -m pytest tests/ -vvv`
 - **Marker**: `@pytest.mark.integration` for integration tests
-- **Pre-commit hook**: runs pytest on every commit
-- **Test structure**: mirrors `src/` — e.g., `tests/test_models/test_mobilenet_v1.py`, `tests/test_layers/test_attention/`
+- **Hooks**: `.pre-commit-config.yaml` *declares* a local hook running `python -m pytest` with `always_run: true`, but hook installation is per-clone and untracked — run `ls .git/hooks/` to see yours. On the author's machine only `pre-push` is installed, so the suite fires on push, not on commit. **The full suite takes about 1.5 hours**, which is why the standing default is `git push --no-verify` and why you should scope pytest to the modules you changed rather than running `make test` as a routine check
+- **CI**: there is none. No `.github/` directory exists; nothing runs these tests except you
+- **Test structure**: mirrors `src/` — e.g., `tests/test_models/test_mobilenet/`, `tests/test_layers/test_attention/`. Under `tests/test_models/` the directory is the norm; under `tests/test_layers/` a loose `test_<name>.py` is (78 loose modules against 21 subdirectories), so a missing directory there means nothing. `REPO_MAP.md` § Tests lists the named exceptions
 - **Test conventions**:
   - Class-based: `class TestModelName`
   - Pytest fixtures for configs and sample data
