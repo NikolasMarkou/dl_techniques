@@ -1,56 +1,87 @@
 """
-MobileNetV4: Universal and Efficient Neural Networks for Mobile Applications
-========================================================================
+A MobileNetV4-shaped classifier: a seven-stage `UniversalInvertedBottleneck` tower
+with optional Mobile Multi-Query Attention in the last two stages.
 
-A complete implementation of MobileNetV4 architecture with Universal Inverted Bottleneck
-(UIB) blocks and optional Mobile Multi-Query Attention (MQA). This version follows modern
-Keras 3 best practices for custom models.
+The generation's two published contributions are a *search space* and an attention
+block. The Universal Inverted Bottleneck generalizes V2's inverted residual by
+making the placement of depthwise convolutions a searchable choice rather than a
+fixed one: with an optional depthwise before the expansion and another after it,
+one parameterized block specializes to the inverted bottleneck (`dw` after
+expansion only), to a ConvNeXt-style block (`dw` before expansion, large kernel),
+to a transformer FFN (no depthwise at all), and to ExtraDW (both), so a NAS can
+trade spatial mixing against channel mixing per stage without changing block
+implementations. Mobile MQA is the second: multi-query attention with a *single*
+shared key/value head, which matters on mobile accelerators because those are
+bandwidth-bound rather than FLOP-bound, and K/V loading — not the matmul — is what
+dominates. It additionally strides the keys and values down by a factor of two
+spatially before attending, so the score matrix is `N x N/4` instead of `N x N`,
+and it enters the residual through a learnable scalar, `x + lambda * Attn(x)`,
+initialized to one.
 
-Based on: "MobileNetV4: Universal Inverted Bottleneck and Mobile MQA"
-Paper: https://arxiv.org/abs/2404.10518
+**What this module actually builds is a simplification of that, and the gap is
+worth stating plainly before the tables below are read as the paper's.** Two
+things are true of the code and not of the paper:
 
-Key Features:
-------------
-- Universal Inverted Bottleneck (UIB) blocks with multiple configurations
-- Optional Mobile Multi-Query Attention for hybrid models
-- Support for both Conv-only and Hybrid variants
-- Modular design with proper serialization support
-- Configurable width multipliers and input resolutions
-- Complete variant support (Small, Medium, Large, Hybrid variants)
+First, the per-stage `block_types` entries — `"IB"`, `"ConvNext"`, `"ExtraDW"`,
+`"FFN"` — are validated by the constructor, stored, and serialized, but they are
+**structurally inert**. `UniversalInvertedBottleneck` accepts `block_type` only as
+a label for its own config; the flags that actually select the variant
+(`use_dw1`, `use_dw2`, `kernel_size`, `expansion_factor`) are never derived from
+it and are left at their defaults here. Every block in every stage is therefore
+the same inverted bottleneck: one depthwise, `3x3`, expansion factor 4. A variant
+whose table reads `ExtraDW` does not get a second depthwise convolution. To
+genuinely vary block structure per stage, the `use_dw1` / `use_dw2` /
+`kernel_size` arguments must be passed through to the block in `_build_stage`.
 
-Architecture Overview:
----------------------
-MobileNetV4 consists of:
-1. **Stem**: Initial convolution block for feature extraction
-2. **Body**: Stack of UIB blocks organized in stages with progressive downsampling
-3. **Head**: Global average pooling and classification layer
+Second, the stage tables in `MODEL_VARIANTS` are hand-written depth/width ladders,
+not the NAS-found MNv4-Conv-S/M/L specifications: there are no per-block kernel
+sizes and no per-block expansion ratios, which is exactly the freedom the UIB
+search space exists to exploit. Accuracy or latency numbers from the paper should
+not be attributed to models built here, and the variant keys are `"small"`,
+`"medium"`, `"large"`, `"hybrid_medium"`, `"hybrid_large"` — there is no
+`"conv_small"` or `"conv_medium"`.
 
-UIB Block Types:
-- IB (Inverted Bottleneck): Standard MobileNet block
-- ConvNext: ConvNext-style block with depthwise conv first
-- ExtraDW: Enhanced version with additional depthwise conv
-- FFN: Feed-forward network style block
+What the code does build is coherent on its own terms. A `3x3` stride-2 ReLU stem
+into `dims[0]`, then seven stages following `DEFAULT_STRIDES = [1, 2, 2, 2, 1, 2, 1]`
+with the stride applied to each stage's first block only, giving a `/32` final
+grid. The residual inside each block is added only where `stride == 1` and the
+input width already equals the output width, so a stage's first block is
+feed-forward and the rest are residual. The head is `GlobalAveragePooling ->
+Dense(1280) -> ReLU -> dropout -> Dense(num_classes, softmax)`. `width_multiplier`
+scales `dims` by plain truncation, with no round-to-multiple-of-8 rule.
 
-Model Variants:
---------------
-- MobileNetV4-ConvSmall: Lightweight conv-only model
-- MobileNetV4-ConvMedium: Balanced conv-only model
-- MobileNetV4-ConvLarge: High-capacity conv-only model
-- MobileNetV4-Hybrid-Medium: Medium model with Mobile MQA
-- MobileNetV4-Hybrid-Large: Large model with Mobile MQA
+The hybrid variants append one `MobileMQA` layer to the *end* of stages 5 and 6,
+after that stage's convolutional blocks, with `use_downsampling=True`. Two
+consequences are non-obvious. The attention layer carries no positional encoding
+of any kind — RoPE is hard-disabled in `MobileMQA` — so all spatial ordering
+information reaching it is whatever the convolutional stack has induced; this is
+by design in the paper, but it means the block is not usable as a standalone
+mixer. And its `num_heads` defaults to 8, so a stage width that is not divisible
+by 8 raises; `width_multiplier` values that break that divisibility on
+`dims[5]`/`dims[6]` will fail at construction rather than silently degrade.
 
-Usage Examples:
---------------
-```python
-# CIFAR-10 model (32x32 input)
-model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+`pretrained=True` on `create_mobilenetv4` logs a warning and returns a randomly
+initialized model. No checkpoints ship with this package; combined with the two
+structural gaps above, this model should be treated as an architecture sketch to
+train from scratch, not as a MobileNetV4 reimplementation. Newer packages here
+(see `resnet/model.py`) raise on `pretrained=True` rather than returning random
+weights, and this module predates that contract. The mutable list defaults on
+`__init__` (`depths`, `dims`, `block_types`, `strides`, `attention_stages`) are a
+known defect inherited by copy-paste across this package: they are never mutated
+in place, so they are currently harmless, but they should not be copied into new
+code.
 
-# ImageNet model (224x224 input)
-model = MobileNetV4.from_variant("conv_medium", num_classes=1000)
-
-# Custom input size with hybrid attention
-model = MobileNetV4.from_variant("hybrid_medium", num_classes=100, input_shape=(128, 128, 3))
-```
+References:
+    - Qin et al., 2024. MobileNetV4: Universal Models for the Mobile Ecosystem.
+      (https://arxiv.org/abs/2404.10518)
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You Need.
+      (https://arxiv.org/abs/1911.02150) — the multi-query attention Mobile MQA
+      specializes.
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
+      (https://arxiv.org/abs/1801.04381)
+    - Liu et al., 2022. A ConvNet for the 2020s.
+      (https://arxiv.org/abs/2201.03545) — the ConvNeXt block the UIB search space
+      subsumes.
 """
 
 import keras

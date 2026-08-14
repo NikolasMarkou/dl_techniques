@@ -1,42 +1,65 @@
 """
-MobileNetV1: Efficient Convolutional Neural Networks for Mobile Vision Applications
-================================================================================
+The original MobileNet: a plain stack of depthwise separable convolutions with a
+global width multiplier.
 
-A complete implementation of the original MobileNet architecture using depthwise
-separable convolutions. This implementation follows modern Keras 3 best practices
-for custom models with proper serialization support.
+The generation's whole contribution is a factorization. A standard `KxK`
+convolution does two jobs at once — it filters space and it mixes channels — and
+pays for their product: `K*K*C_in*C_out*H*W` multiply-adds. Depthwise separable
+convolution splits the two jobs into consecutive layers, a depthwise `KxK`
+convolution that filters each input channel independently followed by a `1x1`
+pointwise convolution that mixes the filtered channels:
 
-Based on: "MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications"
-Paper: https://arxiv.org/abs/1704.04861
+`K*K*C_in*H*W  +  C_in*C_out*H*W`
 
-Key Features:
-------------
-- Depthwise separable convolutions for efficiency
-- Width multiplier (α) for model scaling
-- Resolution flexibility through input_shape
-- Modular design with proper serialization support
-- Complete variant support (1.0, 0.75, 0.5, 0.25 width multipliers)
+The cost ratio against the standard convolution is `1/C_out + 1/K^2`, so for `K=3`
+and any realistic channel count the block is roughly 8-9x cheaper, and the paper
+reports it costs about one point of ImageNet top-1. Nothing else in this
+generation is new: there are no residuals, no bottlenecks, no attention. The
+network is 28 layers of that one block repeated, which is precisely why it is the
+right place to read the factorization argument in isolation.
 
-Architecture Overview:
----------------------
-MobileNetV1 consists of:
-1. **Initial Conv**: Standard 3x3 convolution with stride 2
-2. **Depthwise Separable Blocks**: 13 depthwise separable convolution blocks
-3. **Global Average Pooling**: Reduces spatial dimensions
-4. **Classifier**: Fully connected layer for classification
+Two multipliers scale the result rather than retraining a different topology. The
+width multiplier `alpha` thins every layer to `alpha * C` channels, which reduces
+both parameters and compute quadratically. The resolution multiplier `rho` in the
+paper shrinks the input, cutting compute quadratically at zero parameter cost.
+Here `alpha` is the `width_multiplier` argument; `rho` has no argument of its own
+and is expressed simply by passing a smaller `input_shape`, since the model is
+fully convolutional up to the global pooling.
 
-Usage Examples:
---------------
-```python
-# Standard MobileNetV1 (α=1.0) for ImageNet
-model = MobileNetV1.from_variant("1.0", num_classes=1000)
+Architecturally this is a `3x3` stride-2 stem into `32*alpha` channels, then the
+paper's thirteen separable blocks — 64; 128/s2, 128; 256/s2, 256; 512/s2 then five
+at 512; 1024/s2, 1024 — with all downsampling done by the depthwise stride rather
+than by pooling. The head pools globally, reshapes to `1x1xC`, applies dropout and
+then a `1x1` convolution as the classifier, which is the paper's form and is
+arithmetically a dense layer.
 
-# Smaller model (α=0.75) for CIFAR-10
-model = MobileNetV1.from_variant("0.75", num_classes=10, input_shape=(32, 32, 3))
+Two implementation details are easy to get wrong. The head's `Reshape` target is
+hardcoded to `int(1024 * width_multiplier)`, so `include_top=True` is bound to the
+final block being 1024-wide: editing `ARCHITECTURE`'s last entry breaks the head
+rather than the body. And widths are scaled with a bare `int()` truncation, not the
+round-to-multiple-of-8 `_make_divisible` rule that V2 and V3 use, so channel counts
+here follow the paper's `alpha` table exactly but will not match TF-slim
+checkpoints for fractional `alpha`.
 
-# Custom configuration
-model = MobileNetV1(num_classes=100, width_multiplier=0.5, input_shape=(128, 128, 3))
-```
+Two deliberate deviations from the reference implementation. The blocks use plain
+unbounded ReLU (the `DepthwiseSeparableBlock` factory default), where the paper's
+released model uses ReLU6, which matters if low-precision quantization is the goal.
+And the classifier ends in a softmax, so this model emits probabilities, not
+logits: compile it with `from_logits=False`.
+
+`pretrained=True` on `create_mobilenetv1` logs a warning and returns a randomly
+initialized model. No checkpoints are distributed with this package, and the
+warning is easy to miss, so pretrained weights should be treated as unsupported
+here — the house contract elsewhere in `models/` (see `resnet/model.py`) is to
+raise instead of silently handing back random weights, and this module predates it.
+
+References:
+    - Howard et al., 2017. MobileNets: Efficient Convolutional Neural Networks for
+      Mobile Vision Applications. (https://arxiv.org/abs/1704.04861)
+    - Sifre and Mallat, 2014. Rigid-Motion Scattering for Image Classification.
+      (the origin of the depthwise separable factorization)
+    - Chollet, 2017. Xception: Deep Learning with Depthwise Separable Convolutions.
+      (https://arxiv.org/abs/1610.02357)
 """
 
 import keras

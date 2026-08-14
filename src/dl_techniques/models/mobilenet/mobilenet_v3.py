@@ -1,47 +1,81 @@
 """
-MobileNetV3: Efficient Mobile Networks with Hardware-Aware NAS
-==============================================================
+MobileNetV3 image classifier: the searched Large/Small layer tables, with
+squeeze-and-excitation and hard-swish, assembled from `UniversalInvertedBottleneck`.
 
-A complete implementation of MobileNetV3 architecture built with the flexible
-Universal Inverted Bottleneck (UIB) layer. This version follows modern
-Keras 3 best practices for custom models with proper serialization support.
+Where V2 contributed a block, V3 contributes a *layout*. The block is still V2's
+inverted residual with a linear bottleneck; what changed is that the per-layer
+expansion factors, kernel sizes, widths and strides stopped being hand-designed and
+became the output of a search — platform-aware NAS over a MnasNet-style
+factorized space to fix the block structure, then NetAdapt to trim each layer's
+channel count against measured on-device latency rather than against FLOPs. The
+resulting tables are irregular in a way no human schedule is: expansion sizes like
+200, 184, 480, 672 that are not integer multiples of their input width, `5x5`
+depthwise kernels in some stages and `3x3` in others, and ReLU in the early
+high-resolution stages switching to hard-swish only once resolution has dropped.
 
-Based on: "Searching for MobileNetV3"
-Paper: https://arxiv.org/abs/1905.02244
+`LARGE_CONFIG` and `SMALL_CONFIG` here are those tables transcribed
+row-for-row from the paper (Table 1 and Table 2 of *Searching for MobileNetV3*),
+`(exp_size, out_channels, kernel, stride, use_se, activation)` per row, and they do
+match it — including the details a re-derivation usually gets wrong: Large's first
+block having expansion 16 into 16 channels, Small starting with a stride-2 SE block,
+and the ReLU-to-hard-swish switch landing at the 240/80 block in Large and at the
+96/40 block in Small.
 
-Key Features:
-------------
-- Universal Inverted Bottleneck blocks configured to replicate MobileNetV3's design
-- Squeeze-and-Excite attention modules (via UIB)
-- Hard-swish (h-swish) activation for efficiency
-- Optimized first and last layers
-- Support for Large and Small variants
-- Complete variant configurations
+Two mechanisms are grafted onto the block. Squeeze-and-excitation, applied inside
+the expanded space after the depthwise convolution and before the projection,
+pools each channel to a scalar and predicts a per-channel gate from it, which lets
+the block reweight channels using global context that a depthwise filter can never
+see; V3 enables it only in the rows the search selected, at a reduction of `1/4` of
+the *expanded* channels. Hard-swish replaces swish/SiLU with
 
-Architecture Overview:
----------------------
-MobileNetV3 consists of:
-1. **Stem**: Initial convolution with hard-swish
-2. **Body**: Stack of `UniversalInvertedBottleneck` blocks with optional SE
-3. **Head**: Efficient last stage with optimized structure
+`h-swish(x) = x * ReLU6(x + 3) / 6`
 
-Model Variants:
---------------
-- MobileNetV3-Large: High accuracy model for powerful devices
-- MobileNetV3-Small: Lightweight model for resource-constrained devices
+which keeps swish's smooth non-monotonic shape but needs no sigmoid or exponential,
+so it costs a few piecewise-linear ops and quantizes cleanly. It is used only in
+the later, lower-resolution half of the network, because the activation's cost is
+paid per spatial position and the early stages have the most of those.
 
-Usage Examples:
---------------
-```python
-# ImageNet model (224x224 input)
-model = MobileNetV3.from_variant("large", num_classes=1000)
+The head is the third contribution and is a pure latency optimization: rather than
+running the final `1x1` expansion at `7x7` and then pooling, V3 pools first and
+runs the expensive 1280-wide projection on a `1x1` tensor, deleting the previous
+generation's bottleneck-and-projection pair entirely. This module implements that
+head as `GlobalAveragePooling -> Dense(1280 or 1024) -> hard-swish -> dropout ->
+Dense(num_classes)`, which is arithmetically the paper's post-pool `1x1`
+convolutions; the last block convolution (960 for Large, 576 for Small) still runs
+pre-pool with batch norm and hard-swish, as in the paper.
 
-# CIFAR-10 model (32x32 input)
-model = MobileNetV3.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+Three deviations follow from building on the shared universal block rather than a
+bespoke one, and none of them is visible from the variant tables. The
+squeeze-and-excitation gate in `UniversalInvertedBottleneck` is a plain **sigmoid**,
+where the paper specifies hard-sigmoid — same shape, different numerics and a
+different quantization story. The universal block always constructs its expansion
+`1x1` + norm + activation, so Large's first row (expansion 16 into 16 channels,
+where the paper omits the expansion convolution) carries an extra `C -> C`
+projection here. And the classifier ends in softmax, so this model emits
+probabilities rather than logits: compile with `from_logits=False`.
 
-# Custom configuration
-model = MobileNetV3(num_classes=100, variant="large", width_multiplier=0.75)
-```
+`width_multiplier` scales both the expansion sizes and the output widths through
+the same round-to-multiple-of-8 rule V2 uses, so it reproduces the paper's
+`alpha` family; it does not scale the head's 1280/1024 projection independently of
+that rule.
+
+`pretrained=True` on `create_mobilenetv3` logs a warning and returns a randomly
+initialized model. No checkpoints ship with this package, so pretrained weights
+are effectively unsupported: the call succeeds, the weights are random, and only a
+log line distinguishes that from success. Newer packages here (see
+`resnet/model.py`) raise instead; this module predates that contract.
+
+References:
+    - Howard et al., 2019. Searching for MobileNetV3.
+      (https://arxiv.org/abs/1905.02244)
+    - Tan et al., 2019. MnasNet: Platform-Aware Neural Architecture Search for
+      Mobile. (https://arxiv.org/abs/1807.11626)
+    - Yang et al., 2018. NetAdapt: Platform-Aware Neural Network Adaptation for
+      Mobile Applications. (https://arxiv.org/abs/1804.03230)
+    - Hu et al., 2017. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
+      (https://arxiv.org/abs/1801.04381)
 """
 
 import keras

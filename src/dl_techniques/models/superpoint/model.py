@@ -40,9 +40,24 @@ space. Unit-L2 normalization means descriptor similarity reduces to a dot
 product, so matching is a single matrix multiply and the cosine and Euclidean
 orderings coincide.
 
+Decoding that 65-channel tensor back into pixel coordinates is deliberately *not*
+part of this model, and expecting it here is the usual mistake. The forward pass
+returns raw logits at `H/8 x W/8 x 65`. Recovering a full-resolution heatmap is
+the consumer's job and is three steps: softmax over the 65 channels, drop the
+dustbin channel to leave 64, then reinterpret those 64 channels as the `8x8`
+pixels of their cell — a depth-to-space / pixel-shuffle from `(H/8, W/8, 64)` to
+`(H, W, 1)`. Keeping that outside the model is what lets the detector be trained
+as a plain 65-way cross-entropy against a `(H/8, W/8)` integer label map, which is
+exactly what `losses/superpoint_loss.py` expects and what
+`datasets/synthetic_shapes.py` emits, with class index 64 meaning "no keypoint in
+this cell". Nothing in this model performs non-maximum suppression or thresholding
+either; the within-cell competition the softmax provides is not a substitute for
+cross-cell NMS at inference.
+
 Architecturally, this implementation replaces the original VGG-style encoder with
-a nested three-stage ConvNeXt V2 backbone, followed by a shared 1x1 projection
-neck that both heads consume:
+a nested three-stage ConvNeXt V2 backbone — a deliberate substitution, not a
+transcription of the 2018 network — followed by a shared 1x1 projection neck that
+both heads consume:
 
 `encoder -> proj (1x1) -> {detector_head (1x1), descriptor_head (1x1)}`
 
@@ -58,9 +73,10 @@ Sublayers are built explicitly in forward order rather than lazily on first call
 This matters for serialization: weights created lazily during a deferred first
 call may not exist when a `.keras` restore runs, and the resulting mismatch is
 silent rather than an error. Similarly, the bicubic resize targets the static
-input dimensions, which keeps the operation graph-safe under compilation. The
-consequence is that `H` and `W` should be divisible by 8 so the semi-dense maps
-land exactly on `H/8 x W/8`.
+input dimensions stored at construction, which keeps the operation graph-safe
+under compilation but also means the model is tied to the `input_shape` it was
+built with — it is not resolution-agnostic at call time. `H` and `W` should be
+divisible by 8 so the semi-dense maps land exactly on `H/8 x W/8`.
 
 References:
     - DeTone et al., 2018. SuperPoint: Self-Supervised Interest Point Detection

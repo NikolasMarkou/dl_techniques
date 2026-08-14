@@ -1,51 +1,77 @@
 """
-MobileNetV2: Inverted Residuals and Linear Bottlenecks
-======================================================
+MobileNetV2 image classifier: inverted residual bottlenecks with linear
+projections, assembled here from `UniversalInvertedBottleneck` blocks.
 
-A complete implementation of MobileNetV2 architecture using Universal
-Inverted Bottleneck blocks configured to replicate the original inverted
-residuals and linear bottlenecks. This implementation follows modern Keras 3
-best practices for custom models with proper serialization support.
+What this generation adds over V1 is a shape and a missing activation. V1 was a
+flat stack of separable blocks with no shortcuts and no bottleneck; V2 wraps the
+same depthwise convolution in a residual block whose channel profile is inverted
+relative to a ResNet bottleneck. A ResNet block is wide-narrow-wide: it squeezes
+channels, does the expensive spatial work in the narrow interior, then restores
+width, and the residual runs along the *wide* tensors. V2 is narrow-wide-narrow:
+each block expands `C -> t*C` with a `1x1` convolution, does its `3x3` depthwise
+filtering in that expanded space where a per-channel filter has enough channels to
+be expressive, projects back to a narrow `C_out`, and runs the residual along the
+*narrow* tensors. The inversion is what makes it memory-efficient: only the thin
+block boundaries have to be materialized between blocks, so the expanded tensor
+never has to persist, and the same argument makes the block a natural fit for
+memory-limited inference.
 
-Based on: "MobileNetV2: Inverted Residuals and Linear Bottlenecks"
-Paper: https://arxiv.org/abs/1801.04381
+The linear bottleneck is the second half of the idea and the part that is easy to
+misread as an oversight. The projection `1x1` at the end of every block has **no
+activation** — no ReLU, no ReLU6 — only normalization. The paper's reasoning is
+that the information a layer carries is assumed to lie on a low-dimensional
+manifold embedded in the activation space; ReLU is only information-preserving on
+such a manifold when the space it lives in is high-dimensional enough that the
+zeroed half-space can be recovered from the surviving channels. Applying ReLU
+directly to the narrow output of the projection collapses exactly the
+low-dimensional representation the block just produced, and the collapse is not
+recoverable downstream. So the nonlinearity is kept where the tensor is wide (after
+expansion, after depthwise) and dropped where it is narrow. Empirically the paper
+measures the linear projection as worth several points of top-1.
 
-Key Features:
-------------
-- Universal Inverted Bottleneck blocks configured as inverted residuals
-- Expansion layers with lightweight depthwise convolutions
-- Residual connections between bottleneck layers
-- Width multiplier (α) for model scaling
-- Modular design with proper serialization support
-- Complete variant support (1.0, 0.75, 0.5, 0.35 width multipliers)
+Architecturally: a `3x3` stride-2 stem into 32 channels, the paper's Table 2
+`(t, c, n, s)` schedule of seven stages totalling 17 bottleneck blocks, a final
+`1x1` expansion to 1280 channels, global pooling, dropout and a dense classifier.
+Stride is applied only to the first block of each stage. The residual is added
+inside `UniversalInvertedBottleneck` and only when `stride == 1` and the input
+channel count already equals `filters`, so the first block of every stage — which
+either strides or changes width — is a plain feed-forward block with no shortcut,
+exactly as in the paper.
 
-Architecture Overview:
----------------------
-MobileNetV2 consists of:
-1. **Initial Conv**: Standard 3x3 convolution with stride 2 and 32 filters
-2. **Bottleneck Blocks**: 17 `UniversalInvertedBottleneck` blocks organized in stages
-3. **Final Conv**: 1x1 convolution expanding to 1280 channels
-4. **Global Average Pooling**: Reduces spatial dimensions
-5. **Classifier**: Fully connected layer for classification
+Three code-level details worth stating. Channel counts pass through
+`_make_divisible`, which rounds to a multiple of 8 and refuses to round down by
+more than 10%; this is why `width_multiplier=0.75` does not simply give
+`0.75 * c`. The final 1280-channel convolution is deliberately *not* scaled for
+`width_multiplier <= 1.0` and only widens above 1.0, matching the reference
+implementation — thinning the classifier's input hurts far more than it saves.
+And `MODEL_VARIANTS` includes a `1.4` width ("large") alongside the usual
+1.0/0.75/0.5/0.35 ladder; the variants are named by size, not by their `alpha`
+value, so `from_variant` takes `"medium"`, not `"1.0"`.
 
-Inverted Residual Block (emulated by UniversalInvertedBottleneck):
-- Expansion: 1x1 conv to expand channels (with ReLU6)
-- Depthwise: 3x3 depthwise conv (with ReLU6)
-- Projection: 1x1 conv to project back (LINEAR - no activation)
-- Residual: Skip connection when stride=1 and channels match
+One deviation from the paper follows from reusing the universal block. The paper's
+first stage has expansion factor `t=1` and therefore omits the expansion
+convolution entirely; `UniversalInvertedBottleneck` always builds an expansion
+`1x1` + norm + activation, so that stage here carries an extra `C -> C` projection
+the reference does not have. It is a small parameter cost and a structural
+difference, not a numerical equivalence. The classifier also ends in softmax, so
+this model emits probabilities: compile with `from_logits=False`.
 
-Usage Examples:
---------------
-```python
-# Standard MobileNetV2 (α=1.0) for ImageNet
-model = MobileNetV2.from_variant("1.0", num_classes=1000)
+`pretrained=True` on `create_mobilenetv2` logs a warning and returns a randomly
+initialized model — no checkpoints ship with this package. A caller who asks for
+pretrained weights gets untrained ones and a log line, so treat pretrained as
+unsupported here; the house contract in newer packages (see `resnet/model.py`) is
+to raise instead, and this module predates it.
 
-# Smaller model (α=0.75) for CIFAR-10
-model = MobileNetV2.from_variant("0.75", num_classes=10, input_shape=(32, 32, 3))
-
-# Custom configuration
-model = MobileNetV2(num_classes=100, width_multiplier=0.5, input_shape=(128, 128, 3))
-```
+References:
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
+      (https://arxiv.org/abs/1801.04381)
+    - Howard et al., 2017. MobileNets: Efficient Convolutional Neural Networks for
+      Mobile Vision Applications. (https://arxiv.org/abs/1704.04861)
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+    - Qin et al., 2024. MobileNetV4: Universal Models for the Mobile Ecosystem.
+      (https://arxiv.org/abs/2404.10518) — source of the Universal Inverted
+      Bottleneck this module is built from.
 """
 
 import keras

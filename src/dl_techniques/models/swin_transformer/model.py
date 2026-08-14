@@ -1,40 +1,86 @@
 """
-Swin Transformer Model Implementation
-====================================
+Hierarchical vision transformer built from shifted-window attention, with four
+stages, patch merging between them, and an optional classification head.
 
-A complete implementation of the Swin Transformer architecture with hierarchical vision_heads
-transformer using shifted windows. This implementation follows modern Keras 3 patterns
-for consistency and maintainability.
+The architecture exists to resolve a tension between two facts about applying
+transformers to images. Global self-attention costs `O((HW)^2)` in the number of
+tokens, which is unaffordable at the resolutions dense prediction needs; but
+restricting attention to fixed local windows makes the cost `O(M^2 * HW)` — linear
+in image area for a fixed window `M` — at the price of never letting information
+cross a window boundary, which stacks into a network of disconnected columns.
+Swin's answer is to alternate the window partition instead of enlarging it.
+Even-indexed blocks partition the feature map on a regular `MxM` grid; odd-indexed
+blocks shift the whole partition by `M/2` in both axes, so a window in the shifted
+layer straddles four windows of the previous layer. Two consecutive blocks
+therefore connect every token to a neighbourhood strictly larger than one window,
+and stacking them grows the receptive field without ever computing a global
+attention matrix.
 
-Based on: "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows" (Liu et al., 2021)
-https://arxiv.org/abs/2103.14030
+Implementing that shift naively would produce windows of unequal size at the image
+border — `(M/2+1)^2` partitions instead of `(H/M)^2`, which cannot be batched. The
+trick the paper uses, and which lives in `SwinTransformerBlock` rather than here,
+is a cyclic roll: the feature map is rolled by `-M/2` before partitioning and
+rolled back afterwards, which keeps the window count and shape identical to the
+unshifted case. The roll wraps opposite edges of the image into the same physical
+window, so tokens that are not spatially adjacent end up as window-mates, and an
+attention mask must forbid exactly those pairs. Roll and mask are two halves of
+one operation: a roll without its mask lets the left edge attend to the right edge
+as though they touched, and a mask without its roll masks pairs that were never
+brought together. The block derives both from a single resolved shift value for
+that reason, and drops both together when a stage's grid has become smaller than
+the window (at which point one window covers everything and there is nothing to
+shift).
 
-Model Variants:
---------------
-- Swin-Tiny: [2,2,6,2] blocks, [96,192,384,768] dims, [3,6,12,24] heads (28.3M params)
-- Swin-Small: [2,2,18,2] blocks, [96,192,384,768] dims, [3,6,12,24] heads (49.6M params)
-- Swin-Base: [2,2,18,2] blocks, [128,256,512,1024] dims, [4,8,16,32] heads (87.8M params)
-- Swin-Large: [2,2,18,2] blocks, [192,384,768,1536] dims, [6,12,24,48] heads (196.5M params)
+Attention inside a window is position-agnostic on its own, so each head carries a
+learnable relative position bias added to the scores before softmax — indexed by
+the `(2M-1) x (2M-1)` possible relative offsets between two positions in a window
+rather than by absolute coordinates. This is what supplies spatial structure; the
+model adds no absolute positional embedding anywhere.
 
-Architecture Overview:
---------------------
-1. Patch Embedding: Converts input image to non-overlapping patches
-2. Stage 1-4: Each contains multiple Swin Transformer blocks
-3. Patch Merging: Reduces spatial resolution and increases feature dimensions
-4. Classification Head: Global average pooling + linear classifier
+Between stages, `PatchMerging` concatenates each `2x2` neighbourhood of tokens into
+one and projects `4C -> 2C`. Resolution halves and width doubles, the same
+pyramid a CNN builds, which is what makes the network usable as a detection or
+segmentation backbone rather than only a classifier. Four stages take a `H/4`
+patch grid down to `H/32`.
 
-Usage Examples:
---------------
-```python
-# CIFAR-10 model (32x32 input)
-model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+This module assembles those parts. The stage schedule is the paper's:
+tiny `[2,2,6,2]` at `embed_dim=96`, small `[2,2,18,2]` at 96, base `[2,2,18,2]` at
+128, large `[2,2,18,2]` at 192, giving 28.3M / 49.6M / 87.8M / 196.5M parameters at
+`num_classes=1000` (measured, not quoted). Shift alternates on the block index
+*within* a stage, so every stage begins unshifted. Stochastic depth is scheduled
+linearly across all blocks of all stages, not restarted per stage, so a block's
+drop rate depends on its global depth.
 
-# ImageNet model (224x224 input)
-model = SwinTransformer.from_variant("base", num_classes=1000)
+Three things about the code would otherwise mislead. The model is *functional*, not
+subclassed: `__init__` builds a `keras.Input` graph and calls
+`super().__init__(inputs, outputs)` at the end, which is why `get_config()`
+deliberately does not merge `super().get_config()` — the functional config would
+collide with the constructor arguments on reload. Between the patch embedding and
+the first block there is a bare `Reshape`: `PatchEmbedding2D` emits a 3D
+`(B, HW, C)` sequence while `SwinTransformerBlock` requires a 4D `(B, H, W, C)`
+grid, and both contracts are load-bearing for other models, so the seam is
+resolved here in the model rather than by changing either layer. And the
+divisibility checks on input height and width only `logger.warning`; they are
+compute notes, not correctness guards. `PatchMerging` ceil-pads an odd grid
+dimension, so a non-divisible input still produces the declared output shape — it
+just carries zero-padded tokens through at least one merge. The single hard
+requirement, `H % patch_size == 0`, is raised by `PatchEmbedding2D`.
 
-# Custom input size model
-model = create_swin_transformer("large", num_classes=100, input_shape=(384, 384, 3))
-```
+The classification head emits raw logits — layer-norm, global average pooling, a
+dense layer with no activation — so compile with `from_logits=True`.
+`create_swin_transformer(pretrained=True)` logs a warning and returns a randomly
+initialized model; no checkpoints ship with this package, so pretrained weights
+should be treated as unsupported here rather than as silently available.
+
+References:
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. ICCV 2021. (https://arxiv.org/abs/2103.14030)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Shaw et al., 2018. Self-Attention with Relative Position Representations.
+      (https://arxiv.org/abs/1803.02155)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras
