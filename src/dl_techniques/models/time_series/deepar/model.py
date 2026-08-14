@@ -1,14 +1,83 @@
 """
-DeepAR Probabilistic Forecasting Model.
+Autoregressive recurrent forecaster that emits a likelihood, Gaussian or negative
+binomial, instead of a point prediction.
 
-This module implements the DeepAR model for probabilistic time series forecasting.
-DeepAR learns a global model from multiple related time series and produces
-probabilistic forecasts through Monte Carlo sampling.
+The problem DeepAR addresses is that a forecast is a decision input, and a decision
+needs the spread as much as the level. A network trained on squared error returns
+`E[z_t | history]` and nothing else, so the width of the outcome is unavailable
+exactly where it matters — inventory, capacity, risk. DeepAR instead factorizes the
+joint over the horizon into one-step conditionals and models each one explicitly:
 
-Reference:
-    DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks
-    Salinas et al., 2019
-    https://arxiv.org/abs/1704.04110
+`p(z_{t0:T} | z_{1:t0-1}, x) = prod_t p(z_t | theta(h_t))`,
+`h_t = LSTM([z_{t-1} / nu, x_t], h_{t-1})`
+
+The recurrent state is the whole of the conditioning; the head maps it to
+distribution parameters `theta` and the loss is the negative log-likelihood of the
+observed value under those parameters. Nothing about this is Gaussian by necessity:
+swapping the head swaps the assumed observation process, which is why the count case
+gets a negative binomial (mean `mu`, variance `mu + alpha * mu^2`) rather than a
+Gaussian that would put mass on negative counts.
+
+Training and inference run the same recurrence under two different input policies.
+Training is teacher-forced: the true lagged target is fed in, every step is scored
+in parallel, and the pass is one symbolic forward — this is what `call` does, and it
+returns the parameter dict rather than a prediction. Inference is ancestral: at each
+horizon step a value is drawn from the current predictive distribution and fed back
+as the next input, so uncertainty compounds across the horizon the way it actually
+does. There is no closed form for the multi-step predictive distribution under that
+recurrence; `num_samples` independent trajectories are drawn and quantiles are read
+off as empirical percentiles. The sampling path is deliberately kept out of `call`
+and lives in `predict_step` / `_prediction_mode`, so `call` stays a single symbolic
+dict-returning function instead of a mode-switched one.
+
+Scale is the second thing the architecture handles explicitly. Across a large panel
+the magnitudes of individual series follow a power law, and a shared network cannot
+fit both a series in the single digits and one in the millions with the same weights.
+Each series gets `nu = mean(z over the conditioning range) + scale_epsilon`; inputs
+are divided by it and likelihood parameters are multiplied back. `scale_epsilon`
+defaults to 1.0 and is not a numerical fudge — it keeps `nu` away from zero for
+near-empty series and makes `nu >> 1` the normal case. The Gaussian `sigma` is
+un-scaled by `nu`, NOT `sqrt(nu)`: the forward path divides `z` by `nu` exactly once,
+so if `z~ = z / nu` then both `mu = nu * mu~` and `sigma = nu * sigma~` — `sigma` is
+a first-moment-scale quantity here, not a variance. The `sqrt` belongs only to the
+negative-binomial shape, where `alpha = alpha~ / sqrt(nu)`. Training and sampling
+must agree on this, so both sites carry the same reasoning inline.
+
+Which window `nu` is computed over is a correctness question, not a detail. Inference
+only ever sees the conditioning range, so the scale must come from there. If
+`conditioning_length` is left `None` the training-time scale is the mean of the full
+target window, which makes every teacher-forced step a function of the steps being
+predicted and simultaneously puts training and serving on different `nu`
+distributions. The constructor accepts `conditioning_length` for exactly this, and
+the model emits a warning rather than silently proceeding when it is absent; passing
+a precomputed `inputs['scale']` bypasses the question entirely.
+
+Two implementation properties are worth knowing before trusting long horizons. The
+sampling loop re-runs the whole stacked LSTM over the conditioning window with the
+current value appended, once per horizon step per sample, because a stacked
+`keras.layers.LSTM` does not carry state across separate invocations here. That costs
+`num_samples * prediction_len` full-sequence passes, and it means the context at
+horizon step `t` is the conditioning range plus the single most recent draw — earlier
+draws and their covariates do not re-enter the context. Separately, the negative
+binomial path samples by moment matching to a Gaussian clipped at zero rather than by
+a Gamma-Poisson draw, and `negative_binomial_loss` drops the `lgamma` terms; both are
+approximations of the exact distribution and are marked as such at the call sites.
+
+Both loss functions ignore `y_true` and read the target out of `y_pred`, because
+`call` returns the target alongside the parameters. That keeps the likelihood
+parameters and the value they are scored against in one structure and makes
+`model.compile(loss=model.gaussian_loss)` work with any placeholder `y`. And
+`_forecast` forces a single `predict` batch: `predict_step` returns `(S, B, H, D)`
+with samples on axis 0, and Keras' default multi-batch concatenation would append
+along that same axis, scrambling the result.
+
+References:
+    - Salinas et al., 2020. DeepAR: Probabilistic Forecasting with Autoregressive
+      Recurrent Networks. (https://arxiv.org/abs/1704.04110)
+    - Hochreiter and Schmidhuber, 1997. Long Short-Term Memory. Neural Computation
+      9(8): 1735-1780.
+    - Bengio et al., 2015. Scheduled Sampling for Sequence Prediction with Recurrent
+      Neural Networks. (https://arxiv.org/abs/1506.03099)
 """
 
 import keras

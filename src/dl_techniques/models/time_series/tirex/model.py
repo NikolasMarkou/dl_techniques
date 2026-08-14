@@ -1,54 +1,93 @@
 """
-TiRex hybrid architecture for probabilistic time series forecasting,
-combining recurrent state modeling with attention-based global context.
+TiRex-style probabilistic forecaster: patch tokens processed by a stack of blocks
+that mix LSTM recurrence with windowed self-attention, decoded in one shot into
+non-crossing quantiles under reversible per-instance normalization.
 
-This class realizes a "Mixed Sequential" architecture designed to address the
-dichotomy between local temporal dynamics and long-range global dependencies
-in time series data. It synthesizes the inductive biases of Recurrent Neural
-Networks (LSTMs) and Transformers into a unified, configurable pipeline.
+The design answers three problems at once, and each answer costs something worth
+knowing about.
 
-Architecture Overview:
-    The model processes data through four distinct stages:
-    1.  **Reversible Normalization**: Input data is normalized (z-score) per-instance
-        to handle non-stationary statistics (shifting mean/variance), a technique
-        crucial for robust forecasting across diverse regimes.
-    2.  **Patch Tokenization**: The time series is segmented into sub-sequences
-        (patches) and projected into an embedding space. This reduces the effective
-        sequence length, enabling the processing of long horizons with reduced
-        computational complexity relative to point-wise attention.
-    3.  **Mixed Sequential Encoding**: A stack of configurable blocks processes
-        the tokenized sequence. These blocks can be pure LSTMs, pure Transformers,
-        or "Mixed" blocks.
-        -   **LSTM Layers** enforce a sequential inductive bias, carrying a running
-            state $h_t$ that captures local evolution and short-term causality.
-        -   **Transformer Layers** utilize Self-Attention to model global
-            dependencies ($Attention(Q, K, V)$), allowing the model to attend to
-            distant patches (e.g., yearly seasonality) regardless of their
-            position in the sequence.
-    4.  **Probabilistic Head**: The decoder projects the encoded representation
-        into a distribution of quantiles, approximating the inverse cumulative
-        distribution function (quantile function) of the target.
+The first is *scale*. A forecaster trained across many series sees windows whose
+level and amplitude differ by orders of magnitude; a network fed those raw learns
+the scale instead of the shape. Every window is therefore z-scored along its own
+time axis before anything else touches it and the prediction is mapped back
+afterwards, `y = q * std + mean`. The statistics are per-series and per-feature,
+computed over `axis=1` — never over the batch — so the model becomes indifferent to
+level and scale without any leakage between examples. Missing data is folded into
+the same step: NaNs are located, replaced by zeros, and the mean/variance sums are
+divided by the *count of valid steps* rather than the window length, so a gap
+neither poisons the statistics nor propagates a NaN forward. The validity mask is
+not then discarded — it is concatenated onto the feature axis, doubling it, so the
+encoder can tell an imputed zero from an observed zero. This is why the patch
+embedding is constructed at `embed_dim * 2` and immediately projected back down to
+`embed_dim`: the doubled width carries the mask, and shape threading in `build`
+must mirror that doubling or the restored weights will not fit.
 
-Mathematical Intuition:
-    Standard Transformers suffer from a lack of inherent sequential bias, often
-    requiring complex positional encodings. LSTMs suffer from the vanishing gradient
-    problem over long horizons. TiRex addresses this by applying recurrence *within*
-    or *before* attention.
+The second is *sequence length*. Point-wise attention over a long lookback is
+quadratic in the number of timesteps and spends most of its capacity on
+neighbouring samples that carry nearly identical information. Segmenting the
+series into patches of `patch_size` and embedding each as one token cuts the
+sequence by that factor and gives each token a local waveform rather than a scalar
+— the same trade PatchTST makes.
 
-    Mathematically, the mixed block computes:
-    $$ H_{local} = \text{LSTM}(X_{patches}) $$
-    $$ H_{global} = \text{SelfAttention}(H_{local}) $$
+The third is *inductive bias*. Attention has no notion of order beyond what a
+positional encoding supplies, while an LSTM has order built in but struggles to
+reach across a long context. A `mixed` block runs both in series, pre-normalized
+and residual at each stage: `x = x + LSTM(norm(x))`, then `x = x + Attn(norm(x))`,
+then `x = x + FFN(norm(x))`. Attention therefore operates on tokens that already
+carry recurrent state, so the ordering information it needs is inside the values
+rather than added to them, and no positional embedding exists anywhere in this
+model. Per-block `block_types` let the stack be tuned from purely recurrent to
+purely attentional; the `lstm` and `transformer` variants are the same block with
+one of the two sub-layers omitted.
 
-    This structure ensures that the tokens fed into the attention mechanism
-    already contain rich, context-aware local state information, stabilizing
-    optimization and improving zero-shot generalization capabilities.
+One divergence from the published TiRex is deliberate and is flagged at its
+construction site: attention here is **windowed, not global**. Every block is built
+with `attention_type='window'` and `window_size=attention_window_size` (default 8
+tokens), so a token attends only within its local window; long-range coupling is
+carried by the LSTM path and by the stacking of windows across depth, not by a
+single global attention map. Anything claiming this model attends freely to
+arbitrarily distant patches is describing the paper, not this code. The remaining
+block internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and
+Mish activations throughout.
+
+Decoding is one-shot and pooled. After the final normalization the patch axis is
+collapsed by a mean — the whole encoded history becomes a single `(B, 1, embed_dim)`
+summary — and the head projects that summary directly to
+`prediction_length * num_quantiles` values, reshaped to `(B, H, Q)`. There is no
+autoregressive loop, so horizon cost is constant and no error compounds across
+steps; the price is that the head cannot condition step `h` on step `h-1`, and that
+mean-pooling discards *which* patch a pattern came from. Pooling with
+`keepdims=True` is load-bearing rather than cosmetic: the head flattens its input,
+which requires a statically known sequence length, and a length of exactly 1
+supplies one. Quantile crossing is structurally prevented instead of penalized —
+the head emits `r`, then `Q_0 = r_0` and `Q_i = Q_{i-1} + softplus(r_i)`, so the
+outputs are non-decreasing by construction and no loss term or post-hoc sort is
+needed. For multivariate input the de-normalization uses the statistics of the
+**last** feature, which is the model's standing convention for which column is the
+target.
+
+`predict_quantiles` maps user-requested levels onto the levels the model was
+actually trained with, falling back to the nearest trained level and logging a
+warning rather than interpolating: an interpolated 0.95 from a model that only
+learned 0.9 would look like a calibrated quantile while being nothing of the kind.
+The median is extracted as the point forecast because it is the minimizer of
+absolute error under the quantile loss. When `use_layer_norm=False` the output
+normalization becomes `keras.layers.Identity` rather than a `Lambda` identity —
+lambdas serialize as pickled Python and do not survive a portable `.keras`
+round-trip.
 
 References:
-    -   **TiRex Architecture**: Auer, A., et al. (2025). "TiRex: Zero-Shot
-        Forecasting Across Long and Short Horizons with Enhanced In-Context Learning."
-        arXiv preprint arXiv:2505.23719.
-    -   **Patching**: Nie, Y., et al. (2023). "A Time Series is Worth 64 Words:
-        Long-term Forecasting with Transformers." ICLR.
+    - Auer et al., 2025. TiRex: Zero-Shot Forecasting Across Long and Short
+      Horizons with Enhanced In-Context Learning.
+      (https://arxiv.org/abs/2505.23719)
+    - Nie et al., 2023. A Time Series is Worth 64 Words: Long-term Forecasting
+      with Transformers. ICLR 2023. (https://arxiv.org/abs/2211.14730)
+    - Kim et al., 2022. Reversible Instance Normalization for Accurate Time-Series
+      Forecasting against Distribution Shift. ICLR 2022.
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
+      (https://arxiv.org/abs/2004.05150)
+    - Wen et al., 2017. A Multi-Horizon Quantile Recurrent Forecaster.
+      (https://arxiv.org/abs/1711.11053)
 """
 
 import keras

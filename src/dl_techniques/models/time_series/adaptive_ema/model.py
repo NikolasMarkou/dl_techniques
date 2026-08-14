@@ -1,43 +1,71 @@
 """
-Adaptive EMA Slope Filter Model.
+An EMA-slope regime filter expressed as a trainable model, with a learnable
+threshold band and an optional quantile head over the slope.
 
-This module implements ``AdaptiveEMASlopeFilterModel`` — a ``keras.Model`` (not
-a layer) for time-series trading signal generation based on the slope of an
-exponential moving average. The model emits a dict containing the EMA, the
-slope, three trading signals (``signal_above``, ``signal_below``,
-``signal_between``), and optionally a probabilistic ``slope_quantiles`` head.
+The underlying object is a classical trading rule. An exponential moving average
+smooths a price series with an infinite-impulse-response low pass,
+`EMA_t = a * x_t + (1 - a) * EMA_{t-1}` with `a = 2 / (period + 1)`, and its
+`L`-bar finite difference `slope_t = EMA_t - EMA_{t-L}` estimates the local drift of
+the smoothed level. The rule then partitions the slope into three regimes against a
+band: strongly rising, strongly falling, and the quiet interval between. The
+empirical claim behind the rule is that the middle regime — not the directional ones
+— is where the risk-adjusted edge sits, which is why `signal_between` is a
+first-class output and not the leftover case.
 
-Threshold parameterization
---------------------------
-When ``learnable_thresholds=True`` the upper/lower bounds are parameterized by
-two raw scalar weights — ``midpoint_var`` and ``log_half_range_var`` — such
-that
+The word "adaptive" here refers to the DECISION BAND, not the smoothing coefficient.
+`a` is fixed by `ema_period` and is never trained; what gradient descent can move is
+where the two thresholds sit. Choosing that band by hand is the weakest part of the
+classical rule, since it is expressed in raw price units and does not transfer across
+instruments or volatility regimes. Parameterizing the band by a midpoint and a
+half-width lets it be fitted, and the specific parameterization matters:
 
-    upper = midpoint_var + softplus(log_half_range_var)
-    lower = midpoint_var - softplus(log_half_range_var)
+`upper = m + softplus(r)`, `lower = m - softplus(r)`
 
-This is injective in the raw weights and produces a strictly positive band
-width by construction.
+Because `softplus` is strictly positive, `lower <= upper` cannot be violated by any
+value the optimizer reaches, so the constraint needs no clipping, no projection and
+no penalty. The map is injective in `(m, r)`, so the two raw scalars are identifiable
+rather than trading off against each other, and `r` is initialized by inverting
+`softplus` at the requested half-width so the model starts exactly at the configured
+band. The two threshold weights are stored in float32 regardless of the compute
+policy and cast to the slope's dtype at use — they are two scalars whose absolute
+precision sets every decision boundary, and there is nothing to gain from holding
+them in half precision.
 
-Trainable surface
------------------
-* ``learnable_thresholds=False`` and ``quantile_head_config=None`` → zero
-  trainable parameters.
-* ``learnable_thresholds=True`` → 2 trainable scalars (``midpoint_var``,
-  ``log_half_range_var``).
-* ``quantile_head_config`` set → a small causal Conv1D featurizer
-  (``slope_feature_dim`` filters, kernel ``slope_feature_kernel``, GELU
-  activation) precedes the ``QuantileSequenceHead`` so the head sees a learned
-  representation of the slope window instead of a scalar.
+A hard comparison has zero gradient everywhere, so a trainable band needs a
+relaxation. Under `training=True` the three signals become sigmoid memberships with
+temperature `slope_softness`, small values approaching the step and large values
+flattening it. Under `training=False` the exact comparisons return, and the three
+outputs form a genuine partition (`above + below + between == 1` pointwise). This is
+a deliberate train/serve asymmetry: the model is optimized through a smooth surrogate
+and served as the crisp rule it actually is. The soft branch does not preserve the
+partition — `signal_between` there is a product of two sigmoids and the three values
+do not sum to one — so anything downstream that relies on normalization must use the
+inference branch.
 
-References
-----------
-* LeBeau, C. (1992). *Computer Analysis of the Futures Markets.* McGraw-Hill —
-  origin of the EMA-slope filtering heuristic used as the rule-based path.
-* Bollinger, J. (2001). *Bollinger on Bollinger Bands.* McGraw-Hill — slope as
-  a trend/volatility regime indicator.
-* Koenker, R. & Bassett, G. (1978). "Regression Quantiles." *Econometrica*
-  46(1): 33-50 — quantile-loss formulation used by ``QuantileSequenceHead``.
+The slope shift prepends `L` zeros rather than rolling the sequence. A roll would
+wrap the tail of the series into its head and leak future values into the earliest
+slopes; the zeros instead make the first `L` slopes deliberately meaningless and
+leave that visible to the caller.
+
+The optional quantile path answers a different question from the signals: not "which
+regime is this" but "what is the distribution of the slope". A raw slope is one
+scalar per step and gives a quantile head nothing to condition on, so a causal Conv1D
+with GELU featurizes a short window of slope history first — causal padding, so the
+head never sees ahead. When that head is attached, multi-feature inputs are REJECTED
+rather than accepted: the Conv1D would otherwise mix independent channels into one
+representation silently, and a loud error is preferable to a quietly wrong model. The
+constructor also warns when `learnable_thresholds=True` is combined with no quantile
+head, since that configuration leaves a model with exactly two trainable scalars and
+usually indicates a misconfigured experiment rather than an intent.
+
+With both options off the model has zero trainable parameters and is a pure rule
+evaluated on the graph — a legitimate configuration, useful as the baseline the
+learned variants are measured against.
+
+References:
+    - LeBeau, 1992. Computer Analysis of the Futures Markets. McGraw-Hill.
+    - Bollinger, 2001. Bollinger on Bollinger Bands. McGraw-Hill.
+    - Koenker and Bassett, 1978. Regression Quantiles. Econometrica 46(1): 33-50.
 """
 
 import math

@@ -1,3 +1,85 @@
+"""
+N-BEATSx: the doubly residual N-BEATS stack extended with exogenous covariates,
+mixing trend / seasonality / generic blocks with exogenous blocks whose basis is
+produced by a temporal convolutional encoder.
+
+Plain N-BEATS forecasts a series from its own past alone. That is a real
+limitation whenever the driver of the horizon is *known in advance* — calendar
+effects, scheduled prices, published weather forecasts — because the information
+exists but the model has no port through which to accept it. Concatenating the
+covariates onto the target and widening the input would technically work, but it
+destroys what makes N-BEATS worth using: every block would then explain a mixture
+of target and covariate, the residual stream would no longer be a decomposition of
+the target, and the trend / seasonality components would stop being readable.
+
+N-BEATSx keeps the residual discipline intact and adds a *block type* instead of a
+new input channel. The stacking law is unchanged — each block subtracts its
+backcast from the running residual and adds its forecast to the accumulator,
+
+    `residual_l = residual_{l-1} - backcast_l`
+    `forecast   = sum_l forecast_l`
+
+— but an exogenous block forms its two expansions differently. The endogenous
+blocks synthesize from a fixed basis (`t^p`, `cos/sin`) or a learned static one;
+the exogenous block synthesizes from a basis that is *itself a function of the
+covariates*. History and future covariates are concatenated along time into one
+`(B, backcast + forecast, exog_dim)` tensor, a dilated causal TCN encodes it to
+`C` channels, and the result is split back at the boundary into a backcast basis
+and a forecast basis. The block's fully connected trunk — which sees only the
+target residual — emits one weight per basis channel, and the projection is
+
+    `backcast = einsum('btc,bc->bt', basis_b, theta_b)`
+    `forecast = einsum('btc,bc->bt', basis_f, theta_f)`
+
+so theta is a per-sample vector over channels, not per-timestep. All of the time
+structure comes from the covariates and all of the *amount* comes from the target
+residual. Running the encoder over the concatenated span rather than the two
+halves separately is deliberate: it gives a single continuous receptive field
+across the backcast/forecast boundary, and the convolutions are causal, so a
+position never reads a covariate value from later in the span. Setting
+`use_tcn=False` selects the interpretable variant, where the raw covariate tensor
+*is* the basis and each theta component is directly the (signed) contribution of
+one named covariate.
+
+Two consequences of this construction are easy to get wrong. First, an exogenous
+block replaces the inherited theta heads with Dense layers of width
+`basis_channels` — `tcn_filters` when encoding, `exogenous_dim` when not — so the
+`thetas_dim` entry configured for an exogenous stack is *inert*; only endogenous
+stacks consume it. Second, the exogenous block overrides `call` outright instead of
+implementing the base class's `_generate_backcast` / `_generate_forecast` hooks
+(which are left as no-ops), because the basis must be built from the covariates
+before theta can be projected against it, whereas the base `call` expands theta
+immediately.
+
+The model takes a dictionary input (`target_history`, `exog_history`,
+`exog_forecast`) rather than a single tensor, since three tensors of two different
+time lengths cannot be packed into one array without padding. Endogenous blocks
+are constructed with `input_dim=1` / `output_dim=1` unconditionally: the residual
+stream here is the univariate target, and covariate width lives entirely in
+`exogenous_dim`. Reversible instance normalization is computed over the time axis
+of the target only — the covariates are passed through unscaled, since a calendar
+indicator or a one-hot has no meaningful per-window z-score — and the summed
+forecast is de-normalized with the target's own statistics. Note that
+`use_normalization` is a single switch with two effects here: besides the target
+RevIN, it is forwarded to every block, enabling RMSNorm inside the fully connected
+trunk. Optional dropout is applied to the *residual stream* between blocks, not
+inside the trunk, so it perturbs what the next block is asked to explain. Unlike
+`NBeatsNet`, `call` returns the forecast tensor alone; there is no reconstruction
+output, so `predict()` and `call` agree exactly.
+
+References:
+    - Olivares et al., 2023. Neural basis expansion analysis with exogenous
+      variables: Forecasting electricity prices with NBEATSx. International
+      Journal of Forecasting. (https://arxiv.org/abs/2104.05522)
+    - Oreshkin et al., 2019. N-BEATS: Neural basis expansion analysis for
+      interpretable time series forecasting. ICLR 2020.
+      (https://arxiv.org/abs/1905.10437)
+    - Bai et al., 2018. An Empirical Evaluation of Generic Convolutional and
+      Recurrent Networks for Sequence Modeling. (https://arxiv.org/abs/1803.01271)
+    - Kim et al., 2022. Reversible Instance Normalization for Accurate Time-Series
+      Forecasting against Distribution Shift. ICLR 2022.
+"""
+
 import keras
 from typing import Any, Callable, Dict, List, Optional, Union
 from keras import ops, layers, initializers, regularizers

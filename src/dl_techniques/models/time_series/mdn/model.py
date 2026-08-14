@@ -1,79 +1,89 @@
 """
-Mixture Density Network (MDN) Model.
+A Dense feature stack whose output head emits the parameters of a conditional
+Gaussian mixture over the target, with ancestral sampling and a variance
+decomposition built on top of it.
 
-A Mixture Density Network is a neural network architecture that predicts probability
-distributions rather than single point estimates, making it particularly valuable for
-regression problems with multi-modal outputs, heteroscedastic noise, or when uncertainty
-quantification is crucial.
+The failure this architecture repairs is specific. Regression under squared error is
+maximum likelihood under a fixed-variance unimodal Gaussian, so the network can only
+ever return `E[y|x]`. When the conditional distribution is multi-modal — inverse
+problems, where several distinct outputs explain the same input — the conditional
+mean falls between the modes and is a value the process never generates. Averaging
+two correct answers produces a wrong one. Widening the network does not help, because
+the target being fit is the mean itself.
 
-## What It Does
+A mixture density network replaces the point head with a density:
 
-This MDNModel combines traditional neural network feature extraction with a specialized
-output layer that models the target variable as a mixture of Gaussian distributions.
-Instead of predicting a single value ŷ, it predicts the parameters of a probability
-distribution P(y|x), allowing you to:
+`p(y|x) = sum_i pi_i(x) * N(y; mu_i(x), diag sigma_i(x)^2)`
 
-- Generate multiple plausible predictions for each input
-- Quantify prediction uncertainty (both aleatoric and epistemic)
-- Handle multi-modal target distributions where multiple correct answers exist
-- Capture heteroscedastic noise patterns in your data
+and trains under `L = -log sum_i pi_i(x) N(y; mu_i(x), sigma_i(x))`. The gradient now
+rewards placing probability mass where the data is, not splitting the difference, so
+components separate onto modes and `sigma_i` absorbs whatever local noise remains.
+Heteroscedasticity comes free: `sigma_i` is a function of `x`, so the model can be
+confident in one region and diffuse in another.
 
-## Core Functionality
+The parameterization is where the numerics live. `sigma` is produced by a softplus
+plus a `min_sigma` floor (1e-3), which keeps it strictly positive and, more
+importantly, bounds `log(sigma)` and `1/sigma` — an unfloored MDN drives `sigma`
+toward zero on any component that lands exactly on a data point and the likelihood
+diverges. `pi` is emitted as RAW LOGITS with no activation at all; every consumer
+(loss, sampling, point estimate, uncertainty) applies exactly one softmax or
+log_softmax to that slice, and adding an activation at the head would compress the
+logits through a double application. The likelihood is evaluated entirely in log
+space: `log_softmax` over the mixture axis, per-dimension Gaussian log-densities
+summed over the last axis, then `logsumexp` over the mixture axis. The ordering is
+load-bearing — the sum over output dimensions is the log of a product (components are
+diagonal, so dimensions are independent given a component) and must happen before the
+mixture is reduced, and doing either step in probability space underflows as
+`output_dimension` grows.
 
-**Probabilistic Predictions**: Rather than outputting deterministic values, the model
-outputs mixture parameters (mixing coefficients π, means μ, and variances σ²) that
-define a Gaussian mixture model for each input.
+Structurally the model is a stack of hidden blocks feeding one `MDNLayer`. Each
+configured hidden size expands to `Dense -> [BatchNorm] -> Activation -> [Dropout]`,
+with normalization before the activation and dropout last; the Dense carries no
+activation of its own precisely so the normalization can sit between them. All
+sublayers are created in `__init__` and explicitly built in `build()` rather than
+lazily on first call: a sublayer that does not exist when a `.keras` file restores
+weights is re-initialized afterwards, and the saved values are discarded without any
+error. The head returns a single concatenated tensor of width
+`2 * output_dim * num_mixtures + num_mixtures` laid out `[mu | sigma | pi]`, which is
+why sampling and uncertainty are methods on this model rather than caller-side
+post-processing — the split is the layer's contract, not a convention.
 
-**Uncertainty Quantification**: Separates uncertainty into:
-- Aleatoric uncertainty: Inherent data noise and ambiguity
-- Epistemic uncertainty: Model uncertainty due to limited training data
-- Total predictive uncertainty: Combined uncertainty estimate
+`compile()` deliberately does not accept a `loss` argument. It hard-wires
+`mdn_layer.loss_func`, because the output tensor is a parameter vector and any
+ordinary regression loss applied to it is meaningless arithmetic over concatenated
+`mu`, `sigma` and logits. Making the loss unpassable removes the failure mode rather
+than documenting it.
 
-**Sampling Capability**: Generate multiple samples from the predicted distribution
-to explore the full range of possible outputs and their relative probabilities.
+`sample()` draws ancestrally: a Gumbel-max categorical pick over `pi / temperature`
+selects a component, then a Gaussian draw is taken from that component's parameters.
+Temperature acts on the logits before the softmax, so below 1 it concentrates on
+dominant components and above 1 it flattens toward uniform selection — it changes
+which mode is visited, not the width of the component once chosen. When a `seed` is
+given, sample `i` uses `seed + i` so the draws are reproducible yet uncorrelated, and
+inside the layer the Gaussian draw is offset again so it does not alias the
+categorical stream. Samples stack on axis 1, giving `[batch, num_samples, output_dim]`.
 
-**Confidence Intervals**: Compute prediction intervals at any confidence level
-to provide interpretable uncertainty bounds.
+`predict_with_uncertainty` applies the law of total variance to the mixture:
+`E[y|x] = sum_i pi_i mu_i`, with `sum_i pi_i sigma_i^2` as the within-component term
+and `sum_i pi_i (mu_i - E[y|x])^2` as the between-component term. The keys name these
+`aleatoric_variance` and `epistemic_variance`, and that second name should be read as
+a label for the between-component spread, not as a claim about parameter uncertainty:
+a single deterministically-trained MDN has one set of weights and cannot express
+uncertainty about them. Genuine epistemic uncertainty requires an ensemble or a
+posterior over weights. The returned intervals are likewise `point +/- z * sqrt(total
+variance)`, a Gaussian approximation applied to a distribution chosen for being
+non-Gaussian; they are calibrated in the unimodal case and merely indicative when the
+mixture is genuinely multi-modal, where the honest interval is a set of disjoint
+regions that a single lower/upper pair cannot represent.
 
-## When to Use
-
-- **Multi-modal regression**: When inputs can map to multiple valid outputs
-- **Inverse problems**: Where one input corresponds to multiple possible solutions
-- **Noisy data**: When you need to model and account for heteroscedastic noise
-- **Risk assessment**: When prediction confidence is as important as the prediction itself
-- **Active learning**: To identify regions where the model is most uncertain
-- **Robust decision-making**: When downstream decisions need uncertainty estimates
-
-## Architecture
-
-The model consists of:
-1. **Feature Extraction Network**: Dense layers with configurable architecture,
-   batch normalization, dropout, and activation functions
-2. **MDN Output Layer**: Specialized layer that outputs mixture parameters
-3. **Sampling Mechanism**: Methods to draw samples from the predicted distributions
-4. **Uncertainty Analysis**: Tools to decompose and interpret prediction uncertainty
-
-## Key Advantages
-
-- **Captures output uncertainty**: Unlike standard regression, provides confidence estimates
-- **Handles complex distributions**: Can model multi-modal and skewed target distributions
-- **Flexible architecture**: Configurable hidden layers, regularization, and normalization
-- **Production ready**: Full serialization support, logging, and robust error handling
-- **Interpretable**: Separates different types of uncertainty for better decision-making
-
-## Mathematical Foundation
-
-For each input x, the model predicts:
-P(y|x) = Σᵢ πᵢ(x) * N(y; μᵢ(x), σᵢ²(x))
-
-Where:
-- πᵢ(x): Mixing coefficient for component i (must sum to 1)
-- μᵢ(x): Mean of Gaussian component i
-- σᵢ²(x): Variance of Gaussian component i
-- N(y; μ, σ²): Normal distribution with mean μ and variance σ²
-
-This allows the model to represent arbitrarily complex probability distributions
-as weighted combinations of simpler Gaussian components.
+References:
+    - Bishop, 1994. Mixture Density Networks. Aston University Technical Report
+      NCRG/94/004.
+    - Graves, 2013. Generating Sequences With Recurrent Neural Networks.
+      (https://arxiv.org/abs/1308.0850)
+    - Ha and Schmidhuber, 2018. World Models. (https://arxiv.org/abs/1803.10122)
+    - Kendall and Gal, 2017. What Uncertainties Do We Need in Bayesian Deep Learning
+      for Computer Vision? (https://arxiv.org/abs/1703.04977)
 """
 
 import keras

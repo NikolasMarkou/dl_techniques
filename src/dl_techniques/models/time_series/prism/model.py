@@ -1,67 +1,80 @@
 """
-PRISM: Partitioned Representations for Iterative Sequence Modeling.
+Hierarchical time-frequency forecaster over a binary time tree with per-band routing,
+a channel-independent temporal decoder, and point or monotone-quantile heads.
 
-This module implements the PRISM model for multivariate time series forecasting,
-combining hierarchical time-frequency decomposition with forecasting capabilities.
-Supports both point forecasts and probabilistic quantile forecasts using a
-standardized QuantileHead.
+Real series are not single-scale objects. A demand curve carries a multi-year trend,
+a weekly cycle and a burst that lasts three hours, all at once, and any model that
+commits to one resolution — a fixed patch length, a fixed wavelet level, a single
+downsampling rate — resolves one of those and blurs the rest. Widening the receptive
+field trades away the short structure; narrowing it trades away the long. The
+resolution is a choice, and PRISM's answer is to stop making it globally.
 
-**Overview**:
+The signal is recursively bisected along the time axis into overlapping segments, so
+level `i` of the tree holds `2^i` views of increasingly local extent, with the root
+seeing the whole context. At every node the segment is passed through a Haar DWT,
+producing a set of frequency bands within that node's temporal span. The two
+hierarchies are therefore independent knobs: `tree_depth` sets how finely time is
+partitioned and `num_wavelet_levels` sets how finely frequency is split inside each
+partition, and a node deep in the tree can still attend to a low band while a shallow
+one attends to a high one. That decoupling is the architectural claim.
 
-PRISM addresses the challenge that real-world time series contain global trends,
-local fine-grained structure, and features on multiple scales in between. It builds
-a learnable tree-based partitioning of the signal where the root captures coarse
-trends while recursive splits reveal increasingly localized views.
+Which bands matter is decided per node by data, not by hyperparameter. A small shared
+MLP router reads six summary statistics of each band — mean, standard deviation, min,
+max, and the mean and standard deviation of its first difference — and emits a score;
+scores are turned into weights by a temperature-scaled softmax across bands. Two
+consequences follow from that design. Because the router consumes statistics rather
+than the band content itself, its cost is independent of segment length and its
+decision is invariant to where within the segment a feature occurs. Because the
+normalization is a softmax, the weighting is competitive: bands bid against each
+other for a fixed budget, so the router expresses relative importance and cannot
+simply amplify everything. The standard deviations are computed as `sqrt(var + eps)`
+rather than through a plain `std`, since the gradient of `std` carries a `1 / (2 std)`
+factor that explodes on a constant band — a real occurrence in a high-frequency band
+of a smooth segment.
 
-**Architecture**:
+Reconstruction stitches children back into the parent's span with a linear cross-fade
+across the overlap region. Without overlapping segments and a fade, the tree would
+print its own split points into the output as discontinuities at every level, and
+those artifacts would be indistinguishable from signal to everything downstream.
+`overlap_ratio` is constrained below 0.5 because at half a segment length the
+partition stops being a partition.
 
-The model cycles through four key stages:
+The decoder is where most of the parameter budget would ordinarily be wasted. After
+the PRISM stack the latent is `[B, T_ctx, H]`; flattening it into a Dense that emits
+the horizon costs `O(T_ctx * T_out * H)` weights, dominating the model. Instead the
+tensor is transposed so the Dense acts on the TIME axis, and the same
+context-to-horizon map is shared across every hidden channel — the DLinear
+observation that a linear temporal map is both sufficient and drastically cheaper.
+Batch and horizon are then collapsed into one axis so the output head is applied
+identically at every forecast step. The head has no step-specific parameters at all,
+which is the reason it can be a small MLP; the price is that the horizon length lives
+entirely in the temporal projector, so changing it means rebuilding that layer rather
+than reshaping the head.
 
-1. **Time Decomposition**: Recursive bisection of the time series along the time
-   axis into overlapping segments, forming a binary tree hierarchy. Each level
-   produces 2^i segments where i is the tree depth.
+In probabilistic mode the head is a `QuantileHead` with monotonicity enforced, so
+`Q_i <= Q_{i+1}` holds by construction rather than by penalty — crossed quantiles are
+not merely untidy, they do not describe a distribution, and a soft penalty leaves the
+model free to violate the constraint wherever the data pressure is strong enough. The
+head's own dropout is set to zero because `head_dropout` has already been applied to
+its input; leaving both active would drop twice on the same path. The final reshape
+to `[B, H, F, Q]` is done explicitly here rather than trusted to the head's own output
+layout.
 
-2. **Frequency Decomposition**: At each node, a time-frequency transform (Haar
-   DWT by default) decomposes segments into K frequency bands, extracting
-   scale-specific features.
-
-3. **Importance Weighting**: A lightweight MLP router computes importance scores
-   for each frequency band based on summary statistics (mean, std, max amplitude,
-   first/second derivatives). Scores are converted to weights via temperature-
-   scaled softmax.
-
-4. **Reconstruction**: Weighted frequency bands are combined and child node
-   outputs are stitched together through linear cross-fade over overlap windows,
-   yielding multiscale representations for forecasting.
-
-**Key Design Principles**:
-
-- Joint hierarchy in both time AND frequency domains.
-- Reconstructible design with overlap-based stitching for stability.
-- Data-driven importance scoring enables automatic focus on predictive components.
-- Decoupled temporal and frequency resolutions through learned weighting.
-- **Efficient Decoding**: Uses a channel-independent temporal projection strategy
-  (similar to DLinear) to map context steps to forecast steps, drastically reducing
-  parameter count compared to flattened dense projections.
-
-**Quantile Forecasting**:
-
-When ``use_quantile_head=True``, the model employs a dedicated ``QuantileHead``
-to output probabilistic forecasts. This ensures monotonicity (Q_i <= Q_{i+1})
-and provides a standardized interface for confidence intervals.
-
-**Performance**:
-
-PRISM achieves state-of-the-art results across standard benchmarks (ETT, Traffic,
-Electricity, Exchange, Weather) and shows particular strength on irregular,
-aperiodic, incomplete, nonstationary, and drifting time series data.
+Two deliberate choices govern the prediction surface. `predict_quantiles` maps a
+requested level that was not trained to the nearest trained level and warns, rather
+than interpolating between quantiles — an interpolated quantile is a fabricated
+number with no calibration behind it. And in point mode `_forecast` returns
+`quantiles=None` instead of manufacturing an interval from a model that was never
+trained to produce one.
 
 References:
-    Chen, Z., Andre, A., Ma, W., Knight, I., Shuvaev, S., & Dyer, E. (2025).
-    PRISM: A Hierarchical Multiscale Approach for Time Series Forecasting.
-    arXiv:2512.24898.
-
-    Code: https://github.com/nerdslab/prism
+    - Chen et al., 2025. PRISM: A Hierarchical Multiscale Approach for Time Series
+      Forecasting. arXiv:2512.24898.
+    - Zeng et al., 2022. Are Transformers Effective for Time Series Forecasting?
+      (https://arxiv.org/abs/2205.13504)
+    - Mallat, 1989. A Theory for Multiresolution Signal Decomposition: The Wavelet
+      Representation. IEEE TPAMI 11(7): 674-693.
+    - Koenker and Bassett, 1978. Regression Quantiles. Econometrica 46(1): 33-50.
 """
 
 import keras
