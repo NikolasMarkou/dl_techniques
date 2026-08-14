@@ -69,7 +69,7 @@ Adelson, "The Laplacian Pyramid as a Compact Image Code" (1983).
 
 import keras
 from keras import ops
-from typing import Optional, Union, Tuple, List, Dict, Any
+from typing import Optional, Union, Tuple, List, Dict, Any, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -540,6 +540,140 @@ def _make_supervision_activation(activation, name):
 
 
 # ---------------------------------------------------------------------
+# Bias-free (use_bias=False) guardrails
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-14T092357-0e3d792d/D-012: this is an ALLOWLIST of positively
+# homogeneous activation NAMES, and it is deliberately NARROW and deliberately
+# INCOMPLETE as a homogeneity certificate. Do NOT convert it to a denylist of
+# {'gelu', 'tanh', 'sigmoid', ...}: a denylist silently admits every activation
+# nobody thought of, which is exactly the failure a bias-free denoiser cannot
+# observe (its outputs stay finite and its tests stay green while f(a*x) != a*f(x)).
+# Do NOT widen this set to admit a value some caller happens to pass -- widening a
+# rule to accommodate what the same change discovered is a self-serving edit; the
+# correct response is to escalate. Note what is NOT here and why:
+#   * 'gelu' -- the shipped default of `block_activation`, `stem_activation` and
+#     `supervision_activation`. Those three are DELIBERATELY EXEMPT from the guard
+#     (decisions.md D-006 / plan invariant I-6): guarding them would make the
+#     model's own default configuration raise, which is a breakage, not a guard.
+#   * `downsample_pool_type='max'` -- NOT guarded anywhere. Max pooling is
+#     non-linear but IS positively homogeneous (max(a*x) == a*max(x) for a > 0);
+#     conflating "non-linear" with "non-homogeneous" would wrongly ban it.
+# Consequence, stated so no reader mistakes it: passing these guards is NOT a
+# homogeneity certificate. See decisions.md D-006 and D-012.
+POSITIVELY_HOMOGENEOUS_ACTIVATIONS: FrozenSet[Optional[str]] = frozenset(
+    {None, 'linear', 'relu', 'leaky_relu'}
+)
+
+
+def _validate_bias_free_arguments(
+        final_activation: Union[str, callable],
+        gabor_activation: Optional[str],
+        use_gabor_stem: bool,
+        supervision_norm_center: bool,
+        block_normalization: str,
+) -> None:
+    """Validate the arguments that break bias-freeness / degree-1 homogeneity.
+
+    Called from :func:`create_convunext` **only** when ``use_bias is False``. Under
+    ``use_bias=True`` none of these arguments is a defect, so the whole function is
+    inert on that arm.
+
+    Three hard guards (raise :class:`ValueError`) and one soft guard (warn):
+
+    - ``final_activation`` must name a positively homogeneous activation, i.e. be a
+      member of :data:`POSITIVELY_HOMOGENEOUS_ACTIVATIONS`.
+    - ``gabor_activation`` likewise, but **only when** ``use_gabor_stem`` is True.
+      With the Gabor stem off the argument is inert -- it reaches no layer -- so
+      raising on it would fire on a configuration that is perfectly homogeneous.
+    - ``supervision_norm_center=True`` puts a trainable additive offset (``beta``)
+      on the deep-supervision head LayerNorm, which is a bias by another name.
+    - ``block_normalization='layernorm'`` WARNS and builds. Per-input LayerNorm is
+      scale-INVARIANT (degree 0), not degree-1, so it does break homogeneity -- but
+      it is the shipped default of both arms (plan invariant I-3) and the byte-identity
+      tripwire in ``test_bfconvunext_denoiser.py`` pins it, so raising would take down
+      every existing bias-free caller. Raise-vs-warn here is a CONTRACT, not a comment.
+
+    Two rulings a later reader will be tempted to "fix", recorded here on purpose:
+
+    - **A callable (non-string) activation cannot be statically checked.** Its
+      homogeneity is a property of code this function cannot inspect. It therefore
+      WARNS and never raises. Do not turn that into a raise (it would ban a legitimate
+      homogeneous lambda) and do not turn it into silence (the caller then has no
+      signal at all).
+    - **``supervision_norm_center=True`` raises even when
+      ``enable_deep_supervision=False``**, i.e. even when no supervision head is
+      built and the argument reaches nothing. This is deliberate: the guard's
+      predicate is a pure function of its arguments, and the caller stated a
+      contradictory intent. Do NOT gate this clause on ``enable_deep_supervision``.
+
+    :param final_activation: The builder's ``final_activation`` argument.
+    :type final_activation: str or callable
+    :param gabor_activation: The builder's ``gabor_activation`` argument.
+    :type gabor_activation: str or None
+    :param use_gabor_stem: Whether the frozen Gabor stem is built at all; scopes
+        the ``gabor_activation`` clause.
+    :type use_gabor_stem: bool
+    :param supervision_norm_center: The builder's ``supervision_norm_center``.
+    :type supervision_norm_center: bool
+    :param block_normalization: The builder's ``block_normalization``.
+    :type block_normalization: str
+    :raises ValueError: If ``final_activation`` or (when the Gabor stem is on)
+        ``gabor_activation`` names a non-positively-homogeneous activation, or if
+        ``supervision_norm_center`` is True.
+    :return: None. The function's whole effect is raising or warning.
+    :rtype: None
+    """
+    allowed = sorted(a for a in POSITIVELY_HOMOGENEOUS_ACTIVATIONS if a is not None)
+    allowed_msg = f"None or one of {allowed}"
+
+    def _check_activation(arg_name: str, value: Any) -> None:
+        if value is None or isinstance(value, str):
+            if value not in POSITIVELY_HOMOGENEOUS_ACTIVATIONS:
+                raise ValueError(
+                    f"{arg_name}={value!r} is not positively homogeneous, and "
+                    f"use_bias=False requires it to be. Allowed: {allowed_msg}. "
+                    f"A non-homogeneous activation (gelu, elu, tanh, sigmoid, mish, "
+                    f"swish, softmax, ...) breaks the degree-1 homogeneity "
+                    f"f(a*x) = a*f(x) the bias-free stack rests on."
+                )
+            return
+        # Callable / layer-instance activation: not statically checkable.
+        logger.warning(
+            f"{arg_name} is a callable ({value!r}), not a string, so its "
+            f"positive homogeneity cannot be checked statically under "
+            f"use_bias=False. Building anyway. Verify f(a*x) = a*f(x) yourself; "
+            f"the statically-checkable choices are {allowed_msg}."
+        )
+
+    _check_activation('final_activation', final_activation)
+
+    if use_gabor_stem:
+        _check_activation('gabor_activation', gabor_activation)
+
+    if supervision_norm_center:
+        raise ValueError(
+            "supervision_norm_center=True is incompatible with use_bias=False: the "
+            "deep-supervision head LayerNorm's `center` adds a trainable additive "
+            "offset (beta), which is a bias by another name. Pass "
+            "supervision_norm_center=False. NOTE: this raises regardless of "
+            "enable_deep_supervision -- the guard is a pure function of its "
+            "arguments, so a contradictory intent is reported even when no "
+            "supervision head is built."
+        )
+
+    if block_normalization == 'layernorm':
+        logger.warning(
+            "block_normalization='layernorm' under use_bias=False: per-input "
+            "LayerNorm divides by a per-sample std that itself scales with the "
+            "input, so it is scale-INVARIANT (degree 0), NOT degree-1 "
+            "f(a*x) = a*f(x). This WARNS rather than raises because 'layernorm' is "
+            "the shipped default of both arms. Pass block_normalization='batchnorm' "
+            "(variance-only BiasFreeBatchNorm) for a homogeneous bias-free stack."
+        )
+
+
+# ---------------------------------------------------------------------
 # Core Model Creation Function
 # ---------------------------------------------------------------------
 
@@ -648,6 +782,20 @@ def create_convunext(
        KNOWN non-strictness (D-GAP-1), not an oversight: threading it would change
        the bias-off arm's parameter count, which is the regression instrument this
        merge is validated against.
+
+    **Guardrails under** ``use_bias=False`` **(**:func:`_validate_bias_free_arguments`
+    **, decisions.md D-006/D-012).** Three arguments RAISE ``ValueError`` on the
+    bias-off arm and are completely inert on the bias-on arm:
+    ``final_activation`` and — only when ``use_gabor_stem=True`` —
+    ``gabor_activation`` must be in :data:`POSITIVELY_HOMOGENEOUS_ACTIVATIONS`
+    (``None``, ``'linear'``, ``'relu'``, ``'leaky_relu'``); and
+    ``supervision_norm_center=True`` is rejected outright. Two rulings that look
+    like bugs and are not: a **callable** activation cannot be checked statically,
+    so it WARNS and builds; and ``supervision_norm_center=True`` raises **even when**
+    ``enable_deep_supervision=False``, keeping the guard a pure function of its
+    arguments. Separately, ``block_normalization='layernorm'`` (the default on both
+    arms) only WARNS — raising would break every existing bias-free caller. Given
+    exception 1 above, passing these guards is NOT a homogeneity certificate.
 
     :param input_shape: Shape of input images ``(height, width, channels)``.
     :type input_shape: tuple of 3 ints
@@ -917,6 +1065,21 @@ def create_convunext(
     if downsample_pool_type not in ['max', 'average']:
         raise ValueError(
             f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}"
+        )
+
+    # DECISION plan-2026-08-14T092357-0e3d792d/D-012: the homogeneity guardrails fire
+    # ONLY on the bias-off arm. Do NOT hoist this call out of the `if` -- under
+    # use_bias=True a 'sigmoid' final activation and a centered supervision norm are
+    # ordinary, supported configurations (`ConvUNextModel`'s own deleted trainers used
+    # exactly those), and an unconditional validator would break the bias-ON arm to
+    # protect an invariant the bias-ON arm never claimed. See decisions.md D-012.
+    if use_bias is False:
+        _validate_bias_free_arguments(
+            final_activation=final_activation,
+            gabor_activation=gabor_activation,
+            use_gabor_stem=use_gabor_stem,
+            supervision_norm_center=supervision_norm_center,
+            block_normalization=block_normalization,
         )
 
     # Select ConvNeXt block type

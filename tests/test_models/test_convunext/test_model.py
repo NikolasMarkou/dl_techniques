@@ -19,6 +19,7 @@ functional-graph equivalents.
 """
 
 import os
+import logging
 import tempfile
 from typing import Dict, Any
 
@@ -520,3 +521,179 @@ class TestCreateConvUNextLiveness:
         for name in ('encoder_level_0_stem', 'bottleneck_channel_adjust',
                      'bottleneck_convnext_v2_block_0', 'final_output'):
             assert model.get_layer(name=name) is not None
+
+
+# ---------------------------------------------------------------------
+# Plan step 5: the three use_bias=False guardrails
+# ---------------------------------------------------------------------
+
+def _guard_config(**overrides) -> Dict[str, Any]:
+    """The smallest config that still builds, for the guardrail tests.
+
+    Deliberately tiny: most of these tests assert on a raise that happens BEFORE
+    any layer is constructed, and the few that do build only need the graph to
+    exist, not to be representative.
+    """
+    cfg = dict(
+        input_shape=(16, 16, 3),
+        depth=2,
+        initial_filters=8,
+        blocks_per_level=1,
+    )
+    cfg.update(overrides)
+    return cfg
+
+
+class TestBiasFreeGuardrails:
+    """``_validate_bias_free_arguments`` fires on the bias-off arm only.
+
+    Plan invariant I-6 / decisions.md D-006, D-012. The guard is an ALLOWLIST of
+    positively homogeneous activations, deliberately narrow, deliberately silent
+    on the model's own non-homogeneous ``'gelu'`` defaults, and deliberately
+    non-raising for ``block_normalization='layernorm'``.
+    """
+
+    # -- (a) final_activation ------------------------------------------------
+
+    def test_bias_free_rejects_non_homogeneous_final_activation(self):
+        """A non-homogeneous string ``final_activation`` is a hard error."""
+        with pytest.raises(ValueError, match=r"final_activation='sigmoid'"):
+            create_convunext(use_bias=False, final_activation='sigmoid',
+                             **_guard_config())
+
+    def test_the_final_activation_error_names_the_allowlist(self):
+        """The message must be actionable: argument, value AND allowlist."""
+        with pytest.raises(ValueError) as excinfo:
+            create_convunext(use_bias=False, final_activation='gelu',
+                             **_guard_config())
+        msg = str(excinfo.value)
+        assert 'final_activation' in msg
+        assert "'gelu'" in msg
+        assert 'leaky_relu' in msg and 'linear' in msg and 'relu' in msg
+
+    @pytest.mark.parametrize('activation', [None, 'linear', 'relu', 'leaky_relu'])
+    def test_allowlisted_final_activations_build(self, activation):
+        """Every allowlist member must survive the guard on the bias-off arm."""
+        model = create_convunext(use_bias=False, final_activation=activation,
+                                 **_guard_config())
+        assert isinstance(model, keras.Model)
+
+    # -- (b) gabor_activation, scoped to use_gabor_stem -----------------------
+
+    def test_bias_free_rejects_non_homogeneous_gabor_activation(self):
+        """With the Gabor stem ON, the activation reaches a layer, so it raises."""
+        with pytest.raises(ValueError, match=r"gabor_activation='gelu'"):
+            create_convunext(
+                use_bias=False, use_gabor_stem=True, gabor_filters=4,
+                gabor_activation='gelu', **_guard_config())
+
+    def test_gabor_activation_guard_is_inert_when_gabor_stem_is_off(self):
+        """POSITIVE liveness arm: the guard is SCOPED, not blanket.
+
+        With ``use_gabor_stem=False`` the ``gabor_activation`` argument reaches no
+        layer at all, so the network really is homogeneous and raising on it would
+        be a false positive. This test goes RED if the ``use_gabor_stem`` condition
+        is dropped from the guard.
+        """
+        model = create_convunext(
+            use_bias=False, use_gabor_stem=False, gabor_activation='gelu',
+            **_guard_config())
+        assert isinstance(model, keras.Model)
+        gabor_layers = [l for l in model._flatten_layers()
+                        if 'gabor' in l.name]
+        assert gabor_layers == [], (
+            "use_gabor_stem=False must build no Gabor layer -- if one exists the "
+            "argument is NOT inert and this test is measuring the wrong thing")
+
+    # -- (c) supervision_norm_center -----------------------------------------
+
+    def test_bias_free_rejects_supervision_norm_center(self):
+        """``center=True`` on the supervision LayerNorm is a bias by another name."""
+        with pytest.raises(ValueError, match=r"supervision_norm_center=True"):
+            create_convunext(
+                use_bias=False, enable_deep_supervision=True,
+                supervision_norm_center=True, **_guard_config())
+
+    def test_supervision_norm_center_raises_even_without_deep_supervision(self):
+        """PINNED EDGE CASE (plan.md 'Edge cases'): the guard's predicate is a PURE
+        FUNCTION OF ITS ARGUMENTS.
+
+        With ``enable_deep_supervision=False`` no supervision head is built and
+        ``supervision_norm_center`` reaches nothing -- and it STILL raises, because
+        the caller stated a contradictory intent. This is a deliberate ruling, not
+        an oversight. Do NOT "fix" it by gating the clause on
+        ``enable_deep_supervision``; this test exists to stop exactly that edit.
+        """
+        with pytest.raises(ValueError, match=r"supervision_norm_center=True"):
+            create_convunext(
+                use_bias=False, enable_deep_supervision=False,
+                supervision_norm_center=True, **_guard_config())
+
+    # -- the bias-ON arm is untouched ----------------------------------------
+
+    def test_bias_on_ignores_all_three_guards(self):
+        """All three offending values at once must BUILD under ``use_bias=True``.
+
+        Goes RED if the validator is called unconditionally.
+        """
+        model = create_convunext(
+            use_bias=True,
+            final_activation='sigmoid',
+            use_gabor_stem=True,
+            gabor_filters=4,
+            gabor_activation='gelu',
+            enable_deep_supervision=True,
+            supervision_norm_center=True,
+            **_guard_config())
+        assert isinstance(model, keras.Model)
+
+    # -- the soft guard: warn, never raise -----------------------------------
+
+    def test_layernorm_under_bias_free_warns_but_builds(self, caplog):
+        """Raise-vs-warn is a CONTRACT here, not a comment.
+
+        ``'layernorm'`` is the shipped default of BOTH arms, so promoting this to a
+        raise would take down every existing bias-free caller. The assertion is
+        two-sided on purpose: the warning IS emitted AND the model IS returned.
+        """
+        with caplog.at_level(logging.WARNING, logger='dl'):
+            model = create_convunext(
+                use_bias=False, block_normalization='layernorm',
+                **_guard_config())
+        assert isinstance(model, keras.Model), (
+            "block_normalization='layernorm' must BUILD, never raise")
+        assert any("block_normalization='layernorm'" in r.getMessage()
+                   for r in caplog.records if r.levelno >= logging.WARNING), (
+            "no WARNING mentioning block_normalization='layernorm' was emitted; "
+            f"records={[r.getMessage() for r in caplog.records]}")
+
+    def test_batchnorm_under_bias_free_does_not_warn(self, caplog):
+        """Control for the test above: the homogeneous choice must be silent."""
+        with caplog.at_level(logging.WARNING, logger='dl'):
+            create_convunext(use_bias=False, block_normalization='batchnorm',
+                             **_guard_config())
+        assert not any("block_normalization" in r.getMessage()
+                       for r in caplog.records if r.levelno >= logging.WARNING)
+
+    # -- callables cannot be checked statically ------------------------------
+
+    def test_callable_final_activation_warns_but_does_not_raise(self, caplog):
+        """A callable's homogeneity is a property of code the guard cannot read."""
+        with caplog.at_level(logging.WARNING, logger='dl'):
+            model = create_convunext(
+                use_bias=False, final_activation=keras.activations.relu,
+                **_guard_config())
+        assert isinstance(model, keras.Model)
+        assert any('final_activation' in r.getMessage() and 'callable' in r.getMessage()
+                   for r in caplog.records if r.levelno >= logging.WARNING)
+
+    # -- the shipped default must never raise --------------------------------
+
+    def test_default_bias_free_config_builds(self):
+        """The DEFAULTS (``final_activation='linear'``, ``gabor_activation=None``)
+        are both in the allowlist, so the default bias-free configuration must
+        build. A guard that fires on the shipped default is not a guard, it is an
+        outage for every bias-free caller in the repo.
+        """
+        model = create_convunext(use_bias=False, **_guard_config())
+        assert isinstance(model, keras.Model)
