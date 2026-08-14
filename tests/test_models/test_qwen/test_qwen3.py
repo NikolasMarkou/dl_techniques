@@ -1103,3 +1103,104 @@ class TestQwen3Integration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+
+
+class TestQwen3CausalMasking:
+    """Qwen3 is a decoder-only causal LM and must not attend to the future.
+
+    Modelled on the GPT-2 pair in tests/test_models/test_gpt2/test_gpt2.py:186
+    and :639 -- the isolation test AND its negative control. The control is what
+    makes the isolation attributable to the MASK rather than to some incidental
+    property of the architecture.
+    """
+
+    CFG = {
+        'vocab_size': 512,
+        'hidden_size': 64,
+        'num_layers': 2,
+        'num_attention_heads': 4,
+        'num_key_value_heads': 2,
+        'max_seq_len': 64,
+        'moe_layers': [],
+        'num_experts': 1,
+        'num_experts_per_tok': 1,
+        'dropout_rate': 0.0,
+    }
+
+    @staticmethod
+    def _pair():
+        """Two sequences differing ONLY in the final position."""
+        a = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
+        b = np.array([[1, 2, 3, 4, 5, 6, 7, 99]], dtype=np.int32)
+        return a, b
+
+    def test_future_does_not_affect_past(self):
+        """Changing the LAST token must not change any earlier logits.
+
+        RED-proof: Qwen3.call forwarded only the padding mask (None unless a
+        caller supplied one), TransformerLayer defaults attention_mask=None, and
+        GroupQueryAttention masks only when given one -- so no causal mask
+        existed anywhere in the package and every position saw the future.
+        """
+        keras.utils.set_random_seed(1234)
+        model = Qwen3(**self.CFG)
+        a, b = self._pair()
+
+        la = keras.ops.convert_to_numpy(model(a, training=False))
+        lb = keras.ops.convert_to_numpy(model(b, training=False))
+
+        for pos in range(7):
+            np.testing.assert_allclose(
+                la[0, pos], lb[0, pos], atol=1e-5,
+                err_msg=(f"position {pos} changed when only position 7 changed "
+                         f"-- the future is leaking into the past"))
+
+    def test_the_probe_is_not_vacuous(self):
+        """The perturbation must actually change SOMETHING.
+
+        Without this, a model that ignored its input entirely would satisfy the
+        isolation test above.
+        """
+        keras.utils.set_random_seed(1234)
+        model = Qwen3(**self.CFG)
+        a, b = self._pair()
+
+        la = keras.ops.convert_to_numpy(model(a, training=False))
+        lb = keras.ops.convert_to_numpy(model(b, training=False))
+
+        delta = float(np.abs(la[0, 7] - lb[0, 7]).max())
+        assert delta > 1e-3, (
+            f"changing position 7 moved its own logits by only {delta:.4e}; "
+            f"the causality assertion would be vacuous")
+
+    def test_without_the_mask_the_same_tokens_do_leak(self):
+        """Negative control: the isolation is due to the MASK.
+
+        Feeding an all-ones ATTEND mask (i.e. no causal structure) to the same
+        blocks must let the identical perturbation reach the earlier positions.
+        If it does not, the 0.0 above would be explained by something other than
+        masking and would prove nothing.
+        """
+        keras.utils.set_random_seed(1234)
+        model = Qwen3(**self.CFG)
+        a, b = self._pair()
+        model(a, training=False)  # build
+
+        def _forward_unmasked(ids):
+            h = model.embeddings(ids)
+            seq = keras.ops.shape(h)[1]
+            allow = keras.ops.ones((keras.ops.shape(h)[0], seq, seq), dtype="bool")
+            for block in model.blocks:
+                h = block(h, attention_mask=allow, training=False)
+            return keras.ops.convert_to_numpy(model.lm_head(model.final_norm(h)))
+
+        la = _forward_unmasked(a)
+        lb = _forward_unmasked(b)
+
+        leak = float(np.abs(la[0, :7] - lb[0, :7]).max())
+        assert leak > 1e-3, (
+            f"even with an all-attend mask the prefix did not move "
+            f"(max |delta| = {leak:.4e}); the masked run's agreement would then "
+            f"not be attributable to the causal mask")

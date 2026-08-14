@@ -22,7 +22,7 @@ from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
 
-from .components import Qwen3NextBlock
+from .components import Qwen3NextBlock, build_causal_attention_mask
 
 # ---------------------------------------------------------------------
 
@@ -354,11 +354,16 @@ class Qwen3Next(keras.Model):
         # Token embeddings
         hidden_states = self.embeddings(input_ids)
 
+        # Causal (+ padding) mask. Qwen3Next is a decoder-only causal LM;
+        # without this every token attended to every future token.
+        causal_attend_mask = build_causal_attention_mask(
+            hidden_states, attention_mask)
+
         # Pass through all Qwen3Next blocks
         for block in self.blocks:
             hidden_states = block(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_attend_mask,
                 training=training
             )
 

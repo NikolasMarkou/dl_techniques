@@ -23,6 +23,62 @@ from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention.gated_attention import GatedAttention
+from dl_techniques.utils.masking import create_mask, combine_masks, MaskConfig
+
+
+# ---------------------------------------------------------------------
+
+
+def build_causal_attention_mask(
+        hidden_states: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+) -> keras.KerasTensor:
+    """Build the causal (+ optional padding) attention mask for a Qwen stack.
+
+    Qwen3 and Qwen3Next are decoder-only causal LMs, but neither built a causal
+    mask: ``call`` forwarded only the *padding* mask (``None`` unless a caller
+    supplied one), ``TransformerLayer`` defaults ``attention_mask=None``, and
+    ``GroupQueryAttention``/``GatedAttention`` mask only when one is given. Every
+    token therefore attended to every future token, so ``task_type="generation"``
+    trained next-token prediction on a model that had already seen the answer.
+
+    This mirrors the GPT-2 path in
+    ``layers/transformers/text_decoder.py:505-538``, whose causality is pinned
+    in both directions by ``tests/test_models/test_gpt2/test_gpt2.py:186``
+    (future does not affect past) and ``:639`` (the negative control: without
+    the mask it *does* leak).
+
+    :param hidden_states: Embedded sequence, shape ``(batch, seq_len, dim)``.
+    :type hidden_states: keras.KerasTensor
+    :param attention_mask: Optional padding mask, shape ``(batch, seq_len)``,
+        ``1`` for real tokens and ``0`` for padding.
+    :type attention_mask: keras.KerasTensor or None
+    :return: Boolean mask of shape ``(batch, seq_len, seq_len)`` in ATTEND
+        semantics — ``True`` means "may attend" — which is the convention the
+        attention layers expect.
+    :rtype: keras.KerasTensor
+    """
+    batch_size = keras.ops.shape(hidden_states)[0]
+    seq_len = keras.ops.shape(hidden_states)[1]
+
+    # Block semantics throughout (True = block), inverted once at the end.
+    causal_mask = create_mask('causal', seq_len=seq_len, dtype='bool')
+    causal_mask = keras.ops.expand_dims(causal_mask, axis=0)
+    causal_mask = keras.ops.broadcast_to(
+        causal_mask, (batch_size, seq_len, seq_len))
+
+    if attention_mask is not None:
+        padding_mask_1d = keras.ops.equal(attention_mask, 0)
+        padding_mask_3d = create_mask(config=MaskConfig(
+            mask_type='padding',
+            dtype='bool',
+            extra_params={'padding_mask': padding_mask_1d},
+        ))
+        combined = combine_masks(causal_mask, padding_mask_3d, combination='or')
+    else:
+        combined = causal_mask
+
+    return keras.ops.logical_not(combined)
 
 
 # ---------------------------------------------------------------------
