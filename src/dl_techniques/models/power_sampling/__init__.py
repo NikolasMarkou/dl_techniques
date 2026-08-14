@@ -1,4 +1,17 @@
-"""General-purpose power sampling for any causal LLM/VLM + any tokenizer."""
+"""General-purpose power sampling for any causal LLM/VLM + any tokenizer.
+
+**There is no model class here, and no ``create_*`` factory was added.** This
+package is an inference-time *decoding* algorithm, not an architecture: it holds
+a sampler (``PowerSampler``), its config, the model-call indirection that turns
+any causal LM/VLM into a ``LogitsFn``, and two numeric helpers. Nothing here
+subclasses ``keras.Model``, so there is nothing for a model factory to build --
+inventing one would fabricate an architecture the package does not have. Build
+your model with its own package's factory and pass it to ``make_logits_fn``.
+
+``_log_softmax`` and ``_nucleus_sample`` keep their leading underscore (they are
+internal by name) but are exported because the test suite and the sampler's
+callers pin their exact numerics.
+"""
 from dl_techniques.models.power_sampling.config import PowerSamplingConfig
 from dl_techniques.models.power_sampling.protocols import TokenizerProtocol, LogitsFn
 from dl_techniques.models.power_sampling.ops import _log_softmax, _nucleus_sample

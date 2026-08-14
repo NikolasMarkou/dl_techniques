@@ -393,6 +393,11 @@ class NAM(keras.Model):
 
         return new_carry, outputs
 
+    #: House-shape canonical name for the variant table. This is an ALIAS to
+    #: ``config.NAM_VARIANTS`` -- the same dict object, not a copy -- because
+    #: trainers and tests reference the module-level spelling.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = NAM_VARIANTS
+
     @classmethod
     def from_variant(
         cls,
@@ -426,3 +431,35 @@ class NAM(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "NAM":
         nam_config = config.pop("config")
         return cls(config=nam_config, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_nam(
+    variant: str = "base",
+    **kwargs: Any,
+) -> NAM:
+    """
+    Create a NAM model from a preset variant.
+
+    :param variant: One of ``NAM.MODEL_VARIANTS`` ("tiny", "small", "base").
+    :type variant: str
+    :param kwargs: Individual ``NAMConfig`` field overrides applied on top of
+        the variant.
+    :return: A configured NAM instance.
+    :rtype: NAM
+    :raises ValueError: If ``variant`` is not a known variant name, or if the
+        resulting config fails ``NAMConfig`` validation.
+
+    Example::
+
+        model = create_nam("tiny", halt_max_steps=4)
+        carry = model.initial_carry(batch)
+        carry, outputs = model(carry, batch)
+    """
+    return NAM.from_variant(variant, **kwargs)
+
+# ---------------------------------------------------------------------

@@ -5,7 +5,7 @@ Fixed vocabulary of 21 tokens covering digits, operators, parentheses,
 decimal point, and special tokens.
 """
 
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 

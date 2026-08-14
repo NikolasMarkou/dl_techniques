@@ -4,7 +4,7 @@ Configuration for the Neural Arithmetic Module (NAM).
 Defines ``NAMConfig`` dataclass and preset model variants.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Any, Dict
 
 

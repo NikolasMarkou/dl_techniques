@@ -206,8 +206,8 @@ class FastVLM(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            embed_dims: List[int] = [64, 128, 256],
-            depths: List[int] = [3, 4, 6],
+            embed_dims: Optional[List[int]] = None,
+            depths: Optional[List[int]] = None,
             num_heads: Optional[List[int]] = None,
             mlp_ratio: float = 4.0,
             dropout_rate: float = 0.0,
@@ -221,11 +221,14 @@ class FastVLM(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs: Any
     ) -> None:
-        # Set default input shape
+        # None sentinels, not shared mutable list defaults.
         if input_shape is None:
             input_shape = (224, 224, 3)
+        if embed_dims is None:
+            embed_dims = [64, 128, 256]
+        if depths is None:
+            depths = [3, 4, 6]
 
-        # Validate inputs
         if num_classes < 0:
             raise ValueError(f"num_classes must be non-negative, got {num_classes}")
         if len(embed_dims) != 3:
@@ -245,13 +248,11 @@ class FastVLM(keras.Model):
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        # Set default num_heads if not provided
         if num_heads is None:
             num_heads = [max(1, dim // 32) for dim in embed_dims]
         elif len(num_heads) != 3:
             raise ValueError(f"num_heads must have 3 elements, got {len(num_heads)}")
 
-        # Validate num_heads divisibility
         for i, (dim, heads) in enumerate(zip(embed_dims, num_heads)):
             if heads <= 0:
                 raise ValueError(f"All num_heads must be positive, got {heads} at index {i}")
@@ -260,7 +261,6 @@ class FastVLM(keras.Model):
                     f"embed_dims[{i}] ({dim}) must be divisible by num_heads[{i}] ({heads})"
                 )
 
-        # Store configuration
         self.num_classes = num_classes
         self.embed_dims = embed_dims
         self.depths = depths
@@ -276,13 +276,10 @@ class FastVLM(keras.Model):
         self.include_top = include_top
         self._input_shape = input_shape
 
-        # Create inputs
         inputs = keras.Input(shape=input_shape)
 
-        # Build model
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
@@ -294,7 +291,6 @@ class FastVLM(keras.Model):
         """Build the FastVLM model architecture."""
         x = inputs
 
-        # Convolutional stem
         self.stem = ConvolutionalStem(
             out_channels=self.embed_dims[0],
             use_se=self.use_se,
@@ -304,7 +300,6 @@ class FastVLM(keras.Model):
         )
         x = self.stem(x, training=None)
 
-        # Create stages
         self.stages = []
         self.downsample_layers = []
 
@@ -539,7 +534,6 @@ class FastVLM(keras.Model):
         logger.info(f"Creating FastVLM-{variant.upper()} model")
         logger.info(f"Configuration: {config}")
 
-        # Override with any user-provided arguments
         config.update(kwargs)
 
         return cls(
@@ -610,5 +604,50 @@ class FastVLM(keras.Model):
         logger.info(f"  - Include top: {self.include_top}")
         if self.include_top and self.num_classes > 0:
             logger.info(f"  - Number of classes: {self.num_classes}")
+
+# ---------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_fastvlm(
+        variant: str = "base",
+        num_classes: int = 1000,
+        input_shape: Optional[Tuple[int, ...]] = None,
+        **kwargs: Any
+) -> FastVLM:
+    """
+    Create a FastVLM model from a named variant.
+
+    Args:
+        variant: String, one of ``FastVLM.MODEL_VARIANTS``
+            ("nano", "tiny", "small", "base", "large", "huge").
+        num_classes: Integer, number of output classes for classification.
+        input_shape: Tuple, input shape. ``None`` defaults to (224, 224, 3).
+        **kwargs: Additional arguments passed to the model constructor; they
+            override the variant's entries.
+
+    Returns:
+        A configured FastVLM instance.
+
+    Raises:
+        ValueError: If ``variant`` is not a known variant name, or if any
+            resolved argument is out of range.
+
+    Example:
+        ```python
+        model = create_fastvlm("tiny", num_classes=10, input_shape=(32, 32, 3))
+        backbone = create_fastvlm("base", include_top=False)
+        ```
+    """
+    return FastVLM.from_variant(
+        variant=variant,
+        num_classes=num_classes,
+        input_shape=input_shape,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------
