@@ -356,6 +356,13 @@ def create_bfunet_denoiser(
             use_laplacian_pyramid=use_laplacian_pyramid,
             laplacian_kernel_size=laplacian_kernel_size,
             pool_type=downsample_pool_type,
+            # bfunet is unconditionally bias-free, and `DownsampleAndSkip.use_bias`
+            # (added for its learned 'strided_conv' branch) is READ BY THE TRAINERS'
+            # compliance sweep -- `train/bfunet/train_unet_denoiser.py:198` walks
+            # `_flatten_layers()` for any layer whose `use_bias` is truthy. Leaving the
+            # constructor default (True) makes every junction report as a bias offender
+            # even though the pooling branch has no weights at all. Keep this explicit.
+            use_bias=False,
             name=junction_name,
         )(x)
 

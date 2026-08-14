@@ -152,6 +152,220 @@ class TestPoolingPath:
 
 
 # ---------------------------------------------------------------------
+# OFF path, learned variant (strided conv)
+# ---------------------------------------------------------------------
+
+
+class TestStridedConvPath:
+    """``pool_type='strided_conv'`` -- the only branch that carries weights."""
+
+    def test_strided_conv_downsample_has_learnable_weights(self, sample_input):
+        """RED-proof target for aliasing ``'strided_conv'`` to ``'max'``.
+
+        Both pooling branches are WEIGHTLESS, so a nonzero trainable-weight count is
+        the one assertion an alias cannot survive. Shape is useless here: a
+        ``Conv2D(k=2, s=2)`` and a ``MaxPooling2D(2)`` produce the SAME output shape
+        on an even-sized input, so a shape-only test stays green under the alias.
+        """
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv", name="junction",
+        )
+        skip, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
+
+        assert len(layer.trainable_weights) > 0, (
+            "the strided-conv branch must carry learnable weights; a pooling branch "
+            "has zero"
+        )
+        assert isinstance(layer.conv, keras.layers.Conv2D)
+        assert layer.pool is None
+        assert layer.conv.name == "junction_conv"
+        assert keras.ops.convert_to_numpy(downsampled).shape == (2, 4, 4, 3)
+
+    def test_strided_conv_skip_is_the_input_tensor(self, sample_input):
+        """Same contract as the pooling branch: the skip is the RAW input."""
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv",
+        )
+        skip, _ = layer(keras.ops.convert_to_tensor(sample_input))
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(skip), sample_input, atol=0.0, rtol=0.0
+        )
+
+    def test_strided_conv_preserves_the_channel_count(self):
+        """Channel-PRESERVING by design (decisions.md D-013).
+
+        The deleted ``ConvUNextModel._downsample`` widened channels here. Pinned at a
+        channel count (7) that is not the default anything, so a hardcoded width
+        cannot pass by coincidence.
+        """
+        rng = np.random.default_rng(7)
+        x = rng.normal(size=(1, 8, 8, 7)).astype("float32")
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv",
+        )
+        skip, downsampled = layer(keras.ops.convert_to_tensor(x))
+
+        assert keras.ops.convert_to_numpy(downsampled).shape == (1, 4, 4, 7)
+        assert keras.ops.convert_to_numpy(skip).shape == (1, 8, 8, 7)
+        assert layer.conv.filters == 7
+
+    def test_strided_conv_use_bias_true_creates_a_bias_vector(self, sample_input):
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv", use_bias=True,
+        )
+        layer(keras.ops.convert_to_tensor(sample_input))
+
+        assert layer.conv.use_bias is True
+        assert layer.conv.bias is not None
+        assert len([w for w in layer.weights if "bias" in w.path]) == 1
+
+    def test_strided_conv_use_bias_false_is_degree_one_homogeneous(self, sample_input):
+        """``use_bias=False`` is what makes this branch legal on the bias-free arm.
+
+        Asserts the PROPERTY (``f(a*x) == a*f(x)``), not the flag -- a flag assertion
+        cannot see a conv that carries an additive offset by another route.
+
+        Tolerance note: this is a MATMUL, so on an Ampere+ GPU it runs in TF32
+        (10-bit mantissa) and the measured relative error is ~5e-4, not ~1e-7. The
+        tolerance is set for TF32 rather than for float32; it still discriminates by a
+        wide margin, because a ``use_bias=True`` conv breaks the property by
+        ``(1-alpha)*bias`` -- an absolute offset of 2.7 at the control test's settings,
+        three orders of magnitude above this tolerance.
+        """
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv", use_bias=False,
+        )
+        alpha = 3.7
+        _, base = layer(keras.ops.convert_to_tensor(sample_input))
+        _, scaled = layer(keras.ops.convert_to_tensor(alpha * sample_input))
+
+        assert layer.conv.bias is None
+        assert not [w for w in layer.weights if "bias" in w.path]
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(scaled),
+            alpha * keras.ops.convert_to_numpy(base),
+            rtol=5e-3, atol=5e-3,
+        )
+
+    def test_strided_conv_use_bias_true_is_not_homogeneous(self, sample_input):
+        """CONTROL for the test above: with a bias the property must FAIL.
+
+        Without this control, a homogeneity assertion that passes for a trivial
+        reason (e.g. a bias initialized to zero and never trained) would look like
+        evidence. The bias is set to a nonzero constant first.
+        """
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv", use_bias=True,
+        )
+        layer(keras.ops.convert_to_tensor(sample_input))
+        layer.conv.bias.assign(keras.ops.ones_like(layer.conv.bias))
+
+        alpha = 3.7
+        _, base = layer(keras.ops.convert_to_tensor(sample_input))
+        _, scaled = layer(keras.ops.convert_to_tensor(alpha * sample_input))
+
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(scaled),
+            alpha * keras.ops.convert_to_numpy(base),
+            rtol=5e-3, atol=5e-3,
+        )
+
+    def test_strided_conv_config_round_trip_at_non_default_values(self, sample_input):
+        """Built at NON-DEFAULT knob values on purpose.
+
+        A round trip at defaults is not a ``get_config`` instrument: the constructor
+        default silently repairs a dropped key. ``use_bias`` here is ``False`` (default
+        ``True``) and the initializer/regularizer are non-default too.
+        """
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False,
+            laplacian_kernel_size=(7, 7),
+            pool_type="strided_conv",
+            use_bias=False,
+            kernel_initializer="orthogonal",
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            name="junction",
+        )
+        config = layer.get_config()
+        assert config["use_bias"] is False
+        assert config["pool_type"] == "strided_conv"
+
+        restored = DownsampleAndSkip.from_config(config)
+        restored(keras.ops.convert_to_tensor(sample_input))
+
+        assert restored.use_bias is False
+        assert restored.conv.use_bias is False
+        assert restored.conv.bias is None
+        assert isinstance(restored.kernel_initializer, keras.initializers.Orthogonal)
+        assert isinstance(restored.kernel_regularizer, keras.regularizers.L2)
+
+    @pytest.mark.parametrize("pool_type", ["max", "average"])
+    def test_use_bias_is_visible_to_a_bias_sweep_on_weightless_branches(
+            self, pool_type):
+        """``use_bias`` is INERT on the pooling branches but still OBSERVABLE.
+
+        Every bias-free trainer in this repo audits compliance by walking
+        ``model._flatten_layers()`` and flagging any layer whose ``use_bias`` is
+        truthy (e.g. ``src/train/bfunet/train_unet_denoiser.py:198``). This wrapper
+        now HAS that attribute, so leaving it at the ``True`` default on a bias-free
+        model makes every junction report as a bias offender even though the pooling
+        branch owns no weights at all. Bias-free callers must pass ``use_bias=False``
+        explicitly; this test states why, so nobody "simplifies" it away.
+        """
+        layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type=pool_type, use_bias=False,
+        )
+        assert layer.weights == []
+        assert getattr(layer, "use_bias", False) is False
+
+        default_layer = DownsampleAndSkip(
+            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            pool_type=pool_type,
+        )
+        assert getattr(default_layer, "use_bias", False) is True, (
+            "the constructor default is True and IS seen by a bias sweep")
+
+    def test_strided_conv_keras_round_trip_preserves_weight_values(self, sample_input):
+        """The learned kernel must survive `.keras` save/load BY VALUE.
+
+        A weight-count or config assertion cannot see the recorded defect class where
+        a sub-layer created inside ``build`` is restored with FRESH weights.
+        """
+        inputs = keras.Input(shape=(8, 8, 3))
+        skip, down = DownsampleAndSkip(
+            use_laplacian_pyramid=False,
+            laplacian_kernel_size=(5, 5),
+            pool_type="strided_conv",
+            use_bias=False,
+            name="junction",
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=down)
+
+        before = keras.ops.convert_to_numpy(model(sample_input, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "strided.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+
+        after = keras.ops.convert_to_numpy(reloaded(sample_input, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-6)
+
+        restored_layer = reloaded.get_layer("junction")
+        assert restored_layer.pool_type == "strided_conv"
+        assert restored_layer.use_bias is False
+        assert len(restored_layer.trainable_weights) == 1
+
+
+# ---------------------------------------------------------------------
 # ON path (Laplacian pyramid split)
 # ---------------------------------------------------------------------
 

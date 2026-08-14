@@ -733,6 +733,8 @@ def create_convunext(
         supervision_norm_scale: bool = True,
         supervision_norm_center: bool = False,
         supervision_activation: Union[str, keras.layers.Layer] = 'gelu',
+        include_top: bool = True,
+        output_channels: Optional[int] = None,
         model_name: str = 'convunext'
 ) -> keras.Model:
     """Build a ConvUNext model as a Keras FUNCTIONAL graph.
@@ -910,13 +912,17 @@ def create_convunext(
         ``extra_zero_output_channels`` (which has no learned ``final_output`` conv to
         group).
     :type final_projection_groups: int
-    :param downsample_pool_type: ``'max'`` or ``'average'``. Pooling op for the
-        non-Laplacian encoder downsample. ``'max'`` (default) = MaxPooling2D,
-        NON-LINEAR but positively homogeneous. ``'average'`` = AveragePooling2D, a
-        LINEAR operator that keeps the encoder path linear for the Miyasawa/Tweedie
-        residual-as-score interpretation. Ignored when
-        ``use_laplacian_pyramid=True``. Pooling layers are weightless, so this does
-        not affect weight transfer.
+    :param downsample_pool_type: ``'max'``, ``'average'`` or ``'strided_conv'``.
+        Downsample op for the non-Laplacian encoder junction. ``'max'`` (default) =
+        MaxPooling2D, NON-LINEAR but positively homogeneous. ``'average'`` =
+        AveragePooling2D, a LINEAR operator that keeps the encoder path linear for the
+        Miyasawa/Tweedie residual-as-score interpretation. ``'strided_conv'`` = a
+        LEARNED, channel-preserving ``Conv2D(kernel_size=2, strides=2)`` that threads
+        ``use_bias``; with ``use_bias=False`` it is linear and degree-1 homogeneous,
+        so it is legal on the bias-free arm and is deliberately NOT guarded. Ignored
+        when ``use_laplacian_pyramid=True``. The two pooling ops are weightless, so
+        switching between them does not affect weight transfer; ``'strided_conv'``
+        ADDS parameters at every encoder junction.
     :type downsample_pool_type: str
     :param expose_bottleneck: If True expose the deepest-encoder bottleneck latent as
         an additional, TRAILING model output: ``[denoised, ...(supervision)...,
@@ -995,6 +1001,31 @@ def create_convunext(
     :param supervision_activation: Activation for the deep-supervision heads; default
         ``'gelu'``. Only used when ``enable_deep_supervision=True``.
     :type supervision_activation: str or keras.layers.Layer
+    :param include_top: Whether to build the final ``output_channels`` projection.
+        Defaults to True. With ``include_top=False`` the model's primary output is the
+        full-resolution DECODER FEATURE MAP, exposed through a zero-parameter
+        ``Activation('linear', name='decoder_features')`` tap, and the ``final_output``
+        projection is NOT constructed at all.
+
+        **Divergence from the deleted** ``ConvUNextModel`` **(decisions.md D-013).**
+        That subclass CONSTRUCTED its final projection in ``__init__`` regardless and
+        merely skipped applying it, so its ``include_top=False`` variant still carried
+        the head's weights and a checkpoint could be moved between the two settings. A
+        FUNCTIONAL graph cannot reproduce that: ``keras.Model(inputs, outputs)`` keeps
+        only the layers on a path to an output, so a constructed-but-unapplied layer is
+        pruned, owns no weights and is not reachable via ``get_layer``. The weight
+        compatibility contract is therefore GONE, not preserved --
+        ``include_top=False`` yields a strictly smaller weight list, and
+        ``set_weights`` between the two configurations raises.
+    :type include_top: bool
+    :param output_channels: Number of channels of the final projection and of every
+        deep-supervision output. Defaults to ``None``, which means the INPUT channel
+        count (``input_shape[-1]``) -- the denoiser/autoencoder contract every existing
+        caller relies on. Set it explicitly for a non-reconstruction head (e.g. ``1``
+        for a single-channel mask). Also controls the width of the zero tail appended
+        by ``extra_zero_output_channels``. Inert when ``include_top=False`` and
+        ``enable_deep_supervision=False``.
+    :type output_channels: int or None
     :param model_name: Name of the returned model. Defaults to ``'convunext'``.
     :type model_name: str
 
@@ -1062,9 +1093,27 @@ def create_convunext(
     if convnext_version not in ['v1', 'v2']:
         raise ValueError(f"convnext_version must be 'v1' or 'v2', got {convnext_version}")
 
-    if downsample_pool_type not in ['max', 'average']:
+    if downsample_pool_type not in ['max', 'average', 'strided_conv']:
         raise ValueError(
-            f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}"
+            "downsample_pool_type must be 'max', 'average' or 'strided_conv', got "
+            f"{downsample_pool_type}"
+        )
+
+    if output_channels is None:
+        output_channels = input_shape[-1]
+    elif not isinstance(output_channels, int) or output_channels <= 0:
+        raise ValueError(
+            f"output_channels must be a positive integer or None, got {output_channels!r}"
+        )
+
+    if not include_top and final_projection_groups != 1:
+        # final_projection_groups ONLY parameterizes the `final_output` conv, which
+        # include_top=False does not build. Raise rather than silently ignore it --
+        # a silently inert argument is this repo's recorded defect class.
+        raise ValueError(
+            "final_projection_groups is only meaningful with include_top=True (it "
+            "groups the final_output projection, which include_top=False does not "
+            f"build); got final_projection_groups={final_projection_groups}"
         )
 
     # DECISION plan-2026-08-14T092357-0e3d792d/D-012: the homogeneity guardrails fire
@@ -1152,9 +1201,17 @@ def create_convunext(
             f"split levels={depth} (high-band skips, low-band downsample; bias-free)"
         )
     else:
+        _downsample_descriptions = {
+            'average': 'AveragePooling2D — linear, Miyasawa-clean',
+            'max': 'MaxPooling2D — non-linear but positively homogeneous',
+            'strided_conv': (
+                'Conv2D(k=2, s=2) — LEARNED, channel-preserving, '
+                f"use_bias={use_bias}"
+            ),
+        }
         logger.info(
-            f"Encoder downsample pooling: {downsample_pool_type} "
-            f"({'AveragePooling2D — linear, Miyasawa-clean' if downsample_pool_type == 'average' else 'MaxPooling2D — non-linear'})"
+            f"Encoder downsample: {downsample_pool_type} "
+            f"({_downsample_descriptions[downsample_pool_type]})"
         )
 
     if zero_pad_channels:
@@ -1246,6 +1303,11 @@ def create_convunext(
             use_laplacian_pyramid=use_laplacian_pyramid,
             laplacian_kernel_size=laplacian_kernel_size,
             pool_type=downsample_pool_type,
+            # Only the 'strided_conv' branch reads these three; the pooling and
+            # pyramid branches are weightless and ignore them.
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
             name=junction_name,
         )(x)
 
@@ -1368,7 +1430,6 @@ def create_convunext(
     # =========================================================================
 
     logger.info(f"Building ConvUNext decoder path with {depth} levels")
-    output_channels = input_shape[-1]
 
     for level in range(depth - 1, -1, -1):
         current_filters = filter_sizes[level]
@@ -1517,7 +1578,29 @@ def create_convunext(
             "latter drops the learned final_output Conv2D in favor of a parameter-free tail "
             "slice, so there is no projection to group. Use one or the other."
         )
-    if extra_zero_output_channels:
+    # DECISION plan-2026-08-14T092357-0e3d792d/D-013: include_top=False does NOT
+    # construct the final projection. The deleted `ConvUNextModel` built its head in
+    # __init__ and merely skipped APPLYING it, so its headless variant still carried
+    # the head's weights (an explicit weight-compat contract). That contract is NOT
+    # reproducible here and is deliberately not faked: `keras.Model(inputs, outputs)`
+    # prunes every layer that is not on a path to an output, so a
+    # constructed-but-unapplied Conv2D would own no weights, would not appear in
+    # `model.layers`, and `get_layer('final_output')` would still raise -- MEASURED,
+    # not assumed (decisions.md D-013 records the probe). Do NOT "fix" this by calling
+    # the projection and dropping its tensor (identical pruning), nor by appending it
+    # as a second output (that changes the output signature and silently re-adds the
+    # head this argument exists to remove). The honest contract is: include_top=False
+    # returns the decoder features and a STRICTLY SMALLER weight list; `set_weights`
+    # between the two settings raises.
+    if not include_top:
+        final_output = keras.layers.Activation(
+            'linear', name='decoder_features'
+        )(x)
+        logger.info(
+            f"include_top=False: no final projection; primary output is the decoder "
+            f"feature map with {final_output.shape[-1]} channels"
+        )
+    elif extra_zero_output_channels:
         # DECISION plan_2026-06-26_0ec1a304/D-001: keep ONLY the zero-grown tail
         # channels (last `output_channels`) as the output, dropping the learned 1x1
         # projection. Parameter-free, bias-free, homogeneous. final_activation is

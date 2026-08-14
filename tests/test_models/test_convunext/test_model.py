@@ -697,3 +697,252 @@ class TestBiasFreeGuardrails:
         """
         model = create_convunext(use_bias=False, **_guard_config())
         assert isinstance(model, keras.Model)
+
+
+# ---------------------------------------------------------------------
+# Step 6: the knobs absorbed from the deleted ConvUNextModel
+# ---------------------------------------------------------------------
+
+
+def _knob_config() -> Dict[str, Any]:
+    """A small config for the absorbed-knob tests.
+
+    ``initial_filters`` (8) is deliberately DIFFERENT from the input channel count
+    (3) so that "the decoder feature width" and "the output channel count" are
+    distinguishable numbers -- at ``initial_filters=3`` an ``include_top`` defect
+    would be invisible.
+    """
+    return dict(
+        input_shape=(16, 16, 3),
+        depth=2,
+        initial_filters=8,
+        blocks_per_level=1,
+        drop_path_rate=0.0,
+    )
+
+
+class TestStridedConvDownsample:
+    """``downsample_pool_type='strided_conv'`` (absorbed from ConvUNextModel)."""
+
+    def test_strided_conv_downsample_has_learnable_weights(self):
+        """RED-proof target for aliasing ``'strided_conv'`` to ``'max'``.
+
+        A ``Conv2D(k=2, s=2)`` and a ``MaxPooling2D(2)`` agree on OUTPUT SHAPE, so
+        only the weight count separates them. Asserted at the junction layer itself
+        AND at the whole-model parameter count, because a junction that is built
+        correctly but never applied would still report its own weights.
+        """
+        cfg = _knob_config()
+        model_conv = create_convunext(downsample_pool_type='strided_conv', **cfg)
+        model_pool = create_convunext(downsample_pool_type='max', **cfg)
+
+        junction = model_conv.get_layer(name='encoder_downsample_0')
+        assert len(junction.trainable_weights) > 0, (
+            "the strided-conv junction must carry learnable weights; a pooling "
+            "junction has zero")
+
+        assert model_pool.get_layer(name='encoder_downsample_0').trainable_weights == []
+        assert model_conv.count_params() > model_pool.count_params(), (
+            f"strided_conv={model_conv.count_params()} must exceed "
+            f"max={model_pool.count_params()}")
+
+    def test_strided_conv_is_channel_preserving(self):
+        """decisions.md D-013: this junction does NOT widen channels.
+
+        The deleted ``ConvUNextModel._downsample`` fused downsampling with the
+        channel widening (``filters=next_level_filters``). Keeping channels is what
+        keeps the builder's SEPARATE ``encoder_level_N_channel_adjust`` step valid.
+        """
+        cfg = _knob_config()
+        model = create_convunext(downsample_pool_type='strided_conv', **cfg)
+        junction = model.get_layer(name='encoder_downsample_0')
+
+        assert junction.conv.filters == cfg['initial_filters'], (
+            "the level-0 junction must preserve 8 channels, not widen to the level-1 "
+            f"width 16; got filters={junction.conv.filters}")
+        assert model.get_layer(
+            name='encoder_level_1_channel_adjust').filters == 16, (
+            "the separate channel-adjust step must still do the widening")
+
+    @pytest.mark.parametrize('use_bias', [True, False])
+    def test_strided_conv_threads_use_bias(self, use_bias):
+        """The strided conv is a real learnable conv, so it takes ``use_bias``.
+
+        Unlike the two ruled-hardcoded bias-free sites (``SpatialLinearAttention``,
+        the frozen Gabor bank), this one MUST follow the argument -- asserted on the
+        allocated WEIGHT, not only the flag.
+        """
+        model = create_convunext(
+            use_bias=use_bias, downsample_pool_type='strided_conv', **_knob_config())
+        conv = model.get_layer(name='encoder_downsample_0').conv
+
+        assert conv.use_bias is use_bias
+        assert (conv.bias is not None) is use_bias
+        assert len(conv.weights) == (2 if use_bias else 1)
+
+    def test_strided_conv_is_legal_on_the_bias_free_arm(self):
+        """A bias-free strided conv is linear, hence homogeneous: NOT guarded.
+
+        The guardrails must stay silent here, and no layer in the built model may
+        carry a bias.
+        """
+        model = create_convunext(
+            use_bias=False, downsample_pool_type='strided_conv', **_knob_config())
+        biased = [
+            layer.name for layer in model._flatten_layers()
+            if getattr(layer, 'use_bias', None) is True
+        ]
+        assert biased == [], f"bias-free strided_conv built biased layers: {biased}"
+
+    def test_invalid_downsample_pool_type_still_raises(self):
+        with pytest.raises(ValueError, match='downsample_pool_type'):
+            create_convunext(downsample_pool_type='median', **_knob_config())
+
+
+class TestIncludeTop:
+    """``include_top`` (absorbed from ConvUNextModel, with a documented divergence)."""
+
+    def test_include_top_false_output_channels_match_the_decoder_width(self):
+        """The headless output is the DECODER FEATURE MAP, not a 3-channel image."""
+        cfg = _knob_config()
+        model = create_convunext(include_top=False, **cfg)
+
+        assert model.output_shape[-1] == cfg['initial_filters'], (
+            f"include_top=False must emit the decoder width "
+            f"({cfg['initial_filters']}), got {model.output_shape[-1]}")
+        assert model.output_shape[1:3] == (16, 16), (
+            "the headless output must stay at full resolution")
+        assert model.get_layer(name='decoder_features') is not None
+
+    def test_include_top_false_does_not_construct_the_final_projection(self):
+        """DIVERGENCE PIN (decisions.md D-013), not an oversight.
+
+        ``ConvUNextModel`` CONSTRUCTED its final projection under
+        ``include_top=False`` and merely skipped applying it, so its headless variant
+        still carried the head's weights. A FUNCTIONAL graph cannot reproduce that:
+        ``keras.Model(inputs, outputs)`` prunes every layer that is not on a path to
+        an output, so a constructed-but-unapplied layer owns no weights and is not
+        reachable. This test pins the contract we ACTUALLY ship, so that a future
+        reader cannot quietly "restore" a weight-compat guarantee the graph
+        cannot hold. Measured, not assumed: an experiment that constructed AND
+        applied the projection on a dead branch left this assertion GREEN, because
+        Keras pruned the layer out of the model exactly as described.
+        """
+        model = create_convunext(include_top=False, **_knob_config())
+
+        with pytest.raises(ValueError):
+            model.get_layer(name='final_output')
+
+        assert 'final_output' not in {layer.name for layer in model.layers}
+
+    def test_include_top_false_weight_list_is_strictly_smaller(self):
+        """The measurable consequence of the divergence above.
+
+        Weights trained with ``include_top=True`` do NOT load into an
+        ``include_top=False`` model -- ``set_weights`` raises on the length mismatch.
+        Asserting the raise makes the broken contract a tested fact rather than a
+        comment.
+        """
+        cfg = _knob_config()
+        model_top = create_convunext(include_top=True, **cfg)
+        model_headless = create_convunext(include_top=False, **cfg)
+
+        assert len(model_headless.weights) < len(model_top.weights)
+        assert model_headless.count_params() < model_top.count_params()
+
+        with pytest.raises(ValueError):
+            model_headless.set_weights(model_top.get_weights())
+
+    def test_include_top_false_rejects_final_projection_groups(self):
+        """A silently inert argument is this repo's recorded defect class."""
+        with pytest.raises(ValueError, match='final_projection_groups'):
+            create_convunext(
+                include_top=False, final_projection_groups=2, **_knob_config())
+
+    def test_include_top_true_is_the_default_and_projects(self):
+        """CONTROL: the default must still emit the image-shaped output."""
+        model = create_convunext(**_knob_config())
+        assert model.output_shape[-1] == 3
+        assert model.get_layer(name='final_output').filters == 3
+
+
+class TestOutputChannels:
+    """``output_channels`` (absorbed from ConvUNextModel)."""
+
+    def test_output_channels_override(self):
+        """RED-proof target for ignoring the argument.
+
+        Pinned at 1 against a 3-channel input, so the override and the default are
+        different numbers.
+        """
+        model = create_convunext(output_channels=1, **_knob_config())
+
+        assert model.output_shape[-1] == 1, (
+            f"output_channels=1 must produce 1 output channel, got "
+            f"{model.output_shape[-1]} (3 == the input channel count means the "
+            f"argument was ignored)")
+        assert model.get_layer(name='final_output').filters == 1
+
+    def test_output_channels_defaults_to_the_input_channel_count(self):
+        """CONTROL: the denoiser/autoencoder contract every caller relies on."""
+        model = create_convunext(**_knob_config())
+        assert model.output_shape[-1] == 3
+        assert create_convunext(
+            **dict(_knob_config(), input_shape=(16, 16, 5))
+        ).output_shape[-1] == 5
+
+    def test_output_channels_reaches_the_deep_supervision_heads(self):
+        """The supervision heads emit ``output_channels`` too, not input channels.
+
+        A test that only reads the primary output would be blind to a supervision
+        head still hardcoded to ``input_shape[-1]``.
+        """
+        model = create_convunext(
+            output_channels=1, enable_deep_supervision=True, depth=3,
+            **{k: v for k, v in _knob_config().items() if k != 'depth'})
+
+        assert model.get_layer(name='supervision_output_level_1').filters == 1
+        for shape in model.output_shape:
+            assert shape[-1] == 1, f"a supervision output kept 3 channels: {shape}"
+
+    def test_output_channels_sizes_the_extra_zero_tail(self):
+        """``extra_zero_output_channels`` slices the LAST ``output_channels``."""
+        model = create_convunext(
+            output_channels=1, extra_zero_output_channels=True, **_knob_config())
+        assert model.output_shape[-1] == 1
+        assert model.get_layer(name='extra_zero_output_pad').target_channels == 9
+
+    @pytest.mark.parametrize('bad', [0, -1, 2.0, '3'])
+    def test_invalid_output_channels_raises(self, bad):
+        with pytest.raises(ValueError, match='output_channels'):
+            create_convunext(output_channels=bad, **_knob_config())
+
+
+class TestAbsorbedKnobsRoundTrip:
+    """All three knobs at once must survive a `.keras` round trip BY VALUE."""
+
+    def test_round_trip_at_non_default_knob_values(self):
+        cfg = dict(
+            _knob_config(),
+            downsample_pool_type='strided_conv',
+            include_top=False,
+            output_channels=1,
+            use_bias=False,
+        )
+        model = create_convunext(**cfg)
+        x = np.random.default_rng(11).normal(size=(2, 16, 16, 3)).astype('float32')
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'knobs.keras')
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+
+        after = keras.ops.convert_to_numpy(reloaded(x, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-6)
+
+        junction = reloaded.get_layer(name='encoder_downsample_0')
+        assert junction.pool_type == 'strided_conv'
+        assert junction.use_bias is False
+        assert junction.conv.bias is None
+        assert reloaded.output_shape[-1] == 8
