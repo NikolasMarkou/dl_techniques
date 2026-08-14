@@ -88,13 +88,11 @@ class CapsNet(keras.Model):
     ) -> None:
         super().__init__(name=name, **kwargs)
 
-        # Validate inputs
         self._validate_parameters(
             num_classes, routing_iterations, primary_capsules,
             primary_capsule_dim, digit_capsule_dim, reconstruction, input_shape
         )
 
-        # Store configuration
         self.num_classes = num_classes
         self.routing_iterations = routing_iterations
         self.conv_filters = conv_filters.copy()
@@ -108,13 +106,11 @@ class CapsNet(keras.Model):
         self.kernel_regularizer = self._process_regularizer(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
 
-        # Loss configuration
         self.positive_margin = positive_margin
         self.negative_margin = negative_margin
         self.downweight = downweight
         self.reconstruction_weight = reconstruction_weight
 
-        # Initialize layer containers
         self.conv_layers = []
         self.batch_norm_layers = []
         self.activation_layers = []
@@ -122,7 +118,6 @@ class CapsNet(keras.Model):
         self.digit_caps = None
         self.decoder = None
 
-        # Build status
         self._layers_built = False
 
     def _validate_parameters(
@@ -176,7 +171,6 @@ class CapsNet(keras.Model):
         if self._layers_built:
             return
 
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape [batch, height, width, channels], got {input_shape}"
@@ -188,13 +182,10 @@ class CapsNet(keras.Model):
         if self.reconstruction and self._input_shape is None:
             self._input_shape = tuple(input_shape[1:])
 
-        # Build feature extraction layers
         self._build_feature_extraction()
 
-        # Build capsule layers
         self._build_capsule_layers()
 
-        # Build decoder if needed
         if self.reconstruction and self._input_shape is not None:
             self._build_decoder()
 
@@ -204,7 +195,6 @@ class CapsNet(keras.Model):
     def _build_feature_extraction(self) -> None:
         """Build convolutional feature extraction layers."""
         for i, filters in enumerate(self.conv_filters):
-            # Convolutional layer
             conv_layer = keras.layers.Conv2D(
                 filters=filters,
                 kernel_size=9 if i == 0 else 5,  # First layer uses 9x9, others use 5x5
@@ -216,20 +206,17 @@ class CapsNet(keras.Model):
             )
             self.conv_layers.append(conv_layer)
 
-            # Batch normalization (optional)
             if self.use_batch_norm:
                 bn_layer = keras.layers.BatchNormalization(name=f"bn_{i+1}")
                 self.batch_norm_layers.append(bn_layer)
             else:
                 self.batch_norm_layers.append(None)
 
-            # Activation
             activation_layer = keras.layers.ReLU(name=f"relu_{i+1}")
             self.activation_layers.append(activation_layer)
 
     def _build_capsule_layers(self) -> None:
         """Build primary and routing capsule layers."""
-        # Primary capsule layer
         self.primary_caps = PrimaryCapsule(
             num_capsules=self.primary_capsules,
             dim_capsules=self.primary_capsule_dim,
@@ -241,7 +228,6 @@ class CapsNet(keras.Model):
             name="primary_caps"
         )
 
-        # Digit/class capsule layer
         self.digit_caps = RoutingCapsule(
             num_capsules=self.num_classes,
             dim_capsules=self.digit_capsule_dim,
@@ -258,7 +244,6 @@ class CapsNet(keras.Model):
 
         decoder_layers = []
 
-        # Hidden layers
         for i, units in enumerate(self.decoder_architecture):
             decoder_layers.append(
                 keras.layers.Dense(
@@ -270,10 +255,8 @@ class CapsNet(keras.Model):
                 )
             )
 
-        # Calculate output size
         flattened_size = int(self._input_shape[0] * self._input_shape[1] * self._input_shape[2])
 
-        # Output layer
         decoder_layers.append(
             keras.layers.Dense(
                 units=flattened_size,
@@ -284,7 +267,6 @@ class CapsNet(keras.Model):
             )
         )
 
-        # Reshape to original input shape
         decoder_layers.append(
             keras.layers.Reshape(
                 target_shape=self._input_shape,
@@ -292,7 +274,6 @@ class CapsNet(keras.Model):
             )
         )
 
-        # Create sequential decoder
         self.decoder = keras.Sequential(decoder_layers, name="reconstruction_decoder")
 
     def call(
@@ -302,11 +283,9 @@ class CapsNet(keras.Model):
         mask: Optional[keras.KerasTensor] = None
     ) -> Dict[str, keras.KerasTensor]:
         """Forward pass through the capsule network."""
-        # Validate input
         if len(inputs.shape) != 4:
             raise ValueError(f"Expected 4D input [batch, height, width, channels], got shape {inputs.shape}")
 
-        # Feature extraction
         x = inputs
         for i in range(len(self.conv_layers)):
             x = self.conv_layers[i](x)
@@ -314,22 +293,18 @@ class CapsNet(keras.Model):
                 x = self.batch_norm_layers[i](x, training=training)
             x = self.activation_layers[i](x)
 
-        # Primary capsules
         primary_caps_output = self.primary_caps(x)
 
-        # Digit capsules
         digit_caps_output = self.digit_caps(primary_caps_output)
 
         # Calculate capsule lengths (class probabilities)
         lengths = length(digit_caps_output)
 
-        # Prepare results
         results = {
             "digit_caps": digit_caps_output,
             "length": lengths
         }
 
-        # Handle reconstruction if enabled
         if self.reconstruction and self.decoder is not None:
             reconstructed = self._reconstruct(digit_caps_output, lengths, mask)
             results["reconstructed"] = reconstructed
@@ -344,7 +319,6 @@ class CapsNet(keras.Model):
     ) -> keras.KerasTensor:
         """Perform reconstruction using the decoder network."""
         if mask is not None:
-            # Validate mask shape
             if mask.shape[-1] != self.num_classes:
                 raise ValueError(
                     f"Mask shape mismatch. Expected last dimension {self.num_classes}, "
@@ -356,13 +330,10 @@ class CapsNet(keras.Model):
             # Use predicted classes for reconstruction
             reconstruction_mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
 
-        # Mask digit capsules
         masked_caps = ops.multiply(digit_caps, ops.expand_dims(reconstruction_mask, -1))
 
-        # Flatten for decoder input
         decoder_input = ops.reshape(masked_caps, (-1, self.num_classes * self.digit_capsule_dim))
 
-        # Generate reconstruction
         return self.decoder(decoder_input)
 
     def train_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
@@ -370,10 +341,8 @@ class CapsNet(keras.Model):
         x, y = data
 
         with tf.GradientTape() as tape:
-            # Forward pass
             outputs = self(x, training=True, mask=y)
 
-            # Calculate margin loss
             margin_loss_value = ops.mean(capsule_margin_loss(
                 outputs["length"],  # y_pred
                 y,                  # y_true
@@ -382,24 +351,19 @@ class CapsNet(keras.Model):
                 self.negative_margin
             ))
 
-            # Initialize total loss with margin loss
             total_loss = margin_loss_value
             reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
-            # Add reconstruction loss if applicable
             if self.reconstruction and "reconstructed" in outputs:
                 reconstruction_loss_value = ops.mean(ops.square(x - outputs["reconstructed"]))
                 total_loss += self.reconstruction_weight * reconstruction_loss_value
 
-            # Add regularization losses
             if self.losses:
                 total_loss += ops.sum(self.losses)
 
-        # Calculate gradients
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(total_loss, trainable_vars)
 
-        # Apply gradients
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         # Update metrics manually - avoiding deprecated compiled_metrics
@@ -414,7 +378,6 @@ class CapsNet(keras.Model):
                     # If that fails, skip this metric
                     continue
 
-        # Return metrics
         results = {}
         for metric in self.metrics:
             results[metric.name] = metric.result()
@@ -431,10 +394,8 @@ class CapsNet(keras.Model):
         """Custom test step with margin loss and reconstruction loss."""
         x, y = data
 
-        # Forward pass
         outputs = self(x, training=False, mask=y)
 
-        # Calculate margin loss
         margin_loss_value = ops.mean(capsule_margin_loss(
             outputs["length"],  # y_pred
             y,                  # y_true
@@ -443,16 +404,13 @@ class CapsNet(keras.Model):
             self.negative_margin
         ))
 
-        # Initialize total loss with margin loss
         total_loss = margin_loss_value
         reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
-        # Add reconstruction loss if applicable
         if self.reconstruction and "reconstructed" in outputs:
             reconstruction_loss_value = ops.mean(ops.square(x - outputs["reconstructed"]))
             total_loss += self.reconstruction_weight * reconstruction_loss_value
 
-        # Add regularization losses
         if self.losses:
             total_loss += ops.sum(self.losses)
 
@@ -468,7 +426,6 @@ class CapsNet(keras.Model):
                     # If that fails, skip this metric
                     continue
 
-        # Return metrics
         results = {}
         for metric in self.metrics:
             results[metric.name] = metric.result()
@@ -507,7 +464,6 @@ class CapsNet(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CapsNet":
         """Create model from configuration."""
-        # Handle serialized objects
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
