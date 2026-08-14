@@ -1,10 +1,65 @@
 """
-Vision Transformer (ViT) Model Implementation
+The Vision Transformer, which treats an image as a short sequence of patch
+tokens and hands it to a plain transformer encoder.
 
-The implementation supports different scales and configurations similar to the original
-"An Image is Worth 16x16 Words" paper and its variants, with enhanced flexibility
-through factory-based component creation.
+This model embodies the principle that the convolutional priors -- locality,
+translation equivariance, a hierarchy of scales -- are useful shortcuts rather
+than requirements, and that with enough data a general architecture can learn
+whatever spatial structure the task actually needs. A ConvNet builds those
+priors into its weight sharing, which is what makes it sample-efficient on
+small datasets and what caps it on large ones. ViT removes them entirely: the
+image is cut into non-overlapping `patch_size` squares, each is flattened and
+linearly projected to `embed_dim`, and from that point the network has no
+notion of two dimensions at all. Every layer sees a set of tokens, and any
+geometry it uses it must learn.
+
+Two consequences follow directly. Because the patch grid is discarded, spatial
+position must be re-injected explicitly, which is what the learned positional
+embedding does -- remove it and the model becomes permutation-invariant over
+patches, seeing an image and its shuffled version identically. And because
+self-attention is global from the first layer, receptive field is not something
+that grows with depth; a token at one corner can attend to the opposite corner
+immediately, which is precisely the long-range interaction a ConvNet needs many
+downsampling stages to reach.
+
+The sequence carries a prepended learnable CLS token, a position with no image
+content whose only job is to accumulate a whole-image summary through
+attention. That gives the classification head a single vector to read without
+imposing any pooling rule on the patch tokens. Pooled feature extraction is
+also available and is where the code does something non-obvious: `mean` and
+`max` pooling exclude position 0, because averaging the CLS token into the
+patch statistics mixes a summary vector into the thing it is summarizing. Only
+`cls` pooling reads position 0, and it reads it alone.
+
+Cost is quadratic in the number of patches, which is `(H/P) x (W/P)`, so patch
+size is the architecture's central efficiency knob -- halving it quadruples the
+sequence and roughly sixteen-times the attention cost. Five scales span tiny
+(192d, 3 heads, 12 layers) through huge (1280d, 16 heads, 32 layers). Block
+internals -- attention type, FFN type, normalization type and position -- are
+supplied through the `dl_techniques` factories rather than hard-coded, so a
+variant can be swapped in without forking the file; the defaults reproduce the
+published configuration.
+
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: a placeholder URL 404s into an
+HTML payload that masquerades as a `.keras` file, and swallowing that failure
+makes an unavailable checkpoint indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead; the classifier head and any
+input-shape-dependent layers are skipped by name when the target task differs
+from the checkpoint's.
+
+References:
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Touvron et al., 2021. Training data-efficient image transformers &
+      distillation through attention. (https://arxiv.org/abs/2012.12877)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. (https://arxiv.org/abs/2002.04745)
 """
+
 
 import os
 import keras
@@ -226,13 +281,6 @@ class ViT(keras.Model):
         "vit_base":  {"scale": "base"},
         "vit_large": {"scale": "large"},
         "vit_huge":  {"scale": "huge"},
-    }
-
-    # Pretrained weights URLs (placeholder -- no public ViT weights are
-    # distributed for this implementation; see `_download_weights`).
-    PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {
-        "vit_base":  {"imagenet": "https://example.com/vit_base_imagenet.keras"},
-        "vit_large": {"imagenet": "https://example.com/vit_large_imagenet.keras"},
     }
 
     def __init__(
@@ -714,6 +762,14 @@ class ViT(keras.Model):
         )
         logger.info(f"Weight transfer report: {report}")
 
+    # `_download_weights` raises instead of falling back to random init. A
+    # vestigial `PRETRAINED_WEIGHTS` table of placeholder URLs on a non-existent
+    # host used to sit on the class; it was never read, because this method has
+    # raised since D-002, but it advertised
+    # downloads that could never happen. Do NOT reinstate it, and do NOT widen
+    # the except clause in `from_variant` into a warn-and-return branch -- that
+    # combination is what makes `pretrained=True` silently return an untrained
+    # model. Pass a local path via `pretrained="/path/to/file.keras"` instead.
     @staticmethod
     def _download_weights(
             variant: str,
