@@ -20,6 +20,9 @@ import pytest
 import keras
 
 from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.norms.global_response_norm import (
+    GlobalResponseNormalization,
+)
 from dl_techniques.models.convunext.model import (
     ConvUNextStem,
     ConvUNextModel,
@@ -232,6 +235,103 @@ class TestConvUNextStem:
         output = stem(sample_input_small)
 
         assert output.shape == (2, 64, 64, 32)
+
+
+class TestMergedConvUNextStemKnobs:
+    """The two knobs the merge added: `use_bias` and `stem_normalization`.
+
+    This class collapses what used to be two same-named classes (the bias-free
+    GRN stem in `models/bias_free_denoisers/bfconvunext.py` and the LayerNorm
+    stem here), so each knob needs a guard that is proven to fail when the knob
+    is ignored.
+    """
+
+    def test_stem_use_bias_true_creates_a_bias_vector(
+        self,
+        sample_input_small: np.ndarray
+    ) -> None:
+        """`use_bias=True` must reach the conv AND allocate a bias WEIGHT.
+
+        Asserting the flag alone is not enough: a layer can report
+        `use_bias is True` and still never have allocated the vector.
+        """
+        stem = ConvUNextStem(filters=8, use_bias=True)
+        stem(sample_input_small)
+
+        assert stem.conv.use_bias is True
+        assert stem.conv.bias is not None
+        n_bias_weights = sum(
+            1 for w in stem.conv.weights if w.path.endswith('bias')
+        )
+        assert n_bias_weights == 1, (
+            f"use_bias=True stem allocated {n_bias_weights} bias weights"
+        )
+        assert int(np.prod(stem.conv.bias.shape)) == 8
+
+        # Control: the bias-free arm allocates none.
+        stem_bf = ConvUNextStem(filters=8, use_bias=False)
+        stem_bf(sample_input_small)
+        assert stem_bf.conv.use_bias is False
+        assert stem_bf.conv.bias is None
+        assert not any(w.path.endswith('bias') for w in stem_bf.conv.weights)
+
+    def test_stem_normalization_layernorm_selects_layer_norm(
+        self,
+        sample_input_small: np.ndarray
+    ) -> None:
+        """`stem_normalization` must select the normalization CLASS actually built."""
+        stem_ln = ConvUNextStem(filters=8, stem_normalization='layer_norm')
+        stem_ln(sample_input_small)
+        assert type(stem_ln.norm) is keras.layers.LayerNormalization
+
+        # The default is the bias-free / ConvNeXt-V2 choice, a different class.
+        stem_default = ConvUNextStem(filters=8)
+        stem_default(sample_input_small)
+        assert type(stem_default.norm) is GlobalResponseNormalization
+        assert type(stem_default.norm) is not type(stem_ln.norm)
+
+    def test_stem_config_round_trip_at_non_default_knob_values(
+        self,
+        sample_input_small: np.ndarray
+    ) -> None:
+        """Full `.keras` round trip built at NON-DEFAULT values for both knobs.
+
+        Built at the defaults, this test would be vacuous: dropping a key from
+        `get_config` is silently repaired by the constructor default and the
+        round trip still passes (measured in step 2 of this plan). So the stem
+        here is `use_bias=False` (default True) and
+        `stem_normalization='layer_norm'` (default 'global_response_norm').
+        """
+        inputs = keras.Input(shape=sample_input_small.shape[1:])
+        outputs = ConvUNextStem(
+            filters=8,
+            use_bias=False,
+            stem_normalization='layer_norm',
+            name='stem_under_test',
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        original_output = model(sample_input_small, training=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, 'test_merged_stem.keras')
+            model.save(model_path)
+            loaded_model = keras.models.load_model(model_path)
+
+        loaded_stem = loaded_model.get_layer('stem_under_test')
+        assert loaded_stem.use_bias is False
+        assert loaded_stem.conv.use_bias is False
+        assert loaded_stem.conv.bias is None
+        assert loaded_stem.stem_normalization == 'layer_norm'
+        assert type(loaded_stem.norm) is keras.layers.LayerNormalization
+
+        loaded_output = loaded_model(sample_input_small, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(original_output),
+            keras.ops.convert_to_numpy(loaded_output),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Merged stem outputs differ after .keras round-trip",
+        )
 
 
 # ---------------------------------------------------------------------

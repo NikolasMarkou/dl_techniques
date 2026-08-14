@@ -85,6 +85,10 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+# Registrar import (contract H-4): `denoiser_prior.py` imports THIS module purely so
+# `load_model` can resolve GlobalResponseNormalization by name. The stem no longer
+# references it directly (it now builds its normalization through the norms factory),
+# so this import is deliberately kept for registration, not for use.
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
@@ -97,111 +101,16 @@ from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")
-class ConvUNextStem(keras.layers.Layer):
-    """
-    ConvUNext stem block for initial feature extraction using bias-free design.
-
-    Simple stem that uses a single large kernel convolution followed by
-    Global Response Normalization and a configurable activation (default GELU),
-    while keeping channel count conservative to avoid OOM issues.
-
-    Args:
-        filters: Integer, number of output filters.
-        kernel_size: Integer or tuple, size of convolution kernel. Defaults to 7.
-        kernel_initializer: String or Initializer, weight initializer.
-        kernel_regularizer: String or Regularizer, weight regularizer.
-        **kwargs: Additional arguments for Layer base class.
-    """
-
-    def __init__(
-        self,
-        filters: int,
-        kernel_size: Union[int, Tuple[int, int]] = 7,
-        activation: Union[str, keras.layers.Layer] = 'gelu',
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
-        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.filters = filters
-        self.kernel_size = kernel_size
-        self.activation_name = activation
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        # Sublayers initialized in build()
-        self.conv = None
-        self.grn = None
-        self.activation_layer = None
-
-    def build(self, input_shape):
-        """Build the stem layers."""
-        # Large kernel convolution (bias-free)
-        self.conv = keras.layers.Conv2D(
-            filters=self.filters,
-            kernel_size=self.kernel_size,
-            padding='same',
-            use_bias=False,  # Bias-free for scaling invariance
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='stem_conv'
-        )
-
-        # Global Response Normalization (consistent with ConvNeXt V2)
-        self.grn = GlobalResponseNormalization(name='stem_grn')
-
-        # Explicitly build sublayers so weights materialize on .keras reload
-        # (lazy auto-build drops their state during deserialization).
-        self.conv.build(input_shape)
-        conv_output_shape = self.conv.compute_output_shape(input_shape)
-        self.grn.build(conv_output_shape)
-
-        # GRN is shape-preserving, so the activation input shape == conv_output_shape.
-        self.activation_layer = keras.layers.Activation(
-            self.activation_name, name='stem_activation'
-        )
-        self.activation_layer.build(conv_output_shape)
-
-        super().build(input_shape)
-
-    def call(self, inputs, training=None):
-        """Forward pass."""
-        x = self.conv(inputs)
-        x = self.grn(x)
-        x = self.activation_layer(x)
-        return x
-
-    def compute_output_shape(self, input_shape):
-        """Compute output shape."""
-        return input_shape[:-1] + (self.filters,)
-
-    def get_config(self):
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            'filters': self.filters,
-            'kernel_size': self.kernel_size,
-            # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
-            # activation so LeakyReLU(alpha) round-trips through .keras; the string path
-            # stays raw for backward-compat. Mirrors the block fix (D-001). Do NOT emit a
-            # dict for a plain string activation — that would break existing 'gelu' configs.
-            'activation': keras.layers.serialize(self.activation_name) if isinstance(
-                self.activation_name, keras.layers.Layer) else self.activation_name,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        """Deserialize, reviving a layer-instance activation from its dict form."""
-        config = dict(config)
-        if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.layers.deserialize(config['activation'])
-        # kernel_initializer/kernel_regularizer dicts are passed straight to __init__,
-        # where keras.*.get(...) accepts a serialized dict (Keras 3).
-        return cls(**config)
+# DECISION plan-2026-08-14T092357-0e3d792d/D-010: `ConvUNextStem` no longer LIVES here —
+# it was merged with the same-named class in `models/convunext/model.py` and now lives
+# there, gaining `use_bias` and `stem_normalization`. This module keeps importing it
+# under its own name because it is the Keras REGISTRAR that
+# `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval tools
+# import purely so `load_model` can resolve this class (contract H-4), and because the
+# bf test suite imports it from here. The class's decorator deliberately keeps
+# `package="dl_techniques.bias_free_denoisers"` so its registry key does not move.
+# Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
+from dl_techniques.models.convunext.model import ConvUNextStem
 
 # ---------------------------------------------------------------------
 # Spatial wrapper around bias-free LinearAttention (4D <-> 3D)
@@ -859,6 +768,10 @@ def create_convunext_denoiser(
                 filters=current_filters,
                 kernel_size=stem_kernel_size,
                 activation=stem_activation,
+                # The merged stem defaults to use_bias=True; this arm is bias-free by
+                # construction, so pin both knobs explicitly (GRN is the bf choice).
+                use_bias=False,
+                stem_normalization='global_response_norm',
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'encoder_level_{level}_stem'
