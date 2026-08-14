@@ -125,7 +125,17 @@ class RELGT(keras.Model):
         gnn_pe_dim: Integer, dimension for GNN positional encoding. Defaults to 32.
         gnn_pe_layers: Integer, number of GNN PE layers. Defaults to 2.
         num_transformer_blocks: Integer, number of transformer blocks to stack.
-            Defaults to 2.
+            Defaults to 2. **Bounded above by measurement at ~4** (the depth
+            `create_relgt_model("large")` ships): each block broadcast-adds its
+            summary onto every token at `SUMMARY_BROADCAST_SCALE`, and that
+            token-invariant component grows relative to the token-varying signal
+            with every block (measured untrained at `embedding_dim=32`: ratio
+            0.23-0.49 at block 0, 0.32-1.02 at block 3 over 20 draws, and past
+            1.0 at blocks 4-7 of an 8-block model). Deeper models are not
+            rejected — only `> 0` is validated — but re-measure the ratio at the
+            deepest block before going past 4. See the DEPTH LIMIT note on
+            `SUMMARY_BROADCAST_SCALE` in
+            `layers/graphs/relational_graph_transformer_blocks.py`.
         num_heads: Integer, number of attention heads. Defaults to 4.
         num_global_centroids: Integer, number of learnable global tokens. Defaults to 64.
         ffn_dim: Integer, hidden dimension for FFNs. Defaults to 256.

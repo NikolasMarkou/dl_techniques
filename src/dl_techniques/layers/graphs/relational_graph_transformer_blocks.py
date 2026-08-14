@@ -44,7 +44,26 @@ from ..norms import create_normalization_layer
 # at block 0 and 0.2535 at block 1 -- a token-INVARIANT component 2.60x then
 # 3.94x the token-specific signal, compounding with depth. At 0.1 those ratios
 # are 0.26 and 0.36, i.e. the summary perturbs the sequence instead of
-# dominating it. Do NOT raise this to 1.0 "for symmetry": at 1.0 every query in
+# dominating it.
+#
+# DEPTH LIMIT -- this constant is a BOUNDED fix, not an unconditional one. The
+# numerator is pinned at exactly this value (a LayerNorm output has per-feature
+# RMS 1.0), while the across-token std of the sequence DECAYS block over block,
+# so the ratio grows monotonically with depth. MEASURED on the shipped path
+# (real RELGTTokenEncoder, embedding_dim=32, untrained, 20 unseeded draws at
+# num_transformer_blocks=4), per-block ratio min/max:
+#   block 0: 0.230/0.493   block 1: 0.278/0.569
+#   block 2: 0.297/0.712   block 3: 0.317/1.023
+# `create_relgt_model("large")` ships 4 blocks, and at that depth the worst
+# draw of 20 already TOUCHED 1.0 at the last block; at 8 blocks the ratio
+# exceeded 1.0 at blocks 4-7 on 2-3 of 5 draws. So: 0.1 is safe for the shipped
+# presets (1/2/4 blocks) and the margin at 4 is thin. Do NOT raise
+# `num_transformer_blocks` past 4 without re-measuring the ratio at the DEEPEST
+# block, and do not invent a depth-dependent scaling formula here -- no such
+# formula has been measured. Guard: the ratio assertion runs at 4 blocks and
+# covers every block.
+#
+# Do NOT raise this to 1.0 "for symmetry": at 1.0 every query in
 # the next block's self-attention sees the same query-independent per-key bias
 # and the local attention degenerates toward pooling at initialization. Do NOT
 # make it a learnable per-feature scale either -- MEASURED, that reintroduces
@@ -773,7 +792,11 @@ class RELGTTransformerBlock(keras.layers.Layer):
             and 3.94x (block 1) larger than the across-token per-feature std it
             is added to, since both tensors leave a LayerNorm; at 0.1 those
             ratios are 0.26 and 0.36 (measured, ``embedding_dim=32``,
-            untrained).
+            untrained). Note that this ratio GROWS with depth (the numerator is
+            pinned by the LayerNorm, the denominator decays): it is 0.23-0.49 at
+            block 0 but 0.32-1.02 at block 3 over 20 untrained draws, so the
+            scale bounds the summary only up to ~4 chained blocks. See the
+            DEPTH LIMIT note on ``SUMMARY_BROADCAST_SCALE``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         local_tokens, seed_node_features = inputs

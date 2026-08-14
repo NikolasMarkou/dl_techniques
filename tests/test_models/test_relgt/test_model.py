@@ -258,63 +258,99 @@ class TestBlockChaining:
         injected RMS does not move at all, because a LayerNorm output has
         per-feature RMS exactly 1.0. The floors are set from those numbers with
         an order of magnitude of margin on each side: ratio < 1.0 fires at 1.0
-        (the pre-fix, unscaled add), and block-1 std > 0.20 fires at 10.0. On the
-        SHIPPED model path (real ``RELGTTokenEncoder``, where the across-token
-        std is smaller) the unscaled ratio is worse still: 2.60 at block 0 and
-        3.94 at block 1.
+        (the pre-fix, unscaled add), and block-1 std > 0.20 fires at 10.0.
+
+        **The ratio GROWS with depth**, so checking block 0 is not enough: the
+        across-token std decays block over block while the injected RMS is
+        pinned at the scale by the LayerNorm. This runs at
+        ``num_transformer_blocks=4`` — the largest shipped preset
+        (``create_relgt_model("large")``) — and asserts on EVERY block. Re-derived
+        here at scale 0.1, 20 unseeded draws, per-block ratio (min / max):
+
+        ====== =============== ================================
+        block  this fixture    SHIPPED path (real token encoder)
+        ====== =============== ================================
+        0      0.114 / 0.124   0.230 / 0.493
+        1      0.117 / 0.141   0.278 / 0.569
+        2      0.124 / 0.156   0.297 / 0.712
+        3      0.133 / 0.192   0.317 / **1.023**
+        ====== =============== ================================
+
+        Two consequences worth stating plainly. (a) The floors below bound THIS
+        FIXTURE, whose constant unit-normal tokens keep the across-token std near
+        0.75; on the shipped path the same statistic is ~3x smaller and the ratio
+        ~3x larger. (b) On the shipped path the margin at depth 4 is already thin
+        — 1 of 20 draws touched 1.023 at block 3 — and past depth 4 the ratio
+        exceeds 1.0 routinely (at depth 8, blocks 4-7 crossed on 2-3 of 5 draws).
+        ``SUMMARY_BROADCAST_SCALE`` is therefore a DEPTH-BOUNDED fix, documented
+        as such at the constant; do not raise ``num_transformer_blocks`` past 4
+        without re-measuring.
         """
-        model, tokens = self._probe_model(num_blocks=3)
+        num_blocks = 4  # the largest shipped preset: create_relgt_model("large")
+        model, tokens = self._probe_model(num_blocks=num_blocks)
         x = _inputs()
         _ = model(x, training=False)  # build seed_encoder and every block
 
         seed = model.seed_encoder(x["node_features"][:, 0:1, :])
-        block0, block1 = model.transformer_blocks[0], model.transformer_blocks[1]
 
-        _, out0 = block0([tokens, seed], training=False)
-        local0 = block0.local_transformer(tokens, training=False)
+        cur = tokens
+        ratios, stds = [], []
+        for k in range(num_blocks):
+            block = model.transformer_blocks[k]
+            _, out = block([cur, seed], training=False)
+            local = block.local_transformer(cur, training=False)
 
-        # What the block ACTUALLY injects, derived by difference — deliberately
-        # not `SUMMARY_BROADCAST_SCALE * summary`, which would make the test
-        # self-referential (raising the constant would raise the numerator AND
-        # the reference, and the assertion could never fire).
-        injected = keras.ops.convert_to_numpy(out0 - local0)
-        out0_np = keras.ops.convert_to_numpy(out0)
+            # What the block ACTUALLY injects, derived by difference —
+            # deliberately not `SUMMARY_BROADCAST_SCALE * summary`, which would
+            # make the test self-referential (raising the constant would raise
+            # the numerator AND the reference, and the assertion could never
+            # fire).
+            injected = keras.ops.convert_to_numpy(out - local)
+            out_np = keras.ops.convert_to_numpy(out)
 
-        # It really is token-invariant, so a single scalar describes its scale.
-        assert float(np.max(np.std(injected, axis=1))) < 1e-5, (
-            "the injected component varies across tokens; the ratio below no "
-            "longer measures a shared-vs-distinct decomposition"
+            # It really is token-invariant, so a single scalar describes its
+            # scale.
+            assert float(np.max(np.std(injected, axis=1))) < 1e-5, (
+                f"block {k}'s injected component varies across tokens; the ratio "
+                "below no longer measures a shared-vs-distinct decomposition"
+            )
+
+            injected_rms = float(np.sqrt(np.mean(injected ** 2)))
+            block_std = float(np.mean(np.std(out_np, axis=1)))
+
+            # Liveness: a block that stopped adding the summary at all would make
+            # the ratio 0 and pass vacuously (and would re-strand 32% of the
+            # parameters — see the gradient test above).
+            assert injected_rms > 1e-3, (
+                f"block {k} injects nothing (RMS {injected_rms}); the summary is "
+                "not reaching the token sequence"
+            )
+
+            ratios.append(injected_rms / block_std)
+            stds.append(block_std)
+            cur = out
+
+        worst = int(np.argmax(ratios))
+        assert ratios[worst] < 1.0, (
+            f"at block {worst} of {num_blocks} the broadcast summary is larger "
+            f"than the token-varying signal it is added to (across-token "
+            f"per-feature std {stds[worst]:.4f}, ratio {ratios[worst]:.4f}; all "
+            f"blocks: {[round(r, 4) for r in ratios]}): the next block's "
+            "self-attention receives a query-independent bias larger than its "
+            "content term. The ratio grows with depth — if this fires only at "
+            "the deepest block, the model is too DEEP for the current "
+            "SUMMARY_BROADCAST_SCALE, not mis-scaled at block 0."
         )
 
-        injected_rms = float(np.sqrt(np.mean(injected ** 2)))
-        block0_std = float(np.mean(np.std(out0_np, axis=1)))
-
-        # Liveness: a block that stopped adding the summary at all would make
-        # the ratio 0 and pass vacuously (and would re-strand 32% of the
-        # parameters — see the gradient test above).
-        assert injected_rms > 1e-3, (
-            f"the block injects nothing (RMS {injected_rms}); the summary is not "
-            "reaching the token sequence"
-        )
-
-        ratio = injected_rms / block0_std
-        assert ratio < 1.0, (
-            f"the broadcast summary ({injected_rms:.4f} per-feature RMS) is "
-            f"larger than the token-varying signal it is added to "
-            f"(across-token per-feature std {block0_std:.4f}, ratio {ratio:.4f}): "
-            "block 1's self-attention receives a query-independent bias larger "
-            "than its content term"
-        )
-
-        # Block 1 — the first block that CONSUMES a chained sequence — must still
-        # produce tokens that differ from each other.
-        _, out1 = block1([out0, seed], training=False)
-        block1_std = float(np.mean(np.std(keras.ops.convert_to_numpy(out1), axis=1)))
-        assert block1_std > 0.20, (
-            f"block 1's output tokens are nearly identical to each other "
-            f"(across-token per-feature std {block1_std:.4f}): the chained "
-            "sequence has collapsed toward a constant"
-        )
+        # The chained blocks must still produce tokens that differ from each
+        # other. Checked from block 1 on — block 0 consumes the fixture directly.
+        for k in range(1, num_blocks):
+            assert stds[k] > 0.20, (
+                f"block {k}'s output tokens are nearly identical to each other "
+                f"(across-token per-feature std {stds[k]:.4f}; all blocks: "
+                f"{[round(s, 4) for s in stds]}): the chained sequence has "
+                "collapsed toward a constant"
+            )
 
     def test_model_builds_blocks_that_return_tokens(self):
         model, _ = self._probe_model(num_blocks=2)
