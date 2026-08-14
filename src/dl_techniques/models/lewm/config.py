@@ -5,7 +5,7 @@ upstream behavior by default, but every field is overridable for tests /
 smoke runs.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Any, Dict, Tuple
 
 

@@ -675,3 +675,47 @@ class VideoJEPA(keras.Model):
             else VideoJEPAConfig()
         )
         return cls(config=cfg, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_video_jepa(
+    config: Optional[VideoJEPAConfig] = None,
+    **overrides: Any,
+) -> VideoJEPA:
+    """Create a Video-JEPA-Clifford model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: this port ships
+    one ``VideoJEPAConfig`` and is retuned field by field (embed_dim, depths,
+    horizons) rather than by selecting a named scale, and no scale family is
+    published for it.
+
+    :param config: A ``VideoJEPAConfig``; ``None`` uses the package defaults.
+    :param overrides: Individual ``VideoJEPAConfig`` field overrides applied on
+        top of ``config``. Keys that are not config fields are forwarded to
+        ``keras.Model`` instead (e.g. ``name``).
+    :returns: A configured ``VideoJEPA`` instance.
+    :raises ValueError: If the resulting config fails ``VideoJEPAConfig``
+        validation (e.g. ``patch_size`` not dividing ``img_size``).
+
+    Example::
+
+        model = create_video_jepa(img_size=32, patch_size=8, num_frames=2)
+        pred = model({"pixels": pixels})
+    """
+    base = config if config is not None else VideoJEPAConfig()
+    fields = set(VideoJEPAConfig.__dataclass_fields__)
+    cfg_overrides = {k: v for k, v in overrides.items() if k in fields}
+    model_kwargs = {k: v for k, v in overrides.items() if k not in fields}
+
+    if cfg_overrides:
+        merged = base.to_dict()
+        merged.update(cfg_overrides)
+        base = VideoJEPAConfig.from_dict(merged)
+
+    return VideoJEPA(config=base, **model_kwargs)
+
+# ---------------------------------------------------------------------

@@ -37,7 +37,6 @@ from dl_techniques.models.lewm.embedder import ActionEmbedder
 from dl_techniques.models.lewm.projector import MLPProjector
 from dl_techniques.models.lewm.predictor import ARPredictor
 from dl_techniques.regularizers.sigreg import SIGRegLayer
-from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
@@ -356,3 +355,53 @@ class LeWM(keras.Model):
         cfg_dict = config.pop("config", None)
         cfg = LeWMConfig.from_dict(cfg_dict) if cfg_dict is not None else LeWMConfig()
         return cls(config=cfg, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_lewm(
+    config: Optional[LeWMConfig] = None,
+    **overrides: Any,
+) -> LeWM:
+    """Create a LeWM action-conditioned world model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: LeWM ships one
+    configuration (``LeWMConfig``, mirroring the upstream YAML defaults) and is
+    retuned field by field rather than by picking a named scale, so there is no
+    published scale family to enumerate. Encoder size is the one scale knob and
+    it lives in ``LeWMConfig.encoder_scale``, forwarded to ``ViT``.
+
+    :param config: A ``LeWMConfig``; ``None`` uses the upstream defaults.
+    :param overrides: Individual ``LeWMConfig`` field overrides applied on top
+        of ``config``. Any key that is not a config field is forwarded to
+        ``keras.Model`` instead (e.g. ``name``).
+    :returns: A configured ``LeWM`` instance.
+    :raises ValueError: If the resulting config is inconsistent (e.g.
+        ``num_frames`` too small to cover ``history_size + num_preds``).
+
+    Example::
+
+        model = create_lewm(img_size=64, patch_size=16, depth=1, history_size=2)
+        out = model({"pixels": pixels, "action": actions})
+    """
+    base = config if config is not None else LeWMConfig()
+    fields = set(LeWMConfig.__dataclass_fields__)
+    cfg_overrides = {k: v for k, v in overrides.items() if k in fields}
+    model_kwargs = {k: v for k, v in overrides.items() if k not in fields}
+
+    if cfg_overrides:
+        merged = base.to_dict()
+        merged.update(cfg_overrides)
+        # num_frames is a serialized field with a 0 sentinel: if the caller
+        # resized the horizon without restating it, re-derive it rather than
+        # carrying the old value forward into a ValueError.
+        if "num_frames" not in cfg_overrides:
+            merged["num_frames"] = 0
+        base = LeWMConfig.from_dict(merged)
+
+    return LeWM(config=base, **model_kwargs)
+
+# ---------------------------------------------------------------------
