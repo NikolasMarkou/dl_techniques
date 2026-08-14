@@ -42,7 +42,15 @@ class DiffusionScheduler:
         beta_end: Ending value of β at t=T. Defaults to 0.02.
         clip_sample: Whether to clip samples to [-1, 1]. Defaults to True.
         prediction_type: What the model predicts ('epsilon', 'sample', 'v_prediction').
-            Defaults to 'epsilon'.
+            Defaults to 'sample', which is a deliberate departure from the DDPM
+            convention this class otherwise follows. Every denoiser in this package is
+            an x_0 predictor — ``ScoreBasedNanoVLM.call`` supervises them against the
+            *clean* vision/text features — and none of the three shipped
+            ``create_score_based_nanovlm`` presets overrides this argument, so an
+            'epsilon' default would make ``step`` read an x_0-shaped output as noise
+            and return silently wrong samples rather than raising. Pass 'epsilon'
+            explicitly when the denoiser really predicts noise. Note that the value is
+            not validated here: an unknown one raises only when ``step`` runs.
 
     References:
         - Ho et al. "Denoising Diffusion Probabilistic Models" (2020)
@@ -50,6 +58,15 @@ class DiffusionScheduler:
         - Song et al. "Denoising Diffusion Implicit Models" (2021)
     """
 
+    # DECISION plan-2026-08-14T183218-f4c612aa/D-006: prediction_type defaults to
+    # 'sample', NOT the DDPM-conventional 'epsilon'. Do NOT "restore" 'epsilon' here on
+    # the grounds that it matches DDPM/diffusers: the denoisers in this package are
+    # supervised against clean features by ScoreBasedNanoVLM.call, so they emit x_0, and
+    # the three shipped create_score_based_nanovlm presets pass no prediction_type at
+    # all — this default is their only route. With 'epsilon', step() feeds x_0 into
+    # predict_start_from_noise and returns wrong samples with no error. The alternative
+    # fix — rewriting call() to supervise against noise — was rejected: it would change
+    # what every existing model in this package learns.
     def __init__(
             self,
             num_timesteps: int = 1000,
@@ -57,7 +74,7 @@ class DiffusionScheduler:
             beta_start: float = 0.0001,
             beta_end: float = 0.02,
             clip_sample: bool = True,
-            prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'epsilon',
+            prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'sample',
     ) -> None:
         if num_timesteps <= 0:
             raise ValueError(f"num_timesteps must be positive, got {num_timesteps}")

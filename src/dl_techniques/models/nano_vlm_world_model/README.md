@@ -80,7 +80,7 @@ from dl_techniques.models.nano_vlm_world_model.scheduler import DiffusionSchedul
 scheduler = DiffusionScheduler(
     num_timesteps=1000,
     beta_schedule='cosine',
-    prediction_type='epsilon'  # Model predicts noise
+    prediction_type='sample'  # Model predicts the clean x_0 (the class default)
 )
 
 # Forward diffusion: add noise
@@ -172,7 +172,7 @@ model = ScoreBasedNanoVLM(
     diffusion_config={
         'num_timesteps': 1000,
         'beta_schedule': 'cosine',
-        'prediction_type': 'epsilon'
+        'prediction_type': 'sample'
     },
     generation_mode='joint',
     use_classifier_free_guidance=True

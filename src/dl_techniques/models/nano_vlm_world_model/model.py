@@ -58,16 +58,15 @@ denoiser as a per-batch broadcast vector. Classifier-free guidance is done by
 doubling the batch against a zeros condition and extrapolating between the two
 predictions, rather than by a second forward pass.
 
-One convention mismatch is load-bearing and is easier to see stated than derived.
-``call`` supervises the denoisers against the *clean* features
-(``target_vision``/``target_text``), so they are `x_0` predictors — but
-``DiffusionScheduler`` defaults to ``prediction_type='epsilon'`` and the shipped
-``create_score_based_nanovlm`` configs do not override it, so ``step`` will treat
-an `x_0`-shaped output as noise unless the caller passes
-``prediction_type='sample'`` in ``diffusion_config``. The ``'sample'`` branch in
-``generate_from_text`` in turn calls ``scheduler.predict_noise_from_start``,
-which the scheduler does not define — it defines the inverse,
-``predict_start_from_noise``. Reconcile the two before trusting a sampling run.
+One convention is load-bearing and is easier to see stated than derived. ``call``
+supervises the denoisers against the *clean* features
+(``target_vision``/``target_text``), so they are `x_0` predictors, and
+``DiffusionScheduler`` therefore defaults to ``prediction_type='sample'`` rather
+than to DDPM's usual ``'epsilon'`` — the shipped ``create_score_based_nanovlm``
+presets pass no ``prediction_type`` at all, so that class default is what they
+run. Setting ``'epsilon'`` in ``diffusion_config`` without also changing what
+``call`` supervises makes ``step`` read an `x_0`-shaped output as noise, which
+degrades samples silently instead of raising.
 
 Weight materialization is explicit rather than lazy. The denoisers and the
 decoder head would otherwise be built on first ``call``, which silently drops

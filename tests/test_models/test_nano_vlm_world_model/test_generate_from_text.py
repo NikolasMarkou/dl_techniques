@@ -20,7 +20,10 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.nano_vlm_world_model.model import ScoreBasedNanoVLM
+from dl_techniques.models.nano_vlm_world_model.model import (
+    ScoreBasedNanoVLM,
+    create_score_based_nanovlm,
+)
 from dl_techniques.models.nano_vlm_world_model.scheduler import DiffusionScheduler
 
 IMG_SIZE = 32
@@ -147,3 +150,65 @@ class TestPredictNoiseFromStart:
             np.max(np.abs(ops.convert_to_numpy(recovered) - ops.convert_to_numpy(noise)))
         )
         assert max_err < 1e-4, f"add_noise round-trip max abs error {max_err}"
+
+
+class TestPredictionTypeDefault:
+    """The scheduler's default must match what ``ScoreBasedNanoVLM.call`` supervises.
+
+    ``call`` trains the denoisers against the CLEAN features, so they emit `x_0`. A
+    scheduler defaulting to ``'epsilon'`` reads that `x_0` as noise inside ``step`` and
+    returns wrong samples with no error — the two conventions disagreed silently until
+    the default became ``'sample'``. None of the three shipped
+    ``create_score_based_nanovlm`` presets passes ``prediction_type``, so the class
+    default is the only thing standing between them and that mismatch.
+    """
+
+    def test_scheduler_default_is_sample(self):
+        """A bare ``DiffusionScheduler()`` reports ``'sample'``."""
+        assert DiffusionScheduler().prediction_type == 'sample'
+
+    def test_shipped_variant_inherits_the_sample_default(self):
+        """The preset path, not just the class, must end up on ``'sample'``.
+
+        ``create_score_based_nanovlm``'s ``mini``/``base``/``large`` ``diffusion_config``
+        dicts are only ``{'num_timesteps', 'beta_schedule'}``; this asserts the shipped
+        wiring actually inherits the default rather than re-specifying it somewhere.
+        """
+        model = create_score_based_nanovlm(variant='mini', vocab_size=64)
+        assert model.scheduler.prediction_type == 'sample'
+
+    def test_step_takes_the_sample_branch(self):
+        """Behavioural: ``step`` returns ``model_output`` itself as the predicted `x_0`.
+
+        A string check on ``prediction_type`` cannot tell you which branch ``step``
+        ran. In the ``'sample'`` branch ``pred_original_sample`` IS ``model_output``;
+        in the ``'epsilon'`` branch it is routed through ``predict_start_from_noise``.
+        The two are made to disagree by ~1.4 here, so the identity below can only hold
+        if the sample branch executed.
+
+        ``clip_sample=False`` keeps the identity EXACT (``step`` clips
+        ``pred_original_sample`` otherwise), and ``timestep=0`` is the one step that
+        adds no stochastic noise, so nothing else can perturb the comparison.
+        """
+        scheduler = DiffusionScheduler(
+            num_timesteps=100, beta_schedule='cosine', clip_sample=False
+        )
+        sample = ops.convert_to_tensor(np.full((2, 3, 4), 0.8, dtype='float32'))
+        model_output = ops.convert_to_tensor(np.full((2, 3, 4), -0.6, dtype='float32'))
+
+        epsilon_branch = ops.convert_to_numpy(
+            scheduler.predict_start_from_noise(sample, 0, model_output)
+        )
+        gap = float(np.min(np.abs(epsilon_branch - ops.convert_to_numpy(model_output))))
+        assert gap > 1e-2, (
+            f"probe is vacuous: the two branches agree to {gap} at this input"
+        )
+
+        _, pred_original = scheduler.step(model_output, 0, sample)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(pred_original),
+            ops.convert_to_numpy(model_output),
+            atol=1e-6,
+            err_msg="step() did not take the 'sample' branch",
+        )
