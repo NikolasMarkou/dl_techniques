@@ -7,7 +7,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 ## Model Categories
 
 ### Vision
-- `mobilenet/` — MobileNet variants (V1, V2, V3)
+- `mobilenet/` — MobileNet variants (V1, V2, V3, V4)
 - `resnet/` — ResNet architectures
 - `convnext/` — ConvNeXt
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)
@@ -106,14 +106,14 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `src/dl_techniques/models/__init__.py` (the parent) is empty — always import
   from the model subpackage, never from `dl_techniques.models` itself.
 - Per-model `<pkg>/__init__.py` is **mixed, and the empty case is no longer a
-  safe default assumption**. Re-measured 2026-08-10: 23 of the 72 model packages
+  safe default assumption**. Re-measured 2026-08-14: 26 of the 73 model packages
   bind a `create_*` factory in their own `__init__.py` (an import, a `def` or an
-  assignment). A plain `grep create_` now agrees at 23 — it used to give 24
-  because `convnext_patch_vae/__init__.py` mentioned its factories in a docstring
-  without binding them, and that package has since been deleted; the two figures
-  can diverge again the moment any init mentions a factory it does not bind.
-  Exemplars of a curated init with `__all__`:
-  `energy_transformer/`, `dino/`, `vit/`. The remaining ~50 are empty or
+  assignment). A plain `grep create_` now agrees at 26 — it used to give one more
+  than the binding count, because `convnext_patch_vae/__init__.py` mentioned its
+  factories in a docstring without binding them, and that package has since been
+  deleted; the two figures can diverge again the moment any init mentions a
+  factory it does not bind. Exemplars of a curated init with `__all__`:
+  `energy_transformer/`, `dino/`, `vit/`. The remaining 47 are empty or
   near-empty and do require importing from the submodule directly. **Read the
   package init before assuming either shape.** (`REPO_MAP.md` § "The factory
   convention is not universal" carries the same derivation.)
@@ -150,7 +150,11 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
 ## Testing
 
-Tests in `tests/test_models/` with one subdirectory per model (45+ test suites). Test pattern:
+Tests in `tests/test_models/` with one subdirectory per model — 81 test directories
+as of 2026-08-14, more than the 73 model packages because several architectures get
+more than one suite. One exception: `lewm` is tested by the loose
+`tests/test_models/test_lewm.py`, so a directory-to-directory comparison will
+wrongly report it as untested. Test pattern:
 - Class-based organization: `class TestModelName`
 - Tests cover: serialization, initialization, forward pass, gradient flow, training mode, variants, edge cases
 - Pytest fixtures provide model configs
