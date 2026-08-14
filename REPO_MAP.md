@@ -87,7 +87,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 295 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 265 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. About a third (27 of 73) bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
+| **`src/dl_techniques/models/`** | 265 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-14 **70 of 73** bind a `create_*` factory in their package init and **all 73** export a curated `__all__`; the 3 without a factory (`power_sampling`, and the two nested families `SAM/`, `time_series/`, which export their inner models instead) say why in their init docstring. See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -342,22 +342,22 @@ thing you will meet and should not be surprised by.
   fixtures too: both `tests/conftest.py` and `tests/test_layers/conftest.py`
   document themselves in reST. Read the root `CLAUDE.md`'s "Google-style
   docstrings" line as a preference for new code, not a description of the tree.
-- **The factory convention is not universal, and the two ways of measuring it
-  disagree sharply.** 14 of the 73 model packages define no `create_*` function
-  *anywhere* in the package. But defining one and exporting one are different
-  things: only 27 of the 73 actually *bind* a `create_*` in their own
-  `<pkg>/__init__.py` — an import, a def or an assignment, not a mention
-  (concretely `src/dl_techniques/models/vit/__init__.py`) — and that is the
-  figure a caller actually experiences; the rest bury the factory in a submodule
-  you must know to import. Read the package init before assuming importability.
-  A plain mention-`grep create_` currently agrees at 25, but it is still the
-  wrong instrument and the two figures are not pinned together: until
-  2026-08-10 the grep gave 24, because
+- **The factory convention is now near-universal, but this entry is kept because
+  the measurement trap that produced it is not.** As of 2026-08-14 **70 of 73**
+  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **all 73**
+  declare a curated `__all__`, so the old "read the init before assuming
+  importability" caveat is largely retired. Before that pass the binding figure
+  was 27 of 73 while 14 packages defined no `create_*` *anywhere* — two different
+  numbers answering two different questions, which is the point.
+  **Defining a factory and exporting one are different things**, and a plain
+  mention-`grep create_` answers neither: until 2026-08-10 it gave 24 against a
+  binding count of 25 because
   `src/dl_techniques/models/convnext_patch_vae/__init__.py` was a pure docstring
-  that only cross-referenced its factories without binding them. That package
-  has been deleted and no surviving init has that shape, so the gap is zero **by
-  accident, not by rule** — one docstring mention re-opens it. Use the binding
-  command in the Numbers table, never the mention-grep.
+  cross-referencing factories it never bound. Use an AST scan for the definition
+  question and the binding command in the Numbers table for the export question;
+  never the mention-grep. A grep-based census run on 2026-08-14 got this column
+  wrong for `convnext`, `squeezenet`, `mobilenet`, `qwen`, `gemma` and `gpt2`,
+  each time reporting a factory as missing when it existed.
 
 **Before writing a new layer or model, read
 `research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
