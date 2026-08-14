@@ -78,6 +78,202 @@ class TestDynamicPatcher:
         rebuilt = DynamicPatcher.from_config(patcher.get_config())
         assert rebuilt.max_patches == 16
 
+    # -- entropy-driven patching -------------------------------------
+    # `compute_patch_ids` does NOT validate that a row sums to `seq_len`;
+    # it silently misassigns ids instead. The row sum is therefore pinned
+    # here, at both degenerate ends, rather than being left to the
+    # consumer to notice.
+
+    @staticmethod
+    def _lengths(rows, threshold=1.0, max_patches=4):
+        patcher = DynamicPatcher(entropy_threshold=threshold,
+                                 max_patches=max_patches)
+        entropy = keras.ops.convert_to_tensor(np.asarray(rows, "float32"))
+        return keras.ops.convert_to_numpy(patcher(entropy))
+
+    @pytest.mark.parametrize(
+        "name,row,expected",
+        [
+            # threshold 1.0, max_patches 4, seq_len 6
+            ("zero_crossings", [0., 0., 0., 0., 0., 0.], [6, 0, 0, 0]),
+            ("crossing_at_position_zero", [2., 0., 0., 0., 0., 0.], [0, 6, 0, 0]),
+            ("exactly_max_patches_minus_one", [0., 2., 0., 2., 0., 2.], [1, 2, 2, 1]),
+            ("more_crossings_than_max_patches", [2., 2., 2., 2., 2., 2.], [0, 1, 1, 4]),
+        ],
+    )
+    def test_rows_sum_to_seq_len_in_every_degenerate_case(self, name, row, expected):
+        got = self._lengths([row])[0]
+        assert got.sum() == len(row), (
+            f"{name}: row sums to {got.sum()}, not seq_len={len(row)} "
+            f"(compute_patch_ids will silently misassign ids): {got.tolist()}"
+        )
+        assert (got >= 0).all(), f"{name}: negative length in {got.tolist()}"
+        assert got.tolist() == expected, (
+            f"{name}: expected {expected}, got {got.tolist()}"
+        )
+
+    def test_rows_sum_to_seq_len_when_seq_len_is_below_max_patches(self):
+        got = self._lengths([[0., 2., 0.]], max_patches=8)[0]
+        assert got.sum() == 3, f"row sums to {got.sum()}, not 3: {got.tolist()}"
+        assert got.tolist() == [1, 2, 0, 0, 0, 0, 0, 0]
+
+    def test_the_threshold_moves_the_patch_lengths_on_real_entropy(self):
+        """`entropy_threshold` was stored and serialized at ~15 sites and read
+        at NONE; nothing in the suite would have failed with it permanently
+        dead. The thresholds swept here are derived from the fixture's OWN
+        measured entropy, because a threshold outside the data's range changes
+        nothing and would pass vacuously.
+
+        MEASURED (this fixture, CPU, random init, vocab 32 so the uniform
+        ceiling is ln(32) = 3.466 nats): entropy lands in roughly
+        [2.9, 3.4] nats. Note that the SHIPPED default of 1.5 sits BELOW that
+        whole band -- on an untrained model every position is a boundary.
+        """
+        model = EntropyModel(vocab_size=VOCAB, hidden_dim=HID, num_layers=1,
+                             num_heads=2, max_seq_len=64)
+        entropy = model.compute_entropy(model(_tokens(), training=False))
+        values = keras.ops.convert_to_numpy(entropy)
+
+        lo, hi = float(values.min()), float(values.max())
+        assert hi - lo > 1e-3, (
+            f"fixture entropy is degenerate ([{lo:.4f}, {hi:.4f}]); no "
+            f"threshold could separate it and the sweep below would be vacuous"
+        )
+        low_t, high_t = float(np.quantile(values, 0.25)), float(np.quantile(values, 0.75))
+
+        few = keras.ops.convert_to_numpy(
+            DynamicPatcher(entropy_threshold=high_t, max_patches=NP_)(entropy))
+        many = keras.ops.convert_to_numpy(
+            DynamicPatcher(entropy_threshold=low_t, max_patches=NP_)(entropy))
+
+        assert not np.array_equal(few, many), (
+            f"entropy_threshold is inert: thresholds {high_t:.4f} and "
+            f"{low_t:.4f}, both inside the fixture's measured entropy range "
+            f"[{lo:.4f}, {hi:.4f}], produced identical patch lengths "
+            f"{few.tolist()}"
+        )
+        assert few.sum(axis=1).tolist() == [SEQ] * B
+        assert many.sum(axis=1).tolist() == [SEQ] * B
+        # A higher threshold admits no more boundaries than a lower one, so it
+        # can only occupy fewer or equal patch slots.
+        assert (few > 0).sum() <= (many > 0).sum()
+
+    def test_rows_are_derived_independently(self):
+        """The pre-fix implementation broadcast ONE row to the whole batch, so
+        two sequences with different entropy got identical boundaries."""
+        got = self._lengths([
+            [0., 0., 0., 0., 0., 0.],
+            [0., 2., 0., 2., 0., 0.],
+        ])
+        assert not np.array_equal(got[0], got[1]), (
+            f"both rows got {got[0].tolist()} -- the batch is still broadcast "
+            f"from a single row instead of being segmented per sequence"
+        )
+        assert got[0].tolist() == [6, 0, 0, 0]
+        assert got[1].tolist() == [1, 2, 3, 0]
+
+    def test_patch_ids_depend_only_on_the_past(self):
+        """Causality at the unit level: the id of byte t is the (saturated)
+        count of boundaries at positions <= t, so perturbing entropy at a
+        later position cannot move any earlier id. Asserted through the real
+        `compute_patch_ids` round-trip, which is what the model consumes.
+        """
+        patcher = DynamicPatcher(entropy_threshold=1.0, max_patches=4)
+        base = np.array([[0., 2., 0., 0., 2., 0., 0., 0.]], "float32")
+        after = base.copy()
+        after[0, 5:] = 2.0  # every change is at position >= 5
+
+        def ids(rows):
+            lengths = patcher(keras.ops.convert_to_tensor(rows))
+            return keras.ops.convert_to_numpy(patcher.compute_patch_ids(lengths))
+
+        a, b = ids(base), ids(after)
+        assert np.array_equal(a[:, :5], b[:, :5]), (
+            f"future leak: entropy changed only at positions >= 5 but the "
+            f"patch ids before it moved from {a[0, :5].tolist()} to "
+            f"{b[0, :5].tolist()}"
+        )
+        assert not np.array_equal(a[:, 5:], b[:, 5:]), "probe is inert"
+        for row in (a, b):
+            assert (np.diff(row[0]) >= 0).all(), (
+                f"patch ids are not non-decreasing: {row[0].tolist()} "
+                f"(LocalDecoder's preceding-patch gather requires this)"
+            )
+
+    def test_a_late_boundary_cannot_displace_an_earlier_one(self):
+        """The deterministic gate on the inadmissible algorithm.
+
+        A `top_k`-by-entropy-MAGNITUDE cap would keep the `max_patches - 1`
+        HIGHEST-entropy crossings, so a late, very high entropy value evicts
+        an earlier, lower one and an EARLIER byte's patch id changes. The
+        position-ordered cap cannot do that: the row below is already
+        saturated, so the extra late crossing is absorbed and NOTHING moves.
+
+        "Nothing moves" is the correct answer here, which is why the sibling
+        test below pins that the same construction DOES move when there is
+        boundary budget left -- otherwise this assertion would be satisfied
+        by a patcher that ignored entropy entirely.
+        """
+        patcher = DynamicPatcher(entropy_threshold=1.0, max_patches=4)
+        # crossings at 1, 3, 5 -- exactly max_patches - 1, so the row is full.
+        base = np.array([[0., 3.0, 0., 2.5, 0., 2.0, 0., 0.5]], "float32")
+        after = base.copy()
+        after[0, 7] = 9.0  # a LATE crossing that outranks every earlier one
+
+        def ids(rows):
+            lengths = patcher(keras.ops.convert_to_tensor(rows))
+            return keras.ops.convert_to_numpy(patcher.compute_patch_ids(lengths))
+
+        a, b = ids(base), ids(after)
+        assert np.array_equal(a[:, :7], b[:, :7]), (
+            f"a boundary at position 7 displaced an earlier one: patch ids "
+            f"before it moved from {a[0, :7].tolist()} to {b[0, :7].tolist()} "
+            f"-- this is the magnitude-ranked selection the D-012 anchor "
+            f"forbids"
+        )
+        assert a[0].tolist() == [0, 1, 1, 2, 2, 3, 3, 3]
+
+    def test_a_late_boundary_is_taken_when_there_is_budget_left(self):
+        """Liveness companion for the test above: with only two crossings the
+        row is not saturated, so raising the LAST position above the threshold
+        must open a third patch."""
+        patcher = DynamicPatcher(entropy_threshold=1.0, max_patches=4)
+        base = np.array([[0., 3.0, 0., 2.5, 0., 0., 0., 0.5]], "float32")
+        after = base.copy()
+        after[0, 7] = 9.0
+
+        def ids(rows):
+            lengths = patcher(keras.ops.convert_to_tensor(rows))
+            return keras.ops.convert_to_numpy(patcher.compute_patch_ids(lengths))
+
+        a, b = ids(base), ids(after)
+        assert a[0].tolist() == [0, 1, 1, 2, 2, 2, 2, 2]
+        assert b[0].tolist() == [0, 1, 1, 2, 2, 2, 2, 3], (
+            f"the patcher is inert: raising entropy at position 7 above the "
+            f"threshold left the ids at {b[0].tolist()}"
+        )
+
+    def test_graph_mode_matches_eager(self):
+        """`max_patches` must stay a static Python int and the body must stay
+        raw-`tf`-free: either mistake compiles fine eagerly and breaks in the
+        regime `fit()` actually uses."""
+        import tensorflow as tf
+
+        patcher = DynamicPatcher(entropy_threshold=1.0, max_patches=NP_)
+        entropy = np.random.default_rng(3).standard_normal((B, SEQ)).astype("float32")
+
+        eager = keras.ops.convert_to_numpy(patcher(keras.ops.convert_to_tensor(entropy)))
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None], tf.float32)])
+        def traced(x):
+            return patcher(x)
+
+        graph = traced(tf.constant(entropy)).numpy()
+        assert np.array_equal(eager, graph), (
+            f"graph mode disagrees with eager: {eager.tolist()} vs {graph.tolist()}"
+        )
+        assert graph.sum(axis=1).tolist() == [SEQ] * B
+
 
 # ---------------------------------------------------------------------
 # EntropyModel (single-tensor call -> functional .keras round-trip)

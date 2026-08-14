@@ -583,12 +583,33 @@ class DynamicPatcher(keras.layers.Layer):
     ```
 
     **Patching Algorithm**:
-    1. **Global Threshold**: H(x_t) > θ_g creates patch boundary
-    2. **Monotonic Check**: H(x_t) - H(x_{t-1}) > θ_r for trend detection
-    3. **Length Constraints**: Min/max patch sizes for stability
-    4. **Dynamic Allocation**: Variable patches per sequence
 
-        :param entropy_threshold: Threshold for creating patch boundaries.
+    A position ``t`` opens a new patch when ``H(x_t) > entropy_threshold``.
+    Each byte is then assigned the number of boundaries at or before it,
+    saturated at ``max_patches - 1``; the patch lengths are the occupancy
+    counts of that assignment. Two consequences are deliberate, not
+    incidental:
+
+    - Rows sum to ``seq_len`` **by construction** — every byte is counted
+      into exactly one patch. This matters because ``compute_patch_ids``
+      does not validate the sum; a row that summed to less would silently
+      misassign ids rather than raise.
+    - The cap is a POSITION-ordered truncation, not a magnitude ranking.
+      Everything after the ``(max_patches - 1)``-th boundary merges into
+      the final patch. See the ``call`` anchor for why the alternative is
+      inadmissible rather than merely worse.
+
+    A leading zero-length patch is legal and occurs whenever position 0 is
+    itself a boundary; trailing patches are zero-length whenever a sequence
+    produces fewer boundaries than ``max_patches - 1``. Both leave the patch
+    ids non-decreasing, which is what ``LocalDecoder``'s preceding-patch
+    gather requires.
+
+        :param entropy_threshold: Entropy (in nats) above which a byte opens a
+            new patch. Note the scale: for a vocabulary of size ``V`` the
+            entropy of a uniform distribution is ``ln(V)``, so a threshold at
+            or below the model's typical entropy makes EVERY position a
+            boundary and a threshold above ``ln(V)`` makes none.
         :param max_patches: Maximum number of patches to create.
             **kwargs: Additional layer arguments.
     """
@@ -609,41 +630,72 @@ class DynamicPatcher(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Create patch lengths from entropy values.
+        Derive patch lengths from the entropy values, per row.
 
-        This is a simplified implementation that creates roughly equal patches.
-        A full implementation would use more sophisticated boundary detection.
+        Each row is segmented independently: sequences with different content
+        get different boundaries. This is what makes the shipped
+        ``EntropyModel`` and the trainer's entropy-pretraining stage
+        load-bearing — before this, only ``ops.shape(entropy)`` was read and
+        every row of the batch received the same equal-length partition.
 
-            :param entropy: Entropy tensor of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
+            :param entropy: Entropy tensor of shape (batch_size, seq_len), in
+                the same units as ``entropy_threshold`` (nats, as produced by
+                ``EntropyModel.compute_entropy``).
+            :param training: Whether in training mode. Unused — the
+                segmentation is deterministic.
 
-            :return: Patch lengths tensor of shape (batch_size, max_patches).
+            :return: Patch lengths tensor of shape (batch_size, max_patches),
+                ``int32``, non-negative, each row summing to exactly
+                ``seq_len``.
         """
-        batch_size = ops.shape(entropy)[0]
-        seq_len = ops.shape(entropy)[1]
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-012
+        # ---------------------------------------------------------------
+        # The cap is applied BY POSITION (`ops.minimum` on a running count),
+        # never by entropy MAGNITUDE. DO NOT "improve" this into an
+        # `ops.top_k` over the entropy values to keep the max_patches-1
+        # "most informative" boundaries. That variant is INADMISSIBLE, not
+        # merely a different trade-off: a late high-entropy position would
+        # displace an earlier boundary, so an EARLIER byte's patch id would
+        # depend on a LATER byte. BLT is trained under a next-byte
+        # objective, and
+        # tests/test_models/test_byte_latent_transformer/test_model.py
+        # ::TestCausality::test_future_byte_does_not_change_the_past
+        # requires the logits before the perturbed byte to be EXACTLY
+        # unchanged. The top-k variant was written and measured: it moves
+        # them by 4.85e-01. The price paid here is real and accepted — a
+        # sequence whose most informative positions are all late gets one
+        # long final patch — but it buys causality structurally rather than
+        # by test.
+        #
+        # Two further spellings are load-bearing:
+        #  * The count runs in INT32, not in the compute dtype. A float
+        #    count reduction is the failure `activations/sparsemax.py`'s
+        #    D-017 anchor records as Defect E (an fp16 tree reduction
+        #    counted 2049 as 2048 and 2051 as 2052), and this count is the
+        #    patch id itself.
+        #  * The lengths are OCCUPANCY COUNTS of a per-byte assignment, not
+        #    differences of boundary positions. That is what makes the row
+        #    sum exactly `seq_len` structurally: every byte is counted into
+        #    exactly one patch, for any threshold, including the degenerate
+        #    ends (no boundary at all, or a boundary at every position).
+        #    `compute_patch_ids` does NOT validate the sum, so a
+        #    construction that merely usually sums correctly would fail
+        #    silently.
+        # ---------------------------------------------------------------
+        is_boundary = ops.cast(entropy > self.entropy_threshold, 'int32')
 
-        # Simple patch creation: divide sequence into roughly equal parts
-        # Uses pure tensor ops for graph-mode compatibility
-        avg_patch_size = ops.maximum(seq_len // self.max_patches, 1)
+        # Patch id of byte t = number of boundaries at positions <= t,
+        # saturated so that everything past the last admissible boundary
+        # merges into the final patch. Depends only on entropy[..., :t + 1].
+        patch_index = ops.cumsum(is_boundary, axis=1)
+        patch_index = ops.minimum(patch_index, self.max_patches - 1)
 
-        # Each of the first (max_patches-1) patches gets avg_patch_size tokens
-        # Last patch gets the remainder
-        num_full_patches = ops.minimum(seq_len // avg_patch_size, self.max_patches - 1)
-        remainder = seq_len - num_full_patches * avg_patch_size
+        # (batch, seq_len, max_patches) -> (batch, max_patches) occupancy.
+        # `compute_patch_ids` already materializes a tensor of this exact
+        # shape, so this is not a new memory regime.
+        occupancy = ops.one_hot(patch_index, self.max_patches, dtype='int32')
 
-        # Build patch lengths: [avg, avg, ..., avg, remainder, 0, 0, ...]
-        patch_indices = ops.arange(self.max_patches)
-        full_mask = ops.cast(patch_indices < num_full_patches, 'int32')
-        last_mask = ops.cast(patch_indices == num_full_patches, 'int32')
-        single_row = full_mask * avg_patch_size + last_mask * remainder
-
-        # Broadcast to batch dimension
-        patch_lengths = ops.broadcast_to(
-            ops.expand_dims(single_row, 0),
-            (batch_size, self.max_patches)
-        )
-
-        return ops.cast(patch_lengths, 'int32')
+        return ops.sum(occupancy, axis=1)
 
     def compute_patch_ids(
             self,
