@@ -1,13 +1,117 @@
 """
-Progressive Focused Transformer for Single Image Super-Resolution (PFT-SR).
+Single-image super-resolution with a chain of windowed transformer blocks whose
+attention maps are inherited layer to layer, then pixel-shuffle upsampling.
 
-This module implements the complete PFT-SR architecture for image super-resolution,
-combining shallow feature extraction, deep feature extraction with PFT blocks,
-and high-quality image reconstruction.
+Super-resolution is an inverse problem in which the missing high-frequency
+content has to be inferred from context, and the useful context is often far from
+the pixel being reconstructed: a repeated texture, an edge continuing across the
+image, a self-similar patch elsewhere in the scene. That argues for attention.
+But attention over a full-resolution feature map is quadratic in pixel count, and
+super-resolution runs at full resolution throughout — there is no downsampling
+pyramid to hide behind — so the standard remedy is Swin's window partition, which
+restricts attention to non-overlapping `ws x ws` tiles and recovers cross-window
+reach by cyclically shifting the tiling in alternate layers. That reduces cost
+from `O((HW)^2 C)` to `O(HW * ws^2 * C)` and is the substrate this model is
+built on.
+
+What "PFT" adds on top of that substrate is the observation that a deep stack of
+such blocks recomputes its attention from scratch at every layer, throwing away
+what the layer below already established about which token pairs matter. The
+progressive focusing step reuses it: the previous block's attention map is
+multiplied elementwise into the current block's raw scores before normalization.
+
+`S_foc = (Q K^T / sqrt(d_h) + M_swmsa) (*) A_prev`, then `A = softmax(S_foc)`
+
+The domain of that product is the detail worth being precise about, because it is
+easy to assume the wrong one. The Hadamard product lands on the **logits**, not on
+the probabilities. Where `A_prev[i, j]` is near zero the focused logit is pulled
+toward *zero*, which is the uniform point of the softmax, not toward `-inf`; a
+pair suppressed by an earlier layer is attenuated but recoverable if this layer's
+own score is large. It also means that because `A_prev >= 0` while `S` is signed,
+the product reverses the ordering among negative logits. Both are properties of
+the mechanism as specified and the layers are trained jointly under them, so
+neither is a defect to be "corrected".
+
+One half of the published method is deliberately absent. The paper pairs
+progressive focusing with sparse matrix multiplication that *skips* computing
+similarities for pairs the inherited map has already ruled out — that is where its
+efficiency claim comes from. In this implementation the sparse path is a stub, and
+`ProgressiveFocusedAttention` raises `NotImplementedError` at construction for any
+`sparsity_mode` other than `'none'` rather than silently running dense attention
+while advertising sparse. Everything here therefore computes dense windowed
+attention: the focusing behaviour reproduces, the speedup does not.
+
+The block itself is pre-norm with two residual branches, `x' = x + DropPath(PFA(Norm1(x), A_prev))`
+followed by `y = x' + DropPath(FFN(Norm2(x')))`, and it returns a *pair* —
+`(features, attn_map)` — because the attention map is a second output that the
+next block consumes. That is why `call` here threads two values through the loop
+rather than one, and why the first block is invoked with a bare tensor while every
+subsequent block receives a two-element **list**: a tuple would be misread by
+Keras' shape machinery as a single shape, and a structured input containing `None`
+raises before `call` is ever reached.
+
+`num_blocks` looks like it describes a multi-resolution hierarchy and does not.
+Every stage runs at the same spatial resolution and the same `embed_dim`; there is
+no patch merging, no downsampling and no channel progression anywhere in the deep
+feature extractor. The stage boundaries affect exactly two things: layer naming,
+and the shift schedule, which restarts at `shift_size = 0` on each stage's first
+block and alternates from there. The attention chain does *not* restart — a single
+`prev_attn_map` is threaded across all stages unbroken from the first block to the
+last. Uniform resolution is precisely what makes that possible, since the map's
+shape `(B*nW, heads, ws^2, ws^2)` is constant throughout.
+
+Around the block chain sits the standard SR skeleton: one 3x3 convolution produces
+shallow features, the block chain refines them, `conv_after_body` projects the
+result and a long skip adds the shallow features back, and only then does
+resolution change. Deferring all upsampling to the very end is the design decision
+that makes the model affordable — every attention operation runs at low-resolution
+input size, and the `scale**2` factor is paid once, by rearranging channels into
+space rather than by convolving at the output size. `'pixelshuffle'` composes 4x
+as two 2x stages, which is cheaper and better-conditioned than a single 16x
+channel expansion; `'pixelshuffledirect'` does the single-step version for
+lightweight models. Note that `'nearest+conv'` derives its stage count as
+`int(log2(scale))` and so silently under-upsamples for non-power-of-two scales,
+and that `'pixelshuffle'` accepts only scales 2, 3 and 4.
+
+Two constraints follow from the windowing and bind the caller. Input height and
+width must be divisible by `window_size`, since the partition does not pad. More
+restrictively, shifted-window blocks need **statically known** spatial dimensions:
+the SW-MSA mask encodes which regions became non-adjacent under the cyclic shift
+and is materialized at build time, so it cannot be constructed from dynamic
+`None` dims. This model is not resolution-agnostic at call time the way a purely
+convolutional SR network is.
+
+Two implementation choices are deliberate and load-bearing. The stochastic-depth
+schedule comes from `linear_drop_path_rates`, which returns plain Python floats;
+an earlier `keras.ops.linspace` plus `.item()` formulation raised `AttributeError`
+on TF eager tensors and left the entire `drop_path_rate > 0` branch dead, so no
+backend-tensor linspace belongs here. And `build` ends with a concrete dummy
+forward pass through `self.call`. The sub-layers are created in `build` but would
+otherwise construct their weights lazily on first call; `build_from_config` during
+a `.keras` reload recreates them unbuilt, and weight restoration then fails on
+layers that "were never built". Forcing materialization here is what makes the
+round-trip work — and it matters more than usual because the blocks are held in a
+nested `List[List[Layer]]`, a structure that can otherwise restore fresh weights
+while every layer count and path still matches.
 
 References:
-    Long, Wei, et al. "Progressive Focused Transformer for Single Image Super-Resolution."
-    CVPR 2025. https://arxiv.org/abs/2503.20337
+    - Long et al., 2025. Progressive Focused Transformer for Single Image
+      Super-Resolution. CVPR. (https://arxiv.org/abs/2503.20337)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. ICCV. (https://arxiv.org/abs/2103.14030)
+      The window partition, cyclic shift and SW-MSA mask reused wholesale.
+    - Liang et al., 2021. SwinIR: Image Restoration Using Swin Transformer.
+      (https://arxiv.org/abs/2108.10257)
+      The shallow-feature / deep-feature / long-skip / upsample skeleton.
+    - Shi et al., 2016. Real-Time Single Image and Video Super-Resolution Using an
+      Efficient Sub-Pixel Convolutional Neural Network.
+      (https://arxiv.org/abs/1609.05158)
+      The pixel-shuffle upsampler.
+    - Dong et al., 2022. CSWin Transformer: A General Vision Transformer Backbone
+      with Cross-Shaped Windows. (https://arxiv.org/abs/2107.00652)
+      Origin of LePE, the depthwise positional encoding applied to values.
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

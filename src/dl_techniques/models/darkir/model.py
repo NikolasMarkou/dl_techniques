@@ -1,78 +1,112 @@
 """
-DarkIR: Robust Low-Light Image Restoration Network
-==================================================
+DarkIR low-light image restoration, a fully convolutional U-Net with parallel
+dilated branches and a Fourier-domain modulation path.
 
-A Keras 3 implementation of DarkIR, presented at CVPR 2025.
+Low-light photographs arrive with three degradations entangled at once: the scene
+is under-exposed, the sensor noise that was always present is now comparable to
+the signal, and the long exposure that produced the image also produced motion
+blur. Restoring them separately does not work, because brightening amplifies the
+noise and deblurring sharpens it. The architectural problem this creates is one
+of receptive field under a compute budget: blur removal needs to see far enough
+to find the blur kernel's support, and exposure correction needs a *global* view
+of the image to decide how much to lift, yet self-attention over a full-resolution
+restoration feature map costs `O(H^2 W^2)`.
 
-DarkIR is an efficient, all-in-one image restoration network designed to handle
-multiple degradations simultaneously: low-light, noise, and blur. Unlike many modern
-restoration networks that rely heavily on Vision Transformers, DarkIR utilizes efficient
-CNNs augmented with frequency-domain processing and dilated attention mechanisms.
+This model resolves the two halves with two different cheap mechanisms rather
+than one expensive one. Spatially, a set of parallel depthwise convolutions with
+different dilation rates is summed:
 
-Architectural Highlights:
--------------------------
-1. **U-Net Structure**: A hierarchical encoder-decoder architecture with skip connections.
-2. **Dilated Branching**: Uses parallel dilated convolutions (rates 1, 4, 9) to capture
-   multi-scale context without increasing parameter count significantly.
-3. **Frequency MLP (FreMLP)**: Processes features in the Fourier domain to capture global
-   characteristics efficiently, replacing heavy self-attention mechanisms.
-4. **SimpleGate**: A parameter-free gating mechanism (element-wise multiplication of
-   channel splits) used for non-linear activation.
-5. **PixelShuffle Upsampling**: Uses sub-pixel convolution for high-quality resolution recovery.
-6. **Global Residual**: The network learns the residual image to add to the input.
+`z = sum_d DWConv3x3_d(x)`
 
-Key Components:
----------------
-- **DarkIREncoderBlock**: Contains Normalization -> Dilated Branches -> SimpleGate -> Frequency MLP.
-- **DarkIRDecoderBlock**: Similar to Encoder but replaces FreMLP with inverted FFN structures.
-- **DilatedBranch**: A specific branch within blocks handling specific dilation rates.
+Since a 3x3 kernel at dilation `d` spans `3 + 2*(d - 1)` pixels, the default
+rates `[1, 4, 9]` give 3x3, 11x11 and 19x19 supports from the same 3x3 parameter
+count, and summing rather than concatenating keeps the channel width fixed so
+the cost is linear in the number of branches. Globally, the Fourier transform is
+used in place of attention: every output bin of an FFT already depends on every
+input pixel, so a pointwise operation on the spectrum is a global operation in
+`O(HW log HW)`, with no `H*W`-by-`H*W` matrix anywhere.
 
-Usage Example:
---------------
-```python
-from dl_techniques.models.darkir import create_darkir_model
-from dl_techniques.optimization import optimizer_builder
+`FreMLP` is where that idea is implemented, and it is deliberately narrower than
+"an MLP on the spectrum". It transforms to the frequency domain, processes only
+the *magnitude* through a two-layer 1x1-conv MLP, and reattaches the original
+phase by rescaling the unit phasor `freq / |freq|`. Magnitude carries the
+illumination and contrast envelope while phase carries the structure, so editing
+magnitude alone is what lets the layer relight an image without displacing its
+edges. Two implementation facts about it are not obvious from the concept.
+`keras.ops` has no `rfft2`, `angle` or `complex`, so the layer runs the
+full complex `fft2` over the last two axes and therefore transposes NHWC to NCHW
+and back around the transform; and the real output is valid only because a 1x1
+convolution acts identically on the two members of every conjugate-pair bin, so
+the processed spectrum retains the Hermitian symmetry of a real signal and the
+imaginary part of the inverse transform can be discarded rather than needing a
+projection.
 
-# 1. Create the model (Standard "Medium" Configuration)
-model = create_darkir_model(
-    img_channels=3,
-    width=32,                  # Base feature dimension
-    enc_blk_nums=[1, 2, 3],    # Blocks per encoder stage
-    dec_blk_nums=[3, 1, 1],    # Blocks per decoder stage
-    dilations=[1, 4, 9],       # Dilation rates for parallel branches
-    extra_depth_wise=True
-)
+Everything else in a block is parameter-frugal by the same instinct. `SimpleGate`
+replaces the activation function with a channel split and an element-wise
+product, `x1 * x2`, contributing a multiplicative nonlinearity at zero parameter
+cost; the channel-attention branch is NAFNet's *simplified* channel attention,
+a global average pool followed by a single 1x1 convolution with **no sigmoid**,
+so it is an unbounded per-channel rescaling rather than a gate in `[0, 1]`.
 
-# 2. Compile for Training
-# DarkIR typically uses Charbonnier or L1 Loss.
-# We use AdamW with cosine decay.
-optimizer = optimizer_builder({
-    "type": "adamw",
-    "learning_rate": 2e-4,
-    "weight_decay": 1e-4,
-    "gradient_clipping_by_norm": 1.0
-})
+The encoder block and the decoder block share the dilated first path but differ
+in their second path and in one ordering detail. The encoder's second path is
+`FreMLP`, and it is applied *multiplicatively*: the frequency output modulates
+the running signal, `out = y + gamma * (y * FreMLP(Norm(y)))`, so the frequency
+branch scales the spatial features rather than being added alongside them. The
+decoder's second path is an ordinary gated inverted FFN (expand 1x1, SimpleGate,
+project 1x1) added in the usual way. The ordering detail is that the optional
+extra depthwise convolution sits *before* the channel-expanding 1x1 in the
+encoder and *after* it in the decoder — and because the decoder's version keeps
+`groups=channels` while operating on `channels * dw_expand` maps, that layer is
+a grouped convolution with `dw_expand` channels per group, not a true depthwise
+convolution as its name suggests.
 
-model.compile(optimizer=optimizer, loss='mean_absolute_error')
+Both blocks scale each of their two residual branches by a learnable per-channel
+weight, `beta` for the spatial path and `gamma` for the second path, and both are
+initialized to **zeros**. Every block therefore begins training as an exact
+identity and the whole tower starts as the global residual connection alone.
+This is the LayerScale/ReZero idea and it is what allows a deep restoration
+tower to be trained without warmup tricks: the network cannot destroy its input
+before it has learned anything worth adding.
 
-# 3. Inference
-# Input: (B, H, W, 3) Scaled [0, 1]
-# Output: (B, H, W, 3) Scaled [0, 1]
-restored_img = model.predict(low_light_image_batch)
-```
+The assembled model is a functional builder — `create_darkir_model` returns
+`keras.Model(inputs, outputs)`, not a subclass — with an input of shape
+`(None, None, img_channels)`, so it is fully convolutional and resolution-agnostic
+at call time. Stages downsample with a stride-2 2x2 convolution and upsample by
+a 1x1 channel expansion followed by pixel shuffle. The expansion factor there is
+worth stating precisely: pixel shuffle at `block_size=2` divides channels by four
+while doubling each spatial dimension, and the decoder halves its width per
+stage, so the pre-shuffle convolution must emit `(chan // 2) * 4 == chan * 2`
+filters for the post-shuffle tensor to match the encoder skip it is added to.
+The size requirement follows from the same arithmetic and is a hard constraint
+rather than a preference: the stride-2 downsample uses `padding='valid'`, so a
+height or width that is not a multiple of `2 ** len(enc_blk_nums)` truncates on
+the way down, and the skip-connection `Add` then fails on mismatched shapes.
 
-Input/Output Shapes:
---------------------
-- **Input**: `(Batch, Height, Width, Channels)`
-  - Height and Width should ideally be multiples of `2^num_stages` (e.g., multiple of 8 for 3 stages).
-  - Data type: Float32, range [0, 1].
-- **Output**: `(Batch, Height, Width, Channels)`
-  - Same shape as input. Represents the restored image.
+`use_side_loss=True` adds a second output for deep supervision, taken from the
+bottleneck features captured between the middle encoder blocks and the middle
+decoder blocks. Note that this tap is at bottleneck resolution: the side output
+has shape `(B, H / 2**stages, W / 2**stages, img_channels)`, not full resolution,
+so any auxiliary loss against it must downsample the target first. This differs
+from the paper, whose auxiliary supervision is applied to a full-resolution
+enhanced image produced by a distinct low-light branch; the single shared trunk
+here does not reproduce that two-branch split.
 
-Reference:
-----------
-Feijoo, D., Benito, J. C., Garcia, A., & Conde, M. V. (2025).
-"DarkIR: Robust Low-Light Image Restoration". CVPR 2025.
+References:
+    - Feijoo et al., 2025. DarkIR: Robust Low-Light Image Restoration. CVPR 2025.
+    - Chen et al., 2022. Simple Baselines for Image Restoration.
+      (https://arxiv.org/abs/2204.04676)
+      Source of SimpleGate and the sigmoid-free simplified channel attention.
+    - Yu & Koltun, 2016. Multi-Scale Context Aggregation by Dilated Convolutions.
+      (https://arxiv.org/abs/1511.07122)
+    - Shi et al., 2016. Real-Time Single Image and Video Super-Resolution Using an
+      Efficient Sub-Pixel Convolutional Neural Network.
+      (https://arxiv.org/abs/1609.05158)
+    - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical Image
+      Segmentation. (https://arxiv.org/abs/1505.04597)
+    - Bachlechner et al., 2020. ReZero is All You Need: Fast Convergence at Large
+      Depth. (https://arxiv.org/abs/2003.04887)
+      The zero-initialized per-branch scale used by both blocks.
 """
 
 import keras

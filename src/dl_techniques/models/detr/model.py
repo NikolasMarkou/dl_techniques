@@ -1,50 +1,91 @@
 """
-DETR (DEtection TRansformer) Model Implementation in Keras 3
+DETR object detection: a CNN backbone feeding a transformer encoder-decoder that
+turns a fixed set of learned object queries into a set of box and class
+predictions.
 
-This module provides a Keras 3 implementation of the DETR model, as described in
-"End-to-End Object Detection with Transformers" by Carion et al. (2020).
+Detection had always been posed as a dense surrogate problem. Anchors, region
+proposals and grid cells produce tens of thousands of candidate boxes, almost all
+of them redundant, and a hand-designed non-maximum-suppression stage afterwards
+decides which survive. That pipeline is not end-to-end: NMS is non-differentiable,
+anchor priors encode assumptions about object scale and aspect, and duplicate
+suppression is a rule rather than something the model learns. DETR's premise is
+that detection is *set prediction*, and that a model can be trained to emit a set
+directly if two things are supplied. The first is a decoder that lets predictions
+see each other: `num_queries` learned embeddings pass through self-attention at
+every decoder layer, so a query that is about to claim an object can observe that
+a sibling query has already claimed it and move on. Duplicate suppression becomes
+a learned interaction rather than a post-process. The second is a permutation-
+invariant loss — a Hungarian bipartite matching between the fixed-size prediction
+set and the ground-truth set, with unmatched predictions supervised toward a
+"no object" class. That loss lives in the training loop, not here; this module is
+the forward architecture only, and the extra logit for "no object" is the reason
+the classifier emits `num_classes + 1` outputs.
 
-The implementation follows modern Keras 3 best practices and leverages existing
-components from the dl_techniques framework including:
-- TransformerLayer for encoder blocks
-- TransformerDecoderLayer for decoder blocks
-- Normalization factory for flexible normalization
-- FFN factory for configurable feed-forward networks
-- Attention factory for attention mechanisms
+The queries themselves are the conceptual center. They carry no image content —
+they are a `num_queries x hidden_dim` embedding table, learned once and shared
+across every image. Each one converges during training into a slot with a soft
+spatial and size preference, and cross-attention is what fills that slot with the
+content of whatever object occupies that region of the current image. `num_queries`
+is therefore a hard ceiling on detections per image, which is why the paper sets
+it far above the maximum object count in the dataset.
 
-Key Architectural Features:
----------------------------
-- A CNN backbone (e.g., ResNet-50) for feature extraction.
-- A 2D sinusoidal positional encoding added to the feature map.
-- A standard Transformer architecture with an encoder and a decoder.
-- Learned object queries that attend to image features to detect objects.
-- Prediction heads (FFNs) for bounding boxes and class labels.
+The forward path is backbone, then 1x1 projection to `hidden_dim`, then flatten
+to a sequence, then encoder, then decoder, then two heads: a `Dense` for class
+logits and a three-layer MLP for boxes, the latter passed through `sigmoid` so
+its four outputs are normalized `cxcywh` coordinates in `[0, 1]`. Positional
+encoding is computed on the *projected* feature map rather than on the input
+image, which matters because `PositionEmbeddingSine2D` derives its grid from the
+spatial dimensions of what it is handed; computing it on the full-resolution
+image would produce an encoding of the wrong size for the stride-16 feature map.
+That layer emits channels-first `(B, C, H, W)` and is transposed to `(B, H, W, C)`
+immediately afterwards to match the rest of the graph's NHWC layout.
 
-Usage:
-------
-```python
-# Create a DETR model with a ResNet-50 backbone
-detr_model = create_detr(
-    num_classes=91,
-    num_queries=100,
-    backbone_name="resnet50"
-)
+Several places depart from the paper, deliberately or as unfinished work, and a
+reader comparing against the reference implementation should know which is which.
+The padding mask is **accepted and then discarded**: `call` takes an
+`(images, padding_mask)` tuple but passes `None` into the transformer, because
+the mask arrives as `(B, H*W)` while `TransformerLayer` expects a `(B, T, T)`
+attention mask. Batches of mixed-size images padded to a common canvas will
+therefore attend to their own padding. Positional encodings are added to the
+*input* of each encoder layer rather than to queries and keys only, so values
+carry positional content too, and because the addition is applied to the running
+`memory` at every layer the encoding accumulates across the stack instead of being
+re-injected identically; the decoder makes the same simplification with the query
+embeddings, adding them to the whole decoder input rather than to `Q` and `K`.
+The backbone is tapped at `conv4_block6_out` (C4, stride 16) rather than C5, and
+is frozen by default (`backbone_trainable=False`) rather than fine-tuned at a
+reduced learning rate; note also that ImageNet weights *are* downloaded here via
+`keras.applications`, so unlike most of this package the backbone is genuinely
+pretrained, while nothing above it is. There is no final decoder layer
+normalization, so the auxiliary outputs are read raw from each decoder layer.
 
-# The model expects preprocessed images and a padding mask
-image_input = keras.Input(shape=(None, None, 3), dtype="float32")
-mask_input = keras.Input(shape=(None, None), dtype="bool")
+`aux_loss=True`, the default, applies both heads to every decoder layer's output
+and returns the intermediate predictions under `aux_outputs`. This is a training
+aid rather than an architectural feature: supervising every layer with the same
+matching loss pressures each layer to already be producing a usable detection set,
+which measurably speeds convergence for a model that is otherwise slow to train.
+Inference consumes `pred_logits` and `pred_boxes` alone.
 
-outputs = detr_model([image_input, mask_input])
+Both `DetrTransformer` and `DETR` build all of their sub-layers explicitly rather
+than letting Keras build them lazily. This is required for `.keras` round-trip:
+weight restore calls `load_own_variables` on each sub-layer, and an unbuilt
+sub-layer has no variables to receive the saved arrays, so lazy construction
+fails at load time with a weight-count mismatch rather than at save time.
 
-# The model can be saved and loaded seamlessly
-detr_model.save("detr_model.keras")
-loaded_model = keras.models.load_model("detr_model.keras")
-```
-
-Note: The loss function, which involves the Hungarian Matcher for bipartite
-matching, is not part of the model architecture itself and is intended to be
-implemented within the training loop. This file focuses on the forward-pass
-architecture of the DETR model.
+References:
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+      (https://arxiv.org/abs/2005.12872)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Kuhn, 1955. The Hungarian Method for the Assignment Problem.
+      Naval Research Logistics Quarterly 2(1-2).
+      The bipartite matching the training loop must supply.
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+      The ResNet-50 backbone.
+    - Zhu et al., 2021. Deformable DETR: Deformable Transformers for End-to-End
+      Object Detection. (https://arxiv.org/abs/2010.04159)
+      Diagnoses DETR's slow convergence and its weakness on small objects.
 """
 
 import keras

@@ -1,52 +1,100 @@
 """
-FractalNet Model Implementation
-===========================================================
+A FractalNet-style classifier built from recursively expanded, drop-path
+regularized parallel branches joined by averaging.
 
-A complete implementation of the FractalNet architecture using modern Keras 3 patterns.
-FractalNet is a self-similar deep neural network architecture that builds depth
-through recursive fractal expansion rather than residual connections.
+FractalNet's premise is that residual connections are not the essential
+ingredient in training very deep networks — what matters is that the network
+contains short paths from input to loss alongside the long ones. ResNet supplies
+those short paths implicitly, by making every block skippable. FractalNet
+supplies them explicitly, by an expansion rule that generates a set of branches
+of differing lengths and averages them at a join. The paper's rule composes one
+branch out of two copies of the previous level while the other branch is a single
+convolution:
 
-Based on: "FractalNet: Ultra-Deep Neural Networks without Residuals" (Larsson et al., 2016)
-https://arxiv.org/abs/1605.07648
+`f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]`
 
-Key Features:
-------------
-- Modular design using FractalBlock as building blocks
-- Self-similar architecture through recursive fractal expansion
-- Drop-path regularization for improved generalization
-- Support for multiple FractalNet variants
-- Configurable depths and filter sizes per stage
-- Complete serialization support with modern Keras 3 patterns
-- Production-ready implementation
+so a level-`C` fractal contains paths of length `1, 2, 4, ..., 2^(C-1)` all
+reaching the same output, and the shortest of them is a single layer regardless
+of how deep the block is. The implicit ensemble over those paths, plus drop-path
+regularization that randomly removes branches at each join, is what lets the
+network train to great depth with no identity shortcut anywhere.
 
-Architecture Concept:
--------------------
-FractalNet uses a recursive expansion rule: F_{k+1}(x) = 0.5 * (DP(F_k(x)) + DP(F_k(x)))
-where DP represents drop-path regularization. This creates self-similar structures
-without residual connections.
+**This implementation deviates from that rule, and the deviation changes what the
+model is.** `FractalBlock` at depth `k` builds *two* sub-blocks of depth `k - 1`
+and applies both to the *same* input in parallel, rather than composing one of
+them:
 
-Model Variants:
---------------
-- FractalNet-Micro: [1, 2, 2] depths, [16, 32, 64] filters (for small datasets)
-- FractalNet-Small: [2, 3, 3] depths, [32, 64, 128] filters (CIFAR-10/100)
-- FractalNet-Medium: [3, 4, 4] depths, [64, 128, 256] filters
-- FractalNet-Large: [4, 5, 5] depths, [96, 192, 384] filters (ImageNet)
+`F_k(x) = 0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))`
 
-Usage Examples:
--------------
-```python
-# CIFAR-10 model (32x32 input)
-model = FractalNet.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+Recursion on that rule terminates with every leaf receiving the block's input
+directly, so every input-to-output path traverses exactly **one** convolution no
+matter what `depth` is set to. A depth-`k` block is therefore an average of
+`2^(k-1)` independent parallel convolutions of identical shape, not a fractal
+with a `2^(k-1)`-deep longest path. Increasing `depth` buys width and ensemble
+size, doubling parameters each step, and buys no depth at all; the network's
+actual depth is `len(depths)`, one convolution per stage. Read `depths` as a
+per-stage log2 branch count. The `depths=[4, 5, 5]` "large" variant is 8, 16 and
+16 parallel convolutions in three stages, not a 14-layer network.
 
-# MNIST model (28x28 input)
-model = FractalNet.from_variant("micro", num_classes=10, input_shape=(28, 28, 1))
+One consequence is that the shape-consistency the code enjoys is a symptom of the
+deviation rather than a design win: because the branches are parallel and never
+composed, all `2^(k-1)` leaves apply the stage's stride simultaneously and the
+resolution halves exactly once per stage. Under the paper's composing rule two
+stacked stride-2 convolutions on one branch would disagree with a single stride-2
+convolution on the other, which is precisely why the real FractalNet places
+downsampling *between* blocks and not inside them.
 
-# ImageNet model (224x224 input)
-model = FractalNet.from_variant("large", num_classes=1000)
+The drop-path is likewise a different mechanism from the paper's, in two ways.
+The paper defines *local* drop-path, which drops each input to a join
+independently **but is constrained to keep at least one**, and *global*
+drop-path, which selects a single column and runs the whole network through it;
+training alternates between the two. Neither is implemented here. Each branch is
+guarded by an independent per-sample `StochasticDepth`, so for a given sample
+both branches of a join can be dropped in the same step, in which case that
+block's output for that sample is exactly zero and the zero propagates through
+every remaining stage — an event with probability `drop_path_rate ** 2` per join,
+about 2.3% per join at the 0.15 default. There is no global drop-path path at
+all, and no alternation between regimes. The join is also a fixed `0.5/0.5`
+mean rather than the paper's mean over the *surviving* inputs; what keeps the
+expectation right instead is `StochasticDepth`'s inverted-dropout rescaling by
+`1 / (1 - drop_path_rate)`, which makes each branch unbiased individually, so
+the fixed-weight mean is unbiased in expectation even though any particular step
+is not renormalized. A single `drop_path_rate` is used at every depth; there is
+no linear schedule over the network.
 
-# Custom dataset model
-model = create_fractal_net("medium", num_classes=100, input_shape=(64, 64, 3))
-```
+Structurally the model is a plain sequence: `len(depths)` stages, each one
+`FractalBlock` wrapping a `ConvBlock` (3x3 convolution, configurable
+normalization and activation, dropout, no pooling) at the stage's stride, then a
+global pool, dropout and a `Dense` classifier. There is no stem, no bottleneck
+and no pooling other than the final global reduction — downsampling is carried
+entirely by the stride inside each stage's convolutions. Note that the
+`ConvBlock` is constructed once purely to harvest its `get_config()`; that
+config dict is what `FractalBlock` stores and re-instantiates per leaf, which is
+what makes the recursive structure serializable, and it is why every leaf in a
+stage is configured identically while holding its own independent weights.
+
+Construction happens in `__init__` through the functional API before
+`super().__init__(inputs, outputs)` is called, so this is a Functional model
+wearing a subclass's constructor rather than a subclassed model with a `call`.
+The head emits raw logits — there is no softmax — so a loss must be compiled
+with `from_logits=True`; `create_fractal_net` compiles
+`sparse_categorical_crossentropy` by its string name, which defaults to
+`from_logits=False` and will therefore mis-train unless a configured loss object
+is passed instead.
+
+References:
+    - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
+      Residuals. ICLR. (https://arxiv.org/abs/1605.07648)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
+      The per-sample drop mechanism actually used here, in place of the paper's
+      local/global drop-path.
+    - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
+      Shallow Networks. (https://arxiv.org/abs/1605.06431)
+      The path-ensemble reading that motivates both FractalNet and drop-path.
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+      The residual baseline FractalNet was posed against.
 """
 
 import keras

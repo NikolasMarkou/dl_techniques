@@ -1,32 +1,106 @@
-"""Depth Anything Implementation in Keras.
+"""Monocular depth estimation following the Depth Anything (V1) semi-supervised
+recipe: a ViT encoder, a convolutional dense-prediction head, and an optional
+teacher branch supplying feature alignment and pseudo-label consistency.
 
-This module implements the Depth Anything model architecture as described in the paper.
-Key components:
-1. Feature Alignment Loss for semantic prior transfer
-2. Affine-Invariant Loss for multi-dataset training
-3. Strong augmentation pipeline for unlabeled data
-4. DINOv2 encoder with DPT decoder architecture
+Predicting depth from a single image is ill-posed — an image is consistent with a
+whole family of scenes related by scale — so the only supervision that
+generalizes across datasets is *relative*: depth up to an unknown affine
+transform. That framing makes heterogeneous data usable, which is the real
+bottleneck, because metric depth labels require LiDAR or stereo rigs and exist
+for a few million images at most while unlabeled photographs exist by the
+billion. Depth Anything's contribution is the observation that naive
+pseudo-labeling on that unlabeled pool does nothing: a student trained on its
+teacher's predictions of unperturbed images has no gradient to learn from,
+because it can already produce those predictions. The fix is to make the
+student's job strictly harder than the teacher's. The teacher sees a clean image;
+the student sees the same image after strong perturbation (color jitter, CutMix)
+and must still agree. The residual difficulty is what carries information. A
+second term keeps the encoder from drifting away from the semantic structure of
+its pretrained initialization by aligning student features to a frozen
+counterpart's — semantic priors are what let a depth model reason about object
+boundaries it never saw supervised.
 
-Key Features:
-- Uses large-scale unlabeled data (62M images) for better generalization
-- Implements challenging student model training with strong perturbations
-- Inherits semantic priors from pre-trained encoders
-- Supports fine-tuning on specific datasets
-- State-of-the-art results on NYUv2 and KITTI benchmarks
+`DepthAnything` implements the **V1** recipe. V2's defining moves — replacing
+real labeled data with synthetic renderings and distilling through a large
+teacher onto pseudo-labeled real images — are not present.
 
-Example:
-    >>> config = ModelConfig(encoder_type='vit_l')
-    >>> model = create_depth_anything(config)
-    >>> model.compile(
-    ...     optimizer=keras.optimizers.AdamW(learning_rate=5e-6),
-    ...     loss_weights={'labeled': 1.0, 'unlabeled': 0.5, 'feature': 0.1}
-    ... )
-    >>> # Training would require proper data pipeline
-    >>> # model.fit([x_labeled, x_unlabeled], y_labeled, epochs=100)
+Three things about the encoder differ from the paper and change what the model
+inherits. First, the backbone is this repository's plain supervised `ViT` (patch
+size 16), or a `Conv-BN-ReLU` stack when `encoder_kind='placeholder'`, not
+DINOv2; no pretrained weights are downloaded by this package, so a freshly
+constructed model has no semantic prior to transfer and the feature-alignment
+term is aligning a random encoder to a copy of itself until
+`from_pretrained_encoder` supplies a real checkpoint. Second, the "frozen"
+encoder is *not* frozen in the V1 sense of a fixed pretrained reference; it is a
+`clone_model` of the student, initialized from the student's own weights, and it
+is intended to be advanced as a Mean-Teacher exponential moving average through
+`update_teacher_ema`. That method is a plain public method and nothing in this
+module calls it: the driver is `TeacherEMACallback` in this package's
+`teacher_ema.py`, attached by the trainer in `src/train/depth_anything/`. Without
+that callback the teacher stays pinned at the student's initial weights forever.
+Third, `AffineInvariantLoss` is imported here but never used in this module —
+the affine-invariant objective is supplied by the training script, and
+`compile()` defaults to plain mean-squared error if no loss is passed.
 
-Note:
-    The implementation follows Keras best practices and includes proper
-    regularization, initialization, and normalization techniques.
+The decoder is named `DPTDecoder` but is not the DPT of the paper. It performs no
+multi-scale "reassemble" from intermediate transformer layers and has no residual
+fusion blocks or skip connections; it is a linear stack of `3x3 Conv - BatchNorm
+- ReLU` stages with bilinear 2x upsampling inserted after the first
+`log2(upsample_factor)` of them, consuming only the encoder's final feature map.
+`upsample_factor` is set to the encoder stride so the output resolution returns
+to the input's, which is why the placeholder encoder was deliberately built to
+stride 16 (its legacy stride-2 initial pool was removed) rather than the 32 a
+four-stage conv tower would naturally give — the decoder's four stages can only
+express `2**4`. The final projection is linear by default, leaving the output
+unconstrained; that is the correct choice for affine-invariant or scale-shift
+losses, which need the network free to choose its own scale, and it is why no
+sigmoid clamps the depth to `[0, 1]`.
+
+A ViT emits `(B, N+1, D)` sequences while the decoder needs `(B, h, w, D)`, so
+`_features_to_spatial` drops the CLS token and reshapes on the patch grid derived
+from `image_shape // patch_size`. This ties the model to a fixed input
+resolution: `encoder_h` and `encoder_w` are computed once in `__init__`, so
+calling the model at a resolution other than the configured `image_shape` will
+reshape against the wrong grid.
+
+Two behavioural choices are worth stating as choices. `use_feature_alignment`
+defaults to `True` while `enable_semi_supervised` defaults to `False`, so the
+default configuration *builds* the teacher — roughly doubling parameter count and
+memory — while the custom `train_step` never routes through the semi-supervised
+branch that would use it. Enable the second, or disable the first, rather than
+paying for a teacher that does nothing. And the clone is wrapped in a
+`try/except` that degrades to `use_feature_alignment = False` with a warning
+instead of raising, so an encoder that cannot be cloned yields a working but
+silently unregularized model.
+
+Serialization overrides `save_own_variables` / `load_own_variables` to write the
+entire ordered `self.weights` list into flat numeric slots at the top level.
+Keras 3's default behaviour recurses into child models and maps weights by
+attribute path, and for a `keras.Model` nested as an attribute of another
+`keras.Model` that path mapping was measured to drift between save and load —
+55 of 172 weights restored re-initialized, moving the forward output by 1 to 2.8.
+Writing one flat, path-free record bypasses the framework's path walking
+entirely; `load_own_variables` force-builds via a dummy forward first so the
+weight list it indexes matches the one that was written.
+
+References:
+    - Yang et al., 2024. Depth Anything: Unleashing the Power of Large-Scale
+      Unlabeled Data. CVPR. (https://arxiv.org/abs/2401.10891)
+    - Yang et al., 2024. Depth Anything V2. (https://arxiv.org/abs/2406.09414)
+      Not implemented here; listed to mark which generation this is.
+    - Ranftl et al., 2021. Vision Transformers for Dense Prediction (DPT).
+      (https://arxiv.org/abs/2103.13413)
+      The decoder this one is named after and simplifies.
+    - Ranftl et al., 2020. Towards Robust Monocular Depth Estimation: Mixing
+      Datasets for Zero-shot Cross-dataset Transfer (MiDaS).
+      (https://arxiv.org/abs/1907.01341)
+      Origin of the affine-invariant objective this pipeline is built around.
+    - Tarvainen & Valpola, 2017. Mean Teachers Are Better Role Models.
+      (https://arxiv.org/abs/1703.01780)
+      The EMA teacher that `teacher_ema.py` drives.
+    - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
+      Supervision. (https://arxiv.org/abs/2304.07193)
+      The paper's encoder, which this package does not ship.
 """
 
 import keras
