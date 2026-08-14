@@ -732,8 +732,16 @@ def create_nanovlm(
         # Create different variants
         mini_model = create_nanovlm('mini', fusion_strategy='concatenation')
         base_model = create_nanovlm('base', fusion_strategy='cross_attention')
-        large_model = create_nanovlm('large', fusion_strategy='tensor_fusion')
+        large_model = create_nanovlm('large', fusion_strategy='cross_attention')
         ```
+
+        `'tensor_fusion'` is deliberately absent from these examples: it
+        concatenates on the FEATURE axis and therefore requires the vision and
+        text streams to have the same sequence length. Every variant here fixes
+        the vision length from `img_size`/`patch_size` (197 tokens for
+        `'mini'`/`'base'`, 577 for `'large'`) against a caller-chosen text
+        length, so it raises a `ValueError` naming the requirement unless the
+        two happen to match.
     """
     variants = {
         'mini': {
