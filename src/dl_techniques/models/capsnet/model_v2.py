@@ -608,10 +608,13 @@ def create_capsnet_v2_pretrained(
         create_capsnet_v2(num_classes=num_classes, input_shape=input_shape,
                           stem=backbone, stem_pretrained=pretrained, ...)
 
-    The repo's :func:`dl_techniques.models.resnet.create_resnet` handles the
-    download fallback (logs a warning and continues with random init if the
-    URL is unavailable). Pass a local ``.keras`` weights path string to
-    ``pretrained`` to skip the download path entirely.
+    Pass a local ``.keras`` weights path string to ``pretrained``. No public
+    ResNet weights ship with ``dl_techniques``, so ``pretrained=True`` (the
+    default) raises ``NotImplementedError`` from
+    :func:`dl_techniques.models.resnet.create_resnet` rather than silently
+    returning a randomly-initialized backbone, which is what it used to do.
+
+    :raises NotImplementedError: If ``pretrained`` is ``True`` rather than a path.
     """
     if backbone not in CapsNetV2.RESNET_STEMS:
         raise ValueError(

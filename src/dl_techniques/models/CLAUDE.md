@@ -154,6 +154,140 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
 3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions.md` (full serialization, `build`, `get_config`, tests). Prefer adding it to the appropriate `layers/` subpackage (and its factory registry, where one exists) over burying it inside the model directory, so the next author can reuse it too.
 
+## House Model Module Shape
+
+> **Reference implementation: `models/resnet/model.py`.** Read the spec below rather than
+> copying the file blind — the shape spread through this package by copy-paste, and that is
+> exactly how its defects (placeholder weight URLs, mutable default args, a `logger.info`
+> inside `call()`) reached `convnext/`, `mobilenet/` and others.
+
+This shape applies to a package that implements **one architecture with named variants**. It
+is a target, not a universal law: see "When the shape does not apply" at the end.
+
+### Axis 1 — module skeleton
+
+```python
+"""
+<Model> Model Implementation
+============================
+
+Two to five sentences on what the architecture is and what `call` returns.
+
+Based on: "<Paper Title>" (Author et al., YEAR)
+https://arxiv.org/abs/XXXX.XXXXX
+
+Model Variants:
+--------------
+- <variant>: <the numbers that distinguish it>
+
+Usage Examples:
+-------------
+```python
+model = create_<name>("<variant>", num_classes=10, input_shape=(32, 32, 3))
+```
+"""
+
+import os
+import keras
+from typing import List, Optional, Union, Tuple, Dict, Any, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+...
+
+# ---------------------------------------------------------------------
+```
+
+Architecture essays, benchmark tables and design rationale belong in the package
+`README.md`, not the module docstring. Keep the module docstring under ~50 lines.
+
+### Axis 2 — class API
+
+```python
+@keras.saving.register_keras_serializable()
+class <Model>(keras.Model):
+    MODEL_VARIANTS = {"<variant>": {...}}
+
+    def __init__(self, ..., **kwargs):
+        super().__init__(**kwargs)
+        # 1. validate arguments, raising ValueError with the offending value
+        # 2. resolve None-sentinel defaults (never a mutable default arg)
+        # 3. store configuration on self
+        # 4. call self._build_<part>() helpers
+        # 5. ONE logger.info summarizing what was created
+```
+
+- `call(self, inputs, training=None)` — **no logging inside**; it fires on every trace.
+- `get_config()` returns every constructor argument, with
+  `keras.regularizers.serialize(...)` for regularizers; `from_config()` deserializes them.
+- `from_variant(cls, variant, ..., pretrained=False, **kwargs)` looks the name up in
+  `MODEL_VARIANTS`, raising `ValueError` listing the available keys when it misses.
+
+`MODEL_VARIANTS` is the canonical name. Packages that predate this spec use
+`SCALE_CONFIGS`, `VARIANT_CONFIGS`, `NAM_VARIANTS`, `NTM_VARIANTS`, `MCI_VARIANTS` or
+`<NAME>_CONFIGS`. **Add `MODEL_VARIANTS` and keep the old name as a class-level alias — do
+not rename in place**, since trainers and tests reference the old spelling.
+
+### Axis 3 — pretrained weights
+
+`load_pretrained_weights(weights_path, skip_mismatch, by_name)` loads from a **local path**,
+building the model with a dummy forward pass first if needed.
+
+`_download_weights(...)` **raises `NotImplementedError` naming the variant and showing the
+local-path alternative.** No public checkpoints are distributed with `dl_techniques` for any
+architecture in this package.
+
+**Never** write a placeholder URL table plus a `try/except` in `from_variant` that logs a
+warning and continues with random initialization. That combination means
+`pretrained=True` silently returns an untrained model — a caller asking for pretrained
+weights gets random ones and no error. This contract is pinned by tests in
+`test_bert/`, `test_gpt2/`, `test_wave_field/`, `test_tree_transformer/`, `test_vit/`,
+`test_cliffordnet/`, `test_xlstm/` and `test_capsnet/test_model_v2.py`.
+
+### Axis 4 — factory and exports
+
+A module-level `create_<name>(variant="<default>", ...)` that delegates to `from_variant` —
+no logic of its own. The package `__init__.py` exports the class and the factory with an
+`__all__`; `accunet/__init__.py` is the exemplar.
+
+### Axis 5 — hygiene
+
+- No comment that restates the line below it (`# Store configuration`, `# Squeeze`,
+  `# Compute gradients`).
+- No `# 1. / # 2. / # 3.` step ladders. A comment earns its place by explaining *why*, or by
+  recording a non-obvious constraint — not by narrating *what*.
+- No mutable default arguments; use `None` sentinels resolved in the body.
+- No unused imports (an imported-but-never-called `logger` is the common case).
+- Prefer `keras.ops`; `keras.config.floatx()` / `keras.config.epsilon()` over the
+  `keras.backend.*` spellings.
+
+### Things you must NOT do
+
+- **Never delete or reword a `# DECISION <plan-id>/D-NNN` comment.** They resolve through the
+  append-only manifest `plans/ANCHORS.md`; a comment-tidying sweep that removes one silently
+  destroys the record. Files with a high comment density are usually dense *because of*
+  these anchors — never target a file by comment density.
+- **Never rename a module file to `model.py`.** `bert/bert.py`, `convnext/convnext_v1.py`
+  and `mobilenet/mobilenet_v2.py` stay where they are; renaming breaks every import.
+- **Never convert docstring style.** This package is measurably mixed; match the file you
+  are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
+- **Never delete the deep-supervision re-export shim** at the bottom of `resnet/model.py`,
+  `convunext/model.py`, `bias_free_denoisers/bfunet.py` and
+  `bias_free_denoisers/bfconvunext.py`. It is a deliberate late import with `# noqa: E402`.
+
+### When the shape does not apply
+
+- **No genuine named variants.** Do not invent a `MODEL_VARIANTS` table to satisfy the
+  template. Apply axes 1, 4 and 5 only, and say why in the package `README.md`.
+- **Functional builders** (`bias_free_denoisers/`, `convunext/`, `darkir/`, `detr/`) return
+  `keras.Model(inputs, outputs)` and have no subclass. Keep them functional — converting
+  them would break existing checkpoints. Axes 1, 4 and 5 still apply.
+- **Multi-model families and nested packages** (`SAM/`, `time_series/`, `dino/`,
+  `ideogram4/`, `sd3_mmdit/`) apply the shape per *inner architecture*, not per directory.
+
 ## Testing
 
 Tests in `tests/test_models/` with one subdirectory per model — 81 test directories

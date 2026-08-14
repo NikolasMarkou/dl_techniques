@@ -1,21 +1,10 @@
 """
-ResNet Model Implementation with Pretrained Support and Deep Supervision
-=========================================================================
+ResNet Model Implementation with Deep Supervision
+=================================================
 
-A complete implementation of the ResNet architecture with support for
-loading pretrained weights and deep supervision training. This implementation
-follows the original "Deep Residual Learning for Image Recognition" paper
-with added deep supervision capabilities.
-
-Deep supervision provides several benefits:
-- Better gradient flow to deeper layers during training
-- Multi-scale feature learning and supervision
-- More stable training for very deep networks
-- Improved convergence and generalization
-
-The model outputs multiple predictions during training:
-- Output 0: Final inference output (after final stage, primary output)
-- Output 1-N: Intermediate supervision outputs from earlier stages
+The ResNet architecture with optional deep supervision. With deep supervision
+enabled the model returns `[final_output, stage3, stage2, stage1]`; otherwise a
+single tensor.
 
 Based on: "Deep Residual Learning for Image Recognition" (He et al., 2015)
 https://arxiv.org/abs/1512.03385
@@ -28,17 +17,17 @@ Model Variants:
 - ResNet-101: [3, 4, 23, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
 - ResNet-152: [3, 8, 36, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
 
+No pretrained ResNet weights are distributed with `dl_techniques`; `pretrained=True`
+raises `NotImplementedError`. Pass a local path instead: `pretrained="/path/to.keras"`.
+
 Usage Examples:
 -------------
 ```python
-# Load pretrained ImageNet weights
-model = ResNet.from_variant("resnet50", pretrained=True, num_classes=1000)
-
 # Create model with deep supervision for training
 model = ResNet.from_variant("resnet50", num_classes=1000, enable_deep_supervision=True)
 
-# Load pretrained as feature extractor
-model = create_resnet("resnet34", pretrained=True, include_top=False)
+# Feature extractor from a local checkpoint
+model = create_resnet("resnet34", pretrained="/path/to.keras", include_top=False)
 
 # Fine-tune on CIFAR-10 with deep supervision
 model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
@@ -112,14 +101,11 @@ class ResNet(keras.Model):
         >>> # Create with deep supervision for training
         >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
         >>>
-        >>> # Load pretrained ImageNet model
-        >>> model = ResNet.from_variant("resnet50", pretrained=True)
-        >>>
-        >>> # Load as feature extractor
-        >>> model = ResNet.from_variant("resnet34", pretrained=True, include_top=False)
+        >>> # Load as feature extractor from a local checkpoint
+        >>> model = ResNet.from_variant("resnet34", pretrained="/path/to.keras",
+        ...                             include_top=False)
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "resnet18": {
             "blocks_per_stage": [2, 2, 2, 2],
@@ -148,30 +134,11 @@ class ResNet(keras.Model):
         },
     }
 
-    # Pretrained weights URLs (placeholder - update with actual URLs)
-    PRETRAINED_WEIGHTS = {
-        "resnet18": {
-            "imagenet": "https://example.com/resnet18_imagenet.keras",
-        },
-        "resnet34": {
-            "imagenet": "https://example.com/resnet34_imagenet.keras",
-        },
-        "resnet50": {
-            "imagenet": "https://example.com/resnet50_imagenet.keras",
-        },
-        "resnet101": {
-            "imagenet": "https://example.com/resnet101_imagenet.keras",
-        },
-        "resnet152": {
-            "imagenet": "https://example.com/resnet152_imagenet.keras",
-        },
-    }
-
     def __init__(
             self,
             num_classes: int = 1000,
-            blocks_per_stage: List[int] = [3, 4, 6, 3],
-            filters_per_stage: List[int] = [64, 128, 256, 512],
+            blocks_per_stage: Optional[List[int]] = None,
+            filters_per_stage: Optional[List[int]] = None,
             block_type: Literal["basic", "bottleneck"] = "bottleneck",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: str = "batch_norm",
@@ -184,7 +151,9 @@ class ResNet(keras.Model):
     ):
         super().__init__(**kwargs)
 
-        # Validate configuration
+        blocks_per_stage = list(blocks_per_stage) if blocks_per_stage is not None else [3, 4, 6, 3]
+        filters_per_stage = list(filters_per_stage) if filters_per_stage is not None else [64, 128, 256, 512]
+
         if len(blocks_per_stage) != len(filters_per_stage):
             raise ValueError(
                 f"Length of blocks_per_stage ({len(blocks_per_stage)}) must equal "
@@ -196,7 +165,11 @@ class ResNet(keras.Model):
                 f"block_type must be 'basic' or 'bottleneck', got '{block_type}'"
             )
 
-        # Store configuration
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+
         self.num_classes = num_classes
         self.blocks_per_stage = blocks_per_stage
         self.filters_per_stage = filters_per_stage
@@ -218,41 +191,25 @@ class ResNet(keras.Model):
         self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
         self.input_shape_config = input_shape
-
-        # Validate input shape
-        if input_shape is None:
-            input_shape = (224, 224, 3)
-        if len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
-
         self.input_height, self.input_width, self.input_channels = input_shape
 
-        # --- Build layers ---
-
-        # 1. Initial convolution (stem)
         self._build_stem()
 
-        # 2. Residual stages
         self.stages = []
-        self.stage_outputs = []  # Store stage outputs for deep supervision
         for stage_idx in range(len(blocks_per_stage)):
             self._build_stage(stage_idx)
 
-        # 3. Classification head
         if self.include_top:
             self._build_head()
 
-        # 4. Deep supervision heads (if enabled)
         self.supervision_heads = []
         if self.enable_deep_supervision and self.include_top:
             self._build_supervision_heads()
 
-        total_blocks = sum(blocks_per_stage)
         logger.info(
-            f"Created ResNet model with {total_blocks} blocks "
-            f"for input {input_shape}"
+            f"Created ResNet with {sum(blocks_per_stage)} blocks for input "
+            f"{input_shape} (deep supervision: {enable_deep_supervision})"
         )
-        logger.info(f"Deep supervision enabled: {enable_deep_supervision}")
 
     def _build_stem(self) -> None:
         """Build initial convolution stem."""
@@ -291,31 +248,20 @@ class ResNet(keras.Model):
         num_blocks = self.blocks_per_stage[stage_idx]
         base_filters = self.filters_per_stage[stage_idx]
 
-        # Select block class
-        if self.block_type == "basic":
-            BlockClass = BasicBlock
-            expansion = 1
-        else:  # bottleneck
-            BlockClass = BottleneckBlock
-            expansion = 4
+        BlockClass = BasicBlock if self.block_type == "basic" else BottleneckBlock
 
         stage_blocks = []
 
         for block_idx in range(num_blocks):
-            # First block in stage (except first stage) uses stride=2 for downsampling
             stride = 2 if stage_idx > 0 and block_idx == 0 else 1
 
-            # Use projection if:
-            # 1. First block of stage and stride=2 (downsampling)
-            # 2. First block of first stage (channel adjustment)
+            # Stage 0's first block projects only to widen channels (bottleneck);
+            # every later stage's first block projects to match the stride-2 shortcut.
             use_projection = False
             if block_idx == 0:
-                if stage_idx == 0:
-                    # First stage: need projection if using bottleneck
-                    use_projection = (self.block_type == "bottleneck")
-                else:
-                    # Other stages: need projection for downsampling
-                    use_projection = True
+                use_projection = (
+                    self.block_type == "bottleneck" if stage_idx == 0 else True
+                )
 
             block = BlockClass(
                 filters=base_filters,
@@ -348,16 +294,10 @@ class ResNet(keras.Model):
     def _build_supervision_heads(self) -> None:
         """Build deep supervision classification heads.
 
-        Creates supervision heads for intermediate stages (stages 1, 2, 3).
-        Each head consists of:
-        - Global Average Pooling
-        - Dense layer to num_classes
+        One GAP + Dense head per intermediate stage. Stage 0 is skipped (too
+        shallow to supervise); the final stage is served by the main head.
         """
-        # Create supervision heads for stages 1, 2, 3 (not stage 0 or final stage 4)
-        num_stages = len(self.blocks_per_stage)
-
-        for stage_idx in range(1, num_stages):
-            # Each supervision head
+        for stage_idx in range(1, len(self.blocks_per_stage)):
             gap_layer = keras.layers.GlobalAveragePooling2D(
                 name=f"supervision_gap_stage{stage_idx+1}"
             )
@@ -378,7 +318,6 @@ class ResNet(keras.Model):
                 "stage_idx": stage_idx
             })
 
-            logger.info(f"Added deep supervision head for stage {stage_idx+1}")
 
     def call(
             self,
@@ -399,58 +338,35 @@ class ResNet(keras.Model):
             - If deep_supervision=True: List of output tensors
               [final_output, supervision_output_stage3, supervision_output_stage2, supervision_output_stage1]
         """
-        # Stem
         x = self.stem_conv(inputs)
         x = self.stem_bn(x, training=training)
         x = self.stem_act(x)
         x = self.stem_pool(x)
 
-        # Storage for stage outputs (for deep supervision)
         stage_features = []
-
-        # Residual stages
-        for stage_idx, stage_blocks in enumerate(self.stages):
+        for stage_blocks in self.stages:
             for block in stage_blocks:
                 x = block(x, training=training)
-
-            # Store stage output for deep supervision
             if self.enable_deep_supervision and self.include_top:
                 stage_features.append(x)
 
-        # Final output
         if self.include_top:
             final_features = self.gap(x)
-            if self.classifier:
-                final_output = self.classifier(final_features)
-            else:
-                final_output = final_features
+            final_output = (
+                self.classifier(final_features) if self.classifier else final_features
+            )
         else:
             final_output = x
 
-        # Deep supervision outputs
         if self.enable_deep_supervision and self.include_top and self.supervision_heads:
+            # Reversed (stage 3, 2, 1) to match the BFUNet output convention.
             supervision_outputs = []
-
-            # Generate supervision outputs from stored stage features
-            # Process in reverse order (stage 3, 2, 1) to match BFUNet convention
             for sup_head in reversed(self.supervision_heads):
-                stage_idx = sup_head["stage_idx"]
-                stage_feat = stage_features[stage_idx]
-
-                # Apply supervision head
-                sup_features = sup_head["gap"](stage_feat)
-                if sup_head["classifier"]:
-                    sup_output = sup_head["classifier"](sup_features)
-                else:
-                    sup_output = sup_features
-
-                supervision_outputs.append(sup_output)
-
-            # Return [final_output, stage3_output, stage2_output, stage1_output]
-            all_outputs = [final_output] + supervision_outputs
-
-            logger.info(f"Returning {len(all_outputs)} outputs (deep supervision)")
-            return all_outputs
+                feat = sup_head["gap"](stage_features[sup_head["stage_idx"]])
+                supervision_outputs.append(
+                    sup_head["classifier"](feat) if sup_head["classifier"] else feat
+                )
+            return [final_output] + supervision_outputs
 
         return final_output
 
@@ -475,75 +391,59 @@ class ResNet(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
             if not self.built:
                 dummy_input = keras.random.normal((1,) + tuple(self.input_shape_config))
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
-
             self.load_weights(
                 weights_path,
                 skip_mismatch=skip_mismatch,
                 by_name=by_name
             )
-
             if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. "
-                    "Layers with shape mismatches were skipped."
-                )
+                logger.info("Weights loaded with skip_mismatch=True; mismatched layers skipped.")
             else:
                 logger.info("All weights loaded successfully.")
 
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs
+    # pointing at a non-existent host; `from_variant` caught the download failure,
+    # logged a warning and returned a randomly-initialized model, so
+    # `pretrained=True` silently produced untrained weights. Do NOT reinstate a
+    # warn-and-return branch here or in `from_variant`. No public ResNet weights
+    # are distributed with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
             variant: str,
             dataset: str = "imagenet",
             cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
+
+        Not implemented: no public ResNet weights ship with ``dl_techniques``.
+        Always raises. Kept to mirror the BERT / GPT-2 / WaveFieldLLM factory
+        recipe and to give an explicit failure mode instead of a silent
+        random-init fallback.
 
         Args:
-            variant: String, model variant name.
-            dataset: String, dataset the weights were trained on.
-            cache_dir: Optional string, directory to cache downloaded weights.
-
-        Returns:
-            String, path to the downloaded weights file.
+            variant: Variant name (unused).
+            dataset: Dataset name (unused).
+            cache_dir: Cache directory (unused).
 
         Raises:
-            ValueError: If variant or dataset is not available.
+            NotImplementedError: Always.
         """
-        if variant not in ResNet.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(ResNet.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in ResNet.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(ResNet.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = ResNet.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading {variant} weights from {dataset}...")
-
-        weights_path = keras.utils.get_file(
-            fname=f"{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/resnet"
+        raise NotImplementedError(
+            f"No pretrained ResNet weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: ResNet.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -564,8 +464,10 @@ class ResNet(keras.Model):
                 "resnet101", "resnet152".
             num_classes: Integer, number of output classes.
             input_shape: Tuple, input shape. If None, uses (224, 224, 3).
-            pretrained: Boolean or string. If True, loads pretrained weights.
-                If string, treats it as a path to local weights file.
+            pretrained: If a string, a path to a local weights file to load.
+                If True, raises NotImplementedError — no public ResNet weights
+                ship with dl_techniques. If False (default), returns a
+                randomly-initialized model.
             weights_dataset: String, dataset for pretrained weights.
             weights_input_shape: Tuple, input shape used during weight pretraining.
             cache_dir: Optional string, directory to cache downloaded weights.
@@ -576,11 +478,9 @@ class ResNet(keras.Model):
 
         Raises:
             ValueError: If variant is not recognized.
+            NotImplementedError: If pretrained is True.
 
         Example:
-            >>> # Load pretrained ImageNet model
-            >>> model = ResNet.from_variant("resnet50", pretrained=True)
-            >>>
             >>> # Create with deep supervision for training
             >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
             >>>
@@ -601,7 +501,6 @@ class ResNet(keras.Model):
 
         logger.info(f"Creating {variant.upper()} model")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
@@ -610,29 +509,21 @@ class ResNet(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
-            # Check if we need to skip mismatches
-            include_top = kwargs.get("include_top", True)
-            if include_top:
-                pretrained_classes = 1000  # ImageNet classes
-                if num_classes != pretrained_classes:
-                    skip_mismatch = True
-                    logger.info(
-                        f"num_classes ({num_classes}) differs from pretrained "
-                        f"({pretrained_classes}). Will skip classifier weights."
-                    )
+            # The ImageNet head is 1000-wide; a different num_classes or a
+            # different input shape than the checkpoint was trained at means the
+            # affected layers must be skipped rather than refused.
+            if kwargs.get("include_top", True) and num_classes != 1000:
+                skip_mismatch = True
+                logger.info(
+                    f"num_classes ({num_classes}) differs from the pretrained 1000; "
+                    f"classifier weights will be skipped."
+                )
 
             if weights_input_shape and input_shape and weights_input_shape != input_shape:
                 logger.info(
@@ -641,7 +532,6 @@ class ResNet(keras.Model):
                 )
                 skip_mismatch = True
 
-        # Create model
         model = cls(
             num_classes=num_classes,
             blocks_per_stage=config["blocks_per_stage"],
@@ -651,7 +541,6 @@ class ResNet(keras.Model):
             **kwargs
         )
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -705,7 +594,12 @@ class ResNet(keras.Model):
 # Utility Functions for Deep Supervision
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.deep_supervision import (
+# Re-exported so callers of `models.resnet` get the deep-supervision helpers
+# from the same module as the model itself — `src/train/resnet/train_resnet.py`
+# imports `create_resnet` and `get_model_output_info` in one statement. The
+# import sits here rather than at the top because it is an API re-export, not a
+# dependency of the class above.
+from dl_techniques.utils.deep_supervision import (  # noqa: E402
     get_model_output_info,
     create_inference_model_from_training_model,
 )
@@ -731,8 +625,9 @@ def create_resnet(
             "resnet101", "resnet152").
         num_classes: Integer, number of output classes.
         input_shape: Tuple, input shape.
-        pretrained: Boolean or string. If True, loads pretrained weights.
-            If string, treats it as a path to local weights file.
+        pretrained: If a string, a path to a local weights file. If True, raises
+            NotImplementedError — no public ResNet weights ship with
+            dl_techniques. If False (default), random initialization.
         weights_dataset: String, dataset for pretrained weights.
         weights_input_shape: Tuple, input shape used during weight pretraining.
         cache_dir: Optional string, directory to cache downloaded weights.
@@ -741,19 +636,19 @@ def create_resnet(
     Returns:
         ResNet model instance.
 
+    Raises:
+        NotImplementedError: If pretrained is True.
+
     Example:
-        >>> # Create ResNet-50 with pretrained ImageNet weights
-        >>> model = create_resnet("resnet50", pretrained=True)
-        >>>
-        >>> # Create ResNet-34 as feature extractor
-        >>> model = create_resnet("resnet34", pretrained=True, include_top=False)
+        >>> # Create ResNet-34 as a feature extractor
+        >>> model = create_resnet("resnet34", include_top=False)
         >>>
         >>> # Fine-tune on CIFAR-10 with deep supervision
         >>> model = create_resnet("resnet18", num_classes=10,
         ...                       input_shape=(32, 32, 3),
         ...                       enable_deep_supervision=True)
     """
-    model = ResNet.from_variant(
+    return ResNet.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
@@ -763,8 +658,6 @@ def create_resnet(
         cache_dir=cache_dir,
         **kwargs
     )
-
-    return model
 
 
 # ---------------------------------------------------------------------
