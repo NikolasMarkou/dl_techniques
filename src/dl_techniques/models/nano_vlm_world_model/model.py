@@ -1,20 +1,101 @@
 """
-Score-Based nanoVLM: Navigable World Model Architecture
+Score-based vision-language model: diffusion denoisers over frozen-width
+encoder features, trained by denoising score matching and queried as a joint
+score field.
 
-This module implements the complete score-based vision-language model following
-the Miyasawa theorem framework. Instead of deterministic prediction, the model
-learns the score field ∇ log p(image, text) and navigates it via diffusion.
+An ordinary VLM is a conditional predictor — it maps an image to a caption, or a
+caption to an image, one direction per trained head. This model is built on the
+observation that both directions, and several things that are neither, are
+readouts of one object: the score of the joint density, `grad_x log p(x)`.
+Miyasawa's theorem (equivalently Tweedie's formula) is what makes that object
+reachable without ever evaluating a density. If `x_t = x_0 + sigma * eps` and a
+denoiser `D` is trained under plain MSE to recover `x_0`, then at the optimum
 
-Key Innovation:
-    The VLM is not a predictor but a world model - an implicit representation
-    of the joint probability distribution p(image, text). By learning score
-    functions via Denoising Score Matching, we can navigate this semantic
-    landscape for generation, understanding, and reasoning.
+`grad_x log p(x_t) = (D(x_t) - x_t) / sigma^2`
 
-Protocols Implemented:
-    1. Text-to-Image: Conditional diffusion on p(image | text)
-    2. Image-to-Text: Latent space diffusion on p(text | image)
-    3. Joint Modeling: Unified score field ∇ log p(image, text)
+so the residual of a denoiser *is* the score, up to a known scale. Training
+reduces to regression against clean targets, and every generative behaviour
+becomes a trajectory through the resulting vector field: run it in reverse from
+noise to sample, query it at a point to ask which way probability increases, or
+step along it while dragging one modality's coordinate to move the other.
+
+The diffusion does not happen in pixel space or token space. Images pass through
+a vision encoder and captions through a text encoder first, and the noise, the
+denoisers and the whole reverse process operate on those `(B, seq, dim)` feature
+sequences. That is the same trade latent diffusion makes — cost falls with the
+dimensionality of the space being diffused, and the encoder already discards
+detail the score field would otherwise have to model — but it has a consequence
+that must not be glossed: **there is no pixel decoder in this package**.
+``generate_from_text`` returns denoised *vision features*, not an image, and
+turning them back into pixels requires a decoder that is not implemented here.
+The image-to-text direction is complete by comparison, since a linear head over
+the denoised text embeddings recovers token ids.
+
+Both encoders are forced to sequence output (``output_mode='none'``) because the
+conditional denoiser concatenates its condition along the sequence axis and
+requires rank 3; the default CLS pooling would collapse that to rank 2.
+
+The denoiser is not a U-Net. Noisy data and condition are each projected to a
+common hidden width, a sinusoidal timestep embedding is added to the *data*
+tokens only (broadcast across the sequence), the two are concatenated along the
+sequence axis, residual MLP blocks with optional self-attention run over the
+whole thing, and then only the data portion is sliced back out and projected
+down. Conditioning therefore acts entirely through the concatenated prefix and
+is discarded before the output. The final line is a residual:
+``output = noisy_data + correction``, so the network learns a correction toward
+the clean features rather than the features themselves — which is also the form
+in which the Miyasawa residual is directly readable.
+
+The scheduler follows the discrete DDPM convention. Timesteps are integer
+indices in ``[0, num_timesteps)``, the forward process is
+`x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * eps`, and the reverse
+``step`` first recovers a predicted `x_0`, then takes the posterior mean
+`q(x_{t-1} | x_t, x_0)`, then adds noise at every `t` except `t == 0`. Training
+samples one timestep per batch element uniformly; inference walks
+``np.linspace(T - 1, 0, num_inference_steps)`` on the host, so the loop is
+Python-level and `t` reaches the scheduler as a Python scalar while reaching the
+denoiser as a per-batch broadcast vector. Classifier-free guidance is done by
+doubling the batch against a zeros condition and extrapolating between the two
+predictions, rather than by a second forward pass.
+
+One convention mismatch is load-bearing and is easier to see stated than derived.
+``call`` supervises the denoisers against the *clean* features
+(``target_vision``/``target_text``), so they are `x_0` predictors — but
+``DiffusionScheduler`` defaults to ``prediction_type='epsilon'`` and the shipped
+``create_score_based_nanovlm`` configs do not override it, so ``step`` will treat
+an `x_0`-shaped output as noise unless the caller passes
+``prediction_type='sample'`` in ``diffusion_config``. The ``'sample'`` branch in
+``generate_from_text`` in turn calls ``scheduler.predict_noise_from_start``,
+which the scheduler does not define — it defines the inverse,
+``predict_start_from_noise``. Reconcile the two before trusting a sampling run.
+
+Weight materialization is explicit rather than lazy. The denoisers and the
+decoder head would otherwise be built on first ``call``, which silently drops
+roughly six hundred weights — the MultiHeadAttention and nested Sequential
+blocks — on a ``.keras`` reload; ``build`` constructs them from the stored config
+instead, and ``get_build_config``/``build_from_config`` carry the input shape so
+the reload rebuilds the full sub-layer tree before weights are restored. The
+scheduler is deliberately a plain Python class rather than a layer: it holds only
+buffers derivable from ``diffusion_config``, so it is re-created from that dict
+on load instead of being a serialized sub-object.
+
+References:
+    - Miyasawa, 1961. An empirical Bayes estimator of the mean of a normal
+      population. Bulletin of the ISI 38.
+    - Efron, 2011. Tweedie's Formula and Selection Bias. Journal of the American
+      Statistical Association 106(496).
+    - Vincent, 2011. A Connection Between Score Matching and Denoising
+      Autoencoders. Neural Computation 23(7).
+    - Ho et al., 2020. Denoising Diffusion Probabilistic Models.
+      (https://arxiv.org/abs/2006.11239)
+    - Song et al., 2020. Score-Based Generative Modeling through Stochastic
+      Differential Equations. (https://arxiv.org/abs/2011.13456)
+    - Nichol and Dhariwal, 2021. Improved Denoising Diffusion Probabilistic
+      Models. (https://arxiv.org/abs/2102.09672)
+    - Ho and Salimans, 2022. Classifier-Free Diffusion Guidance.
+      (https://arxiv.org/abs/2207.12598)
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. (https://arxiv.org/abs/2112.10752)
 """
 
 import keras

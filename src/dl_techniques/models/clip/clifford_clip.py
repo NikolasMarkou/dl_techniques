@@ -1,103 +1,104 @@
-"""CliffordCLIP — CLIP-style contrastive model with Clifford geometric blocks.
+"""CLIP-style contrastive dual encoder whose towers are CliffordNet
+geometric-algebra blocks rather than attention, with a selectable
+Clifford-aware projection head.
 
-A dual-encoder contrastive model where **both** the vision and text towers
-are built from isotropic CliffordNet blocks (arXiv:2601.06793v2):
+The premise CLIP rests on is unchanged here: two towers are trained to place an
+image and its caption at the same point of a shared unit sphere, supervised only
+by which pairing in the batch is the true one. What changes is how each tower
+mixes information. A CliffordNet block replaces the attention matmul with a
+*sparse rolling geometric product*: features are read as multivectors over a
+channel axis, and pairs of channels separated by a fixed shift are combined
+through the geometric product `a b = <a, b> + a ^ b`. The symmetric inner part
+behaves like the correlation a dot-product attention would compute, while the
+antisymmetric wedge part carries orientation — information that a symmetric
+similarity discards entirely. Because the shifts are a small fixed set rather
+than an all-pairs comparison, cost is linear in sequence or spatial size instead
+of quadratic, which is the practical reason to prefer it here.
 
-- **Vision tower**: ``Conv2D`` patch stem -> ``BatchNorm`` -> *L*
-  :class:`CliffordNetBlock` layers (bidirectional depthwise context) ->
-  Clifford-aware projection head.
-- **Text tower**: token + positional embedding ->
-  ``LayerNorm`` -> *L* :class:`CausalCliffordNetBlock` layers over
-  ``(B, seq_len, D)`` (causal left-only depthwise context, identical to
-  :class:`CliffordNetLM`) -> Clifford-aware projection head.
+The geometric product mixes *channels*, not positions. Spatial and sequential
+context therefore has to be supplied separately, by depthwise convolution inside
+the block — bidirectional in the vision tower, strictly left-looking in
+:class:`CausalCliffordNetBlock` so text position `i` sees only positions `<= i`.
+This is also why the vision tower has no positional signal by default: nothing
+in the stem or the product distinguishes one patch coordinate from another.
+``vision_positional_encoding`` adds a learned 2-D table over the post-stem map
+and is default-off, so leaving it off is byte-identical to the pre-flag model and
+existing checkpoints keep loading.
 
-The Clifford-aware projection head -- the core distinction from standard
-CLIP -- avoids collapsing the tower output to a single mean-pooled vector.
-The default variant (``head_kind="learned_query_residual"``) uses the
-canonical CLIP anchor (GAP for vision, last-non-pad token for text) and
-adds a LayerScale-gated residual: the geometric product of ``z_det`` (the
-anchor) and ``z_ctx`` (a learnable single-query attention pool over the
-feature sequence) is computed via :class:`SparseRollingGeometricProduct`
-and scaled by a per-channel gamma initialised near zero. Contrastive
-gradients therefore flow through both the symmetric (inner) and the
-antisymmetric (wedge) parts of the algebra, but only where they
-demonstrably reduce the contrastive loss — elsewhere the LayerScale
-keeps the Clifford content small and the head behaves like plain CLIP.
-Other head variants (``plain``, ``mean_max``, ``learned_query``) are
-kept for A/B comparisons; see the :class:`CliffordCLIP` ``head_kind``
-docstring.
+The vision tower is hierarchical, not isotropic. A stride-``vision_patch_size``
+conv stem (two-stage with BatchNorm and SiLU at patch sizes 1 and 4) feeds
+``len(vision_stage_channels)`` stages; between adjacent stages a
+:class:`PatchMerging` halves resolution and emits exactly ``2 * src`` channels,
+with an extra ``Dense`` inserted only when the requested next-stage width is not
+that doubling. The shipped ladder is ``[D, D, 2D, 2D]``, which doubles twice
+across four stages and so keeps the parameter budget near the older isotropic
+tower while collecting the activation-memory win from spatial halving. Total
+depth is preserved against that older ladder — the stage depths sum to the
+former ``vision_depth``. The text tower stays isotropic. Both towers use an
+*external* residual, ``x = x + drop_path(block(x))``: the blocks are
+transform-only and returning `block(x)` directly would annihilate the signal
+across a deep stack.
 
-A learnable temperature (``logit_scale``) scales the cosine-similarity
-matrix before the symmetric contrastive cross-entropy loss; the loss
-itself is unchanged from CLIP.
+One validation rule looks arbitrary and is not. ``image_size //
+vision_patch_size`` must be at least `2 ** n_stages`, so the last stage still
+holds a 2x2 map. At 1x1 the attention pool degenerates to a softmax over a single
+element, whose gradient is identically zero — the pooling layer would still run
+and still produce a plausible vector while learning nothing.
 
-.. note::
+Where a standard CLIP head collapses the tower output to one pooled vector, this
+one keeps two views and combines them through the algebra. Pooling is routed
+through the generic :class:`SequencePooling` for every view, including the vision
+side: the last-stage map is reshaped to a ``(B, H*W, D)`` token sequence so that
+mean pooling over it *is* the old global average pool, and there is a single
+pooling surface rather than one per tower. Four heads are selectable.
+``plain`` uses only the canonical CLIP anchor and leaves the Clifford content in
+the backbone. ``mean_max`` and ``learned_query`` return the geometric product of
+two pooled views outright. The default ``learned_query_residual`` instead adds
+that product back onto the anchor through a per-channel LayerScale gate
+initialised at 1e-5, so training starts numerically indistinguishable from
+``plain`` and the wedge/inner content is introduced only where it lowers the
+contrastive loss. The anchors are the canonical CLIP ones — mean over patches for
+vision, the last non-pad token for text — and ``z_det`` on the text side is the
+*masked* mean, so padding never dilutes the pool.
 
-    The Penguin-VL paper (arXiv:2603.06569) argues *against* contrastive
-    pretraining as the optimal initialization for VLM vision encoders,
-    preferring LLM-initialised encoders with generative supervision. This
-    model deliberately ignores that recommendation: the user asked for a
-    CLIP model and we borrow only Penguin-VL's training-schedule ideas
-    (cosine LR, 3% warmup ratio, low-to-high resolution curriculum) in
-    the training script. The Penguin-VL reconstruction losses
-    (amplitude/direction/relation) require a frozen teacher encoder and
-    are intentionally left for the training script to plug in.
+Numerical placement of the temperature is deliberate at three points.
+``logit_scale`` is created with an explicit ``dtype="float32"`` because under a
+bf16 global policy it would otherwise be a bf16 weight and drift the logits;
+``exp`` is evaluated in float32 because fp16 autocast overflows past
+`log(65504)`; and the result is clipped to ``logit_scale_max`` (OpenCLIP's 100.0)
+before being cast to the features' compute dtype for the matmul. The L2
+normalization in both encoders is likewise computed in float32 with a 1e-8
+epsilon that would underflow to zero in fp16, then cast back — an identity cast
+at float32.
 
-Architecture (default head_kind="learned_query_residual"):
+``build`` runs a symbolic forward pass through both encoders before calling
+``super().build``. Sub-layers here are created in ``__init__`` but their weights
+are shape-dependent, and a lazily built sublayer silently loses its weights on a
+``.keras`` round trip; forcing the pass materialises the whole tree first.
 
-.. code-block:: text
-
-    Image (B,H,W,3)                         Tokens (B,seq_len)
-        │                                         │
-        ▼                                         ▼
-    Conv2D stem + BN                        Token + Position Embedding
-        │                                         │
-        ▼                                         ▼
-    CliffordNetBlock × L_vis                CausalCliffordNetBlock × L_txt
-    (bidirectional, B,H,W,D)                (causal, B,L,D)
-        │                                         │
-        ▼                                         ▼
-    z_det = GAP(x)  (B,D)                   z_det = masked-mean(x)
-    z_ctx = LearnedQueryPool(x) (B,D)       z_ctx = LearnedQueryPool(x,mask)
-                                            z_anchor = last-non-pad-token(x)
-        │                                         │
-        ▼                                         ▼
-    geo = SparseRollingGeometricProduct(z_det, z_ctx)      [wedge+inner]
-        │                                         │
-        ▼                                         ▼
-    mixed = z_det    + γ_v ⊙ geo           mixed = z_anchor + γ_t ⊙ geo
-    (γ init 1e-5: starts ≈ plain, learns to inject Clifford content)
-        │                                         │
-        ▼                                         ▼
-    LayerNorm                               (text_head_norm applied earlier
-        │                                    to the full (B,L,D) sequence)
-        ▼                                         │
-    Dense(embed_dim)                              ▼
-        │                                   Dense(embed_dim)
-        ▼                                         │
-    L2 Normalize                                  ▼
-        │                                   L2 Normalize
-        ▼                                         │
-    image_features (B,D)                          ▼
-                                            text_features (B,D)
-
-    Similarity = image_features @ text_features^T * exp(logit_scale)
-
-    The LayerScale-gated residual means the Clifford geometric product
-    only contributes where it demonstrably reduces the contrastive loss.
-    Where it doesn't help, γ stays near zero and the head behaves like
-    plain CLIP — this is the empirical winner in the A/B sweep.
+The Penguin-VL paper argues against contrastive pretraining as the initialization
+for VLM vision encoders, preferring LLM-initialised encoders under generative
+supervision. This model deliberately does not follow that recommendation — it is
+a CLIP model by request — and borrows from Penguin-VL only the training-schedule
+ideas (cosine LR, 3% warmup, low-to-high resolution curriculum), which live in
+the trainer. Its reconstruction losses need a frozen teacher encoder and are left
+for the trainer to plug in. The contrastive loss itself is not defined here
+either: ``dl_techniques.losses.CLIPContrastiveLoss`` already matches this model's
+output schema.
 
 References:
-    Brandstetter, J., et al. (2025). CliffordNet: All You Need is
-    Geometric Algebra. arXiv:2601.06793v2.
-
-    Radford, A., et al. (2021). Learning Transferable Visual
-    Representations from Natural Language Supervision. ICML.
-    arXiv:2103.00020.
-
-    Zhang, B., et al. (2026). Penguin-VL: Exploring the Efficiency
-    Limits of VLM with LLM-based Vision Encoders. arXiv:2603.06569v2.
+    - Ji, 2026. CliffordNet: All You Need is Geometric Algebra.
+      arXiv:2601.06793v2.
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision. (https://arxiv.org/abs/2103.00020)
+    - Zhang et al., 2026. Penguin-VL: Exploring the Efficiency Limits of VLM
+      with LLM-based Vision Encoders. arXiv:2603.06569v2.
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. (https://arxiv.org/abs/2103.14030)
+    - Touvron et al., 2021. Going deeper with Image Transformers.
+      (https://arxiv.org/abs/2103.17239)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 from __future__ import annotations

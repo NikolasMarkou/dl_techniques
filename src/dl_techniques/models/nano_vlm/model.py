@@ -1,93 +1,84 @@
 """
-NanoVLM: Compact Vision-Language Model - Modern Implementation
+Compact vision-language model assembled from three interchangeable library
+components — a vision encoder, a causal or bidirectional text tower, and a
+pluggable multi-modal fusion layer — over a shared vocabulary head.
 
-## Architecture Overview
+The problem a VLM has to solve is that its two inputs are not commensurate. An
+image arrives as a grid of pixels with no discrete units and no order; a caption
+arrives as a sequence of vocabulary indices whose order is the whole point. The
+standard resolution is to make the image look like text before the language model
+sees it: run a vision transformer, keep its patch tokens rather than a pooled
+summary, and hand the language side a sequence of vectors it can treat exactly
+like word embeddings. Once both modalities are sequences in a single width, any
+mechanism that mixes two sequences becomes a candidate for joining them, and the
+design question stops being "how do we represent an image" and becomes "where and
+how much do the modalities interact".
 
-The NanoVLM combines three main components through a modern, configurable design:
+This model keeps that question open rather than answering it once. Both towers
+are required to emit ``embed_dim``-wide sequences — construction fails if the
+vision and text widths disagree, since nothing downstream could reconcile them —
+and everything about the interaction is delegated to a configurable
+``MultiModalFusion`` with eight strategies. Cross-attention lets each modality
+read the other while keeping both streams intact; the pooling and tensor-product
+strategies collapse them more aggressively; concatenation barely interacts them
+at all. The trade is depth of interaction against parameter count and sequence
+length, and it is meant to be swept, not decided in this file.
 
-```
-Input Images (batch, height, width, channels) + Text Tokens (batch, seq_len)
-           ↓                                            ↓
-    VisionEncoder                                TextDecoder/TextEncoder
-    (configurable)                               (configurable)
-           ↓                                            ↓
-    Vision Features                              Text Features
-    (batch, vision_seq_len, embed_dim)          (batch, text_seq_len, embed_dim)
-           ↓                                            ↓
-                        MultiModalFusion
-                     (configurable strategy)
-                              ↓
-                    Fused Representations
-                   (batch, combined_seq_len, embed_dim)
-                              ↓
-                       Output Projection
-                              ↓
-                    Language Model Logits
-                   (batch, seq_len, vocab_size)
-```
+Two consequences of that delegation are not obvious from the call graph. First,
+the vision encoder is forced to ``output_mode='none'`` during config validation
+regardless of what the caller asked for: the default CLS pooling would hand the
+fusion layer a rank-2 tensor, and every strategy expects a rank-3 sequence.
+Second, the fusion layer's output shape is strategy-dependent, so ``call``
+branches on the *type* of what it returns — cross-attention yields a tuple of two
+streams, which are concatenated along the sequence axis with vision first, while
+the other strategies yield a single tensor that is used as-is. The vocabulary
+projection is then applied to the whole combined sequence. That means the logits
+tensor contains one row per vision token as well as one per text token, and those
+leading rows predict nothing: ``generate`` slices them off with
+``logits[:, vision_seq_len:, :]``, and any loss computed against this model must
+slice the same way or it will train the head to predict tokens for image
+patches.
 
-## Key Improvements Over Original
+Note that vision tokens are *not* spliced into the text token sequence in the
+LLaVA sense — the text tower runs on text alone and the modalities only meet
+downstream, in the fusion layer. Whatever causal masking applies is therefore
+entirely the text component's business: ``text_component_type='decoder'`` selects
+a causal tower for generation, ``'encoder'`` a bidirectional one, and no mask is
+constructed here.
 
-1. **Component Reuse**: Leverages existing VisionEncoder, TextDecoder, and MultiModalFusion
-2. **Modern Patterns**: Follows latest Keras 3 serialization and build patterns
-3. **Flexible Fusion**: Supports multiple fusion strategies (cross-attention, concatenation, etc.)
-4. **Better Abstraction**: Clear separation of concerns between components
-5. **Enhanced Configuration**: Comprehensive configuration management and validation
-6. **Robust Serialization**: Full save/load compatibility with proper weight restoration
+Input/output embedding tying is performed at call time, as a
+``matmul(x, transpose(word_embeddings.embeddings))``, and never by reassigning a
+weight. The straightforward implementation — pointing the output ``Dense``'s
+kernel at the embedding matrix — is doubly wrong under Keras 3: reassigning a
+built layer's kernel raises outright, and the embedding matrix is
+``(vocab, dim)``, the transpose of the Dense kernel's ``(dim, vocab)``, so the
+shapes never matched either. The ``output_projection`` layer is still created and
+built, because it is the live path when tying is disabled and because a
+half-built layer would break serialization, but it is simply unused when tying is
+on.
 
-## Usage Examples
+The fusion configuration has a signature hazard worth stating explicitly.
+``MultiModalFusion`` takes ``dim`` plus ``attention_config={'num_heads': N}``; it
+does *not* take ``embed_dim`` or a top-level ``num_heads``. Because the config
+dict is splatted into the constructor, a stale key is not ignored — it is
+forwarded to the base ``Layer`` and raises. The ``create_modern_nanovlm`` helper
+at the bottom of this module still writes the older spelling.
 
-### Basic Configuration
-```python
-# Create model with standard components
-model = NanoVLM(
-    vision_config={
-        'img_size': 224,
-        'patch_size': 16,
-        'embed_dim': 768,
-        'depth': 12,
-        'num_heads': 12
-    },
-    text_config={
-        'vocab_size': 32000,
-        'embed_dim': 768,
-        'depth': 12,
-        'num_heads': 12,
-        'max_seq_len': 512
-    },
-    fusion_config={
-        'fusion_strategy': 'cross_attention',
-        'num_fusion_layers': 6
-    }
-)
-```
+Generation is a plain sampling loop with no KV cache: the image is encoded once
+and reused, but the text tower re-reads the entire prefix at every step, so cost
+grows quadratically in the number of generated tokens. It is adequate for
+smoke-testing a trained model and not intended as a serving path.
 
-### Advanced Configuration
-```python
-# Modern encoder with advanced components
-model = NanoVLM(
-    vision_config={
-        'img_size': 384,
-        'embed_dim': 1024,
-        'depth': 24,
-        'attention_type': 'differential_attention',
-        'normalization_type': 'rms_norm',
-        'ffn_type': 'swiglu'
-    },
-    text_config={
-        'vocab_size': 50000,
-        'embed_dim': 1024,
-        'embedding_type': 'factorized',
-        'positional_type': 'rope',
-        'normalization_type': 'rms_norm'
-    },
-    fusion_config={
-        'fusion_strategy': 'tensor_fusion',
-        'num_tensor_projections': 8
-    },
-    vocab_size=50000
-)
-```
+References:
+    - Alayrac et al., 2022. Flamingo: a Visual Language Model for Few-Shot
+      Learning. (https://arxiv.org/abs/2204.14198)
+    - Liu et al., 2023. Visual Instruction Tuning. (https://arxiv.org/abs/2304.08485)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Zadeh et al., 2017. Tensor Fusion Network for Multimodal Sentiment
+      Analysis. (https://arxiv.org/abs/1707.07250)
+    - Press and Wolf, 2016. Using the Output Embedding to Improve Language
+      Models. (https://arxiv.org/abs/1608.05859)
 """
 
 import keras

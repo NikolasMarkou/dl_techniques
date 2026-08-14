@@ -1,56 +1,93 @@
 """
-CLIP (Contrastive Language-Image Pre-training) Model Implementation.
+Contrastive language-image pretraining over two modernized transformer towers
+(grouped-query attention, RMSNorm, SwiGLU, rotary position embeddings).
 
-CLIP learns a shared, multimodal embedding space where visual and textual
-concepts that correspond to each other are located closely. This is
-achieved through a dual-encoder architecture: a Vision Transformer (ViT)
-processes images, and a standard text Transformer processes natural
-language descriptions. Both encoders project their respective inputs into
-feature vectors within this common space.
+CLIP addresses a supervision problem rather than an architectural one. Labelled
+image datasets are small and their label sets are closed, so a classifier
+trained on one can only ever name the categories somebody enumerated in
+advance. Image-caption pairs are abundant and their supervision is open-ended,
+but a caption is not a label: predicting it token by token is expensive, and two
+captions of the same picture rarely agree word for word. The contrastive
+formulation extracts a usable signal anyway by asking a much weaker question —
+which caption in this batch belongs to which image. Both modalities are mapped
+into one embedding space, each feature is L2-normalized so an inner product is a
+cosine, and a batch of `N` pairs produces an `N x N` similarity matrix whose
+diagonal must dominate both its row and its column:
 
-The model is optimized via a contrastive learning objective. Given a batch
-of N (image, text) pairs, the encoders produce N image features and N text
-features. After L2 normalization, the cosine similarity between every
-image feature and every text feature is calculated, forming an N x N
-similarity matrix. The diagonal of this matrix represents the similarity
-of N correct pairs, while the off-diagonal elements represent the
-N² - N incorrect pairs.
+`S = tau * f_I(I) @ f_T(T)^T`
 
-The learning task is to maximize the similarity on the diagonal (correct
-pairs) while minimizing it on the off-diagonal. This is framed as a
-prediction problem: for a given image, the model predicts which of the N
-text captions is its true partner. A symmetric objective is computed for
-predicting the correct image for each text caption.
+The training objective is the symmetric cross-entropy over `S`'s rows and its
+columns. It scales because the batch supplies its own negatives — the `N^2 - N`
+mismatched pairs cost nothing to construct — and it yields zero-shot
+classification for free, since any set of class names can be encoded as text and
+used directly as a classifier weight matrix. The loss itself is not implemented
+here; this module produces the two logits matrices and the temperature, and the
+loss lives in `dl_techniques.losses`.
 
-A learnable temperature parameter, τ, scales the logits (similarity scores)
-before the softmax operation. This parameter controls the sharpness of the
-predicted probability distribution, effectively tuning the model's focus on
-hard-negative examples. The final training loss is the average of two
-cross-entropy losses: one for image-to-text predictions (computed over
-the rows of the similarity matrix) and one for text-to-image predictions
-(computed over the columns).
+The two towers never see each other. There is no cross-attention, no shared
+trunk and no fusion layer: the only place the modalities meet is the final
+matmul, and the only thing that forces them into agreement is the contrastive
+gradient. Each tower therefore ends in its own bias-free `Dense(embed_dim)`
+projection out of its native width (768 for vision, 512 for text at base scale)
+into the shared space, followed by L2 normalization. Keeping the projection last
+and the normalization after it is what makes the dot product a cosine and the
+temperature the sole scale in the logits.
 
-This approach allows CLIP to learn robust visual representations directly
-from raw text, enabling powerful zero-shot transfer capabilities to a wide
-range of downstream tasks without requiring direct fine-tuning.
+The vision tower is a strided convolution patch embedding, a learnable CLS token
+prepended to the patch sequence, `vision_layers` transformer blocks, and a read
+of position 0. The text tower is a token embedding, `text_layers` blocks, and a
+read of the last non-padding position. Neither tower carries a learned
+positional table: position enters only as RoPE inside the grouped-query
+attention, rotating queries and keys by an angle proportional to index. For the
+image side this means patches are positioned along the flattened raster order
+with the CLS token at index 0, which is a real departure from CLIP's learned
+positional embedding and worth knowing before comparing numbers.
+
+Two pooling details are easy to get wrong. The CLS token is a single
+`(1, 1, vision_width)` weight broadcast across the batch, so every image starts
+from the same query vector and the attention blocks are what make its final
+state image-specific; it is created in `build()` alongside the temperature rather
+than in `__init__`. On the text side the pooled position is found by
+`last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`.
+That assumes right padding and pad id `0` — the id is hard-coded at this call
+site. Left-padded batches, or a tokenizer whose pad id is not zero, will pool the
+wrong position silently rather than raising. This is also where the tower differs
+most from the reference implementation: OpenAI CLIP locates the EOT token as the
+argmax of the token ids and runs its text transformer with a causal mask, while
+this text tower attends bidirectionally, with no mask constructed anywhere in
+`encode_text`. Under a causal tower the final real token is the only position
+that has read the whole sentence, which is why it is the one pooled; here every
+position has, so pooling the last one is a convention carried over rather than a
+requirement.
+
+The temperature is stored as its logarithm. `logit_scale` is an unconstrained
+scalar weight and `exp` is applied on every use, which keeps the multiplier
+strictly positive under ordinary gradient descent without a constraint object.
+Its default init of 2.6592 is `ln(1 / 0.07)`, the CLIP paper's starting
+temperature of roughly 14.3. Unlike the MobileCLIP models in this repository,
+this class applies no upper clamp to `exp(logit_scale)`: a diverging temperature
+here produces `inf` logits and a `nan` loss with no other symptom, so a trainer
+that expects OpenCLIP's clamp must supply it.
+
+`call` is deliberately partial. Passing only `image` or only `text` returns just
+that tower's features and omits the logits keys entirely, so encoding a caption
+bank for retrieval does not require fabricating a dummy image batch. The dict
+output shape is therefore input-dependent, which any consumer indexing the
+result must account for.
 
 References:
-    - Radford, A., et al. (2021). Learning Transferable Visual
-      Representations from Natural Language Supervision. In Proceedings of
-      the 38th International Conference on Machine Learning (ICML).
-      https://arxiv.org/abs/2103.00020
-
-Mathematical Framework:
-    1. Image encoder: f_I(image) → R^d (ViT with patches)
-    2. Text encoder: f_T(text) → R^d (Transformer with tokens)
-    3. Similarity: S = f_I(I) · f_T(T)^T / τ (temperature-scaled cosine)
-    4. Contrastive loss: symmetric cross-entropy on similarity matrix
-
-Model Variants:
-    - "ViT-B/32": Base model with 32x32 patches
-    - "ViT-B/16": Base model with 16x16 patches
-    - "ViT-L/14": Large model with 14x14 patches
-    - "ViT-H/14": Huge model with 14x14 patches
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision. (https://arxiv.org/abs/2103.00020)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer
+      Models from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
 """
 
 import keras

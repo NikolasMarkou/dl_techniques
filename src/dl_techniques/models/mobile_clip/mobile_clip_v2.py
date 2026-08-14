@@ -1,3 +1,101 @@
+"""
+MobileCLIP2 dual encoder — the faithful port, pairing the FastViT MCi image
+tower with the shared CLIP text transformer.
+
+This is the weights-faithful half of the package. Its sibling
+``mobile_clip_v1.py`` deliberately substitutes ``keras.applications`` CNNs for
+the MCi trunk under its own D-001; this class instead builds the real tower from
+``models/fastvit/``. Neither deprecates the other.
+
+MobileCLIP's efficiency comes from what the image tower does at training time
+versus what it costs at inference. FastViT is structurally reparameterizable: a
+block is trained with several parallel branches — an over-parameterized
+convolution, a scale branch, an implicit skip — and every one of them is an
+affine map over the same input, so at inference they collapse algebraically into
+a single convolution of the same kernel size. The network is therefore wide and
+easy to optimize during training and narrow and cheap afterwards, with no
+approximation in between. The second lever is where attention is spent: token
+mixing in the early, high-resolution stages is done by a depthwise RepMixer,
+which is itself reparameterizable, and self-attention appears only in the last
+stage where the token count has already been reduced enough for its quadratic
+cost to be affordable. MobileCLIP2's own advance over MobileCLIP is a training
+recipe — a stronger captioner and teacher ensemble for multi-modal reinforced
+training — not an architectural change, which is precisely why an
+architecture-only port such as this one can be structurally faithful and still
+make no accuracy claim.
+
+The contrastive epilogue is standard CLIP: L2-normalized features from both
+towers, a learnable temperature, and the symmetric logits matrix. The one
+structural subtlety is that **there is no separate image projection layer**.
+MobileCLIP's open_clip configs set ``timm_pool: avg`` with ``timm_proj: null``,
+so the trunk is instantiated at ``num_classes=embed_dim`` and its terminal
+``Dense`` *is* the CLIP image projection. ``embed_dim`` is injected as
+``projection_dim`` into both sub-configs for that reason and must never be
+tabulated inside them; ``_validate_config`` rejects a ``projection_dim`` that
+appears there, because stacking another projection on top of the trunk's would
+be a second, unfaithful one. Two more naming hazards sit one nesting level apart
+and are worth stating outright: ``text_config['embed_dim']`` is the text
+transformer's width, not the joint space, and ``image_config['variant']``
+(``'mci0'``) is FastViT's own kwarg, a different thing from the model-level
+variant name (``'mobileclip2_s0'``).
+
+Normalization is placed at the model, not in the towers. Both encoders return
+raw features from their own ``call``; ``encode_image`` and ``encode_text``
+normalize, because ``compute_clip_logits`` expects already-normalized inputs and
+does not normalize internally. The temperature is a single scalar weight holding
+a log, created in ``build`` rather than ``__init__``, and read through
+``compute_logit_scale``, which exponentiates and clips to ``logit_scale_max``.
+That clip carries weight: without it a diverging temperature yields ``inf``
+logits and a ``nan`` loss and nothing else observably wrong.
+
+Causal masking in the text tower is the sole reason two families are tabulated.
+The ``mobileclip2_s*`` rows are non-causal (their JSON configs set
+``no_causal_mask: true``) while the earlier ``mobileclip_s3``/``mobileclip_s4``
+rows are causal over the same image backbones. Every row is transcribed from one
+supplied JSON file and keyed by that file's name, so a row is a checkable
+transcription rather than a re-derivation of itself.
+
+Serialization is where most of this class's non-obvious code lives. Both towers
+are serialized as objects in ``get_config`` and handed back to ``__init__``
+already constructed, so a reduced-depth or otherwise-overridden tower round-trips
+as itself instead of being rebuilt from its config; the towers are never
+substituted after construction, since Keras refuses a post-build sub-layer swap
+and a pre-build one leaves the discarded tower's variables reachable through
+tracking. ``build`` checks ``built`` per tower rather than only on ``self``,
+because on a ``.keras`` load the towers arrive already built and the shared v1
+text encoder has no idempotence guard of its own — a second ``build`` re-enters
+``LayerNormalization.build`` and raises. ``get_build_config`` states both shapes
+explicitly because Keras' generic implementation cannot round-trip a dict
+input-shape spec and would leave the restored model unbuilt. And the sequence
+fields of ``image_config`` are coerced back to tuples on the way in, since JSON
+returns them as lists and a restored model would otherwise compare unequal to
+the one it was saved from.
+
+Two behavioural choices differ from v1 on purpose. With ``output_dict=False``
+this model returns a five-tuple rather than v1's three, because dropping to
+``(image, text, logit_scale)`` would silently discard both logits matrices —
+which v1 never computes and this class always does. And a deterministic forward
+requires passing ``training=False`` explicitly: the image tower's stochastic-depth
+branches take their stochastic path at ``training=None``.
+
+No pretrained weights are ported. ``create_mobile_clip_v2(pretrained=True)``
+warns and returns a randomly initialized model rather than raising. See the
+package ``README.md`` §16 for the deviations that void any comparison against
+published numbers.
+
+References:
+    - Vasu et al., 2023. MobileCLIP: Fast Image-Text Models through Multi-Modal
+      Reinforced Training. (https://arxiv.org/abs/2311.17049)
+    - Faghri et al., 2025. MobileCLIP2: Improving Multi-Modal Reinforced
+      Training. (https://arxiv.org/abs/2508.20691)
+    - Vasu et al., 2023. FastViT: A Fast Hybrid Vision Transformer using
+      Structural Reparameterization. (https://arxiv.org/abs/2303.14189)
+    - Ding et al., 2021. RepVGG: Making VGG-style ConvNets Great Again.
+      (https://arxiv.org/abs/2101.03697)
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision. (https://arxiv.org/abs/2103.00020)
+"""
+
 import copy
 import math
 import keras

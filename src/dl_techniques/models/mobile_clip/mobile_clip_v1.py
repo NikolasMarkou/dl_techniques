@@ -1,3 +1,82 @@
+"""
+MobileCLIP v1 dual encoder — a faithful CLIP text tower paired with a
+deliberately substituted image tower.
+
+MobileCLIP's contribution is efficiency rather than a new training objective.
+The contrastive premise is CLIP's: two towers map an image and a caption into
+one L2-normalized embedding space, and the only supervision is which pairing in
+the batch is correct. What MobileCLIP changes is the cost of the image side —
+a hybrid convolution/transformer trunk (MCi) whose training-time branches
+reparameterize into a single convolution at inference — and the data side, via
+multi-modal reinforced training against a captioner-and-ensemble teacher. Only
+the first of those is an architectural matter, and it is exactly the part this
+module does not implement.
+
+**This class is deliberately non-faithful on the image side, and the
+substitution is total.** The official image backbones (``mci0``, ``mci1``,
+``mci2``, ``vit_b16``) have no equivalent in ``keras.applications``: there is no
+MCi port and no ViT. Since ``ImageProjectionHead`` opens with
+``GlobalAveragePooling2D``, the backbone must emit a 4-D ``[B, H, W, C]`` feature
+map, which independently rules out a token-sequence ViT. ``components._BACKBONE_ALIASES``
+therefore resolves each of those names to a real ``keras.applications`` CNN, so
+that variant ``b`` builds and runs a MobileNetV3Large rather than a ViT-B/16.
+This is a deliberate choice of functional buildability over weights fidelity,
+recorded as the package's D-001; every tabulated variant also sets
+``backbone_weights=None``, so not even the substitute's ImageNet weights are
+loaded. Nothing here reproduces published MobileCLIP numbers and nothing should
+be compared against them. The faithful port lives beside this file in
+``mobile_clip_v2.py``, over the real FastViT MCi tower; the two coexist and
+neither deprecates the other.
+
+The text tower, by contrast, is a plain CLIP transformer and is faithful. It is
+shared verbatim with v2 rather than copied, which is a maintenance decision with
+teeth: it owns one of only two places in the tree that adapt a block-polarity
+mask into a keep-polarity one, and a copy would create a third. Token embeddings
+are scaled by ``embed_dim ** -0.5`` before positional embeddings are added, the
+stack ends in a LayerNorm, and a raw ``(embed_dim, projection_dim)`` weight —
+not a ``Dense`` — performs the projection into the shared space.
+
+Causal masking is per-variant, not a constant. The ``b`` variant attends
+causally; ``s0``, ``s1`` and ``s2`` do not, matching their official configs. When
+it is on, the mask is built from ``MaskFactory.create_causal_mask`` and inverted,
+rather than from ``ops.tril``: ``ops.tril`` routes through a ``tf.cond`` that
+rejects a Python-bool predicate the moment it is traced, so it works eagerly and
+fails on every graph path — ``tf.function``, ``predict``, ``.keras`` save/load,
+XLA. The mask this layer needs is the complementary keep polarity, hence the
+``logical_not`` and cast.
+
+Pooling is CLIP's end-of-text convention, implemented as ``argmax`` over the raw
+token ids. That is correct only because CLIP's BPE vocabulary assigns the EOT
+token the numerically largest id in a well-formed sequence; a tokenizer that
+breaks that property, or a sequence containing an id above EOT, pools the wrong
+position silently. The gather is a one-hot matmul so it stays differentiable and
+backend-agnostic.
+
+The temperature is stored as a log and exponentiated on use, with the result
+clipped to ``[0, 100]`` — the clip is not cosmetic, since an unbounded
+temperature turns a diverging run into ``inf`` logits and a ``nan`` loss with no
+other visible symptom. Unlike v2, this class stops there: ``call`` returns the
+two feature tensors and the scale, never the similarity matrices, and it emits
+``None`` for a missing modality rather than omitting the key, so consumers must
+check for ``None`` rather than for key presence.
+
+No pretrained weights are distributed. ``create_mobile_clip_model(pretrained=True)``
+logs a warning and returns a randomly initialized model rather than raising,
+which means an unavailable checkpoint is indistinguishable from a successful
+load at the call site — the opposite of the contract the newer model packages in
+this library hold themselves to.
+
+References:
+    - Vasu et al., 2023. MobileCLIP: Fast Image-Text Models through Multi-Modal
+      Reinforced Training. (https://arxiv.org/abs/2311.17049)
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision. (https://arxiv.org/abs/2103.00020)
+    - Howard et al., 2019. Searching for MobileNetV3.
+      (https://arxiv.org/abs/1905.02244)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks. (https://arxiv.org/abs/1801.04381)
+"""
+
 import math
 import keras
 from keras import ops
