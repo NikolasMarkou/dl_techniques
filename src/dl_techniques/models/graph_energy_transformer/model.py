@@ -1,36 +1,93 @@
 """
-Graph Energy Transformer — shared backbone (and, in later steps, its two heads).
+Graph Energy Transformer — a shared graph trunk plus node-anomaly and graph-classification
+heads, built on the same recurrent energy-descent block as the image models.
 
-This module gives the ``EnergyTransformer`` block
-(``layers/transformers/energy_transformer.py``, arXiv:2302.07253) a GRAPH-domain trunk,
-the direct analog of ``models/energy_transformer/model.py``'s image backbone. It is the
-shared trunk consumed by BOTH graph heads:
+A message-passing GNN propagates information one hop per layer, so reaching a node `k` hops
+away requires `k` stacked layers with `k` parameter sets, and depth past a few layers
+oversmooths — repeated neighbourhood averaging drives every node representation toward the
+same value. The Energy Transformer takes a different route. A single scalar energy `E` is
+defined over the node states and the forward pass is `T` steps of gradient descent on it,
 
-* variant **B** — ``GraphAnomalyDetector`` (node anomaly; single block, ``descend_capture``),
-* variant **C-lite** — ``GraphClassifier`` (graph classification; ``S`` stacked blocks, a CLS
-  token, Laplacian positional encodings and eq.-27 saddle-escape noise).
+`x <- x - alpha * dE/dg`,  `g = EnergyLayerNorm(x)`,
 
-Only :class:`GraphEnergyTransformerBackbone` lives here for now; steps 5/7 add the two heads
-to this same file, so the seams below are intentional.
+so propagation is iterative refinement of one objective rather than a stack of distinct
+transforms, and one block's weights are reused across all `T` steps. What stops the states
+from collapsing is that they are descending toward *attractors* of an associative memory,
+not toward their neighbourhood mean: the energy is the sum of an attention term `E_ATT`,
+whose gradient mixes tokens along the graph, and a Hopfield term `E_HN` over a tied memory
+matrix, whose gradient pulls each node toward the nearest stored pattern independently of
+its neighbours. The second term is the restoring force the averaging lacks.
 
 **THE GRAPH ADJACENCY IS THE RANK-3 ``attention_mask``.** A binary ``(B, N, N)`` adjacency is
-fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep). PAD nodes are excluded
-from ``E_HN`` (and from attention) via the rank-2 ``(B, N)`` ``node_mask``. On this default path
-there is NO new gradient — the block already supports exactly this masking
-(``EnergyTransformer.call`` masking semantics; D-001/D-002 of this plan). The paper's eq.-25
-learned per-edge WEIGHTED adjacency is available **opt-in** via ``use_weighted_adjacency=True``
-(Branch A: a ``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively
-into the attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the
-default and stays byte-identical.
+fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep), which is what turns
+the block's dense all-pairs attention into message passing restricted to real edges — the
+whole graph adaptation, with no new gradient on the default path, because the block already
+supports exactly this masking. PAD nodes are excluded from ``E_HN`` (and from attention) via
+the rank-2 ``(B, N)`` ``node_mask``. The paper's eq.-25 learned per-edge WEIGHTED adjacency is
+available **opt-in** via ``use_weighted_adjacency=True`` (Branch A: a
+``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively into the
+attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the default
+and stays byte-identical.
+
+**The graph trunk defaults to ``attn_self=True``, unlike the image backbone.** With
+``attn_self=False`` ``EnergyAttention`` masks the adjacency DIAGONAL, so the self-loops that
+the graph loaders add become a measured no-op (bit-identical energy whether the diagonal is 1
+or 0) and a node can never attend to its own features. On images that is harmless; on graphs,
+where a node's own attributes are often the strongest signal, it is not. The flag stays
+configurable, with ``False`` recovering the image default.
+
+This module holds the trunk and both heads:
+
+* :class:`GraphEnergyTransformerBackbone` — node projection -> [Laplacian PE] -> [mask token]
+  -> [CLS] -> ``num_blocks`` ET blocks. Exposes three seams: ``embed`` (tokens only), ``call``
+  (the standard stacked descent), and ``descend_capture``, which drives a single block's
+  descent manually through its public ``.norm`` / ``.attention.update`` / ``.hopfield.update``
+  surface so intermediate LayerNormed states can be read without copying block internals.
+* :class:`GraphAnomalyDetector` — variant B. One block, and the readout concatenates the
+  target node's state at the FIRST descent step with its state at the LAST, ``g_1 || g_T``.
+  The early state still carries the raw one-hop neighbourhood; the converged one carries the
+  settled attractor, and the pair is a strictly richer readout than either alone. This is the
+  reason ``descend_capture`` exists.
+* :class:`GraphClassifier` — variant C-lite. ``S`` stacked blocks over a prepended learnable
+  CLS token, with Laplacian positional encodings and eq.-27 saddle-escape Langevin noise
+  (training only). The CLS token, its mask augmentation and the PE add all live in the
+  BACKBONE, not the head — CLS is prepended after the PE add (so CLS gets no PE) and the
+  rank-3 adjacency is augmented with an all-ones CLS row and column, leaving the original
+  adjacency in the ``[1:, 1:]`` block unchanged.
+
+Both heads slice index 0 statically — the CLS token, and the target node, which the fraud
+subgraph sampler always places first. A runtime gather would be the general solution but
+``take_along_axis`` with a broadcast index is rejected by tf2xla
+(``BroadcastArgs must be compile-time constant``), so the static slice is what keeps the
+fp16/XLA training path compilable. ``target_index`` remains in the input contract for
+forward-compatibility and is ignored. Both heads emit LOGITS with no sigmoid or softmax
+in-graph, per the house convention.
 
 **THE fp16/XLA DTYPE FIX IS REPLICATED VERBATIM FROM THE IMAGE BACKBONE (D-010/D-011).** Each
 block is built with ``dtype=self.dtype_policy.variable_dtype`` (NOT ``self.dtype_policy``) and
-:meth:`call` casts tokens IN to the block's variable dtype and back OUT. This is the fix for
-``EnergyLayerNorm``'s fp16 backward overflow under XLA, which SILENTLY freezes training. It is
-NOT fixed at the layer source — the consumer must do it, exactly as here.
+:meth:`call` casts tokens IN to the block's variable dtype and back OUT. ``EnergyLayerNorm``'s
+backward forms ``(var + eps)^(-3/2)``, which overflows fp16's 65504 under XLA and SILENTLY
+freezes training — the loss stays finite while no weight moves. It is NOT fixed at the layer
+source; the consumer must do it, exactly as here. Under float32/float64 the two spellings are
+identical, so no checkpoint is affected.
+
+Variant B and variant C backbones are INTENTIONALLY not weight-compatible: C owns a
+``pe_proj`` Dense and a ``cls_token`` that B does not, and the CLS token changes ``N``. A
+cross-variant warm-start is expected to transfer nothing. ``MaskTokenApply``, by contrast, is
+always created and always built even for a head that never masks nodes, so the trunk's weight
+surface does not depend on whether a masked-node pretext is used.
 
 References:
-    - Hoover et al., "Energy Transformer", NeurIPS 2023, arXiv:2302.07253 (§4, graph model).
+    - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§4-§5, graph model).
+      (https://arxiv.org/abs/2302.07253)
+    - Ramsauer et al., 2020. Hopfield Networks is All You Need.
+      (https://arxiv.org/abs/2008.02217)
+    - Dwivedi & Bresson, 2020. A Generalization of Transformer Networks to Graphs.
+      (https://arxiv.org/abs/2012.09699)
+    - Kreuzer et al., 2021. Rethinking Graph Transformers with Spectral Attention.
+      (https://arxiv.org/abs/2106.03893)
+    - Welling & Teh, 2011. Bayesian Learning via Stochastic Gradient Langevin Dynamics.
+      ICML 2011.
 """
 
 import keras
