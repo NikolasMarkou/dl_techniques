@@ -115,18 +115,15 @@ class FireModule(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if s1x1 <= 0 or e1x1 <= 0 or e3x3 <= 0:
             raise ValueError("All filter counts must be positive integers")
 
-        # Store configuration
         self.s1x1 = s1x1
         self.e1x1 = e1x1
         self.e3x3 = e3x3
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
 
-        # Create squeeze layer (1x1 convolution)
         self.squeeze = layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
@@ -136,7 +133,6 @@ class FireModule(keras.layers.Layer):
             name='squeeze'
         )
 
-        # Create expand layers
         self.expand_1x1 = layers.Conv2D(
             filters=e1x1,
             kernel_size=1,
@@ -156,22 +152,17 @@ class FireModule(keras.layers.Layer):
             name='expand_3x3'
         )
 
-        # Concatenation layer
         self.concat = layers.Concatenate(axis=-1)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the Fire module by building all sub-layers."""
-        # Build squeeze layer
         self.squeeze.build(input_shape)
 
-        # Compute squeeze output shape
         squeeze_output_shape = self.squeeze.compute_output_shape(input_shape)
 
-        # Build expand layers with squeeze output shape
         self.expand_1x1.build(squeeze_output_shape)
         self.expand_3x3.build(squeeze_output_shape)
 
-        # Build concatenation layer
         expand_1x1_shape = self.expand_1x1.compute_output_shape(squeeze_output_shape)
         expand_3x3_shape = self.expand_3x3.compute_output_shape(squeeze_output_shape)
         self.concat.build([expand_1x1_shape, expand_3x3_shape])
@@ -184,14 +175,11 @@ class FireModule(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the Fire module."""
-        # Squeeze
         squeezed = self.squeeze(inputs, training=training)
 
-        # Expand
         expanded_1x1 = self.expand_1x1(squeezed, training=training)
         expanded_3x3 = self.expand_3x3(squeezed, training=training)
 
-        # Concatenate
         output = self.concat([expanded_1x1, expanded_3x3])
 
         return output
@@ -248,7 +236,6 @@ class SqueezeNetV1(keras.Model):
         >>>                                    input_shape=(32, 32, 3))
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "1.0": {
             "fire_configs": [
@@ -319,17 +306,14 @@ class SqueezeNetV1(keras.Model):
             input_shape: Tuple[int, int, int] = (224, 224, 3),
             **kwargs: Any
     ) -> None:
-        # Use default configuration if none provided
         if variant_config is None:
             variant_config = self.MODEL_VARIANTS["1.0"]
 
-        # Validate inputs
         if num_classes <= 0:
             raise ValueError("num_classes must be a positive integer")
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
 
-        # Store configuration
         self.num_classes = num_classes
         self.variant_config = variant_config
         self.use_bypass = use_bypass if use_bypass else variant_config.get("use_bypass", False)
@@ -339,38 +323,31 @@ class SqueezeNetV1(keras.Model):
         self.include_top = include_top
         self._input_shape = input_shape
 
-        # Extract variant configuration
         self.fire_configs = variant_config["fire_configs"]
         self.conv1_filters = variant_config["conv1_filters"]
         self.conv1_kernel = variant_config["conv1_kernel"]
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        # Initialize layer lists
         self.stem_layers = []
         self.fire_modules = []
         self.pool_layers = []
         self.bypass_layers = []
         self.head_layers = []
 
-        # Build the model
         inputs = keras.Input(shape=input_shape)
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the complete SqueezeNet model architecture."""
         x = inputs
 
-        # Build stem (initial convolution)
         x = self._build_stem(x)
 
-        # Build Fire modules with pooling and bypass
         x = self._build_fire_modules(x)
 
-        # Build classification head if requested
         if self.include_top:
             x = self._build_head(x)
 
@@ -415,10 +392,8 @@ class SqueezeNetV1(keras.Model):
         for idx, fire_config in enumerate(self.fire_configs):
             fire_name = f'fire{idx + 2}'  # Fire modules start from fire2
 
-            # Store identity for bypass if needed
             identity = x
 
-            # Create and apply Fire module
             fire_module = FireModule(
                 s1x1=fire_config['s1x1'],
                 e1x1=fire_config['e1x1'],
@@ -430,10 +405,8 @@ class SqueezeNetV1(keras.Model):
             x = fire_module(x)
             self.fire_modules.append(fire_module)
 
-            # Add bypass connection if needed
             if idx in bypass_indices:
                 if self.use_bypass == "simple" and identity.shape[-1] == x.shape[-1]:
-                    # Simple bypass (just addition)
                     add_layer = layers.Add(name=f'add_{fire_name}')
                     x = add_layer([x, identity])
                     self.bypass_layers.append(add_layer)
@@ -455,7 +428,6 @@ class SqueezeNetV1(keras.Model):
                     x = add_layer([x, identity])
                     self.bypass_layers.append(add_layer)
 
-            # Add pooling after specific Fire modules
             fire_number = idx + 2  # Convert to 1-based fire module number
             if fire_number in self.pool_indices:
                 pool_layer = layers.MaxPooling2D(
@@ -467,7 +439,6 @@ class SqueezeNetV1(keras.Model):
                 x = pool_layer(x)
                 self.pool_layers.append(pool_layer)
 
-            # Add dropout after last Fire module
             if idx == len(self.fire_configs) - 1:
                 dropout = layers.Dropout(
                     rate=self.dropout_rate,
@@ -480,7 +451,6 @@ class SqueezeNetV1(keras.Model):
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Build the classification head."""
-        # Final convolution for classification
         conv10 = layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
@@ -492,12 +462,10 @@ class SqueezeNetV1(keras.Model):
         x = conv10(x)
         self.head_layers.append(conv10)
 
-        # Global average pooling
         avgpool = layers.GlobalAveragePooling2D(name='avgpool')
         x = avgpool(x)
         self.head_layers.append(avgpool)
 
-        # Softmax activation
         softmax = layers.Activation('softmax', name='predictions')
         x = softmax(x)
         self.head_layers.append(softmax)
@@ -568,7 +536,6 @@ class SqueezeNetV1(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeNetV1":
         """Create model from configuration."""
-        # Deserialize regularizer if present
         if config.get('kernel_regularizer'):
             config['kernel_regularizer'] = regularizers.deserialize(
                 config['kernel_regularizer']
@@ -626,7 +593,7 @@ def create_squeezenet_v1(
         variant: String, model variant ("1.0", "1.1", "1.0_bypass")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape (height, width, channels)
-        weights: String, pretrained weights to load (not implemented)
+        weights: Unsupported; any non-None value raises NotImplementedError.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -645,15 +612,20 @@ def create_squeezenet_v1(
         >>>                              input_shape=(64, 64, 3))
     """
     if weights is not None:
-        logger.info("Warning: Pretrained weights are not yet implemented")
+        # Raise rather than log-and-ignore: silently returning a randomly
+        # initialized model to a caller who asked for pretrained weights is the
+        # failure mode this package's house shape exists to prevent.
+        raise NotImplementedError(
+            f"No pretrained SqueezeNet weights are distributed with dl_techniques "
+            f"(got weights={weights!r}). Train from scratch, or load a local "
+            f"checkpoint with keras.models.load_model()."
+        )
 
-    model = SqueezeNetV1.from_variant(
+    return SqueezeNetV1.from_variant(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
         **kwargs
     )
-
-    return model
 
 # ---------------------------------------------------------------------

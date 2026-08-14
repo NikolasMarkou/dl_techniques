@@ -304,10 +304,17 @@ class TestSqueezeNetV1:
         assert model.conv1_filters == SqueezeNetV1.MODEL_VARIANTS["1.1"]["conv1_filters"]
         assert model.dropout_rate == 0.4
 
-    def test_factory_with_weights_warning(self, num_classes, caplog):
-        """Test factory function with weights warning."""
-        _ = create_squeezenet_v1(variant="1.0", num_classes=num_classes, weights="imagenet")
-        assert "Pretrained weights are not yet implemented" in caplog.text
+    def test_factory_with_weights_raises(self, num_classes):
+        """A non-None `weights` must RAISE, not log and return random weights.
+
+        The previous behaviour logged "Pretrained weights are not yet
+        implemented" and returned a randomly-initialized model, so a caller
+        asking for ImageNet weights silently trained from scratch.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained SqueezeNet weights"):
+            create_squeezenet_v1(
+                variant="1.0", num_classes=num_classes, weights="imagenet"
+            )
 
     def test_numerical_stability(self, num_classes, small_input_shape):
         """Test model stability with extreme input values."""

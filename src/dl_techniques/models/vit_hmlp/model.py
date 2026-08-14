@@ -1,49 +1,34 @@
 """
-Vision Transformer with Hierarchical MLP Stem - Modern Implementation
+Vision Transformer with Hierarchical MLP Stem
+=============================================
 
-This module provides a Vision Transformer model with Hierarchical MLP (hMLP) stem,
-designed for compatibility with the dl-techniques framework. The implementation follows
-modern Keras 3 lifecycle patterns and leverages the framework's factory system for
-consistent component creation.
+A Vision Transformer whose patch embedding is a hierarchical MLP (hMLP) stem
+rather than a single linear projection or a convolutional stem. The stem
+processes each patch independently through a 2x2 -> 4x4 -> 8x8 -> 16x16 ladder
+of linear projections with normalization, so there is no cross-patch information
+leakage — which is what makes it compatible with masked self-supervised methods
+(BeiT, MAE): masking before or after the stem gives identical results.
 
-PAPER REFERENCE:
----------------
-"Three things everyone should know about Vision Transformers"
-Hugo Touvron, Matthieu Cord, Alaaeldin El-Hassany, Matthijs Douze, Armand Joulin, Hervé Jégou
-https://arxiv.org/abs/2203.09795
+Based on: "Three things everyone should know about Vision Transformers"
+(Touvron et al., 2022) https://arxiv.org/abs/2203.09795
 
-HIERARCHICAL MLP STEM OVERVIEW:
-------------------------------
-The hMLP stem is a revolutionary patch preprocessing technique that addresses key limitations
-of traditional Vision Transformers while maintaining compatibility with masked self-supervised
-learning approaches. Unlike convolutional stems that cause information leakage between patches,
-the hMLP stem processes each patch independently through a hierarchical structure.
-
-STEM ARCHITECTURE:
-- Progressive patch processing: 2×2 → 4×4 → 8×8 → 16×16 pixels
-- Independent patch processing (no cross-patch information leakage)
-- Linear projections with normalization and non-linearity at each stage
-- Minimal computational overhead (<1% FLOPs increase vs standard ViT)
-- Compatible with both BatchNorm (better performance) and LayerNorm (stable for small batches)
-
-KEY ADVANTAGES:
+Model Variants (embed_dim, num_heads, num_layers, mlp_ratio):
 --------------
-1. **Masked Self-Supervised Learning Compatibility**:
-   - Perfect compatibility with BeiT, MAE, and other mask-based approaches
-   - Masking can be applied before or after stem with identical results
-   - No information leakage between patches (unlike convolutional stems)
+- tiny:  (192, 3, 12, 4.0)
+- small: (384, 6, 12, 4.0)
+- base:  (768, 12, 12, 4.0)
+- large: (1024, 16, 24, 4.0)
+- huge:  (1280, 16, 32, 4.0)
 
-2. **Performance Benefits**:
-   - Supervised learning: ~0.3% accuracy improvement over standard ViT
-   - BeiT pre-training: +0.4% accuracy improvement over linear projection
-   - Matches or exceeds convolutional stem performance for supervised learning
+Usage Examples:
+-------------
+```python
+model = ViTHMLP.from_variant("base", num_classes=1000)
+model = create_vit_hmlp(scale="small", num_classes=10, input_shape=(32, 32, 3))
+```
 
-EXPERIMENTAL RESULTS FROM PAPER:
--------------------------------
-- Supervised ViT-B with Linear stem: 82.2% top-1 accuracy on ImageNet
-- Supervised ViT-B with hMLP stem: 82.5% top-1 accuracy (+0.3%)
-- BeiT+FT ViT-B with Linear stem: 83.1% top-1 accuracy
-- BeiT+FT ViT-B with hMLP stem: 83.4% top-1 accuracy (+0.3%)
+The paper's benchmark numbers and the full design discussion live in this
+package's README.md.
 """
 
 import keras
@@ -276,6 +261,12 @@ class ViTHMLP(keras.Model):
         "large": (1024, 16, 24, 4.0),  # ViT-Large
         "huge": (1280, 16, 32, 4.0),  # ViT-Huge
     }
+
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` is kept as
+    # the definition because tests and the `scale=` constructor argument already
+    # name it; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
 
     def __init__(
             self,
@@ -654,6 +645,70 @@ class ViTHMLP(keras.Model):
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ViTHMLP":
+        """
+        Recreate a model from its serialized configuration.
+
+        `get_config` serializes the initializers and regularizers, so they must
+        be deserialized back into objects here; without this, the raw config
+        dicts reach `__init__` and are stored (and re-serialized) as dicts.
+
+        Args:
+            config: Configuration dictionary from `get_config`.
+
+        Returns:
+            ViTHMLP model instance.
+        """
+        config = dict(config)
+        for key in ("kernel_initializer", "bias_initializer"):
+            if config.get(key) is not None:
+                config[key] = initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "bias_regularizer"):
+            if config.get(key) is not None:
+                config[key] = regularizers.deserialize(config[key])
+        return cls(**config)
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            **kwargs: Any
+    ) -> "ViTHMLP":
+        """
+        Create a ViTHMLP from a predefined variant.
+
+        Args:
+            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
+            num_classes: Number of output classes.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            ViTHMLP model instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> model = ViTHMLP.from_variant("base", num_classes=1000)
+            >>> model = ViTHMLP.from_variant("small", num_classes=10,
+            ...                              input_shape=(32, 32, 3), patch_size=4)
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            scale=variant,
+            **kwargs
+        )
 
     def get_feature_extractor(self) -> "ViTHMLP":
         """

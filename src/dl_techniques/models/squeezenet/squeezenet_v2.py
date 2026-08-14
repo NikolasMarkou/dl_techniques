@@ -115,19 +115,16 @@ class SimplifiedFireModule(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if s1x1 <= 0 or e3x3 <= 0:
             raise ValueError("All filter counts must be positive integers")
         if s1x1 >= e3x3:
             raise ValueError("Squeeze filters should be less than expand filters for compression")
 
-        # Store configuration
         self.s1x1 = s1x1
         self.e3x3 = e3x3
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
 
-        # Create squeeze layer (1x1 convolution)
         self.squeeze = layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
@@ -150,10 +147,8 @@ class SimplifiedFireModule(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the Simplified Fire module by building all sub-layers."""
-        # Build squeeze layer
         self.squeeze.build(input_shape)
 
-        # Compute squeeze output shape
         squeeze_output_shape = self.squeeze.compute_output_shape(input_shape)
 
         # Build expand layer with squeeze output shape
@@ -167,7 +162,6 @@ class SimplifiedFireModule(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the Simplified Fire module."""
-        # Squeeze
         squeezed = self.squeeze(inputs, training=training)
 
         # Expand (3x3 only)
@@ -228,7 +222,6 @@ class SqueezeNoduleNetV2(keras.Model):
         >>>                                          input_shape=(32, 32, 32, 1))
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "v1": {
             "fire_configs": [
@@ -318,13 +311,11 @@ class SqueezeNoduleNetV2(keras.Model):
         if variant_config is None:
             variant_config = self.MODEL_VARIANTS["v2"]
 
-        # Validate inputs
         if num_classes <= 0:
             raise ValueError("num_classes must be a positive integer")
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
 
-        # Store configuration
         self.num_classes = num_classes
         self.variant_config = variant_config
         self.dropout_rate = dropout_rate
@@ -334,37 +325,31 @@ class SqueezeNoduleNetV2(keras.Model):
         self.use_3d = use_3d or variant_config.get("use_3d", False)
         self._input_shape = input_shape
 
-        # Extract variant configuration
         self.fire_configs = variant_config["fire_configs"]
         self.conv1_filters = variant_config["conv1_filters"]
         self.conv1_kernel = variant_config["conv1_kernel"]
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        # Initialize layer lists
         self.stem_layers = []
         self.fire_modules = []
         self.pool_layers = []
         self.head_layers = []
 
-        # Build the model
         inputs = keras.Input(shape=input_shape)
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the complete SqueezeNodule-Net model architecture."""
         x = inputs
 
-        # Build stem (initial convolution)
         x = self._build_stem(x)
 
         # Build Fire modules with pooling
         x = self._build_fire_modules(x)
 
-        # Build classification head if requested
         if self.include_top:
             x = self._build_head(x)
 
@@ -434,7 +419,6 @@ class SqueezeNoduleNetV2(keras.Model):
             x = fire_module(x)
             self.fire_modules.append(fire_module)
 
-            # Add pooling after specific Fire modules
             fire_number = idx + 2  # Convert to 1-based fire module number
             if fire_number in self.pool_indices:
                 pool_layer = MaxPool(
@@ -492,7 +476,6 @@ class SqueezeNoduleNetV2(keras.Model):
             Conv = layers.Conv2D
             GlobalPool = layers.GlobalAveragePooling2D
 
-        # Final convolution for classification
         conv10 = Conv(
             filters=self.num_classes,
             kernel_size=1,
@@ -504,7 +487,6 @@ class SqueezeNoduleNetV2(keras.Model):
         x = conv10(x)
         self.head_layers.append(conv10)
 
-        # Global average pooling
         globalpool = GlobalPool(name='globalpool')
         x = globalpool(x)
         self.head_layers.append(globalpool)
@@ -586,7 +568,6 @@ class SqueezeNoduleNetV2(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeNoduleNetV2":
         """Create model from configuration."""
-        # Deserialize regularizer if present
         if config.get('kernel_regularizer'):
             config['kernel_regularizer'] = regularizers.deserialize(
                 config['kernel_regularizer']
@@ -656,7 +637,7 @@ def create_squeezenodule_net_v2(
         variant: String, model variant ("v1", "v2", "v1_3d", "v2_3d")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape
-        weights: String, pretrained weights to load (not implemented)
+        weights: Unsupported; any non-None value raises NotImplementedError.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -676,15 +657,20 @@ def create_squeezenodule_net_v2(
         >>>                                     input_shape=(32, 32, 32, 1))
     """
     if weights is not None:
-        logger.info("Warning: Pretrained weights are not yet implemented")
+        # Raise rather than log-and-ignore: silently returning a randomly
+        # initialized model to a caller who asked for pretrained weights is the
+        # failure mode this package's house shape exists to prevent.
+        raise NotImplementedError(
+            f"No pretrained SqueezeNodule-Net weights are distributed with dl_techniques "
+            f"(got weights={weights!r}). Train from scratch, or load a local "
+            f"checkpoint with keras.models.load_model()."
+        )
 
-    model = SqueezeNoduleNetV2.from_variant(
+    return SqueezeNoduleNetV2.from_variant(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
         **kwargs
     )
-
-    return model
 
 # ---------------------------------------------------------------------
