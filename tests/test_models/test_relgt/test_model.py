@@ -155,6 +155,47 @@ class TestBlockChaining:
             f"(delta {liveness_delta}): the probe is degenerate"
         )
 
+    def test_no_trainable_variable_is_gradient_less(self):
+        """Every parameter of every block must reach the loss.
+
+        Chaining only the LOCAL token pathway is not enough: a block's global
+        module (``global_centroids``, ``GlobalAttention``, ``ResidualProjection``,
+        ``CombinationNorm``, ``CombinationFFN``) contributes only to its ``(B, E)``
+        summary, and every summary but the LAST one is overwritten by the loop.
+        Those parameters are then computed, discarded, and silently skipped by
+        ``fit()`` ("Gradients do not exist for variables ..."). This asserts the
+        docstring's claim that ``num_transformer_blocks`` buys real depth, which
+        the block-zeroing probe above cannot see (the live local path alone
+        satisfies it).
+        """
+        import tensorflow as tf
+
+        model = RELGT(
+            output_dim=2,
+            embedding_dim=self.E,
+            num_heads=2,
+            num_global_centroids=4,
+            ffn_dim=64,
+            num_transformer_blocks=3,
+            dropout_rate=0.0,
+        )
+        x = _inputs()
+        _ = model(x, training=False)  # build
+
+        with tf.GradientTape() as tape:
+            preds = model(x, training=True)
+            loss = tf.reduce_mean(tf.square(preds - 1.0))
+        grads = tape.gradient(loss, model.trainable_variables)
+
+        no_grad = [
+            v.path for v, g in zip(model.trainable_variables, grads) if g is None
+        ]
+        assert not no_grad, (
+            f"{len(no_grad)} of {len(model.trainable_variables)} trainable variables "
+            f"receive NO gradient with num_transformer_blocks=3, so their blocks' "
+            f"computation never reaches the output: {no_grad}"
+        )
+
     def test_model_builds_blocks_that_return_tokens(self):
         model, _ = self._probe_model(num_blocks=2)
         for block in model.transformer_blocks:

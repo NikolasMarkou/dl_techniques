@@ -40,12 +40,16 @@ global expressiveness against parameters.
 Two structural facts about this implementation are worth stating plainly. The first
 is how the blocks stack. A block's headline output is a single `(B, E)` vector, so
 chaining *that* across blocks would hand every block after the first a one-token
-sequence to self-attend over — depth in name only. What is chained instead is the
-`(B, K, E)` token sequence the block's local transformer produces before the mean
-pool, which the block returns alongside its summary when constructed with
-`return_tokens=True`. Block `i+1` therefore attends over block `i`'s full, processed
-token set, `K` is preserved at every level, and `num_transformer_blocks` buys real
-depth rather than only parameters. The seed embedding is deliberately *not* chained:
+sequence to self-attend over — depth in name only. What is chained instead is a
+`(B, K, E)` token sequence: the block's local transformer output with the block's
+own combined `(B, E)` summary broadcast-added onto every token, which the block
+returns alongside that summary when constructed with `return_tokens=True`. Block
+`i+1` therefore attends over block `i`'s full, processed token set, `K` is preserved
+at every level, and `num_transformer_blocks` buys real depth rather than only
+parameters. The summary is folded in rather than dropped so that a non-final block's
+global/centroid half is not computed and discarded — chaining the local tokens alone
+left 32% of a 3-block model's parameters without any gradient at all, which is what
+`test_no_trainable_variable_is_gradient_less` now pins. The seed embedding is deliberately *not* chained:
 it is only ever the cross-attention query, no block emits an updated seed, and it is
 the fixed anchor identifying the node being predicted about. Second, the seed node is
 taken to be index 0 of `node_features` — the subgraph sampler's contract, not

@@ -739,8 +739,12 @@ class RELGTTransformerBlock(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Combined representation ``(batch_size, embedding_dim)``; or,
             when ``return_tokens`` is set, the tuple
-            ``(combined_representation, local_processed_tokens)`` whose second
-            element has shape ``(batch_size, num_tokens, embedding_dim)``.
+            ``(combined_representation, output_tokens)`` whose second element has
+            shape ``(batch_size, num_tokens, embedding_dim)``. ``output_tokens``
+            is the locally processed token sequence with the combined
+            representation broadcast-added onto every token, so the block's
+            global/centroid half is carried forward rather than discarded by a
+            downstream consumer that reads only the token sequence.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         local_tokens, seed_node_features = inputs
@@ -784,7 +788,26 @@ class RELGTTransformerBlock(keras.layers.Layer):
         output = self.combination_norm(output + residual)
 
         if self.return_tokens:
-            return output, local_processed_tokens
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-014
+            # The returned token sequence carries the block's COMBINED
+            # representation, broadcast onto every token -- it is not the raw
+            # `local_processed_tokens`. Returning the raw local tokens is the
+            # obvious spelling and it makes the block's whole global half dead
+            # weight in every non-final block: only the last block's `output` is
+            # read by the model, so `global_centroids`, `GlobalAttention`,
+            # `ResidualProjection`, `CombinationNorm` and `CombinationFFN` were
+            # MEASURED to receive no gradient at all (34 of 107 trainable
+            # variables, 32%, in a 3-block RELGT). Do NOT "simplify" this back to
+            # `return output, local_processed_tokens`; the guard is
+            # `test_no_trainable_variable_is_gradient_less`. Rejected
+            # alternatives: appending the summary as an extra token (grows K by
+            # one per block and lets the summary be re-pooled as if it were a
+            # neighbour) and a learned gate (new parameters, and a multiplicative
+            # gate can annihilate the token signal). See decisions.md D-014.
+            output_tokens = local_processed_tokens + keras.ops.expand_dims(
+                output, axis=1
+            )
+            return output, output_tokens
 
         return output
 
