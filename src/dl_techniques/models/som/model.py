@@ -264,7 +264,6 @@ class SOMModel(keras.Model):
         """Initialize the SOM model with configuration parameters."""
         super().__init__(name=name, **kwargs)
 
-        # Validate inputs
         if len(map_size) != 2 or any(dim <= 0 for dim in map_size):
             raise ValueError(f"map_size must be tuple of two positive integers, got {map_size}")
         if input_dim <= 0:
@@ -279,7 +278,6 @@ class SOMModel(keras.Model):
                 f"got {neighborhood_function!r}"
             )
 
-        # Store configuration for serialization and introspection
         self.map_size = map_size
         self.input_dim = input_dim
         self.initial_learning_rate = initial_learning_rate
@@ -289,7 +287,6 @@ class SOMModel(keras.Model):
         self.regularizer = regularizer
         self.class_prototypes = class_prototypes
 
-        # Track build state
         self._is_built = False
 
         # Create the SOM layer - instantiated in __init__, built in build()
@@ -315,11 +312,9 @@ class SOMModel(keras.Model):
             input_shape: Shape tuple of input data, typically (batch_size, input_dim).
         """
         if not self._is_built:
-            # Explicitly build the SOM layer for proper serialization
             self.som_layer.build(input_shape)
             self._is_built = True
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -436,10 +431,8 @@ class SOMModel(keras.Model):
             total_iterations = epochs  # Degenerate case: empty training set.
         self.som_layer.max_iterations.assign(float(total_iterations))
 
-        # Initialize training history
         history = {'mean_quantization_error': []}
 
-        # Training loop over epochs
         for epoch in range(epochs):
             start_time = time.time()
             epoch_quant_errors = []
@@ -452,7 +445,6 @@ class SOMModel(keras.Model):
             else:
                 x_train_shuffled = x_train
 
-            # Process data in batches
             for i in range(0, len(x_train_shuffled), batch_size):
                 x_batch = x_train_shuffled[i:i + batch_size]
                 if x_batch.shape[0] == 0:
@@ -469,7 +461,6 @@ class SOMModel(keras.Model):
                 avg_error = ops.mean(quant_errors)
                 epoch_quant_errors.append(ops.convert_to_numpy(avg_error))
 
-            # Compute and store epoch statistics
             avg_error = np.mean(epoch_quant_errors) if epoch_quant_errors else 0.0
             history['mean_quantization_error'].append(avg_error)
 
@@ -539,12 +530,10 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Find BMU for each training sample
         x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
-        # Get unique class labels
         unique_classes = np.unique(y_train)
 
         # Map each class to its most representative BMU
@@ -564,8 +553,6 @@ class SOMModel(keras.Model):
             # Find the most frequently activated BMU for this class
             bmu_counts = Counter(bmu_tuples)
             most_common_bmu = bmu_counts.most_common(1)[0][0]
-
-            # Store as class prototype
             class_to_bmu[c] = most_common_bmu
 
         self.class_prototypes = class_to_bmu
@@ -627,7 +614,6 @@ class SOMModel(keras.Model):
                 "Call fit_class_prototypes() first."
             )
 
-        # Find BMU for each test sample
         x_test_tensor = ops.convert_to_tensor(x_test.reshape(x_test.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_test_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
@@ -638,7 +624,6 @@ class SOMModel(keras.Model):
         # Create reverse mapping from BMU to class
         bmu_to_class = {bmu: c for c, bmu in self.class_prototypes.items()}
 
-        # Predict class for each sample
         predictions = []
         for bmu in bmu_tuples:
             # Check for exact prototype match
@@ -709,7 +694,6 @@ class SOMModel(keras.Model):
             proper topological preservation. Abrupt changes suggest discontinuities
             in the learned representation.
         """
-        # Get neuron weights as grid: (height, width, input_dim)
         weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, input_dim = weights.shape
 
@@ -816,7 +800,6 @@ class SOMModel(keras.Model):
 
             The legend is placed outside the plot area to avoid obscuring data.
         """
-        # Find BMU for each sample
         x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
@@ -1017,7 +1000,6 @@ class SOMModel(keras.Model):
             The hit histogram helps diagnose training issues and choose appropriate
             map sizes for the dataset.
         """
-        # Find BMU for each sample
         x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
@@ -1256,7 +1238,6 @@ class SOMModel(keras.Model):
         Returns:
             New instance of SOMModel with the saved configuration.
         """
-        # Deserialize complex objects
         if config.get('weights_initializer'):
             config['weights_initializer'] = keras.initializers.deserialize(
                 config['weights_initializer']
@@ -1275,5 +1256,68 @@ class SOMModel(keras.Model):
             }
 
         return cls(**config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_som(
+        map_size: Tuple[int, int] = (10, 10),
+        input_dim: int = 784,
+        initial_learning_rate: float = 0.1,
+        sigma: float = 1.0,
+        neighborhood_function: str = 'gaussian',
+        weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
+        regularizer: Optional[keras.regularizers.Regularizer] = None,
+        class_prototypes: Optional[Dict[int, Tuple[int, int]]] = None,
+        **kwargs: Any
+) -> SOMModel:
+    """
+    Create a Self-Organizing Map model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: a SOM is
+    specified entirely by its grid extent and input dimension, both of which
+    are continuous problem-specific quantities. Kohonen defines no named scale
+    family, so this factory constructs the class directly.
+
+    Args:
+        map_size: (height, width) of the neuron grid. Both entries must be
+            positive.
+        input_dim: Dimensionality of the input vectors. Must be positive.
+        initial_learning_rate: Starting learning rate for the adaptation step.
+            Must be positive; it decays over the configured iteration budget.
+        sigma: Initial neighborhood radius. Must be positive.
+        neighborhood_function: Either ``'gaussian'`` or ``'bubble'``.
+        weights_initializer: Initializer for the neuron prototype vectors.
+        regularizer: Optional regularizer applied to the prototype weights.
+        class_prototypes: Optional pre-fitted class -> BMU coordinate mapping.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SOMModel instance. Calling it returns
+        ``(bmu_coordinates, quantization_errors)``.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+
+    Example:
+        >>> model = create_som(map_size=(4, 4), input_dim=8)
+        >>> bmu, err = model(keras.random.normal((6, 8)), training=False)
+        >>> tuple(bmu.shape)
+        (6, 2)
+    """
+    return SOMModel(
+        map_size=map_size,
+        input_dim=input_dim,
+        initial_learning_rate=initial_learning_rate,
+        sigma=sigma,
+        neighborhood_function=neighborhood_function,
+        weights_initializer=weights_initializer,
+        regularizer=regularizer,
+        class_prototypes=class_prototypes,
+        **kwargs
+    )
 
 # ------------------------------------------------------------------------

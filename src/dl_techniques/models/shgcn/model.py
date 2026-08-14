@@ -157,7 +157,6 @@ class SHGCNModel(keras.Model):
         """Initialize multi-layer sHGCN model."""
         super().__init__(**kwargs)
 
-        # Validate inputs
         if not hidden_dims:
             raise ValueError("hidden_dims must contain at least one dimension")
         if any(dim <= 0 for dim in hidden_dims):
@@ -174,7 +173,6 @@ class SHGCNModel(keras.Model):
         self.use_bias = use_bias
         self.use_curvature = use_curvature
 
-        # Create hidden layers
         self.hidden_layers = []
         for i, dim in enumerate(hidden_dims):
             layer = SHGCNLayer(
@@ -187,7 +185,6 @@ class SHGCNModel(keras.Model):
             )
             self.hidden_layers.append(layer)
 
-        # Create output layer
         self.output_layer = SHGCNLayer(
             units=output_dim,
             activation=output_activation,
@@ -216,11 +213,9 @@ class SHGCNModel(keras.Model):
         """
         x, adj = inputs
 
-        # Pass through hidden layers
         for layer in self.hidden_layers:
             x = layer([x, adj], training=training)
 
-        # Pass through output layer
         x = self.output_layer([x, adj], training=training)
 
         return x
@@ -352,7 +347,6 @@ class SHGCNNodeClassifier(keras.Model):
             name='shgcn_backbone'
         )
 
-        # Classification head
         self.classifier = keras.layers.Dense(
             num_classes,
             activation='softmax',
@@ -374,10 +368,8 @@ class SHGCNNodeClassifier(keras.Model):
         Returns:
             Class probabilities of shape [num_nodes, num_classes].
         """
-        # Extract features through sHGCN
         embeddings = self.backbone(inputs, training=training)
 
-        # Classify
         logits = self.classifier(embeddings)
 
         return logits
@@ -511,7 +503,6 @@ class SHGCNLinkPredictor(keras.Model):
             name='shgcn_backbone'
         )
 
-        # Fermi-Dirac decoder for edge probabilities
         self.decoder = FermiDiracDecoder(name='fermi_dirac_decoder')
 
     def call(
@@ -534,10 +525,8 @@ class SHGCNLinkPredictor(keras.Model):
         """
         features, adjacency, edge_pairs = inputs
 
-        # Generate node embeddings
         embeddings = self.backbone([features, adjacency], training=training)
 
-        # Extract embeddings for edge pairs
         # edge_pairs: [num_edges, 2] with [src, tgt] indices
         src_indices = edge_pairs[:, 0]
         tgt_indices = edge_pairs[:, 1]
@@ -545,7 +534,6 @@ class SHGCNLinkPredictor(keras.Model):
         src_embeddings = keras.ops.take(embeddings, src_indices, axis=0)
         tgt_embeddings = keras.ops.take(embeddings, tgt_indices, axis=0)
 
-        # Compute edge probabilities
         probabilities = self.decoder([src_embeddings, tgt_embeddings])
 
         return probabilities
@@ -561,5 +549,136 @@ class SHGCNLinkPredictor(keras.Model):
             'use_curvature': self.use_curvature,
         })
         return config
+
+# ---------------------------------------------------------------------
+# Factories
+# ---------------------------------------------------------------------
+
+
+def create_shgcn(
+        hidden_dims: Optional[List[int]] = None,
+        output_dim: int = 16,
+        output_activation: Optional[Union[str, callable]] = 'linear',
+        dropout_rate: float = 0.5,
+        use_bias: bool = True,
+        use_curvature: bool = True,
+        **kwargs: Any
+) -> SHGCNModel:
+    """Create a base sHGCN feature-extraction model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: sHGCN is
+    specified by a per-layer hidden-dimension list chosen for the dataset at
+    hand, and the paper publishes no named scale family. This factory therefore
+    constructs the class with a sensible two-layer default.
+
+    Args:
+        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+            ``[64, 32]``.
+        output_dim: Dimension of the output layer.
+        output_activation: Activation applied to the output layer.
+        dropout_rate: Dropout applied between layers.
+        use_bias: Whether the sHGCN layers use a bias term.
+        use_curvature: Whether learnable curvature is enabled.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SHGCNModel. It is called with ``[features, adjacency]``.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+    """
+    if hidden_dims is None:
+        hidden_dims = [64, 32]
+    return SHGCNModel(
+        hidden_dims=hidden_dims,
+        output_dim=output_dim,
+        output_activation=output_activation,
+        dropout_rate=dropout_rate,
+        use_bias=use_bias,
+        use_curvature=use_curvature,
+        **kwargs
+    )
+
+
+def create_shgcn_node_classifier(
+        num_classes: int,
+        hidden_dims: Optional[List[int]] = None,
+        embedding_dim: int = 16,
+        dropout_rate: float = 0.5,
+        use_bias: bool = True,
+        use_curvature: bool = True,
+        **kwargs: Any
+) -> SHGCNNodeClassifier:
+    """Create an sHGCN node-classification model.
+
+    Args:
+        num_classes: Number of target classes. Required -- it is a property of
+            the dataset, not something a default can guess.
+        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+            ``[64, 32]``.
+        embedding_dim: Dimension of the node embedding fed to the classifier
+            head.
+        dropout_rate: Dropout applied between layers.
+        use_bias: Whether the sHGCN layers use a bias term.
+        use_curvature: Whether learnable curvature is enabled.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SHGCNNodeClassifier. It is called with
+        ``[features, adjacency]`` and returns class logits.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+    """
+    if hidden_dims is None:
+        hidden_dims = [64, 32]
+    return SHGCNNodeClassifier(
+        num_classes=num_classes,
+        hidden_dims=hidden_dims,
+        embedding_dim=embedding_dim,
+        dropout_rate=dropout_rate,
+        use_bias=use_bias,
+        use_curvature=use_curvature,
+        **kwargs
+    )
+
+
+def create_shgcn_link_predictor(
+        hidden_dims: Optional[List[int]] = None,
+        embedding_dim: int = 16,
+        dropout_rate: float = 0.3,
+        use_bias: bool = True,
+        use_curvature: bool = True,
+        **kwargs: Any
+) -> SHGCNLinkPredictor:
+    """Create an sHGCN link-prediction model.
+
+    Args:
+        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+            ``[64, 32]``.
+        embedding_dim: Dimension of the node embeddings scored by the
+            Fermi-Dirac decoder.
+        dropout_rate: Dropout applied between layers.
+        use_bias: Whether the sHGCN layers use a bias term.
+        use_curvature: Whether learnable curvature is enabled.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SHGCNLinkPredictor. It is called with
+        ``[features, adjacency, edge_pairs]`` and returns edge probabilities.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+    """
+    if hidden_dims is None:
+        hidden_dims = [64, 32]
+    return SHGCNLinkPredictor(
+        hidden_dims=hidden_dims,
+        embedding_dim=embedding_dim,
+        dropout_rate=dropout_rate,
+        use_bias=use_bias,
+        use_curvature=use_curvature,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

@@ -444,3 +444,80 @@ class VQVAERotationTrick(keras.Model):
         decoder = keras.saving.deserialize_keras_object(decoder_cfg)
         config["input_shape"] = config.pop("input_shape_config", None)
         return cls(encoder=encoder, decoder=decoder, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_vq_vae_rotation(
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        num_embeddings: int = 512,
+        embedding_dim: int = 64,
+        encoder: Optional[keras.Model] = None,
+        decoder: Optional[keras.Model] = None,
+        gradient_mode: str = "rotation",
+        distance_mode: str = "euclidean",
+        commitment_cost: float = 0.25,
+        hidden_channels: int = 128,
+        downsample_factor: int = 4,
+        num_res_blocks: int = 2,
+        norm_type: NormalizationType = "layer_norm",
+        **kwargs: Any
+) -> VQVAERotationTrick:
+    """Create a rotation-trick VQ-VAE.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: Fifty et al.
+    publish a quantizer, not a backbone family, and this package's convolutional
+    encoder/decoder is parameterized continuously by ``hidden_channels``,
+    ``downsample_factor`` and ``num_res_blocks`` with no named scales to
+    enumerate. The factory therefore constructs the class directly.
+
+    Leave ``encoder``/``decoder`` as ``None`` and pass ``input_shape`` to use the
+    auto-built convolutional pair; pass both to bring your own.
+
+    :param input_shape: ``(H, W, C)`` of the input images. Required when
+        ``encoder``/``decoder`` are not supplied.
+    :param num_embeddings: Codebook size K.
+    :param embedding_dim: Codebook vector dimension D.
+    :param encoder: Optional caller-supplied encoder model.
+    :param decoder: Optional caller-supplied decoder model.
+    :param gradient_mode: One of ``rotation``, ``reflection``, ``no_grad_scale``,
+        ``ste``.
+    :param distance_mode: ``euclidean`` or ``cosine``.
+    :param commitment_cost: Weight beta of the commitment term.
+    :param hidden_channels: Channel width of the auto-built encoder/decoder.
+    :param downsample_factor: Spatial reduction of the auto-built encoder; must
+        be a power of 2.
+    :param num_res_blocks: Residual blocks per auto-built stack.
+    :param norm_type: Normalization type passed to
+        ``create_normalization_layer``.
+    :param kwargs: Additional arguments forwarded to the model constructor.
+    :returns: A configured ``VQVAERotationTrick`` instance.
+    :raises ValueError: If an argument is out of range, or if neither an
+        encoder/decoder pair nor an ``input_shape`` is given.
+
+    Example::
+
+        model = create_vq_vae_rotation(input_shape=(32, 32, 3),
+                                       num_embeddings=64, embedding_dim=16)
+        recon = model(keras.random.normal((2, 32, 32, 3)))
+    """
+    return VQVAERotationTrick(
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
+        encoder=encoder,
+        decoder=decoder,
+        commitment_cost=commitment_cost,
+        gradient_mode=gradient_mode,
+        distance_mode=distance_mode,
+        input_shape=input_shape,
+        hidden_channels=hidden_channels,
+        downsample_factor=downsample_factor,
+        num_res_blocks=num_res_blocks,
+        norm_type=norm_type,
+        **kwargs
+    )
+
+# ---------------------------------------------------------------------
