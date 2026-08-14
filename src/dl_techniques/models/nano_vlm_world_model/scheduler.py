@@ -221,6 +221,46 @@ class DiffusionScheduler:
 
         return pred_original
 
+    def predict_noise_from_start(
+            self,
+            x_t: keras.KerasTensor,
+            t: keras.KerasTensor,
+            x_0: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Predict the noise ε from x_t and a predicted x_0 — the exact inverse of
+        :meth:`predict_start_from_noise`.
+
+        Rearranging that method's `x_0 = (x_t - √(1-ᾱ_t) · ε) / √ᾱ_t` for ε gives
+
+        `ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)`
+
+        Needed by `ScoreBasedNanoVLM.generate_from_text`, whose
+        `prediction_type='sample'` branch has a denoiser that emits x_0 while the
+        reverse step consumes ε. That branch called this method before it existed
+        and raised `AttributeError` for every caller.
+
+        Note the inversion is exact only when `clip_sample` is False. With
+        clipping enabled `predict_start_from_noise` is a projection, not a
+        bijection: any x_0 driven outside [-1, 1] is clamped, and the ε that
+        produced it cannot be recovered from the clamped value.
+
+        Args:
+            x_t: Noisy samples at timestep t
+            t: Timestep indices
+            x_0: Predicted clean samples
+
+        Returns:
+            The noise ε consistent with (x_t, x_0) at timestep t
+        """
+        sqrt_alpha_prod = self._extract(self.sqrt_alphas_cumprod, t, x_t)
+        sqrt_one_minus_alpha_prod = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x_t
+        )
+
+        # ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)
+        return (x_t - sqrt_alpha_prod * x_0) / sqrt_one_minus_alpha_prod
+
     def get_score_from_noise(
             self,
             noise_pred: keras.KerasTensor,
