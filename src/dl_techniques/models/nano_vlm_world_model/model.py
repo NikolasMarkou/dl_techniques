@@ -479,13 +479,15 @@ class ScoreBasedNanoVLM(keras.Model):
                     latents, text_features, t_tensor, training=False
                 )
 
-            # Convert denoised output to noise prediction if needed
-            if self.scheduler.prediction_type == 'sample':
-                noise_pred = self.scheduler.predict_noise_from_start(
-                    latents, t_tensor, noise_pred
-                )
-
-            # Take reverse diffusion step
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-013: hand the denoiser's raw
+            # output straight to `step`. Do NOT reinstate a
+            # `predict_noise_from_start` conversion here "for symmetry" with the
+            # 'epsilon' convention: `step`'s 'sample' branch consumes x_0 DIRECTLY
+            # (`pred_original_sample = model_output`), so converting first makes it
+            # read the noise AS the clean sample and drives the whole reverse process
+            # off the wrong quantity — measured max deviation 3.86 at t=50, silently,
+            # on the path all three shipped presets take. `step` dispatches on
+            # `prediction_type` itself; the caller must not pre-translate.
             latents, _ = self.scheduler.step(noise_pred, t, latents)
 
         # Decode latents to images (this would need a decoder)

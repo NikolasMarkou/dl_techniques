@@ -252,10 +252,17 @@ class DiffusionScheduler:
 
         `ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)`
 
-        Needed by `ScoreBasedNanoVLM.generate_from_text`, whose
-        `prediction_type='sample'` branch has a denoiser that emits x_0 while the
-        reverse step consumes ε. That branch called this method before it existed
-        and raised `AttributeError` for every caller.
+        This is a standalone utility for callers that hold an x_0 estimate and
+        need the ε consistent with it — e.g. converting an x_0-predicting denoiser
+        into an ε-predicting one, or recovering the noise that `add_noise` used.
+        It currently has NO in-repo caller.
+
+        It is deliberately not used by `ScoreBasedNanoVLM.generate_from_text`: an
+        earlier version of that method converted x_0 to ε here before calling
+        :meth:`step`, on the false premise (previously recorded in this docstring)
+        that `step`'s `prediction_type='sample'` branch consumes ε. It does not —
+        that branch consumes x_0 directly, so the conversion made the reverse
+        process read noise as the clean sample. Do not reintroduce it.
 
         Note the inversion is exact only when `clip_sample` is False. With
         clipping enabled `predict_start_from_noise` is a projection, not a

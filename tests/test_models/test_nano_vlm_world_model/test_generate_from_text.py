@@ -7,12 +7,20 @@ behind that gap, and they were ordered — the first masked the second:
 1. The vision-feature shape probe hardcoded a ``(1, 224, 224, 3)`` dummy image
    regardless of the model's configured ``img_size``, so at any other size the call
    died inside ``PositionalEmbedding.call`` before reaching the generation loop.
-2. The ``prediction_type='sample'`` branch calls
+2. The ``prediction_type='sample'`` branch called
    ``scheduler.predict_noise_from_start``, which the scheduler did not define — it
    defined only the inverse, ``predict_start_from_noise``.
 
 Both are pinned below at a NON-224 ``img_size`` (32), which is the configuration that
 makes defect 1 observable at all.
+
+A THIRD defect lived in the seam between this method and the scheduler, and neither
+site's own tests could see it: adding ``predict_noise_from_start`` (defect 2's fix)
+silenced an ``AttributeError`` and revealed that the conversion should never have been
+there at all — ``step``'s ``'sample'`` branch consumes x_0 directly, so converting
+x_0 to eps first made the reverse process read noise as the clean sample. That is what
+``TestGenerateFromTextComposesWithTheScheduler`` below pins: the composition, not
+either endpoint.
 """
 
 import keras
@@ -30,7 +38,7 @@ IMG_SIZE = 32
 EMBED_DIM = 64
 
 
-def _tiny_model(prediction_type=None):
+def _tiny_model(prediction_type=None, **diffusion_overrides):
     """A ``text_to_image`` model at img_size=32 — deliberately NOT the hardcoded 224."""
     vision_config = {
         'img_size': IMG_SIZE, 'patch_size': 16, 'embed_dim': EMBED_DIM,
@@ -43,6 +51,7 @@ def _tiny_model(prediction_type=None):
     diffusion_config = {'num_timesteps': 100, 'beta_schedule': 'cosine'}
     if prediction_type is not None:
         diffusion_config['prediction_type'] = prediction_type
+    diffusion_config.update(diffusion_overrides)
     return ScoreBasedNanoVLM(
         vision_config=vision_config,
         text_config=text_config,
@@ -81,12 +90,16 @@ class TestGenerateFromTextShapeProbe:
 class TestPredictNoiseFromStart:
     """RED-proof + oracle for the missing scheduler method (plan step 4)."""
 
-    def test_sample_branch_reaches_the_scheduler(self):
-        """``prediction_type='sample'`` must resolve ``predict_noise_from_start``.
+    def test_sample_branch_runs_end_to_end(self):
+        """``prediction_type='sample'`` must complete the generation loop.
 
-        Pre-fix this raised ``AttributeError: 'DiffusionScheduler' object has no
-        attribute 'predict_noise_from_start'`` at ``model.py:482``. Reachable ONLY
-        after the step-3 probe fix, since this model is configured at img_size=32.
+        Historical note: this once raised ``AttributeError: 'DiffusionScheduler'
+        object has no attribute 'predict_noise_from_start'`` at ``model.py:482``,
+        because the loop converted x_0 to eps before stepping. That conversion has
+        since been deleted (it was wrong, not merely unimplemented — see
+        ``TestGenerateFromTextComposesWithTheScheduler``), so this is now only a
+        liveness check on the ``'sample'`` path. Reachable ONLY after the step-3
+        probe fix, since this model is configured at img_size=32.
         """
         model = _tiny_model(prediction_type='sample')
         out = model.generate_from_text(_text_features(), num_inference_steps=2)
@@ -211,4 +224,97 @@ class TestPredictionTypeDefault:
             ops.convert_to_numpy(model_output),
             atol=1e-6,
             err_msg="step() did not take the 'sample' branch",
+        )
+
+
+class _RecordingDenoiserStub:
+    """Stands in for ``vision_denoiser``, returning a KNOWN x_0 and recording x_t.
+
+    Deterministic and seeded: the value it returns depends only on the latent shape,
+    so the reference computation below can be replayed against the exact tensors the
+    generation loop actually used.
+    """
+
+    def __init__(self, seed: int = 3):
+        self._rng = np.random.default_rng(seed)
+        self.seen_latents = []
+        self.returned_x0 = []
+
+    def __call__(self, latents, text_features, timesteps, training=None):
+        shape = tuple(int(d) for d in ops.shape(latents))
+        x0 = ops.convert_to_tensor(self._rng.normal(size=shape).astype('float32'))
+        self.seen_latents.append(latents)
+        self.returned_x0.append(x0)
+        return x0
+
+
+class TestGenerateFromTextComposesWithTheScheduler:
+    """The SEAM guard: ``generate_from_text``'s reverse step vs ``scheduler.step``.
+
+    The plan's blind spot was that no test composed these two sites. Each had a
+    passing test of its own while they implemented opposite contracts:
+    ``generate_from_text`` converted the denoiser's x_0 into eps via
+    ``predict_noise_from_start`` whenever ``prediction_type == 'sample'``, and
+    ``step``'s ``'sample'`` branch then consumed that eps AS x_0
+    (``pred_original_sample = model_output``). Measured deviation at t=50 with the
+    conversion in place: ``max|pred_original - x_0| = 3.86``, i.e. the posterior mean
+    at every reverse step was built from noise mislabelled as the clean sample.
+
+    ``clip_sample=False`` keeps the comparison exact (``step`` otherwise projects
+    ``pred_original_sample`` onto [-1, 1], which would partially mask the difference).
+    ``num_inference_steps=2`` puts the FINAL reverse step at ``t == 0``, the one
+    timestep at which ``step`` adds no stochastic noise — so the returned latents are
+    a deterministic function of the tensors the stub recorded, even though the two
+    earlier steps and the initial latents are random.
+    """
+
+    def test_reverse_step_matches_a_direct_scheduler_step_on_x0(self):
+        """Feeding the denoiser's x_0 to ``step`` unchanged is the whole contract.
+
+        Fails if anyone reinstates a ``predict_noise_from_start`` conversion at the
+        call site, or changes ``step``'s ``'sample'`` branch to expect eps.
+        """
+        model = _tiny_model(prediction_type='sample', clip_sample=False)
+        stub = _RecordingDenoiserStub()
+        model.vision_denoiser = stub
+
+        out = model.generate_from_text(_text_features(), num_inference_steps=2)
+
+        assert len(stub.seen_latents) == 2, (
+            f"expected 2 denoiser calls, got {len(stub.seen_latents)}"
+        )
+
+        x_t_final = stub.seen_latents[-1]
+        x0_final = stub.returned_x0[-1]
+
+        expected, pred_original = model.scheduler.step(x0_final, 0, x_t_final)
+        expected = ops.convert_to_numpy(expected)
+
+        # The reference itself must be the x_0 branch, not silently something else.
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(pred_original),
+            ops.convert_to_numpy(x0_final),
+            atol=1e-6,
+            err_msg="reference step() did not consume x_0 directly",
+        )
+
+        # Non-vacuity: the deleted conversion must produce a MEASURABLY different
+        # result at this input, otherwise the assertion below could not detect it.
+        t_tensor = ops.convert_to_tensor([0] * 2, dtype='int32')
+        eps = model.scheduler.predict_noise_from_start(x_t_final, t_tensor, x0_final)
+        wrong, _ = model.scheduler.step(eps, 0, x_t_final)
+        conversion_gap = float(
+            np.max(np.abs(ops.convert_to_numpy(wrong) - expected))
+        )
+        assert conversion_gap > 1e-2, (
+            f"probe is vacuous: converting x_0 to eps moves the result by only "
+            f"{conversion_gap} at this input"
+        )
+
+        max_dev = float(np.max(np.abs(ops.convert_to_numpy(out) - expected)))
+        assert max_dev < 1e-5, (
+            f"generate_from_text's reverse step disagrees with scheduler.step(x_0, "
+            f"t, x_t) by {max_dev} (the x_0 -> eps conversion gap here is "
+            f"{conversion_gap}); the caller must not pre-translate the denoiser "
+            f"output — step() dispatches on prediction_type itself"
         )
