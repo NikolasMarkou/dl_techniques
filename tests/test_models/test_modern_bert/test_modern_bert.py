@@ -428,5 +428,27 @@ class TestModernBERTAdvancedFeatures:
             pytest.fail(f"Model summary raised an exception: {e}")
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `ModernBERT.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained ModernBERT weights"):
+            ModernBERT.from_variant("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = ModernBERT.from_variant("tiny", vocab_size=128)
+        assert isinstance(model, ModernBERT)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(ModernBERT, "PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -1,89 +1,71 @@
 """
-ModernBERT: A High-Performance BERT Successor
-==============================================
+ModernBERT, a BERT-shaped encoder rebuilt with the training recipe that came
+out of the large-language-model era.
 
-An advanced, refactored implementation of a BERT-style encoder that serves as a
-powerful, efficient, and direct replacement for classic BERT architectures.
-ModernBERT integrates a suite of contemporary deep learning techniques to
-deliver superior performance, faster processing, and better stability, especially
-for long-context applications.
+This model embodies the principle that an encoder's ceiling is usually set by
+its optimization behaviour and its context budget, not by its parameter count.
+Classic BERT was trained at 512 tokens with post-layer normalization and dense
+global attention everywhere, and each of those three choices independently caps
+what the architecture can do: post-normalization makes deep stacks fragile to
+learning rate, quadratic global attention makes long sequences unaffordable,
+and a 512-token window makes whole classes of retrieval task impossible.
+ModernBERT changes all three while leaving the encoder's interface identical,
+so it is a drop-in replacement rather than a new family.
 
-This model is engineered as a pure foundation model, separating the core
-encoding logic from task-specific heads. It supports pretrained weights and
-maintains an API consistent with the original BERT implementation, ensuring
-seamless interchangeability and ease of adoption.
+Pre-layer normalization is the stability change. Normalizing the input to each
+sublayer rather than the residual sum leaves the skip path an unmodified
+identity from input to output, so gradient magnitude no longer depends on how
+many normalization layers it has passed through. That is what removes the
+learning-rate warmup sensitivity that makes deep post-normalization stacks
+awkward to train.
 
------------------------------
-Key Architectural Upgrades
------------------------------
+Hybrid local/global attention is the cost change, and it is where the design
+does something non-obvious. Rather than making every layer cheap, the stack
+alternates: most layers use windowed local attention over
+`local_attention_window_size` tokens, and every `global_attention_interval`-th
+layer uses full global attention. Local layers do the bulk of the work at
+linear cost, while the periodic global layers stitch the windows together so
+information still crosses the whole sequence -- a token pair `L` apart is
+connected after one global layer, not after `L / window` local ones. This is
+what makes an 8192-token context affordable when dense attention at that length
+would not be.
 
-ModernBERT distinguishes itself from its predecessors through several key
-innovations inspired by recent advances in large language models:
+GeGLU replaces the plain GELU feed-forward. Gating gives the FFN a
+multiplicative interaction its linear-then-activate predecessor lacks, which
+buys quality at equal parameter count. Bias terms are removed from most linear
+and normalization layers: they contribute little at this scale, and the freed
+budget is spent on width instead.
 
-1.  **Pre-Layer Normalization (Pre-LN):** Applies layer normalization *before*
-    the attention and feed-forward blocks. This significantly improves training
-    stability, allows for faster convergence, and reduces sensitivity to
-    learning rate schedules, making it easier to train deep models.
+The class is a pure foundation model. It emits `{"last_hidden_state",
+"attention_mask"}`, owns no pooler and no task head, and keeps BERT's API so
+the two are interchangeable at call sites. Its embedding stage is its own
+`layers.embedding.modern_bert_embeddings.ModernBertEmbeddings` rather than the
+`BertEmbeddings` that `bert/` and `distilbert/` share, because the token-type
+table BERT carries is not part of this design. Three preset variants span tiny,
+base (150M) and large (280M), each pinning its own
+`global_attention_interval` and `local_attention_window_size`.
 
-2.  **GeGLU Activation Function:** Replaces the standard GELU with a Gated GELU
-    (GeGLU) in the feed-forward network. GeGLU offers a more sophisticated
-    gating mechanism that can improve performance and contribute to more
-    stable training dynamics.
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, making an
+unavailable checkpoint silently indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead.
 
-3.  **Hybrid Local & Global Attention:** Employs an efficient alternating
-    attention strategy. Most layers use computationally cheaper **windowed
-    (local) attention**, while periodic **global attention** layers ensure
-    that long-range dependencies across the entire sequence are captured.
-    This hybrid approach enables the model to process much longer sequences
-    (e.g., up to 8192 tokens) far more efficiently than models relying solely
-    on global attention.
-
-4.  **Bias-Free Layers:** Removes bias parameters from most linear layers and
-    normalization, reallocating the parameter budget to more impactful parts
-    of the model for better efficiency.
-
-These enhancements make ModernBERT a state-of-the-art encoder for a wide
-range of NLP tasks, including retrieval-augmented generation (RAG), semantic
-search, classification, and code analysis.
-
--------------------
-Usage Examples
--------------------
-
-.. code-block:: python
-
-    import keras
-    from dl_techniques.nlp.heads.factory import create_nlp_head
-    from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
-
-    # 1. Load a ModernBERT variant (e.g., from a pretrained checkpoint)
-    # model = ModernBERT.from_variant("base", pretrained="path/to/weights.keras")
-    model = ModernBERT.from_variant("base")
-
-    # 2. Define a downstream task (e.g., Named Entity Recognition)
-    ner_config = NLPTaskConfig(
-        name="ner",
-        task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-        num_classes=17
-    )
-
-    # 3. Create a complete model with a task head
-    ner_model = create_modern_bert_with_head(
-        bert_variant="base",
-        task_config=ner_config
-    )
-    ner_model.summary()
-
-    # 4. Use the model for inference
-    inputs = {
-        "input_ids": keras.random.uniform((2, 256), 0, 50368, dtype="int32"),
-        "attention_mask": keras.ops.ones((2, 256), dtype="int32")
-    }
-    predictions = ner_model(inputs)
-    print(predictions.shape)
-    # (2, 256, 17)
-
+References:
+    - Warner et al., 2024. Smarter, Better, Faster, Longer: A Modern
+      Bidirectional Encoder. (https://arxiv.org/abs/2412.13663)
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding.
+      (https://arxiv.org/abs/1810.04805)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. (https://arxiv.org/abs/2002.04745)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
+      (https://arxiv.org/abs/2004.05150)
 """
+
 
 import os
 import keras
@@ -241,13 +223,6 @@ class ModernBERT(keras.Model):
         },
     }
 
-    # Pretrained weights URLs (placeholders, update with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "tiny": {"uncased": "https://example.com/modern_bert_tiny_uncased.keras"},
-        "base": {"uncased": "https://example.com/modern_bert_base_uncased.keras"},
-        "large": {"uncased": "https://example.com/modern_bert_large_uncased.keras"},
-    }
-
     # Default architecture constants
     DEFAULT_VOCAB_SIZE = 50368
     DEFAULT_TYPE_VOCAB_SIZE = 2
@@ -324,9 +299,14 @@ class ModernBERT(keras.Model):
                 f"num_heads ({num_heads})"
             )
         if not (0.0 <= hidden_dropout_prob <= 1.0):
-            raise ValueError(f"hidden_dropout_prob must be between 0 and 1.")
+            raise ValueError(
+                f"hidden_dropout_prob must be between 0 and 1, got {hidden_dropout_prob}"
+            )
         if not (0.0 <= attention_probs_dropout_prob <= 1.0):
-            raise ValueError(f"attention_probs_dropout_prob must be between 0 and 1.")
+            raise ValueError(
+                "attention_probs_dropout_prob must be between 0 and 1, got "
+                f"{attention_probs_dropout_prob}"
+            )
         if global_attention_interval <= 0:
             raise ValueError("global_attention_interval must be positive.")
 
@@ -476,28 +456,37 @@ class ModernBERT(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
+    # a non-existent host; `from_variant` caught the download failure, logged a
+    # warning and continued with random initialization, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`. No public ModernBERT weights are
+    # distributed with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
             variant: str,
             dataset: str = "uncased",
             cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL."""
-        if variant not in ModernBERT.PRETRAINED_WEIGHTS:
-            raise ValueError(f"No pretrained weights for variant '{variant}'.")
-        if dataset not in ModernBERT.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(f"No pretrained weights for dataset '{dataset}'.")
+        """Resolve a download path for pretrained weights; always raises.
 
-        url = ModernBERT.PRETRAINED_WEIGHTS[variant][dataset]
-        logger.info(f"Downloading ModernBERT-{variant} ({dataset}) weights...")
-        weights_path = keras.utils.get_file(
-            fname=f"modern_bert_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/modern_bert"
+        :param variant: Model variant name (unused).
+        :type variant: str
+        :param dataset: Dataset/version identifier (unused).
+        :type dataset: str
+        :param cache_dir: Cache directory (unused).
+        :type cache_dir: Optional[str]
+        :raises NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            f"No pretrained ModernBERT weights are distributed with "
+            f"dl_techniques (requested variant '{variant}', dataset "
+            f"'{dataset}'). Pass a local checkpoint instead: "
+            f"ModernBERT.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -508,7 +497,24 @@ class ModernBERT(keras.Model):
             cache_dir: Optional[str] = None,
             **kwargs: Any
     ) -> "ModernBERT":
-        """Create a ModernBERT model from a predefined variant."""
+        """Create a ModernBERT model from a predefined variant.
+
+        :param variant: One of the keys in :attr:`MODEL_VARIANTS`.
+        :type variant: str
+        :param pretrained: If a string, a path to a local ``.keras`` weights
+            file. If True, raises ``NotImplementedError`` -- no public
+            ModernBERT weights ship with ``dl_techniques``. If False (default),
+            the model is randomly initialized.
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset/version for pretrained weights.
+        :type weights_dataset: str
+        :param cache_dir: Directory to cache downloaded weights.
+        :type cache_dir: Optional[str]
+        :return: A configured ModernBERT instance.
+        :rtype: ModernBERT
+        :raises ValueError: If the variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is True.
+        """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
@@ -526,15 +532,10 @@ class ModernBERT(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                try:
-                    load_weights_path = cls._download_weights(variant, weights_dataset, cache_dir)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {e}. "
-                        "Continuing with random initialization."
-                    )
+                load_weights_path = cls._download_weights(
+                    variant, weights_dataset, cache_dir
+                )
 
-            # Check for config mismatches that require skipping weights
             if kwargs.get("vocab_size", config.get("vocab_size")) != cls.DEFAULT_VOCAB_SIZE:
                 skip_mismatch = True
                 logger.info("Custom vocab_size differs from pretrained. Will skip embedding layer.")
@@ -587,7 +588,7 @@ class ModernBERT(keras.Model):
             f"  - Attention: Mixed Global/Window (Global every {self.global_attention_interval} layers)"
         )
         logger.info(f"  - Vocabulary: {self.vocab_size} tokens")
-        logger.info(f"  - Normalization: Pre-LN with final LayerNorm")
+        logger.info("  - Normalization: Pre-LN with final LayerNorm")
         logger.info(
             f"  - Feed-forward: GeGLU, {self.intermediate_size} intermediate size"
         )
@@ -610,8 +611,9 @@ def create_modern_bert_with_head(
     :type bert_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
     :type task_config: NLPTaskConfig
-    :param pretrained: If True, loads pretrained weights. If string,
-        path to local weights file.
+    :param pretrained: If a string, a path to a local ``.keras`` weights file.
+        If True, raises ``NotImplementedError`` -- no public ModernBERT weights
+        ship with ``dl_techniques``. If False (default), random init.
     :type pretrained: Union[bool, str]
     :param weights_dataset: Dataset for pretrained weights ("uncased", etc.).
     :type weights_dataset: str
