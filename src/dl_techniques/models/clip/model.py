@@ -51,14 +51,18 @@ than in `__init__`. On the text side the pooled position is found by
 `last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`.
 That assumes right padding and pad id `0` — the id is hard-coded at this call
 site. Left-padded batches, or a tokenizer whose pad id is not zero, will pool the
-wrong position silently rather than raising. This is also where the tower differs
-most from the reference implementation: OpenAI CLIP locates the EOT token as the
-argmax of the token ids and runs its text transformer with a causal mask, while
-this text tower attends bidirectionally, with no mask constructed anywhere in
-`encode_text`. Under a causal tower the final real token is the only position
-that has read the whole sentence, which is why it is the one pooled; here every
-position has, so pooling the last one is a convention carried over rather than a
-requirement.
+wrong position silently rather than raising. Where the tower still differs from
+the reference implementation is *which* position it pools: OpenAI CLIP locates
+the EOT token as the argmax of the token ids, this one counts non-pad tokens.
+The masking now agrees — `encode_text` builds a lower-triangular causal mask and
+passes it to every text block, so the pooled last real token is the only
+position that has read the whole sentence, which is what makes last-token
+pooling meaningful. The mask is constructed in the masking factory's *block*
+semantics and inverted once to the *attend* semantics the attention layers
+expect, and it is broadcast to rank 3 deliberately: a rank-2 mask is read by
+`GroupedQueryAttention` as a `(batch, seq)` padding mask, not as a
+`(seq, seq)` score mask. The vision tower is bidirectional and stays so — there
+is no ordering over image patches to respect.
 
 The temperature is stored as its logarithm. `logit_scale` is an unconstrained
 scalar weight and `exp` is applied on every use, which keeps the multiplier
@@ -104,6 +108,7 @@ from dl_techniques.utils.clip_utils import (
     last_non_pad_token,
 )
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.utils.masking import create_mask
 
 # ---------------------------------------------------------------------
 
@@ -618,9 +623,26 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
+        # Causal mask. `create_mask` returns BLOCK semantics (True = mask out);
+        # the attention layers expect ATTEND semantics, hence the inversion.
+        # Without this the tower is bidirectional and the pooled last token is
+        # not the only position that has read the whole sentence -- which is
+        # both a departure from OpenAI CLIP and the reason last-token pooling
+        # is meaningful at all.
+        # The mask is broadcast to rank 3 (batch, seq, seq) on purpose: the
+        # attention layers read a rank-2 mask as a (batch, seq) PADDING mask.
+        batch_size = ops.shape(text_ids)[0]
+        seq_len = ops.shape(text_ids)[1]
+        causal_block = create_mask('causal', seq_len=seq_len, dtype='bool')
+        causal_block = ops.broadcast_to(
+            ops.expand_dims(causal_block, axis=0),
+            (batch_size, seq_len, seq_len),
+        )
+        attend_mask = ops.logical_not(causal_block)
+
         # Apply text transformer layers
         for transformer_layer in self.text_transformer_layers:
-            x = transformer_layer(x, training=training)
+            x = transformer_layer(x, attention_mask=attend_mask, training=training)
 
         # Extract features from the last non-padding token
         # (assuming 0 is the padding id; right-padded sequences).
