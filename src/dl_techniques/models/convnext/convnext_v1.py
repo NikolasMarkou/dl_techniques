@@ -1,10 +1,9 @@
 """
-ConvNeXt V1 Model Implementation with Pretrained Support
-==================================================
+ConvNeXt V1 Model Implementation
+================================
 
-A complete implementation of the ConvNeXt V1 architecture with support for
-loading pretrained weights. This version can natively handle different input
-sizes without requiring preprocessing.
+The ConvNeXt V1 architecture. Handles different input sizes natively, without
+preprocessing.
 
 Based on: "A ConvNet for the 2020s" (Liu et al., 2022)
 https://arxiv.org/abs/2201.03545
@@ -17,20 +16,19 @@ Model Variants:
 - ConvNeXt-L: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims
 - ConvNeXt-XL: [3, 3, 27, 3] blocks, [256, 512, 1024, 2048] dims
 
+No pretrained ConvNeXt V1 weights are distributed with `dl_techniques`;
+`pretrained=True` raises `NotImplementedError`. Pass a local path instead.
+
 Usage Examples:
 -------------
 ```python
-# Load pretrained ImageNet weights
-model = ConvNeXtV1.from_variant("tiny", pretrained=True, num_classes=1000)
+# Feature extractor
+model = ConvNeXtV1.from_variant("base", include_top=False)
 
-# Load pretrained as feature extractor
-model = ConvNeXtV1.from_variant("base", pretrained=True, include_top=False)
+# Fine-tune on a custom dataset
+model = create_convnext_v1("small", num_classes=10, input_shape=(32, 32, 3))
 
-# Fine-tune on custom dataset
-model = create_convnext_v1("small", num_classes=10, input_shape=(32, 32, 3),
-                           pretrained=True, weights_input_shape=(224, 224, 3))
-
-# Load from local weights file
+# Load from a local weights file
 model = ConvNeXtV1.from_variant("large", pretrained="path/to/weights.keras")
 ```
 """
@@ -96,14 +94,10 @@ class ConvNeXtV1(keras.Model):
         >>> # Create ConvNeXt-Tiny model for CIFAR-10
         >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
         >>>
-        >>> # Load pretrained ImageNet model
-        >>> model = ConvNeXtV1.from_variant("tiny", pretrained=True)
-        >>>
         >>> # Load as feature extractor
-        >>> model = ConvNeXtV1.from_variant("base", pretrained=True, include_top=False)
+        >>> model = ConvNeXtV1.from_variant("base", include_top=False)
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "cifar10": {"depths": [5, 5], "dims": [96, 192]},
         "tiny": {"depths": [3, 3, 9, 3], "dims": [96, 192, 384, 768]},
@@ -111,30 +105,6 @@ class ConvNeXtV1(keras.Model):
         "base": {"depths": [3, 3, 27, 3], "dims": [128, 256, 512, 1024]},
         "large": {"depths": [3, 3, 27, 3], "dims": [192, 384, 768, 1536]},
         "xlarge": {"depths": [3, 3, 27, 3], "dims": [256, 512, 1024, 2048]},
-    }
-
-    # Pretrained weights URLs (update these with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "tiny": {
-            "imagenet": "https://example.com/convnext_tiny_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_tiny_imagenet22k.keras",
-        },
-        "small": {
-            "imagenet": "https://example.com/convnext_small_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_small_imagenet22k.keras",
-        },
-        "base": {
-            "imagenet": "https://example.com/convnext_base_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_base_imagenet22k.keras",
-        },
-        "large": {
-            "imagenet": "https://example.com/convnext_large_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_large_imagenet22k.keras",
-        },
-        "xlarge": {
-            "imagenet": "https://example.com/convnext_xlarge_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_xlarge_imagenet22k.keras",
-        },
     }
 
     # Architecture constants
@@ -145,8 +115,8 @@ class ConvNeXtV1(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            depths: List[int] = [3, 3, 9, 3],
-            dims: List[int] = [96, 192, 384, 768],
+            depths: Optional[List[int]] = None,
+            dims: Optional[List[int]] = None,
             drop_path_rate: float = 0.0,
             stochastic_mode: str = 'depth',
             kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -164,7 +134,9 @@ class ConvNeXtV1(keras.Model):
     ):
         super().__init__(**kwargs)
 
-        # Validate configuration
+        depths = list(depths) if depths is not None else [3, 3, 9, 3]
+        dims = list(dims) if dims is not None else [96, 192, 384, 768]
+
         if len(depths) != len(dims):
             raise ValueError(
                 f"Length of depths ({len(depths)}) must equal length of dims ({len(dims)})"
@@ -184,7 +156,12 @@ class ConvNeXtV1(keras.Model):
             raise ValueError(
                 f"stochastic_mode must be 'depth' or 'gradient', got {stochastic_mode!r}"
             )
-        # Store configuration
+
+        if input_shape is None:
+            input_shape = (None, None, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+
         self.num_classes = num_classes
         self.depths = depths
         self.dims = dims
@@ -202,35 +179,20 @@ class ConvNeXtV1(keras.Model):
         self.strides = strides
         self.input_shape = input_shape
 
-        # Validate and store input shape details
-        if input_shape is None:
-            input_shape = (None, None, 3)
-        if len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
-
         self.input_height, self.input_width, self.input_channels = input_shape
         if self.input_channels not in [1, 3]:
             logger.warning(
                 f"Unusual number of channels: {self.input_channels}. ConvNeXt typically uses 3 channels")
 
-        # --- Build layers ---
-        # This follows the Keras subclassing model best practice.
-        # Layers are created in __init__ and used in call().
-
-        # 1. Stem
         self._build_stem()
 
-        # 2. Downsample layers and Stages
         self.downsample_layers_list = []
         self.stages_list = []
         for i in range(len(self.depths)):
-            # Downsample layer (except for the first stage)
             if i > 0:
                 self._build_downsample_layer(i)
-            # Stage of ConvNeXt blocks
             self._build_stage(i)
 
-        # 3. Head
         if self.include_top:
             self._build_head()
 
@@ -432,14 +394,12 @@ class ConvNeXtV1(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
             if not self.built:
                 dummy_input = keras.random.normal((1,) + tuple(self.input_shape))
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            # Load weights with appropriate settings
             self.load_weights(
                 weights_path,
                 skip_mismatch=skip_mismatch,
@@ -457,54 +417,39 @@ class ConvNeXtV1(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
+    # non-existent host; `from_variant` caught the download failure, logged a
+    # warning and returned a randomly-initialized model, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`.
     @staticmethod
     def _download_weights(
             variant: str,
             dataset: str = "imagenet",
             cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
+
+        Not implemented: no public ConvNeXt V1 weights ship with
+        ``dl_techniques``. Always raises. Kept to mirror the house factory
+        recipe (see ``models/resnet/model.py``) and to give an explicit failure
+        mode instead of a silent random-init fallback.
 
         Args:
-            variant: String, model variant name.
-            dataset: String, dataset the weights were trained on.
-                Options: "imagenet", "imagenet22k".
-            cache_dir: Optional string, directory to cache downloaded weights.
-                If None, uses default Keras cache directory.
-
-        Returns:
-            String, path to the downloaded weights file.
+            variant: Variant name (unused).
+            dataset: Dataset name (unused).
+            cache_dir: Cache directory (unused).
 
         Raises:
-            ValueError: If variant or dataset is not available.
+            NotImplementedError: Always.
         """
-        if variant not in ConvNeXtV1.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(ConvNeXtV1.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in ConvNeXtV1.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(ConvNeXtV1.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = ConvNeXtV1.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading ConvNeXt-{variant} weights from {dataset}...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"convnext_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/convnext_v1"
+        raise NotImplementedError(
+            f"No pretrained ConvNeXt V1 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: ConvNeXtV1.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -527,7 +472,7 @@ class ConvNeXtV1(keras.Model):
             pretrained: Boolean or string. If True, loads pretrained weights from
                 default URL. If string, treats it as a path to local weights file.
             weights_dataset: String, dataset for pretrained weights.
-                Options: "imagenet", "imagenet22k". Only used if pretrained=True.
+                Options: "imagenet", "imagenet22k".
             weights_input_shape: Tuple, input shape used during weight pretraining.
                 Only needed if loading pretrained weights with different input_shape.
                 Defaults to (224, 224, 3) for ImageNet weights.
@@ -539,22 +484,12 @@ class ConvNeXtV1(keras.Model):
 
         Raises:
             ValueError: If variant is not recognized
+            NotImplementedError: If pretrained is True
+            NotImplementedError: If pretrained is True
 
         Example:
-            >>> # Load pretrained ImageNet model
-            >>> model = ConvNeXtV1.from_variant("tiny", pretrained=True)
-            >>>
-            >>> # Load pretrained as feature extractor for fine-tuning
-            >>> model = ConvNeXtV1.from_variant("base", pretrained=True, include_top=False)
-            >>>
-            >>> # Fine-tune on custom dataset with different input size
-            >>> model = ConvNeXtV1.from_variant(
-            ...     "small",
-            ...     num_classes=10,
-            ...     input_shape=(32, 32, 3),
-            ...     pretrained=True,
-            ...     weights_input_shape=(224, 224, 3)
-            ... )
+            >>> # Feature extractor for fine-tuning
+            >>> model = ConvNeXtV1.from_variant("base", include_top=False)
             >>>
             >>> # Load from local weights file
             >>> model = ConvNeXtV1.from_variant("large", pretrained="path/to/weights.keras")
@@ -567,46 +502,32 @@ class ConvNeXtV1(keras.Model):
 
         config = cls.MODEL_VARIANTS[variant]
 
-        logger.info(f"Creating ConvNeXt-{variant.upper()} model")
-        logger.info(f"from_variant received input_shape: {input_shape}")
+        logger.info(f"Creating ConvNeXt-{variant.upper()} model with input_shape {input_shape}")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
-                # Load from local file path
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
-            # Determine if we need to skip mismatches
-            include_top = kwargs.get("include_top", True)
-            if include_top:
-                # Check if num_classes matches pretrained weights
-                pretrained_classes = 1000 if weights_dataset == "imagenet" else 21841
-                if num_classes != pretrained_classes:
-                    skip_mismatch = True
-                    logger.info(
-                        f"num_classes ({num_classes}) differs from pretrained "
-                        f"({pretrained_classes}). Will skip classifier weights."
-                    )
+            # A head width or input resolution differing from the checkpoint's
+            # means the affected layers must be skipped rather than refused.
+            pretrained_classes = 1000 if weights_dataset == "imagenet" else 21841
+            if kwargs.get("include_top", True) and num_classes != pretrained_classes:
+                skip_mismatch = True
+                logger.info(
+                    f"num_classes ({num_classes}) differs from pretrained "
+                    f"({pretrained_classes}). Will skip classifier weights."
+                )
 
-            # Handle different input shapes
             if weights_input_shape and input_shape and weights_input_shape != input_shape:
                 logger.info(
                     f"Loading weights pretrained on {weights_input_shape} "
@@ -615,7 +536,6 @@ class ConvNeXtV1(keras.Model):
                 )
                 skip_mismatch = True
 
-        # Create model
         model = cls(
             num_classes=num_classes,
             depths=config["depths"],
@@ -624,7 +544,6 @@ class ConvNeXtV1(keras.Model):
             **kwargs
         )
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -675,7 +594,6 @@ class ConvNeXtV1(keras.Model):
         Returns:
             ConvNeXtV1 model instance
         """
-        # Deserialize regularizer if present
         if config.get("kernel_regularizer"):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
@@ -685,16 +603,14 @@ class ConvNeXtV1(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model first if it hasn't been built
         if not self.built:
             dummy_input = keras.KerasTensor(self.input_shape)
             self.build(dummy_input.shape)
 
         super().summary(**kwargs)
 
-        # Print additional model information
         total_blocks = sum(self.depths)
-        logger.info(f"ConvNeXt V1 configuration:")
+        logger.info("ConvNeXt V1 configuration:")
         logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
         logger.info(f"  - Stages: {len(self.depths)}")
         logger.info(f"  - Depths: {self.depths}")
@@ -728,7 +644,7 @@ def create_convnext_v1(
         pretrained: Boolean or string. If True, loads pretrained weights from
             default URL. If string, treats it as a path to local weights file.
         weights_dataset: String, dataset for pretrained weights.
-            Options: "imagenet", "imagenet22k". Only used if pretrained=True.
+            Options: "imagenet", "imagenet22k".
         weights_input_shape: Tuple, input shape used during weight pretraining.
             Only needed if loading pretrained weights with different input_shape.
         cache_dir: Optional string, directory to cache downloaded weights.

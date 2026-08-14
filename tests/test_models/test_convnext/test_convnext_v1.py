@@ -545,17 +545,20 @@ class TestConvNeXtV1:
         assert model.dims == [96, 192, 384, 768]
         assert model.drop_path_rate == 0.1
 
-    def test_factory_with_pretrained_warning(self, num_classes):
-        """Test factory function with pretrained warning."""
-        # This should log a warning but still create the model
-        model = create_convnext_v1(
-            variant="base",
-            num_classes=num_classes,
-            pretrained=True
-        )
+    def test_factory_with_pretrained_true_raises(self, num_classes):
+        """`pretrained=True` must RAISE, never return a random-init model.
 
-        assert isinstance(model, ConvNeXtV1)
-        assert model.depths == [3, 3, 27, 3]  # Base variant
+        Before this contract, `PRETRAINED_WEIGHTS` held placeholder URLs on a
+        non-existent host, `from_variant` caught the download failure, logged a
+        warning and returned an untrained model — so a caller asking for
+        pretrained weights silently got random ones. Do not reinstate that.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained ConvNeXt V1 weights"):
+            create_convnext_v1(
+                variant="base",
+                num_classes=num_classes,
+                pretrained=True
+            )
 
     def test_numerical_stability(self, num_classes):
         """Test model stability with extreme input values."""

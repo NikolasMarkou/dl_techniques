@@ -1,10 +1,9 @@
 """
-ConvNeXt V2 Model Implementation with Pretrained Support
-===========================================================
+ConvNeXt V2 Model Implementation
+================================
 
-A complete implementation of the ConvNeXt V2 architecture with support for
-loading pretrained weights. This version can natively handle different input
-sizes without requiring preprocessing.
+The ConvNeXt V2 architecture. Handles different input sizes natively, without
+preprocessing.
 
 Based on: "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders" (Woo et al., 2023)
 https://arxiv.org/abs/2301.00808
@@ -20,20 +19,19 @@ Model Variants:
 - ConvNeXt-Large: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims (198M params)
 - ConvNeXt-Huge: [3, 3, 27, 3] blocks, [352, 704, 1408, 2816] dims (660M params)
 
+No pretrained ConvNeXt V2 weights are distributed with `dl_techniques`;
+`pretrained=True` raises `NotImplementedError`. Pass a local path instead.
+
 Usage Examples:
 -------------
 ```python
-# Load pretrained ImageNet weights
-model = ConvNeXtV2.from_variant("tiny", pretrained=True, num_classes=1000)
+# Feature extractor
+model = ConvNeXtV2.from_variant("base", include_top=False)
 
-# Load pretrained as feature extractor
-model = ConvNeXtV2.from_variant("base", pretrained=True, include_top=False)
+# Fine-tune on a custom dataset
+model = create_convnext_v2("pico", num_classes=10, input_shape=(32, 32, 3))
 
-# Fine-tune on custom dataset
-model = create_convnext_v2("pico", num_classes=10, input_shape=(32, 32, 3),
-                           pretrained=True, weights_input_shape=(224, 224, 3))
-
-# Load from local weights file
+# Load from a local weights file
 model = ConvNeXtV2.from_variant("large", pretrained="path/to/weights.keras")
 ```
 """
@@ -100,10 +98,7 @@ class ConvNeXtV2(keras.Model):
         >>> model = ConvNeXtV2.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
         >>>
         >>> # Load pretrained ImageNet model
-        >>> model = ConvNeXtV2.from_variant("tiny", pretrained=True)
-        >>>
-        >>> # Load as feature extractor
-        >>> model = ConvNeXtV2.from_variant("base", pretrained=True, include_top=False)
+        >>> model = ConvNeXtV2.from_variant("base", include_top=False)
     """
 
     # Model variant configurations
@@ -119,42 +114,6 @@ class ConvNeXtV2(keras.Model):
         "huge": {"depths": [3, 3, 27, 3], "dims": [352, 704, 1408, 2816]},
     }
 
-    # Pretrained weights URLs (update these with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "atto": {
-            "imagenet": "https://example.com/convnext_v2_atto_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_atto_imagenet22k.keras",
-        },
-        "femto": {
-            "imagenet": "https://example.com/convnext_v2_femto_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_femto_imagenet22k.keras",
-        },
-        "pico": {
-            "imagenet": "https://example.com/convnext_v2_pico_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_pico_imagenet22k.keras",
-        },
-        "nano": {
-            "imagenet": "https://example.com/convnext_v2_nano_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_nano_imagenet22k.keras",
-        },
-        "tiny": {
-            "imagenet": "https://example.com/convnext_v2_tiny_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_tiny_imagenet22k.keras",
-        },
-        "base": {
-            "imagenet": "https://example.com/convnext_v2_base_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_base_imagenet22k.keras",
-        },
-        "large": {
-            "imagenet": "https://example.com/convnext_v2_large_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_large_imagenet22k.keras",
-        },
-        "huge": {
-            "imagenet": "https://example.com/convnext_v2_huge_imagenet.keras",
-            "imagenet22k": "https://example.com/convnext_v2_huge_imagenet22k.keras",
-        },
-    }
-
     # Architecture constants
     LAYERNORM_EPSILON = 1e-6
     STEM_INITIALIZER = "truncated_normal"
@@ -163,8 +122,8 @@ class ConvNeXtV2(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            depths: List[int] = [3, 3, 9, 3],
-            dims: List[int] = [96, 192, 384, 768],
+            depths: Optional[List[int]] = None,
+            dims: Optional[List[int]] = None,
             drop_path_rate: float = 0.0,
             stochastic_mode: str = 'depth',
             kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -182,7 +141,9 @@ class ConvNeXtV2(keras.Model):
     ):
         super().__init__(**kwargs)
 
-        # Validate configuration
+        depths = list(depths) if depths is not None else [3, 3, 9, 3]
+        dims = list(dims) if dims is not None else [96, 192, 384, 768]
+
         if len(depths) != len(dims):
             raise ValueError(
                 f"Length of depths ({len(depths)}) must equal length of dims ({len(dims)})"
@@ -202,7 +163,12 @@ class ConvNeXtV2(keras.Model):
             raise ValueError(
                 f"stochastic_mode must be 'depth' or 'gradient', got {stochastic_mode!r}"
             )
-        # Store configuration
+
+        if input_shape is None:
+            input_shape = (None, None, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+
         self.num_classes = num_classes
         self.depths = depths
         self.dims = dims
@@ -220,35 +186,20 @@ class ConvNeXtV2(keras.Model):
         self.strides = strides
         self.input_shape = input_shape
 
-        # Validate and store input shape details
-        if input_shape is None:
-            input_shape = (None, None, 3)
-        if len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
-
         self.input_height, self.input_width, self.input_channels = input_shape
         if self.input_channels not in [1, 3]:
             logger.warning(
                 f"Unusual number of channels: {self.input_channels}. ConvNeXt typically uses 3 channels")
 
-        # --- Build layers ---
-        # This follows the Keras subclassing model best practice.
-        # Layers are created in __init__ and used in call().
-
-        # 1. Stem
         self._build_stem()
 
-        # 2. Downsample layers and Stages
         self.downsample_layers_list = []
         self.stages_list = []
         for i in range(len(self.depths)):
-            # Downsample layer (except for the first stage)
             if i > 0:
                 self._build_downsample_layer(i)
-            # Stage of ConvNeXt blocks
             self._build_stage(i)
 
-        # 3. Head
         if self.include_top:
             self._build_head()
 
@@ -484,54 +435,39 @@ class ConvNeXtV2(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
+    # non-existent host; `from_variant` caught the download failure, logged a
+    # warning and returned a randomly-initialized model, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`.
     @staticmethod
     def _download_weights(
             variant: str,
             dataset: str = "imagenet",
             cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
+
+        Not implemented: no public ConvNeXt V2 weights ship with
+        ``dl_techniques``. Always raises. Kept to mirror the house factory
+        recipe (see ``models/resnet/model.py``) and to give an explicit failure
+        mode instead of a silent random-init fallback.
 
         Args:
-            variant: String, model variant name.
-            dataset: String, dataset the weights were trained on.
-                Options: "imagenet", "imagenet22k".
-            cache_dir: Optional string, directory to cache downloaded weights.
-                If None, uses default Keras cache directory.
-
-        Returns:
-            String, path to the downloaded weights file.
+            variant: Variant name (unused).
+            dataset: Dataset name (unused).
+            cache_dir: Cache directory (unused).
 
         Raises:
-            ValueError: If variant or dataset is not available.
+            NotImplementedError: Always.
         """
-        if variant not in ConvNeXtV2.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(ConvNeXtV2.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in ConvNeXtV2.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(ConvNeXtV2.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = ConvNeXtV2.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading ConvNeXt V2-{variant} weights from {dataset}...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"convnext_v2_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/convnext_v2"
+        raise NotImplementedError(
+            f"No pretrained ConvNeXt V2 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: ConvNeXtV2.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -555,7 +491,7 @@ class ConvNeXtV2(keras.Model):
             pretrained: Boolean or string. If True, loads pretrained weights from
                 default URL. If string, treats it as a path to local weights file.
             weights_dataset: String, dataset for pretrained weights.
-                Options: "imagenet", "imagenet22k". Only used if pretrained=True.
+                Options: "imagenet", "imagenet22k".
             weights_input_shape: Tuple, input shape used during weight pretraining.
                 Only needed if loading pretrained weights with different input_shape.
                 Defaults to (224, 224, 3) for ImageNet weights.
@@ -567,21 +503,21 @@ class ConvNeXtV2(keras.Model):
 
         Raises:
             ValueError: If variant is not recognized
+            NotImplementedError: If pretrained is True
 
         Example:
             >>> # Load pretrained ImageNet model
-            >>> model = ConvNeXtV2.from_variant("tiny", pretrained=True)
+            >>> model = ConvNeXtV2.from_variant("base", include_top=False)
             >>>
             >>> # Load pretrained as feature extractor for fine-tuning
-            >>> model = ConvNeXtV2.from_variant("base", pretrained=True, include_top=False)
+
             >>>
             >>> # Fine-tune on custom dataset with different input size
             >>> model = ConvNeXtV2.from_variant(
             ...     "pico",
             ...     num_classes=10,
             ...     input_shape=(32, 32, 3),
-            ...     pretrained=True,
-            ...     weights_input_shape=(224, 224, 3)
+                ...     weights_input_shape=(224, 224, 3)
             ... )
             >>>
             >>> # Load from local weights file
@@ -598,29 +534,19 @@ class ConvNeXtV2(keras.Model):
         logger.info(f"Creating ConvNeXt V2-{variant.upper()} model")
         logger.info(f"from_variant received input_shape: {input_shape}")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
-                # Load from local file path
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
             # Determine if we need to skip mismatches
             include_top = kwargs.get("include_top", True)
@@ -643,7 +569,6 @@ class ConvNeXtV2(keras.Model):
                 )
                 skip_mismatch = True
 
-        # Create model
         model = cls(
             num_classes=num_classes,
             depths=config["depths"],
@@ -652,7 +577,6 @@ class ConvNeXtV2(keras.Model):
             **kwargs
         )
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -741,7 +665,6 @@ class ConvNeXtV2(keras.Model):
         Returns:
             ConvNeXtV2 model instance
         """
-        # Deserialize regularizer if present
         if config.get("kernel_regularizer"):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
@@ -751,14 +674,12 @@ class ConvNeXtV2(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model first if it hasn't been built
         if not self.built:
             dummy_input = keras.KerasTensor(self.input_shape)
             self.build(dummy_input.shape)
 
         super().summary(**kwargs)
 
-        # Print additional model information
         total_blocks = sum(self.depths)
         logger.info(f"ConvNeXt V2 configuration:")
         logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
@@ -795,7 +716,7 @@ def create_convnext_v2(
         pretrained: Boolean or string. If True, loads pretrained weights from
             default URL. If string, treats it as a path to local weights file.
         weights_dataset: String, dataset for pretrained weights.
-            Options: "imagenet", "imagenet22k". Only used if pretrained=True.
+            Options: "imagenet", "imagenet22k".
         weights_input_shape: Tuple, input shape used during weight pretraining.
             Only needed if loading pretrained weights with different input_shape.
         cache_dir: Optional string, directory to cache downloaded weights.
@@ -806,17 +727,16 @@ def create_convnext_v2(
 
     Example:
         >>> # Create ConvNeXt V2-Tiny with pretrained ImageNet weights
-        >>> model = create_convnext_v2("tiny", pretrained=True)
+        >>> model = create_convnext_v2("tiny")
         >>>
         >>> # Create ConvNeXt V2-Base as feature extractor
-        >>> model = create_convnext_v2("base", pretrained=True, include_top=False)
+        >>> model = create_convnext_v2("base", include_top=False)
         >>>
         >>> # Fine-tune on CIFAR-10 with pretrained backbone
         >>> model = create_convnext_v2(
         ...     "pico",
         ...     num_classes=10,
         ...     input_shape=(32, 32, 3),
-        ...     pretrained=True,
         ...     weights_input_shape=(224, 224, 3)
         ... )
         >>>
