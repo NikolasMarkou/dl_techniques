@@ -1,56 +1,70 @@
 """
-FNet Model Implementation with Pretrained Support
-==================================================
+FNet, a transformer encoder whose token mixer is an unparameterized Fourier
+transform instead of self-attention.
 
-A complete and refactored implementation of the FNet (Fourier Transform-based
-Neural Network) architecture with support for loading pretrained weights. This
-version is designed as a pure foundation model, separating the core encoding
-logic from task-specific heads for maximum flexibility, especially in
-pre-training and multi-task fine-tuning scenarios.
+This model embodies the principle that most of what self-attention contributes
+to an encoder is token mixing, not the specific content-dependent weights it
+computes. Self-attention costs `O(L^2)` time and memory in sequence length and
+carries four projection matrices per layer; if the downstream layers can
+recover the needed interactions from any sufficiently rich mixing of positions,
+then the mixer itself need not be learned at all. FNet takes that idea to its
+limit and replaces the whole attention sublayer with a two-dimensional discrete
+Fourier transform:
 
-Based on: "FNet: Mixing Tokens with Fourier Transforms"
-(Lee-Thorp et al., 2021) https://arxiv.org/abs/2105.03824
+`y = Re(F_seq(F_hidden(x)))`
 
-Usage Examples:
---------------
+The transform is applied along the hidden dimension and then along the sequence
+dimension, and only the real part is kept. Discarding the imaginary component
+is not an approximation to be apologized for: it keeps the sublayer a real-valued
+map with the same shape as its input, so the residual connection and the
+feed-forward network that follow are untouched, and the imaginary part carries
+no information the subsequent layers are set up to consume.
 
-.. code-block:: python
+Two consequences follow, and they are the whole argument for the architecture.
+The mixer has zero parameters and zero learned state, so a layer's entire
+capacity sits in its feed-forward network. And because every output position is
+a fixed linear combination of every input position, one layer already achieves
+global receptive field -- the property attention is usually credited with -
+without any pairwise score matrix. The reported cost is a few points of
+accuracy against a BERT baseline in exchange for substantially faster training,
+which is a favourable trade whenever the encoder is a component rather than the
+product.
 
-    import keras
-    from dl_techniques.nlp.heads.factory import create_nlp_head
-    from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
+The consequence that matters in code is that masking works differently here,
+and the difference is easy to get wrong. There is no softmax to add a `-inf`
+bias to, so `attention_mask` is applied MULTIPLICATIVELY and only AFTER mixing:
+a padded position's own output is zeroed, but it has already contributed to the
+mixed values of every real token, because a DFT cannot be told to skip an
+index. The usual "masked tokens are invisible" guarantee therefore does not
+hold. The mask is still forwarded on the output so downstream heads can pool
+correctly.
 
-    # 1. Load pretrained FNet model
-    fnet_encoder = FNet.from_variant("base", pretrained=True)
+Everything else is a standard encoder: BERT-style embeddings, then
+`num_layers` blocks of `Fourier mix -> residual -> norm -> FFN -> residual ->
+norm` (post-normalization, with optional stochastic depth on each branch),
+emitting `{"last_hidden_state", "attention_mask"}` with no pooler and no task
+head, so a single encoder can back several heads at once. Four preset variants
+span tiny through large.
 
-    # 2. Load from local weights file
-    fnet_encoder = FNet.from_variant("large", pretrained="path/to/weights.keras")
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, making an
+unavailable checkpoint silently indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead.
 
-    # 3. Create FNet with custom configuration
-    fnet_encoder = FNet.from_variant("base", vocab_size=50000)
-
-    # 4. Combine with task-specific head
-    sentiment_config = NLPTaskConfig(
-        name="sentiment",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=3
-    )
-    sentiment_head = create_nlp_head(
-        task_config=sentiment_config,
-        input_dim=fnet_encoder.hidden_size
-    )
-
-    # 5. Build complete model
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
-        "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
-    }
-    fnet_outputs = fnet_encoder(inputs)
-    task_outputs = sentiment_head(fnet_outputs)
-    sentiment_model = keras.Model(inputs, task_outputs)
-
+References:
+    - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
+      (https://arxiv.org/abs/2105.03824)
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding.
+      (https://arxiv.org/abs/1810.04805)
+    - Tay et al., 2020. Efficient Transformers: A Survey.
+      (https://arxiv.org/abs/2009.06732)
+    - Tolstikhin et al., 2021. MLP-Mixer: An all-MLP Architecture for Vision.
+      (https://arxiv.org/abs/2105.01601)
 """
+
 
 import os
 import keras
@@ -166,10 +180,7 @@ class FNet(keras.Model):
             # Create standard FNet-base model
             model = FNet.from_variant("base")
 
-            # Load pretrained FNet-base
-            model = FNet.from_variant("base", pretrained=True)
-
-            # Load from local file
+            # Load from local file (`pretrained=True` raises NotImplementedError)
             model = FNet.from_variant("large", pretrained="path/to/weights.keras")
 
             # Use the model
@@ -208,26 +219,6 @@ class FNet(keras.Model):
             "num_layers": 4,
             "intermediate_size": 512,
             "description": "FNet-Tiny: Ultra-lightweight for mobile/edge deployment",
-        },
-    }
-
-    # Pretrained weights URLs (replace with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "base": {
-            "uncased": "https://example.com/fnet_base_uncased.keras",
-            "cased": "https://example.com/fnet_base_cased.keras",
-        },
-        "large": {
-            "uncased": "https://example.com/fnet_large_uncased.keras",
-            "cased": "https://example.com/fnet_large_cased.keras",
-        },
-        "small": {
-            "uncased": "https://example.com/fnet_small_uncased.keras",
-            "cased": "https://example.com/fnet_small_cased.keras",
-        },
-        "tiny": {
-            "uncased": "https://example.com/fnet_tiny_uncased.keras",
-            "cased": "https://example.com/fnet_tiny_cased.keras",
         },
     }
 
@@ -482,7 +473,6 @@ class FNet(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
             if not self.built:
                 dummy_input = {
                     "input_ids": keras.random.uniform(
@@ -494,7 +484,6 @@ class FNet(keras.Model):
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            # Load weights with appropriate settings
             self.load_weights(
                 weights_path, skip_mismatch=skip_mismatch, by_name=by_name
             )
@@ -510,56 +499,38 @@ class FNet(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
+    # a non-existent host; `from_variant` caught the download failure, logged a
+    # warning and continued with random initialization, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`. No public FNet weights are distributed
+    # with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
 
-        :param variant: Model variant name.
+        Not implemented: no public FNet weights ship with ``dl_techniques``.
+        Always raises, so an unavailable checkpoint is never silently
+        indistinguishable from a successful load.
+
+        :param variant: Model variant name (unused).
         :type variant: str
-        :param dataset: Dataset/version the weights were trained on.
-            Options: "uncased", "cased".
+        :param dataset: Dataset/version identifier (unused).
         :type dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-            If None, uses default Keras cache directory.
+        :param cache_dir: Cache directory (unused).
         :type cache_dir: Optional[str]
-        :return: Path to the downloaded weights file.
-        :rtype: str
-        :raises ValueError: If variant or dataset is not available.
-
-        Example:
-            .. code-block:: python
-
-                weights_path = FNet._download_weights("base", "uncased")
+        :raises NotImplementedError: Always.
         """
-        if variant not in FNet.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(FNet.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in FNet.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(FNet.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = FNet.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading FNet-{variant} ({dataset}) weights...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"fnet_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/fnet",
+        raise NotImplementedError(
+            f"No pretrained FNet weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: FNet.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -575,8 +546,10 @@ class FNet(keras.Model):
         :param variant: The name of the variant, one of "base", "large",
             "small", "tiny".
         :type variant: str
-        :param pretrained: If True, loads pretrained weights from default URL.
-            If string, treats it as a path to local weights file.
+        :param pretrained: If a string, a path to a local ``.keras`` weights
+            file. If True, raises ``NotImplementedError`` -- no public FNet
+            weights ship with ``dl_techniques``. If False (default), the model
+            is randomly initialized.
         :type pretrained: Union[bool, str]
         :param weights_dataset: Dataset/version for pretrained weights.
             Options: "uncased", "cased".
@@ -589,21 +562,21 @@ class FNet(keras.Model):
         :return: An FNet model instance configured for the specified variant.
         :rtype: FNet
         :raises ValueError: If the specified variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is True.
 
         Example:
             .. code-block:: python
 
-                # Load pretrained FNet-base
-                model = FNet.from_variant("base", pretrained=True)
-
-                # Load pretrained FNet-large (cased)
-                model = FNet.from_variant("large", pretrained=True, weights_dataset="cased")
+                # Random init
+                model = FNet.from_variant("base")
 
                 # Load from local file
                 model = FNet.from_variant("base", pretrained="path/to/weights.keras")
 
                 # Create with custom vocab size (will skip embedding weights)
-                model = FNet.from_variant("base", pretrained=True, vocab_size=50000)
+                model = FNet.from_variant(
+                    "base", pretrained="path/to/weights.keras", vocab_size=50000
+                )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -617,30 +590,18 @@ class FNet(keras.Model):
         logger.info(f"Creating FNet-{variant.upper()} model")
         logger.info(f"Configuration: {description}")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
-                # Load from local file path
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant, dataset=weights_dataset, cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant, dataset=weights_dataset, cache_dir=cache_dir
+                )
 
-            # Determine if we need to skip mismatches
-            # Check if vocab_size differs from default
             pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
             custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
 
@@ -651,7 +612,6 @@ class FNet(keras.Model):
                     f"({pretrained_vocab_size}). Will skip embedding layer weights."
                 )
 
-            # Check if other architectural parameters differ
             pretrained_config_keys = [
                 "hidden_size",
                 "num_layers",
@@ -665,13 +625,9 @@ class FNet(keras.Model):
                         f"Will skip layers with shape mismatches."
                     )
 
-        # Override defaults with kwargs
         config.update(kwargs)
-
-        # Create model
         model = cls(**config)
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -736,7 +692,7 @@ class FNet(keras.Model):
             f"  - Architecture: {self.num_layers} layers, "
             f"{self.hidden_size} hidden size"
         )
-        logger.info(f"  - Token Mixing: Fourier Transform (parameter-free)")
+        logger.info("  - Token Mixing: Fourier Transform (parameter-free)")
         logger.info(f"  - Vocabulary: {self.vocab_size} tokens")
         logger.info(f"  - Max sequence length: {self.max_position_embeddings}")
         logger.info(
@@ -814,11 +770,11 @@ def create_fnet_with_head(
                 num_classes=9
             )
 
-            # Create the full model with pretrained FNet
+            # Create the full model (pass a local .keras path to `pretrained`
+            # to warm-start; `pretrained=True` raises NotImplementedError)
             ner_model = create_fnet_with_head(
                 fnet_variant="base",
                 task_config=ner_task,
-                pretrained=True,
                 sequence_length=128, # Provide a fixed length
                 head_config_overrides={"use_task_attention": True}
             )
@@ -829,7 +785,6 @@ def create_fnet_with_head(
 
     logger.info(f"Creating FNet-{fnet_variant} with a '{task_config.name}' head.")
 
-    # 1. Create the foundational FNet model (with optional pretrained weights)
     fnet_encoder = FNet.from_variant(
         fnet_variant,
         pretrained=pretrained,
@@ -838,14 +793,12 @@ def create_fnet_with_head(
         **fnet_config_overrides,
     )
 
-    # 2. Create the task head
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=fnet_encoder.hidden_size,
         **head_config_overrides,
     )
 
-    # 3. Define inputs and build the end-to-end model
     input_shape = (sequence_length,) if sequence_length is not None else (None,)
     inputs = {
         "input_ids": keras.Input(shape=input_shape, dtype="int32", name="input_ids"),

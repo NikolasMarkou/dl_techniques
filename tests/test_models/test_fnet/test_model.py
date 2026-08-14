@@ -390,5 +390,27 @@ class TestFNetWithHeadFactory:
         assert output["logits"].shape == (2, 16, 9)
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `FNet.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained FNet weights"):
+            FNet.from_variant("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = FNet.from_variant("tiny", vocab_size=128, max_position_embeddings=32)
+        assert isinstance(model, FNet)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(FNet, "PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
