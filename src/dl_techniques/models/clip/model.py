@@ -553,6 +553,27 @@ class CLIP(keras.Model):
         # Mark as built
         super().build(input_shape)
 
+    def _ensure_built(self) -> None:
+        """Build the model's own weights if a public encoder is called first.
+
+        `class_token`, `logit_scale` and the positional embeddings are created in
+        `build`, which Keras runs on `__call__`. `encode_image` and `encode_text`
+        are public entry points that do NOT go through `__call__`, so on a fresh
+        instance they read `self.class_token` as None and fail inside
+        `ops.broadcast_to` with
+
+            ValueError: Attempt to convert a value (None) ... to a Tensor
+
+        rather than saying the model is unbuilt. Shapes come from the constructor
+        config, so no input is needed to resolve them.
+        """
+        if self.built:
+            return
+        self.build({
+            'image': (None, self.image_size, self.image_size, 3),
+            'text': (None, self.context_length),
+        })
+
     def encode_image(
         self,
         images: keras.KerasTensor,
@@ -570,6 +591,7 @@ class CLIP(keras.Model):
         Returns:
             L2-normalized image features with shape `(batch_size, embed_dim)`.
         """
+        self._ensure_built()
         batch_size = ops.shape(images)[0]
 
         # Convert to patches: (batch, num_patches, vision_width)
@@ -623,6 +645,7 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
+        self._ensure_built()
         # Causal mask. `create_mask` returns BLOCK semantics (True = mask out);
         # the attention layers expect ATTEND semantics, hence the inversion.
         # Without this the tower is bidirectional and the pooled last token is
