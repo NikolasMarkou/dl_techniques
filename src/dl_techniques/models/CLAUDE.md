@@ -288,9 +288,14 @@ no logic of its own. The package `__init__.py` exports the class and the factory
 
 - **No genuine named variants.** Do not invent a `MODEL_VARIANTS` table to satisfy the
   template. Apply axes 1, 4 and 5 only, and say why in the package `README.md`.
-- **Functional builders** (`bias_free_denoisers/`, `convunext/`, `darkir/`, `detr/`) return
+- **Functional builders** (`bias_free_denoisers/`, `convunext/`, `darkir/`) return
   `keras.Model(inputs, outputs)` and have no subclass. Keep them functional — converting
-  them would break existing checkpoints. Axes 1, 4 and 5 still apply.
+  them would break existing checkpoints, and the `bias_free_denoisers` ones are actively
+  used by `src/train/bfunet/` and `src/applications/`. Axes 1, 4 and 5 still apply.
+  (`detr/` was listed here in the first draft of this section and does **not** belong:
+  `detr/model.py:315` is `class DETR(models.Model)`. Verify with
+  `grep -n "^class .*(.*Model)" <pkg>/*.py` before classifying a package — the census
+  that produced the original list was grep-based and wrong about several packages.)
 - **Multi-model families and nested packages** (`SAM/`, `time_series/`, `dino/`,
   `ideogram4/`, `sd3_mmdit/`) apply the shape per *inner architecture*, not per directory.
 

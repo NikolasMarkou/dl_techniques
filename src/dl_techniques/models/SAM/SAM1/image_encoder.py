@@ -1,17 +1,10 @@
 """
 SAM 1 Image Encoder: the ViT backbone and its stride-1 channel neck.
-====================================================================
 
 :class:`ImageEncoderViT` turns an image into the single dense embedding every
 other SAM 1 component consumes. It is a plain (non-hierarchical) ViT whose
 attention is windowed everywhere except at a named set of global block indices,
 followed by a two-convolution neck that changes the channel count only.
-
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
-- Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
-- Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
 
 Key Features:
 ------------
@@ -65,6 +58,11 @@ Measured caveats:
 - The relative-position path is pinned by a spy in
   ``tests/test_models/test_sam/test_correctness.py`` (call count non-zero with
   the flag on, exactly zero with it off) rather than assumed to be reached.
+
+References:
+    Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+    Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
+    Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
 """
 
 import keras
