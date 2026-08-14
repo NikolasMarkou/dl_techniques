@@ -122,7 +122,8 @@ Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsu
     from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork
     ```
   - Submodule imports keep working in both cases (e.g. `from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention`); for a subpackage with an `__all__`, prefer the package-level import.
-- Docstrings in `layers/` use **Sphinx/reST** (`:param:` / `:type:` / `:raises:`), not Google `Args:` — this differs from `models/` and most other top-level packages. In `attention/` it is mandatory; `attention/channel_attention.py` is the reference exemplar.
+- Docstrings in `layers/` use **Sphinx/reST** (`:param:` / `:type:` / `:raises:`), not Google `Args:` — in the large majority of modules; the count, its date and the grep that re-derives it are printed once, in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style. In `attention/` it is mandatory; `attention/channel_attention.py` is the reference exemplar.
+  - This does **not** put `layers/` in opposition to a Google-style `models/`: `models/` has no package-wide style at all — it is measurably mixed, and its normative exemplar for new packages (`models/bert/bert.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs from `models/`", rested on a blanket claim that measurement refuted. Where `layers/` genuinely differs is from the Google-majority `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/` and `visualization/`.
 - Subpackages with `factory.py` support config-driven layer construction
 - All layers must implement `get_config()` for Keras serialization
 - Layers follow Keras 3 custom layer patterns: `__init__`, `build`, `call`, `get_config`

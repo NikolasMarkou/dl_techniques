@@ -401,7 +401,7 @@ We welcome contributions from the research community. Whether you are implementi
 ### Development Standards
 -   **Code Quality**: Follow PEP 8, use type hints, and rely on centralized logging via `dl_techniques.utils.logger` (no `print`).
 -   **Testing**: Develop in the `.venv` environment and write comprehensive tests using `pytest`, scoped to the modules you change (`make test` runs the full ~1.5h suite). Set `MPLBACKEND=Agg` when running training scripts on headless machines.
--   **Documentation**: Provide Google-style docstrings and update relevant guides in the `research/` directory.
+-   **Documentation**: Document every public symbol, and update relevant guides in the `research/` directory. Docstring style is **not** uniform across this repo — `layers/` is predominantly Sphinx/reST (`:param:`), `models/` is measurably mixed with the Sphinx exemplar `models/bert/bert.py` as the model for new packages, and `losses/`/`metrics/`/`utils/`/`optimization/`/`analyzer/`/`visualization/` are Google-`Args:`-majority. Match the package you are editing and never convert a file wholesale; the measured counts and the greps that re-derive them are in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style.
 -   **Validation**: Include benchmarks or comparisons against reference implementations where applicable.
 
 ### Contribution Types

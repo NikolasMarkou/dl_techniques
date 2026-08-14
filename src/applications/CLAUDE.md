@@ -41,8 +41,16 @@ surviving reference pattern.
   frame never kills the track, and resize the output back to the input frame size
   so the video track resolution stays stable.
 - Standard repo rules still apply: centralized `dl_techniques.utils.logger` (no
-  `print`), type hints, Google-style docstrings, `MPLBACKEND=Agg` guard for any
-  matplotlib use.
+  `print`), type hints, `MPLBACKEND=Agg` guard for any matplotlib use.
+- Docstrings here are Google-style (`Args:`) — measured 2026-08-14: 7 of the 9
+  `.py` files under `src/applications/` carry an `Args:` block and 0 carry
+  `:param `, re-derivable with
+  `grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/applications --include=*.py | wc -l`
+  and `grep -rl ":param " src/applications --include=*.py | wc -l` over
+  `find src/applications -name '*.py' | wc -l`. This is a fact about
+  `src/applications/` only — it is **not** a repo-wide rule. `layers/` is
+  predominantly Sphinx/reST and `models/` is measurably mixed; see
+  `src/dl_techniques/CLAUDE.md` § Code Style for those counts and their greps.
 
 ## Dependencies
 
