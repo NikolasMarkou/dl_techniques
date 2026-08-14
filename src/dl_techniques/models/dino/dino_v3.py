@@ -1,79 +1,88 @@
 """
-DINOv3 Model Implementation
+Pre-norm vision transformer in the DINO family, with optional rotary position
+embeddings.
 
-A pre-normalization Vision Transformer backbone in the DINO family, with
-**optional rotary position embeddings (RoPE)**. It shares the coding style of the
-sibling `dino_v1.py` / `dino_v2.py` implementations and re-uses shared layers
-from the `dl_techniques` library rather than re-implementing them.
+The DINOv3 paper's central problem is that self-distillation, run long enough and
+large enough, degrades *dense* features even while global ones keep improving:
+patch representations drift toward a few high-magnitude directions, and
+segmentation or depth probes get worse as linear-probe classification gets better.
+The paper's answer is Gram anchoring — an extra loss pulling the student's
+patch-feature Gram matrix back toward that of an earlier, frozen copy of itself —
+plus a positional scheme that does not bake in one resolution.
 
-What this file DOES implement
------------------------------
-- A standard pre-norm ViT trunk (patch embedding -> [CLS] token -> encoder
-  stack -> final norm -> optional linear head). Pre-norm is what makes DINO-style
-  self-distillation stable.
-- ``positional_embedding_type="rope"``: **1-D rotary position embeddings applied
-  to Q and K inside the attention operator**, routed through the registered
-  ``group_query`` attention type with ``num_kv_heads == num_heads`` (which makes
-  it plain multi-head attention with RoPE). When RoPE is selected the learned
-  absolute positional-embedding table is **omitted entirely**, not stacked on top.
-- ``positional_embedding_type="learned"`` (the default): the classic learned
-  absolute positional-embedding table, i.e. the DINOv1/ViT behaviour.
-- The larger-scale variant table (tiny -> giant).
+That second half is what this file implements. `positional_embedding_type='rope'`
+replaces the learned absolute table with rotary embeddings applied to Q and K
+inside the attention operator. Rotating the queries and keys by an angle
+proportional to position makes the resulting score depend on the *difference* of
+two positions rather than on their absolute values, so the model generalizes
+across sequence lengths that a fixed learned table cannot represent at all. The
+first half is not implemented: **Gram anchoring is an explicit non-goal here**, and
+none of its machinery — a third frozen Gram teacher, a Gram-matrix loss term —
+exists in this repository.
 
-What this file does NOT implement
----------------------------------
-These DINOv3 mechanisms are **absent**. They are named here so the file does not
-claim, by its name, capabilities it lacks:
+RoPE is reached through the registered `group_query` attention with
+`num_kv_heads == num_heads`, which reduces grouped-query attention to ordinary
+multi-head attention that happens to rotate Q and K. Two alternatives were
+rejected for concrete reasons. Applying `RotaryPositionEmbedding` to the token
+stream before the projections destroys the relative-position property the
+mechanism is defined by, because the rotation must act on Q and K *after* they are
+projected. Passing rope arguments to the `multi_head` type does not work either
+and does not complain: the attention factory silently drops unknown keys, so such
+a model builds, forward-passes and round-trips with RoPE entirely absent.
 
-- **Gram anchoring — NOT IMPLEMENTED.** DINOv3's dense-feature regularizer needs
-  a third, frozen "Gram teacher" network and an extra loss term on patch-feature
-  Gram matrices. It is an explicit non-goal of this implementation; none of the
-  machinery for it exists here.
-- **Sinkhorn-Knopp centering — NOT IMPLEMENTED.** ``dl_techniques.losses.dino_loss``
-  provides EMA centering only.
-- **2-D axial RoPE with coordinate jittering — NOT IMPLEMENTED.** The RoPE here is
-  1-D over the flattened token sequence (position = token index). DINOv3 uses a
-  2-D axial formulation over patch (row, column) coordinates, with random
-  coordinate jittering during training. The rotation implemented here is real and
-  live, but it is not the paper's.
-- **Register tokens — NOT IMPLEMENTED here.** (``dino_v2.DINOv2VisionTransformer``
-  has ``num_register_tokens``; this model does not.)
-- **High-resolution adaptation, and distillation from a large pretrained
-  teacher — NOT IMPLEMENTED.** No pretrained weights are shipped; ``pretrained=True``
-  on the factory only logs a warning.
+Under `'rope'` the learned absolute table is omitted, never stacked on top of the
+rotation. Two independent position signals would be redundant, and the learned
+table alone breaks permutation equivariance, which would make it impossible to
+tell a live rotation from a dead one. A consequence worth knowing: `rope_percentage=0.0`
+is legal and leaves the model with *no* positional information whatsoever, a
+permutation-equivariant bag of patches. It exists as the control arm of the
+RoPE-liveness test, not as a training configuration. A checkpoint is not portable
+between the two positional modes — they instantiate different attention classes.
 
-Model Variants
---------------
-- DinoV3-Tiny: 192 dim, 12 layers, 3 heads
-- DinoV3-Small: 384 dim, 12 layers, 6 heads
-- DinoV3-Base: 768 dim, 12 layers, 12 heads
-- DinoV3-Large: 1024 dim, 24 layers, 16 heads
-- DinoV3-Giant: 1536 dim, 40 layers, 24 heads
+Everything else is a conventional pre-norm ViT: patch embedding, a learnable
+[CLS] token, `depth` `TransformerLayer` encoder blocks with a linearly increasing
+stochastic-depth rate, a final normalization, and the [CLS] row as the feature
+vector, optionally followed by a classifier. Pre-norm is not incidental — it is
+what keeps DINO-style self-distillation stable at depth.
 
-Usage Examples
---------------
-```python
-import keras
-from dl_techniques.models.dino.dino_v3 import create_dino_v3
-from dl_techniques.models.dino.dino_v1 import DINOHead
+Several other DINOv3 mechanisms are absent, named here so the file does not claim
+by its title what it does not do. The RoPE here is **1-D over the flattened token
+sequence** (position = token index); the paper uses a 2-D axial formulation over
+patch (row, column) coordinates with random coordinate jittering during training.
+The rotation implemented here is real and live, but it is not the paper's.
+**Sinkhorn-Knopp centering is not implemented** — `dl_techniques.losses.dino_loss`
+offers EMA centering only. **Register tokens are not implemented in this model**;
+`dino_v2.DINOv2VisionTransformer` has them. **High-resolution adaptation and
+distillation from a large pretrained teacher are not implemented**, and no
+pretrained weights are shipped — `pretrained=True` only logs a warning.
 
-# DinoV3-Base for ImageNet classification (224x224 input), learned pos-embeddings
-model = create_dino_v3("base", num_classes=1000)
+The variant table is the only place in the DINO trio where `patch_size=None`
+resolves to something other than a constant: `giant` carries `(14, 14)` and
+`stochastic_depth_rate=0.4` while every other variant carries `(16, 16)`, so
+`create_dino_v3('giant')` gives a /14 model and passing `patch_size=16`
+explicitly gives a /16 one. Giving that parameter a concrete default would
+silently break the first of those.
 
-# DinoV3-Small for CIFAR-10 (32x32 input), with RoPE instead of a learned table
-model = create_dino_v3(
-    "small",
-    image_size=32,               # int or (height, width)
-    patch_size=(4, 4),           # smaller patches for smaller images
-    num_classes=10,
-    positional_embedding_type="rope",
-)
+`get_last_selfattention` raises `NotImplementedError` rather than returning a
+zero tensor a caller cannot distinguish from a broken model. The gap differs by
+path and both are real: under `'learned'` the multi-head attention classes accept
+no `return_attention_scores` at all, while under `'rope'` `GroupedQueryAttention`
+does return a correct probability map but `TransformerLayer.call` never forwards
+the flag.
 
-# Feature-extraction backbone (no classification head) + a DINO projection head
-backbone = create_dino_v3("base", include_top=False)
-head = DINOHead(in_dim=768, out_dim=65536)
-ssl_model = keras.Model(inputs=backbone.input, outputs=head(backbone.output))
-```
+References:
+    - Siméoni et al., 2025. DINOv3. (arXiv preprint; Gram anchoring and 2-D axial
+      RoPE, neither implemented here)
+    - Caron et al., 2021. Emerging Properties in Self-Supervised Vision
+      Transformers. (https://arxiv.org/abs/2104.14294)
+    - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
+      Supervision. (https://arxiv.org/abs/2304.07193)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

@@ -1,15 +1,85 @@
 """
-Masked Autoencoder (MAE) Framework
-===================================
+Masked autoencoder wrapper turning a convolutional feature extractor into a
+self-supervised reconstruction model.
 
-A flexible framework for training masked autoencoders with any encoder architecture.
-Supports patch-based masking and works seamlessly with ConvNeXt V2, ViT, and ResNet.
+Masked image modelling works because of an asymmetry between language and vision.
+Removing one word from a sentence leaves a puzzle with few plausible answers;
+removing one patch of an image leaves a puzzle a bilinear interpolation solves.
+The signal only becomes semantic when the mask ratio is high enough that local
+extrapolation fails — around 75% — at which point filling the holes requires
+knowing what the object is, not merely what its neighbours look like. The loss is
+therefore computed on masked patches only: scoring the visible ones would reward
+copying the input, which the model can do perfectly and learns nothing from.
 
-Key Features:
-- Asymmetric Encoder-Decoder architecture
-- Efficient masked training (loss computed only on masked patches)
-- Mixed Precision compatible (explicit casting in loss)
-- **Deep Supervision Support**: Handles encoders returning lists of outputs.
+`mask_ratio` (default 0.75) and `patch_size` set that difficulty; `mask_value`
+chooses what a removed patch is replaced with — a single learnable token shared
+across all masked positions (the default), zeros, fresh Gaussian noise, or a
+constant.
+
+**How this differs from the MAE paper, and it matters.** In the paper the
+asymmetry is that the *encoder never sees the masked patches at all*: masked
+tokens are dropped from the sequence, the encoder runs on roughly a quarter of
+the tokens, and a small decoder re-inserts mask tokens to reconstruct. That is
+where MAE's training-speed advantage comes from. Here masking happens in **pixel
+space** — `PatchMasking` substitutes the mask value into the image and returns a
+full-size image — so the encoder processes every pixel at full cost. The
+asymmetry that remains is only the lightweight `ConvDecoder`, which is enough to
+push representational work into the encoder but yields none of the compute
+saving. This design is what makes the wrapper encoder-agnostic: any model that
+maps an image to a feature map can be dropped in without teaching it to consume a
+sparse token set.
+
+The consequence is a hard shape contract that has no other statement in the code.
+The encoder must return a **4-D** `(B, H', W', C)` feature map — a constructor
+`ValueError` fires otherwise, so a standard token-sequence ViT does not fit — and
+`ConvDecoder` upsamples exactly 2x per entry in `decoder_dims`. The encoder's
+total downsampling factor must therefore equal `2 ** len(decoder_dims)`, which is
+`2 ** decoder_depth` (16x by default) when `decoder_dims` is auto-configured.
+Mismatch surfaces as a broadcast failure in the loss, not as a clear error.
+
+Two behaviours are deliberate and look like bugs from the outside. `PatchMasking`
+generates a mask only when `training` is true, returning an all-zero mask
+otherwise; combined with a loss denominator of `sum(mask) + 1e-6`, an inference-mode
+loss would divide by nearly zero. `test_step` therefore calls the model with
+`training=True` on purpose, so validation measures reconstruction of genuinely
+masked patches rather than an identity map. Separately, `non_mask_value` raises
+the per-pixel weight floor on *unmasked* patches above zero while the denominator
+still counts masked pixels only, so it is a knob for leaking a little
+visible-region reconstruction into the loss, not a normalized reweighting.
+
+`norm_pix_loss` normalizes each target patch to zero mean and unit variance
+before the MSE, following the paper, and leaves the reconstruction unnormalized —
+the model is asked to predict a locally standardized patch. Its patch reshaping
+reads `H, W, C` from the configured `input_shape`, so it requires inputs at
+exactly that resolution. Mixed precision is handled by casting explicitly at two
+points: the masked image is cast to the compute dtype before the encoder (the
+masking ops return float32 and would otherwise propagate a dtype mismatch), and
+target, reconstruction and mask are all cast to float32 inside the loss.
+
+This model overrides `train_step` and `test_step` with a hand-written
+`tf.GradientTape` loop, which is a deviation from this repository's standing
+preference for stock `fit()`. The cost is that compiled losses, compiled metrics
+and `sample_weight` are bypassed — the only reported metrics are `loss` and the
+tracked `reconstruction_loss`. Note also that `train_step`'s import of
+`tensorflow` makes this path TensorFlow-specific even though the rest of the
+module is written against `keras.ops`.
+
+Deep supervision is supported only in the shape probe: when an encoder reports a
+list of output shapes the constructor takes the first as the main feature map. The
+forward path passes the encoder's output to `ConvDecoder` unchanged, and
+`ConvDecoder` expects a single tensor, so an encoder that actually *returns* a
+list of tensors does not work end to end.
+
+References:
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
+    - Xie et al., 2021. SimMIM: A Simple Framework for Masked Image Modeling
+      (masking in the input rather than by token dropping).
+      (https://arxiv.org/abs/2111.09886)
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. (https://arxiv.org/abs/2301.00808)
+    - Bao et al., 2021. BEiT: BERT Pre-Training of Image Transformers.
+      (https://arxiv.org/abs/2106.08254)
 """
 
 import keras

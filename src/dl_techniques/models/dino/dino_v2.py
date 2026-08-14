@@ -1,46 +1,85 @@
 """
-DINOv2 Vision Transformer Implementation - Modern Keras 3 Patterns
+DINOv2 vision transformer with register tokens, LayerScale, and an iBOT mask input.
 
-This module provides a complete implementation of the DINOv2 (DINO version 2) Vision Transformer
-architecture using modern Keras 3 best practices following the refined guide patterns.
+DINOv2 keeps DINOv1's label-free self-distillation and adds what is needed to make
+it hold up at scale on curated data. Three changes matter. The image-level DINO
+objective is joined by a patch-level one taken from iBOT: some patch embeddings
+are replaced by a learnable mask token before the trunk runs, and the student must
+predict the teacher's output for exactly those positions, which forces the
+representation to carry local detail the [CLS] objective alone never asks for. A
+KoLeo regularizer spreads features within a batch by penalizing nearest-neighbour
+crowding, which stops the encoder from packing everything into a narrow cone.
+Register tokens — extra learnable tokens that carry no positional signal and are
+discarded at the output — give the network somewhere to park the global,
+image-wide summaries that would otherwise be smuggled into a handful of arbitrary
+patch tokens and show up as high-norm artifacts in attention maps.
 
-Key Features:
-- Configurable ViT backbone with multiple size variants (Tiny, Small, Base, Large, Giant)
-- Support for register tokens for improved attention quality
-- LearnableMultiplier for layer scaling (LayerScale replacement)
-- Stochastic depth regularization with proper linear decay
-- Flexible positional embedding with interpolation support
-- Memory-efficient attention mechanisms
-- Pre-normalization architecture for better gradient flow
-- Modern Keras 3 patterns with explicit sub-layer building
+**What lives where.** This file is architecture only. The DINO, iBOT and KoLeo
+losses are `DINOLoss`, `iBOTPatchLoss` and `KoLeoLoss` in
+`dl_techniques.losses.dino_loss`; the teacher EMA is in
+`dl_techniques.models.dino.training`. Sinkhorn-Knopp centering is **not
+implemented anywhere in this repository** — `DINOLoss` offers EMA centering only.
+Variable-resolution positional-embedding interpolation is **not implemented
+either**: `interpolate_antialias` and `interpolate_offset` are accepted, stored
+and serialized, but nothing reads them, and the positional table is sized for one
+resolution.
 
-The implementation is designed to be compatible with both self-supervised pre-training
-(DINO, iBOT, KoLeo losses) and downstream supervised fine-tuning tasks.
+The backbone's input contract is a 2-element list `[images, masks]`, where `masks`
+is a boolean `(batch, num_patches)` tensor marking the iBOT positions. The mask
+input is mandatory even at inference; pass an all-`False` mask to disable masking.
+Its output is **always** the same 5-key dictionary — `x_norm_clstoken`,
+`x_norm_regtokens`, `x_norm_patchtokens`, `x_prenorm`, `masks` — regardless of
+`training`. That is a deliberate choice: an earlier version returned the dict when
+training and a bare tensor otherwise, which is a mismatched nested structure that
+`keras.ops.cond` rejects outright and an output whose *structure* depends on a
+runtime flag. Each key is produced by its own single-tensor `Lambda`, because one
+`Lambda` returning a Python dict cannot always be shape-inferred. The echoed
+`masks` output is routed through an identity op rather than passed straight
+through, otherwise the same tensor is both an input and an output of the
+functional graph and nesting the backbone inside `DINOv2` raises a cycle error.
 
-Architecture Overview:
-```
-Input Image (B, H, W, C)
-     ↓
-Patch Embedding → (B, N, D)
-     ↓
-[CLS] + [REG] + Patches + PosEmb → (B, 1+R+N, D)
-     ↓
-DINOv2Block_1 → ... → DINOv2Block_L
-     ↓
-Layer Normalization
-     ↓
-CLS Token Features (B, D)
-```
+Token order inside the trunk is patch embedding, mask-token substitution, [CLS]
+prepend, positional embedding, then register-token insertion. The positional table
+is sized `num_patches + 1` and is applied *before* the registers are concatenated,
+so registers receive no positional signal at all. This looks like an off-by-R bug
+and is not: position-free is what a register is. Enlarging the table to `1 + R + N`
+or moving the insertion earlier would give registers a spatial identity they are
+defined not to have.
 
-Where:
-- B: Batch size
-- H, W: Image height and width
-- C: Input channels (typically 3)
-- N: Number of patches = (H/P) * (W/P)
-- P: Patch size (typically 14)
-- D: Embedding dimension
-- R: Number of register tokens (0 or 4)
-- L: Number of transformer layers (depth)
+Each block is pre-norm with LayerScale on both branches, implemented with
+`LearnableMultiplier` in `CHANNEL` mode. Note a deviation from the reference:
+these multipliers are created with `constraint='non_neg'`, so a LayerScale gamma
+that wants to be negative is clamped to zero; the paper's LayerScale is
+unconstrained. One `StochasticDepth` instance is shared by the attention and FFN
+branches rather than two. That is equivalence, not sloppiness — the layer draws a
+fresh mask per call and holds no seed state or variables, so the two branches get
+independent masks, and a second instance would only add a serialized sub-layer.
+
+The factories treat `None` as "defer to the variant" and any explicit value as
+final. This distinction is load-bearing for `ffn_type` and `num_register_tokens`:
+when `'mlp'` was both the default and the promotion trigger for `giant`'s SwiGLU,
+a caller who explicitly asked `giant` for MLP was silently upgraded with no way to
+opt out. `patch_size=None` resolves to 14 for every v2 variant, since
+`MODEL_VARIANTS` carries no per-variant patch size. `pretrained=True` only logs a
+warning; no DINOv2 weights are shipped with this repository.
+
+References:
+    - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
+      Supervision. (https://arxiv.org/abs/2304.07193)
+    - Caron et al., 2021. Emerging Properties in Self-Supervised Vision
+      Transformers. (https://arxiv.org/abs/2104.14294)
+    - Zhou et al., 2021. iBOT: Image BERT Pre-Training with Online Tokenizer.
+      (https://arxiv.org/abs/2111.07832)
+    - Darcet et al., 2023. Vision Transformers Need Registers.
+      (https://arxiv.org/abs/2309.16588)
+    - Sablayrolles et al., 2018. Spreading Vectors for Similarity Search (the
+      KoLeo regularizer). (https://arxiv.org/abs/1806.03198)
+    - Touvron et al., 2021. Going Deeper with Image Transformers (LayerScale).
+      (https://arxiv.org/abs/2103.17239)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
+    - Shazeer, 2020. GLU Variants Improve Transformer (the giant variant's SwiGLU
+      FFN). (https://arxiv.org/abs/2002.05202)
 """
 
 import keras

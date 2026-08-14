@@ -1,15 +1,36 @@
-"""FastViT (MCi) image backbone.
+"""FastViT (MCi) image tower assembled from the ``layers/fastvit/`` primitives.
 
-This module assembles the ``layers/fastvit/`` primitives (enumerated once and
-only once, in that package's ``__all__``) into a complete image encoder — a
-faithful channels-last transcription of timm's ``FastVit`` class restricted to
-the five ``MCi`` configurations.
+FastViT is built around a tension every efficient vision backbone has to
+resolve: self-attention mixes tokens globally but costs quadratically in their
+number, so it is unaffordable exactly where a convolutional network spends most
+of its time — the early, high-resolution stages. FastViT keeps attention only in
+the deepest one or two stages, where the feature map is small, and mixes tokens
+everywhere else with RepMixer, a depthwise convolution written as
+``y = x + gamma * (Mixer(x) - Norm(x))``. The subtraction is what makes that
+expression collapse: ``Norm`` is a deliberately degenerate block whose only
+surviving branch is an identity BatchNormalization, so the whole residual is
+affine at inference and fuses into a single depthwise convolution.
 
-The tower is a standalone :class:`keras.Model` and is usable on its own; it is
-*also* the vision branch of MobileCLIP / MobileCLIP2, which lives at
-``models/mobile_clip/mobile_clip_v2.py`` and imports
-:class:`FastVitImageEncoder` from here. The one place that dual role shows
-through is the head ``Dense`` — see the next paragraph.
+That fusability is the architecture's second idea, structural
+reparameterization. Wherever the reference could have used one convolution it
+uses a sum of parallel branches — a ``k x k`` conv-BN beside a ``1x1`` scale
+branch beside an identity, or a ``7x7`` beside a ``3x3`` — which is a strictly
+better-conditioned thing to optimize, and which collapses back into one
+convolution once the BatchNormalizations are folded, at zero inference cost.
+
+**This port implements the train-time multi-branch form only.** There is no
+``reparameterize()`` / branch-fusion path anywhere under ``layers/fastvit/`` or
+``layers/mobile_one_block.py``, so a model built here always runs every branch,
+and the *latency* half of the paper's claim is not realized. That matches how
+the MobileCLIP2 reference weights are shipped and evaluated (always with
+``inference_mode=False``); it does mean this tower is a faithful *functional*
+transcription, not a fast one.
+
+The tower is a standalone :class:`keras.Model` and is usable on its own. It is
+also the vision branch of MobileCLIP2 specifically —
+``models/mobile_clip/mobile_clip_v2.py`` imports :class:`FastVitImageEncoder`
+from here, while the deliberately non-faithful ``mobile_clip_v1.py`` does not.
+The one place that dual role shows through is the head ``Dense``.
 
 **Architecture**::
 
@@ -31,15 +52,16 @@ through is the head ``Dense`` — see the next paragraph.
 
 **The head ``Dense`` is the CLIP image projection, not a classifier.** It is
 named ``projection_dim`` rather than ``num_classes`` for exactly this reason.
-All four
-MobileCLIP / MobileCLIP2 fastvit configs set ``"timm_proj": null`` with
+All four MobileCLIP / MobileCLIP2 fastvit configs set ``"timm_proj": null`` with
 ``"timm_pool": "avg"``. In open_clip's ``TimmModel`` a non-attention pool asserts
 that the trunk itself does the projecting and instantiates the trunk with
 ``num_classes=embed_dim``; the timm ``ClassifierHead``'s linear layer therefore
 *is* the image-side projection into the joint embedding space. There is no
 separate projection layer to add, and adding one would be a second, unfaithful
 projection. ``timm_drop`` is ``0.0`` in all four configs, so the head dropout is
-inert at the reference settings.
+inert at the reference settings. Passing ``projection_dim=None`` skips it and
+returns the pooled ``embed_dims[-1] * cls_ratio`` features, which is useful for
+backbone reuse and wrong for CLIP.
 
 **The stochastic-depth schedule is GLOBAL, then sliced.** The reference computes
 one linear ramp across ``sum(layers)`` blocks — every block of every stage — and
@@ -49,13 +71,39 @@ model must start where stage 0 ended, not at zero) and produces an
 identically-shaped, identically-parameterized, subtly-wrong model. See
 :func:`_stagewise_drop_path_rates`.
 
+Two more asymmetries in the reference are reproduced rather than tidied away.
+Squeeze-and-Excitation appears at two different reduction ratios in the same
+network — ``1/16`` inside ``final_conv`` (timm's ``SqueezeExcite`` default, never
+overridden there) against ``0.25`` at ``ReparamLargeKernelConv``'s call site.
+And the stages are stored as a FLAT list of :class:`FastVitStage`: a nested
+``List[List[Layer]]`` restores fresh kernels on a ``.keras`` round trip while the
+layer count, the variable paths and the parameter total all still match, so the
+damage is invisible to every check except a value comparison.
+
+The variant table's provenance is uneven and the comment above it says so in
+detail — ``mci3``/``mci4`` are cross-checked against a committed reference file
+by a real oracle, while ``mci0``/``mci1``/``mci2`` come from a timm fetch with no
+local oracle, since timm is not installed here. ``get_config`` therefore stores
+the resolved architecture explicitly rather than only the variant name, so a
+checkpoint keeps describing the network it was trained with even if a table row
+is later corrected.
+
 References:
-    - Vasu et al., 2023. "FastViT: A Fast Hybrid Vision Transformer using
-      Structural Reparameterization." ICCV. arXiv:2303.14189.
-    - Vasu et al., 2024. "MobileCLIP: Fast Image-Text Models through Multi-Modal
-      Reinforced Training." CVPR. arXiv:2311.17049.
-    - Faghri et al., 2025. "MobileCLIP2: Improving Multi-Modal Reinforced
-      Training." arXiv:2508.20691.
+    - Vasu et al., 2023. FastViT: A Fast Hybrid Vision Transformer using
+      Structural Reparameterization. ICCV.
+      (https://arxiv.org/abs/2303.14189)
+    - Vasu et al., 2022. MobileOne: An Improved One millisecond Mobile Backbone.
+      (https://arxiv.org/abs/2206.04040)
+    - Ding et al., 2021. RepVGG: Making VGG-style ConvNets Great Again.
+      (https://arxiv.org/abs/2101.03697)
+    - Hu et al., 2017. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+    - Vasu et al., 2024. MobileCLIP: Fast Image-Text Models through Multi-Modal
+      Reinforced Training. CVPR. (https://arxiv.org/abs/2311.17049)
+    - Faghri et al., 2025. MobileCLIP2: Improving Multi-Modal Reinforced
+      Training. (https://arxiv.org/abs/2508.20691)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras
