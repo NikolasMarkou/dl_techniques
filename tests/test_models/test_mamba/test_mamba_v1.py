@@ -130,26 +130,41 @@ class TestMambaModelVariants:
         assert model.num_layers == 24
         assert model.vocab_size == 50257
 
+    # These three pinned the pre-2026-08-14 MODEL_VARIANTS table, which did not
+    # match the paper: 370m carried 24 layers instead of 48, 790m d_model 1024
+    # instead of 1536, and 1.4b d_model 1536 instead of 2048. The tests asserted
+    # those numbers, so they pinned the defect rather than the specification.
+    # They now assert Gu and Dao 2023's Table 9.
     def test_mamba_370m_variant(self):
         """Test 370M parameter variant."""
         model = Mamba.from_variant("370m", vocab_size=50257)
         assert model.d_model == 1024
-        assert model.num_layers == 24
+        assert model.num_layers == 48
         assert model.vocab_size == 50257
 
     def test_mamba_790m_variant(self):
         """Test 790M parameter variant."""
         model = Mamba.from_variant("790m", vocab_size=50257)
-        assert model.d_model == 1024
+        assert model.d_model == 1536
         assert model.num_layers == 48
         assert model.vocab_size == 50257
 
     def test_mamba_1_4b_variant(self):
         """Test 1.4B parameter variant."""
         model = Mamba.from_variant("1.4b", vocab_size=50257)
-        assert model.d_model == 1536
+        assert model.d_model == 2048
         assert model.num_layers == 48
         assert model.vocab_size == 50257
+
+    def test_pretrained_true_raises(self):
+        """`pretrained=True` must fail loudly, not return a random model.
+
+        It used to log a warning and hand back randomly initialized weights,
+        which is exactly the silent-untrained-model failure the house contract
+        (models/CLAUDE.md, Axis 3) forbids.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained weights"):
+            Mamba.from_variant("base", vocab_size=1000, pretrained=True)
 
     def test_mamba_2_8b_variant(self):
         """Test 2.8B parameter variant."""
@@ -993,22 +1008,23 @@ class TestMambaComparison:
     """Comparison tests between different Mamba configurations."""
 
     def test_variant_parameter_counts(self):
-        """Test that different variants have expected parameter differences."""
-        vocab_size = 50257
+        """Larger named variants must be larger models.
 
-        variants = ["130m", "370m", "790m"]
-        param_counts = []
-
-        for variant in variants:
-            model = Mamba.from_variant(variant, vocab_size=vocab_size)
-            input_ids = keras.random.randint((1, 16), minval=0, maxval=vocab_size, dtype="int32")
-            _ = model({"input_ids": input_ids}, training=False)
-
-            param_count = model.count_params()
-            param_counts.append(param_count)
-
-        # Each larger variant should have more parameters
-        assert param_counts[0] < param_counts[1] < param_counts[2]
+        This used to materialize 130m/370m/790m and forward a batch through
+        each. Once MODEL_VARIANTS was corrected to the paper's sizes, 790m is a
+        real 790M-parameter model and the build exhausted a 12GB card
+        (RESOURCE_EXHAUSTED inside the depthwise Conv1D). The claim under test
+        is about the *table*, so it is checked against the table; the real
+        build-and-count claim is covered at toy sizes by
+        `test_deeper_model_has_more_params` and `test_wider_model_has_more_params`.
+        """
+        sizes = [
+            (v, Mamba.MODEL_VARIANTS[v]["d_model"], Mamba.MODEL_VARIANTS[v]["num_layers"])
+            for v in ["130m", "370m", "790m", "1.4b", "2.8b"]
+        ]
+        # Parameter count grows as d_model^2 * num_layers for the block stack.
+        scores = [d * d * n for _, d, n in sizes]
+        assert scores == sorted(scores) and len(set(scores)) == len(scores), sizes
 
     def test_deeper_model_has_more_params(self):
         """Test that deeper models have more parameters."""

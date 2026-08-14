@@ -71,13 +71,17 @@ component that can act on it (masked pooling). Padded positions still update the
 state, so a batch's results depend on its padding; right-padding a causal model
 leaves the valid prefix intact, left-padding does not.
 
-Two caveats a reader should not have to discover empirically. `pretrained=True`
-logs a warning and returns a randomly initialized model rather than raising, which
-violates this repository's standing rule that an unavailable checkpoint must fail
-loudly, and means a caller can believe it holds trained weights when it does not.
-And `MODEL_VARIANTS` does not reproduce the paper's size table: the published
-790M/1.4B configurations are `d_model` 1536 and 2048 at 48 layers, whereas the
-entries here use 1024 and 1536, so parameter counts will not match the names.
+Two things were wrong here until 2026-08-14 and are worth stating as fixed rather
+than leaving a reader to re-derive. `pretrained=True` used to log a warning and
+return a randomly initialized model; it now raises `NotImplementedError`, because no
+public Mamba checkpoints ship with `dl_techniques` and a caller who asks for trained
+weights must not silently receive untrained ones. Pass a local `.keras` path to
+`pretrained` instead. And `MODEL_VARIANTS` did not reproduce the paper's size table:
+370M carried 24 layers instead of 48, 790M carried `d_model` 1024 instead of 1536 and
+1.4B carried 1536 instead of 2048, so three of the six rows built a model
+substantially smaller than the parameter count in its own name. The table now matches
+Gu and Dao 2023: 130M 768x24, 370M 1024x48, 790M 1536x48, 1.4B 2048x48, 2.8B
+2560x64.
 
 References:
     - Gu and Dao, 2023. Mamba: Linear-Time Sequence Modeling with Selective State
@@ -232,7 +236,12 @@ class Mamba(keras.Model):
         the causal convolutions and recurrent state space mechanism.
     """
 
-    # Model variants following the original Mamba paper specifications
+    # Model variants following the original Mamba paper's size table (Gu and Dao
+    # 2023, Table 9). Corrected 2026-08-14: 370m carried 24 layers, 790m carried
+    # d_model 1024 and 1.4b carried d_model 1536, so three of the six rows were
+    # smaller than the parameter count in their own name. The layer counts are
+    # double the GPT-3 equivalents by design — one Mamba block replaces an
+    # attention+MLP pair, so 130M is 24 blocks where GPT-3 small is 12 layers.
     MODEL_VARIANTS = {
         "2.8b": {
             "d_model": 2560,
@@ -240,18 +249,18 @@ class Mamba(keras.Model):
             "description": "Mamba-2.8B: Largest variant with 2.8B parameters"
         },
         "1.4b": {
-            "d_model": 1536,
+            "d_model": 2048,
             "num_layers": 48,
             "description": "Mamba-1.4B: Large variant with ~1.4B parameters"
         },
         "790m": {
-            "d_model": 1024,
+            "d_model": 1536,
             "num_layers": 48,
             "description": "Mamba-790M: Medium variant with ~790M parameters"
         },
         "370m": {
             "d_model": 1024,
-            "num_layers": 24,
+            "num_layers": 48,
             "description": "Mamba-370M: Small variant with ~370M parameters"
         },
         "130m": {
@@ -401,14 +410,15 @@ class Mamba(keras.Model):
         :type variant: str
         :param vocab_size: Size of the vocabulary. Must be specified.
         :type vocab_size: int
-        :param pretrained: If True, attempts to load pretrained weights (not yet
-            implemented). If string, loads weights from the specified path.
-            Defaults to False.
+        :param pretrained: If a string, loads weights from that local path. If
+            True, raises `NotImplementedError` — no public checkpoints ship with
+            this package. Defaults to False.
         :type pretrained: Union[bool, str]
         :param kwargs: Additional arguments to override variant defaults.
         :return: A Mamba model instance configured for the specified variant.
         :rtype: Mamba
         :raises ValueError: If unknown variant or invalid parameters.
+        :raises NotImplementedError: If ``pretrained is True``.
 
         Example:
             .. code-block:: python
@@ -461,10 +471,17 @@ class Mamba(keras.Model):
                     logger.error(f"Failed to load weights: {e}")
                     raise
             elif pretrained is True:
-                # Future: load from hub or default location
-                logger.warning(
-                    "Pretrained weights not yet available. "
-                    "Model initialized with random weights."
+                # Do NOT reinstate a warn-and-return branch here. It made
+                # `pretrained=True` hand back a randomly initialized model that
+                # a caller had every reason to believe was trained; the house
+                # rule (models/CLAUDE.md, Axis 3) is that an unavailable
+                # checkpoint fails loudly.
+                raise NotImplementedError(
+                    f"No pretrained weights are distributed with dl_techniques "
+                    f"for Mamba variant '{variant}'. Pass a local checkpoint "
+                    f"instead: Mamba.from_variant('{variant}', "
+                    f"vocab_size=..., pretrained='/path/to/weights.keras'), "
+                    f"or use pretrained=False (default) for random init."
                 )
 
         return model
