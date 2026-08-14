@@ -292,7 +292,7 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
 
@@ -362,7 +362,7 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 

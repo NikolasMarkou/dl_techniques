@@ -431,7 +431,7 @@ class PW_FNet_Block(keras.layers.Layer):
 # Scaling Layers
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.pw_fnet")
 class Downsample(keras.layers.Layer):
     """
     Trainable downsampling layer using strided convolution.
@@ -517,7 +517,7 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.pw_fnet")
 class Upsample(keras.layers.Layer):
     """
     Trainable upsampling layer using transposed convolution.
