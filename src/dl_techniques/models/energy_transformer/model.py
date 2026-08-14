@@ -132,6 +132,19 @@ def _resolve_scale(variant: str) -> str:
 # the layer tree. `layers/` is frozen for this plan (I8), so the factory cannot be fixed here.
 # WHAT NOT TO DO: do NOT pass `dtype=` to `create_embedding_layer` and assume it landed, and
 # do NOT "simplify" this to `layer.dtype_policy = policy` — see decisions.md D-009.
+#
+# SUPERSEDED 2026-08-14 by plan-2026-08-14T042537-ff96c6c6/D-002 — ONLY on the "SILENTLY"
+# half. `create_embedding_layer` no longer drops an unregistered kwarg: it now RAISES
+# `ValueError: ... unsupported parameter(s) ['dtype']` (embedding/factory.py, the strict
+# dropped-kwarg raise). MEASURED at this plan's HEAD:
+# `create_embedding_layer('patch_2d', patch_size=4, embed_dim=32, dtype='float64')` raises.
+# The original text above is kept verbatim because the HISTORY is the point — the no-op was
+# real, and it is why this helper exists. Everything else in it still holds and this helper is
+# MORE necessary, not less: `dtype=` is now a hard error rather than a quiet miss, so the tree
+# walk below remains the only way to push a policy into the returned layer, and Keras'
+# `Layer.dtype_policy` setter still does not recurse. The WHAT-NOT-TO-DO stands unchanged in
+# force, with a different failure mode: passing `dtype=` no longer silently does nothing, it
+# breaks the call.
 def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.Layer:
     """Force ``policy`` onto ``layer`` AND every sub-layer, before anything is built."""
     if hasattr(layer, "_flatten_layers"):

@@ -17,6 +17,17 @@ applied. Measured before this guard existed::
     create_embedding_layer('patch_2d', patch_size=4, embed_dim=32, flatten=False)
     -> layer.flatten is True          # the caller's False vanished
 
+**UPDATE 2026-08-14 (plan-2026-08-14T042537-ff96c6c6/D-002): that example no longer
+reproduces, for `embedding` ONLY.** `create_embedding_layer` now RAISES
+`ValueError: ... unsupported parameter(s) [...]` on any key it would have dropped, so the
+call above is a loud failure rather than a silent one, and `create_ffn_layer` has raised
+since an earlier plan. The silent-discard sentence above still holds VERBATIM for the other
+five registry factories (`attention`, `activations`, `mixtures`, `logic`,
+`sequence_pooling`), which is why this guard is still repo-wide and still necessary.
+Note also that the raise does NOT subsume this guard even for `embedding`: a parameter
+REGISTERED but absent from the class ctor, or registered and never wired, passes the filter
+untouched and can only be caught by the registry-vs-ctor comparison below.
+
 That is a silent-misconfiguration bug, and it is a DIFFERENT (and worse) failure mode than
 the one the norms factory had, where a hand-maintained whitelist made the *validator*
 reject a parameter the *builder* accepted -- that one at least failed loudly. An audit

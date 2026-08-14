@@ -1040,13 +1040,22 @@ class TestViTPositionalDropoutReachesTheLayer:
 
     `ViT.build` used to call `create_embedding_layer('positional_learned',
     ..., dropout=...)`, but the registry and `PositionalEmbedding.__init__`
-    both declare `dropout_rate`. `create_embedding_layer` silently filters
-    unknown keys out, so positional dropout was unconditionally 0.0 for
-    every caller.
+    both declare `dropout_rate`. `create_embedding_layer` silently filtered
+    unknown keys out AT THE TIME, so positional dropout was unconditionally
+    0.0 for every caller.
 
     Asserting `model.pos_dropout_rate` here would be VACUOUS — the model's
     own stored attribute was always correct and was never the bug. This
     reads the real `keras.layers.Dropout` instance's `.rate`.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. So re-injecting the historical bug at
+    the KEYWORD level (`dropout=` for `dropout_rate=`) now fails with the
+    factory's `ValueError: ... unsupported parameter(s) ['dropout']` at
+    construction, NOT with the `.rate == 0.5` assertion below. To exercise
+    THIS assertion, inject at the VALUE level instead (pass a different
+    `dropout_rate=`).
     """
 
     def test_pos_dropout_rate_reaches_built_dropout_layer(self):
@@ -1065,8 +1074,89 @@ class TestViTPositionalDropoutReachesTheLayer:
         assert pos_dropout.rate == 0.5, (
             "positional dropout never reached the built keras.layers.Dropout: "
             f"got rate={pos_dropout.rate}, expected 0.5 "
-            "(create_embedding_layer silently drops an unknown kwarg name)"
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
         )
+
+
+class TestViTPositionalDropoutHasAnEffect:
+    """The EFFECT-level companion to the guard above, which is configuration-level.
+
+    `pos_dropout.rate == 0.5` says the right `Dropout` was BUILT. It does not say
+    it is ever CALLED. A refactor that constructs the layer correctly and then
+    drops it out of `call`, or invokes it with a hard-wired `training=False`,
+    passes that assertion and every other test in this file while positional
+    dropout is dead again -- which is exactly the shape of the original D-2 bug,
+    one level down.
+
+    So this pins the observable consequence instead: at a non-zero
+    `pos_dropout_rate`, two training-mode forward passes on the SAME input must
+    DIFFER, while two inference-mode passes must not; and at rate 0.0 the
+    training passes must agree. `dropout_rate` and `attention_dropout_rate` are
+    pinned to 0.0 so positional dropout is the only stochastic element in the
+    graph -- otherwise a green result here would be evidence about block
+    dropout, not about the positional path.
+
+    Seeded with `keras.utils.set_random_seed`, per repo convention: an unseeded
+    statistic reads the process-global RNG and couples its value to test
+    collection order.
+    """
+
+    @staticmethod
+    def _build(rate: float):
+        keras.utils.set_random_seed(1234)
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            dropout_rate=0.0,
+            attention_dropout_rate=0.0,
+            pos_dropout_rate=rate,
+        )
+        x = np.asarray(
+            np.random.default_rng(0).normal(size=(2, 32, 32, 3)), dtype=np.float32)
+        _ = model(x, training=False)  # materialize every sub-layer
+        return model, x
+
+    def test_training_passes_differ_and_inference_passes_do_not(self):
+        model, x = self._build(0.5)
+
+        train_a = np.asarray(model(x, training=True))
+        train_b = np.asarray(model(x, training=True))
+        infer_a = np.asarray(model(x, training=False))
+        infer_b = np.asarray(model(x, training=False))
+
+        train_delta = float(np.max(np.abs(train_a - train_b)))
+        infer_delta = float(np.max(np.abs(infer_a - infer_b)))
+
+        assert train_delta > 1e-6, (
+            "positional dropout is CONFIGURED at rate 0.5 but has NO EFFECT: two "
+            f"training-mode passes on identical input agree to {train_delta}. The "
+            "Dropout layer is built and never called (or is called with a "
+            "hard-wired training=False). Every .rate assertion in this file "
+            "passes in that state.")
+        assert infer_delta == 0.0, (
+            "two inference-mode passes disagree "
+            f"({infer_delta}): dropout is active outside training, or some other "
+            "stochastic element leaked into this model despite dropout_rate and "
+            "attention_dropout_rate both being 0.0 -- in which case the "
+            "training-mode assertion above is not evidence about the positional "
+            "path.")
+
+    def test_at_rate_zero_the_training_passes_agree(self):
+        """The other arm: without this, the test above could pass on any noise."""
+        model, x = self._build(0.0)
+
+        train_a = np.asarray(model(x, training=True))
+        train_b = np.asarray(model(x, training=True))
+        train_delta = float(np.max(np.abs(train_a - train_b)))
+
+        assert train_delta == 0.0, (
+            f"at pos_dropout_rate=0.0 two training passes differ by {train_delta}: "
+            "some stochastic element other than positional dropout is live, so the "
+            "non-zero-rate test above does not isolate the positional path.")
 
 
 if __name__ == "__main__":

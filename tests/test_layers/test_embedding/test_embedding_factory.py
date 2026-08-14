@@ -107,11 +107,15 @@ class TestEmbeddingFactory:
 # I-5: the three opt-in BertEmbeddings parameters must SURVIVE the factory.
 #
 # ``create_embedding_layer`` filters kwargs to
-# ``required_params | optional_params`` and silently DROPS the rest
-# (``factory.py``, the ``final_params`` comprehension). A parameter that is
-# not registered is therefore a silent no-op, and a test that only asserts
-# "construction succeeded" cannot see it -- it would pass identically with the
-# parameter registered and un-registered.
+# ``required_params | optional_params``. It USED TO silently DROP the rest
+# (``factory.py``, the ``final_params`` comprehension); since 2026-08-14 it
+# RAISES ``ValueError`` on any dropped key instead -- see
+# ``TestStrictDroppedKwargs`` below in this file. That reversal does NOT retire
+# the rule that follows. A
+# parameter that is REGISTERED but never wired through to the layer's own
+# behaviour is still a silent no-op that no raise can see, and a test that only
+# asserts "construction succeeded" would pass identically with the parameter
+# wired and un-wired.
 #
 # Every test below asserts the parameter's EFFECT: the value read back off
 # ``get_config()`` AND a behavioural consequence (which weight exists, whether a

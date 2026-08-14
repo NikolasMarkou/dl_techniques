@@ -1148,11 +1148,19 @@ class TestSigLIPPositionalDropoutReachesTheLayer:
     `SigLIPVisionTransformer.build` used to call
     `create_embedding_layer('positional_learned', ..., dropout=...)` while
     the registry and `PositionalEmbedding.__init__` both declare
-    `dropout_rate`; the factory silently drops unknown keys, so positional
-    dropout was unconditionally 0.0.
+    `dropout_rate`; the factory silently dropped unknown keys AT THE TIME, so
+    positional dropout was unconditionally 0.0.
 
     Asserting `model.pos_dropout_rate` would be VACUOUS (that attribute was
     always correct). This reads the real `keras.layers.Dropout` instance.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. Re-injecting the historical bug at the
+    KEYWORD level (`dropout=` for `dropout_rate=`) therefore now fails with
+    the factory's `ValueError: ... unsupported parameter(s) ['dropout']` at
+    construction, NOT with the `.rate == 0.5` assertion below. Inject at the
+    VALUE level to exercise this assertion.
     """
 
     def test_pos_dropout_rate_reaches_built_dropout_layer(self):
@@ -1170,7 +1178,9 @@ class TestSigLIPPositionalDropoutReachesTheLayer:
         assert pos_dropout.rate == 0.5, (
             "positional dropout never reached the built keras.layers.Dropout: "
             f"got rate={pos_dropout.rate}, expected 0.5 "
-            "(create_embedding_layer silently drops an unknown kwarg name)"
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
         )
 
 

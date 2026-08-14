@@ -508,11 +508,18 @@ class DistilBERT(keras.Model):
         #     two-masks-collide hazard: that claim was measured FALSE.
         #   * layer_norm_eps -- I-2. Omitting it does NOT inherit this model's
         #     1e-12; BertEmbeddings' own default is 1e-8.
-        # create_embedding_layer SILENTLY DROPS any kwarg not registered in
-        # EMBEDDING_REGISTRY['bert_embeddings'] (measured, findings/
-        # step1-premise-rederivation.md (f)), so a misspelt kwarg here is a
-        # silent no-op: any test covering these must assert the EFFECT, never
-        # that construction succeeded.
+        # create_embedding_layer USED TO SILENTLY DROP any kwarg not registered
+        # in EMBEDDING_REGISTRY['bert_embeddings'] (measured, findings/
+        # step1-premise-rederivation.md (f)), so a misspelt kwarg here WAS a
+        # silent no-op. SUPERSEDED 2026-08-14 by
+        # plan-2026-08-14T042537-ff96c6c6/D-002: the factory now RAISES
+        # `ValueError: ... unsupported parameter(s) [...]` on any kwarg outside
+        # `required_params | optional_params`, so a misspelling here is a loud
+        # construction failure, not a quiet one. The testing rule below is
+        # UNCHANGED and is the durable half: a REGISTERED-but-unwired parameter
+        # still reaches the ctor and still does nothing, which no raise can
+        # catch -- any test covering these must assert the EFFECT, never that
+        # construction succeeded.
         # DECISION plan-2026-08-10T183739-b007f435/D-018
         # See decisions.md D-011, whose stated mask_zero rationale is SUPERSEDED
         # by D-018: the "two masking mechanisms collide" hazard was re-measured

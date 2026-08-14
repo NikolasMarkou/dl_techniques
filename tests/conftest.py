@@ -63,3 +63,71 @@ def golden_reference_device() -> str:
 
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+
+# --- D-1: no test may write into the repo-root results/ directory ----------
+#
+# The defect CLASS, not one instance. Trainer entry points resolve a relative
+# `output_dir` (typically the literal default `"results"`) against the REPO
+# ROOT, so any test that calls a real trainer -- or a real `ModelCheckpoint`,
+# or a real `model.save()` through one -- deposits a run directory into the
+# user's `results/` tree. That tree is gitignored AND untracked, so anything
+# that lands there is indistinguishable from a real experiment, and anything
+# deleted from there is UNRECOVERABLE (62 run directories, including a
+# published paper's subject checkpoint, were destroyed exactly once this way).
+#
+# `tests/test_train/test_sam3/test_train_sam3.py` carried this snapshot inline
+# in a single test body. It is promoted here so the next test anywhere in the
+# suite that reaches a trainer entry point is watched by default rather than by
+# remembering.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_ROOT = REPO_ROOT / "results"
+
+
+def _results_entries() -> frozenset:
+    """Names directly under the repo-root ``results/``; empty if absent.
+
+    One ``os.scandir`` on ONE directory, no recursion and no ``stat``, because
+    this runs twice per test for the whole suite.
+
+    :return: entry names, or an empty frozenset when ``results/`` does not
+        exist (a fresh clone) or is unreadable.
+    """
+    try:
+        with os.scandir(RESULTS_ROOT) as it:
+            return frozenset(entry.name for entry in it)
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return frozenset()
+
+
+@pytest.fixture(autouse=True)
+def no_repo_root_results_writes():
+    """Fail any test that adds an entry to the repo-root ``results/``.
+
+    ASSERT-ONLY, AND THIS IS NOT NEGOTIABLE. This fixture MUST NEVER delete,
+    move, truncate, rename or otherwise "clean up" anything under ``results/``
+    -- not even an entry it can prove the test under it just created, and not
+    in a ``finally``. ``results/`` is gitignored and untracked: there is no
+    history and no backup, so a deletion here is permanent, and a cleanup step
+    that names that directory is precisely how 62 run directories (including a
+    published paper's subject checkpoint) were destroyed on 2026-08-12. When
+    this assertion fires, the repair is to route the test's config through
+    ``tmp_path``; the reported directory is then removed BY A HUMAN, if at all.
+
+    Failing rather than skipping is deliberate: a run directory in ``results/``
+    is not a cosmetic mess, it is an artefact a later human reads as an
+    experiment.
+
+    :raises AssertionError: if new entries appear directly under ``results/``
+        while the test runs.
+    """
+    before = _results_entries()
+    yield
+    new = sorted(_results_entries() - before)
+    assert not new, (
+        f"this test wrote into the repo-root results/ directory: {new}. "
+        "A trainer's relative output_dir resolves against the repo root; route "
+        "the config through tmp_path (e.g. dataclasses.replace(config, "
+        "output_dir=str(tmp_path))). results/ is gitignored and untracked -- do "
+        "NOT delete what this assertion reports, and do NOT make this fixture "
+        "clean up after itself.")
