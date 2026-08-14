@@ -243,3 +243,106 @@ class TestDeepARTrainingWrapper:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+
+
+class TestDeepARScaleSemantics:
+    """The scale must be a first-moment scale, and must not see the future.
+
+    Both assertions are derived from Salinas et al. §3.2 (mu = nu*mu~,
+    sigma = nu*softplus(sigma~)), NOT read off the implementation.
+    """
+
+    CFG = dict(num_layers=1, hidden_dim=8, likelihood='gaussian', target_dim=1)
+
+    @staticmethod
+    def _inputs(target, cov):
+        return {'target': target, 'covariates': cov}
+
+    def test_sigma_scales_linearly_with_the_target(self):
+        """Scaling the target by k must scale BOTH mu and sigma by k.
+
+        RED-proof: sigma was de-normalized with sqrt(scale) while mu used
+        scale, so sigma grew as sqrt(k) and every predictive interval was
+        mis-calibrated by a scale-dependent factor. Asserting sigma > 0, or
+        that it is finite, would be VACUOUS -- both held.
+
+        Homogeneity is the right probe because it is a property of the
+        parameterization and needs no reference implementation to check.
+        """
+        keras.utils.set_random_seed(0)
+        rng = np.random.default_rng(0)
+        T = 12
+        base = np.abs(rng.normal(size=(4, T, 1))).astype("float32") + 1.0
+        cov = rng.normal(size=(4, T, 3)).astype("float32")
+
+        model = DeepAR(**self.CFG)
+        # A precomputed scale is supplied so this test isolates the
+        # de-normalization arithmetic from the scale-estimation question.
+        k = 10.0
+        s1 = np.mean(base, axis=1, keepdims=True).astype("float32")
+        s2 = (s1 * k).astype("float32")
+
+        o1 = model({**self._inputs(base, cov), 'scale': s1}, training=False)
+        o2 = model({**self._inputs(base * k, cov), 'scale': s2}, training=False)
+
+        mu1 = keras.ops.convert_to_numpy(o1['mu'])
+        mu2 = keras.ops.convert_to_numpy(o2['mu'])
+        sg1 = keras.ops.convert_to_numpy(o1['sigma'])
+        sg2 = keras.ops.convert_to_numpy(o2['sigma'])
+
+        np.testing.assert_allclose(mu2, mu1 * k, rtol=1e-4,
+                                   err_msg="mu is not scale-linear")
+        np.testing.assert_allclose(
+            sg2, sg1 * k, rtol=1e-4,
+            err_msg=("sigma is not scale-linear: it is a first-moment-scale "
+                     "quantity, not a variance, so it must scale by nu and not "
+                     "by sqrt(nu)"))
+
+    def test_scale_ignores_the_prediction_range(self):
+        """With conditioning_length set, mutating the TAIL must not move nu.
+
+        RED-proof: compute_scale was called without conditioning_length, so nu
+        was mean(z_1..z_T) over the whole window and every teacher-forced step
+        was divided by a function of its own future.
+        """
+        rng = np.random.default_rng(1)
+        T, C = 12, 6
+        target = np.abs(rng.normal(size=(2, T, 1))).astype("float32") + 1.0
+        mutated = target.copy()
+        mutated[:, C:, :] += 100.0  # only the prediction range changes
+
+        cov = rng.normal(size=(2, T, 3)).astype("float32")
+
+        keras.utils.set_random_seed(0)
+        model = DeepAR(**self.CFG, conditioning_length=C)
+
+        # Go through call(), not compute_scale directly: compute_scale has
+        # ALWAYS accepted conditioning_length, so probing it in isolation would
+        # pass with or without the fix. What was broken is the WIRING -- no
+        # caller ever passed the argument.
+        o_base = model(self._inputs(target, cov), training=False)
+        o_mut = model(self._inputs(mutated, cov), training=False)
+
+        mu_base = keras.ops.convert_to_numpy(o_base['mu'])[:, :C, :]
+        mu_mut = keras.ops.convert_to_numpy(o_mut['mu'])[:, :C, :]
+
+        np.testing.assert_allclose(
+            mu_base, mu_mut, rtol=1e-5, atol=1e-6,
+            err_msg=("mu over the CONDITIONING range moved when only the "
+                     "PREDICTION range was mutated -- the scale is leaking the "
+                     "future into every teacher-forced step"))
+
+        # Control: the perturbation is real. A model with no conditioning split
+        # DOES move, so the agreement above is attributable to the split.
+        keras.utils.set_random_seed(0)
+        leaky = DeepAR(**self.CFG)
+        l_base = keras.ops.convert_to_numpy(
+            leaky(self._inputs(target, cov), training=False)['mu'])[:, :C, :]
+        l_mut = keras.ops.convert_to_numpy(
+            leaky(self._inputs(mutated, cov), training=False)['mu'])[:, :C, :]
+        assert not np.allclose(l_base, l_mut, rtol=1e-5, atol=1e-6), (
+            "even without a conditioning split the tail perturbation changed "
+            "nothing; the isolation assertion above would be vacuous")

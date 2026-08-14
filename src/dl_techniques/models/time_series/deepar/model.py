@@ -20,6 +20,7 @@ from typing import Optional, Union, Literal, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.deepar_blocks import (
     ScaleLayer,
     GaussianLikelihoodHead,
@@ -94,6 +95,13 @@ class DeepAR(keras.Model, ForecastMixin):
         num_samples: Number of Monte Carlo samples to draw during prediction.
             Defaults to 100.
         scale_epsilon: Small constant added to scale computation. Defaults to 1.0.
+        conditioning_length: Number of leading steps used to compute the
+            per-series scale nu during training. Set this to the context length.
+            If None (default) the scale is computed over the FULL target window,
+            which leaks the prediction range into nu and disagrees with
+            inference, where the scale comes from the conditioning range only;
+            a warning is emitted in that case. Passing a precomputed
+            ``inputs['scale']`` bypasses this entirely.
         **kwargs: Additional arguments for Model base class.
 
     Input shape:
@@ -171,6 +179,7 @@ class DeepAR(keras.Model, ForecastMixin):
             target_dim: int = 1,
             num_samples: int = 100,
             scale_epsilon: float = 1.0,
+            conditioning_length: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -189,8 +198,12 @@ class DeepAR(keras.Model, ForecastMixin):
                 f"Unknown likelihood: {likelihood}. "
                 f"Must be one of {self.SUPPORTED_LIKELIHOODS}"
             )
+        if conditioning_length is not None and conditioning_length <= 0:
+            raise ValueError(
+                f"conditioning_length must be > 0, got {conditioning_length}")
 
         # Store configuration
+        self.conditioning_length = conditioning_length
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout_rate
@@ -346,9 +359,32 @@ class DeepAR(keras.Model, ForecastMixin):
         covariates = inputs['covariates']  # (batch, seq_len, covariate_dim)
         scale = inputs.get('scale', None)
 
-        # Compute scale if not provided
+        # Compute scale if not provided.
+        #
+        # `conditioning_length` MUST be honoured here. Without it the scale is
+        # mean(z_1..z_T) over the whole window -- including the steps being
+        # predicted -- so every teacher-forced step t is divided by a nu that is
+        # a function of z_{t+1..T}, and the likelihood parameters are multiplied
+        # back by that same nu. Both the inputs and the output scale then carry
+        # information about the future of the window.
+        #
+        # _prediction_mode has always done this correctly (it passes only the
+        # conditioning target), so leaving it out here also made training and
+        # inference use different nu distributions -- leakage AND train/serve
+        # skew. The `conditioning_length` argument of compute_scale existed for
+        # exactly this purpose and no caller ever supplied it.
         if scale is None:
-            scale = self.compute_scale(target)
+            if self.conditioning_length is None:
+                logger.warning(
+                    "DeepAR: computing the scale over the FULL target window "
+                    "because conditioning_length is None. This leaks the "
+                    "prediction range into the scale and does not match "
+                    "_prediction_mode, which scales from the conditioning range "
+                    "only. Pass conditioning_length=<context steps> to the "
+                    "constructor, or supply a precomputed inputs['scale']."
+                )
+            scale = self.compute_scale(
+                target, conditioning_length=self.conditioning_length)
 
         # Scale the target
         target_scaled = self.scale_layer(target, scale=scale, inverse=False)
@@ -374,13 +410,21 @@ class DeepAR(keras.Model, ForecastMixin):
         if self.likelihood == 'gaussian':
             mu_scaled, sigma_scaled = self.likelihood_head(hidden)
 
-            # Inverse scale for mu and sigma
+            # Inverse scale for mu and sigma.
+            #
+            # sigma uses `scale`, NOT sqrt(scale). The forward path divides the
+            # target by nu exactly once (`target_scaled = z / nu` above), so if
+            # z~ = z/nu then mu = nu*mu~ AND sigma = nu*sigma~ -- sigma is a
+            # first-moment-scale quantity, not a variance. Salinas et al. §3.2
+            # gives mu = nu*mu~, sigma = nu*softplus(sigma~).
+            #
+            # The sqrt belongs only to the NegBinomial branch below, where
+            # alpha = alpha~/sqrt(nu) is correct; it was copied across to the
+            # Gaussian head, where it under-scaled sigma by sqrt(nu) and left
+            # every predictive interval mis-calibrated by a scale-dependent
+            # factor (nu = mean(z)+1, so nu >> 1 is the normal case).
             mu = self.scale_layer(mu_scaled, scale=scale, inverse=True)
-            sigma = self.scale_layer(
-                sigma_scaled,
-                scale=ops.sqrt(scale),
-                inverse=True
-            )
+            sigma = self.scale_layer(sigma_scaled, scale=scale, inverse=True)
 
             return {'mu': mu, 'sigma': sigma, 'target': target}
 
@@ -502,13 +546,11 @@ class DeepAR(keras.Model, ForecastMixin):
                 if self.likelihood == 'gaussian':
                     mu_scaled, sigma_scaled = self.likelihood_head(hidden_t_current)
 
-                    # Inverse scale
+                    # Inverse scale. sigma uses `scale`, not sqrt(scale) --
+                    # same reasoning as _training_mode; the two sites must agree
+                    # or sampling would not match the trained likelihood.
                     mu = self.scale_layer(mu_scaled, scale=scale, inverse=True)
-                    sigma = self.scale_layer(
-                        sigma_scaled,
-                        scale=ops.sqrt(scale),
-                        inverse=True
-                    )
+                    sigma = self.scale_layer(sigma_scaled, scale=scale, inverse=True)
 
                     # Sample from Gaussian
                     epsilon = keras.random.normal(ops.shape(mu))
@@ -694,6 +736,7 @@ class DeepAR(keras.Model, ForecastMixin):
             'target_dim': self.target_dim,
             'num_samples': self.num_samples,
             'scale_epsilon': self.scale_epsilon,
+            'conditioning_length': self.conditioning_length,
         })
         return config
 
