@@ -817,3 +817,60 @@ class TestFastVLMStochasticDepthWiring:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestAttentionBlockVLMSignalPath:
+    """LayerScale must sit inside the residual, not on the block's whole output."""
+
+    def test_layer_scale_does_not_annihilate_the_signal(self) -> None:
+        """A stack of blocks must not collapse the activation magnitude.
+
+        RED-proof: LayerScale used to be a standalone LearnableMultiplier
+        applied to the block's output in call(), AFTER TransformerLayer had
+        already closed its own residuals -- i.e. ``x = gamma * f(x)`` with no
+        skip path. At the default ``layer_scale_init=1e-4`` that attenuates by
+        1e-4 per block, so the 6 blocks of the `base` variant's stage 3 give
+        ~1e-24 and the classifier sees zeros.
+
+        Asserting output shape, finiteness, or that gradients merely EXIST would
+        all be VACUOUS -- every one of those held at 1e-24, which is why the
+        three existing drop-path tests sit beside this defect without seeing it.
+        """
+        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(2, 4, 4, 32)).astype("float32")
+
+        depth = 6
+        h = x
+        for i in range(depth):
+            block = AttentionBlockVLM(
+                dim=32, num_heads=4,
+                use_layer_scale=True, layer_scale_init=1e-4,
+                name=f"blk{i}",
+            )
+            h = block(h, training=False)
+
+        ratio = float(np.std(keras.ops.convert_to_numpy(h)) / np.std(x))
+        assert ratio > 0.1, (
+            f"signal magnitude collapsed to {ratio:.3e} of the input over "
+            f"{depth} blocks; LayerScale is being applied outside the residual")
+
+    def test_layer_scale_init_is_near_identity_at_small_gamma(self) -> None:
+        """With gamma ~ 0 the block must approach the IDENTITY, not zero.
+
+        This is the sign check that distinguishes the two placements: inside a
+        residual, gamma -> 0 means ``out -> x``; applied to the output, it means
+        ``out -> 0``.
+        """
+        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=(2, 4, 4, 32)).astype("float32")
+
+        block = AttentionBlockVLM(
+            dim=32, num_heads=4, use_layer_scale=True, layer_scale_init=1e-8)
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        np.testing.assert_allclose(
+            out, x, atol=1e-3,
+            err_msg="at gamma~0 the block must reduce to the identity")

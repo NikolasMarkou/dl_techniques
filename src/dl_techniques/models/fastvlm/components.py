@@ -7,7 +7,9 @@ from typing import Optional, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.layers.layer_scale import LearnableMultiplier, MultiplierType
+# NOTE: LayerScale is no longer instantiated here — TransformerLayer owns it so
+# that gamma is applied inside the residual branch rather than to the block's
+# whole output. See AttentionBlockVLM.__init__.
 
 # ---------------------------------------------------------------------
 
@@ -80,8 +82,9 @@ class AttentionBlockVLM(keras.layers.Layer):
         4D tensor with same shape as input: `(batch_size, height, width, channels)`
 
     Attributes:
-        transformer: TransformerLayer instance for attention computation.
-        layer_scale: Optional LearnableMultiplier for output scaling.
+        transformer: TransformerLayer instance for attention computation. It
+            owns the LayerScale (applied inside its residual branches) when
+            ``use_layer_scale`` is set.
         height: Height dimension extracted from input shape.
         width: Width dimension extracted from input shape.
 
@@ -167,7 +170,20 @@ class AttentionBlockVLM(keras.layers.Layer):
         self.height = None
         self.width = None
 
-        # CREATE transformer layer with vision_heads-optimized settings
+        # CREATE transformer layer with vision_heads-optimized settings.
+        #
+        # LayerScale is delegated to TransformerLayer, which applies gamma
+        # INSIDE each residual branch (transformer.py:926-928, 937-939:
+        # ``x = layer_scale(x); out = x + residual``).
+        #
+        # It used to be a standalone LearnableMultiplier applied to this block's
+        # whole output in call(), AFTER the transformer had already added its
+        # own residuals — i.e. ``x = gamma * f(x)`` with no skip path at all.
+        # With the default layer_scale_init=1e-4 and FastVLM stacking these as
+        # ``x = stage3(x)`` (model.py:400-402, no external residual), the stage
+        # output was attenuated by 1e-4 PER BLOCK: ~1e-24 over the 6 blocks of
+        # the `base` variant, so the classifier saw zeros. Shape, finiteness and
+        # gradient-existence checks all still passed at that magnitude.
         self.transformer = TransformerLayer(
             hidden_size=dim,
             num_heads=num_heads,
@@ -178,19 +194,11 @@ class AttentionBlockVLM(keras.layers.Layer):
             attention_dropout_rate=dropout_rate,
             use_stochastic_depth=use_stochastic_depth,
             stochastic_depth_rate=stochastic_depth_rate,
+            use_layer_scale=use_layer_scale,
+            layer_scale_init_value=layer_scale_init,
             activation='gelu',
             name='vision_transformer'
         )
-
-        # CREATE layer scale if requested
-        if use_layer_scale:
-            self.layer_scale = LearnableMultiplier(
-                multiplier_type=MultiplierType.CHANNEL,
-                initializer=keras.initializers.Constant(layer_scale_init),
-                name='layer_scale'
-            )
-        else:
-            self.layer_scale = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the attention block and extract spatial dimensions."""
@@ -218,10 +226,6 @@ class AttentionBlockVLM(keras.layers.Layer):
         transformer_input_shape = (batch_size, seq_length, channels)
         self.transformer.build(transformer_input_shape)
 
-        # Build layer scale if present
-        if self.layer_scale is not None:
-            self.layer_scale.build(input_shape)
-
         super().build(input_shape)
 
     def call(
@@ -243,11 +247,8 @@ class AttentionBlockVLM(keras.layers.Layer):
         x = self.transformer(x, training=training)
 
         # Reshape back to spatial: [B, H*W, C] -> [B, H, W, C]
+        # LayerScale already ran inside the transformer's residual branches.
         x = ops.reshape(x, (batch_size, height, width, self.dim))
-
-        # Apply layer scale if present
-        if self.layer_scale is not None:
-            x = self.layer_scale(x, training=training)
 
         return x
 
