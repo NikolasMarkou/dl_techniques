@@ -1,379 +1,389 @@
-# ConvUNext: Modern U-Net Architecture
+# ConvUNext
 
-[![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
+A U-Net encoder/decoder built out of ConvNeXt (V1 or V2) blocks, exposed as **one
+functional builder**:
 
-A production-ready, highly scalable implementation of **ConvUNext** in **Keras 3**. This architecture fuses the hierarchical structure of a U-Net with the modern design principles of **ConvNeXt V2**, creating a powerful backbone for image segmentation, restoration, and denoising tasks.
+```python
+create_convunext(input_shape, use_bias=True, ...)  -> keras.Model
+```
 
-Key architectural features include a **flexible bias design** (supporting bias-free restoration), **Global Response Normalization (GRN)** for channel inter-dependency, and integrated **Deep Supervision** for robust training convergence.
+`use_bias=True` is the ordinary, bias-carrying network. `use_bias=False` is the
+**bias-free** network used for image restoration, where the absence of any additive
+term makes the model degree-1 homogeneous (`f(a*x) = a*f(x)`) and therefore
+scale-invariant across noise levels. Both arms are the same graph.
+
+> **History, because it changes how you read the rest of the repo.** Until 2026-08-14
+> this package shipped a subclassed `ConvUNextModel`, and
+> `models/bias_free_denoisers/bfconvunext.py` shipped a separate functional builder for
+> the bias-free arm. They were two implementations of one architecture. They are now
+> merged onto the **functional** graph, here. `ConvUNextModel`, its own `ConvUNextStem`,
+> its bespoke `create_inference_model_from_training_model`, `PRETRAINED_WEIGHTS` and
+> `_download_weights` **no longer exist**, and neither does `src/train/convunext/`.
+> `bfconvunext.py` survives as thin `use_bias=False` wrappers plus the Keras registrar
+> (see [§8](#8-relationship-to-bfconvunext)).
+
+Every code block below was executed against this tree before it was written down.
 
 ---
 
-## Table of Contents
+## Contents
 
-1. [Overview: Modernizing the U-Net](#1-overview-modernizing-the-u-net)
-2. [The Problem: Bias and Receptive Fields](#2-the-problem-bias-and-receptive-fields)
-3. [How ConvUNext Works](#3-how-convunext-works)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Troubleshooting & FAQs](#13-troubleshooting--faqs)
-14. [Technical Details](#14-technical-details)
-15. [Testing & Validation](#15-testing--validation)
-16. [Citation](#16-citation)
+1. [Quick start](#1-quick-start)
+2. [Architecture](#2-architecture)
+3. [`use_bias` and the three documented asymmetries](#3-use_bias-and-the-three-documented-asymmetries)
+4. [The bias-free guardrails](#4-the-bias-free-guardrails)
+5. [`block_normalization` — the default rule](#5-block_normalization--the-default-rule)
+6. [Knobs absorbed from the deleted subclass](#6-knobs-absorbed-from-the-deleted-subclass)
+7. [Deep supervision, bottleneck exposure, serialization](#7-deep-supervision-bottleneck-exposure-serialization)
+8. [Relationship to `bfconvunext`](#8-relationship-to-bfconvunext)
+9. [Package surface](#9-package-surface)
+10. [Tests](#10-tests)
 
 ---
 
-## 1. Overview: Modernizing the U-Net
+## 1. Quick start
 
-### What is ConvUNext?
+```python
+from dl_techniques.models.convunext import create_convunext
 
-**ConvUNext** is a "ConvNet for the 2020s" applied to the classic U-Net encoder-decoder structure. While Vision Transformers (ViTs) have gained popularity, modern ConvNets like ConvNeXt have demonstrated that pure convolutional architectures can compete with or outperform Transformers when designed correctly.
-
-This implementation provides a highly configurable foundation model. By standardizing on modern architectural choices (7x7 kernels, GRN, GELU), the model achieves excellent performance on standard benchmarks. It also supports a **bias-free mode** (via `use_bias=False`), which allows for **scale invariance**—crucial for image restoration tasks like denoising.
-
-### Key Innovations of this Implementation
-
-1.  **Flexible Bias Design**: Defaults to standard biased convolutions (`use_bias=True`) for optimal performance on classification and segmentation. Can be switched to `use_bias=False` for restoration tasks requiring scale invariance.
-2.  **ConvNeXt V1/V2 Support**: Fully supports both V1 (LayerScale) and V2 (Global Response Normalization) blocks, leveraging the "Masked Autoencoder" scaling insights.
-3.  **Deep Supervision**: Built-in support for multi-scale supervision. The decoder outputs predictions at multiple resolutions during training to combat vanishing gradients and enforce structural consistency.
-4.  **Keras 3 Native**: Built as a custom `keras.Model` following modern Keras 3 best practices with complete serialization support, comprehensive type hints, and Sphinx-compliant documentation.
-5.  **Production-Ready**: Extensively tested with 125+ unit tests covering initialization, forward pass, gradient flow, serialization, edge cases, and integration scenarios.
-
-### ConvUNext vs. Standard U-Net
-
-**Traditional U-Net (2015)**:
-```
-- Block: 3x3 Conv -> ReLU -> 3x3 Conv -> ReLU
-- Normalization: Often Batch Norm (can be unstable with small batches).
-- Receptive Field: Small, grows slowly with depth.
-- Mechanics: Simple sliding windows.
+model = create_convunext(input_shape=(64, 64, 3), depth=3, initial_filters=16)
+print(model.name, model.output_shape, model.count_params())
+# convunext (None, 64, 64, 3) 510307
 ```
 
-**ConvUNext (Modern)**:
-```
-- Block: 7x7 Depthwise Conv -> LayerNorm -> 1x1 Conv -> GELU -> 1x1 Conv.
-- Normalization: Global Response Norm (GRN) & Layer Norm.
-- Receptive Field: Large (7x7 kernels), mimicking Vision Transformers.
-- Mechanics: Inverted bottlenecks, configurable bias propagation.
-```
+Named variants (`tiny`, `small`, `base`, `large`, `xlarge`) fill in
+`depth` / `initial_filters` / `blocks_per_level` / `convnext_version` /
+`drop_path_rate`:
 
----
+```python
+from dl_techniques.models.convunext import create_convunext_variant, CONVUNEXT_CONFIGS
 
-## 2. The Problem: Bias and Receptive Fields
-
-### The Challenge of Generalization in Restoration
-
-In low-level vision tasks (like denoising or super-resolution), standard CNNs often overfit to specific noise levels or intensity ranges.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Standard Layer (use_bias=True)                             │
-│                                                             │
-│  y = Wx + b                                                 │
-│                                                             │
-│  If input 'x' is scaled by 2 (2x), the output becomes:      │
-│  y_new = W(2x) + b  !=  2 * (Wx + b)                        │
-│                                                             │
-│  The bias term 'b' does not scale. This is fine for         │
-│  segmentation, but breaks linearity for denoising.          │
-└─────────────────────────────────────────────────────────────┘
+print(sorted(CONVUNEXT_CONFIGS))
+# ['base', 'large', 'small', 'tiny', 'xlarge']
+tiny = create_convunext_variant('tiny', input_shape=(64, 64, 1))
+print(tiny.count_params())
+# 1939521
 ```
 
-### The ConvUNext Solution
+`CONVUNEXT_CONFIGS` is the **single** variant dict for both arms; the bias-free
+wrappers in `bfconvunext` reuse it rather than carrying their own copy.
 
-ConvUNext allows you to enforce a bias-free constraint throughout the network by setting `use_bias=False`.
+Default output channel count is the INPUT channel count — the
+denoiser/autoencoder contract. Override it with `output_channels`
+([§6](#6-knobs-absorbed-from-the-deleted-subclass)).
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Bias-Free Mode (use_bias=False)                            │
-│                                                             │
-│  y = Wx                                                     │
-│                                                             │
-│  If input 'x' is scaled by 2 (2x), the output becomes:      │
-│  y_new = W(2x) = 2 * (Wx) = 2y                              │
-│                                                             │
-│  The model becomes scale-invariant. This ensures the        │
-│  network focuses on structural content.                     │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 3. How ConvUNext Works
-
-### The High-Level Architecture
-
-The model follows a symmetric Encoder-Decoder structure with skip connections, using ConvNeXt blocks as the primary compute unit.
+## 2. Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     ConvUNext Architecture                       │
-│                                                                  │
-│ Input Image (H, W, C)                                            │
-│       │                                                          │
-│       ▼                                                          │
-│ ┌────────────┐                                  ┌────────────┐   │
-│ │    Stem    │─────────────────────────────────►│ Final Conv │   │
-│ └─────┬──────┘                                  └─────▲──────┘   │
-│       │                                               │          │
-│       ▼                                               ▲          │
-│ ┌────────────┐         Skip Connection          ┌────────────┐   │
-│ │ Encoder L0 │─────────────────────────────────►│ Decoder L0 │   │
-│ └─────┬──────┘                                  └─────▲──────┘   │
-│       │ Downsample                            Upsample│          │
-│       ▼                                               ▲          │
-│ ┌────────────┐         Skip Connection          ┌────────────┐   │
-│ │ Encoder L1 │─────────────────────────────────►│ Decoder L1 │   │
-│ └─────┬──────┘                                  └─────▲──────┘   │
-│       │                                               │          │
-│      ...                 Bottleneck                  ...         │
-│       │                ┌────────────┐                 │          │
-│       └───────────────►│ ConvNeXt   │─────────────────┘          │
-│                        │ Blocks     │                            │
-│                        └────────────┘                            │
-└──────────────────────────────────────────────────────────────────┘
+input
+  |
+  stem                    ConvUNextStem  (Conv2D k=7 -> <stem_normalization> -> activation)
+  |                       or a frozen Gabor depthwise bank + 1x1 projection (use_gabor_stem)
+  |
+  encoder level i         blocks_per_level x ConvNeXt block   -> skip_i
+  |                       DownsampleAndSkip                   (max / average / strided_conv,
+  |                                                            or a Laplacian pyramid split)
+  bottleneck              channel adjust
+  |                       [bottleneck_attention_blocks x residual SpatialLinearAttention]
+  |                       blocks_per_level x ConvNeXt block, drop-path RAMP
+  |
+  decoder level i         UpSampling2D -> concat(skip_i) -> channel adjust
+  |                       blocks_per_level x ConvNeXt block
+  |                       [supervision head -> supervision output]   (enable_deep_supervision)
+  |
+  final_output            Conv2D(output_channels, 1) -> final_activation     (include_top=True)
+  or decoder_features     zero-parameter linear tap                          (include_top=False)
 ```
 
-### Data Flow with Deep Supervision
+Channels at encoder level `i` are `int(round(initial_filters * filter_multiplier ** i))`.
+The encoder junction is one serializable layer,
+`dl_techniques.layers.downsample_and_skip.DownsampleAndSkip`, shared with `bfunet`; it
+returns `(skip, downsampled)` and owns the `max` / `average` / `strided_conv` /
+Laplacian dispatch in one place.
 
-When `enable_deep_supervision=True`, the model returns a list of outputs during training.
+Optional structure, all off by default and all contributing zero layers when off:
+`use_gabor_stem`, `use_laplacian_pyramid` (+ `high_freq_blocks`),
+`bottleneck_attention_blocks`, `zero_pad_channels`, `extra_zero_output_channels`,
+`final_projection_groups`, `expose_bottleneck`, `enable_deep_supervision`.
+Each parameter is documented in full on `create_convunext`'s docstring — that
+docstring, not this file, is the reference.
 
-1.  **Input**: Image Tensor `(B, H, W, C)`
-2.  **Encoder**: Progressively reduces spatial dims (H/2, H/4, H/8...) while increasing channels.
-3.  **Bottleneck**: Processes the most compressed representation.
-4.  **Decoder**: Progressively upsamples. At each level, it concatenates features from the equivalent Encoder level (Skip Connection).
-5.  **Outputs**:
-    *   **Output 0**: Final High-Res Prediction.
-    *   **Output 1**: Prediction from Decoder Level 1 (H/2).
-    *   **Output 2**: Prediction from Decoder Level 2 (H/4).
+## 3. `use_bias` and the three documented asymmetries
 
----
+```python
+bf = create_convunext(input_shape=(64, 64, 1), use_bias=False, depth=3, initial_filters=16)
+on = create_convunext(input_shape=(64, 64, 1), use_bias=True,  depth=3, initial_filters=16)
+print('bias adds', on.count_params() - bf.count_params(), 'parameters')
+# bias adds 5281 parameters
+```
 
-## 4. Architecture Deep Dive
+`use_bias` is threaded into the stem conv, every channel-adjust conv, every ConvNeXt
+block, every deep-supervision head, the final projection, and the `strided_conv`
+junction. **Three sites are deliberately NOT threaded**, and `use_bias=False`
+therefore does not mean "provably, strictly bias-free":
 
-### 4.1 `ConvUNextStem`
-Unlike standard U-Nets that use 3x3 convolutions initially, the stem uses a **7x7 convolution** followed by **LayerNormalization**. This aggressive initial receptive field helps capture broader context immediately. The stem supports configurable bias via `use_bias`.
+| Site | Behaviour | Why |
+|---|---|---|
+| `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence today; the trainer's `verify_bias_free` logs it and does not raise. Pre-existing, now documented. |
+| `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | Held by an earlier decision (`plan_2026-07-11_bb4b38b5/D-001`) that forbids adding knobs there. It is bias-free on BOTH arms. |
+| The frozen Gabor bank | hardcoded `use_bias=False`, `trainable=False` | A frozen biased filter bank is a meaningless construct. |
 
-### 4.2 ConvNeXt V2 Block
-The core building block used in both encoder and decoder stages:
-1.  **Depthwise Conv (7x7)**: Spatial mixing with large receptive field.
-2.  **LayerNorm**: Channel-wise normalization for stable gradients.
-3.  **Pointwise Conv (1x1)**: Channel expansion (4x width).
-4.  **GELU**: Smooth, differentiable activation.
-5.  **GRN**: Global Response Normalization (calibrates channel interaction).
-6.  **Pointwise Conv (1x1)**: Channel projection back to original width.
-7.  **Drop Path**: Stochastic depth for regularization (rate increases with depth).
+A fourth asymmetry is about activations rather than bias: `block_activation`,
+`stem_activation` and `supervision_activation` all default to `'gelu'`, which is NOT
+positively homogeneous, and they are **deliberately exempt** from the guardrails below.
+Guarding them would make the shipped default configuration raise. Consequence, stated
+plainly: **passing the guardrails is not a homogeneity certificate.**
 
-### 4.3 Decoder & Upsampling
-The decoder uses **bilinear upsampling** followed by concatenation with skip connections. Crucially, a **channel adjustment layer** (1x1 conv) is applied after concatenation to smoothly fuse the features before processing them with ConvNeXt blocks.
+## 4. The bias-free guardrails
 
----
+Under `use_bias=False` only, `create_convunext` validates three arguments against an
+**allowlist** of positively homogeneous activations (an allowlist, not a denylist: a
+denylist silently admits every activation nobody thought of).
 
-## 5. Quick Start Guide
+```python
+from dl_techniques.models.convunext import model as convunext_model
+print(sorted(a for a in convunext_model.POSITIVELY_HOMOGENEOUS_ACTIVATIONS if a))
+# ['leaky_relu', 'linear', 'relu']       (plus None)
 
-### Installation
+for kw in ({'final_activation': 'sigmoid'}, {'supervision_norm_center': True}):
+    try:
+        create_convunext(input_shape=(32, 32, 1), use_bias=False, depth=2,
+                         initial_filters=8, **kw)
+    except ValueError as e:
+        print(type(e).__name__, str(e).split('.')[0])
+# ValueError final_activation='sigmoid' is not positively homogeneous, and use_bias=False requires it to be
+# ValueError supervision_norm_center=True is incompatible with use_bias=False: the deep-supervision head LayerNorm's `center` adds a trainable additive offset (beta), which is a bias by another name
+```
+
+| Argument | Under `use_bias=False` |
+|---|---|
+| `final_activation` | must be in the allowlist, else `ValueError` |
+| `gabor_activation` | must be in the allowlist **only when `use_gabor_stem=True`** — otherwise it reaches no layer and raising would be a false positive |
+| `supervision_norm_center=True` | `ValueError`, **even when `enable_deep_supervision=False`** (the guard's predicate is a pure function of its arguments; the caller declared a contradictory intent) |
+| `block_normalization='layernorm'` | `logger.warning`, **never** a raise — see [§5](#5-block_normalization--the-default-rule) |
+| a CALLABLE activation | warns; a callable's homogeneity is not statically checkable |
+| `downsample_pool_type='max'` | **not guarded**: max pooling is non-linear but IS positively homogeneous |
+
+All of it is inert on the bias-carrying arm:
+
+```python
+create_convunext(input_shape=(32, 32, 1), use_bias=True, depth=2, initial_filters=8,
+                 final_activation='sigmoid', supervision_norm_center=True)
+# builds; all three guards inert
+
+create_convunext(input_shape=(32, 32, 1), use_bias=False, depth=2, initial_filters=8,
+                 use_gabor_stem=False, gabor_activation='gelu')
+# builds; the gabor guard is SCOPED to use_gabor_stem=True
+```
+
+`POSITIVELY_HOMOGENEOUS_ACTIVATIONS` is the single owner of this rule.
+`src/train/bfunet/common.py` DERIVES its `GABOR_ACTIVATIONS` argparse choices from it
+rather than re-spelling the set.
+
+## 5. `block_normalization` — the default rule
+
+Read this one carefully; the asymmetry is real and it surprises people.
+
+| Entry point | `block_normalization` |
+|---|---|
+| `convunext.create_convunext(...)` | `'layernorm'` (the builder default, on BOTH arms) |
+| `convunext.create_convunext_variant(...)` (bias-ON) | `'layernorm'` |
+| `bfconvunext.create_convunext_denoiser(...)` | `'layernorm'` |
+| **`bfconvunext.create_convunext_variant(...)`** | **`'batchnorm'`** |
+
+Only the last one flips, and it flips by `kwargs.setdefault(...)` inside
+`bfconvunext.create_convunext_variant`, so a caller-supplied value always wins. The
+key is deliberately absent from the shared `CONVUNEXT_CONFIGS`: putting it there
+would flip the bias-carrying variants too.
+
+Why it matters: `'layernorm'` is per-input `LayerNormalization`, which is scale
+INVARIANT (degree 0), not degree-1 homogeneous. `'batchnorm'` is the variance-only
+`BiasFreeBatchNorm`, which at `training=False` divides by a frozen constant and so
+restores `f(a*x) = a*f(x)`. The named bias-free variants therefore get the
+homogeneous choice; the bare bias-free builder keeps the historical default, which a
+byte-identity test pins.
+
+## 6. Knobs absorbed from the deleted subclass
+
+**`downsample_pool_type`** gains a third value:
+
+```python
+for pt in ('max', 'average', 'strided_conv'):
+    m = create_convunext(input_shape=(32, 32, 1), depth=2, initial_filters=8,
+                         downsample_pool_type=pt)
+    j = m.get_layer('encoder_downsample_0')
+    print(f"{pt:13s} {type(j).__name__:18s} trainable weights at junction: {len(j.trainable_weights)}")
+# max           DownsampleAndSkip  trainable weights at junction: 0
+# average       DownsampleAndSkip  trainable weights at junction: 0
+# strided_conv  DownsampleAndSkip  trainable weights at junction: 2
+```
+
+`'strided_conv'` is a learned `Conv2D(kernel_size=2, strides=2)` that threads
+`use_bias`. It is **channel-preserving** (unlike the deleted subclass's fused
+downsample-and-widen), and its skip is the RAW INPUT, exactly like the pooling
+branches — both callers already widen channels in a separate, separately-named step
+that a channel-changing junction would silently duplicate. With `use_bias=False` a
+strided conv is linear and homogeneous, so it is legal on the bias-free arm and is
+deliberately not guarded.
+
+**`stem_normalization`** routes the stem's normalization through the norms factory:
+
+```python
+for sn in ('global_response_norm', 'layer_norm'):
+    m = create_convunext(input_shape=(32, 32, 1), depth=2, initial_filters=8,
+                         stem_normalization=sn)
+    print(sn, '->', type(m.get_layer('encoder_level_0_stem').norm).__name__)
+# global_response_norm -> GlobalResponseNormalization
+# layer_norm -> LayerNormalization
+```
+
+The default `'global_response_norm'` is the ConvNeXt-V2 / bias-free choice;
+`'layer_norm'` reproduces the standard ConvNeXt stem the deleted subclass built. Only
+used when `use_gabor_stem=False`.
+
+**`output_channels`** defaults to `input_shape[-1]`; set it for a non-reconstruction
+head. It also drives every deep-supervision output and the `extra_zero_output_channels`
+tail:
+
+```python
+seg = create_convunext(input_shape=(32, 32, 3), depth=2, initial_filters=8,
+                       output_channels=1)
+print(seg.output_shape)
+# (None, 32, 32, 1)
+```
+
+**`include_top` — and its DOCUMENTED DIVERGENCE.**
+
+```python
+head = create_convunext(input_shape=(32, 32, 3), depth=2, initial_filters=8)
+back = create_convunext(input_shape=(32, 32, 3), depth=2, initial_filters=8,
+                        include_top=False)
+print('with top :', head.output_shape, len(head.weights), 'weights')
+print('headless :', back.output_shape, len(back.weights), 'weights')
+print('tap      :', back.get_layer('decoder_features').name)
+# with top : (None, 32, 32, 3) 124 weights
+# headless : (None, 32, 32, 8) 122 weights
+# tap      : decoder_features
+
+back.get_layer('final_output')
+# ValueError: No such layer: final_output. ...
+```
+
+The deleted `ConvUNextModel` CONSTRUCTED its final projection regardless and merely
+skipped applying it, so `include_top=False` still carried the head's weights and a
+checkpoint could move between the two settings. **A functional graph cannot reproduce
+that**, and this was measured rather than argued: `keras.Model(inputs, outputs)` prunes
+every layer not on a path to an output, so a constructed-but-unapplied projection owns
+no weights and is not reachable through `get_layer`. The weight-compatibility contract
+is therefore GONE, not preserved — `include_top=False` yields a strictly smaller
+weight list, its primary output is the full-resolution decoder feature map
+(`initial_filters` channels), and `set_weights` between the two settings raises.
+`include_top=False` combined with `final_projection_groups != 1` raises rather than
+silently ignoring the argument.
+
+## 7. Deep supervision, bottleneck exposure, serialization
+
+`enable_deep_supervision=True` returns `[final_output, supervision...]`;
+`expose_bottleneck=True` appends a TRAILING `bottleneck` output. Convert a
+deep-supervision training model to its single-output inference form with the shared
+utility (re-exported from this package):
+
+```python
+from dl_techniques.models.convunext import create_inference_model_from_training_model
+
+train_m = create_convunext(input_shape=(32, 32, 1), depth=3, initial_filters=8,
+                           enable_deep_supervision=True)
+print('training outputs :', len(train_m.outputs))
+inf_m = create_inference_model_from_training_model(train_m)
+print('inference outputs:', len(inf_m.outputs), inf_m.output_shape)
+# training outputs : 3
+# inference outputs: 1 (None, 32, 32, 1)
+```
+
+This is `dl_techniques.utils.deep_supervision.create_inference_model_from_training_model`
+— the ONE implementation. The subclass's bespoke copy is gone.
+
+Full `.keras` round trip:
+
+```python
+import os, tempfile, numpy as np, keras
+
+m = create_convunext(input_shape=(32, 32, 1), depth=2, initial_filters=8)
+x = np.random.rand(1, 32, 32, 1).astype('float32')
+y0 = m(x, training=False)
+with tempfile.TemporaryDirectory() as d:
+    p = os.path.join(d, 'convunext.keras')
+    m.save(p)
+    r = keras.models.load_model(p)
+print('max abs delta:', float(np.max(np.abs(np.array(y0) - np.array(r(x, training=False))))))
+# max abs delta: 0.0
+```
+
+Assert `training=False` explicitly on both sides. `training=None` is not inference and
+produces round-trip deltas that look like reinitialized weights.
+
+## 8. Relationship to `bfconvunext`
+
+`src/dl_techniques/models/bias_free_denoisers/bfconvunext.py` is now 232 lines
+(`wc -l`) and does exactly two jobs:
+
+1. **Thin `use_bias=False` wrappers** at their historical, frozen signatures:
+   `create_convunext_denoiser(...)` forwards here with `use_bias=False`;
+   `create_convunext_variant(...)` adds `kwargs.setdefault('block_normalization',
+   'batchnorm')` ([§5](#5-block_normalization--the-default-rule)) and defaults
+   `enable_deep_supervision=True`. The forward is a `locals()` capture, so a parameter
+   can never be silently dropped.
+2. **The Keras registrar.** Importing it registers `ConvUNextStem`, `ConvNextV1Block`,
+   `GlobalResponseNormalization`, `MatchChannels`, `GaborFiltersInitializer` and
+   `SpatialLinearAttention` so `keras.models.load_model` resolves them.
+   `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval tools
+   import it for that reason alone.
+
+The two builders produce the same network:
+
+```python
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_denoiser
+
+bf  = create_convunext(input_shape=(64, 64, 1), use_bias=False, depth=3, initial_filters=16)
+bf2 = create_convunext_denoiser(input_shape=(64, 64, 1), depth=3, initial_filters=16)
+print(bf.count_params(), bf2.count_params(), bf.count_params() == bf2.count_params())
+# 503424 503424 True
+```
+
+`ConvUNextStem` lives HERE (`models/convunext/model.py`) but keeps the decorator
+`@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")`.
+That package string no longer matches its module path and **that mismatch is
+deliberate and load-bearing**: it is the registry key
+`dl_techniques.bias_free_denoisers>ConvUNextStem` that existing `.keras` artifacts
+carry. Do not "tidy" it. An in-file `# DECISION` anchor says the same thing next to
+the code.
+
+## 9. Package surface
+
+```python
+from dl_techniques.models.convunext import (
+    ConvUNextStem,                            # the merged stem layer
+    SpatialLinearAttention,                   # bias-free bottleneck attention block
+    CONVUNEXT_CONFIGS,                        # the one variant dict
+    create_convunext,                         # the builder
+    create_convunext_variant,                 # variant -> builder
+    create_inference_model_from_training_model,  # re-export from utils.deep_supervision
+)
+```
+
+`POSITIVELY_HOMOGENEOUS_ACTIVATIONS` and `_validate_bias_free_arguments` live in
+`dl_techniques.models.convunext.model`; the first is public, the second is private.
+
+## 10. Tests
+
+```
+tests/test_models/test_convunext/test_model.py                     # both arms, symmetric
+tests/test_models/test_bias_free_denoisers/test_bfconvunext_*.py   # the bias-free arm
+tests/test_layers/test_downsample_and_skip.py                      # the shared junction layer
+```
+
+Run scoped, never the whole suite:
 
 ```bash
-# Ensure requirements are met
-pip install keras>=3.8.0 tensorflow>=2.18.0
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=-1 .venv/bin/python -m pytest tests/test_models/test_convunext/ -q
 ```
-
-### Your First ConvUNext Model (30 seconds)
-
-Let's build a model for semantic segmentation of 256x256 images.
-
-```python
-import keras
-import numpy as np
-from dl_techniques.models.convunext.model import create_convunext_variant
-
-# 1. Create a 'base' variant model
-# Enable deep supervision for better training convergence
-# use_bias defaults to True (standard for segmentation)
-model = create_convunext_variant(
-    variant='base',
-    input_shape=(256, 256, 3),
-    enable_deep_supervision=True,
-    output_channels=1  # Binary segmentation
-)
-
-# 2. Compile the model
-# With deep supervision, the model returns a list of outputs
-# We apply the same loss to each output with decreasing weights
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss=['mse', 'mse', 'mse', 'mse'],
-    loss_weights=[1.0, 0.5, 0.25, 0.125]  # Weight multi-scale outputs
-)
-
-model.summary()
-
-# 3. Test with dummy data
-x = np.random.normal(size=(2, 256, 256, 3)).astype('float32')
-outputs = model(x, training=False)
-
-print(f"Number of outputs: {len(outputs)}")  # 4 for depth=4
-```
-
----
-
-## 6. Component Reference
-
-### 6.1 `ConvUNextModel`
-The main Keras Model class. It handles the complex wiring of encoder, decoder, skip connections, and supervision heads.
-
-**Key Parameters**:
-- `input_shape`: Tuple of (height, width, channels).
-- `depth`: Number of downsampling stages (minimum 2).
-- `initial_filters`: Base channel count, multiplied at each stage.
-- `use_bias`: **(New)** Boolean. If `True` (default), adds bias to all convolutions. Set to `False` for restoration tasks requiring scale invariance.
-- `enable_deep_supervision`: Whether to return multi-scale outputs.
-- `convnext_version`: Either `'v1'` (LayerScale) or `'v2'` (GRN).
-
-### 6.2 `ConvUNextStem`
-The initial feature extraction layer. Implements a 7x7 convolution with LayerNormalization.
-
-### 6.3 `create_convunext_variant`
-The factory function recommended for instantiation.
-
-**Signature**:
-```python
-def create_convunext_variant(
-    variant: str,
-    input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
-    enable_deep_supervision: bool = False,
-    output_channels: Optional[int] = None,
-    use_bias: bool = True,
-    **kwargs
-) -> ConvUNextModel
-```
-
----
-
-## 7. Configuration & Model Variants
-
-The architecture scales by depth (number of downsampling levels) and width (channel counts).
-
-| Variant | Depth | Initial Filters | Blocks/Level | Drop Path | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`tiny`** | 3 | 32 | 2 | 0.0 | Mobile, Real-time video |
-| **`small`**| 3 | 48 | 2 | 0.1 | Lightweight edge devices |
-| **`base`** | 4 | 64 | 3 | 0.1 | General purpose |
-| **`large`** | 4 | 96 | 4 | 0.2 | High-fidelity segmentation |
-| **`xlarge`**| 5 | 128 | 5 | 0.3 | SOTA performance benchmarks |
-
----
-
-## 8. Comprehensive Usage Examples
-
-### Example 1: Creating a Bias-Free Denoising Model
-
-For restoration tasks, disable bias to achieve scale invariance.
-
-```python
-from dl_techniques.models.convunext.model import create_convunext_variant
-
-# Explicitly disable bias for restoration/denoising
-denoise_model = create_convunext_variant(
-    'base',
-    input_shape=(None, None, 3),  # Dynamic input shape
-    use_bias=False,               # <-- Bias-free mode
-    enable_deep_supervision=False
-)
-```
-
-### Example 2: Standard Segmentation (With Bias)
-
-For classification or segmentation where absolute intensity matters, keep the default `use_bias=True`.
-
-```python
-# Binary segmentation
-seg_model = create_convunext_variant(
-    'small',
-    input_shape=(256, 256, 3),
-    output_channels=1,
-    final_activation='sigmoid',
-    use_bias=True  # Default
-)
-```
-
----
-
-## 9. Advanced Usage Patterns
-
-### Converting Training Models to Inference
-
-The `create_inference_model_from_training_model` function handles weight transfer automatically:
-
-```python
-from dl_techniques.models.convunext.model import (
-    create_convunext_variant, 
-    create_inference_model_from_training_model
-)
-
-# 1. Train with deep supervision
-train_model = create_convunext_variant(
-    'base',
-    input_shape=(256, 256, 3),
-    enable_deep_supervision=True,
-    output_channels=1
-)
-
-# ... training happens here ...
-
-# 2. Convert to inference model (weights transferred automatically)
-inference_model = create_inference_model_from_training_model(train_model)
-
-# 3. Verify outputs match
-test_input = np.random.randn(1, 256, 256, 3).astype('float32')
-train_output = train_model(test_input, training=False)[0]  # First output
-infer_output = inference_model(test_input, training=False)
-
-assert np.allclose(train_output, infer_output, rtol=1e-5)
-```
-
----
-
-## 13. Troubleshooting & FAQs
-
-### Common Issues
-
-**Q: Should I use `use_bias=True` or `False`?**
-
-A: 
-- **Use `True` (Default)**: For semantic segmentation, classification, or object detection where inputs are normalized to a fixed range (e.g., [-1, 1]).
-- **Use `False`**: For image restoration (denoising, deblurring) or super-resolution, especially if you want the model to be robust to global intensity scaling (e.g., handling both dark and bright images with the same weights).
-
-**Q: Why do I get OOM (Out of Memory) errors?**
-
-A: ConvUNext uses larger 7×7 kernels and higher channel dimensions than standard U-Nets. Reduce batch size or use a smaller variant (`tiny`/`small`).
-
----
-
-**Q: Why does the model output a list instead of a single tensor?**
-
-A: You initialized the model with `enable_deep_supervision=True`. This is intended for training. For inference, access the first output or use `create_inference_model_from_training_model`.
-
----
-
-## 14. Technical Details
-
-### Global Response Normalization (GRN)
-
-Introduced in ConvNeXt V2, GRN enhances feature competition across channels. In ConvUNext, GRN is applied after GELU activation.
-
-### Scaling Invariance (Bias-Free Mode)
-
-When `use_bias=False`, the absence of additive constants means:
-$$f(\alpha \cdot x) \approx \alpha \cdot f(x)$$
-This relationship holds well in practice for $\alpha \in [0.5, 2.0]$, making the model generalize across different exposure levels.
-
----

@@ -115,13 +115,14 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 > exploits, with zero retraining.
 
 #### Optional frozen Gabor stem (non-learnable)
-`create_convunext_denoiser` accepts three params to prepend a **non-learnable (frozen)** Gabor depthwise convolution stem:
+`create_convunext_denoiser` accepts three params that swap the learned stem for a **non-learnable (frozen)** Gabor depthwise convolution stem:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `use_gabor_stem` | `False` | When `True`, prepend a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters`, before the standard ConvUNext stem. Default `False` is byte-identical to the original architecture. |
+| `use_gabor_stem` | `False` | When `True`, build a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned `ConvUNextStem` — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
 | `gabor_filters` | `32` | Depth multiplier of the depthwise Gabor bank; the stem emits `input_channels * gabor_filters` channels which the 1x1 projection reduces back to `initial_filters`. |
 | `gabor_kernel_size` | `11` | Kernel size of the Gabor depthwise stem. |
+| `gabor_stem_projection` | `True` | Added after this table was first written. `False` DROPS the mandatory 1x1 projection and feeds the Gabor bank straight into the encoder — legal only when `input_channels * gabor_filters == initial_filters` exactly (`ValueError` otherwise), and it leaves all cross-channel mixing to the first ConvNeXt block. |
 
 The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
 
@@ -197,8 +198,8 @@ pip install keras>=3.0 tensorflow>=2.16
 
 ```python
 import keras
-from dl_techniques.models.bfunet import create_bfunet_variant
-from dl_techniques.models.bfconvunext import create_convunext_variant
+from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # 1. Create a Base ConvUNext model for RGB images
 # Note: Deep supervision is enabled by default for variants
@@ -253,7 +254,7 @@ When training with deep supervision, your data generator must provide multiple g
 
 ```python
 import numpy as np
-from dl_techniques.models.bfconvunext import create_convunext_variant
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # Create model
 model = create_convunext_variant('small', (64, 64, 3), enable_deep_supervision=True)
@@ -277,7 +278,7 @@ model.fit(X, targets, epochs=5)
 For deployment, you typically don't want the overhead of calculating the auxiliary outputs.
 
 ```python
-from dl_techniques.models.bfconvunext import (
+from dl_techniques.models.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
     create_inference_model_from_training_model
 )
@@ -297,7 +298,7 @@ result = inference_model.predict(some_image)
 BF-UNet supports automatic weight downloading for standard configurations.
 
 ```python
-from dl_techniques.models.bfunet import create_bfunet_variant
+from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
 
 model = create_bfunet_variant(
     'base',

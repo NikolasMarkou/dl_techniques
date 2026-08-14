@@ -186,15 +186,23 @@ transformer block's constructor arguments. For the options behind `attention_typ
 
 ## The model / trainer / test triangle
 
+<!-- allow-dead-path: src/train/convunext/ - drift-note subject: deleted 2026-08-14 in the ConvUNext/bfconvunext merge; naming it is the point of the addendum below -->
+
 Three trees are meant to line up by directory name: 73 model packages under
-`src/dl_techniques/models/`, 47 trainer directories under `src/train/`, and 81 test
+`src/dl_techniques/models/`, 46 trainer directories under `src/train/`, and 81 test
 directories under `tests/test_models/`. (All three digits were re-measured on
 2026-08-14 in the whole-table re-derivation; the trainer count had drifted 48 -> 47
-since 2026-08-10 without any row moving to record it. Re-run the Numbers-table
+since 2026-08-10 without any row moving to record it. **ADDENDUM, 2026-08-14 (later
+the same day): 47 -> 46.** `src/train/convunext/` was deleted when
+`models/convunext` and `models/bias_free_denoisers/bfconvunext` were merged onto one
+`create_convunext(..., use_bias=...)` builder; its two scripts reached into the
+deleted `ConvUNextModel`'s subclass-only internals and had zero importers, zero
+tests and no row here. Both derivations move together: 48 -> 47 including
+`src/train/common/`, 47 -> 46 excluding it. Re-run the Numbers-table
 commands before quoting these; they are correct as of that measurement, not
-permanently.) **47 counts `src/train/` entries EXCLUDING
+permanently.) **46 counts `src/train/` entries EXCLUDING
 `src/train/common/`, which is a shared library, not a trainer** — the Numbers table
-carries both derivations (48 including it, 47 excluding it), because the two rows were
+carries both derivations (47 including it, 46 excluding it), because the two rows were
 once read as contradicting each other. Comparing those name lists directly is the
 obvious move and it produces a badly wrong picture. Four things break the correspondence:
 
@@ -561,7 +569,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 74 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model packages under `src/dl_techniques/models/` | 73 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Entries under `src/train/` | 48 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Entries under `src/train/` | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Run dirs under `results/` (local) | 8 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
@@ -582,7 +590,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Keys in `MIXTURE_REGISTRY` | 3 | `awk 'index($0,"MIXTURE_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/mixtures/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
-| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
+| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 46 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
 | Test dirs under `tests/test_models/` | 81 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Files under `src/` naming `keras.callbacks.Callback` | 49 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |

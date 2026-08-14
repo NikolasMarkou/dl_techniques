@@ -116,9 +116,12 @@ class AccUNetTrainingConfig:
 
 
 # ---------------------------------------------------------------------
-# Synthetic data generator (port of train_convunext.generate_synthetic_data,
-# adapted to (B, H, W, num_classes) labels for binary, (B, H, W) integer
-# labels for multi-class, matching the loss expectations)
+# Synthetic data generator. Originally a port of
+# `train.convunext.train_convunext.generate_synthetic_data`; that module was
+# DELETED on 2026-08-14 with the whole `src/train/convunext/` package, so the
+# provenance is history, not a place to look. This copy is now the only one, and
+# it emits (B, H, W, num_classes) labels for binary and (B, H, W) integer labels
+# for multi-class, matching the loss expectations here.
 # ---------------------------------------------------------------------
 
 
