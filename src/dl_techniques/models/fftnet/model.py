@@ -1,62 +1,82 @@
 """
-FFTNet Foundation Model Implementation
-======================================
+FFTNet vision encoder: a pure feature-extracting backbone that replaces self-attention
+with adaptive spectral filtering, plus the block and mixer it is built from.
 
-A complete and refactored implementation of FFTNet (Adaptive Spectral Filtering)
-as a pure foundation model. This version is designed with strict separation between
-the core encoding logic and task-specific heads for maximum flexibility in
-vision tasks.
+Self-attention mixes tokens by forming an `N x N` score matrix, which costs `O(N^2)`
+in both time and memory and is the reason long sequences and high-resolution images
+are expensive. The convolution theorem offers a different route to global mixing:
+a pointwise multiplication in the frequency domain is a circular convolution in the
+token domain, so multiplying by a length-`N` filter couples every token to every
+other token at `O(N log N)` — the cost of the transform — and with `O(N)` parameters
+instead of `O(N^2)` computation.
 
-Based on: "The FFT Strikes Back: An Efficient Alternative to Self-Attention"
-(Fein-Ashley, 2025) arXiv:2502.18394v2 [cs.LG]
+The catch is that a fixed filter makes the mixing input-independent, which is
+precisely what attention buys and what a plain Fourier mixer gives up. FFTNet
+recovers the adaptivity by conditioning the filter on the input. A global context
+vector `c = mean(x, axis=tokens)` is passed through a small MLP to produce a
+per-feature offset, which is added to a learned base filter:
 
-ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
-    ``FFTMixer.call`` uses ``tf.signal.fft`` / ``tf.signal.ifft`` on a complex64
-    tensor for adaptive spectral filtering. This cannot migrate to ``keras.ops``:
-    ``keras.ops`` exposes only a real/imag-tuple ``fft`` and has NO ``ifft``, so a
-    backend-agnostic complex forward+inverse transform is not expressible. The raw
-    ``tf.signal`` FFT path is therefore an accepted, documented exception to the
-    keras.ops-only (H10) rule for the forward pass.
+`W = W_base + MLP(mean(x))`,  `y = IFFT(modReLU(FFT(x) * W))`
 
-Refactored Architecture Philosophy:
------------------------------------
+so the spectral gains applied to a given image depend on that image's summary
+statistics. It is weaker than attention — the modulation is one global vector, not a
+per-token-pair score — and that is the trade: global receptive field and log-linear
+cost, in exchange for content dependence that is global rather than pairwise.
 
-This implementation strictly adheres to the principle of separating the foundation model
-from the task-specific head. The `FFTNet` class acts as a pure feature extractor,
-transforming input images into contextualized patch representations. All task-specific
-logic, such as classification, detection, or segmentation, is delegated to downstream
-"head" models.
+The nonlinearity is `modReLU`, which is what keeps a stack of these layers from
+collapsing. Applying a real ReLU to a complex tensor is not meaningful, and applying
+none at all would make consecutive spectral filters compose into a single linear
+filter. `modReLU` acts on the magnitude only — it shifts `|z|` by a learned
+per-feature bias, rectifies, and rescales `z` by the ratio — so the phase, which is
+where the spatial arrangement of the signal lives, passes through untouched. The
+magnitude used in the denominator is floored at `1e-8` so a zero-magnitude bin does
+not produce a division by zero. The bias initializes at `-0.1`, a small negative
+value, so the activation starts by suppressing low-magnitude bins rather than acting
+as the identity.
 
-**Architectural Contract:**
+**Which axis the FFT runs over is the thing to get right, and it was wrong once.**
+`tf.signal.fft` transforms the INNERMOST axis. The token state is `(B, N, D)`, so
+calling it directly transformed `D`, the feature axis, and the layer performed no
+token mixing whatsoever — the one thing the architecture exists to do. The sequence
+axis is therefore transposed to the end for the transform and transposed back
+afterwards. The shape of `W_base`, `(seq_len, embed_dim)`, is a gain per frequency
+BIN per feature, and it is only meaningful when the bins index the token axis; that
+shape is the check on this. Because `W_base` is sized by `seq_len`, the model is tied
+to the token count it was built for — a fixed image resolution, unlike attention.
 
-```
-Input Processing:
-    Image → Patch Embedding → Add CLS Token → Add Position Embedding
-               ↓
-FFTNet Transformer Stack (N blocks)
-    [FFTMixer + FFN] × N layers
-               ↓
-Output Dictionary: {
-    "last_hidden_state": [batch_size, num_patches+1, hidden_size],
-    "cls_token": [batch_size, hidden_size],
-    "patch_features": [batch_size, num_patches, hidden_size]
-}
-               ↓
-Vision Task Head (e.g., ImageClassificationHead)
-               ↓
-Task-Specific Outputs
-    (e.g., {"logits": ..., "probabilities": ...})
-```
+**ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10).** ``FFTMixer.call`` uses
+``tf.signal.fft`` / ``tf.signal.ifft`` on a complex64 tensor. This cannot migrate to
+``keras.ops``: ``keras.ops`` exposes only a real/imag-tuple ``fft`` and has NO
+``ifft``, so a backend-agnostic complex forward+inverse transform is not
+expressible. The raw ``tf.signal`` path is a documented exception to the
+keras.ops-only rule for the forward pass.
 
-**Key Design Principles:**
+Structurally each block is a standard pre-norm transformer block with the mixer in
+the attention slot: `x + FFTMixer(norm(x))` then `x + FFN(norm(x))`. Keeping the
+residual-and-norm skeleton intact is deliberate — it isolates the mixing mechanism as
+the only variable, so a comparison against an attention baseline measures the mixer
+rather than a differently-tuned block.
 
-1.  **Pure Encoder:** The `FFTNet` model contains no pooling or classification layers.
-    Its sole responsibility is to produce high-fidelity patch representations.
-2.  **Consistent Output:** The `call` method always returns a dictionary containing
-    sequence features, cls token, and patch features. This provides a stable interface.
-3.  **Decoupled Heads:** Task-specific heads are separate and can be attached via
-    the integration function `create_fftnet_with_head`.
-4.  **Simplified Interface:** Clean, composable design pattern for multi-task learning.
+The `FFTNet` class is a pure encoder and holds no pooling or classification layer. It
+embeds patches, prepends a CLS token, adds a learned positional embedding, runs the
+block stack, and returns a dictionary of ``last_hidden_state``, ``cls_token`` and
+``patch_features``. Returning all three unconditionally, rather than switching the
+return type on a flag, gives downstream heads a stable interface: a classification
+head reads the CLS token, a dense-prediction head reads the patch features, and
+neither needs the encoder reconfigured. Heads are attached externally through
+``create_fftnet_with_head``.
+
+References:
+    - Fein-Ashley, 2025. The FFT Strikes Back: An Efficient Alternative to
+      Self-Attention. (https://arxiv.org/abs/2502.18394)
+    - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
+      (https://arxiv.org/abs/2105.03824)
+    - Arjovsky et al., 2015. Unitary Evolution Recurrent Neural Networks.
+      (https://arxiv.org/abs/1511.06464)
+    - Rao et al., 2021. Global Filter Networks for Image Classification.
+      (https://arxiv.org/abs/2107.00645)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
 """
 
 import keras

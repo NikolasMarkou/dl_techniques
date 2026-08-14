@@ -1,153 +1,87 @@
 """
-Hierarchical Reasoning Model: Adaptive Computation Time with Multi-Level Reasoning
-================================================================================
+Hierarchical Reasoning Model: a two-timescale recurrent reasoning core under Adaptive
+Computation Time with Q-learned halting.
 
-A complete implementation of the Hierarchical Reasoning Model (HRM) with Adaptive
-Computation Time (ACT), providing dynamic computational depth allocation for complex
-reasoning tasks through a stateful wrapper around hierarchical reasoning cores.
+A fixed-depth transformer spends identical compute on every input. For multi-step
+reasoning that is doubly wrong: easy instances are over-served, and hard ones are
+capped by a depth chosen at training time. HRM makes depth a runtime quantity in two
+independent ways. Within one step, a small core iterates its own latent states rather
+than passing through distinct layers, so effective depth is `h_cycles * l_cycles`
+applications of a fixed parameter set. Across steps, Adaptive Computation Time lets
+each sequence in the batch decide for itself how many steps to take.
 
-The HRM addresses the computational efficiency challenges in complex reasoning by
-learning to adaptively allocate computation time based on input complexity, using
-Q-learning to determine optimal halting decisions and hierarchical processing
-for multi-scale reasoning.
+The hierarchy is a separation of timescales. Two latent states are maintained: a
+low-level `z_l` that is refreshed against the input on every inner iteration, and a
+high-level `z_h` that is refreshed only once per outer `h_cycle`, from the low-level
+state that the inner loop just settled. `z_l` sees `z_h + input_emb`, so the
+high-level state acts as a slowly-varying context that conditions fast local
+computation, while the fast state supplies the evidence the slow state integrates.
+This is the structure that lets a small network behave like a deep one without a deep
+one's parameter count.
 
-Architecture Overview:
----------------------
-The HRM employs a stateful wrapper architecture with adaptive computation:
+Gradients are truncated deliberately, and where they are truncated is the
+non-obvious part. Every cycle *except the last* runs under `stop_gradient`; the
+states are then detached and one final `l_reasoning` / `h_reasoning` pair runs with
+gradients recorded. Backpropagation therefore covers a single update applied to a
+converged state, not the whole `h_cycles * l_cycles` unroll. Memory is constant in
+the cycle counts, which is what makes large cycle settings affordable, and the
+assumption being made is that the earlier cycles are approximating a fixed point
+whose gradient the last step adequately represents.
 
-```
-Input(batch: {token_ids, puzzle_ids})
-       ↓
-   ┌─────────────────────────┐
-   │  Hierarchical Reasoning │
-   │         Model           │
-   │                         │
-   │  ┌─────────────────────┐│
-   │  │ Reasoning Core      ││  ← High/Low Level Processing
-   │  │ - High-level layers ││  ← Attention & FFN Blocks
-   │  │ - Low-level layers  ││  ← Multi-cycle Processing
-   │  │ - Q-learning head   ││  ← Halt/Continue Decisions
-   │  └─────────────────────┘│
-   │                         │
-   │  ┌─────────────────────┐│
-   │  │   ACT Controller    ││  ← Adaptive Computation
-   │  │ - Halting Logic     ││  ← Q-value Based Decisions
-   │  │ - State Management  ││  ← Carry State Tracking
-   │  │ - Step Counting     ││  ← Iteration Control
-   │  └─────────────────────┘│
-   └─────────────────────────┘
-       ↓
-   Output(logits, q_values, carry_state)
-```
+Halting is learned as a two-action Q-value problem. A `q_head` reads `z_h`'s first
+position and emits `q_halt` and `q_continue`; a sequence halts when
+`q_halt > q_continue`, with `halt_max_steps` as a hard ceiling. The Q-values are
+trained against a Bellman target formed by looking one step ahead and taking
+`sigmoid(max(q_halt', q_continue'))`, or `sigmoid(q_halt')` when that step would be
+the last. Note there is no discount factor: the target is the raw bootstrapped value,
+not `gamma * max(...)`. The lookahead runs with `training=False` and the target is
+`stop_gradient`-ed, so it is neither stochastic nor differentiable — without both, the
+TD loss can be minimized by dragging the target toward the prediction, the standard
+target-network collapse.
 
-Key Features:
-------------
-- **Adaptive Computation**: Variable reasoning steps based on problem complexity
-- **Hierarchical Processing**: Multi-level reasoning with high and low-level cycles
-- **Q-Learning Halting**: Learned stopping decisions via Q-value optimization
-- **State Management**: Stateful carry mechanism for iterative computation
-- **Exploration Strategy**: Configurable exploration for halting decisions
-- **Model Variants**: Pre-configured architectures for different complexity levels
-- **Full Keras Compatibility**: Complete Model class with compile/fit workflow
-- **Dual Call Interface**: Support for complete and single-step execution modes
+Training adds an exploration branch that forces a random subset of sequences to run
+for at least a randomly drawn minimum number of steps, so the model observes states
+that a greedy halting head would never reach. Inference uses the same learned halt
+signal but no exploration. An earlier version halted at inference on `halt_max_steps`
+alone, which made the trained `q_head` inert at exactly the time adaptivity is
+claimed; that is fixed, and the two code paths are now deliberately symmetric apart
+from exploration.
 
-Core Concepts:
--------------
+Two implementation details exist because this must run under `tf.function`, which is
+the regime `fit()` uses. The complete-forward loop has a STATIC trip count of
+`halt_max_steps` and no Python `break`: `all_finished` is a symbolic scalar, so an
+`if` on it raises `OperatorNotAllowedInGraphError` and only ever worked eagerly.
+Instead, once `done` is true both carry and outputs are frozen by `ops.where`, which
+reproduces the break exactly — continuing to step would reset the halted sequences
+(a halted sequence's states are reset on the next step) and silently restart their
+reasoning, returning a different answer. For the same reason `is_last_step` is used
+inside an `ops.where` rather than a Python `if`: it is a per-sequence `(batch,)`
+tensor and a truth-test on it is ambiguous eagerly and illegal in graph mode.
 
-**1. Wrapper Architecture:**
-The model acts as a stateful controller managing an inner HierarchicalReasoningCore,
-orchestrating iterative reasoning processes with dynamic computation allocation.
+The carry is a dict of `inner_carry` (the two latent states), a per-sequence `steps`
+counter, a `halted` mask, and `current_data`. That last field is what lets a batch
+slot be recycled: when a sequence halts, its slot is refilled from the incoming batch
+and its states are reset, so a batch is never blocked waiting for its slowest member.
+The model exposes both a complete mode (`call(batch)`, run to halting) and a
+single-step mode (`call((carry, batch))`) so an external training loop can drive the
+recursion itself.
 
-**2. Adaptive Computation Time (ACT):**
-Unlike fixed-depth models, HRM learns to perform variable reasoning steps, allowing
-longer computation for more complex problems while efficiently handling simpler cases.
+Six preset variants scale layers, heads and cycle counts together, from 2+2 layers
+with 2+2 cycles to 16+16 layers with 4+4 cycles.
 
-**3. State Management (Carry):**
-The model maintains a carry state dictionary tracking:
-- `inner_carry`: High-level (z_h) and low-level (z_l) reasoning states
-- `steps`: Computation step count for each sequence in the batch
-- `halted`: Boolean flags indicating completion status
-- `current_data`: Cached input data for iterative processing
-
-**4. Q-Learning Halting:**
-The core produces Q-values for "halt" and "continue" actions, with training using:
-- Bootstrap targets from next-step Q-values
-- Exploration strategy encouraging diverse computation depths
-- Hard limits preventing infinite computation loops
-
-Model Variants:
---------------
-- **micro**: 2+2 layers, 4+4 heads, 2+2 cycles - Minimal reasoning (1.2M params)
-- **tiny**: 4+4 layers, 4+4 heads, 2+2 cycles - Basic reasoning (4.8M params)
-- **small**: 6+6 layers, 8+8 heads, 2+3 cycles - Standard reasoning (18.3M params)
-- **base**: 8+8 layers, 8+8 heads, 3+3 cycles - Advanced reasoning (52.1M params)
-- **large**: 12+12 layers, 12+12 heads, 3+4 cycles - Complex reasoning (156.7M params)
-- **xlarge**: 16+16 layers, 16+16 heads, 4+4 cycles - Expert reasoning (421.2M params)
-
-Performance Characteristics:
----------------------------
-Compared to fixed-depth transformers:
-- Computational Efficiency: 2-5x reduction in average FLOPs
-- Problem Adaptation: Dynamic allocation based on complexity
-- Reasoning Quality: Superior performance on multi-step reasoning tasks
-- Training Stability: Q-learning provides stable halting gradients
-
-Usage Examples:
---------------
-```python
-# Mathematical reasoning model
-model = HierarchicalReasoningModel.from_variant(
-    "base",
-    vocab_size=32000,
-    seq_len=512,
-    num_puzzle_identifiers=1000
-)
-
-# Custom reasoning architecture
-model = HierarchicalReasoningModel(
-    vocab_size=50000,
-    seq_len=1024,
-    embed_dim=768,
-    h_layers=8,
-    l_layers=8,
-    halt_max_steps=12,
-    halt_exploration_prob=0.15
-)
-
-# Logical reasoning with high exploration
-model = create_hierarchical_reasoning_model(
-    vocab_size=30000,
-    seq_len=256,
-    variant="large",
-    halt_exploration_prob=0.2
-)
-```
-
-Mathematical Foundation:
------------------------
-The HRM implements iterative reasoning with learned halting:
-
-For step t:
-1. s_t+1, o_t = Core(s_t, x)  # Reasoning step
-2. Q_halt_t, Q_cont_t = Q-head(o_t)  # Halting Q-values
-3. halt_t = Q_halt_t > Q_cont_t  # Halting decision
-4. Target_t = γ * max(Q_halt_t+1, Q_cont_t+1)  # Bootstrap target
-
-Where s_t is the carry state and o_t are the step outputs.
-
-Research References:
--------------------
-[1] "Adaptive Computation Time for Recurrent Neural Networks" (Graves, 2016)
-[2] "Universal Transformers" (Dehghani et al., 2019)
-[3] "Hierarchical Neural Story Generation" (Fan et al., 2018)
-[4] "Q-Learning for Adaptive Computation" (Various, 2020-2023)
-
-Technical Notes:
----------------
-- Requires careful Q-learning hyperparameter tuning
-- Exploration probability should decrease during training
-- Hard step limits prevent runaway computation
-- Carry state management is critical for gradient flow
+References:
+    - Wang et al., 2025. Hierarchical Reasoning Model.
+      (https://arxiv.org/abs/2506.21734)
+    - Graves, 2016. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983)
+    - Dehghani et al., 2018. Universal Transformers.
+      (https://arxiv.org/abs/1807.03819)
+    - Banino et al., 2021. PonderNet: Learning to Ponder.
+      (https://arxiv.org/abs/2107.05407)
+    - Bai et al., 2019. Deep Equilibrium Models.
+      (https://arxiv.org/abs/1909.01377)
+    - Mnih et al., 2015. Human-level control through deep reinforcement learning.
+      Nature 518, 529-533.
 """
 
 import keras

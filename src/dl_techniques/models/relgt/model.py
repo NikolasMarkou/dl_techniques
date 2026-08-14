@@ -1,11 +1,67 @@
 """
-Modern Relational Graph Transformer (RELGT) Implementation
+Relational Graph Transformer: multi-element node tokenization over sampled subgraphs,
+with local self-attention combined with cross-attention to learnable global centroids.
 
-This module provides a modernized implementation of the Relational Graph Transformer,
+A relational database is a graph, but not one a standard graph transformer handles
+well. Its nodes come from different tables and so carry different feature schemas and
+different meanings; edges encode foreign keys rather than a single relation; rows
+carry timestamps, so an edge's usefulness depends on when it was created relative to
+the prediction time. Flattening all of that into one node-feature vector throws away
+exactly the structure that makes the data relational, and running full attention over
+a real database is impossible anyway — the graph does not fit.
 
-The RELGT model introduces a novel multi-element tokenization strategy for relational
-graph data and combines local attention over subgraphs with global attention to
-learnable centroids for powerful relational deep learning.
+RELGT's answer to the first problem is to stop treating a node as one vector.
+Each node in a sampled subgraph is decomposed into five elements, each embedded
+separately and summed:
+
+`T = Norm(Dropout(E_feat(x) + E_type(t) + E_hop(h) + E_time(tau) + E_pe(A)))`
+
+carrying, in order, its own features, which table it came from, how many hops it sits
+from the seed node, its timestamp relative to the seed's, and its structural position.
+Because the components are summed after independent embedding, attention can weigh
+"same table as the seed", "two hops away" and "recent" as separable signals rather
+than having to disentangle them from a concatenated blob. The positional element is
+computed by a small GNN run over random features propagated through the subgraph's
+adjacency — a learned structural fingerprint, since a relational graph has no
+canonical node ordering to index a positional table with.
+
+The second problem, scale, is handled by attending locally and summarizing globally.
+Local attention runs only over the sampled subgraph around the seed node, so cost is
+governed by the sample size rather than by the database. That alone would confine
+every prediction to its own neighbourhood, so each block also cross-attends from the
+seed node to a bank of learnable global centroids — `K = V = centroids`, `Q = seed` —
+which act as a small learned codebook of database-wide structure. The two are then
+combined, `output = Norm(FFN([h_local; h_global]) + ResidualProj([h_local; h_global]))`,
+where `h_local` is the mean-pooled output of local self-attention and `h_global` the
+single vector produced by the centroid cross-attention. The centroids are parameters,
+not statistics: they are shaped by the task, and their count is the knob that trades
+global expressiveness against parameters.
+
+Two structural facts about this implementation are worth stating plainly. Each
+transformer block collapses its token set to a single vector, so a block consumes
+tokens and emits a representation rather than an updated token sequence. As a
+consequence the block loop does not compose: every block is handed the *same*
+`local_tokens` and seed embedding, and only the last block's output reaches the
+prediction head. Setting `num_transformer_blocks > 1` therefore adds parameters and
+compute without deepening the computation, and a genuinely stacked variant would need
+blocks that return tokens. Separately, the seed node is taken to be index 0 of
+`node_features` — the subgraph sampler's contract, not something the model verifies.
+
+The prediction head's final activation follows `problem_type`, and when there are no
+transformer blocks at all the model falls back to mean-pooling the tokens, so the
+degenerate configuration still produces a well-shaped output rather than failing.
+
+References:
+    - Dwivedi et al., 2025. Relational Graph Transformer.
+      (https://arxiv.org/abs/2505.10960)
+    - Fey et al., 2023. Relational Deep Learning: Graph Representation Learning on
+      Relational Databases. (https://arxiv.org/abs/2312.04615)
+    - Dwivedi & Bresson, 2020. A Generalization of Transformer Networks to Graphs.
+      (https://arxiv.org/abs/2012.09699)
+    - Rampasek et al., 2022. Recipe for a General, Powerful, Scalable Graph
+      Transformer. (https://arxiv.org/abs/2205.12454)
+    - Jaegle et al., 2021. Perceiver: General Perception with Iterative Attention.
+      (https://arxiv.org/abs/2103.03206)
 """
 
 import keras

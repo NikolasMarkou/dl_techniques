@@ -1,206 +1,89 @@
 """
-TabM: Deep Ensemble Architecture for High-Performance Tabular Learning
-=====================================================================
+TabM: a parameter-efficient batched MLP ensemble for tabular data, with integrated
+categorical encoding and selectable diversity mechanisms.
 
-A comprehensive implementation of TabM (Tabular Model), providing state-of-the-art
-deep ensemble architectures specifically designed for tabular data. TabM addresses
-key challenges in tabular ML through efficient ensemble methods, integrated
-preprocessing, and parameter-efficient diversity mechanisms.
+Deep ensembles are the reliable way to improve a neural network on tabular data:
+train `k` models from different initializations and average them. The improvement is
+real but the cost is literal — `k` times the parameters, `k` times the training runs,
+`k` times the inference. TabM asks how much of the ensemble's benefit survives if the
+members are forced to share almost all of their weights, and answers that most of it
+does, provided the shared computation is perturbed per member in the right places.
 
-TabM represents a significant advancement in tabular deep learning, offering
-competitive performance with gradient boosting methods while maintaining the
-flexibility and end-to-end differentiability of neural networks. The architecture
-employs innovative batched ensemble techniques that provide uncertainty estimation
-and improved generalization without the computational overhead of traditional
-ensemble training.
+The mechanism is a rank-1 multiplicative perturbation of a shared kernel. A single
+weight matrix `W` is used by every member; member `i` scales the layer's input by a
+learned vector `r_i` and its output by a learned vector `s_i`, so
 
-Architecture Overview:
----------------------
-TabM integrates preprocessing, ensemble diversity, and prediction in a unified framework:
+`y_i = s_i * ((r_i * x) W) + b_i`
 
-```
-Input: {Numerical Features, Categorical Features}
-       ↓
-   ┌─────────────────────────────────────────────────┐
-   │               TabM Architecture                 │
-   │                                                 │
-   │  Preprocessing Pipeline                         │
-   │  ┌─────────────────┐  ┌─────────────────┐       │
-   │  │ Numerical       │  │ Categorical     │       │
-   │  │ Features        │  │ One-Hot         │       │
-   │  │ (passthrough)   │  │ Encoding        │       │
-   │  └─────────────────┘  └─────────────────┘       │
-   │           ↓                     ↓               │
-   │  ┌─────────────────────────────────────────────┐│
-   │  │          Feature Concatenation              ││
-   │  └─────────────────────────────────────────────┘│
-   │                      ↓                          │
-   │  ┌─────────────────────────────────────────────┐│
-   │  │         Ensemble Diversity Layer            ││ ← Architecture Dependent
-   │  │  • plain: No ensemble (baseline)            ││
-   │  │  • tabm: LinearEfficientEnsemble            ││
-   │  │  • tabm-mini: ScaleEnsemble (input only)    ││
-   │  │  • tabm-packed: Packed ensemble variants    ││
-   │  └─────────────────────────────────────────────┘│
-   │                      ↓                          │
-   │  ┌─────────────────────────────────────────────┐│
-   │  │            TabM Backbone MLP                ││
-   │  │  • Multiple hidden layers                   ││
-   │  │  • Configurable activation & dropout        ││
-   │  │  • Ensemble-aware or shared weights         ││
-   │  └─────────────────────────────────────────────┘│
-   │                      ↓                          │
-   │  ┌─────────────────────────────────────────────┐│
-   │  │           Output Layer                      ││
-   │  │  • plain: Standard Dense layer              ││
-   │  │  • ensemble: NLinear (k independent heads)  ││
-   │  └─────────────────────────────────────────────┘│
-   └─────────────────────────────────────────────────┘
-       ↓
-   Output: {Predictions, Uncertainty Estimates}
-```
+which is exactly `x (diag(r_i) W diag(s_i)) + b_i` — a distinct effective weight
+matrix per member, expressed in `d_in + d_out` parameters instead of
+`d_in * d_out`. The members are genuinely different functions, not a shared function
+with different readouts, and they cost a vector each. That is the whole idea; the
+rest of the architecture is how far the perturbation is pushed.
 
-Key Innovations:
----------------
+`arch_type` selects that. Under `'plain'` there is no ensemble at all: `k` must be
+`None`, the backbone is an ordinary MLP and the head an ordinary `Dense` — the
+baseline the ensemble variants are measured against. Under `'tabm'` every backbone
+layer is a `LinearEfficientEnsemble` with per-member input and output scaling, and
+the head is `NLinear`, which is `k` fully independent output matrices; the head is
+small enough that sharing it is not worth the loss of diversity where diversity
+matters most. Under `'tabm-mini'` the backbone weights are shared with no per-layer
+perturbation and *all* diversity comes from a single `ScaleEnsemble` adapter applied
+to the input, one learned scale vector per member — the cheapest possible ensemble,
+and the interesting limit case, since every member thereafter computes the same
+function of a differently-scaled input. `'tabm-mini-normal'` is the same with the
+adapter initialized from a normal distribution instead of random signs; random signs
+is the default because it guarantees members start at distinct, non-degenerate
+scalings rather than clustered near zero.
 
-**1. Batched Ensemble Training**: All k ensemble members are trained in parallel
-within a single model using efficient tensor operations, avoiding k-fold
-computational overhead while maintaining ensemble diversity.
+Two of the accepted `arch_type` values, `'tabm-packed'` and `'tabm-normal'`, are
+currently validated and stored but not branched on anywhere in layer construction —
+they build exactly what `'tabm'` builds. They are accepted for forward-compatibility;
+do not read them as distinct architectures.
 
-**2. Efficient Diversity Mechanisms**:
-- **LinearEfficientEnsemble**: Shared kernels with rank-1 perturbations
-- **ScaleEnsemble**: Input-level scaling for lightweight diversity
-- **NLinear**: Independent output heads for ensemble members
+Ensembling is done by carrying an explicit member axis through the whole network:
+tensors are `(batch, k, features)` and every layer is written to broadcast over that
+middle axis, so all `k` members are evaluated in one pass of dense kernels rather
+than in a Python loop. How the batch reaches that shape is governed by
+`share_training_batches`. When true (and always at inference), one batch is tiled `k`
+ways so every member sees identical rows — the members differ only through their
+perturbations. When false, an incoming batch of `B * k` rows is *reshaped* so each
+member gets a disjoint slice, which decorrelates members through data as well as
+through weights. That second path requires the caller to have prepared the batch at
+`k` times the nominal size; the model does not resample for you, and a batch that is
+not a multiple of `k` will not reshape correctly.
 
-**3. Integrated Preprocessing**: Seamless handling of mixed numerical and
-categorical data with built-in one-hot encoding, eliminating external
-preprocessing pipeline complexity.
+Preprocessing is inside the model rather than upstream: numerical features pass
+through unchanged and categorical features are one-hot encoded against declared
+cardinalities, then concatenated. This keeps the whole pipeline differentiable and
+serializable as one object, at the cost of an input width that grows with the sum of
+cardinalities — high-cardinality columns are the case where an external embedding
+would be preferable.
 
-Architecture Variants:
----------------------
+`call` returns per-member predictions of shape `(batch, k, d_out)`, deliberately
+un-aggregated; the `'plain'` path expands to `(batch, 1, d_out)` so the output rank
+does not depend on the architecture. Aggregation is a separate concern handled by the
+module-level prediction helper, because the right reduction differs by task — mean
+for the point estimate, and the across-member spread if a dispersion measure is
+wanted. Note that the model itself emits no uncertainty quantity; whatever is
+computed from the member axis is computed by the caller.
 
-**Plain MLP ('plain')**:
-- Standard Multi-Layer Perceptron baseline
-- Single model without ensemble mechanisms
-- Minimal parameters, fast inference
-- Reference point for ensemble evaluation
+Six preset variants scale hidden widths and member count together, from `[64, 32]`
+with `k=4` up to `[2048, 1024, 512, 256]` with `k=32`. The two smallest default to
+`'tabm-mini'` and the rest to `'tabm'`, on the reasoning that at small widths the
+per-layer scaling vectors are a large fraction of the parameter budget.
 
-**TabM Full Ensemble ('tabm')**:
-- Complete efficient ensemble architecture
-- LinearEfficientEnsemble for hidden layers
-- NLinear for independent output heads
-- Optimal performance-efficiency trade-off
-
-**TabM Mini ('tabm-mini')**:
-- Lightweight ensemble with shared weights
-- Diversity only through ScaleEnsemble input adapter
-- Parameter-efficient alternative to full ensemble
-- Suitable for resource-constrained environments
-
-**TabM Variants ('tabm-packed', 'tabm-normal')**:
-- Alternative initialization strategies
-- Different diversity distribution assumptions
-- Task-specific optimization opportunities
-
-Model Variants:
---------------
-- **micro**: [64, 32] layers, 4 ensemble members - Minimal tabular model (8K params)
-- **tiny**: [128, 64] layers, 8 ensemble members - Small-scale datasets (32K params)
-- **small**: [256, 128] layers, 8 ensemble members - Standard configuration (128K params)
-- **base**: [512, 256, 128] layers, 8 ensemble members - High-performance default (512K params)
-- **large**: [1024, 512, 256] layers, 16 ensemble members - Large tabular datasets (2M params)
-- **xlarge**: [2048, 1024, 512, 256] layers, 32 ensemble members - XL datasets (8M params)
-
-Performance Characteristics:
----------------------------
-Compared to traditional tabular ML approaches:
-- **vs Gradient Boosting**: Competitive accuracy with uncertainty quantification
-- **vs Standard MLPs**: Significant robustness improvement through ensembling
-- **vs Naive Ensembles**: 5-10x parameter efficiency with batched training
-- **Uncertainty Estimation**: Built-in epistemic uncertainty without MC Dropout
-- **End-to-End Learning**: Differentiable preprocessing and feature interaction
-
-Usage Examples:
---------------
-```python
-# Binary classification with mixed features
-model = TabMModel.from_variant(
-    "base",
-    n_num_features=20,
-    cat_cardinalities=[5, 3, 12, 8],
-    n_classes=2
-)
-
-# Regression with ensemble uncertainty
-model = create_tabm_ensemble(
-    n_num_features=15,
-    cat_cardinalities=[],
-    n_classes=None,  # Regression
-    k=16,           # 16 ensemble members
-    arch_type='tabm'
-)
-
-# Parameter-efficient ensemble
-model = create_tabm_mini(
-    n_num_features=50,
-    cat_cardinalities=[10, 5, 3],
-    n_classes=5,    # Multi-class
-    k=8
-)
-
-# Baseline comparison
-model = create_tabm_plain(
-    n_num_features=30,
-    cat_cardinalities=[4, 6],
-    n_classes=2
-)
-```
-
-Technical Implementation:
-------------------------
-- **Mixed Data Handling**: Automatic numerical passthrough and categorical one-hot encoding
-- **Ensemble Batching**: k members processed in parallel via (batch_size, k, features) tensors
-- **Memory Efficiency**: Shared computations where possible, minimal memory overhead
-- **Training Modes**: Support for shared vs independent batch sampling strategies
-
-Mathematical Foundation:
------------------------
-**Ensemble Prediction**: For k ensemble members, final prediction aggregates individual outputs:
-```
-ŷ = (1/k) Σᵢ₌₁ᵏ fᵢ(x)
-```
-
-**Uncertainty Estimation**: Epistemic uncertainty from prediction variance:
-```
-σ²ₑₚᵢₛₜₑₘᵢc = Var[{fᵢ(x)}ᵢ₌₁ᵏ]
-```
-
-**Efficient Ensemble**: Shared backbone with diverse perturbations:
-```
-fᵢ(x) = (W + ΔWᵢ)x + bᵢ
-```
-where ΔWᵢ represents rank-1 or input-level perturbations.
-
-Research Context:
-----------------
-TabM builds upon several key research directions:
-- Deep ensemble methods for uncertainty quantification
-- Efficient ensemble training techniques
-- Neural networks for tabular data
-- Automated feature preprocessing in deep learning
-- Parameter-efficient diversity mechanisms
-
-The architecture addresses known limitations of neural networks on tabular data
-while maintaining computational efficiency and providing principled uncertainty
-estimates crucial for real-world deployment.
-
-Technical Notes:
----------------
-- Requires careful ensemble member diversity to avoid mode collapse
-- Batch sampling strategy affects ensemble decorrelation
-- One-hot encoding dimension can become large with high cardinality features
-- Ensemble aggregation method (mean, best, greedy) impacts final performance
-- Memory scaling approximately linear with ensemble size k
+References:
+    - Gorishniy et al., 2024. TabM: Advancing Tabular Deep Learning with Parameter-
+      Efficient Ensembling. (https://arxiv.org/abs/2410.24210)
+    - Lakshminarayanan et al., 2017. Simple and Scalable Predictive Uncertainty
+      Estimation using Deep Ensembles. (https://arxiv.org/abs/1612.01474)
+    - Wen et al., 2020. BatchEnsemble: An Alternative Approach to Efficient Ensemble
+      and Lifelong Learning. (https://arxiv.org/abs/2002.06715)
+    - Gorishniy et al., 2021. Revisiting Deep Learning Models for Tabular Data.
+      (https://arxiv.org/abs/2106.11959)
+    - Grinsztajn et al., 2022. Why do tree-based models still outperform deep
+      learning on typical tabular data? (https://arxiv.org/abs/2207.08815)
 """
 
 import keras
