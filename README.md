@@ -46,12 +46,13 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>1. State-of-the-Art Architectures & Models (70+ Architectures)</b></summary>
 <p>
 
-- **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`** (including MEGA & SOM variants), **`Mamba`**, and modern **`BERT`** variants featuring Block-wise Latent Transformers (BLT) and Hierarchical Reasoning Models (HRM).
-- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`FastVLM`**, **`NanoVLM`** (including a score-based World Model), **`DINOv1/v2/v3`**, **`SigLIP-ViT`**, object detection with **`DETR`** and **`YOLOv12`**, and the **`Segment Anything Model (SAM)`**.
-- **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`MobileNetV1-V4`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
-- **Time Series & Forecasting**: State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`**, and the novel **`xLSTM`**.
-- **Generative & Specialized Models**: Task-specific models like **`DepthAnything`** for monocular depth estimation, a complete **`Variational Autoencoder (VAE)`** framework, full **`Capsule Networks`** (CapsNet) with dynamic routing, and unsupervised aligners like `Mini-Vec2Vec`.
-- **Experimental Frontiers**: Explore novel concepts including a wide range of **`Graph Neural Networks`** (GNNs) in `RELGT`, Kolmogorov-Arnold Networks (**`KAN`**), and bio-mimetic models like `MothNet`.
+- **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`**, **`Mamba`**, **`ModernBERT`**, **`DistilBERT`** and **`GPT-2`**, alongside the **`Byte Latent Transformer`** (BLT) and the **`Hierarchical Reasoning Model`** (HRM).
+- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`MobileCLIP`** and **`MobileCLIP2`** (on a faithful **`FastViT`** image tower), **`FastVLM`**, **`NanoVLM`** (including a score-based World Model), **`DINOv1/v2/v3`**, **`SigLIP-ViT`**, **`BEiT`**, **`Swin Transformer`**, **`Video-JEPA`**, object detection with **`DETR`** and **`YOLOv12`**, keypoints with **`SuperPoint`**, and **`Segment Anything`** (SAM 1, 2 and 3).
+- **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`ConvUNeXt`**, **`MobileNetV1-V4`**, **`ResNet`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
+- **Time Series & Forecasting**: State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`**, autoregressive **`DeepAR`**, **`PRISM`**, and the novel **`xLSTM`**.
+- **Generative Modeling & Image Restoration**: Diffusion and flow-matching transformers (**`SD3 MMDiT`**, **`Ideogram4`**), a complete **`Variational Autoencoder (VAE)`** framework with **`VQ-VAE`** variants, arbitrary-scale super-resolution (**`THERA`**, **`PFT-SR`**), and restoration/denoising backbones (**`DarkIR`**, **`SCUNet`**, **`ACC-UNet`**, and a family of bias-free denoisers).
+- **Specialized Models**: Task-specific models like **`DepthAnything`** for monocular depth estimation, full **`Capsule Networks`** (CapsNet) with dynamic routing, **`TabM`** for tabular data, and unsupervised aligners like `Mini-Vec2Vec`.
+- **Experimental Frontiers**: Explore novel concepts including a wide range of **`Graph Neural Networks`** (GNNs) in `RELGT`, the **`Energy Transformer`** family (image and graph domains), geometric-algebra networks in **`CliffordNet`**, Kolmogorov-Arnold Networks (**`KAN`**), Neural Turing Machines (**`NTM`**), and bio-mimetic models like `MothNet`.
 </p>
 </details>
 
@@ -60,7 +61,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <p>
 
 - **Pioneering Attention Mechanisms**: Go beyond standard attention with **`DifferentialMultiHeadAttention`**, modern **`HopfieldAttention`**, **`GroupQueryAttention`**, `CapsuleRoutingAttention`, and efficient alternatives like `FNetFourierTransform` and `RingAttention`.
-- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating over **25+ attention mechanisms**, **16 normalization variants** (including `BandRMS`, `LogitNorm`), and **15 Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code.
+- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating **32 attention mechanisms**, **18 normalization variants** (including `BandRMS`, `LogitNorm`), and **21 Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code — plus registries for **22 activations**, **13 embeddings**, and task heads dispatched by domain via `create_head`.
 - **Graph & Structural Primitives**: Configurable **GNN layers** with multiple aggregation strategies (`GCN`, `GAT`, `GraphSAGE`), **`Relational Graph Transformer`** (RELGT) blocks, and **`Entity-Graph Refinement`** for learning hierarchical relationships.
 - **Mixture of Experts (MoE) System**: A complete MoE implementation with configurable FFN experts, multiple gating strategies (including **SoftMoE** and Cosine Gating), and integrated training utilities.
 - **Probabilistic & Statistical Layers**: Build models that reason about uncertainty with **`Mixture Density Networks`** (MDN), **`Normalizing Flows`**, and time series analysis layers for residual autocorrelation (`ResidualACFLayer`).
@@ -72,7 +73,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>3. A Unified Command Center for Model Analysis & Introspection</b></summary>
 <p>
 
-- **Holistic Model Analysis**: A powerful `ModelAnalyzer` to benchmark models across six critical dimensions: training dynamics, weight health, prediction calibration, information flow, and advanced spectral analysis. Its modular design includes specialized analyzers like `CalibrationAnalyzer`, `WeightAnalyzer`, and `InformationFlowAnalyzer`.
+- **Holistic Model Analysis**: A powerful `ModelAnalyzer` to benchmark models across five critical dimensions: training dynamics, weight health, prediction calibration, information flow, and advanced spectral analysis. Its modular design includes specialized analyzers like `CalibrationAnalyzer`, `WeightAnalyzer`, and `InformationFlowAnalyzer`.
 - **Publication-Ready Visualizations**: Automatically generate insightful visualizations, interactive summary dashboards, and comparative analysis plots with integrated statistical significance testing.
 - **Predictive Generalization with Spectral Analysis**: Integrate the power of **WeightWatcher** through our `SpectralAnalyzer` to assess generalization potential by analyzing the spectral properties (eigenvalues) of weight matrices—often without needing test data.
 - **Deep Diagnostic Toolkit**: Move beyond accuracy to diagnose overconfidence (`CalibrationAnalyzer`), information bottlenecks (`InformationFlowAnalyzer`), weight decay and similarity (`WeightAnalyzer`), and learning efficiency (`TrainingDynamicsAnalyzer`).
@@ -80,7 +81,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 </details>
 
 <details>
-<summary><b>4. Next-Generation Loss Functions & Optimization (20+ Specialized Losses)</b></summary>
+<summary><b>4. Next-Generation Loss Functions & Optimization (40+ Specialized Losses)</b></summary>
 <p>
 
 - **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy, Matthews Correlation Coefficient) into a differentiable loss function for direct optimization on imbalanced data.
@@ -94,10 +95,10 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: Over **75+ ready-to-use training scripts** (`src/train/`) for all major architectures, establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Accelerated Development with Training Pipelines**: **70 ready-to-use `train_*.py` entry points across 48 pipeline directories** (`src/train/`), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
-- **Assured Reliability**: An extensive **500+ module test suite** (`tests/`) ensures the correctness and stability of every component.
-- **Validated Performance**: Rigorous benchmarks against reference implementations and established academic results to guarantee numerical accuracy and performance.
+- **Assured Reliability**: An extensive **600+ module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions.
+- **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/fastvit/reference.py`) rather than asserting parity in prose.
 </p>
 </details>
 
@@ -136,10 +137,18 @@ This library is a comprehensive suite of tools organized into five key pillars, 
     ```
     This installs additional tools such as `pytest`, `pytest-cov`, `pylint`, and `pre-commit`.
 
-4.  **Verify Installation:**
+4.  **Optional Extras:**
+    The Streamlit applications under `src/applications/` need an extra that is *not* part of a core install:
+    ```bash
+    pip install ".[apps]"
+    ```
+
+5.  **Verify Installation:**
     ```bash
     python -c "import dl_techniques; print('Installation successful!')"
     ```
+
+> **No trained weights ship with this repository.** Training outputs live under `results/`, which is gitignored, so a fresh clone contains source, tests and prose only. Any `results/<run>/final_model.keras` path quoted in a trainer default, a paper or an application is a local artifact — you train it yourself first. See `REPO_MAP.md` § *What a fresh clone actually contains*.
 
 ---
 
@@ -191,11 +200,12 @@ model = create_tirex_model(
     quantile_levels=[0.1, 0.5, 0.9],  # 80% prediction interval + median
 )
 
-# Train directly for calibrated uncertainty with a quantile loss
+# Train directly for calibrated uncertainty with a quantile loss.
+# Predictions are (batch, prediction_length, n_quantiles), so a plain
+# point-forecast metric like 'mae' would broadcast across the quantile axis.
 model.compile(
     optimizer='adamw',
     loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]),
-    metrics=['mae', 'mse'],
 )
 ```
 
@@ -254,7 +264,7 @@ results = analyzer.analyze(test_data)
 
 # Access detailed, structured metrics programmatically for automated reporting
 print(f"Best calibrated model (by ECE): {min(results.calibration_metrics.items(), key=lambda x: x[1]['ece'])}")
-print(f"Training efficiency ranking (epochs to converge): {results.training_metrics.convergence_epochs}")
+print(f"Training efficiency ranking (epochs to converge): {results.training_metrics.epochs_to_convergence}")
 ```
 
 ### 5. Optimize Directly for F1-Score on Imbalanced Data
@@ -307,11 +317,15 @@ node_embeddings = gnn([node_features, adjacency_matrix])
 
 ## In-Depth Documentation
 
-This library is engineered to be a living knowledge base, bridging the gap between academia and industry. Our documentation is split into two primary resources: in-depth theoretical guides and a comprehensive API reference.
+This library is engineered to be a living knowledge base, bridging the gap between academia and industry. Our documentation is split into three primary resources: a navigational map of the repository, in-depth theoretical guides, and a comprehensive API reference.
+
+### Start Here: [`REPO_MAP.md`](./REPO_MAP.md)
+
+Before anything else, read **[`REPO_MAP.md`](./REPO_MAP.md)** — a path-verified router for the repository. It answers *where code of a given kind lives*, *how the registry and factory dispatch is wired*, *which trainer trains which model*, and *which of the many in-tree docs answers your question*. Every number in it sits beside the command that re-derives it, and it carries a ledger of claims the repo's own older docs get wrong.
 
 ### Tutorials & Deep Dives (`research/`)
 
-Our `research/` directory contains over 100+ articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
+Our `research/` directory contains over 120 articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
 
 -   **[Complete Transformer Guide (2025)](./research/2025_transformer_architectures.md)**: A production-focused guide to implementing state-of-the-art Transformer architectures.
 -   **[Model Analyzer Guide](./src/dl_techniques/analyzer/README.md)**: A comprehensive tutorial for the advanced model analysis toolkit.
@@ -319,6 +333,10 @@ Our `research/` directory contains over 100+ articles providing the theoretical 
 -   **[Chronological Neural Architectures](./research/neural_network_architectures.md)**: An extensive chronological guide to influential architectures with implementation notes.
 -   **[Band-Constrained Normalization](./research/bcn_thesis.md)**: A novel normalization technique that preserves magnitude information within bounded constraints.
 -   **[Mixture Density Networks](./research/mdn.md)**: The theory and best practices for implementing probabilistic models.
+
+### Papers (`research/papers/`)
+
+Five LaTeX manuscripts written against this codebase live under [`research/papers/`](./research/papers), several with built PDFs: `band_rms` (band-constrained RMS normalization), `bfunet` (bias-free denoisers as image priors), `cliffordnet_extensions`, `correlations`, and `logical_net`.
 
 ### API Reference (per-module docs)
 For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. The `research/` guides above complement these with the underlying theory.
@@ -329,28 +347,43 @@ For detailed documentation on every module, class, and function, browse the sour
 
 The repository is organized for clarity, maintainability, and ease of contribution.
 
+`src/` is the import root: the library is imported as `dl_techniques.*`, the training pipelines as `train.*`, and the applications as `applications.*`.
+
 ```
 dl_techniques/
-├── src/dl_techniques/
+├── src/dl_techniques/         # THE LIBRARY — 13 subpackages
 │   ├── models/                # 70+ complete, ready-to-train model implementations
-│   │   ├── qwen/              # Qwen3 family (Base, MEGA, SOM)
+│   │   ├── qwen/              # Qwen3 (Base, Next, Embeddings)
 │   │   ├── dino/              # DINO v1, v2, v3
-│   │   ├── fastvlm/           # Fast Vision-Language Models
+│   │   ├── SAM/               # Segment Anything v1, v2, v3
+│   │   ├── time_series/       # 7 nested forecasting models (TiRex, N-BEATS, xLSTM, ...)
 │   │   └── ...
-│   ├── layers/                # 290+ specialized layer implementations
-│   │   ├── attention/         # 25+ modern attention mechanisms with factory
-│   │   ├── norms/             # 16 advanced normalization layers with factory
-│   │   ├── ffn/               # 15 feed-forward networks with factory
+│   ├── layers/                # 290+ modules across 21 themed subpackages
+│   │   ├── attention/         # 32 modern attention mechanisms with factory
+│   │   ├── norms/             # 18 advanced normalization layers with factory
+│   │   ├── ffn/               # 21 feed-forward networks with factory
+│   │   ├── embedding/         # 13 positional/semantic embeddings with factory
+│   │   ├── heads/             # Task heads dispatched by domain (nlp/vision/vlm)
 │   │   ├── graphs/            # Graph neural network components
 │   │   ├── moe/               # Mixture of Experts (MoE) system
-│   │   └── statistics/        # Statistical and probabilistic layers (MDN, Flows)
-│   ├── losses/                # 20+ specialized loss functions (AnyLoss, Goodhart, etc.)
+│   │   ├── statistics/        # Statistical and probabilistic layers (MDN, Flows)
+│   │   └── ...
+│   ├── losses/                # 40+ specialized loss modules (AnyLoss, Goodhart, etc.)
+│   ├── metrics/               # Custom Keras metrics (PSNR, SSIM, perplexity, Brier)
+│   ├── optimization/          # Optimizers (Muon, VSGD, SGLD), LR schedules
 │   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers
+│   ├── visualization/         # Plotting helpers for training and evaluation
+│   ├── datasets/              # Dataset loaders and synthetic generators
+│   ├── callbacks/             # Reusable Keras callbacks
 │   ├── regularizers/          # Advanced regularization techniques (SRIP, Orthogonal)
-│   └── utils/                 # Core utilities, loggers, and data handlers
-├── research/                  # 100+ in-depth articles and theoretical guides
-├── src/train/                 # 75+ ready-to-use training pipelines and scripts
-└── tests/                     # 500+ test modules ensuring component reliability
+│   ├── initializers/          # Structured initializers (Gabor, Haar, orthonormal, KAN)
+│   ├── constraints/           # Weight constraints
+│   └── utils/                 # Core utilities, loggers, masking, and data handlers
+├── src/train/                 # 70 training entry points across 48 pipeline directories
+├── src/applications/          # Deployable applications built on the library
+├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
+├── tests/                     # 600+ test modules ensuring component reliability
+└── REPO_MAP.md                # Path-verified router — read this first
 ```
 
 ---
@@ -415,11 +448,13 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Attention Is All You Need** (Transformer): Vaswani, A., et al. (2017). *NeurIPS*.
 -   **BERT: Pre-training of Deep Bidirectional Transformers**: Devlin, J., et al. (2018). *NAACL*.
 -   **RoFormer: Enhanced Transformer with Rotary Position Embedding**: Su, J., et al. (2021). *ACL*.
--   **DIFFERENTIAL TRANSFORMER**: Zhu, J., et al. (2025). *CVPR*.
+-   **Differential Transformer**: Ye, T., et al. (2024). *ICLR 2025*.
 -   **Mamba: Linear-Time Sequence Modeling**: Gu, A., & Dao, T. (2023).
--   **Gemma 3 Technical Report**: Google (2024).
+-   **Gemma 3 Technical Report**: Google DeepMind (2025).
 -   **Qwen Technical Report**: Bai, J., et al. (2023).
 -   **Byte Latent Transformer: Patches Scale Better Than Tokens**: Pagnoni, A., et al. (2024).
+-   **ModernBERT: Smarter, Better, Faster, Longer**: Warner, B., et al. (2024).
+-   **DistilBERT, a distilled version of BERT**: Sanh, V., et al. (2019).
 </details>
 
 <details>
@@ -436,6 +471,26 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Learning Transferable Visual Models From Natural Language Supervision** (CLIP): Radford, A., et al. (2021). *ICML*.
 -   **End-to-End Object Detection with Transformers** (DETR): Carion, N., et al. (2020). *ECCV*.
 -   **FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization**: Vasu, P. K. A., et al. (2023).
+-   **BEiT: BERT Pre-Training of Image Transformers**: Bao, H., et al. (2021). *ICLR*.
+-   **Swin Transformer: Hierarchical Vision Transformer using Shifted Windows**: Liu, Z., et al. (2021). *ICCV*.
+-   **MobileCLIP2: Improving Multi-Modal Reinforced Training**: Faghri, F., et al. (2025).
+-   **Segment Anything**: Kirillov, A., et al. (2023). *ICCV*.
+-   **SAM 2: Segment Anything in Images and Videos**: Ravi, N., et al. (2024).
+-   **SuperPoint: Self-Supervised Interest Point Detection and Description**: DeTone, D., et al. (2018). *CVPR Workshops*.
+-   **V-JEPA: Revisiting Feature Prediction for Learning Visual Representations from Video**: Bardes, A., et al. (2024).
+-   **Masked Autoencoders Are Scalable Vision Learners** (MAE): He, K., et al. (2022). *CVPR*.
+</details>
+
+<details>
+<summary><b>Generative Modeling & Image Restoration</b></summary>
+
+-   **Scaling Rectified Flow Transformers for High-Resolution Image Synthesis** (SD3 / MMDiT): Esser, P., et al. (2024). *ICML*.
+-   **Flow Matching for Generative Modeling**: Lipman, Y., et al. (2023). *ICLR*.
+-   **Auto-Encoding Variational Bayes** (VAE): Kingma, D. P., & Welling, M. (2013).
+-   **Neural Discrete Representation Learning** (VQ-VAE): van den Oord, A., et al. (2017). *NeurIPS*.
+-   **Robust and Interpretable Blind Image Denoising via Bias-Free Convolutional Neural Networks**: Mohan, S., et al. (2020). *ICLR*.
+-   **Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields**: Becker, A., et al. (2025). *CVPR*.
+-   **DarkIR: Robust Low-Light Image Restoration**: Feijoo, D., et al. (2025). *CVPR*.
 </details>
 
 <details>
@@ -460,6 +515,9 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Dynamic Routing Between Capsules**: Sabour, S., et al. (2017). *NeurIPS*.
 -   **KAN: Kolmogorov-Arnold Networks**: Liu, Z., et al. (2024).
 -   **FractalNet: Ultra-Deep Neural Networks without Residuals**: Larsson, G., et al. (2016).
+-   **Energy Transformer**: Hoover, B., et al. (2023). *NeurIPS*.
+-   **Neural Turing Machines**: Graves, A., et al. (2014).
+-   **Geometric Clifford Algebra Networks**: Ruhe, D., et al. (2023). *ICML*.
 </details>
 
 <details>
@@ -468,6 +526,7 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **N-BEATS: Neural basis expansion analysis for interpretable time series forecasting**: Oreshkin, B. N., et al. (2019). *ICLR*.
 -   **Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting**: Lim, B., et al. (2021).
 -   **DeepAR: Probabilistic forecasting with autoregressive recurrent networks**: Salinas, D., et al. (2020).
+-   **xLSTM: Extended Long Short-Term Memory**: Beck, M., et al. (2024). *NeurIPS*.
 -   **Reversible Instance Normalization for Accurate Time-Series Forecasting against Distribution Shift**: Kim, T., et al. (2021). *ICLR*.
 </details>
 
