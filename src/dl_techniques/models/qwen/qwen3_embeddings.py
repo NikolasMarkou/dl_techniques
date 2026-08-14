@@ -46,18 +46,26 @@ tokenizer: `yes_token_id` and `no_token_id` default to 9891 and 2201, and pointi
 this model at a different vocabulary without changing them silently scores two
 unrelated tokens.
 
-**These towers are not causal, and that contradicts the pooling rationale.** Neither
-`call` constructs a causal mask; both forward the caller's 2D padding mask directly
-to `TransformerLayer`, and `TransformerLayer` masks only with what it is given. The
-attention is therefore bidirectional, so "the last token has seen the whole prefix"
-is true here only in the trivial sense that every token has seen every other. For an
-embedding model bidirectionality is arguably an advantage and the pooled vector is
-still well-defined. For the reranker it is a genuine defect: the head is trained to
-predict a token from a position that has already attended to the tokens after it.
-The sibling modules `qwen3.py` and `qwen3_next.py` build their masks explicitly
-through `components.build_causal_attention_mask`; this module does not, and earlier
-revisions of this docstring asserted a causal architecture that the code does not
-implement.
+**The two towers are deliberately masked differently, and the asymmetry is the
+point.** The reranker converts its own language-modelling head into a judgment, so
+it is a next-token prediction and is causal: `Qwen3RerankerLayer.call` builds the
+mask through `components.build_causal_attention_mask` — the same constructor
+`qwen3.py` and `qwen3_next.py` use — which OR-combines a lower-triangular mask with
+the caller's padding mask and returns ATTEND semantics. Before this was wired the
+head scored a position that had already attended to the tokens after it; perturbing
+a token at index 6 of a 12-token sequence moved every hidden state at index < 6 by
+up to 3.42e-01, and now moves them by exactly 0.0 while positions >= 6 still
+respond.
+
+`Qwen3EmbeddingLayer` stays **bidirectional on purpose** and forwards the caller's
+2D padding mask unchanged. Nothing is predicted from the pooled vector, so there is
+no target to leak; bidirectional attention is strictly more informative for an
+encoder, and it is what the strong open embedding models do. The one thing it costs
+is the usual justification for last-token pooling — in a bidirectional trunk every
+position has seen the whole sequence, so reading the last real one is a convention
+carried over from the decoder-only lineage rather than a requirement. It remains a
+reasonable convention (that position is the only one guaranteed to exist and to be
+non-padding for every row), but do not read it as evidence of causality.
 
 Position is encoded with *learned absolute* embeddings (`positional_learned` from
 the embedding factory), not the rotary embeddings used elsewhere in the Qwen family.
@@ -91,6 +99,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.factory import create_embedding_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
+
+from .components import build_causal_attention_mask
 
 # ---------------------------------------------------------------------
 
@@ -376,8 +386,8 @@ class Qwen3RerankerLayer(keras.layers.Layer):
     **Architecture**:
     ```
     Formatted Prompt -> Token Embeddings -> Positional Embeddings ->
-    N × TransformerLayer -> Language Modeling Head -> Logits["no", "yes"] ->
-    Softmax -> Score
+    N × TransformerLayer (CAUSAL + padding mask) -> Language Modeling Head ->
+    Logits["no", "yes"] -> Softmax -> Score
     ```
 
     **Mathematical Operation**:
@@ -550,11 +560,20 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Apply dropout
         hidden_states = self.embedding_dropout(hidden_states, training=training)
 
+        # The reranker reads its own LM head at the last real position, so it is
+        # a next-token prediction and MUST be causal: without the mask that
+        # position has already attended to the tokens it is being asked to
+        # score. Shared with qwen3.py / qwen3_next.py; returns ATTEND semantics
+        # and folds the padding mask in, so the raw 2D mask is not forwarded.
+        causal_attend_mask = build_causal_attention_mask(
+            hidden_states, attention_mask
+        )
+
         # Process through transformer layers
         for transformer_layer in self.transformer_layers:
             hidden_states = transformer_layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_attend_mask,
                 training=training
             )
 
