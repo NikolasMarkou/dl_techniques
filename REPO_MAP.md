@@ -101,7 +101,7 @@ Every one of the 13 has its own `CLAUDE.md` — start there, not here.
 | Directory | Present here | Ships in a clone | Consequence |
 |---|---|---|---|
 | `src/`, `tests/`, `research/`, `imgs/`, `scripts/` | yes | yes | The whole repo a newcomer gets. |
-| `results/` | yes — 6 run dirs, 3.4 M | **no** (gitignored) | Zero checkpoints in a clone. These two digits are the most volatile in this file: they describe one machine's untracked scratch, and they fell from 55 dirs / 6.3 G to 6 / 3.4 M between 2026-08-11 and 2026-08-14. Do not read them as a repo property, and never act on them — `results/` is gitignored and untracked, so a deletion there is unrecoverable. |
+| `results/` | yes — 8 run dirs, 4.5 M | **no** (gitignored) | Zero checkpoints in a clone. These two digits are the most volatile in this file: they describe one machine's untracked scratch, and they fell from 55 dirs / 6.3 G to 6 / 3.4 M between 2026-08-11 and 2026-08-14, then rose to 8 / 4.5 M when `plan-2026-08-14T042537-ff96c6c6` proved a repo-root-write guard RED (the 2 added dirs are that injection's artifacts, deliberately left in place because nothing under `results/` may be deleted; the figure returns to 6 if the user removes them). Do not read them as a repo property, and never act on them — `results/` is gitignored and untracked, so a deletion there is unrecoverable. |
 | `plans/` | yes | **no** (gitignored) | Planner state is machine-local. |
 | `data/` | yes — 2.6 G | **no** (untracked) | Local datasets only. |
 
@@ -556,13 +556,13 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Entries under `src/train/` | 48 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Run dirs under `results/` (local) | 6 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Size of `results/` (local) | 3.4M | `LC_ALL=C du -sh results \| cut -f1` |
+| Run dirs under `results/` (local) | 8 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
+| Size of `results/` (local) | 4.5M | `LC_ALL=C du -sh results \| cut -f1` |
 | Size of `data/` (local) | 2.6G | `LC_ALL=C du -sh data \| cut -f1` |
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
-| Notes in `research/` | 122 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
+| Notes in `research/` | 123 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Lines in `README.md` | 485 | `wc -l < README.md` |
+| Lines in `README.md` | 544 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
 | Keys in `ATTENTION_REGISTRY` | 32 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
