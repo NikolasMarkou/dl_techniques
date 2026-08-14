@@ -382,8 +382,7 @@ class ConvNeXtV2(keras.Model):
     def load_pretrained_weights(
             self,
             weights_path: str,
-            skip_mismatch: bool = True,
-            by_name: bool = True
+            skip_mismatch: bool = True
     ) -> None:
         """Load pretrained weights into the model.
 
@@ -401,8 +400,6 @@ class ConvNeXtV2(keras.Model):
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
                 Useful when loading weights with different num_classes. Maps to
                 ``strict=not skip_mismatch``.
-            by_name: Retained for backward compatibility; layer-by-layer transfer
-                is always name-based, so this argument is ignored.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -414,8 +411,6 @@ class ConvNeXtV2(keras.Model):
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
-
-        del by_name  # name-based transfer is implicit; kept for signature stability
 
         try:
             # Build model if not already built (weight transfer needs a built target)
@@ -590,8 +585,7 @@ class ConvNeXtV2(keras.Model):
             try:
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True
+                    skip_mismatch=skip_mismatch
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")

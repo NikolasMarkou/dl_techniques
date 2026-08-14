@@ -472,8 +472,7 @@ class CliffordNet(keras.Model):
     def load_pretrained_weights(
         self,
         weights_path: str,
-        skip_mismatch: bool = True,
-        by_name: bool = True,
+        skip_mismatch: bool = True
     ) -> None:
         """Load pretrained weights into the model.
 
@@ -489,15 +488,12 @@ class CliffordNet(keras.Model):
         :param skip_mismatch: Skip layers with mismatched shapes. Useful
             when loading weights with different ``num_classes``. Maps to
             ``strict=not skip_mismatch``.
-        :param by_name: Retained for backward compatibility; layer-by-layer
             transfer is always name-based, so this argument is ignored.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
         :raises ValueError: If weights cannot be loaded.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
-
-        del by_name  # name-based transfer is implicit; kept for signature stability
 
         try:
             logger.info(f"Loading pretrained weights from {weights_path}")
@@ -753,8 +749,7 @@ class CliffordNet(keras.Model):
             try:
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True,
+                    skip_mismatch=skip_mismatch
                 )
             except Exception as exc:
                 logger.error(f"Failed to load pretrained weights: {exc}")

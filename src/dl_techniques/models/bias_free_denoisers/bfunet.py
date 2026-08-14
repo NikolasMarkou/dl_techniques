@@ -700,8 +700,7 @@ def _download_bfunet_weights(
 def load_pretrained_weights_into_model(
         model: keras.Model,
         weights_path: str,
-        skip_mismatch: bool = True,
-        by_name: bool = True
+        skip_mismatch: bool = True
 ) -> None:
     """
     Load pretrained weights into a BFUNet model.
@@ -721,8 +720,6 @@ def load_pretrained_weights_into_model(
         skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
             Useful when loading weights with different input/output shapes
             or deep supervision settings. Maps to ``strict=not skip_mismatch``.
-        by_name: Boolean, retained for backward compatibility. Layer-by-layer
-            transfer is always name-based; this argument is ignored.
 
     Raises:
         FileNotFoundError: If weights_path doesn't exist.
@@ -740,8 +737,6 @@ def load_pretrained_weights_into_model(
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
-
-    del by_name  # name-based transfer is implicit; kept for signature stability
 
     try:
         # Weight transfer needs a built target.
@@ -889,7 +884,6 @@ def create_bfunet_variant(
             model=model,
             weights_path=load_weights_path,
             skip_mismatch=True,
-            by_name=True
         )
 
     return model

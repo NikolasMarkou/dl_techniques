@@ -421,8 +421,7 @@ class ModernBERT(keras.Model):
     def load_pretrained_weights(
             self,
             weights_path: str,
-            skip_mismatch: bool = True,
-            by_name: bool = True
+            skip_mismatch: bool = True
     ) -> None:
         """Load pretrained weights into the model.
 
@@ -430,8 +429,6 @@ class ModernBERT(keras.Model):
         :type weights_path: str
         :param skip_mismatch: Whether to skip layers with mismatched shapes.
         :type skip_mismatch: bool
-        :param by_name: Whether to load weights by layer name.
-        :type by_name: bool
         :raises FileNotFoundError: If weights_path doesn't exist.
         :raises ValueError: If weights cannot be loaded.
         """

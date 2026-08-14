@@ -257,8 +257,14 @@ Prefer an alias over renaming in place: the old spelling is referenced by traine
 
 ### Axis 3 — pretrained weights
 
-`load_pretrained_weights(weights_path, skip_mismatch, by_name)` loads from a **local path**,
-building the model with a dummy forward pass first if needed.
+`load_pretrained_weights(weights_path, skip_mismatch)` loads from a **local path**,
+building the model with a dummy forward pass first if needed. There is **no `by_name`
+parameter**: Keras 3 removed it from `Model.load_weights`, transfer here is
+layer-by-layer via `utils/weight_transfer.py` and therefore always name-based, and
+the argument survived for a while as an accepted no-op — deleted 2026-08-14 from all
+nine packages that carried it (`resnet`, `bert`, `convnext_v1`, `convnext_v2`,
+`fnet`, `modern_bert`, `cliffordnet`, `bias_free_denoisers/bfunet`, `kan`). Do not
+reintroduce it.
 
 `_download_weights(...)` **raises `NotImplementedError` naming the variant and showing the
 local-path alternative.** No public checkpoints are distributed with `dl_techniques` for any

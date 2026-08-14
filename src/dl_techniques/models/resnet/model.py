@@ -502,8 +502,7 @@ class ResNet(keras.Model):
     def load_pretrained_weights(
             self,
             weights_path: str,
-            skip_mismatch: bool = True,
-            by_name: bool = True
+            skip_mismatch: bool = True
     ) -> None:
         """Load pretrained weights into the model from a local checkpoint.
 
@@ -521,8 +520,6 @@ class ResNet(keras.Model):
             weights_path: String, path to the weights file (.keras format).
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
                 Maps to the inverse of the transfer helper's ``strict``.
-            by_name: Retained for backward compatibility; layer-by-layer transfer
-                is always by name, so this argument has no effect.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -684,8 +681,7 @@ class ResNet(keras.Model):
             try:
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True
+                    skip_mismatch=skip_mismatch
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")
