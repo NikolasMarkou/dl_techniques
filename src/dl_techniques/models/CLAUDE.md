@@ -232,10 +232,28 @@ class <Model>(keras.Model):
 - `from_variant(cls, variant, ..., pretrained=False, **kwargs)` looks the name up in
   `MODEL_VARIANTS`, raising `ValueError` listing the available keys when it misses.
 
-`MODEL_VARIANTS` is the canonical name. Packages that predate this spec use
-`SCALE_CONFIGS`, `VARIANT_CONFIGS`, `NAM_VARIANTS`, `NTM_VARIANTS`, `MCI_VARIANTS` or
-`<NAME>_CONFIGS`. **Add `MODEL_VARIANTS` and keep the old name as a class-level alias — do
-not rename in place**, since trainers and tests reference the old spelling.
+`MODEL_VARIANTS` is the canonical name for **the registry of publicly named variants**.
+Packages that predate this spec also use `VARIANT_CONFIGS`, `NAM_VARIANTS`, `NTM_VARIANTS`
+or `MCI_VARIANTS` for that same role; where one of those is the package's *only* variant
+table, add `MODEL_VARIANTS` as a class-level alias to the same dict.
+
+**`SCALE_CONFIGS` is NOT a stale spelling of `MODEL_VARIANTS`, and the two must not be
+merged where both appear.** They answer different questions, measured in
+`beit/model.py:150` and `:182`:
+
+- `SCALE_CONFIGS` is the **architecture table** — `'tiny' -> {hidden_size: 192,
+  num_layers: 12, num_heads: 3, ...}`.
+- `MODEL_VARIANTS` is the **public-name registry** — `'beit_tiny' -> {scale: 'tiny'}`,
+  one row per name a caller may pass, resolving to a scale.
+
+`beit`, `vit`, `energy_transformer` and `fastvit` carry both, deliberately, and a
+`_resolve_scale`-style helper accepts either spelling. Unifying them would collapse a
+name→scale indirection that exists so a variant can pin a patch size or an input
+resolution alongside its scale. Only where a package has a single table does the alias
+apply.
+
+Prefer an alias over renaming in place: the old spelling is referenced by trainers under
+`src/train/` and by tests, and the rename buys nothing the alias does not.
 
 ### Axis 3 — pretrained weights
 
