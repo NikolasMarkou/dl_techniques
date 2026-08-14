@@ -1,31 +1,26 @@
-"""Segment Anything — public API re-exports.
+"""Segment Anything — three generations as nested subpackages.
 
-Three generations as nested subpackages, each a full architecture with its own
-`MODEL_VARIANTS` and `from_variant`: `SAM1/` (image encoder + prompt encoder +
-mask decoder), `SAM2/` (adds the memory bank and attention for video), and
-`SAM3/` (adds text-conditioned open-vocabulary segmentation). Nothing is shared
-between them beyond the repo's layer library, and none deprecates the others.
+`SAM1/`, `SAM2/` and `SAM3/` are each a full architecture with its own
+`MODEL_VARIANTS` and `from_variant`: SAM 1 is image encoder + prompt encoder +
+mask decoder, SAM 2 adds the memory bank and memory attention for video, SAM 3
+adds text-conditioned open-vocabulary segmentation. Nothing is shared between
+them beyond the repo's layer library, and none deprecates the others.
 
-Only the top-level models and training models are re-exported here. The internal
-components — encoders, necks, decoders, memory modules — stay behind their
-submodules, since all three generations define same-named parts that must not
-collide at package level.
+**This package deliberately exports nothing — import from the subpackage.**
+
+    from dl_techniques.models.SAM.SAM2.model import SAM2, create_sam2
+
+The house convention is a curated `__all__` (see `models/CLAUDE.md` § House
+Model Module Shape, Axis 4), and this package is an explicit, measured exception.
+SAM 2's model CLASS is named `SAM2` and its SUBPACKAGE is also named `SAM2`, so
+re-exporting the class here binds the name `SAM2` in this package's namespace and
+SHADOWS the subpackage. `dl_techniques.models.SAM.SAM2.model` then fails with
+
+    ImportError: cannot import name 'model' from 'SAM2' (unknown location)
+
+which is what happened when the re-exports were first added, and it broke
+`tests/test_models/test_sam2/` at collection time. Aliasing the class to dodge
+the collision would give the package two names for one model, which is worse
+than importing from the submodule. The three generations also define same-named
+components (encoders, necks, decoders) that would collide with each other here.
 """
-from .SAM1.image_encoder import ImageEncoderViT
-from .SAM1.model import SAM
-from .SAM1.training_model import SAMTrainingModel
-from .SAM2.model import SAM2, create_sam2
-from .SAM2.training_model import SAM2TrainingModel
-from .SAM3.sam3_image import Sam3Image
-from .SAM3.training_model import Sam3TrainingModel
-
-__all__ = [
-    "ImageEncoderViT",
-    "SAM",
-    "SAM2",
-    "SAM2TrainingModel",
-    "SAMTrainingModel",
-    "Sam3Image",
-    "Sam3TrainingModel",
-    "create_sam2",
-]
