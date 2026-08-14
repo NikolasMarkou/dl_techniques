@@ -4,6 +4,10 @@
 **Plan:** `plans/plan_2026-06-15_b5cec9e4`
 **Scope:** REPORT-ONLY. Zero edits to any file under `src/dl_techniques/models/` or `src/dl_techniques/layers/`.
 
+> **STATUS UPDATE (2026-08-14, plan-2026-08-14T042537-ff96c6c6):** A path-existence re-derivation over the doc body below (at HEAD `9eced2b5b`; slash-bearing path tokens only, resolved against the repo root plus `src/dl_techniques/`, `src/dl_techniques/models/`, `src/dl_techniques/layers/`, `tests/`, `tests/test_models/`) measured **6 dead of 69 distinct paths**. (Re-run against this file *as committed* the figure reads 8 dead of 78: this note and the inline tags add 9 live paths plus two tokens that are dead *by assertion* — `models/jepa/` and `src/dl_techniques/models/ccnets/` are cited precisely because they do not exist.) Three are tagged inline **STALE** in the rows below (row 7 `ccnets`, row 45 `power_mlp`, Backlog item 11 `jepa`). The other three are recorded here: row 11's `test_convnext_patch_vae/` and `test_convnext_patch_vae_v2/` were dropped as orphans (`028f1f035`, `712cbf4ce`) after the `convnext_patch_vae` package itself was deleted (`46bf5cdf0`), so — like row 7 — **that row's assumed-PASS verdict is now unverifiable, there is no source left to build**; and row 66's `test_trm/` was merged into `test_tiny_recursive_model/` in `45fc8834e`, so that row's "(both non-empty)" parenthetical no longer holds although its surviving test dir does.
+>
+> **Nothing substantive is amended.** Every Build / Forward verdict, the headline counts (**9 PASS / 10 XFAIL / 1 SKIP** among the 20 newly-tested gap families), the 76 family rows and the risk-cluster re-run figure (**162 passed / 4 skipped / 0 failed**) **stand unchanged** — only the file paths rotted, and only through restructurings of the packages named above.
+
 ## 1. Summary
 
 This sweep gave the 20 model families that had **zero forward-pass coverage** (16 with no test dir, 4 with 0-byte stub files) a **permanent pytest smoke test** that builds the smallest documented variant and runs one `training=False` forward pass with a NaN/Inf guard. For the remaining already-covered families the sweep **cites the existing test suite as evidence and does NOT re-run it** (the full suite is ~1.5h; re-running 50+ suites has low marginal signal — per the user's cite-not-rerun decision D-001). No model or layer code was fixed: every build/forward break is **documented**, encoded as `pytest.mark.xfail(strict=False)` / `pytest.mark.skip` with the captured error, and routed to the `## Backlog` (Section 3) for a future dedicated fix plan. The scoped suite for all 20 new tests is **green** (only passed / xfailed / skipped — zero red).
@@ -34,7 +38,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 4 | byte_latent_transformer | PASS | PASS | new smoke test (this plan) | `create_blt_model`; real sig `(variant, vocab_size, max_sequence_length, ...)` |
 | 5 | capsnet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_capsnet/` |
 | 6 | cbam | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_cbam/` |
-| 7 | ccnets | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ccnets/` |
+| 7 | ccnets | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ccnets/` — **STALE** (2026-08-14): doubly wrong. The path never was under `test_models/`; the surviving orphan dir is `tests/test_ccnets/`. And the model source `src/dl_techniques/models/ccnets/` was DELETED in `4838bc438`, so **this row's assumed-PASS verdict is unverifiable** — there is nothing left to build or forward. |
 | 8 | cliffordnet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_cliffordnet/` |
 | 9 | clip | PASS (re-run) | PASS (re-run) | existing test suite (re-run step 5) | `tests/test_models/test_clip/`; risk-cluster — re-run, no regression |
 | 10 | convnext | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_convnext/` |
@@ -72,7 +76,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 42 | nano_vlm_world_model | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling in `ScoreBasedNanoVLM.call`); GHOST still broken despite commit 1b61a381 |
 | 43 | ntm | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ntm/` |
 | 44 | pft_sr | PASS | PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was PFTBlock `drop_path` kwarg. FIXED: `drop_path`->`drop_path_rate`; 4x `keras.ops.nn.depth_to_space` Lambda -> `PixelShuffle2D`; + 2 call-loop cascade fixes (None-input, tuple->list to PFTBlock.build). Smoke PASS (2,64,64,3). Latent: PFTBlock tuple/list build asymmetry. |
-| 45 | power_mlp | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_powermlp/` |
+| 45 | power_mlp | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_powermlp/` — **STALE** (2026-08-14): the real dir is `tests/test_models/test_power_mlp/` (underscore). Verdict unaffected. |
 | 46 | pw_fnet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_pw_fnet/` |
 | 47 | qwen | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_qwen/` |
 | 48 | relgt | PASS | PASS | new smoke test (this plan) | `create_relgt_model(2)`, dict input |
@@ -133,7 +137,7 @@ Each item is a candidate for a future dedicated fix plan. Grouped by likely root
 10. **nano_vlm_world_model** — `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling). *`models/nano_vlm_world_model/model.py` → `ScoreBasedNanoVLM.call`.* Fix hint: sample timesteps with a float dtype then cast to int, or use `keras.random.randint`. GHOST: still broken despite commit 1b61a381.
 
 ### Class D — No top-level model (cannot forward without bespoke assembly)
-11. **jepa** — no top-level `keras.Model`; only `JEPAEncoder` / `JEPAPredictor` layers. *`models/jepa/encoder.py`.* Fix hint: add a thin `keras.Model` wrapper / factory that assembles encoder+predictor (or document it as a sub-package of `video_jepa` and remove the smoke-test expectation). Disposition: `skip`, not `xfail`.
+11. **jepa** — no top-level `keras.Model`; only `JEPAEncoder` / `JEPAPredictor` layers. *`models/jepa/encoder.py`.* — **STALE** (2026-08-14): there is no `models/jepa/` package; the correct path is `src/dl_techniques/models/video_jepa/encoder.py`. Disposition and verdict unaffected. Fix hint: add a thin `keras.Model` wrapper / factory that assembles encoder+predictor (or document it as a sub-package of `video_jepa` and remove the smoke-test expectation). Disposition: `skip`, not `xfail`.
 
 ### Out-of-scope / separately-tracked (not counted in the 11 above)
 - **fftnet/SpectreHead** — triple-dead: `tf.signal.rfft(axis=)` TypeError + absent `ops.complex` (`models/fftnet/components.py:746,754,775`). Dedicated plan; NOT exercised this sweep. fftnet vision path is healthy.
