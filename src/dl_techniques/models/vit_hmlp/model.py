@@ -1,34 +1,46 @@
 """
-Vision Transformer with Hierarchical MLP Stem
-=============================================
+Vision Transformer with a hierarchical MLP (hMLP) patch stem.
 
-A Vision Transformer whose patch embedding is a hierarchical MLP (hMLP) stem
-rather than a single linear projection or a convolutional stem. The stem
-processes each patch independently through a 2x2 -> 4x4 -> 8x8 -> 16x16 ladder
-of linear projections with normalization, so there is no cross-patch information
-leakage — which is what makes it compatible with masked self-supervised methods
-(BeiT, MAE): masking before or after the stem gives identical results.
+A standard ViT embeds each patch with a single linear projection. Replacing that
+with a small convolutional stem improves supervised accuracy, but it also breaks
+masked self-supervised pretraining: a convolutional stem has a receptive field
+wider than one patch, so a masked patch's neighbours leak into its embedding and
+the model can partially see what it is being asked to reconstruct. The hMLP stem
+resolves the tension by keeping the improvement and refusing the leak.
 
-Based on: "Three things everyone should know about Vision Transformers"
-(Touvron et al., 2022) https://arxiv.org/abs/2203.09795
+It processes each patch INDEPENDENTLY through a hierarchy of linear projections
+with normalization and non-linearity between them, doubling the granularity at
+each step: 2x2, then 4x4, then 8x8, then the full 16x16 patch. Because no
+operation ever crosses a patch boundary, masking before the stem and masking
+after it produce identical results — which is exactly the property BeiT and MAE
+need, and exactly what a convolutional stem cannot offer. The cost is under 1%
+of FLOPs.
 
-Model Variants (embed_dim, num_heads, num_layers, mlp_ratio):
---------------
-- tiny:  (192, 3, 12, 4.0)
-- small: (384, 6, 12, 4.0)
-- base:  (768, 12, 12, 4.0)
-- large: (1024, 16, 24, 4.0)
-- huge:  (1280, 16, 32, 4.0)
+`stem_norm_layer` chooses between BatchNorm and LayerNorm inside the stem.
+BatchNorm performs better but couples examples within a batch; LayerNorm is the
+stable choice at small batch sizes. Everything after the stem is a conventional
+pre-norm transformer encoder built from the repo's `TransformerLayer`, so the
+attention, FFN and normalization types are all selectable through the same
+factories the rest of the library uses.
 
-Usage Examples:
--------------
-```python
-model = ViTHMLP.from_variant("base", num_classes=1000)
-model = create_vit_hmlp(scale="small", num_classes=10, input_shape=(32, 32, 3))
-```
+`pooling` selects how a sequence becomes a vector when `include_top=False`:
+`cls` takes the class token, `mean` averages the patch tokens, `max` takes their
+maximum. Note that positional-mode pooling over a padded sequence is a known
+hazard elsewhere in this library; here the sequence length is fixed by the patch
+grid, so the modes are unambiguous.
 
-The paper's benchmark numbers and the full design discussion live in this
-package's README.md.
+Variants follow the standard ViT ladder as `(embed_dim, num_heads, num_layers,
+mlp_ratio)`, from tiny at 192 wide to huge at 1280.
+
+References:
+    - Touvron et al., 2022. Three things everyone should know about Vision
+      Transformers. (https://arxiv.org/abs/2203.09795)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Bao et al., 2021. BEiT: BERT Pre-Training of Image Transformers.
+      (https://arxiv.org/abs/2106.08254)
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
 """
 
 import keras

@@ -77,6 +77,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
@@ -445,7 +446,20 @@ class ModernBERT(keras.Model):
                 }
                 self(dummy_input, training=False)
             logger.info(f"Loading pretrained weights from {weights_path}")
-            self.load_weights(weights_path, skip_mismatch=skip_mismatch, by_name=by_name)
+            # Keras 3 removed `by_name` from `Model.load_weights` — the
+            # signature is `(filepath, skip_mismatch=False, **kwargs)` and it
+            # REJECTS the unknown keyword, so this call raised
+            # `ValueError: Invalid keyword arguments: {'by_name': True}` for
+            # every caller. It went unnoticed because the only route here was
+            # `pretrained=<path>` and the enclosing except turned the failure
+            # into a warning that continued with random weights.
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
+            )
+            logger.info(f"Weight transfer complete: {report}")
             if skip_mismatch:
                 logger.info(
                     "Weights loaded with skip_mismatch=True. Layers with shape "

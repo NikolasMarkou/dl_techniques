@@ -78,6 +78,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.standard_blocks import (
@@ -504,12 +505,24 @@ class ResNet(keras.Model):
             skip_mismatch: bool = True,
             by_name: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained weights into the model from a local checkpoint.
+
+        Transfer is layer-by-layer via
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        not ``self.load_weights(..., by_name=True)``. Keras 3 removed ``by_name``
+        from ``Model.load_weights`` — its signature is
+        ``(filepath, skip_mismatch=False, **kwargs)`` and it rejects the unknown
+        keyword — so the old call raised ``ValueError: Invalid keyword arguments:
+        {'by_name': True}`` for every caller. Nothing noticed, because the only
+        route to it was ``pretrained=<path>`` and the surrounding ``except``
+        turned the failure into a warning that continued with random weights.
 
         Args:
             weights_path: String, path to the weights file (.keras format).
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-            by_name: Boolean, whether to load weights by layer name.
+                Maps to the inverse of the transfer helper's ``strict``.
+            by_name: Retained for backward compatibility; layer-by-layer transfer
+                is always by name, so this argument has no effect.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -524,15 +537,13 @@ class ResNet(keras.Model):
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
-            if skip_mismatch:
-                logger.info("Weights loaded with skip_mismatch=True; mismatched layers skipped.")
-            else:
-                logger.info("All weights loaded successfully.")
+            logger.info(f"Weight transfer complete: {report}")
 
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")

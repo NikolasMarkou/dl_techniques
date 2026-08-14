@@ -1,39 +1,48 @@
 """
-ConvNeXt V2 Model Implementation
-================================
+ConvNeXt V2: ConvNeXt with Global Response Normalization, co-designed with
+fully-convolutional masked autoencoding.
 
-The ConvNeXt V2 architecture. Handles different input sizes natively, without
-preprocessing.
+V1 was designed and evaluated under supervised training. Carrying it directly
+into masked-autoencoder pretraining underperforms, and the reason is visible in
+the features: across the channels of the inverted bottleneck's expanded `4F`
+representation, many collapse onto near-duplicates of each other. The MLP learns
+redundant filters, and adding capacity does not help because the redundancy is
+the problem. Global Response Normalization is the architectural answer, and it is
+the only structural change from V1.
 
-Based on: "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders" (Woo et al., 2023)
-https://arxiv.org/abs/2301.00808
+GRN sits immediately after the GELU inside the expanded part of the block. It
+computes each channel's L2 norm over the spatial dimensions, divides those norms
+by their mean across channels to get a relative measure of how active each
+channel is compared with its peers, and rescales each channel by that ratio.
+Channels that are globally quiet relative to the rest are suppressed further and
+channels that carry signal are amplified — an explicit competition between
+channels that increases their contrast and prevents the collapse. Because it is
+computed from a global spatial statistic rather than a local window, it costs
+almost nothing and adds only two learnable per-channel parameters.
 
-Model Variants:
---------------
-- ConvNeXt-Atto: [2, 2, 6, 2] blocks, [40, 80, 160, 320] dims (3.7M params)
-- ConvNeXt-Femto: [2, 2, 6, 2] blocks, [48, 96, 192, 384] dims (5.2M params)
-- ConvNeXt-Pico: [2, 2, 6, 2] blocks, [64, 128, 256, 512] dims (9.1M params)
-- ConvNeXt-Nano: [2, 2, 8, 2] blocks, [80, 160, 320, 640] dims (15.6M params)
-- ConvNeXt-Tiny: [3, 3, 9, 3] blocks, [96, 192, 384, 768] dims (28.6M params)
-- ConvNeXt-Base: [3, 3, 27, 3] blocks, [128, 256, 512, 1024] dims (89M params)
-- ConvNeXt-Large: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims (198M params)
-- ConvNeXt-Huge: [3, 3, 27, 3] blocks, [352, 704, 1408, 2816] dims (660M params)
+Everything else is V1: a depthwise `KxK` convolution (default 7), a 1x1
+expansion to `4F`, one GELU, now GRN, a 1x1 reduction back to `F`, and a
+learnable `gamma` layer scale. As in V1 the block is TRANSFORM-ONLY — it returns
+`F(x)`, and the residual plus drop-path wiring is the caller's responsibility,
+which this model performs in `call`. The drop-path ramp is global across the
+network rather than per stage, and downsampling is a separate LayerNorm +
+strided convolution with `padding="same"` for the same small-input reason
+documented in V1.
 
-No pretrained ConvNeXt V2 weights are distributed with `dl_techniques`;
-`pretrained=True` raises `NotImplementedError`. Pass a local path instead.
+The variant table spans a much wider range than V1's because the FCMAE recipe
+was evaluated from Atto (3.7M parameters) to Huge (660M), and the small end is
+where GRN's benefit is most visible.
 
-Usage Examples:
--------------
-```python
-# Feature extractor
-model = ConvNeXtV2.from_variant("base", include_top=False)
+No pretrained ConvNeXt V2 weights are distributed with this package.
+`pretrained=True` raises `NotImplementedError` rather than warning and returning
+a randomly initialized model. Local checkpoints load by path.
 
-# Fine-tune on a custom dataset
-model = create_convnext_v2("pico", num_classes=10, input_shape=(32, 32, 3))
-
-# Load from a local weights file
-model = ConvNeXtV2.from_variant("large", pretrained="path/to/weights.keras")
-```
+References:
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. (https://arxiv.org/abs/2301.00808)
+    - Liu et al., 2022. A ConvNet for the 2020s. (https://arxiv.org/abs/2201.03545)
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
 """
 
 import os

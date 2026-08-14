@@ -1,36 +1,66 @@
 """
-ConvNeXt V1 Model Implementation
-================================
+ConvNeXt V1: a pure convolutional network modernized toward transformer design.
 
-The ConvNeXt V1 architecture. Handles different input sizes natively, without
-preprocessing.
+The architecture answers a question left open by the Vision Transformer's
+success: how much of that success is attention, and how much is everything else
+the transformer papers changed at the same time — the patchified stem, the large
+receptive field per operation, the inverted bottleneck, the sparse placement of
+normalization and activation, LayerNorm in place of BatchNorm, and separate
+downsampling stages. Applying those changes one at a time to a ResNet-50, with
+no attention anywhere, recovers the accuracy of a Swin Transformer at matched
+FLOPs. The conclusion is that the convolution was never the limitation; the
+surrounding design was.
 
-Based on: "A ConvNet for the 2020s" (Liu et al., 2022)
-https://arxiv.org/abs/2201.03545
+Each block is a depthwise `KxK` convolution (default 7, the "large kernel"
+standing in for attention's wide receptive field) followed by an inverted
+bottleneck MLP: a 1x1 expansion to `4F` channels, one GELU, and a 1x1 reduction
+back to `F`. There is a single activation and a single normalization per block
+rather than one of each per convolution — the sparsity is deliberate, and adding
+them back costs accuracy. A learnable per-channel `gamma` (layer scale) closes
+the block, initialized small so a fresh block starts near a no-op and the
+network begins life close to its identity path.
 
-Model Variants:
---------------
-- ConvNeXt-T: [3, 3, 9, 3] blocks, [96, 192, 384, 768] dims
-- ConvNeXt-S: [3, 3, 27, 3] blocks, [96, 192, 384, 768] dims
-- ConvNeXt-B: [3, 3, 27, 3] blocks, [128, 256, 512, 1024] dims
-- ConvNeXt-L: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims
-- ConvNeXt-XL: [3, 3, 27, 3] blocks, [256, 512, 1024, 2048] dims
+`ConvNextV1Block` is a TRANSFORM-ONLY block: it returns `F(x)`, not `x + F(x)`,
+and applies no drop-path. The residual and the stochastic-depth wiring belong to
+the caller, and this model owns them in `call` — `residual = x`, block, optional
+drop-path, `add([residual, x])`. Wiring it as `x = block(x)` instead silently
+removes the residual, which does not raise, does not change any shape, and
+annihilates the signal by roughly a factor of 1e-5 per block. The `gamma` floor
+of `GAMMA_MIN_VALUE = 1e-6` exists so a residual path can never be scaled to
+exactly zero.
 
-No pretrained ConvNeXt V1 weights are distributed with `dl_techniques`;
-`pretrained=True` raises `NotImplementedError`. Pass a local path instead.
+The drop-path ramp is GLOBAL across the whole network, not per stage: the rate
+for a block is indexed by `block_start_idx + block_idx` over `sum(depths)`
+blocks, so stage 0 starts at 0.0 and the last block of the last stage reaches
+`drop_path_rate`. Computing it per stage instead would reset the schedule four
+times and leave every stage's first block unregularized.
 
-Usage Examples:
--------------
-```python
-# Feature extractor
-model = ConvNeXtV1.from_variant("base", include_top=False)
+Downsampling is a separate LayerNorm + strided convolution between stages rather
+than a stride inside a residual block, and the stem is the same operation applied
+to the image (a `strides x strides` patchify, default 4). Those convolutions use
+`padding="same"` rather than `"valid"`: at kernel == stride the two are identical
+whenever the spatial dimension divides the stride, but `"valid"` collapses to a
+0x0 feature map on the small inputs the CIFAR-scale variants use, which produced
+non-finite output.
 
-# Fine-tune on a custom dataset
-model = create_convnext_v1("small", num_classes=10, input_shape=(32, 32, 3))
+`stochastic_mode` selects what the per-block regularizer actually does: `depth`
+is standard stochastic depth (drops the whole branch at training time), while
+`gradient` is forward-identity and only perturbs the backward pass. `depth` is
+the behaviour-preserving default.
 
-# Load from a local weights file
-model = ConvNeXtV1.from_variant("large", pretrained="path/to/weights.keras")
-```
+No pretrained ConvNeXt V1 weights are distributed with this package.
+`pretrained=True` raises `NotImplementedError` rather than warning and returning
+a randomly initialized model, because the previous behaviour made an unavailable
+download indistinguishable from a successful one. Local checkpoints load by path.
+
+References:
+    - Liu et al., 2022. A ConvNet for the 2020s. (https://arxiv.org/abs/2201.03545)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. (https://arxiv.org/abs/2103.14030)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
+    - Touvron et al., 2021. Going deeper with Image Transformers. (LayerScale)
+      (https://arxiv.org/abs/2103.17239)
 """
 
 import os
@@ -42,6 +72,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -400,11 +431,20 @@ class ConvNeXtV1(keras.Model):
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
+            # Keras 3 removed `by_name` from `Model.load_weights` — the
+            # signature is `(filepath, skip_mismatch=False, **kwargs)` and it
+            # REJECTS the unknown keyword, so this call raised
+            # `ValueError: Invalid keyword arguments: {'by_name': True}` for
+            # every caller. It went unnoticed because the only route here was
+            # `pretrained=<path>` and the enclosing except turned the failure
+            # into a warning that continued with random weights.
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
+            logger.info(f"Weight transfer complete: {report}")
 
             if skip_mismatch:
                 logger.info(
