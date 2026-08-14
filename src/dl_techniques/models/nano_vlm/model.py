@@ -834,8 +834,8 @@ def create_modern_nanovlm(
         },
         fusion_config={
             'fusion_strategy': kwargs.get('fusion_strategy', 'tensor_fusion'),
-            'embed_dim': embed_dim,
-            'num_heads': embed_dim // 64,
+            'dim': embed_dim,
+            'attention_config': {'num_heads': embed_dim // 64},
             'num_tensor_projections': 8,
             'ffn_type': 'swiglu',
             'norm_type': 'rms_norm'
