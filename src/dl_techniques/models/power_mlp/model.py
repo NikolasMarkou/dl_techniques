@@ -1,120 +1,70 @@
 """
-PowerMLP Model: Efficient Alternative to Kolmogorov-Arnold Networks
-==================================================================
+PowerMLP, a dual-branch feedforward network that replaces KAN's B-spline bases with
+ReLU-k activations, with configurable power, dropout and batch normalization.
 
-A complete implementation of PowerMLP as a Keras Model providing an efficient
-alternative to Kolmogorov-Arnold Networks (KAN) with superior computational
-performance while maintaining equal or better learning capabilities.
+Kolmogorov-Arnold Networks move the nonlinearity from the nodes to the edges: each
+connection carries its own learned univariate function, parameterized as a B-spline
+over a grid. That is what gives KAN its expressiveness per parameter, and it is
+also what makes it slow — every forward pass must locate each input in the spline
+grid and evaluate the basis polynomials there, an irregular, memory-bound
+computation that does not reduce to a matrix multiply. PowerMLP starts from the
+observation that the *shape* KAN buys with splines can be approximated by a fixed
+nonlinearity of the right order combined with a linear map, recovering dense
+GEMM-shaped compute.
 
-PowerMLP addresses the computational limitations of KAN by replacing expensive
-B-spline basis functions with efficient ReLU-k activations in a dual-branch
-architecture, achieving ~40x faster training and ~10x fewer FLOPs.
+The layer is two branches summed:
 
-Architecture Overview:
----------------------
-PowerMLP employs a dual-branch design for each layer:
+`y = ReLU_k(W_main x + b) + W_basis * swish(x)`
 
-```
-Input(shape=[..., input_dim])
-       ↓
-   ┌─────────────────┐
-   │  PowerMLP Layer │
-   │                 │
-   │ Main Branch:    │ Basis Branch:
-   │ Dense → ReLU-k  │ BasisFunc → Dense
-   │                 │ (no bias)
-   │        ↘       ↙│
-   │     Element-wise│
-   │        Add      │
-   └─────────────────┘
-       ↓
-   [Optional: BatchNorm]
-       ↓
-   [Optional: Dropout]
-       ↓
-   Output(shape=[..., output_dim])
-```
+The main branch is a dense projection followed by `ReLU_k(z) = max(0, z)^k`. Raising
+ReLU to an integer power `k` makes the branch piecewise-polynomial of degree `k`
+rather than piecewise-linear, so a single layer can bend where a ReLU layer would
+need several to approximate the same curvature — the same degree-of-freedom KAN
+gets from its splines, but as an elementwise power on an already-projected vector.
+The branch ordering matters and is easy to state backwards: the dense map comes
+*first* and the power is applied to its output, so `k` acts on learned features
+rather than on raw inputs.
 
-Key Features:
-------------
-- **Efficient Design**: ReLU-k activation replaces expensive B-splines
-- **Dual-Branch Architecture**: Combines dense transformation with basis functions
-- **Model Variants**: Pre-configured architectures for different use cases
-- **Regularization Support**: Built-in dropout and batch normalization
-- **Full Keras Compatibility**: Complete Model class with compile/fit workflow
-- **Serialization Ready**: Proper save/load functionality with .keras format
-- **Production Ready**: Comprehensive error handling and validation
+The basis branch applies `swish(x) = x * sigmoid(x)` to the *input* and then
+projects it. Swish is smooth, non-monotonic and unbounded above, which makes it a
+complementary shape to `ReLU_k`: it is nonzero for negative inputs, where `ReLU_k`
+is identically zero and its gradient vanishes. Summing the two means a unit is
+never fully dead — whatever the main branch gates off, the basis branch still
+passes a signal and a gradient. The basis projection is deliberately bias-free;
+both branches carrying a bias would be redundant, and the main branch already has
+one.
 
-Model Variants:
---------------
-- **micro**: [32, 16] - Minimal model for simple tasks (1.1K params)
-- **tiny**: [64, 32] - Small model for basic classification (4.2K params)
-- **small**: [128, 64, 32] - Medium model for standard datasets (16.9K params)
-- **base**: [256, 128, 64] - Standard model for most applications (65.8K params)
-- **large**: [512, 256, 128] - Large model for complex tasks (262.7K params)
-- **xlarge**: [1024, 512, 256, 128] - Extra large for demanding applications (1.3M params)
+Note that the basis branch is a *stateless* activation followed by a linear map. It
+adds no learned nonlinearity of its own, unlike a KAN edge function; the learning
+in that branch lives entirely in `W_basis`. This is the trade PowerMLP makes, and
+it is why it is faster rather than merely cheaper.
 
-Performance Characteristics:
----------------------------
-Compared to equivalent KAN networks:
-- Training Time: ~40x faster
-- FLOPs: ~10x reduction
-- Memory Usage: ~5x lower
-- Accuracy: Equal or superior on most benchmarks
+The model stacks these layers according to `hidden_units`, which is read as
+`[input_dim, hidden_1, ..., hidden_n, output_dim]` — the first entry describes the
+expected input width rather than creating a layer, and the last entry sizes the
+output. Optional batch normalization and dropout are applied after each hidden
+layer, in that order. The output layer is a plain `Dense`, not a PowerMLP layer:
+the final map needs an arbitrary activation (softmax, sigmoid, or none for
+regression), and `ReLU_k` on the logits would clamp them non-negative and destroy
+the parameterization every downstream loss expects.
 
-Usage Examples:
---------------
-```python
-# CIFAR-10 classification
-model = PowerMLP.from_variant("small", num_classes=10, input_dim=32*32*3)
+`k` is a fixed integer hyperparameter, validated as such at construction — it is
+not learned. The preset variants raise it with model size (2 for micro, 3 through
+base, 4 for the two largest), since higher-degree units are only worth their
+conditioning cost when there is enough width to use them. Large `k` sharpens the
+activation's gradient near the origin and grows its outputs fast, which is why
+batch normalization becomes worth enabling as `k` rises.
 
-# MNIST with custom architecture
-model = PowerMLP(
-    hidden_units=[784, 128, 64, 10],
-    k=3,
-    dropout_rate=0.2,
-    batch_normalization=True
-)
-
-# Regression task
-model = create_power_mlp_regressor(
-    hidden_units=[100, 256, 128, 1],
-    k=4,
-    learning_rate=0.001
-)
-
-# Binary classification with deep supervision
-model = create_power_mlp_binary_classifier(
-    hidden_units=[200, 512, 256, 128, 1],
-    dropout_rate=0.3
-)
-```
-
-Mathematical Foundation:
------------------------
-The PowerMLP layer implements:
-
-f(x) = Dense_main(ReLU_k(x)) + Dense_basis(BasisFunction(x))
-
-Where:
-- ReLU_k(x) = max(0, x)^k for learnable power k
-- BasisFunction provides learnable nonlinear transformations
-- The addition combines expressive power of both branches
-
-Research References:
--------------------
-[1] "PowerMLP: An Efficient Alternative to KAN" (2024)
-[2] "Kolmogorov-Arnold Networks" (2024)
-[3] "Deep Learning with ReLU Networks" (2017)
-[4] "Understanding the Power of Neural Networks" (2020)
-
-Technical Notes:
----------------
-- Requires input flattening for dense operations
-- Optimal k values typically range from 2-5
-- Batch normalization recommended for k > 3
-- Gradient clipping may be beneficial for high k values
+References:
+    - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks.
+      (https://arxiv.org/abs/2404.19756)
+    - Ramachandran et al., 2017. Searching for Activation Functions.
+      (https://arxiv.org/abs/1710.05941)
+    - Ioffe & Szegedy, 2015. Batch Normalization: Accelerating Deep Network
+      Training by Reducing Internal Covariate Shift.
+      (https://arxiv.org/abs/1502.03167)
 """
+
 
 import os
 import keras

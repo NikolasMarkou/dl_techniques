@@ -1,61 +1,97 @@
 """
-Variational Autoencoder (VAE) Model Implementation
-========================================================
+Residual convolutional variational autoencoder with selectable Gaussian,
+hypersphere or von Mises-Fisher latent geometry.
 
-A complete implementation of the ResNet-based VAE architecture using modern Keras 3 patterns.
-VAE learns latent representations through variational inference with proper reparameterization
-trick, KL divergence regularization, and generative capabilities.
+Fitting a latent-variable generative model by maximum likelihood requires the
+marginal `p(x) = integral p(x|z) p(z) dz`, which no encoder can evaluate. The
+variational bound sidesteps it by introducing an approximate posterior `q(z|x)`
+and optimizing
 
-Based on: "Auto-Encoding Variational Bayes" (Kingma & Welling, 2013)
-https://arxiv.org/abs/1312.6114
+`L = E_q[log p(x|z)] - beta * KL(q(z|x) || p(z))`
 
-Key Features:
-------------
-- ResNet-based encoder and decoder with residual connections
-- Proper reparameterization trick for gradient flow
-- KL divergence regularization with configurable weighting
-- Support for multiple VAE variants for different image sizes
-- Custom training loop with reconstruction + KL losses
-- Numerical stability measures and gradient clipping
-- Complete serialization support with modern Keras 3 patterns
-- Production-ready implementation with comprehensive validation
+a quantity that lower-bounds the log evidence and involves only expectations the
+encoder can produce. The first term is reconstruction; the second pulls the
+per-sample posterior toward the prior, and it is the term that makes the latent
+space a *space* rather than a lookup table — without it nothing stops the encoder
+from scattering each training image to its own isolated coordinate, and decoding an
+unseen point would return noise. `beta` trades the two off explicitly: raise it and
+samples from the prior decode to plausible images while reconstructions blur; lower
+it and the reverse.
 
-Architecture Concept:
--------------------
-VAE learns to encode images into a latent space following a prior distribution
-(typically standard normal), then decodes from this space to reconstruct images.
-The reparameterization trick enables gradient-based optimization through sampling.
+The remaining obstacle is that `z` is sampled, and one cannot differentiate through
+a draw. Reparameterization moves the randomness out of the path: for the Gaussian
+mode `z = mu + exp(0.5 * log_var) * eps` with `eps ~ N(0, I)`, so the sampler is a
+deterministic function of the encoder outputs plus an input-independent noise
+tensor, and gradients reach `mu` and `log_var` normally.
 
-Mathematical Foundation:
-- Encoder: q(z|x) - Approximate posterior distribution
-- Decoder: p(x|z) - Likelihood distribution
-- Prior: p(z) = N(0, I) - Standard normal prior
-- Loss: L = E[log p(x|z)] - β * KL(q(z|x)||p(z))
-- Reparameterization: z = μ + σ * ε, where ε ~ N(0, I)
+`sampling_type` changes the latent geometry, and it changes three things together
+that must stay consistent — the second encoder head, the sampler, and the KL term.
+Under `"gaussian"` the second head emits a full `[B, latent_dim]` diagonal
+log-variance and the KL is the closed-form Gaussian-to-`N(0, I)` divergence, summed
+over the latent axis and averaged over the batch (summing over latents and
+averaging over samples is what keeps the KL comparable across latent widths for a
+fixed `beta`). Under `"hypersphere"` the head collapses to a single `[B, 1]` radius
+log-variance: the sampler places `z` on a shell of fixed radius and the only
+learned uncertainty is radial, so the KL is the one-dimensional
+`0.5 * (exp(rlv) - rlv - 1)` on that radius alone. There is deliberately no
+direction term — the direction carries an implicit uniform-sphere prior. This is a
+simplification, not a full S-VAE, and is documented as such because the difference
+matters to anyone comparing against the literature. Under `"vmf"` the head is a
+strictly positive concentration `kappa` (softplus, `[B, 1]`), the sampler draws
+from a von Mises-Fisher distribution around the L2-normalized `z_mean`, and the KL
+is the analytic vMF-to-uniform divergence, which depends only on `kappa` and the
+latent dimension. The `"z_log_var"` output slot is reused across all three modes
+and carries a *different quantity* in each — diagonal log-variance, radius
+log-variance, concentration — a shape-only contract that is worth knowing before
+reading any downstream consumer of that key.
 
-Model Variants:
---------------
-- VAE-Micro: depths=2, filters=[16, 32], latent_dim=32 (small images)
-- VAE-Small: depths=2, filters=[32, 64], latent_dim=64 (MNIST, CIFAR-10)
-- VAE-Medium: depths=3, filters=[32, 64, 128], latent_dim=128 (larger images)
-- VAE-Large: depths=3, filters=[64, 128, 256], latent_dim=256 (high-res images)
-- VAE-XLarge: depths=4, filters=[64, 128, 256, 512], latent_dim=512 (very high-res)
+Two choices in the vMF path exist to defeat posterior collapse, the failure mode
+where the KL drives `q(z|x)` to the prior, the decoder learns to ignore `z`, and
+reconstruction stalls at the data mean. The `kappa` head is initialized with a
+zeros kernel and a bias of 12.0, so concentration starts at roughly 12 — an
+informative posterior from step 0, and predictable at initialization rather than
+determined by whatever the encoder features happen to be. Separately, the KL weight
+is a non-trainable scalar model weight rather than a Python float, so a callback
+can ramp it from 0 to `kl_loss_weight` over the first epochs under `tf.function`.
+Its default equals the constructor value, so with no callback attached behaviour is
+unchanged; the Python attribute remains the `get_config` source of truth.
 
-Usage Examples:
--------------
-```python
-# MNIST VAE
-model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
+`sample()` draws from each mode's *true* prior rather than always from `N(0, I)`:
+uniform-on-sphere at the sampler's radius for the hypersphere mode, and
+uniform-on-the-unit-sphere for vMF, since the vMF prior at `kappa = 0` is exactly
+that. Drawing Gaussian noise for a model trained on a spherical latent decodes
+points the decoder has never seen and makes a working model look broken.
 
-# CIFAR-10 VAE
-model = VAE.from_variant("medium", input_shape=(32, 32, 3), latent_dim=128)
+Architecturally the encoder is a residual convolutional stack: each stage
+downsamples, then applies `steps_per_depth` residual blocks at that width, with the
+filter list setting the width per stage. The decoder mirrors it with upsampling.
+Five presets scale depth, width and latent dimension together and lower
+`kl_loss_weight` as the model grows, since a larger decoder tolerates — and needs —
+a weaker prior pull.
 
-# High-resolution VAE
-model = VAE.from_variant("large", input_shape=(128, 128, 3), latent_dim=256)
+Reconstruction is binary crossentropy on flattened inputs with predictions clipped
+to `[1e-7, 1 - 1e-7]`, which assumes data in `[0, 1]`. The training step is custom
+because the loss depends on intermediate encoder outputs rather than on
+`(y_true, y_pred)` alone; it clips gradients elementwise to `[-1, 1]`, a blunt but
+effective guard against the loss spikes the KL term can produce early in training.
+The vMF mode opts out of XLA on every compile path — direct `compile()`, factory,
+and reload — because the beta sampler it uses crashes under jit; that opt-out is
+reapplied on deserialization so a reloaded model does not inherit a stale
+`jit_compile="auto"`.
 
-# Custom VAE
-model = create_vae(input_shape=(64, 64, 3), latent_dim=128, kl_loss_weight=0.01)
-```
+References:
+    - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
+      (https://arxiv.org/abs/1312.6114)
+    - Rezende et al., 2014. Stochastic Backpropagation and Approximate Inference
+      in Deep Generative Models. (https://arxiv.org/abs/1401.4082)
+    - Higgins et al., 2017. beta-VAE: Learning Basic Visual Concepts with a
+      Constrained Variational Framework. ICLR 2017.
+    - Davidson et al., 2018. Hyperspherical Variational Auto-Encoders.
+      (https://arxiv.org/abs/1804.00891)
+    - Bowman et al., 2015. Generating Sentences from a Continuous Space.
+      (https://arxiv.org/abs/1511.06349)
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
 """
 
 import keras

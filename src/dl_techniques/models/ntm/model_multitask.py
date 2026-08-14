@@ -1,3 +1,42 @@
+"""
+Neural Turing Machine conditioned on a task identity for multi-task sequence
+learning.
+
+The NTM's algorithmic tasks — copy, repeat-copy, associative recall, priority sort
+— share an input format but demand different memory disciplines, and a single NTM
+trained on their union has no way to know which discipline the current sequence
+calls for. Task conditioning supplies that missing bit. A one-hot task vector is
+broadcast across the temporal axis and concatenated onto every timestep's features,
+so the controller sees the task identity at the same moment it sees the first
+symbol, and the head parameters it emits — key, sharpness, interpolation gate,
+shift, erase and add vectors — can be functions of the task from step one.
+
+Broadcasting rather than prepending a task token is the deliberate choice here. A
+prepended token would make the task identity a memory the controller has to hold
+across the whole sequence, competing for exactly the recurrent capacity that
+external memory exists to relieve; carrying it on every timestep instead makes it a
+free-standing input the controller can consult without remembering. The cost is
+`num_tasks` extra input features at every step, which is negligible against the
+controller width.
+
+The wrapper is otherwise thin: it computes the fused feature dimension
+(`feature_dim + num_tasks`) in `build` and hands it to the inner
+`NeuralTuringMachine`, which is the fully unrolled sequence-level NTM rather than
+the RNN cell. Output is always a sequence — these tasks are supervised at every
+timestep, not at the end — so `return_sequences=True` is fixed rather than exposed,
+and `return_state=False` keeps the memory matrix out of the model's outputs. The
+broadcast target shape is built from `ops.shape(x)` rather than static dimensions
+so a variable sequence length survives graph tracing.
+
+See `dl_techniques.layers.memory.baseline_ntm` for the addressing, shift and
+erase-then-add mechanics the inner NTM implements.
+
+References:
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401)
+    - Caruana, 1997. Multitask Learning. Machine Learning 28, 41-75.
+"""
+
 import keras
 from keras import ops
 from typing import Any, Dict, List, Tuple, Union
