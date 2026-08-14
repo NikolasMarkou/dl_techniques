@@ -804,12 +804,20 @@ def create_modern_nanovlm(
 
     Uses advanced components like RMSNorm, SwiGLU, differential attention, etc.
 
+    The fusion default is `'cross_attention'`, matching `create_nanovlm`. It used to
+    be `'tensor_fusion'`, which could not run on any input this factory accepts:
+    `tensor_fusion` concatenates the modalities on the feature axis and therefore
+    needs equal sequence lengths, while this factory's vision stream is fixed at 197
+    tokens (`img_size=224`, `patch_size=16`) against a caller-chosen text length.
+    Passing `fusion_strategy='tensor_fusion'` explicitly is still allowed; it now
+    raises a `ValueError` naming the length requirement instead of dying inside a
+    `ConcatOp`.
+
     Example:
         ```python
         model = create_modern_nanovlm(
             vocab_size=50000,
-            embed_dim=1024,
-            fusion_strategy='tensor_fusion'
+            embed_dim=1024
         )
         ```
     """
@@ -833,7 +841,13 @@ def create_modern_nanovlm(
             'ffn_type': 'swiglu'
         },
         fusion_config={
-            'fusion_strategy': kwargs.get('fusion_strategy', 'tensor_fusion'),
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-007
+            # Do NOT restore 'tensor_fusion' here for symmetry with the docstring
+            # example or with MultiModalFusion's own richer strategy: this factory
+            # hardcodes a 197-token vision stream, so tensor_fusion's equal-length
+            # requirement is violated by EVERY call, not by an edge case. See
+            # decisions.md D-007.
+            'fusion_strategy': kwargs.get('fusion_strategy', 'cross_attention'),
             'dim': embed_dim,
             'attention_config': {'num_heads': embed_dim // 64},
             'num_tensor_projections': 8,

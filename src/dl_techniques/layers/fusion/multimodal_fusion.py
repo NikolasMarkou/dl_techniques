@@ -953,7 +953,33 @@ class MultiModalFusion(keras.layers.Layer):
 
         :return: Fused tensor after tensor fusion.
         :rtype: keras.KerasTensor
+
+        :raises ValueError: If the modalities have statically-known but unequal
+            sequence lengths, which this strategy cannot fuse.
         """
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-007
+        # Do NOT drop this in favour of "the concat already fails": it fails as a
+        # backend-level InvalidArgumentError ("ConcatOp : Dimension 1 in both shapes
+        # must be equal"), which is not a ValueError, names neither the strategy nor
+        # the requirement, and points at no alternative. Do NOT "fix" it by padding
+        # or slicing to a common length either — that would silently change the
+        # semantics of the fusion. See decisions.md D-007.
+        lengths = [
+            t.shape[1] for t in inputs
+            if len(t.shape) > 2 and t.shape[1] is not None
+        ]
+        # Only decide on statically-known lengths: a symbolic build with a `None`
+        # sequence axis is legal and must not be refused here.
+        if len(lengths) == len(inputs) and len(set(lengths)) > 1:
+            raise ValueError(
+                "fusion_strategy='tensor_fusion' requires all modality inputs to "
+                "share the same sequence length, because it concatenates them on "
+                f"the feature axis; got sequence lengths {lengths} for inputs of "
+                f"shapes {[tuple(t.shape) for t in inputs]}. Use "
+                "fusion_strategy='cross_attention' or 'attention_pooling' for "
+                "modalities of different sequence length."
+            )
+
         # Concatenate all modalities
         concatenated = keras.ops.concatenate(inputs, axis=-1)
 
