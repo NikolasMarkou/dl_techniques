@@ -664,5 +664,113 @@ class TestTiRexFactory:
         assert model.patch_size == small_config['patch_size']
         assert model.embed_dim == small_config['embed_dim']
 
+
+class TestTiRexAttentionType:
+    """`attention_type` is a real constructor knob, not a hardcoded literal.
+
+    Until this suite existed the attention type was pinned to `'window'` inside
+    `__init__`, so no caller could build the paper's global attention. These tests
+    pin BOTH ends of the knob: the string that goes in, and the compute profile that
+    comes out. The string alone is deliberately not enough — a `get_config`
+    round-trip would keep passing if the value never reached the attention factory.
+    """
+
+    def _block_config(self, attention_type: str, window_size: int) -> Dict[str, Any]:
+        """A single `transformer` block: no LSTM path, so attention is the ONLY
+        route by which one token can influence another. With a `mixed` block the
+        LSTM would carry position 0 forward regardless of the attention span and
+        the receptive-field probe below would be vacuous."""
+        return {
+            'patch_size': 4,
+            'embed_dim': 16,
+            'num_blocks': 1,
+            'num_heads': 2,
+            'block_types': ['transformer'],
+            'quantile_levels': [0.5],
+            'prediction_length': 4,
+            'dropout_rate': 0.0,
+            'attention_type': attention_type,
+            'attention_window_size': window_size,
+        }
+
+    def test_default_attention_type_is_multi_head(self):
+        """The default is global/full attention — `'multi_head'` is the factory's
+        key for it; there is no key spelled `'global'`."""
+        model = TiRexCore(patch_size=4, embed_dim=16, num_blocks=1, num_heads=2,
+                          prediction_length=4, quantile_levels=[0.5])
+
+        assert model.attention_type == 'multi_head'
+        assert type(model.blocks[0].attention_layer).__name__ == 'MultiHeadAttention'
+
+    def test_attention_type_survives_config_round_trip(self):
+        """A constructor parameter absent from `get_config()` restores as the
+        default and the loss of the caller's choice is silent."""
+        model = TiRexCore(**self._block_config('window', 2))
+
+        config = model.get_config()
+        assert config['attention_type'] == 'window'
+
+        restored = TiRexCore.from_config(config)
+        assert restored.attention_type == 'window'
+        assert type(restored.blocks[0].attention_layer).__name__ == 'WindowAttention'
+
+    def test_window_still_builds_and_forward_passes(self):
+        """`'window'` remains selectable end-to-end. `attention_window_size` stays
+        wired through `attention_args` for BOTH types — the attention factory drops
+        keyword arguments the target type does not declare, so the global path does
+        not need a branch."""
+        window_model = TiRexCore(**self._block_config('window', 2))
+        global_model = TiRexCore(**self._block_config('multi_head', 2))
+
+        assert window_model.blocks[0].attention_args == {'window_size': 2}
+        assert global_model.blocks[0].attention_args == {'window_size': 2}
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(window_model(x, training=False)) == (2, 4, 1)
+        assert ops.shape(global_model(x, training=False)) == (2, 4, 1)
+
+    def test_attention_span_actually_changes(self):
+        """The compute profile, not the string.
+
+        Perturb token 0 of a block's input and read the LAST token's output. Under
+        global attention every token reads every other, so the last token moves.
+        Under a window of 2 it cannot see token 0 at all, so it moves by EXACTLY
+        zero. The `perturbed_position_moves` arm is the liveness control: without
+        it a block that returned a constant would satisfy the window assertion.
+        """
+        seq_len, embed_dim = 16, 16
+
+        def probe(attention_type: str) -> Tuple[float, float]:
+            model = TiRexCore(**self._block_config(attention_type, 2))
+            block = model.blocks[0]
+
+            tokens = keras.random.normal((1, seq_len, embed_dim), seed=0)
+            baseline = ops.convert_to_numpy(block(tokens, training=False))
+
+            perturbed = ops.convert_to_numpy(tokens).copy()
+            perturbed[0, 0, :] += 10.0
+            after = ops.convert_to_numpy(
+                block(ops.convert_to_tensor(perturbed), training=False))
+
+            delta = np.abs(after - baseline)
+            return float(delta[0, -1].max()), float(delta[0, 0].max())
+
+        global_last, global_first = probe('multi_head')
+        window_last, window_first = probe('window')
+
+        # liveness: the perturbation landed, under both spans
+        assert global_first > 1.0, "perturbed_position_moves (multi_head)"
+        assert window_first > 1.0, "perturbed_position_moves (window)"
+
+        # the assertion that proves the wiring
+        assert window_last == 0.0, (
+            "window_span_excludes_distant_token: token 0 reached the last "
+            f"position through a window of 2 (delta {window_last})")
+        assert global_last > 1e-4, (
+            "global_span_reaches_distant_token: token 0 did NOT reach the last "
+            f"position under 'multi_head' (delta {global_last}) — attention_type "
+            "is not reaching the factory")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -12,7 +12,7 @@ matters; as H grows, the single summary becomes the bottleneck.
 
 This variant keeps the entire front half of `TiRexCore` — NaN-aware reversible
 instance normalization, mask concatenation onto the feature axis, patch embedding,
-input projection, and the same mixed LSTM/windowed-attention block stack — and
+input projection, and the same mixed LSTM/attention block stack — and
 changes only how the horizon representation is formed. A weight of shape
 `(1, prediction_length, embed_dim)` holds one learnable token per forecast step.
 These are broadcast to the batch and concatenated onto the *end* of the embedded
@@ -29,13 +29,16 @@ one, which is what a decoder-style architecture buys, while remaining a single
 forward pass with no autoregressive loop and therefore no compounding of sampled
 errors.
 
-The interaction with windowed attention is the non-obvious part and it is easy to
-misread. Because the inherited blocks use local windows rather than global
-attention, a query token can attend only within its own window of the augmented
-sequence; the tokens near the start of the appended block can reach the final
-history patches, while later tokens see mostly other query tokens. Long-range
-access to the history is therefore carried by the recurrent path and by depth, not
-by attention. Widening `attention_window_size` is the knob that changes this.
+The interaction with the inherited `attention_type` is the non-obvious part and it
+is easy to misread, because the two settings give the query tokens entirely
+different reach. Under the default `'multi_head'` every query token attends over the
+whole augmented sequence, so each horizon token can read any history patch directly.
+Under `attention_type='window'` a query token sees only its own window of that
+sequence: tokens near the start of the appended block can reach the final history
+patches, while later tokens see mostly other query tokens, and long-range access to
+the history falls back onto the recurrent path and depth. Widening
+`attention_window_size` is the knob that changes this in the windowed setting; it is
+inert under the global default.
 
 Two implementation consequences follow from the changed topology and are the
 reason this class cannot simply inherit its parent's plumbing. `build` is

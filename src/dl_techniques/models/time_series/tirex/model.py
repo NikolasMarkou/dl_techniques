@@ -1,6 +1,6 @@
 """
 TiRex-style probabilistic forecaster: patch tokens processed by a stack of blocks
-that mix LSTM recurrence with windowed self-attention, decoded in one shot into
+that mix LSTM recurrence with self-attention, decoded in one shot into
 non-crossing quantiles under reversible per-instance normalization.
 
 The design answers three problems at once, and each answer costs something worth
@@ -40,15 +40,22 @@ model. Per-block `block_types` let the stack be tuned from purely recurrent to
 purely attentional; the `lstm` and `transformer` variants are the same block with
 one of the two sub-layers omitted.
 
-One divergence from the published TiRex is deliberate and is flagged at its
-construction site: attention here is **windowed, not global**. Every block is built
-with `attention_type='window'` and `window_size=attention_window_size` (default 8
-tokens), so a token attends only within its local window; long-range coupling is
-carried by the LSTM path and by the stacking of windows across depth, not by a
-single global attention map. Anything claiming this model attends freely to
-arbitrarily distant patches is describing the paper, not this code. The remaining
-block internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and
-Mish activations throughout.
+Attention follows the published TiRex by default and the windowed divergence is now
+an opt-in, chosen through `attention_type`. The default `'multi_head'` is the
+factory's key for standard full self-attention — there is no key spelled `'global'`
+— so every patch token attends to every other, at `O(L^2)` in the number of patches.
+Passing `attention_type='window'` restores the earlier behaviour: each token then
+attends only within `attention_window_size` tokens (default 8) at `O(L*w)`, and
+long-range coupling falls back onto the LSTM path and the stacking of windows across
+depth. The knob exists because the two answers differ in kind, not degree — a
+windowed stack cannot form a single long-range association at any depth cheaply, and
+a global stack pays quadratically for one it may not need — and because a model whose
+attention span is fixed in the source cannot be compared against the paper it cites.
+`attention_window_size` stays wired through `attention_args` under both settings; the
+attention factory filters keyword arguments against the target type's own parameter
+list, so an unused `window_size` is dropped rather than raising. The remaining block
+internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and Mish
+activations throughout.
 
 Decoding is one-shot and pooled. After the final normalization the patch axis is
 collapsed by a mean — the whole encoded history becomes a single `(B, 1, embed_dim)`
@@ -154,6 +161,16 @@ class TiRexCore(keras.Model, ForecastMixin):
         prediction_length: Integer, length of prediction horizon.
         dropout_rate: Float, dropout rate for regularization.
         use_layer_norm: Boolean, whether to use layer normalization.
+        use_normalization: Boolean, whether to apply reversible per-instance
+            normalization to the inputs.
+        attention_window_size: Integer, window width in tokens, used only when
+            `attention_type='window'`.
+        attention_type: String, attention factory key used by every block.
+            Defaults to `'multi_head'` — full/global self-attention, `O(L^2)` in the
+            number of patch tokens, matching the published TiRex. `'window'` selects
+            the local-window variant at `O(L*attention_window_size)`. Any other key
+            from `layers/attention/factory.py`'s registry is accepted and validated
+            there.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -238,6 +255,7 @@ class TiRexCore(keras.Model, ForecastMixin):
         use_layer_norm: bool = True,
         use_normalization: bool = True,
         attention_window_size: int = 8,
+        attention_type: str = 'multi_head',
         name: str = "TiRex",
         **kwargs: Any
     ) -> None:
@@ -269,6 +287,19 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.use_layer_norm = use_layer_norm
         self.use_normalization = use_normalization
         self.attention_window_size = attention_window_size
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-008
+        # `attention_type` deliberately carries NO membership check here, unlike
+        # every other argument above. `create_attention_layer` already raises
+        # `ValueError: Unknown attention type '<value>'. Available types: [...]`
+        # for an unregistered key, and it does so eagerly — the blocks below are
+        # constructed in `__init__`, not lazily in `build`. A local whitelist would
+        # either duplicate that raise or, worse, freeze this model to the two keys
+        # anyone happened to test, locking out the other 29 registry entries for no
+        # reason. Do NOT "fix" this by adding `if attention_type not in
+        # ('multi_head', 'window')`. The one gap is an all-`'lstm'` `block_types`
+        # stack, which builds no attention layer at all and so cannot validate the
+        # key; there it is inert and round-trips unused.
+        self.attention_type = attention_type
 
         if len(self.block_types) != num_blocks:
             raise ValueError(
@@ -294,6 +325,14 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
             # --- DIVERGENCE FROM TIREX: WINDOW ATTENTION INSTEAD OF GLOBAL ATTENTION ---
+            # Kept as history, no longer as behaviour: this line hardcoded
+            # `attention_type='window'`, so no caller could build the paper's global
+            # attention. The divergence is now OPT-IN via the constructor argument
+            # and the default is the paper's `'multi_head'` (the factory's key for
+            # full self-attention; there is no key spelled `'global'`). Existing
+            # windowed behaviour is one keyword away, and `window_size` stays wired
+            # unconditionally because the factory filters unknown kwargs by the
+            # target type's parameter list.
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
@@ -303,7 +342,7 @@ class TiRexCore(keras.Model, ForecastMixin):
                 dropout_rate=self.dropout_rate,
                 use_layer_norm=self.use_layer_norm,
                 normalization_type='rms_norm',
-                attention_type='window',
+                attention_type=self.attention_type,
                 ffn_type='geglu',
                 activation='mish',
                 attention_args={'window_size': self.attention_window_size},
@@ -741,6 +780,7 @@ class TiRexCore(keras.Model, ForecastMixin):
             "use_layer_norm": self.use_layer_norm,
             "use_normalization": self.use_normalization,
             "attention_window_size": self.attention_window_size,
+            "attention_type": self.attention_type,
         })
         return config
 
