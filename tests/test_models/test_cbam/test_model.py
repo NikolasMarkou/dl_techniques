@@ -205,6 +205,46 @@ class TestCBAMNet:
         assert not model.built
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `CBAMNet.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained CBAMNet weights"):
+            CBAMNet.from_variant("tiny", pretrained=True)
+
+    def test_factory_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained CBAMNet weights"):
+            create_cbam_net("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = CBAMNet.from_variant(
+            "tiny", num_classes=4, input_shape=(32, 32, 3), pretrained=False
+        )
+        assert isinstance(model, CBAMNet)
+
+    def test_local_path_still_works(self, tmp_path):
+        src = CBAMNet.from_variant(
+            "tiny", num_classes=4, input_shape=(32, 32, 3)
+        )
+        src(np.zeros((1, 32, 32, 3), dtype="float32"))
+        path = str(tmp_path / "cbam.keras")
+        src.save(path)
+        loaded = CBAMNet.from_variant(
+            "tiny", num_classes=4, input_shape=(32, 32, 3), pretrained=path
+        )
+        assert isinstance(loaded, CBAMNet)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(CBAMNet, "PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
 
