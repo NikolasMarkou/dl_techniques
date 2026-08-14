@@ -1,5 +1,10 @@
 """Guards for the DINO trainer (``src/train/dino/train_dino.py``).
 
+If this module is ever reported as carrying "pre-existing failures", read
+``research/2026_test_suite_contention_and_false_failures.md`` FIRST: a prior report of
+exactly that was refuted, and the faults were GPU contention from concurrent test runs,
+not defects here. Re-run serially on an idle GPU before diagnosing anything.
+
 Four things are pinned here, each because its failure mode is SILENT:
 
 1. **Every CLI flag reaches ``TrainingConfig``.** A flag that ``parse_arguments()`` defines

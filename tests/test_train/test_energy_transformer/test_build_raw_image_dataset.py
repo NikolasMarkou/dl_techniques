@@ -1,5 +1,10 @@
 """Direct tests for `build_raw_image_dataset` — the shared pipeline builder.
 
+If this module is ever reported as carrying "pre-existing failures", read
+``research/2026_test_suite_contention_and_false_failures.md`` FIRST: a prior report of
+exactly that was refuted, and the faults were GPU contention from concurrent test runs,
+not defects here. Re-run serially on an idle GPU before diagnosing anything.
+
 Written for plan-2026-08-01T195746-12a1f2db step 5. Until then this function had
 NO dedicated test module, despite being shared by **7 call sites across 3
 trainers** (`train_classification.py` x2, `train_masked_completion.py` x2,
