@@ -46,18 +46,29 @@ move by 3.31e+00.
 This implementation still diverges from the paper in ways that matter, and they are
 stated here rather than left for a reader to discover:
 
-- **Patching is not entropy-based.** `DynamicPatcher.call` ignores the entropy tensor
-  it is handed and emits fixed, equal-length patches (`seq_len // max_patches`, with
-  the remainder in the last patch). `entropy_threshold` is validated, stored and
-  serialized but never consulted. The `EntropyModel` still runs on every forward and
-  its Shannon entropy is still computed, so the compute is paid and then discarded.
-  The adaptive-compute claim of the paper does not hold for this code.
+- **Boundary selection is position-ordered, not paper-ranked.** Patching IS
+  entropy-based: `DynamicPatcher.call` opens a new patch at every byte whose entropy
+  exceeds `entropy_threshold`, and each row of the batch is segmented independently.
+  Where it departs from the paper is what happens once the `max_patches` budget is
+  spent: the FIRST `max_patches - 1` crossings are kept BY POSITION and everything
+  after them merges into the final patch. Keeping the most informative crossings
+  instead would let a late high-entropy byte displace an earlier boundary, i.e. make
+  an earlier byte's patch id depend on a later byte, which the next-byte objective
+  forbids. The cost is real: a sequence whose surprising regions are all late gets
+  one long final patch.
+- **The threshold is a fixed constant, not a trained or adaptive one.** The paper
+  also describes an approximate-monotonicity criterion; here a single scalar in nats
+  decides every boundary, and it must be chosen against the entropy scale of the
+  vocabulary in use (`ln(vocab_size)` is the uniform ceiling). A threshold below the
+  model's typical entropy makes every position a boundary — one byte per patch with
+  the tail collapsed into the last one — and a threshold above `ln(vocab_size)` makes
+  none. Construction logs a warning when the configured value is degenerately low.
 - **There are no hash n-gram byte embeddings.** The paper augments byte
   representations with rolling-hash n-gram embeddings; this implementation uses a
   plain learned byte embedding plus positional embeddings.
 - Efficiency and quality figures from the paper (inference-FLOP savings, parity with
   token-based models at scale) describe the reference model. Nothing here has been
-  measured against them, and the two divergences above would have to be closed before
+  measured against them, and the divergences above would have to be closed before
   such a comparison would mean anything.
 
 Behavioural choices worth knowing:

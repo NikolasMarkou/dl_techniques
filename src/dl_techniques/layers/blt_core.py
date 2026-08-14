@@ -21,8 +21,9 @@ The architecture is best understood as two parallel, interacting streams: a
     -   **Information-Theoretic Patching**: An `EntropyModel`, itself a small
         transformer, first computes the per-byte information entropy `H(b) =
         -Σ p(b) log p(b)` for each byte `b` in the sequence. The sequence is
-        then dynamically segmented into patches at points of low entropy,
-        based on a learned `entropy_threshold`. The intuition is to group
+        then dynamically segmented: a byte whose entropy exceeds the fixed
+        `entropy_threshold` (a constructor hyperparameter in nats, not a
+        learned quantity) opens a new patch. The intuition is to group
         information-sparse regions (e.g., padding, repeated characters) into
         large patches and information-dense regions into smaller, more granular
         patches. This focuses the model's capacity on the most complex parts
