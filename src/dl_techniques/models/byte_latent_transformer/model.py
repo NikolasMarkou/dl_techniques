@@ -25,24 +25,27 @@ patch's (masked) byte states, with `'mean'` and `'max'` as cheaper alternatives.
 sequence, and is where the bulk of the FLOPs live. `LocalDecoder` re-embeds the bytes
 and alternates its own self-attention with a cross-attention that injects patch
 context, projecting to `vocab_size` logits at every byte position. Cross-attention
-keys and values are built by a gather: `patch_ids` selects, for each byte position,
-the global vector of the patch that byte belongs to, so the key sequence is
-byte-length rather than patch-length. Note that no mask then restricts a byte's
-query to its own slot, so a byte still attends across the whole gathered sequence
-rather than only to its own patch's representation.
+keys and values are built by a gather over `patch_ids`, so the key sequence is
+byte-length rather than patch-length.
 
-This implementation diverges from the paper in ways that matter, and they are stated
-here rather than left for a reader to discover:
+Causality is enforced in all five places it is needed, and each one is load-bearing
+under the next-byte objective `train_step` implements. The entropy model, the local
+encoder, the global transformer (causal over the *patch* axis) and the local
+decoder's self-attention all receive a lower-triangular attend-mask from
+`layers.blt_blocks.causal_attend_mask`. The fifth is the cross-attention, and it is
+the subtle one: gathering a byte's *own* patch representation leaks the future
+regardless of any mask, because that representation is pooled over every byte of the
+patch, the target byte included. The gather is therefore of the *preceding* patch
+(`patch_ids - 1`, with patch-0 bytes receiving a zeroed context vector rather than
+their own patch), and a causal mask is applied over the gathered key axis as well,
+since key `j > i` can otherwise carry a patch at or after the query's own. With all
+five in place, perturbing the byte at index 6 of a 12-byte sequence moves the logits
+at every index < 6 by exactly 0.0, against 5.64e-01 before, while indices >= 6 still
+move by 3.31e+00.
 
-- **There is no causal mask anywhere in the model.** Every transformer stack -- the
-  entropy model, the local encoder, the global transformer and the local decoder's
-  self-attention -- invokes `TransformerLayer(x, training=...)` with no
-  `attention_mask` and no causal option, so all attention is bidirectional. Under the
-  next-byte objective implemented by `train_step`, position `i` can see the very byte
-  it is asked to predict, so training loss is not a meaningful measure of language
-  modelling here and `generate()` will not behave as an autoregressive sampler. Fixing
-  this requires plumbing a causal mask into all four stacks; nothing in the current
-  code approximates one.
+This implementation still diverges from the paper in ways that matter, and they are
+stated here rather than left for a reader to discover:
+
 - **Patching is not entropy-based.** `DynamicPatcher.call` ignores the entropy tensor
   it is handed and emits fixed, equal-length patches (`seq_len // max_patches`, with
   the remainder in the last patch). `entropy_threshold` is validated, stored and

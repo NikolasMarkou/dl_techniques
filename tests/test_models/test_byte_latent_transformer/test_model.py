@@ -128,5 +128,75 @@ class TestKerasRoundTrip:
         )
 
 
+# ---------------------------------------------------------------------
+# Causality: the future-leak probe
+# ---------------------------------------------------------------------
+
+class TestCausality:
+    """BLT is trained under a next-byte objective, so no output at position
+    ``i`` may depend on any byte at a position ``>= i + 1``.
+
+    The instrument is a future-leak probe: change ONE byte at position ``t``
+    and require the logits at every position ``< t`` to be bit-identical. On
+    the unmasked implementation (no causal mask in any of the four stacks and
+    a cross-attention gathering the byte's OWN patch, whose pooled
+    representation contains the target byte) this measured
+    ``max|delta| = 5.636312e-01`` over positions ``< t``.
+    """
+
+    SEQ_LEN = 12
+    PERTURB_AT = 6
+
+    @staticmethod
+    def _tiny_model() -> ByteLatentTransformer:
+        return create_blt_model(
+            variant="micro",
+            vocab_size=32,
+            max_sequence_length=TestCausality.SEQ_LEN,
+            max_patches=4,
+            local_dim=32,
+            global_dim=48,
+            num_local_layers=2,
+            num_global_layers=2,
+            num_heads_local=4,
+            num_heads_global=4,
+            dropout_rate=0.0,
+        )
+
+    def _perturbed_pair(self):
+        rng = np.random.default_rng(0)
+        x = rng.integers(1, 32, size=(2, self.SEQ_LEN)).astype("int32")
+        x2 = x.copy()
+        x2[:, self.PERTURB_AT] = (x2[:, self.PERTURB_AT] + 7) % 31 + 1
+        return x, x2
+
+    def test_future_byte_does_not_change_the_past(self) -> None:
+        model = self._tiny_model()
+        x, x2 = self._perturbed_pair()
+
+        a = keras.ops.convert_to_numpy(model(x, training=False))
+        b = keras.ops.convert_to_numpy(model(x2, training=False))
+
+        past = np.abs(a[:, :self.PERTURB_AT] - b[:, :self.PERTURB_AT]).max()
+        assert past == 0.0, (
+            f"future leak: perturbing byte {self.PERTURB_AT} moved the logits "
+            f"at earlier positions by {past:.6e} (must be exactly 0.0)"
+        )
+
+    def test_the_model_still_responds_at_and_after_the_perturbation(self) -> None:
+        """A mask that froze the whole model would also pass the test above."""
+        model = self._tiny_model()
+        x, x2 = self._perturbed_pair()
+
+        a = keras.ops.convert_to_numpy(model(x, training=False))
+        b = keras.ops.convert_to_numpy(model(x2, training=False))
+
+        future = np.abs(a[:, self.PERTURB_AT:] - b[:, self.PERTURB_AT:]).max()
+        assert future > 1e-3, (
+            f"the model is inert: positions >= {self.PERTURB_AT} moved by only "
+            f"{future:.6e} when the byte there changed"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

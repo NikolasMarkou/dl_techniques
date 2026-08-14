@@ -225,6 +225,42 @@ from typing import Optional, Dict, Any, List, Tuple
 from .transformers.transformer import TransformerLayer
 from .attention.multi_head_attention import MultiHeadAttention
 from .embedding.positional_embedding import PositionalEmbedding
+from ..utils.masking import create_mask
+
+# ---------------------------------------------------------------------
+
+
+def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
+    """Build the lower-triangular self-attention mask for a BLT stack.
+
+    Every stack in BLT -- the entropy model, the local encoder, the global
+    transformer over patches and the local decoder's self-attention -- is
+    consumed under a next-byte objective, and none of them constructed a mask:
+    each called ``TransformerLayer(x, training=...)``, ``TransformerLayer``
+    defaults ``attention_mask=None`` and the attention layers mask only with
+    what they are handed. Position ``i`` therefore attended to the very byte it
+    was asked to predict.
+
+    The mask is built in the masking factory's BLOCK semantics (``True`` means
+    "mask out") and inverted once to the ATTEND semantics the attention layers
+    expect. It is returned at rank 3 on purpose: a rank-2 mask is interpreted
+    by the attention layers as a ``(batch, seq_len)`` *padding* mask, not as a
+    ``(seq_len, seq_len)`` score mask, so a rank-2 causal mask would be
+    silently misread.
+
+    :param hidden_states: Sequence tensor of shape ``(batch, seq_len, dim)``.
+    :type hidden_states: keras.KerasTensor
+    :return: Boolean mask ``(batch, seq_len, seq_len)``, ``True`` = may attend.
+    :rtype: keras.KerasTensor
+    """
+    batch_size = ops.shape(hidden_states)[0]
+    seq_len = ops.shape(hidden_states)[1]
+    blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
+    blocked = ops.broadcast_to(
+        ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
+    )
+    return ops.logical_not(blocked)
+
 
 # ---------------------------------------------------------------------
 
@@ -473,9 +509,12 @@ class EntropyModel(keras.layers.Layer):
         # Add positional embedding
         x = self.positional_embedding(x, training=training)
 
-        # Apply transformer layers
+        # Apply transformer layers. The entropy model predicts the NEXT byte,
+        # so it is causal: without the mask its "surprise" at position i is
+        # computed from a state that has already read byte i+1.
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Final layer norm and projection
         x = self.layer_norm(x)
@@ -1061,8 +1100,9 @@ class LocalEncoder(keras.layers.Layer):
         x = self.positional_embedding(x, training=training)
 
         # Apply causal transformer layers
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Apply layer normalization
         x = self.layer_norm(x)
@@ -1201,9 +1241,11 @@ class GlobalTransformer(keras.layers.Layer):
         # Add patch positional embeddings
         x = self.patch_positional_embedding(patch_representations, training=training)
 
-        # Apply global transformer layers
+        # Apply global transformer layers, causal over the PATCH axis: patch p's
+        # contextualized representation must not depend on patches after it.
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Apply final layer norm
         x = self.layer_norm(x)
@@ -1425,11 +1467,12 @@ class LocalDecoder(keras.layers.Layer):
             global_context = self.context_projection(global_context)
 
         # Apply decoder layers with cross-attention
+        attend_mask = causal_attend_mask(x)
         for i, (decoder_layer, cross_attention, cross_norm) in enumerate(
                 zip(self.decoder_layers, self.cross_attention_layers, self.cross_attention_norms)
         ):
-            # Self-attention within byte sequence
-            x = decoder_layer(x, training=training)
+            # Self-attention within byte sequence (causal)
+            x = decoder_layer(x, attention_mask=attend_mask, training=training)
 
             # Cross-attention to global context
             cross_attended = self._masked_cross_attention(
@@ -1457,27 +1500,56 @@ class LocalDecoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply cross-attention with patch-based masking.
+        Apply cross-attention to the PRECEDING patch's global representation.
 
-        Each byte position can only attend to the global representation
-        of the patch it belongs to.
+        Byte ``i`` reads the contextualized representation of patch
+        ``patch_ids[i] - 1``, not of its own patch, and the attention is
+        additionally masked causally over the gathered byte-length key
+        sequence. Both restrictions are needed for the decoder to be causal:
+
+        * gathering the byte's *own* patch leaks the future, because a patch
+          representation is pooled over every byte of that patch, including
+          the bytes after ``i`` -- and including the target byte itself;
+        * even with the previous-patch gather, key ``j`` for ``j > i`` may
+          carry patch ``patch_ids[j] - 1``, which can be ``patch_ids[i]`` or
+          later, so the causal mask over the key axis is not redundant.
+
+        Bytes in patch 0 have no preceding patch. Their gather index is clamped
+        to 0 and the gathered vector is then zeroed, so they receive no global
+        context at all rather than reading their own patch. Zeroing the key
+        rather than masking the query row also avoids a fully-masked softmax
+        row.
         """
         batch_size = ops.shape(decoder_hidden)[0]
         seq_len = ops.shape(decoder_hidden)[1]
-        num_patches = ops.shape(global_context)[1]
 
-        # For each byte position, gather its corresponding patch representation
-        # patch_ids shape: (batch, seq_len) -> expand for gathering from (batch, num_patches, dim)
-        gather_idx = ops.expand_dims(patch_ids, axis=-1)  # (batch, seq_len, 1)
+        # Previous-patch gather, clamped at 0 for the first patch.
+        prev_patch_ids = ops.maximum(patch_ids - 1, 0)  # (batch, seq_len)
+        gather_idx = ops.expand_dims(prev_patch_ids, axis=-1)  # (batch, seq_len, 1)
         global_dim = ops.shape(global_context)[-1]
-        gather_idx = ops.broadcast_to(gather_idx, (batch_size, seq_len, global_dim))  # (batch, seq_len, dim)
-        position_context = ops.take_along_axis(global_context, gather_idx, axis=1)  # (batch, seq_len, dim)
+        gather_idx = ops.broadcast_to(gather_idx, (batch_size, seq_len, global_dim))
+        position_context = ops.take_along_axis(global_context, gather_idx, axis=1)
 
-        # Apply cross-attention
+        # Patch-0 bytes get a zero context vector instead of their own patch.
+        has_prev = ops.cast(
+            ops.expand_dims(ops.greater(patch_ids, 0), axis=-1),
+            position_context.dtype,
+        )
+        position_context = position_context * has_prev
+
+        # Causal mask over the gathered key sequence. keras MultiHeadAttention
+        # takes ATTEND semantics (True = may attend) at shape (B, T_q, T_k).
+        blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
+        blocked = ops.broadcast_to(
+            ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
+        )
+        cross_attend_mask = ops.logical_not(blocked)
+
         attended = cross_attention(
             query=decoder_hidden,
             value=position_context,
             key=position_context,
+            attention_mask=cross_attend_mask,
             training=training
         )
 
