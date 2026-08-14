@@ -1,9 +1,9 @@
-"""FractalNet-style classifier — public API re-exports.
+"""FractalNet — public API re-exports.
 
-Note the architecture deviates from the paper: `FractalBlock` applies both
-branches to the SAME input rather than composing one through the other, so every
-input-to-output path traverses exactly one convolution and `depth` buys width,
-not depth. See the module docstring of `model.py` for the full derivation.
+A very deep classifier built by recursive expansion with no residual connection
+anywhere: `f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]`, so the longest path is
+`2^C` blocks while the shortest stays a single convolution. `depths` is the
+per-stage expansion level, not a block count.
 """
 from .model import FractalNet, create_fractal_net
 

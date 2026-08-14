@@ -109,41 +109,56 @@ class FractalBlock(keras.layers.Layer):
         self.depth = depth
         self.drop_path_rate = drop_path_rate
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        if self.depth == 1:
-            # Base case: create single base block
-            self.block = self._create_block_from_config()
-            self.branch1 = None
-            self.branch2 = None
-            self.drop_path1 = None
-            self.drop_path2 = None
-            logger.debug(f"Created FractalBlock base case with depth=1")
-        else:
-            # Recursive case: create two branches with drop-path layers
-            self.block = None
-            self.branch1 = FractalBlock(
-                block_config=self.block_config,
-                depth=self.depth - 1,
-                drop_path_rate=self.drop_path_rate,
-                name="branch1"
-            )
-            self.branch2 = FractalBlock(
-                block_config=self.block_config,
-                depth=self.depth - 1,
-                drop_path_rate=self.drop_path_rate,
-                name="branch2"
+        # A composed deep path applies its base block 2^(depth-1) times, so a
+        # stride > 1 inside the block would downsample the deep and shallow
+        # branches by different factors and the join would receive mismatched
+        # shapes. FractalNet downsamples BETWEEN blocks, not inside them; the
+        # caller is responsible for that (see FractalNet._build_fractal_stage).
+        block_stride = self.block_config.get("strides", 1)
+        if block_stride not in (1, (1, 1), [1, 1]):
+            raise ValueError(
+                f"block_config['strides'] must be 1 inside a FractalBlock, got "
+                f"{block_stride!r}. A fractal runs at constant resolution: the "
+                f"deep branch applies the base block 2^(depth-1) times, so any "
+                f"stride > 1 would downsample it 2^(depth-1) times against the "
+                f"shallow branch's once. Downsample between blocks instead."
             )
 
-            # Create stochastic depth layers
-            self.drop_path1 = StochasticDepth(
+        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        if self.depth == 1:
+            # Base case: a single base block; the fractal bottoms out here.
+            self.block = self._create_block_from_config()
+            self.deep_first = None
+            self.deep_second = None
+            self.shallow = None
+            logger.debug("Created FractalBlock base case with depth=1")
+        else:
+            # Paper's expansion rule, f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]:
+            # the DEEP branch COMPOSES two depth-(C) fractals, and the SHALLOW
+            # branch is a single base block applied to the same input. That
+            # composition is what makes the longest path 2^(depth-1) blocks long
+            # while the shortest stays 1, which is the entire point of the
+            # architecture -- the short path is what trains, the long path is
+            # what the short path teaches.
+            self.block = None
+            self.deep_first = FractalBlock(
+                block_config=self.block_config,
+                depth=self.depth - 1,
                 drop_path_rate=self.drop_path_rate,
-                name="drop_path1"
+                name="deep_first"
             )
-            self.drop_path2 = StochasticDepth(
+            self.deep_second = FractalBlock(
+                block_config=self.block_config,
+                depth=self.depth - 1,
                 drop_path_rate=self.drop_path_rate,
-                name="drop_path2"
+                name="deep_second"
             )
+            self.shallow = self._create_block_from_config()
             logger.debug(f"Created FractalBlock recursive case with depth={self.depth}")
+
+        # One generator per block so the join's draws are reproducible under a
+        # seeded run and independent between blocks.
+        self._seed_generator = keras.random.SeedGenerator()
 
     def _create_block_from_config(self) -> keras.layers.Layer:
         """Create a block instance from the stored configuration.
@@ -164,27 +179,14 @@ class FractalBlock(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         """
         if self.depth == 1:
-            # Base case: build single block
-            if self.block is not None:
-                self.block.build(input_shape)
+            self.block.build(input_shape)
         else:
-            # Recursive case: build all sub-layers
-            if self.branch1 is not None:
-                self.branch1.build(input_shape)
-            if self.branch2 is not None:
-                self.branch2.build(input_shape)
-
-            # Determine output shape for drop-path layers
-            # Both branches should have the same output shape
-            if self.branch1 is not None:
-                branch_output_shape = self.branch1.compute_output_shape(input_shape)
-            else:
-                branch_output_shape = input_shape
-
-            if self.drop_path1 is not None:
-                self.drop_path1.build(branch_output_shape)
-            if self.drop_path2 is not None:
-                self.drop_path2.build(branch_output_shape)
+            # The deep branch is COMPOSED, so the second half is built on the
+            # first half's OUTPUT shape, not on the block's input shape.
+            self.deep_first.build(input_shape)
+            intermediate_shape = self.deep_first.compute_output_shape(input_shape)
+            self.deep_second.build(intermediate_shape)
+            self.shallow.build(input_shape)
 
         logger.debug(f"Built FractalBlock with input_shape={input_shape}, depth={self.depth}")
 
@@ -211,20 +213,77 @@ class FractalBlock(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         if self.depth == 1:
-            # Base case: apply base block
             return self.block(inputs, training=training)
-        else:
-            # Recursive case: combine two branches with drop-path
-            y1 = self.branch1(inputs, training=training)
-            y2 = self.branch2(inputs, training=training)
 
-            # Apply stochastic depth (drop-path)
-            y1 = self.drop_path1(y1, training=training)
-            y2 = self.drop_path2(y2, training=training)
+        deep = self.deep_second(
+            self.deep_first(inputs, training=training), training=training
+        )
+        shallow = self.shallow(inputs, training=training)
+        return self._join(deep, shallow, training=training)
 
-            # Mean join: average the paths
-            # This encourages both paths to contribute meaningfully
-            return keras.ops.add(keras.ops.multiply(y1, 0.5), keras.ops.multiply(y2, 0.5))
+    def _join(
+        self,
+        deep: keras.KerasTensor,
+        shallow: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Mean-join the two branches under local drop-path.
+
+        At inference, or when ``drop_path_rate`` is zero, this is the plain mean
+        of the two branches.
+
+        During training each branch is dropped by its own per-sample Bernoulli
+        draw and the join averages only the SURVIVORS, which is what makes the
+        join a mean over a varying number of paths rather than a fixed one. The
+        previous implementation instead scaled each branch by a fixed ``0.5``
+        after an independent :class:`StochasticDepth`, so when both draws
+        dropped -- which happens at rate ``drop_path_rate ** 2``, about 2.3% at
+        the 0.15 default -- the block emitted EXACTLY ZERO and destroyed the
+        signal for that sample. Here the both-dropped case is explicitly
+        rescued: one branch is revived by a fair coin, so at least one path is
+        always live and the block is never a zero map.
+
+        :param deep: Output of the composed deep branch.
+        :type deep: keras.KerasTensor
+        :param shallow: Output of the single-block shallow branch.
+        :type shallow: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: The joined tensor.
+        :rtype: keras.KerasTensor
+        """
+        if training is False or self.drop_path_rate == 0.0:
+            return keras.ops.multiply(keras.ops.add(deep, shallow), 0.5)
+
+        batch_size = keras.ops.shape(deep)[0]
+        draw_shape = [batch_size] + [1] * (len(deep.shape) - 1)
+        keep_prob = 1.0 - self.drop_path_rate
+
+        def _bernoulli(threshold: float) -> keras.KerasTensor:
+            u = keras.random.uniform(
+                draw_shape, dtype=deep.dtype, seed=self._seed_generator
+            )
+            return keras.ops.cast(u < threshold, deep.dtype)
+
+        keep_deep = _bernoulli(keep_prob)
+        keep_shallow = _bernoulli(keep_prob)
+
+        # Rescue the both-dropped case with a fair coin rather than emitting 0.
+        both_dropped = keras.ops.cast(
+            keras.ops.add(keep_deep, keep_shallow) < 0.5, deep.dtype
+        )
+        coin = _bernoulli(0.5)
+        keep_deep = keras.ops.add(keep_deep, keras.ops.multiply(both_dropped, coin))
+        keep_shallow = keras.ops.add(
+            keep_shallow, keras.ops.multiply(both_dropped, 1.0 - coin)
+        )
+
+        survivors = keras.ops.add(keep_deep, keep_shallow)
+        summed = keras.ops.add(
+            keras.ops.multiply(deep, keep_deep),
+            keras.ops.multiply(shallow, keep_shallow),
+        )
+        return keras.ops.divide(summed, survivors)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape of the FractalBlock.
@@ -235,11 +294,11 @@ class FractalBlock(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         """
         if self.depth == 1:
-            if self.block is not None:
-                return self.block.compute_output_shape(input_shape)
+            return self.block.compute_output_shape(input_shape)
         else:
-            if self.branch1 is not None:
-                return self.branch1.compute_output_shape(input_shape)
+            return self.deep_second.compute_output_shape(
+                self.deep_first.compute_output_shape(input_shape)
+            )
 
         # Fallback: assume shape is preserved
         return input_shape

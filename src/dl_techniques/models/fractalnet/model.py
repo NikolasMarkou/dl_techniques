@@ -1,94 +1,75 @@
 """
-A FractalNet-style classifier built from recursively expanded, drop-path
-regularized parallel branches joined by averaging.
+FractalNet: a very deep classifier built by recursive expansion, with no residual
+connection anywhere.
 
 FractalNet's premise is that residual connections are not the essential
 ingredient in training very deep networks — what matters is that the network
-contains short paths from input to loss alongside the long ones. ResNet supplies
+contains SHORT paths from input to loss alongside the long ones. ResNet supplies
 those short paths implicitly, by making every block skippable. FractalNet
-supplies them explicitly, by an expansion rule that generates a set of branches
-of differing lengths and averages them at a join. The paper's rule composes one
-branch out of two copies of the previous level while the other branch is a single
+supplies them explicitly, through an expansion rule that generates branches of
+differing lengths and averages them at a join. The rule composes one branch out
+of two copies of the previous level while the other branch is a single
 convolution:
 
 `f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]`
 
 so a level-`C` fractal contains paths of length `1, 2, 4, ..., 2^(C-1)` all
-reaching the same output, and the shortest of them is a single layer regardless
-of how deep the block is. The implicit ensemble over those paths, plus drop-path
-regularization that randomly removes branches at each join, is what lets the
-network train to great depth with no identity shortcut anywhere.
+reaching the same output, and the shortest is a single layer regardless of how
+deep the block is. The long path is what gives capacity; the short path is what
+makes it trainable, and the implicit ensemble over both is what substitutes for
+the identity shortcut.
 
-**This implementation deviates from that rule, and the deviation changes what the
-model is.** `FractalBlock` at depth `k` builds *two* sub-blocks of depth `k - 1`
-and applies both to the *same* input in parallel, rather than composing one of
-them:
+The composition is the whole architecture, and it is easy to get wrong in a way
+nothing catches. Until 2026-08-14 this implementation applied both sub-blocks to
+the SAME input in parallel — `F_k(x) = 0.5 * (F_{k-1}(x) + F_{k-1}(x))` — which
+recursion terminates with every leaf receiving the block's own input, so every
+path traversed exactly ONE convolution at any `depth`. Parameter count, layer
+count and output shape were all unaffected, which is why the suite stayed green.
+The instrument that detects it is the RECEPTIVE FIELD: with 3x3 `same`
+convolutions a path of `L` composed blocks spans `1 + 2L` pixels, so a correct
+depth-`k` block spans `1 + 2 * 2^(k-1)` — 3, 5, 9, 17 — where the parallel
+version measured 3 at every depth. That measurement is pinned in
+`tests/test_layers/test_fractal_block.py::TestFractalExpansionRule`.
 
-`F_k(x) = 0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))`
+Because the deep branch applies its base block `2^(k-1)` times, the fractal must
+run at CONSTANT resolution: a stride inside the block would downsample the deep
+branch `2^(k-1)` times against the shallow branch's once and the join would
+receive mismatched shapes. `FractalBlock` refuses a strided `block_config` for
+that reason, and downsampling happens BETWEEN stages, as max-pooling, which is
+where the paper puts it.
 
-Recursion on that rule terminates with every leaf receiving the block's input
-directly, so every input-to-output path traverses exactly **one** convolution no
-matter what `depth` is set to. A depth-`k` block is therefore an average of
-`2^(k-1)` independent parallel convolutions of identical shape, not a fractal
-with a `2^(k-1)`-deep longest path. Increasing `depth` buys width and ensemble
-size, doubling parameters each step, and buys no depth at all; the network's
-actual depth is `len(depths)`, one convolution per stage. Read `depths` as a
-per-stage log2 branch count. The `depths=[4, 5, 5]` "large" variant is 8, 16 and
-16 parallel convolutions in three stages, not a 14-layer network.
+Drop-path is LOCAL and renormalized. Each input to a join is dropped by its own
+per-sample Bernoulli draw, and the join averages only the SURVIVORS. Critically,
+at least one path is always kept: when both draws drop, one is revived by a fair
+coin. Without that rescue a join emits exactly zero for that sample — an event
+with probability `drop_path_rate ** 2`, about 2.3% at the 0.15 default — and the
+zero then propagates through every remaining stage. The paper's *global*
+drop-path, which selects one column and runs the whole network through it, and
+the alternation between the two regimes, are NOT implemented; a single
+`drop_path_rate` applies at every depth with no schedule.
 
-One consequence is that the shape-consistency the code enjoys is a symptom of the
-deviation rather than a design win: because the branches are parallel and never
-composed, all `2^(k-1)` leaves apply the stage's stride simultaneously and the
-resolution halves exactly once per stage. Under the paper's composing rule two
-stacked stride-2 convolutions on one branch would disagree with a single stride-2
-convolution on the other, which is precisely why the real FractalNet places
-downsampling *between* blocks and not inside them.
-
-The drop-path is likewise a different mechanism from the paper's, in two ways.
-The paper defines *local* drop-path, which drops each input to a join
-independently **but is constrained to keep at least one**, and *global*
-drop-path, which selects a single column and runs the whole network through it;
-training alternates between the two. Neither is implemented here. Each branch is
-guarded by an independent per-sample `StochasticDepth`, so for a given sample
-both branches of a join can be dropped in the same step, in which case that
-block's output for that sample is exactly zero and the zero propagates through
-every remaining stage — an event with probability `drop_path_rate ** 2` per join,
-about 2.3% per join at the 0.15 default. There is no global drop-path path at
-all, and no alternation between regimes. The join is also a fixed `0.5/0.5`
-mean rather than the paper's mean over the *surviving* inputs; what keeps the
-expectation right instead is `StochasticDepth`'s inverted-dropout rescaling by
-`1 / (1 - drop_path_rate)`, which makes each branch unbiased individually, so
-the fixed-weight mean is unbiased in expectation even though any particular step
-is not renormalized. A single `drop_path_rate` is used at every depth; there is
-no linear schedule over the network.
-
-Structurally the model is a plain sequence: `len(depths)` stages, each one
-`FractalBlock` wrapping a `ConvBlock` (3x3 convolution, configurable
-normalization and activation, dropout, no pooling) at the stage's stride, then a
-global pool, dropout and a `Dense` classifier. There is no stem, no bottleneck
-and no pooling other than the final global reduction — downsampling is carried
-entirely by the stride inside each stage's convolutions. Note that the
-`ConvBlock` is constructed once purely to harvest its `get_config()`; that
-config dict is what `FractalBlock` stores and re-instantiates per leaf, which is
-what makes the recursive structure serializable, and it is why every leaf in a
-stage is configured identically while holding its own independent weights.
+Structurally the model is a plain sequence: `len(depths)` stages, each a
+`FractalBlock` over a `ConvBlock` (3x3 convolution, configurable normalization
+and activation, dropout) followed by max-pooling where the stage's stride
+exceeds 1, then a global pool, dropout and a `Dense` classifier. There is no
+stem and no bottleneck. The `ConvBlock` is constructed once purely to harvest
+its `get_config()`; that dict is what `FractalBlock` stores and re-instantiates
+per leaf, which is what makes the recursive structure serializable and why every
+leaf in a stage is configured identically while holding independent weights.
 
 Construction happens in `__init__` through the functional API before
-`super().__init__(inputs, outputs)` is called, so this is a Functional model
-wearing a subclass's constructor rather than a subclassed model with a `call`.
-The head emits raw logits — there is no softmax — so a loss must be compiled
-with `from_logits=True`; `create_fractal_net` compiles
-`sparse_categorical_crossentropy` by its string name, which defaults to
-`from_logits=False` and will therefore mis-train unless a configured loss object
-is passed instead.
+`super().__init__(inputs, outputs)`, so this is a Functional model wearing a
+subclass's constructor rather than a subclassed model with a `call`. The head
+emits RAW LOGITS — there is no softmax — so `create_fractal_net` defaults its
+loss to `SparseCategoricalCrossentropy(from_logits=True)`. It previously
+defaulted to the string `"sparse_categorical_crossentropy"`, which resolves to
+`from_logits=False` and mis-trained silently.
 
 References:
     - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
       Residuals. ICLR. (https://arxiv.org/abs/1605.07648)
     - Huang et al., 2016. Deep Networks with Stochastic Depth.
       (https://arxiv.org/abs/1603.09382)
-      The per-sample drop mechanism actually used here, in place of the paper's
-      local/global drop-path.
     - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
       Shallow Networks. (https://arxiv.org/abs/1605.06431)
       The path-ensemble reading that motivates both FractalNet and drop-path.
@@ -294,11 +275,16 @@ class FractalNet(keras.Model):
         num_filters = self.filters[stage_idx]
         stride = self.strides[stage_idx]
 
-        # Create a ConvBlock to get its configuration
+        # The fractal itself runs at CONSTANT resolution, at stride 1. Its deep
+        # branch applies the base block 2^(depth-1) times, so a stride inside
+        # the block would downsample that branch 2^(depth-1) times against the
+        # shallow branch's once and the join would see mismatched shapes.
+        # FractalNet downsamples BETWEEN blocks, which is what the pooling below
+        # does.
         conv_block = ConvBlock(
             filters=num_filters,
             kernel_size=self.DEFAULT_KERNEL_SIZE,
-            strides=stride,
+            strides=1,
             padding="same",
             normalization_type=self.normalization_type,
             activation_type=self.activation_type,
@@ -307,19 +293,23 @@ class FractalNet(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             kernel_initializer=self.kernel_initializer,
         )
-
-        # Get the configuration dictionary from the ConvBlock
         block_config = conv_block.get_config()
 
-        # Create and apply fractal block using the block configuration
         fractal_block = FractalBlock(
             block_config=block_config,
             depth=depth,
             drop_path_rate=self.drop_path_rate,
             name=f"fractal_stage_{stage_idx}"
         )
-
         x = fractal_block(x)
+
+        if stride > 1:
+            x = keras.layers.MaxPooling2D(
+                pool_size=stride,
+                strides=stride,
+                padding="same",
+                name=f"fractal_pool_{stage_idx}"
+            )(x)
 
         logger.info(f"Stage {stage_idx}: depth={depth}, filters={num_filters}, stride={stride}")
 
@@ -487,7 +477,7 @@ def create_fractal_net(
     input_shape: Optional[Tuple[int, ...]] = None,
     optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
     learning_rate: float = 0.001,
-    loss: Union[str, keras.losses.Loss] = "sparse_categorical_crossentropy",
+    loss: Optional[Union[str, keras.losses.Loss]] = None,
     metrics: List[Union[str, keras.metrics.Metric]] = None,
     **kwargs
 ) -> FractalNet:
@@ -499,7 +489,10 @@ def create_fractal_net(
         input_shape: Tuple, input shape. If None, uses (32, 32, 3)
         optimizer: String name or optimizer instance. Default is "adam"
         learning_rate: Float, learning rate for optimizer. Default is 0.001
-        loss: String name or loss function. Default is "sparse_categorical_crossentropy"
+        loss: String name or loss object. Defaults to
+            ``SparseCategoricalCrossentropy(from_logits=True)`` — the head emits
+            raw logits, so the string ``"sparse_categorical_crossentropy"``
+            (which is ``from_logits=False``) would silently mis-train.
         metrics: List of metrics to track. Default is ["accuracy"]
         **kwargs: Additional arguments passed to the model constructor
 
@@ -518,6 +511,14 @@ def create_fractal_net(
     """
     if metrics is None:
         metrics = ["accuracy"]
+
+    if loss is None:
+        # The head emits RAW LOGITS (no softmax). The string
+        # "sparse_categorical_crossentropy" resolves to from_logits=False, which
+        # would apply a log to values that are not probabilities and mis-train
+        # silently -- no error, just a worse model. Default to the configured
+        # object instead of the string.
+        loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     if input_shape is None:
         input_shape = (32, 32, 3)
