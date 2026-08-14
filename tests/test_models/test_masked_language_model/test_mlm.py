@@ -964,3 +964,49 @@ class TestMaskedLanguageModelIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestCompiledMetricsAreReported:
+    """`compile(metrics=[...])` must reach `history.history`.
+
+    RED-proof for the defect where `MaskedLanguageModel.metrics` was overridden to
+    return ONLY `[loss_tracker, acc_metric]`. Keras still BUILT whatever was passed
+    to `compile(metrics=[...])` — so `compile()` raised nothing — but nothing ever
+    called `update_state` on it and nothing ever reported it. Measured before the
+    fix: `history keys: ['accuracy', 'loss']`, the requested metric absent.
+
+    NOT covered here, deliberately: weight tying. `mlm.py:49-53` documents the
+    untied head as a deliberate choice (the encoder is injectable and the embedding
+    table path is not stable across encoders), and D-002 records the decision not to
+    implement it.
+    """
+
+    def _tiny(self):
+        encoder = MockEncoder(vocab_size=32, hidden_size=16)
+        return MaskedLanguageModel(encoder=encoder, vocab_size=32, mask_token_id=3)
+
+    def test_named_compiled_metric_appears_in_history(self):
+        model = self._tiny()
+        model.compile(
+            optimizer="adam",
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="my_extra_metric")],
+        )
+        rng = np.random.default_rng(0)
+        x = {"input_ids": rng.integers(1, 32, (4, 8)).astype("int32")}
+        history = model.fit(x, epochs=1, batch_size=2, verbose=0)
+
+        assert "my_extra_metric" in history.history, (
+            f"compiled metric was dropped; history keys: {sorted(history.history)}"
+        )
+
+    def test_internal_trackers_keep_their_names(self):
+        """The union must not rename or displace `loss` / `accuracy`."""
+        model = self._tiny()
+        model.compile(
+            optimizer="adam",
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="my_extra_metric")],
+        )
+        names = [m.name for m in model.metrics]
+        assert "loss" in names and "accuracy" in names
+        assert names[:2] == ["loss", "accuracy"], (
+            f"internal trackers must stay first and keep their names, got {names}"
+        )

@@ -245,8 +245,42 @@ class MaskedLanguageModel(keras.Model):
 
     @property
     def metrics(self):
-        """List of metrics for Keras to track."""
-        return [self.loss_tracker, self.acc_metric]
+        """Metrics Keras tracks: the two internal trackers PLUS any compiled ones.
+
+        This property previously returned ONLY `[loss_tracker, acc_metric]`.
+        Because `train_step`/`test_step` build their return dict by iterating
+        this same property, anything passed to `compile(metrics=[...])` was
+        built by Keras and then never updated and never reported — it vanished
+        silently, with no error and no warning.
+
+        The compiled metrics are appended rather than substituted, so the two
+        tracker names `loss` and `accuracy` keep their existing meaning; a large
+        body of tests asserts on them.
+        """
+        tracked = [self.loss_tracker, self.acc_metric]
+        compiled = getattr(self, "_compile_metrics", None)
+        if compiled is not None:
+            names = {m.name for m in tracked}
+            tracked += [m for m in compiled.metrics if m.name not in names]
+        return tracked
+
+    def _update_compiled_metrics(
+            self,
+            labels: keras.KerasTensor,
+            logits: keras.KerasTensor,
+            sample_weight: Optional[keras.KerasTensor] = None
+    ) -> None:
+        """Feed the compiled metrics, which nothing updated before this.
+
+        Kept separate from the two internal trackers because those are updated
+        with an explicit `masked_positions` weight and must keep that exact
+        semantics; this only forwards the same signals to whatever the caller
+        compiled.
+        """
+        compiled = getattr(self, "_compile_metrics", None)
+        if compiled is None:
+            return
+        compiled.update_state(labels, logits, sample_weight=sample_weight)
 
     def _validate_config(
             self,
@@ -370,6 +404,7 @@ class MaskedLanguageModel(keras.Model):
             y_pred=logits,
             sample_weight=masked_positions
         )
+        self._update_compiled_metrics(labels, logits, masked_positions)
 
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
@@ -405,6 +440,7 @@ class MaskedLanguageModel(keras.Model):
             y_pred=logits,
             sample_weight=masked_positions
         )
+        self._update_compiled_metrics(labels, logits, masked_positions)
 
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
