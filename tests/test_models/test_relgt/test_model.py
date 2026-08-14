@@ -196,6 +196,93 @@ class TestBlockChaining:
             f"computation never reaches the output: {no_grad}"
         )
 
+    def test_the_broadcast_summary_does_not_swamp_the_token_signal(self):
+        """The chained sequence must stay TOKEN-specific, not become a constant.
+
+        The block adds its ``(B, E)`` summary onto every token. Both that summary
+        and the local tokens leave a LayerNorm, so both have per-feature RMS
+        exactly 1.0 — while the token-VARYING part of the sequence is much
+        smaller. Added at unit weight the summary is therefore a token-INVARIANT
+        component LARGER than the signal it is added to, and the next block's
+        self-attention sees a query-independent per-key bias that pushes every
+        query toward the same distribution (attention degenerating toward
+        pooling). Gradient reachability — the only property the test above pins —
+        cannot see this at all.
+
+        MEASURED on THIS fixture (``embedding_dim=32``, 3 blocks, untrained,
+        constant token stub), at three values of ``SUMMARY_BROADCAST_SCALE``:
+
+        =========================  =======  ==========  =======
+        quantity                       1.0  0.1 (ship)     10.0
+        =========================  =======  ==========  =======
+        injected RMS                1.0000      0.1000  10.0000
+        injected RMS / block-0 std  1.1402      0.1178  11.7894
+        block-1 across-token std    0.5441      0.7678   0.0594
+        =========================  =======  ==========  =======
+
+        The fixture is not seeded, so these move by a few percent per process
+        (block-0 std was 0.8770 / 0.8488 / 0.8482 in the three runs above); the
+        injected RMS does not move at all, because a LayerNorm output has
+        per-feature RMS exactly 1.0. The floors are set from those numbers with
+        an order of magnitude of margin on each side: ratio < 1.0 fires at 1.0
+        (the pre-fix, unscaled add), and block-1 std > 0.20 fires at 10.0. On the
+        SHIPPED model path (real ``RELGTTokenEncoder``, where the across-token
+        std is smaller) the unscaled ratio is worse still: 2.60 at block 0 and
+        3.94 at block 1.
+        """
+        model, tokens = self._probe_model(num_blocks=3)
+        x = _inputs()
+        _ = model(x, training=False)  # build seed_encoder and every block
+
+        seed = model.seed_encoder(x["node_features"][:, 0:1, :])
+        block0, block1 = model.transformer_blocks[0], model.transformer_blocks[1]
+
+        _, out0 = block0([tokens, seed], training=False)
+        local0 = block0.local_transformer(tokens, training=False)
+
+        # What the block ACTUALLY injects, derived by difference — deliberately
+        # not `SUMMARY_BROADCAST_SCALE * summary`, which would make the test
+        # self-referential (raising the constant would raise the numerator AND
+        # the reference, and the assertion could never fire).
+        injected = keras.ops.convert_to_numpy(out0 - local0)
+        out0_np = keras.ops.convert_to_numpy(out0)
+
+        # It really is token-invariant, so a single scalar describes its scale.
+        assert float(np.max(np.std(injected, axis=1))) < 1e-5, (
+            "the injected component varies across tokens; the ratio below no "
+            "longer measures a shared-vs-distinct decomposition"
+        )
+
+        injected_rms = float(np.sqrt(np.mean(injected ** 2)))
+        block0_std = float(np.mean(np.std(out0_np, axis=1)))
+
+        # Liveness: a block that stopped adding the summary at all would make
+        # the ratio 0 and pass vacuously (and would re-strand 32% of the
+        # parameters — see the gradient test above).
+        assert injected_rms > 1e-3, (
+            f"the block injects nothing (RMS {injected_rms}); the summary is not "
+            "reaching the token sequence"
+        )
+
+        ratio = injected_rms / block0_std
+        assert ratio < 1.0, (
+            f"the broadcast summary ({injected_rms:.4f} per-feature RMS) is "
+            f"larger than the token-varying signal it is added to "
+            f"(across-token per-feature std {block0_std:.4f}, ratio {ratio:.4f}): "
+            "block 1's self-attention receives a query-independent bias larger "
+            "than its content term"
+        )
+
+        # Block 1 — the first block that CONSUMES a chained sequence — must still
+        # produce tokens that differ from each other.
+        _, out1 = block1([out0, seed], training=False)
+        block1_std = float(np.mean(np.std(keras.ops.convert_to_numpy(out1), axis=1)))
+        assert block1_std > 0.20, (
+            f"block 1's output tokens are nearly identical to each other "
+            f"(across-token per-feature std {block1_std:.4f}): the chained "
+            "sequence has collapsed toward a constant"
+        )
+
     def test_model_builds_blocks_that_return_tokens(self):
         model, _ = self._probe_model(num_blocks=2)
         for block in model.transformer_blocks:

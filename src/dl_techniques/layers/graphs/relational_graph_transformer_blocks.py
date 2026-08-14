@@ -33,6 +33,29 @@ from ..norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-08-14T183218-f4c612aa/D-017
+# Scale applied to the block summary before it is broadcast onto every output
+# token (see `RELGTTransformerBlock.call`). It is NOT a free constant: both the
+# summary and the local tokens leave a LayerNorm, so BOTH have per-feature RMS
+# exactly 1.0 by construction, while the token-VARYING part of the sequence is
+# far smaller. MEASURED unscaled on the shipped model path (embedding_dim=32,
+# 3 blocks, untrained, real RELGTTokenEncoder):
+# summary per-feature RMS 1.0 against an across-token per-feature std of 0.3843
+# at block 0 and 0.2535 at block 1 -- a token-INVARIANT component 2.60x then
+# 3.94x the token-specific signal, compounding with depth. At 0.1 those ratios
+# are 0.26 and 0.36, i.e. the summary perturbs the sequence instead of
+# dominating it. Do NOT raise this to 1.0 "for symmetry": at 1.0 every query in
+# the next block's self-attention sees the same query-independent per-key bias
+# and the local attention degenerates toward pooling at initialization. Do NOT
+# make it a learnable per-feature scale either -- MEASURED, that reintroduces
+# exactly the defect D-014 closed (the LAST block's tokens are discarded by
+# `RELGT.call`, so its scale weight gets a `None` gradient: 1 of 110). Guard:
+# `test_the_broadcast_summary_does_not_swamp_the_token_signal`.
+# See decisions.md D-017.
+SUMMARY_BROADCAST_SCALE: float = 0.1
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class LightweightGNNLayer(keras.layers.Layer):
@@ -742,9 +765,15 @@ class RELGTTransformerBlock(keras.layers.Layer):
             ``(combined_representation, output_tokens)`` whose second element has
             shape ``(batch_size, num_tokens, embedding_dim)``. ``output_tokens``
             is the locally processed token sequence with the combined
-            representation broadcast-added onto every token, so the block's
-            global/centroid half is carried forward rather than discarded by a
-            downstream consumer that reads only the token sequence.
+            representation broadcast-added onto every token at
+            ``SUMMARY_BROADCAST_SCALE``, so the block's global/centroid half is
+            carried forward rather than discarded by a downstream consumer that
+            reads only the token sequence. The scale matters: added at unit
+            weight the summary is a token-INVARIANT component 2.60x (block 0)
+            and 3.94x (block 1) larger than the across-token per-feature std it
+            is added to, since both tensors leave a LayerNorm; at 0.1 those
+            ratios are 0.26 and 0.36 (measured, ``embedding_dim=32``,
+            untrained).
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         local_tokens, seed_node_features = inputs
@@ -804,8 +833,15 @@ class RELGTTransformerBlock(keras.layers.Layer):
             # one per block and lets the summary be re-pooled as if it were a
             # neighbour) and a learned gate (new parameters, and a multiplicative
             # gate can annihilate the token signal). See decisions.md D-014.
-            output_tokens = local_processed_tokens + keras.ops.expand_dims(
-                output, axis=1
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-017
+            # The summary is added at `SUMMARY_BROADCAST_SCALE`, not at unit
+            # weight. Unscaled it is a token-INVARIANT component 2.6x-3.9x
+            # LARGER than the token-varying signal (both sides leave a
+            # LayerNorm), which drives the next block's self-attention toward a
+            # query-independent distribution. The rationale and the measured
+            # ratios live on the constant at the top of this module.
+            output_tokens = local_processed_tokens + (
+                SUMMARY_BROADCAST_SCALE * keras.ops.expand_dims(output, axis=1)
             )
             return output, output_tokens
 
