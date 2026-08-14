@@ -162,7 +162,6 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate and store configuration
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if ffn_expansion_factor <= 0:
@@ -188,7 +187,6 @@ class PW_FNet_Block(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
 
-        # Normalization layers using factory
         self.norm1 = create_normalization_layer(
             normalization_type=self.normalization_type,
             name="norm1",
@@ -200,7 +198,6 @@ class PW_FNet_Block(keras.layers.Layer):
             **self.norm2_kwargs
         )
 
-        # Token Mixer sub-layers (unchanged)
         self.token_mixer_expand = keras.layers.Conv2D(
             hidden_dim,
             kernel_size=1,
@@ -222,7 +219,6 @@ class PW_FNet_Block(keras.layers.Layer):
             name="token_mixer_project"
         )
 
-        # Feed-Forward Network sub-layers (configurable)
         if self.use_spatial_ffn:
             self._setup_spatial_ffn(hidden_dim)
         else:
@@ -286,7 +282,6 @@ class PW_FNet_Block(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        # Token Mixer Path
         self.norm1.build(input_shape)
         self.token_mixer_expand.build(input_shape)
         expanded_shape = self.token_mixer_expand.compute_output_shape(input_shape)
@@ -306,7 +301,6 @@ class PW_FNet_Block(keras.layers.Layer):
 
         self.token_mixer_project.build(ifft_output_shape)
 
-        # FFN Path
         self.norm2.build(input_shape)
 
         if self.use_spatial_ffn:
@@ -332,7 +326,6 @@ class PW_FNet_Block(keras.layers.Layer):
         Returns:
             Token-mixed features of shape (batch, height, width, dim).
         """
-        # Expand channels for frequency domain processing
         x_expanded = self.token_mixer_expand(x)
 
         # Frequency domain token mixing: FFT -> Conv -> GELU -> IFFT
@@ -341,7 +334,6 @@ class PW_FNet_Block(keras.layers.Layer):
         x_freq = keras.activations.gelu(x_freq, approximate=False)
         x_ifft = self.ifft(x_freq)
 
-        # Project back to original dimension
         x_token_mixed = self.token_mixer_project(x_ifft)
 
         return x_token_mixed
@@ -383,26 +375,20 @@ class PW_FNet_Block(keras.layers.Layer):
             Output tensor of shape (batch, height, width, dim).
         """
         # -- Token Mixer Stage --
-        # Normalize input
         x_norm1 = self.norm1(inputs)
 
-        # Apply token mixer
         x_token_mixed = self._token_mixer_forward(x_norm1)
 
-        # First residual connection
         x = inputs + x_token_mixed
 
         # -- Feed-Forward Network Stage --
-        # Normalize features
         x_norm2 = self.norm2(x)
 
-        # Apply FFN (spatial or factory-based)
         if self.use_spatial_ffn:
             x_ffn = self._spatial_ffn_forward(x_norm2)
         else:
             x_ffn = self.ffn(x_norm2, training=training)
 
-        # Second residual connection
         return x + x_ffn
 
     def compute_output_shape(
@@ -477,7 +463,6 @@ class Downsample(keras.layers.Layer):
 
         self.dim = dim
 
-        # Create convolution layer for learnable downsampling
         self.conv = keras.layers.Conv2D(
             dim,
             kernel_size=4,
@@ -564,7 +549,6 @@ class Upsample(keras.layers.Layer):
 
         self.dim = dim
 
-        # Create transposed convolution for learnable upsampling
         self.conv_transpose = keras.layers.Conv2DTranspose(
             dim,
             kernel_size=2,
@@ -722,7 +706,6 @@ class PW_FNet(keras.Model):
         """
         super().__init__(**kwargs)
 
-        # Set defaults
         if enc_blk_nums is None:
             enc_blk_nums = [2, 2]
         if dec_blk_nums is None:
@@ -732,7 +715,6 @@ class PW_FNet(keras.Model):
         if ffn_kwargs is None:
             ffn_kwargs = {}
 
-        # Validate parameters
         if img_channels <= 0:
             raise ValueError(f"img_channels must be positive, got {img_channels}")
         if width <= 0:
@@ -759,7 +741,6 @@ class PW_FNet(keras.Model):
                 "ffn_type must be specified when use_spatial_ffn=False"
             )
 
-        # Store configuration
         self.img_channels = img_channels
         self.width = width
         self.middle_blk_num = middle_blk_num
@@ -772,7 +753,6 @@ class PW_FNet(keras.Model):
         self.ffn_kwargs = ffn_kwargs
 
         # CREATE all sub-layers in __init__ (unbuilt)
-        # Introduction convolution
         self.intro = keras.layers.Conv2D(
             width,
             kernel_size=3,
@@ -947,7 +927,6 @@ class PW_FNet(keras.Model):
         res_l0 = self.output_l0(dec_feat_l1)
         out_l0 = inputs + res_l0
 
-        # Return multi-scale outputs: [full, half, quarter]
         return [out_l0, out_l1, out_l2]
 
     def get_config(self) -> Dict[str, Any]:
@@ -971,5 +950,77 @@ class PW_FNet(keras.Model):
             "ffn_kwargs": self.ffn_kwargs,
         })
         return config
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_pw_fnet(
+        img_channels: int = 3,
+        width: int = 32,
+        middle_blk_num: int = 4,
+        enc_blk_nums: Optional[List[int]] = None,
+        dec_blk_nums: Optional[List[int]] = None,
+        normalization_type: str = 'layer_norm',
+        norm_kwargs: Optional[Dict[str, Any]] = None,
+        use_spatial_ffn: bool = True,
+        ffn_type: Optional[str] = None,
+        ffn_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
+) -> PW_FNet:
+    """
+    Create a PW-FNet image-restoration model.
+
+    PW-FNet has no ``MODEL_VARIANTS`` table and none was invented: the
+    architecture is a single 3-level U-Net parameterized continuously by
+    ``width`` and the per-level block counts, with no published named scale
+    family to enumerate. This factory therefore constructs the class with the
+    reference defaults instead of delegating to a ``from_variant``.
+
+    Args:
+        img_channels: Number of channels in input/output images. Must be positive.
+        width: Base channel width. Must be positive.
+        middle_blk_num: Number of bottleneck blocks. Must be non-negative.
+        enc_blk_nums: Per-level encoder block counts; ``None`` resolves to
+            ``[2, 2]``.
+        dec_blk_nums: Per-level decoder block counts; ``None`` resolves to
+            ``[2, 2]``. Must match ``enc_blk_nums`` in length.
+        normalization_type: Normalization type from the normalization factory.
+        norm_kwargs: Optional arguments forwarded to every normalization layer.
+        use_spatial_ffn: If True use the original spatial FFN; if False use the
+            factory FFN named by ``ffn_type``.
+        ffn_type: Factory FFN type; required when ``use_spatial_ffn`` is False.
+        ffn_kwargs: Optional arguments for the factory FFN.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured PW_FNet instance. Calling it returns the three multi-scale
+        outputs ``[full, half, quarter]``.
+
+    Raises:
+        ValueError: If any argument is invalid or the encoder/decoder block
+            lists disagree in length.
+
+    Example:
+        >>> model = create_pw_fnet(width=16, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
+        >>> outputs = model(keras.random.normal((1, 32, 32, 3)))
+        >>> len(outputs)
+        3
+    """
+    return PW_FNet(
+        img_channels=img_channels,
+        width=width,
+        middle_blk_num=middle_blk_num,
+        enc_blk_nums=enc_blk_nums,
+        dec_blk_nums=dec_blk_nums,
+        normalization_type=normalization_type,
+        norm_kwargs=norm_kwargs,
+        use_spatial_ffn=use_spatial_ffn,
+        ffn_type=ffn_type,
+        ffn_kwargs=ffn_kwargs,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

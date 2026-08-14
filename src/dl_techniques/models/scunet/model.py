@@ -124,10 +124,8 @@ class SCUNet(keras.Model):
         logger.info(f"Initializing SCUNet with config: {config}, dim: {dim}, "
                     f"window_size: {window_size}, input_resolution: {input_resolution}")
 
-        # Calculate drop path rates for each layer
         dpr = linear_drop_path_rates(sum(config), stochastic_depth_rate)
 
-        # Build network components
         self._build_network(dpr)
 
     def _validate_config(
@@ -531,5 +529,60 @@ class SCUNet(keras.Model):
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
+
+# ---------------------------------------------------------------------
+
+
+def create_scunet(
+        in_nc: int = 3,
+        config: Optional[List[int]] = None,
+        dim: int = 64,
+        head_dim: int = 32,
+        window_size: int = 8,
+        stochastic_depth_rate: float = 0.0,
+        input_resolution: int = 256,
+        **kwargs: Any
+) -> SCUNet:
+    """Create an SCUNet image-restoration model.
+
+    SCUNet has no ``MODEL_VARIANTS`` table and none was invented: Zhang et al.
+    publish a single network (``config=[4]*7``, ``dim=64``) and scale it only by
+    editing those two arguments, so there are no named scales to enumerate.
+    This factory therefore constructs the class with the paper's defaults.
+
+    Args:
+        in_nc: Number of input (and output) channels. Defaults to 3.
+        config: Per-stage block counts; exactly 7 entries (3 down + bottleneck
+            + 3 up). ``None`` resolves to the paper's ``[4, 4, 4, 4, 4, 4, 4]``.
+        dim: Base feature dimension. Must be positive and even.
+        head_dim: Attention head dimension.
+        window_size: Swin attention window size.
+        stochastic_depth_rate: Maximum stochastic-depth drop rate, scheduled
+            linearly across all blocks.
+        input_resolution: Advisory resolution hint forwarded to every
+            ``SwinConvBlock``; it changes no attention geometry.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SCUNet instance.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+
+    Examples:
+        >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
+        >>> model(keras.random.normal((1, 64, 64, 3))).shape
+        (1, 64, 64, 3)
+    """
+    return SCUNet(
+        in_nc=in_nc,
+        config=config,
+        dim=dim,
+        head_dim=head_dim,
+        window_size=window_size,
+        stochastic_depth_rate=stochastic_depth_rate,
+        input_resolution=input_resolution,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------
