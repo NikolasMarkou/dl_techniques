@@ -8,7 +8,9 @@ which exercises the ``build()`` weight-structure consistency the H6 fix touches.
 """
 
 import os
+import math
 import keras
+import logging
 import numpy as np
 import pytest
 
@@ -20,6 +22,8 @@ from dl_techniques.layers.blt_blocks import (
     LocalEncoder,
     GlobalTransformer,
     LocalDecoder,
+    warn_if_entropy_threshold_is_degenerate,
+    DEGENERATE_ENTROPY_THRESHOLD_FRACTION,
 )
 
 VOCAB, HID, SEQ, NP_, GDIM = 32, 16, 10, 8, 16
@@ -273,6 +277,98 @@ class TestDynamicPatcher:
             f"graph mode disagrees with eager: {eager.tolist()} vs {graph.tolist()}"
         )
         assert graph.sum(axis=1).tolist() == [SEQ] * B
+
+
+# ---------------------------------------------------------------------
+# The SHIPPED DEFAULT threshold, pinned rather than left derivable
+# ---------------------------------------------------------------------
+
+class TestTheShippedDefaultThreshold:
+    """Every other patcher test picks a threshold from its own fixture's
+    entropy range — correctly, since that is what makes them non-vacuous. The
+    consequence is that nothing exercises the value a caller who passes no
+    argument actually gets. These tests pin it.
+    """
+
+    BYTE_VOCAB = 260  # ByteLatentTransformer's default vocab_size
+
+    def _uniform_entropy(self, seq_len, vocab_size=None):
+        """Entropy of a uniform next-byte distribution: the ceiling ln(V).
+
+        This is what an UNTRAINED entropy model emits, and it is the regime
+        every fresh model, every smoke test and the first epochs of every
+        training run are in.
+        """
+        ceiling = math.log(float(vocab_size or self.BYTE_VOCAB))
+        return keras.ops.convert_to_tensor(
+            np.full((1, seq_len), ceiling, dtype="float32")
+        )
+
+    def test_default_threshold_makes_every_position_a_boundary(self):
+        patcher = DynamicPatcher()  # entropy_threshold=1.5, max_patches=512
+        assert patcher.entropy_threshold == 1.5, (
+            "this test pins the behaviour of the SHIPPED default; the default moved"
+        )
+
+        lengths = keras.ops.convert_to_numpy(
+            patcher(self._uniform_entropy(seq_len=12))
+        )[0]
+
+        # Patch 0 is EMPTY (position 0 is itself a boundary), then one byte per
+        # patch, then nothing. Not adaptive patching: byte-level tokens.
+        assert lengths[:13].tolist() == [0] + [1] * 12, (
+            "the shipped default no longer degenerates to one byte per patch on "
+            f"uniform ln({self.BYTE_VOCAB}) entropy: {lengths[:13].tolist()}"
+        )
+        assert lengths[13:].sum() == 0
+        assert lengths.sum() == 12  # row-sum invariant holds regardless
+
+    def test_default_threshold_collapses_the_tail_into_the_final_patch(self):
+        # Same default threshold, a budget smaller than the sequence: the
+        # segmentation is strictly WORSE than an equal-length split.
+        patcher = DynamicPatcher(max_patches=8)
+        lengths = keras.ops.convert_to_numpy(
+            patcher(self._uniform_entropy(seq_len=20))
+        )[0]
+
+        assert lengths.tolist() == [0, 1, 1, 1, 1, 1, 1, 14], (
+            f"the shipped default's tail collapse moved: {lengths.tolist()}"
+        )
+        assert lengths.sum() == 20
+
+
+class TestDegenerateThresholdWarning:
+
+    def test_it_warns_on_the_shipped_default_at_the_byte_vocabulary(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            warned = warn_if_entropy_threshold_is_degenerate(
+                entropy_threshold=1.5, vocab_size=260, source="Probe"
+            )
+        assert warned is True, (
+            "the shipped default 1.5 nats at vocab_size=260 is below "
+            f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION} * ln(260) = "
+            f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION * math.log(260):.4g} and must warn"
+        )
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "Probe" in text and "every position" in text.lower(), (
+            f"the warning does not name the consequence: {text}"
+        )
+
+    def test_it_is_silent_above_the_fraction(self, caplog):
+        ceiling = math.log(260.0)
+        with caplog.at_level(logging.WARNING):
+            warned = warn_if_entropy_threshold_is_degenerate(
+                entropy_threshold=DEGENERATE_ENTROPY_THRESHOLD_FRACTION * ceiling + 1e-6,
+                vocab_size=260,
+                source="Probe",
+            )
+        assert warned is False
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_it_is_silent_when_the_ceiling_is_undefined(self):
+        # No vocabulary -> no ceiling -> no claim. A diagnostic must not guess.
+        assert warn_if_entropy_threshold_is_degenerate(0.0, None, "Probe") is False
+        assert warn_if_entropy_threshold_is_degenerate(0.0, 1, "Probe") is False
 
 
 # ---------------------------------------------------------------------

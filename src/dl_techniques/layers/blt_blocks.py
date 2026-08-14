@@ -214,6 +214,7 @@ that maintains competitive performance while offering significant advantages
 in efficiency, robustness, and multilingual capabilities.
 """
 
+import math
 import keras
 from keras import ops
 from typing import Optional, Dict, Any, List, Tuple
@@ -226,6 +227,7 @@ from .transformers.transformer import TransformerLayer
 from .attention.multi_head_attention import MultiHeadAttention
 from .embedding.positional_embedding import PositionalEmbedding
 from ..utils.masking import create_mask
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -559,6 +561,75 @@ class EntropyModel(keras.layers.Layer):
         return config
 
 # ---------------------------------------------------------------------
+
+#: Fraction of the uniform-entropy ceiling ``ln(vocab_size)`` below which an
+#: ``entropy_threshold`` is reported as degenerate. See
+#: :func:`warn_if_entropy_threshold_is_degenerate` for why this number is 0.5
+#: and why it lives in exactly one place.
+DEGENERATE_ENTROPY_THRESHOLD_FRACTION: float = 0.5
+
+
+def warn_if_entropy_threshold_is_degenerate(
+        entropy_threshold: float,
+        vocab_size: Optional[int],
+        source: str,
+) -> bool:
+    """Log a warning when an ``entropy_threshold`` sits below the usable band.
+
+    **Contract**: pure except for the log record. Returns ``True`` iff a warning
+    was emitted, so a caller (or a test) can assert on the decision without
+    parsing log text. Never raises and never changes behaviour — it is a
+    diagnostic, not a validation. Returns ``False`` when ``vocab_size`` is
+    unknown or degenerate (``None`` or ``< 2``), because the ceiling is then
+    undefined.
+
+    Per-byte entropy is bounded by the uniform ceiling ``ln(vocab_size)``
+    (5.56 nats at ``vocab_size=260``) and floored at 0. ``DynamicPatcher`` opens
+    a new patch at every byte whose entropy exceeds the threshold, so a
+    threshold below the entropies a model actually produces makes EVERY position
+    a boundary: patch 0 is empty, patches 1..``max_patches - 2`` hold one byte
+    each, and the whole remaining tail collapses into the final patch — a worse
+    segmentation than a fixed equal-length split, reached with no error and no
+    complaint.
+
+    The line is drawn at ``0.5 * ln(vocab_size)`` — the midpoint of the entropy
+    range the model can emit at all. It is deliberately coarse. A *trained*
+    byte-level entropy model on natural text emits roughly 1-2 nats per byte, so
+    a threshold below the midpoint may be exactly right in the regime that
+    matters; but an untrained or lightly-trained one sits near the ceiling, and
+    that is the regime every fresh model, every smoke test and the first epochs
+    of every training run are in. The warning names that consequence and stops
+    there: the shipped defaults are NOT changed on this basis, because doing so
+    would be a training-semantics change made without measured evidence on a
+    trained entropy model.
+
+    :param entropy_threshold: Configured threshold, in nats.
+    :param vocab_size: Vocabulary the entropy is computed over; ``None`` if the
+        caller does not know it.
+    :param source: Human-readable name of the constructing class, used in the
+        message so the reader knows which object to reconfigure.
+    :return: ``True`` if a warning was logged.
+    """
+    if vocab_size is None or vocab_size < 2:
+        return False
+
+    ceiling = math.log(float(vocab_size))
+    floor = DEGENERATE_ENTROPY_THRESHOLD_FRACTION * ceiling
+    if entropy_threshold >= floor:
+        return False
+
+    logger.warning(
+        f"{source}: entropy_threshold={entropy_threshold:.4g} nats is below "
+        f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION:.2g} * ln(vocab_size={vocab_size}) "
+        f"= {floor:.4g}. An entropy model whose output sits near the uniform "
+        f"ceiling ln(vocab_size)={ceiling:.4g} (i.e. any untrained or lightly "
+        f"trained one) will then cross this threshold at EVERY position, giving "
+        f"an empty first patch, one byte per patch after it, and the entire "
+        f"remaining sequence merged into the final patch. Raise the threshold, "
+        f"or pretrain the entropy model before relying on the segmentation."
+    )
+    return True
+
 
 @keras.saving.register_keras_serializable()
 class DynamicPatcher(keras.layers.Layer):

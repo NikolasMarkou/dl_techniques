@@ -114,7 +114,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.blt_blocks import (
     ByteTokenizer, EntropyModel,
     DynamicPatcher, LocalDecoder,
-    LocalEncoder, GlobalTransformer
+    LocalEncoder, GlobalTransformer,
+    warn_if_entropy_threshold_is_degenerate
 )
 
 
@@ -300,6 +301,23 @@ class ByteLatentTransformer(keras.Model):
 
         # Validate configuration before constructing sub-layers
         self._validate_config()
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-015
+        # A warning, NOT a raise and NOT a changed default. entropy_threshold is
+        # a legal value at any positive number, and the shipped 1.5 may well be
+        # right once the entropy model is trained (a trained byte LM emits ~1-2
+        # nats on natural text). What is NOT acceptable is that the degenerate
+        # regime -- threshold below the entropies the model actually emits, so
+        # every position is a boundary and the whole tail collapses into the
+        # last patch -- arrives silently. Do NOT "fix" this by raising the
+        # default or by turning it into a ValueError: neither has measured
+        # evidence behind it, and the second would refuse configurations that
+        # are correct for a trained entropy model. See decisions.md D-015.
+        warn_if_entropy_threshold_is_degenerate(
+            entropy_threshold=self.entropy_threshold,
+            vocab_size=self.vocab_size,
+            source=type(self).__name__,
+        )
 
         # Create all sub-layers in __init__ following modern Keras pattern
         self.tokenizer = ByteTokenizer(

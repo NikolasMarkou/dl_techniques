@@ -79,6 +79,25 @@ class TestConstruction:
         with pytest.raises(ValueError, match="patch_pooling_method"):
             ByteLatentTransformer(patch_pooling_method="bogus")
 
+    def test_construction_warns_on_the_degenerate_default_threshold(self, caplog) -> None:
+        """The shipped default is NOT changed (that would be a
+        training-semantics change with no measured evidence on a trained
+        entropy model) -- so the degeneracy must at least be audible. Without
+        this, a caller building a default BLT gets one byte per patch plus a
+        giant tail with nothing said.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            ByteLatentTransformer(vocab_size=260, max_sequence_length=32,
+                                  num_local_layers=1, num_global_layers=1)
+
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "entropy_threshold" in text and "ByteLatentTransformer" in text, (
+            "constructing with the shipped entropy_threshold=1.5 at vocab_size=260 "
+            f"(below 0.5 * ln(260) = 2.78 nats) said nothing: {text[:400]}"
+        )
+
     def test_invalid_dropout_raises(self) -> None:
         with pytest.raises(ValueError, match="dropout_rate"):
             ByteLatentTransformer(dropout_rate=1.5)

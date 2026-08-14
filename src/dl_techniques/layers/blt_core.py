@@ -93,7 +93,8 @@ from .reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from .blt_blocks import (
     ByteTokenizer, EntropyModel,
     DynamicPatcher, LocalEncoder,
-    GlobalTransformer, LocalDecoder
+    GlobalTransformer, LocalDecoder,
+    warn_if_entropy_threshold_is_degenerate
 )
 
 # ---------------------------------------------------------------------
@@ -255,6 +256,16 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.embeddings_regularizer = embeddings_regularizer
         self.kernel_regularizer = kernel_regularizer
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-015
+        # Diagnostic only -- see the sibling anchor in
+        # models/byte_latent_transformer/model.py. Do not promote to a raise and
+        # do not change the default on the strength of it.
+        warn_if_entropy_threshold_is_degenerate(
+            entropy_threshold=self.entropy_threshold,
+            vocab_size=self.vocab_size,
+            source=type(self).__name__,
+        )
 
         # Calculate embedding scale
         self.embed_scale = math.sqrt(embed_dim)
