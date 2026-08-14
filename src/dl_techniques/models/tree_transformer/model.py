@@ -1,64 +1,62 @@
 """
-Tree Transformer: Grammar Induction with Hierarchical Attention
-===============================================================
+Tree Transformer, a transformer encoder that induces a soft constituency tree
+and uses it to constrain its own attention.
 
-A complete and refactored implementation of the Tree Transformer architecture
-with support for loading (hypothetical) pretrained weights. This version is
-designed as a pure foundation model, separating the core encoding logic from
-task-specific heads for maximum flexibility, and follows modern Keras 3 best
-practices for robust serialization and production readiness.
+This model embodies the principle that language is hierarchical and a flat
+attention matrix has no way to say so. Standard self-attention scores every
+token pair independently; nothing in the architecture prefers "the old man" to
+"man who is" as a unit, so the model must rediscover phrase structure from data
+at every layer, from scratch, with no inductive bias helping it. Supervised
+parsers do have that bias but need treebanks, which exist for a handful of
+languages. Tree Transformer takes the third route: it makes constituency an
+unsupervised byproduct of ordinary language-model training by giving attention
+a structural prior it must learn to satisfy.
 
-The Tree Transformer introduces a hierarchical group attention mechanism that learns
-soft constituency trees from raw text, without explicit syntactic supervision.
+The mechanism is Group Attention. For each adjacent token pair the model
+computes a *break probability* -- how likely a constituent boundary falls
+between them -- and from those neighbour scores derives, for every span, the
+probability that the span is a single constituent. The derivation is the
+non-obvious part: rather than enumerating `O(L^2)` spans explicitly, the
+constituent probability of a span is obtained from the break probabilities
+inside it by a dynamic-programming recurrence expressed as matrix products, so
+the whole span table costs a few matmuls. The resulting matrix multiplies the
+standard scaled-dot-product attention weights element-wise, so a token pair
+that the model believes to straddle a boundary has its attention attenuated.
+Attention is thus biased toward learned constituents without ever being
+hard-masked by them.
 
-Based on: "Tree Transformer: Integrating Tree Structures into Self-Attention"
-(Shen et al., 2019) https://arxiv.org/abs/1904.00035
+The tree is built jointly across depth, not per layer. Each block passes its
+computed group probabilities to the next as a prior, so boundaries agreed on by
+lower layers persist and constituents grow monotonically with depth -- the
+hierarchy emerges from the layer stack itself rather than being decoded at the
+end. Every block's break probabilities are also collected and returned, shape
+`[batch, num_layers, seq_len, seq_len]`, which is the induced grammar and the
+artifact a grammar-induction evaluation consumes.
 
-Usage Examples:
---------------
+Each block is Pre-LN for training stability, ordering
+`GroupAttention -> TreeMHA -> FFN` with residual connections throughout. The
+`lm_head` is part of the foundation model and is always built; for pure-encoder
+downstream use that is wasted weight, and the pretraining script saves a
+separate encoder-only artifact. Four preset variants span tiny through large.
 
-.. code-block:: python
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, making an
+unavailable checkpoint silently indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead.
 
-    import keras
-    from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
-    from dl_techniques.layers.heads.nlp import NLPTaskType
-
-    # 1. Load Tree Transformer from a local weights file
-    #    (no public Tree Transformer weights are hosted — `pretrained=True`
-    #    raises NotImplementedError; supply a path to your own weights.)
-    tree_transformer = TreeTransformer.from_variant(
-        "base", pretrained="path/to/weights.keras"
-    )
-
-    # 2. Load a larger variant from a different local checkpoint
-    tree_transformer = TreeTransformer.from_variant(
-        "large", pretrained="path/to/large.keras"
-    )
-
-    # 3. Create Tree Transformer with custom configuration
-    tree_transformer = TreeTransformer.from_variant("base", vocab_size=50000)
-
-    # 4. Combine with a task-specific head (e.g., for sequence tagging)
-    ner_config = NLPTaskConfig(
-        name="ner",
-        task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-        num_classes=9
-    )
-    ner_head = create_nlp_head(
-        task_config=ner_config,
-        input_dim=tree_transformer.hidden_size
-    )
-
-    # 5. Build a complete end-to-end model
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-    }
-    encoder_outputs = tree_transformer(inputs)
-    head_inputs = {"hidden_states": encoder_outputs["last_hidden_state"]}
-    task_outputs = ner_head(head_inputs)
-    ner_model = keras.Model(inputs, task_outputs)
-
+References:
+    - Shen et al., 2019. Tree Transformer: Integrating Tree Structures into
+      Self-Attention. (https://arxiv.org/abs/1904.00035)
+    - Shen et al., 2019. Ordered Neurons: Integrating Tree Structures into
+      Recurrent Neural Networks. (https://arxiv.org/abs/1810.09536)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. (https://arxiv.org/abs/2002.04745)
 """
+
 
 import os
 import keras
@@ -192,12 +190,6 @@ class TreeTransformer(keras.Model):
             "description": "TreeTransformer-Tiny: Ultra-lightweight for research",
         },
     }
-
-    # B-5 fix: no public pretrained weights are distributed for TreeTransformer.
-    # The previous `https://example.com/...` placeholder URLs guaranteed a 404
-    # at download time. Pass `pretrained=<local-path.keras>` to load local
-    # weights, or omit `pretrained` for random init.
-    PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {}
 
     DEFAULT_VOCAB_SIZE = 30000
     DEFAULT_MAX_LEN = 256
@@ -440,20 +432,32 @@ class TreeTransformer(keras.Model):
         )
         logger.info(report.summary_string())
 
+    # `_download_weights` raises instead of falling back to random init. This
+    # class used to carry a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
+    # non-existent host; `from_variant` caught the resulting download failure,
+    # logged a warning and returned a randomly-initialized model, so
+    # `pretrained=True` silently produced untrained weights. The B-5 fix emptied
+    # the table and this method has raised since; the empty dict itself was then
+    # dead machinery that could never succeed, so it is gone too. Do NOT
+    # reinstate either the table or a warn-and-return branch -- the except clause
+    # in `from_variant` is deliberately narrow (see the D-001 anchor) so this
+    # NotImplementedError reaches the caller.
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
     ) -> str:
-        """B-5 fix: no public pretrained weights exist for TreeTransformer.
+        """No public pretrained weights exist for TreeTransformer; always raises.
 
-        Raises ``NotImplementedError`` with a clear remediation message. Pass
-        ``pretrained=<path/to/checkpoint.keras>`` to ``from_variant`` to load
-        local weights, or omit ``pretrained`` to initialize randomly.
+        Pass ``pretrained=<path/to/checkpoint.keras>`` to ``from_variant`` to
+        load local weights, or omit ``pretrained`` to initialize randomly.
+
+        :raises NotImplementedError: Always.
         """
         raise NotImplementedError(
-            "No public pretrained weights are distributed for TreeTransformer. "
-            "Pass `pretrained=path/to/checkpoint.keras` to load local weights, "
-            "or omit `pretrained` for random init."
+            f"No public pretrained TreeTransformer weights are distributed with "
+            f"dl_techniques (requested variant '{variant}', dataset '{dataset}'). "
+            f"Pass a local checkpoint instead: TreeTransformer.from_variant("
+            f"'{variant}', pretrained='/path/to/weights.keras')."
         )
 
     @classmethod

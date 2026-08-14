@@ -358,7 +358,7 @@ This implementation includes a `pytest` suite at `tests/test_models/test_tree_tr
 
 ## 12. Known Limitations
 
--   **No public pretrained weights**: `PRETRAINED_WEIGHTS` is empty. Calling
+-   **No public pretrained weights**: there is no weight-URL table. Calling
     `TreeTransformer.from_variant(..., pretrained=True)` raises a clear
     `NotImplementedError`. Pass `pretrained=path/to/checkpoint.keras` to load
     locally-trained weights, or omit the argument for random init.
