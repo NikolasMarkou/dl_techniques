@@ -247,14 +247,24 @@ class TestPrepareInputsAndLabels:
         np.testing.assert_array_equal(y, [[2, 3, 4, 5]])
         np.testing.assert_array_equal(mask, [[1, 1, 1, 1]])
 
-    def test_attention_mask_shifted(self, clm_model):
-        # Mask is [1, 1, 1, 0, 0] -> Shifted: [1, 1, 1, 0]
+    def test_loss_weights_are_label_aligned_not_input_aligned(self, clm_model):
+        """The returned weights multiply LABELS, so they are ``mask[:, 1:]``.
+
+        This test previously asserted ``[[1, 1, 1, 0]]`` -- the *input*-aligned
+        slice ``mask[:, :-1]`` -- and so pinned an off-by-one: with a real mask
+        of ``[1, 1, 1, 0, 0]`` the tokens are ``[t0, t1, t2, PAD, PAD]``, and
+        weighting the third prediction with a 1 scores the model on predicting
+        the first padding id. The label-aligned slice is ``[[1, 1, 0, 0]]``.
+        The backbone still receives the input-aligned slice; the two are
+        checked separately here because they are genuinely different objects.
+        """
         inputs = {
             "input_ids": tf.constant([[1, 2, 3, 4, 5]], dtype=tf.int32),
             "attention_mask": tf.constant([[1, 1, 1, 0, 0]], dtype=tf.int32)
         }
-        x, _, mask = clm_model._prepare_inputs_and_labels(inputs)
-        np.testing.assert_array_equal(mask, [[1, 1, 1, 0]])
+        x, _, loss_weights = clm_model._prepare_inputs_and_labels(inputs)
+        np.testing.assert_array_equal(loss_weights, [[1, 1, 0, 0]])
+        np.testing.assert_array_equal(x["attention_mask"], [[1, 1, 1, 0]])
 
     def test_no_attention_mask(self, clm_model):
         inputs = {"input_ids": tf.constant([[1, 2, 3]], dtype=tf.int32)}
@@ -438,6 +448,71 @@ class TestCausalLanguageModelIntegration:
             model.embedding_weights.numpy(),
             emb_var.numpy()
         )
+
+@keras.saving.register_keras_serializable()
+class MockBidirectionalBackbone(keras.Model):
+    """A backbone that mixes across the whole sequence -- i.e. leaks the future.
+
+    ``GlobalAveragePooling`` broadcast back over the sequence is the smallest
+    thing that makes every output position depend on every input position, so
+    it is the dead component the causality guard must catch.
+    """
+
+    def __init__(self, hidden_size=64, vocab_size=1000, **kwargs):
+        super().__init__(**kwargs)
+        self.hidden_size = hidden_size
+        self.vocab_size = vocab_size
+        self.token_embeddings = keras.layers.Embedding(vocab_size, hidden_size)
+        self.dense = keras.layers.Dense(hidden_size)
+
+    def call(self, inputs, training=False):
+        x = self.token_embeddings(inputs["input_ids"])
+        pooled = ops.mean(x, axis=1, keepdims=True)
+        x = self.dense(x + pooled)
+        return {"last_hidden_state": x}
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"hidden_size": self.hidden_size, "vocab_size": self.vocab_size})
+        return config
+
+
+class TestBackboneCausalityGuard:
+    """`CausalLanguageModel` cannot inject a mask into an arbitrary backbone,
+    but it must refuse one that leaks: under a next-token objective a
+    bidirectional backbone trains on its own targets, and the symptom is a
+    loss that collapses -- i.e. it looks like success.
+    """
+
+    def test_bidirectional_backbone_is_rejected(self, sample_inputs):
+        model = CausalLanguageModel(
+            backbone=MockBidirectionalBackbone(hidden_size=64, vocab_size=1000),
+            vocab_size=1000,
+        )
+        with pytest.raises(ValueError, match="NOT causal"):
+            model(sample_inputs)
+
+    def test_causal_backbone_is_accepted(self, mock_backbone, sample_inputs):
+        model = CausalLanguageModel(backbone=mock_backbone, vocab_size=1000)
+        out = model(sample_inputs)
+        assert out.shape == (4, 32, 1000)
+
+    def test_the_guard_can_be_switched_off(self, sample_inputs):
+        """Opt-out exists, and it really opts out."""
+        model = CausalLanguageModel(
+            backbone=MockBidirectionalBackbone(hidden_size=64, vocab_size=1000),
+            vocab_size=1000,
+            verify_causality=False,
+        )
+        out = model(sample_inputs)
+        assert out.shape == (4, 32, 1000)
+
+    def test_verify_causality_survives_get_config(self, mock_backbone):
+        model = CausalLanguageModel(
+            backbone=mock_backbone, vocab_size=1000, verify_causality=False
+        )
+        assert model.get_config()["verify_causality"] is False
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
