@@ -1,28 +1,66 @@
 """
-Kolmogorov-Arnold Network (KAN)
-====================================================================
+Kolmogorov-Arnold Networks, which put the learnable nonlinearity on the edges
+of the graph rather than on its nodes.
 
-A complete implementation of the KAN architecture using modern Keras 3 patterns.
-KAN uses learnable activation functions on edges rather than nodes, providing
-a more flexible alternative to traditional MLPs with fixed activation functions.
+This model embodies a different answer to where a network's expressive power
+should live. An MLP fixes the activation function -- ReLU, GELU, whatever --
+and learns only the linear maps between layers, so every unit in a layer
+applies the identical nonlinearity and all adaptation happens in the weights. A
+KAN inverts that: there are no weight matrices and no fixed activations, only a
+learnable univariate function on each connection, and nodes do nothing but sum
+what arrives. The motivating result is the Kolmogorov-Arnold representation
+theorem, which states that any continuous multivariate function can be written
+as a finite composition of continuous univariate functions and addition. That
+theorem is an existence statement about a two-layer construction, not a recipe
+for a deep network, so it should be read as the intuition behind the design
+rather than a guarantee about it.
 
-Based on: "KAN: Kolmogorov-Arnold Networks" (Liu et al., 2024)
-https://arxiv.org/abs/2404.19756
+Each edge function is a B-spline of order `spline_order` over a grid of
+`grid_size` intervals, added to a fixed base activation. The spline is what
+makes the function learnable and locally adjustable: moving one control point
+changes the function only near that knot, so different regions of an edge's
+input range can be shaped independently without the global interference a
+single parameterized activation would suffer. The additive base activation
+matters more than it looks -- it keeps a well-conditioned gradient path through
+the edge in regions where the spline coefficients are still near zero, which is
+what makes the layer trainable from initialization rather than only after the
+splines have found signal.
 
-Usage Examples:
--------------
-```python
-# Create standard KAN
-model = create_kan_model("small", input_features=784, output_features=10)
+The grid is the part of this architecture a caller can silently get wrong.
+Splines are only defined over their knot range, and the default grid is set at
+construction time from nothing but a guess about input scale. If the data
+occupies a different range, every edge spends its capacity on the wrong
+interval and extrapolates outside it. `update_kan_grids(x)` re-fits the knot
+positions to the empirical distribution of a data sample and should be run
+before training on any new dataset; it is not optional tuning, it is part of
+setup.
 
-# Update grids with training data (Critical step for KANs)
-model.update_kan_grids(x_train[:1000])
+Structurally the model is a stack of `KANLinear` layers driven by a list of
+per-layer config dicts, with an optional final activation. Five preset variants
+span micro (`[16, 8]`, grid 3) through xlarge (`[512, 256, 128, 64]`, grid 12),
+trading grid resolution and width together, since a fine grid on a narrow layer
+tends to overfit and a coarse grid on a wide one wastes it. The variant table is
+named `VARIANT_CONFIGS` here rather than the house `MODEL_VARIANTS`; trainers
+and tests reference the existing spelling.
 
-# Compile and Train
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-model.fit(x_train, y_train, epochs=10)
-```
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, making an
+unavailable checkpoint silently indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead.
+
+References:
+    - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks.
+      (https://arxiv.org/abs/2404.19756)
+    - Kolmogorov, 1957. On the representation of continuous functions of many
+      variables by superposition of continuous functions of one variable and
+      addition. Dokl. Akad. Nauk SSSR 114.
+    - Girosi and Poggio, 1989. Representation Properties of Networks:
+      Kolmogorov's Theorem Is Irrelevant. Neural Computation 1(4).
+    - de Boor, 1978. A Practical Guide to Splines. Springer.
 """
+
 
 import os
 import keras
@@ -69,34 +107,12 @@ class KAN(keras.Model):
         **kwargs: Additional arguments passed to the Model base class.
     """
 
-    # Model variant configurations
     VARIANT_CONFIGS = {
         "micro":  {"hidden_features": [16, 8], "grid_size": 3, "spline_order": 3, "activation": "swish"},
         "small":  {"hidden_features": [64, 32, 16], "grid_size": 5, "spline_order": 3, "activation": "swish"},
         "medium": {"hidden_features": [128, 64, 32], "grid_size": 7, "spline_order": 3, "activation": "gelu"},
         "large":  {"hidden_features": [256, 128, 64, 32], "grid_size": 10, "spline_order": 3, "activation": "gelu"},
         "xlarge": {"hidden_features": [512, 256, 128, 64], "grid_size": 12, "spline_order": 3, "activation": "gelu"},
-    }
-
-    # Pretrained weights URLs (Placeholders - update with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "micro": {
-            "mnist": "https://example.com/kan_micro_mnist.keras",
-        },
-        "small": {
-            "mnist": "https://example.com/kan_small_mnist.keras",
-            "cifar10": "https://example.com/kan_small_cifar10.keras",
-        },
-        "medium": {
-            "mnist": "https://example.com/kan_medium_mnist.keras",
-            "cifar10": "https://example.com/kan_medium_cifar10.keras",
-        },
-        "large": {
-            "cifar10": "https://example.com/kan_large_cifar10.keras",
-        },
-        "xlarge": {
-            "cifar100": "https://example.com/kan_xlarge_cifar100.keras",
-        },
     }
 
     def __init__(
@@ -259,39 +275,40 @@ class KAN(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
+    # a non-existent host; `from_variant` caught the download failure, logged a
+    # warning and continued with random initialization, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`. No public KAN weights are distributed
+    # with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
         variant: str,
         dataset: str = "mnist",
         cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL."""
-        if variant not in KAN.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(KAN.PRETRAINED_WEIGHTS.keys())}"
-            )
+        """Resolve a download path for pretrained weights of ``variant``.
 
-        if dataset not in KAN.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(KAN.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
+        Not implemented: no public KAN weights ship with dl_techniques. Always
+        raises, so an unavailable checkpoint is never silently indistinguishable
+        from a successful load.
 
-        url = KAN.PRETRAINED_WEIGHTS[variant][dataset]
+        Args:
+            variant: Model variant name (unused).
+            dataset: Dataset identifier (unused).
+            cache_dir: Cache directory (unused).
 
-        logger.info(f"Downloading KAN-{variant} weights from {dataset}...")
-
-        weights_path = keras.utils.get_file(
-            fname=f"kan_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/kan"
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            f"No pretrained KAN weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: KAN.from_variant('{variant}', ..., "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -314,8 +331,9 @@ class KAN(keras.Model):
             input_features: Dimension of input data.
             output_features: Dimension of output.
             output_activation: Final activation (e.g., "softmax", "sigmoid").
-            pretrained: Boolean or string. If True, loads weights from default URL.
-                        If string, treats as path to local weights file.
+            pretrained: If a string, a path to a local weights file. If True,
+                        raises NotImplementedError -- no public KAN weights ship
+                        with dl_techniques. If False (default), random init.
             weights_dataset: Dataset the weights were trained on (e.g., "mnist").
                              Only used if pretrained=True and not a local path.
             weights_input_features: Input dimension of the pretrained model.
@@ -323,6 +341,10 @@ class KAN(keras.Model):
             cache_dir: Directory to cache downloaded weights.
             override_config: Dictionary to override variant defaults.
             **kwargs: Arguments passed to KAN constructor.
+
+        Raises:
+            ValueError: If variant is not recognized.
+            NotImplementedError: If pretrained is True.
         """
         if variant not in cls.VARIANT_CONFIGS:
             available = list(cls.VARIANT_CONFIGS.keys())
@@ -335,17 +357,14 @@ class KAN(keras.Model):
         hidden_features = config_base.pop("hidden_features")
         layer_configs = []
 
-        # Build hidden layers configuration
         for features in hidden_features:
             config = config_base.copy()
             config["features"] = features
             layer_configs.append(config)
 
-        # Build output layer configuration
         output_config = config_base.copy()
         output_config["features"] = output_features
 
-        # Determine final activation
         if output_activation:
             output_config["activation"] = output_activation
         elif output_features > 1:
@@ -355,7 +374,6 @@ class KAN(keras.Model):
 
         layer_configs.append(output_config)
 
-        # Handle pretrained weights logic
         load_weights_path = None
         skip_mismatch = False
 
@@ -364,21 +382,12 @@ class KAN(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
-            # Detect mismatches
-            # 1. Input mismatch
             if weights_input_features and weights_input_features != input_features:
                 logger.info(
                     f"Pretrained input features ({weights_input_features}) differ from "
@@ -386,7 +395,6 @@ class KAN(keras.Model):
                 )
                 skip_mismatch = True
 
-            # 2. Output mismatch
             pretrained_classes = 10
             if weights_dataset == "cifar100":
                 pretrained_classes = 100
@@ -400,10 +408,8 @@ class KAN(keras.Model):
                 )
                 skip_mismatch = True
 
-        # Create model instance
         model = cls(layer_configs=layer_configs, input_features=input_features, **kwargs)
 
-        # Load weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
@@ -549,7 +555,9 @@ def create_kan_model(
         input_features: Input dimension.
         output_features: Output dimension.
         output_activation: Final activation.
-        pretrained: Load pretrained weights (bool or path string).
+        pretrained: Path string to a local weights file, or False (default).
+            True raises NotImplementedError -- no public KAN weights ship with
+            dl_techniques.
         weights_dataset: Dataset for pretrained weights (e.g. "mnist").
         weights_input_features: Original input features of pretrained model.
         cache_dir: Download cache location.
@@ -557,8 +565,11 @@ def create_kan_model(
 
     Returns:
         Uncompiled KAN model.
+
+    Raises:
+        NotImplementedError: If pretrained is True.
     """
-    model = KAN.from_variant(
+    return KAN.from_variant(
         variant=variant,
         input_features=input_features,
         output_features=output_features,
@@ -569,4 +580,3 @@ def create_kan_model(
         cache_dir=cache_dir,
         **model_kwargs
     )
-    return model

@@ -742,5 +742,33 @@ class TestPerformance:
         assert 0.5 <= ratio <= 2.0, f"Ratio {ratio} outside bounds"
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `KAN.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained KAN weights"):
+            KAN.from_variant("micro", input_features=8, output_features=2,
+                             pretrained=True)
+
+    def test_factory_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained KAN weights"):
+            create_kan_model("micro", input_features=8, output_features=2,
+                             pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = KAN.from_variant("micro", input_features=8, output_features=2)
+        assert isinstance(model, KAN)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(KAN, "PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
