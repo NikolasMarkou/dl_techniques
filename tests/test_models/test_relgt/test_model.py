@@ -13,7 +13,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.relgt.model import create_relgt_model
+from dl_techniques.models.relgt.model import RELGT, create_relgt_model
 
 B, N, F = 2, 8, 16
 
@@ -59,6 +59,109 @@ class TestRelGT:
                 atol=1e-6,
                 err_msg=f"weight {w_orig.path} not preserved after round-trip",
             )
+
+
+class _FixedTokenEncoder:
+    """Stands in for ``RELGTTokenEncoder``, which is NOT deterministic.
+
+    The real encoder draws fresh ``keras.random.normal`` features for its GNN
+    positional encoding on every call, so two forwards of the same model on the
+    same inputs differ — which would swamp any delta this probe measures.
+    Replacing it with a constant makes ``RELGT.call`` deterministic while leaving
+    the transformer-block loop, the part under test, entirely untouched.
+    """
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+
+    def __call__(self, inputs, training=None):
+        return self.tokens
+
+
+class TestBlockChaining:
+    """Blocks must COMPOSE: block ``i+1`` consumes block ``i``'s token output.
+
+    A shape assertion cannot see this — the prediction is ``(B, output_dim)``
+    whether the blocks are chained or all fed the same tokens. The distinguishing
+    behaviour is whether an EARLIER block's contribution can reach the output at
+    all. Unchained, only the last block's output is read, so block 0 is dead
+    weight and neutralizing it provably changes nothing.
+    """
+
+    K, E = 8, 32
+
+    def _probe_model(self, num_blocks=3):
+        model = RELGT(
+            output_dim=2,
+            embedding_dim=self.E,
+            num_heads=2,
+            num_global_centroids=4,
+            ffn_dim=64,
+            num_transformer_blocks=num_blocks,
+            dropout_rate=0.0,
+        )
+        rng = np.random.default_rng(7)
+        tokens = keras.ops.convert_to_tensor(
+            rng.standard_normal((B, self.K, self.E)).astype("float32")
+        )
+        model.token_encoder = _FixedTokenEncoder(tokens)
+        return model, tokens
+
+    def test_neutralizing_block_zero_changes_the_prediction(self):
+        model, tokens = self._probe_model()
+        x = _inputs()
+
+        baseline = keras.ops.convert_to_numpy(model(x, training=False))
+
+        # Control: the probe is only meaningful if the forward is deterministic,
+        # otherwise any delta below could be resampling noise.
+        repeat = keras.ops.convert_to_numpy(model(x, training=False))
+        determinism_delta = float(np.max(np.abs(repeat - baseline)))
+        assert determinism_delta == 0.0, (
+            f"probe forward is not deterministic (delta {determinism_delta}); "
+            "every other assertion in this test would be measuring noise"
+        )
+
+        # Neutralize block 0 IN THE SAME MODEL INSTANCE — comparing against a
+        # second, freshly built model would move both sides and prove nothing.
+        block_zero = model.transformer_blocks[0]
+        saved = [np.array(keras.ops.convert_to_numpy(w)) for w in block_zero.weights]
+        block_zero.set_weights([np.zeros_like(w) for w in saved])
+        try:
+            neutralized = keras.ops.convert_to_numpy(model(x, training=False))
+        finally:
+            block_zero.set_weights(saved)
+
+        assert np.all(np.isfinite(neutralized)), "neutralized forward produced non-finite values"
+
+        block_zero_delta = float(np.max(np.abs(neutralized - baseline)))
+        assert block_zero_delta > 1e-4, (
+            "zeroing TransformerBlock_0 left the prediction unchanged "
+            f"(delta {block_zero_delta}): the blocks are NOT chained, only the "
+            "last block's output reaches the prediction head"
+        )
+
+        # Liveness: a model that returned a constant would fail the assertion
+        # above for the wrong reason and could never be caught by it. Perturbing
+        # the tokens must move the prediction too.
+        restored = keras.ops.convert_to_numpy(model(x, training=False))
+        assert float(np.max(np.abs(restored - baseline))) == 0.0, "weight restore failed"
+
+        model.token_encoder = _FixedTokenEncoder(tokens + 1.0)
+        perturbed = keras.ops.convert_to_numpy(model(x, training=False))
+        liveness_delta = float(np.max(np.abs(perturbed - baseline)))
+        assert liveness_delta > 1e-4, (
+            f"perturbing the input tokens did not move the prediction "
+            f"(delta {liveness_delta}): the probe is degenerate"
+        )
+
+    def test_model_builds_blocks_that_return_tokens(self):
+        model, _ = self._probe_model(num_blocks=2)
+        for block in model.transformer_blocks:
+            assert block.return_tokens is True, (
+                f"{block.name} does not return its token sequence, so it cannot be chained"
+            )
+            assert block.get_config()["return_tokens"] is True
 
 
 if __name__ == "__main__":

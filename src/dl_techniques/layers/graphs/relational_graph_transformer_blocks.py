@@ -571,6 +571,15 @@ class RELGTTransformerBlock(keras.layers.Layer):
     :param kernel_initializer: Initializer for Dense layers.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param return_tokens: When ``True``, ``call`` returns the tuple
+        ``(combined_representation, local_processed_tokens)`` instead of the
+        combined representation alone, exposing the ``(B, K, E)`` token sequence
+        that the local transformer produced before it was mean-pooled. This is
+        what lets a caller STACK blocks: chaining the ``(B, E)`` summary instead
+        would hand the next block a single-token sequence. Defaults to ``False``,
+        which keeps the historical single-tensor return. See
+        ``models/relgt/model.py``. Defaults to ``False``.
+    :type return_tokens: bool
     :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
@@ -584,6 +593,7 @@ class RELGTTransformerBlock(keras.layers.Layer):
         ffn_type: str = "mlp",
         normalization_type: str = "layer_norm",
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        return_tokens: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -613,6 +623,18 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-009
+        # The token sequence is exposed behind an opt-in flag, NOT by making the
+        # tuple the unconditional return. A bare tuple return would be a silent
+        # breaking change for every caller that treats the block as a one-tensor
+        # layer -- including a functional `keras.Model` built over it, which is
+        # how the layer suite exercises serialization. Do not "simplify" this by
+        # always returning the tuple and deleting the flag; and do not read the
+        # tokens off `self` as a side-channel attribute instead (that is not
+        # graph-safe under `@tf.function` and would not survive a saved model).
+        # See decisions.md D-009.
+        self.return_tokens = return_tokens
 
         # CREATE all sub-layers in __init__
 
@@ -708,15 +730,18 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self,
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """Forward pass for hybrid local-global processing.
 
         :param inputs: List of ``[local_tokens, seed_node_features]``.
         :type inputs: List[keras.KerasTensor]
         :param training: Whether in training mode.
         :type training: Optional[bool]
-        :return: Combined representation ``(batch_size, embedding_dim)``.
-        :rtype: keras.KerasTensor
+        :return: Combined representation ``(batch_size, embedding_dim)``; or,
+            when ``return_tokens`` is set, the tuple
+            ``(combined_representation, local_processed_tokens)`` whose second
+            element has shape ``(batch_size, num_tokens, embedding_dim)``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         local_tokens, seed_node_features = inputs
         batch_size = keras.ops.shape(seed_node_features)[0]
@@ -758,22 +783,35 @@ class RELGTTransformerBlock(keras.layers.Layer):
         residual = self.residual_projection(combined_representation)
         output = self.combination_norm(output + residual)
 
+        if self.return_tokens:
+            return output, local_processed_tokens
+
         return output
 
     def compute_output_shape(
         self,
         input_shape: List[Tuple[Optional[int], ...]],
-    ) -> Tuple[Optional[int], ...]:
+    ) -> Union[
+        Tuple[Optional[int], ...],
+        Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]],
+    ]:
         """Compute output shape.
 
         :param input_shape: List of ``[local_tokens_shape, seed_features_shape]``.
         :type input_shape: List[Tuple[Optional[int], ...]]
-        :return: Output shape tuple.
-        :rtype: Tuple[Optional[int], ...]
+        :return: Output shape tuple, or a pair of them when ``return_tokens``
+            is set — mirroring exactly what ``call`` returns.
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]
         """
         local_tokens_shape, _ = input_shape
         batch_size = local_tokens_shape[0]
-        return (batch_size, self.embedding_dim)
+        representation_shape = (batch_size, self.embedding_dim)
+
+        if self.return_tokens:
+            num_tokens = local_tokens_shape[1]
+            return representation_shape, (batch_size, num_tokens, self.embedding_dim)
+
+        return representation_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -787,6 +825,7 @@ class RELGTTransformerBlock(keras.layers.Layer):
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "return_tokens": self.return_tokens,
         })
         return config
 

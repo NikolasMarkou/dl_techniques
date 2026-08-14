@@ -173,6 +173,22 @@ class TestRELGTTransformerBlock:
         )
         assert layer.compute_output_shape([(B, K, EMB), (B, 1, EMB)]) == (B, EMB)
 
+    def test_return_tokens_widens_the_return_to_a_pair(self, inputs):
+        local, seed = inputs
+        layer = RELGTTransformerBlock(
+            embedding_dim=EMB, num_heads=4, num_global_centroids=3, ffn_dim=32,
+            return_tokens=True,
+        )
+        representation, tokens = layer([local, seed])
+        assert tuple(representation.shape) == (B, EMB)
+        # The point of the flag: K survives, so the next block in a stack has a
+        # real token sequence to attend over rather than a single pooled vector.
+        assert tuple(tokens.shape) == (B, K, EMB)
+        assert layer.compute_output_shape([(B, K, EMB), (B, 1, EMB)]) == (
+            (B, EMB), (B, K, EMB),
+        )
+        assert layer.get_config()["return_tokens"] is True
+
     def test_serialization_round_trip(self, inputs, tmp_path):
         local, seed = inputs
         local_in = keras.Input(shape=(K, EMB), name="local")

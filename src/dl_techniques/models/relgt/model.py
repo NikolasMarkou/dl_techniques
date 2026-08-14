@@ -37,15 +37,19 @@ single vector produced by the centroid cross-attention. The centroids are parame
 not statistics: they are shaped by the task, and their count is the knob that trades
 global expressiveness against parameters.
 
-Two structural facts about this implementation are worth stating plainly. Each
-transformer block collapses its token set to a single vector, so a block consumes
-tokens and emits a representation rather than an updated token sequence. As a
-consequence the block loop does not compose: every block is handed the *same*
-`local_tokens` and seed embedding, and only the last block's output reaches the
-prediction head. Setting `num_transformer_blocks > 1` therefore adds parameters and
-compute without deepening the computation, and a genuinely stacked variant would need
-blocks that return tokens. Separately, the seed node is taken to be index 0 of
-`node_features` — the subgraph sampler's contract, not something the model verifies.
+Two structural facts about this implementation are worth stating plainly. The first
+is how the blocks stack. A block's headline output is a single `(B, E)` vector, so
+chaining *that* across blocks would hand every block after the first a one-token
+sequence to self-attend over — depth in name only. What is chained instead is the
+`(B, K, E)` token sequence the block's local transformer produces before the mean
+pool, which the block returns alongside its summary when constructed with
+`return_tokens=True`. Block `i+1` therefore attends over block `i`'s full, processed
+token set, `K` is preserved at every level, and `num_transformer_blocks` buys real
+depth rather than only parameters. The seed embedding is deliberately *not* chained:
+it is only ever the cross-attention query, no block emits an updated seed, and it is
+the fixed anchor identifying the node being predicted about. Second, the seed node is
+taken to be index 0 of `node_features` — the subgraph sampler's contract, not
+something the model verifies.
 
 The prediction head's final activation follows `problem_type`, and when there are no
 transformer blocks at all the model falls back to mean-pooling the tokens, so the
@@ -224,6 +228,7 @@ class RELGT(keras.Model):
                 dropout_rate=dropout_rate,
                 ffn_type=ffn_type,
                 normalization_type=normalization_type,
+                return_tokens=True,
                 name=f"TransformerBlock_{i}",
             )
             self.transformer_blocks.append(block)
@@ -258,27 +263,25 @@ class RELGT(keras.Model):
         seed_node_features = inputs["node_features"][:, 0:1, :]  # (batch, 1, feature_dim)
         seed_node_embedding = self.seed_encoder(seed_node_features)  # (batch, 1, embed_dim)
 
-        # 1. Encode input graph data into tokens
         local_tokens = self.token_encoder(inputs, training=training)
 
-        # 2. Process through transformer blocks
-        # In a complete implementation, you might want to update local_tokens
-        # between blocks, but for simplicity we process once and then use
-        # the representation for all blocks
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-009
+        # What is chained is the (B, K, E) TOKEN SEQUENCE, not the block's (B, E)
+        # summary. Chaining the summary (via expand_dims) is type-correct and
+        # defeats the purpose: every block after the first would self-attend over
+        # a single token. Do NOT chain `seed_node_embedding` either -- it is only
+        # ever the cross-attention query and no block emits an updated seed, so a
+        # "chained seed" would have to be invented rather than read. See
+        # decisions.md D-009.
         current_representation = None
+        current_tokens = local_tokens
 
         for block in self.transformer_blocks:
-            # Each block outputs a single vector representation
-            current_representation = block(
-                [local_tokens, seed_node_embedding],
+            current_representation, current_tokens = block(
+                [current_tokens, seed_node_embedding],
                 training=training
             )
 
-            # For multi-block architectures, you might want to update tokens
-            # or maintain running representations. This implementation uses
-            # the final block output directly.
-
-        # 3. Generate final prediction
         if current_representation is None:
             # Handle case with no transformer blocks
             current_representation = ops.mean(local_tokens, axis=1)
