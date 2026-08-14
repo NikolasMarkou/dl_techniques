@@ -6,8 +6,12 @@ round-trip), the create_convunext_denoiser functional builder (ValueError paths,
 forward pass, deep supervision), the create_convunext_variant wrapper, and the
 M2 full .keras save -> load -> identical-output round-trip.
 
-NOTE: this ConvUNextStem is the *bias-free* variant (use_bias is always False),
-distinct from the one in models/convunext/model.py.
+NOTE: ConvUNextStem is now ONE class, defined in models/convunext/model.py and
+re-exported here; it carries a `use_bias` parameter that defaults to True. Being
+bias-free is therefore a contract of the *bias-free builder*
+(create_convunext_denoiser pins use_bias=False), not a structural property of the
+class. TestConvUNextStem::test_bias_free asserts that contract through the
+builder.
 """
 
 import os
@@ -73,11 +77,27 @@ class TestConvUNextStem:
         )
         assert output.shape == expected
 
-    def test_bias_free(self, stem_config, sample_input) -> None:
-        """Stem must be bias-free: the conv uses no bias weights."""
-        stem = ConvUNextStem(**stem_config)
-        stem(sample_input)
+    def test_bias_free(self, input_shape) -> None:
+        """The stem the BIAS-FREE BUILDER produces must carry no bias weights.
+
+        `ConvUNextStem` gained a `use_bias` parameter that defaults to True, so
+        asserting on a bare `ConvUNextStem(...)` would only re-assert a class
+        default and would say nothing about the bias-free arm. The contract that
+        still matters is the wrapper's: a model built by
+        `create_convunext_denoiser` has a stem whose conv is bias-free and has
+        allocated no bias weight.
+        """
+        model = create_convunext_denoiser(
+            input_shape=input_shape,
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=1,
+        )
+        stem = model.get_layer('encoder_level_0_stem')
+        assert isinstance(stem, ConvUNextStem)
         assert stem.conv.use_bias is False
+        assert stem.conv.bias is None
+        assert not [w for w in stem.weights if w.path.endswith('bias')]
 
     def test_build_creates_weights(self, stem_config, sample_input) -> None:
         stem = ConvUNextStem(**stem_config)
