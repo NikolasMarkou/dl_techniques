@@ -127,3 +127,55 @@ class TestFactoryIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+class TestRotationTrickForwardIdentity:
+    """Every gradient_mode must emit the CODEBOOK vector in the forward pass."""
+
+    @pytest.mark.parametrize(
+        "mode", ["rotation", "reflection", "no_grad_scale", "ste"])
+    def test_forward_equals_the_indexed_codebook_vector(self, mode):
+        """call() must agree with encode -> quantize_from_indices -> decode.
+
+        RED-proof for `reflection`: it reflected about the hyperplane with
+        normal (u + v), which maps u -> -v, so its forward output was exactly
+        -q. A single Householder reflection cannot map u -> +v about that
+        normal; the two-reflection `rotation` path corrects for it and
+        `reflection` had no second term.
+
+        The existing suite parametrizes all four modes and asserts only the
+        output SHAPE, which is invariant under a sign flip -- that is why this
+        survived.
+        """
+        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+            VectorQuantizerRotationTrick,
+        )
+
+        keras.utils.set_random_seed(0)
+        vq = VectorQuantizerRotationTrick(
+            num_embeddings=16, embedding_dim=8, gradient_mode=mode)
+        vq.build((None, 8))
+
+        z = np.random.default_rng(0).normal(size=(32, 8)).astype("float32")
+
+        out = keras.ops.convert_to_numpy(vq(z, training=False))
+        idx = vq.get_codebook_indices(z)
+        ref = keras.ops.convert_to_numpy(vq.quantize_from_indices(idx))
+
+        # Sign-discriminating and scale-free: compare the distance to +ref
+        # against the distance to -ref. This cannot be satisfied by loosening a
+        # tolerance, and it is exactly the axis the defect lived on.
+        d_plus = float(np.abs(out - ref).max())
+        d_minus = float(np.abs(out + ref).max())
+        assert d_plus < 0.1 * d_minus, (
+            f"gradient_mode={mode!r}: call() is closer to -q ({d_minus:.3e}) "
+            f"than it should be relative to +q ({d_plus:.3e}) -- the forward "
+            f"pass is not emitting the codebook vector")
+
+        # The residual floor is the rotation-trick arithmetic in float32 with
+        # the eps-regularised norms; it is ~5.3e-05 for all three rotation
+        # modes and ~3e-08 for the exact 'ste' path.
+        np.testing.assert_allclose(
+            out, ref, atol=1e-4,
+            err_msg=(f"gradient_mode={mode!r}: call() does not emit the "
+                     f"codebook vector, so it disagrees with the index path"))

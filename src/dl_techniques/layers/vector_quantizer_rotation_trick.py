@@ -526,6 +526,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         w_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True) + eps)
         w_sg = keras.ops.stop_gradient(w_unnorm / w_norm)
 
+
         # x · w and x · unit_x — gradient WILL flow through x here (the whole point).
         x_dot_w = keras.ops.sum(x32 * w_sg, axis=-1, keepdims=True)
         x_dot_ux = keras.ops.sum(x32 * unit_x_sg, axis=-1, keepdims=True)
@@ -533,7 +534,22 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         if mode == "rotation":
             rotated = x32 - 2.0 * x_dot_w * w_sg + 2.0 * x_dot_ux * unit_q_sg
         elif mode == "reflection":
-            rotated = x32 - 2.0 * x_dot_w * w_sg
+            # A Householder reflection about the hyperplane with normal
+            # (u + v) maps u -> -v, NOT u -> +v. This branch used to return
+            # that reflection unnegated, so its forward output was exactly -q
+            # -- verified numerically -- contradicting the module's contract
+            # that the forward pass emits the codebook vector, and making
+            # call() disagree in SIGN with
+            # encode_to_indices -> quantize_from_indices -> decode.
+            #
+            # Negating recovers u -> +v while keeping the (u + v) normal.
+            # The alternative -- reflecting about (u - v), which maps u -> +v
+            # directly -- is mathematically equivalent but numerically far
+            # worse HERE: (u - v) vanishes exactly when x is close to its
+            # codebook vector, which is the common case, and normalizing a
+            # vanishing normal loses precision (measured ~1e-4 absolute error
+            # on unit-scale codebook entries, versus ~1e-7 for this form).
+            rotated = 2.0 * x_dot_w * w_sg - x32
         elif mode == "no_grad_scale":
             rotated = x32 - 2.0 * x_dot_w * w_sg + 2.0 * x_dot_ux * unit_q_sg
         else:  # pragma: no cover (validated in __init__)
