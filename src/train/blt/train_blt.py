@@ -24,7 +24,7 @@ from pathlib import Path
 from train.common import setup_gpu, set_seeds, json_numpy_default
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
-from dl_techniques.layers.blt_blocks import ByteTokenizer, EntropyModel
+from dl_techniques.layers.blt_blocks import ByteTokenizer, DynamicPatcher, EntropyModel
 
 
 # ---------------------------------------------------------------------
@@ -361,6 +361,22 @@ class BLTTrainer:
         )
 
         logger.info(f"Entropy model final loss: {entropy_history.history['loss'][-1]:.4f}")
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # The degeneracy diagnostic runs HERE, on the entropy this run actually
+        # produced, and not at model construction. A construction-time check can
+        # only do arithmetic on vocab_size -- which at vocab_size=260 fires on
+        # this trainer's own entropy_threshold=1.3 and on the library default of
+        # 1.5, i.e. on every run ever made. This call fires only when the trained
+        # entropy model puts a boundary at every position, or at none.
+        probe_batch = train_x[: min(len(train_x), max(self.config.batch_size, 8))]
+        probe_entropy = self.entropy_model.compute_entropy(
+            self.entropy_model(keras.ops.convert_to_tensor(probe_batch), training=False)
+        )
+        DynamicPatcher(
+            entropy_threshold=self.config.entropy_threshold,
+            max_patches=self.config.max_patches,
+        ).warn_if_segmentation_is_degenerate(probe_entropy)
 
         entropy_path = Path(self.config.output_dir) / "entropy_model.keras"
         entropy_train_model.save(str(entropy_path))

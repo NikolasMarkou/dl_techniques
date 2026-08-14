@@ -22,8 +22,6 @@ from dl_techniques.layers.blt_blocks import (
     LocalEncoder,
     GlobalTransformer,
     LocalDecoder,
-    warn_if_entropy_threshold_is_degenerate,
-    DEGENERATE_ENTROPY_THRESHOLD_FRACTION,
 )
 
 VOCAB, HID, SEQ, NP_, GDIM = 32, 16, 10, 8, 16
@@ -337,38 +335,74 @@ class TestTheShippedDefaultThreshold:
         assert lengths.sum() == 20
 
 
-class TestDegenerateThresholdWarning:
+class TestObservedDegeneracyWarning:
+    """The degeneracy check reads the ENTROPY, not the vocabulary size.
 
-    def test_it_warns_on_the_shipped_default_at_the_byte_vocabulary(self, caplog):
+    Its predecessor compared ``entropy_threshold`` to ``0.5 * ln(vocab_size)``,
+    which fired on every shipped configuration (1.5 and 1.3 against a 2.78-nat
+    floor at ``vocab_size=260``) and could never fire on the regime it was
+    aimed at -- a *trained* entropy model at 1.5 nats is exactly the case it
+    called degenerate. These tests pin the two ends it now reports and, more
+    importantly, the middle it must stay silent on.
+    """
+
+    def _entropy(self, values):
+        return keras.ops.convert_to_tensor(np.array([values], dtype="float32"))
+
+    def test_it_warns_when_every_position_is_a_boundary(self, caplog):
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
         with caplog.at_level(logging.WARNING):
-            warned = warn_if_entropy_threshold_is_degenerate(
-                entropy_threshold=1.5, vocab_size=260, source="Probe"
+            warned = patcher.warn_if_segmentation_is_degenerate(
+                self._entropy([5.5] * 12)  # untrained model: near ln(260)=5.56
             )
         assert warned is True, (
-            "the shipped default 1.5 nats at vocab_size=260 is below "
-            f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION} * ln(260) = "
-            f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION * math.log(260):.4g} and must warn"
+            "entropy above the threshold at EVERY position gives an empty patch "
+            "0, one byte per patch, and the whole tail merged into the last "
+            "patch -- and it was reported as an ordinary segmentation"
         )
         text = " ".join(r.getMessage() for r in caplog.records)
-        assert "Probe" in text and "every position" in text.lower(), (
-            f"the warning does not name the consequence: {text}"
+        assert "1.0" in text and "every position" in text.lower(), (
+            f"the warning does not name the observed rate or consequence: {text}"
         )
 
-    def test_it_is_silent_above_the_fraction(self, caplog):
-        ceiling = math.log(260.0)
+    def test_it_warns_when_no_position_is_a_boundary(self, caplog):
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
         with caplog.at_level(logging.WARNING):
-            warned = warn_if_entropy_threshold_is_degenerate(
-                entropy_threshold=DEGENERATE_ENTROPY_THRESHOLD_FRACTION * ceiling + 1e-6,
-                vocab_size=260,
-                source="Probe",
+            warned = patcher.warn_if_segmentation_is_degenerate(
+                self._entropy([0.2] * 12)
             )
-        assert warned is False
+        assert warned is True, (
+            "no boundary at all means one patch for the whole sequence and an "
+            "inert max_patches; that end is degenerate too"
+        )
+        assert "0.0" in " ".join(r.getMessage() for r in caplog.records)
+
+    def test_it_is_silent_on_an_ordinary_segmentation(self, caplog):
+        """The property the predecessor could not have: silence in the good case.
+
+        A *trained* byte-level entropy model emits roughly 1-2 nats per byte, so
+        the shipped default of 1.5 lands mid-sequence — the configuration the
+        old check warned about unconditionally and this one must not.
+        """
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
+        with caplog.at_level(logging.WARNING):
+            warned = patcher.warn_if_segmentation_is_degenerate(
+                self._entropy([0.9, 2.1, 1.0, 0.8, 2.4, 1.1, 0.7, 1.9])
+            )
+        assert warned is False, (
+            "a mixed-entropy batch at the shipped default is an ordinary "
+            "segmentation and must not be reported"
+        )
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
-    def test_it_is_silent_when_the_ceiling_is_undefined(self):
-        # No vocabulary -> no ceiling -> no claim. A diagnostic must not guess.
-        assert warn_if_entropy_threshold_is_degenerate(0.0, None, "Probe") is False
-        assert warn_if_entropy_threshold_is_degenerate(0.0, 1, "Probe") is False
+    def test_it_does_not_change_the_segmentation(self):
+        # Diagnostic, not validation: calling it must leave `call` untouched.
+        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=8)
+        entropy = self._entropy([0.9, 2.1, 1.0, 0.8, 2.4, 1.1, 0.7, 1.9])
+        before = keras.ops.convert_to_numpy(patcher(entropy))
+        patcher.warn_if_segmentation_is_degenerate(entropy)
+        after = keras.ops.convert_to_numpy(patcher(entropy))
+        np.testing.assert_array_equal(before, after)
 
 
 # ---------------------------------------------------------------------

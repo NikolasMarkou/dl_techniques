@@ -79,12 +79,17 @@ class TestConstruction:
         with pytest.raises(ValueError, match="patch_pooling_method"):
             ByteLatentTransformer(patch_pooling_method="bogus")
 
-    def test_construction_warns_on_the_degenerate_default_threshold(self, caplog) -> None:
-        """The shipped default is NOT changed (that would be a
-        training-semantics change with no measured evidence on a trained
-        entropy model) -- so the degeneracy must at least be audible. Without
-        this, a caller building a default BLT gets one byte per patch plus a
-        giant tail with nothing said.
+    def test_construction_is_silent_about_the_entropy_threshold(self, caplog) -> None:
+        """Construction must NOT warn about ``entropy_threshold``.
+
+        The predecessor check compared the threshold to ``0.5 * ln(vocab_size)``
+        -- vocabulary arithmetic that never looked at the entropy -- so at the
+        shipped ``vocab_size=260`` (floor 2.78 nats) it fired on the default
+        1.5, on ``train_blt.py``'s 1.3, and on every construction in this test
+        suite: 100% of shipped configurations, including the one its own
+        reasoning called probably right. A diagnostic that always fires carries
+        no information. The degeneracy is now measured where it is observable,
+        by ``DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)``.
         """
         import logging
 
@@ -92,10 +97,13 @@ class TestConstruction:
             ByteLatentTransformer(vocab_size=260, max_sequence_length=32,
                                   num_local_layers=1, num_global_layers=1)
 
-        text = " ".join(r.getMessage() for r in caplog.records)
-        assert "entropy_threshold" in text and "ByteLatentTransformer" in text, (
-            "constructing with the shipped entropy_threshold=1.5 at vocab_size=260 "
-            f"(below 0.5 * ln(260) = 2.78 nats) said nothing: {text[:400]}"
+        offenders = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING and "entropy_threshold" in r.getMessage()
+        ]
+        assert not offenders, (
+            "construction warns about entropy_threshold again; the alarm fires "
+            f"on every shipped configuration and is noise: {offenders}"
         )
 
     def test_invalid_dropout_raises(self) -> None:

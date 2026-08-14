@@ -214,7 +214,6 @@ that maintains competitive performance while offering significant advantages
 in efficiency, robustness, and multilingual capabilities.
 """
 
-import math
 import keras
 from keras import ops
 from typing import Optional, Dict, Any, List, Tuple
@@ -562,75 +561,6 @@ class EntropyModel(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-#: Fraction of the uniform-entropy ceiling ``ln(vocab_size)`` below which an
-#: ``entropy_threshold`` is reported as degenerate. See
-#: :func:`warn_if_entropy_threshold_is_degenerate` for why this number is 0.5
-#: and why it lives in exactly one place.
-DEGENERATE_ENTROPY_THRESHOLD_FRACTION: float = 0.5
-
-
-def warn_if_entropy_threshold_is_degenerate(
-        entropy_threshold: float,
-        vocab_size: Optional[int],
-        source: str,
-) -> bool:
-    """Log a warning when an ``entropy_threshold`` sits below the usable band.
-
-    **Contract**: pure except for the log record. Returns ``True`` iff a warning
-    was emitted, so a caller (or a test) can assert on the decision without
-    parsing log text. Never raises and never changes behaviour — it is a
-    diagnostic, not a validation. Returns ``False`` when ``vocab_size`` is
-    unknown or degenerate (``None`` or ``< 2``), because the ceiling is then
-    undefined.
-
-    Per-byte entropy is bounded by the uniform ceiling ``ln(vocab_size)``
-    (5.56 nats at ``vocab_size=260``) and floored at 0. ``DynamicPatcher`` opens
-    a new patch at every byte whose entropy exceeds the threshold, so a
-    threshold below the entropies a model actually produces makes EVERY position
-    a boundary: patch 0 is empty, patches 1..``max_patches - 2`` hold one byte
-    each, and the whole remaining tail collapses into the final patch — a worse
-    segmentation than a fixed equal-length split, reached with no error and no
-    complaint.
-
-    The line is drawn at ``0.5 * ln(vocab_size)`` — the midpoint of the entropy
-    range the model can emit at all. It is deliberately coarse. A *trained*
-    byte-level entropy model on natural text emits roughly 1-2 nats per byte, so
-    a threshold below the midpoint may be exactly right in the regime that
-    matters; but an untrained or lightly-trained one sits near the ceiling, and
-    that is the regime every fresh model, every smoke test and the first epochs
-    of every training run are in. The warning names that consequence and stops
-    there: the shipped defaults are NOT changed on this basis, because doing so
-    would be a training-semantics change made without measured evidence on a
-    trained entropy model.
-
-    :param entropy_threshold: Configured threshold, in nats.
-    :param vocab_size: Vocabulary the entropy is computed over; ``None`` if the
-        caller does not know it.
-    :param source: Human-readable name of the constructing class, used in the
-        message so the reader knows which object to reconfigure.
-    :return: ``True`` if a warning was logged.
-    """
-    if vocab_size is None or vocab_size < 2:
-        return False
-
-    ceiling = math.log(float(vocab_size))
-    floor = DEGENERATE_ENTROPY_THRESHOLD_FRACTION * ceiling
-    if entropy_threshold >= floor:
-        return False
-
-    logger.warning(
-        f"{source}: entropy_threshold={entropy_threshold:.4g} nats is below "
-        f"{DEGENERATE_ENTROPY_THRESHOLD_FRACTION:.2g} * ln(vocab_size={vocab_size}) "
-        f"= {floor:.4g}. An entropy model whose output sits near the uniform "
-        f"ceiling ln(vocab_size)={ceiling:.4g} (i.e. any untrained or lightly "
-        f"trained one) will then cross this threshold at EVERY position, giving "
-        f"an empty first patch, one byte per patch after it, and the entire "
-        f"remaining sequence merged into the final patch. Raise the threshold, "
-        f"or pretrain the entropy model before relying on the segmentation."
-    )
-    return True
-
-
 @keras.saving.register_keras_serializable()
 class DynamicPatcher(keras.layers.Layer):
     """
@@ -767,6 +697,82 @@ class DynamicPatcher(keras.layers.Layer):
         occupancy = ops.one_hot(patch_index, self.max_patches, dtype='int32')
 
         return ops.sum(occupancy, axis=1)
+
+    def warn_if_segmentation_is_degenerate(
+            self,
+            entropy: keras.KerasTensor,
+    ) -> bool:
+        """Report a degenerate segmentation MEASURED on a concrete batch.
+
+        **Contract**: pure except for the log record; returns ``True`` iff a
+        warning was emitted, so a caller (or a test) asserts on the decision
+        rather than on log text. Never raises and never changes behaviour.
+        Requires an EAGER tensor — it reads the entropy values.
+
+        Degenerate means one of the two ends, and only those:
+
+        - **boundary rate 1.0** — every position opens a patch, so patch 0 is
+          empty, one byte lands in each patch after it, and the whole remaining
+          tail merges into the final patch. This is what an untrained entropy
+          model produces (its output sits near the uniform ceiling
+          ``ln(vocab_size)``) against any threshold below that ceiling.
+        - **boundary rate 0.0** — no position opens a patch, so the entire
+          sequence is one patch and ``max_patches`` is inert.
+
+        Both are legal, silent, and worse than the fixed equal-length split
+        this layer replaced. Rates strictly between the ends are NOT reported:
+        that is an ordinary segmentation, and how coarse or fine it should be
+        is a modelling choice this layer has no basis to second-guess.
+
+        :param entropy: Concrete (eager) entropy tensor, ``(batch, seq_len)``,
+            in nats — the same tensor ``call`` consumes.
+        :return: ``True`` if a warning was logged.
+        """
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # This is an EXPLICIT, opt-in diagnostic and it is deliberately NOT
+        # called from `call()`. Two reasons, the second measured:
+        #  * `call()` is `keras.ops`-only with a static `max_patches` (I-1/I-2/
+        #    I-3). A Python-level branch on a tensor value is not expressible
+        #    there without raw `tf`.
+        #  * A once-per-instance warning inside `call()` cannot observe the
+        #    rate at all under tracing: reading it raises
+        #    `NotImplementedError: Cannot convert a symbolic tf.Tensor
+        #    (Mean:0) to a numpy array`, and a Python side effect in a traced
+        #    `call` fires once per RETRACE regardless of the data.
+        # It replaces `warn_if_entropy_threshold_is_degenerate`, which compared
+        # the threshold to `0.5 * ln(vocab_size)` — vocabulary arithmetic that
+        # never looked at the entropy and therefore fired on 100% of shipped
+        # configurations (1.5 and 1.3 against a 2.78-nat floor at
+        # vocab_size=260), including the one D-015 argues is probably right.
+        # Do NOT reintroduce a construction-time variant: at construction there
+        # is no entropy to measure. See decisions.md D-018.
+        is_boundary = ops.cast(entropy > self.entropy_threshold, 'float32')
+        rate = float(ops.convert_to_numpy(ops.mean(is_boundary)))
+
+        if rate == 1.0:
+            logger.warning(
+                f"{type(self).__name__}: entropy_threshold="
+                f"{self.entropy_threshold:.4g} nats is below the entropy at "
+                f"EVERY position of this batch (observed boundary rate 1.0), "
+                f"so patch 0 is empty, each patch after it holds one byte, and "
+                f"the whole remaining sequence collapses into the final patch "
+                f"of max_patches={self.max_patches}. Raise the threshold, or "
+                f"pretrain the entropy model before relying on the "
+                f"segmentation."
+            )
+            return True
+
+        if rate == 0.0:
+            logger.warning(
+                f"{type(self).__name__}: entropy_threshold="
+                f"{self.entropy_threshold:.4g} nats is above the entropy at "
+                f"every position of this batch (observed boundary rate 0.0), "
+                f"so the whole sequence is a single patch and "
+                f"max_patches={self.max_patches} is inert. Lower the threshold."
+            )
+            return True
+
+        return False
 
     def compute_patch_ids(
             self,

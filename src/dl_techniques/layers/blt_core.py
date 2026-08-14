@@ -93,8 +93,7 @@ from .reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from .blt_blocks import (
     ByteTokenizer, EntropyModel,
     DynamicPatcher, LocalEncoder,
-    GlobalTransformer, LocalDecoder,
-    warn_if_entropy_threshold_is_degenerate
+    GlobalTransformer, LocalDecoder
 )
 
 # ---------------------------------------------------------------------
@@ -257,15 +256,12 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.embeddings_regularizer = embeddings_regularizer
         self.kernel_regularizer = kernel_regularizer
 
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-015
-        # Diagnostic only -- see the sibling anchor in
-        # models/byte_latent_transformer/model.py. Do not promote to a raise and
-        # do not change the default on the strength of it.
-        warn_if_entropy_threshold_is_degenerate(
-            entropy_threshold=self.entropy_threshold,
-            vocab_size=self.vocab_size,
-            source=type(self).__name__,
-        )
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # No construction-time degeneracy warning -- see the sibling anchor in
+        # models/byte_latent_transformer/model.py. The check moved to
+        # `DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)`, which
+        # measures the OBSERVED boundary rate instead of doing arithmetic on
+        # vocab_size. Do not reintroduce a constructor-side variant here.
 
         # Calculate embedding scale
         self.embed_scale = math.sqrt(embed_dim)
