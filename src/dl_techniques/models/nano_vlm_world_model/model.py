@@ -436,8 +436,11 @@ class ScoreBasedNanoVLM(keras.Model):
 
         batch_size = ops.shape(text_features)[0]
 
-        # Get vision feature shape from encoder
-        dummy_img = keras.random.normal((1, 224, 224, 3))
+        # Get vision feature shape from encoder. The probe MUST follow the
+        # configured img_size: the encoder's positional table is sized from it, so a
+        # hardcoded 224 dies inside PositionalEmbedding at every other resolution.
+        img_size = self.vision_config.get('img_size', 224)
+        dummy_img = keras.random.normal((1, img_size, img_size, 3))
         vision_feat_shape = ops.shape(self.vision_encoder(dummy_img, training=False))
         seq_len, feat_dim = vision_feat_shape[1], vision_feat_shape[2]
 
