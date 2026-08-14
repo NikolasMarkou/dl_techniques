@@ -21,25 +21,33 @@ matrix per member, expressed in `d_in + d_out` parameters instead of
 with different readouts, and they cost a vector each. That is the whole idea; the
 rest of the architecture is how far the perturbation is pushed.
 
-`arch_type` selects that. Under `'plain'` there is no ensemble at all: `k` must be
-`None`, the backbone is an ordinary MLP and the head an ordinary `Dense` — the
-baseline the ensemble variants are measured against. Under `'tabm'` every backbone
-layer is a `LinearEfficientEnsemble` with per-member input and output scaling, and
-the head is `NLinear`, which is `k` fully independent output matrices; the head is
-small enough that sharing it is not worth the loss of diversity where diversity
-matters most. Under `'tabm-mini'` the backbone weights are shared with no per-layer
-perturbation and *all* diversity comes from a single `ScaleEnsemble` adapter applied
-to the input, one learned scale vector per member — the cheapest possible ensemble,
-and the interesting limit case, since every member thereafter computes the same
-function of a differently-scaled input. `'tabm-mini-normal'` is the same with the
-adapter initialized from a normal distribution instead of random signs; random signs
-is the default because it guarantees members start at distinct, non-degenerate
-scalings rather than clustered near zero.
+`arch_type` selects that, and the class attribute `ARCH_SPECS` is the single table
+that says what each value builds — every field in it is read by `_create_layers`,
+and no two rows are equal, so each name denotes a genuinely different model.
 
-Two of the accepted `arch_type` values, `'tabm-packed'` and `'tabm-normal'`, are
-currently validated and stored but not branched on anywhere in layer construction —
-they build exactly what `'tabm'` builds. They are accepted for forward-compatibility;
-do not read them as distinct architectures.
+Under `'plain'` there is no ensemble at all: `k` must be `None`, the backbone is an
+ordinary MLP and the head an ordinary `Dense` — the baseline the ensemble variants
+are measured against. Under `'tabm'` every backbone layer is a
+`LinearEfficientEnsemble` with per-member input and output scaling, and the head is
+`NLinear`, which is `k` fully independent output matrices; the head is small enough
+that sharing it is not worth the loss of diversity where diversity matters most.
+`'tabm-normal'` is that same architecture with the scaling vectors drawn from
+`N(1, 0.1)` instead of random signs. Random signs is the default because it
+guarantees members start at distinct, unit-magnitude perturbations; a normal draw
+clusters them near the identity, which is the point of offering both.
+
+`'tabm-packed'` drops the rank-1 trick entirely and gives every backbone layer `k`
+independent kernels (`NLinear`). It costs `k` times the backbone parameters and is
+the honest deep-ensemble upper bound the efficient variants are measured against —
+without it in the table, "efficient ensembling recovers most of the benefit" has no
+denominator.
+
+Under `'tabm-mini'` the backbone weights are shared with no per-layer perturbation
+and *all* diversity comes from a single `ScaleEnsemble` adapter applied to the input,
+one learned scale vector per member — the cheapest possible ensemble, and the
+interesting limit case, since every member thereafter computes the same function of a
+differently-scaled input. `'tabm-mini-normal'` is the same with the adapter
+initialized from a normal distribution instead of random signs.
 
 Ensembling is done by carrying an explicit member axis through the whole network:
 tensors are `(batch, k, features)` and every layer is written to broadcast over that
@@ -62,11 +70,13 @@ would be preferable.
 
 `call` returns per-member predictions of shape `(batch, k, d_out)`, deliberately
 un-aggregated; the `'plain'` path expands to `(batch, 1, d_out)` so the output rank
-does not depend on the architecture. Aggregation is a separate concern handled by the
-module-level prediction helper, because the right reduction differs by task — mean
-for the point estimate, and the across-member spread if a dispersion measure is
-wanted. Note that the model itself emits no uncertainty quantity; whatever is
-computed from the member axis is computed by the caller.
+does not depend on the architecture. Aggregation is a separate, explicit step —
+`predict_with_uncertainty` returns `ŷ = (1/k) Σ fᵢ(x)` together with the
+across-member standard deviation, and the module-level `ensemble_predict` returns the
+mean alone. It is deliberately not folded into `call`, because the training loss
+needs the per-member outputs and because the right reduction differs by task. The
+spread is a disagreement statistic over whatever `call` emits (logits, for a
+classifier), not a calibrated predictive variance.
 
 Six preset variants scale hidden widths and member count together, from `[64, 32]`
 with `k=4` up to `[2048, 1024, 512, 256]` with `k=32`. The two smallest default to
@@ -128,7 +138,9 @@ class TabMModel(keras.Model):
     - **Efficient Ensembling**: Batched k-member training without k-fold computational cost
     - **Mixed Data Support**: Integrated numerical passthrough and categorical encoding
     - **Diversity Mechanisms**: Multiple strategies from input-level to full perturbations
-    - **Uncertainty Quantification**: Built-in epistemic uncertainty through ensemble variance
+    - **Uncertainty Quantification**: `call` emits the un-aggregated member axis and
+      quantifies nothing on its own; `predict_with_uncertainty` is the explicit
+      opt-in that reduces it to a mean and an across-member spread
 
     Args:
         n_num_features: Integer, number of numerical input features.
@@ -139,12 +151,16 @@ class TabMModel(keras.Model):
             Set to None for regression tasks. Binary classification should use n_classes=2.
         hidden_dims: List of integers, dimensions for each hidden layer.
             Must be non-empty with all positive values. Defines backbone architecture.
-        arch_type: String, architecture variant selector:
-            - 'plain': Standard MLP without ensemble mechanisms
-            - 'tabm': Full efficient ensemble with LinearEfficientEnsemble
-            - 'tabm-mini': Lightweight ensemble with ScaleEnsemble input adapter
-            - 'tabm-packed': Packed ensemble variant
-            - 'tabm-normal': Alternative initialization distribution
+        arch_type: String, architecture variant selector. The row of `ARCH_SPECS`
+            it names is what `_create_layers` reads; no two rows are equal.
+            - 'plain': Standard MLP, no member axis (k must be None)
+            - 'tabm': Efficient ensemble, per-layer rank-1 scaling, random-signs init
+            - 'tabm-normal': As 'tabm' but the scaling vectors init from N(1, 0.1)
+            - 'tabm-packed': k fully independent backbone kernels (NLinear); costs
+              k times the backbone parameters, no rank-1 scaling
+            - 'tabm-mini': Shared un-perturbed backbone; all diversity comes from a
+              single input-side ScaleEnsemble, random-signs init
+            - 'tabm-mini-normal': As 'tabm-mini' but the adapter inits from N(1, 0.1)
         k: Integer or None, number of ensemble members.
             Required for ensemble variants ('tabm', 'tabm-mini', etc.), must be positive.
             Must be None for 'plain' architecture.
@@ -220,9 +236,59 @@ class TabMModel(keras.Model):
     Note:
         For models, Keras automatically handles sub-layer building, so no custom
         build() method is needed. The model can be compiled and trained directly
-        after instantiation. Ensemble predictions provide both point estimates
-        and uncertainty quantification through prediction variance.
+        after instantiation. `call` returns the raw member axis; use
+        `predict_with_uncertainty` (or the module-level `ensemble_predict`) to
+        reduce it to a point estimate and a spread.
     """
+
+    # What each arch_type actually builds. Every field here is read by
+    # `_create_layers`; an entry that changed nothing would be a lie about an
+    # ablation, so there is deliberately no row whose fields duplicate another's.
+    #
+    #   ensemble_type     - 'efficient' (one shared kernel + rank-1 per-member
+    #                       scaling) or 'packed' (k independent kernels)
+    #   backbone_scaling  - whether the efficient backbone perturbs per member
+    #   backbone_init     - init of the backbone's per-member scaling vectors
+    #   adapter_init      - init of the input-side ScaleEnsemble, or None for
+    #                       no adapter
+    ARCH_SPECS: Dict[str, Dict[str, Any]] = {
+        'plain': {
+            'ensemble_type': 'efficient',
+            'backbone_scaling': False,
+            'backbone_init': 'ones',
+            'adapter_init': None,
+        },
+        'tabm': {
+            'ensemble_type': 'efficient',
+            'backbone_scaling': True,
+            'backbone_init': 'random-signs',
+            'adapter_init': None,
+        },
+        'tabm-normal': {
+            'ensemble_type': 'efficient',
+            'backbone_scaling': True,
+            'backbone_init': 'normal',
+            'adapter_init': None,
+        },
+        'tabm-packed': {
+            'ensemble_type': 'packed',
+            'backbone_scaling': False,
+            'backbone_init': 'ones',
+            'adapter_init': None,
+        },
+        'tabm-mini': {
+            'ensemble_type': 'efficient',
+            'backbone_scaling': False,
+            'backbone_init': 'ones',
+            'adapter_init': 'random-signs',
+        },
+        'tabm-mini-normal': {
+            'ensemble_type': 'efficient',
+            'backbone_scaling': False,
+            'backbone_init': 'ones',
+            'adapter_init': 'normal',
+        },
+    }
 
     # Model variant configurations optimized for different dataset scales
     MODEL_VARIANTS = {
@@ -385,6 +451,12 @@ class TabMModel(keras.Model):
         if not all(d > 0 for d in hidden_dims):
             raise ValueError("All hidden dimensions must be positive")
 
+        if arch_type not in self.ARCH_SPECS:
+            raise ValueError(
+                f"Unknown arch_type {arch_type!r}. Available: "
+                f"{sorted(self.ARCH_SPECS)}"
+            )
+
         if arch_type == 'plain':
             if k is not None:
                 raise ValueError("Plain architecture must have k=None")
@@ -413,13 +485,14 @@ class TabMModel(keras.Model):
         else:
             self.cat_encoder = None
 
+        spec = self.ARCH_SPECS[self.arch_type]
+
         # Minimal ensemble adapter for tabm-mini variants
-        if self.arch_type in ('tabm-mini', 'tabm-mini-normal'):
-            init_distribution = 'normal' if self.arch_type == 'tabm-mini-normal' else 'random-signs'
+        if spec['adapter_init'] is not None:
             self.minimal_ensemble_adapter = ScaleEnsemble(
                 k=self.k,
                 input_dim=self.d_flat,
-                init_distribution=init_distribution,
+                init_distribution=spec['adapter_init'],
                 kernel_regularizer=self.kernel_regularizer
             )
         else:
@@ -430,6 +503,10 @@ class TabMModel(keras.Model):
         self.backbone = TabMBackbone(
             hidden_dims=self.hidden_dims,
             k=backbone_k,
+            ensemble_type=spec['ensemble_type'],
+            ensemble_scaling_in=spec['backbone_scaling'],
+            ensemble_scaling_out=spec['backbone_scaling'],
+            init_distribution=spec['backbone_init'],
             activation=self.activation,
             dropout_rate=self.dropout_rate,
             use_bias=self.use_bias,
@@ -555,6 +632,34 @@ class TabMModel(keras.Model):
             x = ops.expand_dims(x, axis=1)
 
         return x
+
+    def predict_with_uncertainty(
+            self,
+            x_data: Union[Tuple[Any, Any], Dict[str, Any], Any],
+            **kwargs: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Aggregate the member axis into a point estimate and a spread.
+
+        This is the explicit opt-in for the aggregation `call` deliberately does
+        not perform. `call` returns `(batch, k, d_out)`; this returns the mean
+        `ŷ = (1/k) Σ fᵢ(x)` and the across-member standard deviation, each of
+        shape `(batch, d_out)`.
+
+        The spread is the ensemble's disagreement, which is an *epistemic*
+        signal only. It is computed on whatever `call` emits — for a classifier
+        that is logits, not probabilities, so it is not a calibrated predictive
+        variance and should not be read as one. For `arch_type='plain'` there is
+        one member and the spread is identically zero.
+
+        Args:
+            x_data: Input data in any format `call` accepts.
+            **kwargs: Forwarded to `keras.Model.predict`.
+
+        Returns:
+            Tuple `(mean, std)`, both shaped `(batch_size, d_out)`.
+        """
+        predictions = self.predict(x_data, **kwargs)
+        return np.mean(predictions, axis=1), np.std(predictions, axis=1)
 
     @classmethod
     def from_variant(

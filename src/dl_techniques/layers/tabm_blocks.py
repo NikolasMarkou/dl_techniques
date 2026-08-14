@@ -45,11 +45,86 @@ The module contains the following key components:
     -   They can operate in either a "plain" mode (a single model) or an "ensemble"
         mode (with `k` members) by simply setting the `k` parameter, making it easy
         to switch between standard and ensemble architectures.
+    -   In ensemble mode `ensemble_type` chooses which of the two mechanisms above
+        realizes the members: `'efficient'` (shared kernel + rank-1 scaling) or
+        `'packed'` (`NLinear`, `k` independent kernels). The packed form is what
+        the efficient form is supposed to approximate, so it belongs in the same
+        switch rather than only in the output head.
+
+A note on the scaling-vector initialization, since it decides whether the members
+are different functions at all: `LinearEfficientEnsemble` and `ScaleEnsemble` take
+an `init_distribution` of `'random-signs'` (draw from {-1, +1}, the paper's choice),
+`'normal'` (N(1, 0.1)) or `'ones'`. Under `'ones'` every member's effective weight
+matrix is identical at initialization — a legitimate setting for a variant whose
+diversity comes from elsewhere, and a silent degeneracy if it is not.
 """
 
 import keras
 from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
+
+# ---------------------------------------------------------------------
+
+EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
+
+
+@keras.saving.register_keras_serializable()
+class RandomSigns(keras.initializers.Initializer):
+    """
+    Draw each element uniformly from :math:`\\{-1, +1\\}`.
+
+    This is the initializer the TabM paper uses for the per-member scaling
+    vectors. It is the only one of the three options that guarantees every
+    ensemble member starts at a distinct, non-degenerate, unit-magnitude
+    perturbation of the shared kernel: a normal draw clusters members near the
+    mean, and a constant draw makes them identical.
+
+    :param seed: Optional seed for reproducible draws.
+    :type seed: int or None
+    """
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self.seed = seed
+        # Delegate the draw to a stock initializer rather than calling
+        # `keras.random.*` directly: inside `add_weight` the global seed
+        # generator has no variable to update and the direct call raises.
+        self._uniform = keras.initializers.RandomUniform(
+            minval=-1.0, maxval=1.0, seed=seed
+        )
+
+    def __call__(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
+        dtype = dtype or keras.config.floatx()
+        u = self._uniform(shape, dtype=dtype)
+        return ops.where(u >= 0.0, ops.ones_like(u), -ops.ones_like(u))
+
+    def get_config(self) -> Dict[str, Any]:
+        return {"seed": self.seed}
+
+
+def _ensemble_scaling_initializer(
+        init_distribution: EnsembleInitDistribution
+) -> keras.initializers.Initializer:
+    """
+    Resolve an ensemble scaling-vector initializer by name.
+
+    :param init_distribution: One of ``'ones'``, ``'normal'``, ``'random-signs'``.
+    :type init_distribution: str
+
+    :return: The matching initializer instance.
+    :rtype: keras.initializers.Initializer
+
+    :raises ValueError: If ``init_distribution`` is not one of the three names.
+    """
+    if init_distribution == 'ones':
+        return keras.initializers.Ones()
+    if init_distribution == 'normal':
+        return keras.initializers.RandomNormal(mean=1.0, stddev=0.1)
+    if init_distribution == 'random-signs':
+        return RandomSigns()
+    raise ValueError(
+        f"init_distribution must be one of 'ones', 'normal', 'random-signs'; "
+        f"got {init_distribution!r}"
+    )
 
 # ---------------------------------------------------------------------
 
@@ -84,10 +159,10 @@ class ScaleEnsemble(keras.layers.Layer):
     :type k: int
     :param input_dim: Input feature dimension.
     :type input_dim: int
-    :param init_distribution: Initialization distribution (``'normal'`` or ``'random-signs'``).
+    :param init_distribution: Initialization distribution for the scaling weights
+        (``'ones'``, ``'normal'`` or ``'random-signs'``). ``'random-signs'`` draws
+        from :math:`\\{-1, +1\\}` and ``'normal'`` from :math:`\\mathcal{N}(1, 0.1)`.
     :type init_distribution: str
-    :param kernel_initializer: Initializer for the scaling weights.
-    :type kernel_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for scaling weights.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
     :param kwargs: Additional layer arguments.
@@ -98,8 +173,7 @@ class ScaleEnsemble(keras.layers.Layer):
             self,
             k: int,
             input_dim: int,
-            init_distribution: Literal['normal', 'random-signs'] = 'normal',
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'ones',
+            init_distribution: EnsembleInitDistribution = 'normal',
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             **kwargs
     ) -> None:
@@ -107,18 +181,11 @@ class ScaleEnsemble(keras.layers.Layer):
         self.k = k
         self.input_dim = input_dim
         self.init_distribution = init_distribution
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # The scaling weights have exactly one job — differ per member — so the
+        # initializer is fully determined by ``init_distribution``; there is no
+        # separate ``kernel_initializer`` knob to contradict it.
+        self.kernel_initializer = _ensemble_scaling_initializer(init_distribution)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        # Adjust initializer based on distribution type
-        if init_distribution == 'random-signs':
-            self.kernel_initializer = keras.initializers.RandomUniform(
-                minval=-1.0, maxval=1.0, seed=None
-            )
-        elif init_distribution == 'normal':
-            self.kernel_initializer = keras.initializers.RandomNormal(
-                mean=0.0, stddev=0.1, seed=None
-            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the scaling weights with proper initialization."""
@@ -154,7 +221,6 @@ class ScaleEnsemble(keras.layers.Layer):
             "k": self.k,
             "input_dim": self.input_dim,
             "init_distribution": self.init_distribution,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
@@ -208,6 +274,13 @@ class LinearEfficientEnsemble(keras.layers.Layer):
     :type ensemble_scaling_in: bool
     :param ensemble_scaling_out: Whether to use output scaling.
     :type ensemble_scaling_out: bool
+    :param init_distribution: How the per-member scaling vectors ``r`` and ``s``
+        are initialized. ``'random-signs'`` draws from :math:`\\{-1, +1\\}` (the
+        paper's default: members start as distinct, unit-magnitude sign patterns),
+        ``'normal'`` draws from :math:`\\mathcal{N}(1, 0.1)`, and ``'ones'``
+        starts every member at the identity perturbation — under which all ``k``
+        members share one effective weight matrix at initialization.
+    :type init_distribution: str
     :param kernel_initializer: Initializer for the main weights.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param bias_initializer: Initializer for bias.
@@ -227,6 +300,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
             use_bias: bool = True,
             ensemble_scaling_in: bool = True,
             ensemble_scaling_out: bool = True,
+            init_distribution: EnsembleInitDistribution = 'random-signs',
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -239,6 +313,8 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         self.use_bias = use_bias
         self.ensemble_scaling_in = ensemble_scaling_in
         self.ensemble_scaling_out = ensemble_scaling_out
+        self.init_distribution = init_distribution
+        self.scaling_initializer = _ensemble_scaling_initializer(init_distribution)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -261,7 +337,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         if self.ensemble_scaling_in:
             self.r = self.add_weight(
                 shape=(self.k, input_dim),
-                initializer='ones',
+                initializer=self.scaling_initializer,
                 trainable=True,
                 name='input_scaling'
             )
@@ -270,7 +346,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         if self.ensemble_scaling_out:
             self.s = self.add_weight(
                 shape=(self.k, self.units),
-                initializer='ones',
+                initializer=self.scaling_initializer,
                 trainable=True,
                 name='output_scaling'
             )
@@ -329,6 +405,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
             "use_bias": self.use_bias,
             "ensemble_scaling_in": self.ensemble_scaling_in,
             "ensemble_scaling_out": self.ensemble_scaling_out,
+            "init_distribution": self.init_distribution,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -369,7 +446,8 @@ class NLinear(keras.layers.Layer):
 
     :param n: Number of parallel linear layers.
     :type n: int
-    :param input_dim: Input dimension.
+    :param input_dim: Input dimension, or ``None`` to infer it from the input
+        shape at build time.
     :type input_dim: int
     :param output_dim: Output dimension per linear layer.
     :type output_dim: int
@@ -390,7 +468,7 @@ class NLinear(keras.layers.Layer):
     def __init__(
             self,
             n: int,
-            input_dim: int,
+            input_dim: Optional[int],
             output_dim: int,
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -411,6 +489,12 @@ class NLinear(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the parallel linear layer weights."""
+        # ``input_dim=None`` defers the fan-in to build time, which is what lets
+        # a packed MLPBlock construct its NLinear in __init__ (where the input
+        # width is not yet known) instead of lazily inside build().
+        if self.input_dim is None:
+            self.input_dim = input_shape[-1]
+
         self.kernels = self.add_weight(
             shape=(self.n, self.input_dim, self.output_dim),
             initializer=self.kernel_initializer,
@@ -468,7 +552,10 @@ class NLinear(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+# Registered under an explicit package: the bare class name collides with
+# `layers/ffn/mlp.py::MLPBlock`, and whichever module imported last used to win
+# the global registry key, so a saved TabM deserialized into the FFN block.
+@keras.saving.register_keras_serializable(package="dl_techniques.tabm")
 class MLPBlock(keras.layers.Layer):
     """
     MLP block with optional efficient ensemble support.
@@ -505,6 +592,21 @@ class MLPBlock(keras.layers.Layer):
     :type units: int
     :param k: Number of ensemble members (None for plain MLP).
     :type k: int or None
+    :param ensemble_type: How the ``k`` members are realized when ``k`` is not
+        ``None``. ``'efficient'`` uses a :class:`LinearEfficientEnsemble` (one
+        shared kernel plus rank-1 per-member scaling); ``'packed'`` uses an
+        :class:`NLinear`, i.e. ``k`` fully independent kernels, which costs ``k``
+        times the backbone parameters and is the honest deep-ensemble baseline.
+    :type ensemble_type: str
+    :param ensemble_scaling_in: Whether the efficient ensemble applies per-member
+        input scaling. Ignored when ``ensemble_type='packed'`` or ``k is None``.
+    :type ensemble_scaling_in: bool
+    :param ensemble_scaling_out: Whether the efficient ensemble applies per-member
+        output scaling. Ignored when ``ensemble_type='packed'`` or ``k is None``.
+    :type ensemble_scaling_out: bool
+    :param init_distribution: Initialization of the per-member scaling vectors
+        (see :class:`LinearEfficientEnsemble`).
+    :type init_distribution: str
     :param activation: Activation function.
     :type activation: str
     :param dropout_rate: Dropout rate.
@@ -521,12 +623,18 @@ class MLPBlock(keras.layers.Layer):
     :type bias_regularizer: str or keras.regularizers.Regularizer or None
     :param kwargs: Additional layer arguments.
     :type kwargs: Any
+
+    :raises ValueError: If ``ensemble_type`` is not ``'efficient'`` or ``'packed'``.
     """
 
     def __init__(
             self,
             units: int,
             k: Optional[int] = None,
+            ensemble_type: Literal['efficient', 'packed'] = 'efficient',
+            ensemble_scaling_in: bool = True,
+            ensemble_scaling_out: bool = True,
+            init_distribution: EnsembleInitDistribution = 'random-signs',
             activation: str = 'relu',
             dropout_rate: float = 0.0,
             use_bias: bool = True,
@@ -537,8 +645,16 @@ class MLPBlock(keras.layers.Layer):
             **kwargs
     ) -> None:
         super().__init__(**kwargs)
+        if ensemble_type not in ('efficient', 'packed'):
+            raise ValueError(
+                f"ensemble_type must be 'efficient' or 'packed'; got {ensemble_type!r}"
+            )
         self.units = units
         self.k = k
+        self.ensemble_type = ensemble_type
+        self.ensemble_scaling_in = ensemble_scaling_in
+        self.ensemble_scaling_out = ensemble_scaling_out
+        self.init_distribution = init_distribution
         self.activation = keras.activations.get(activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
@@ -560,12 +676,28 @@ class MLPBlock(keras.layers.Layer):
                 bias_regularizer=self.bias_regularizer,
                 name='linear'
             )
+        elif self.ensemble_type == 'packed':
+            # k fully independent kernels; fan-in resolved at build time.
+            self.linear = NLinear(
+                n=self.k,
+                input_dim=None,
+                output_dim=self.units,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name='linear'
+            )
         else:
             # Efficient ensemble layer
             self.linear = LinearEfficientEnsemble(
                 self.units,
                 self.k,
                 use_bias=self.use_bias,
+                ensemble_scaling_in=self.ensemble_scaling_in,
+                ensemble_scaling_out=self.ensemble_scaling_out,
+                init_distribution=self.init_distribution,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
@@ -621,6 +753,10 @@ class MLPBlock(keras.layers.Layer):
         config.update({
             "units": self.units,
             "k": self.k,
+            "ensemble_type": self.ensemble_type,
+            "ensemble_scaling_in": self.ensemble_scaling_in,
+            "ensemble_scaling_out": self.ensemble_scaling_out,
+            "init_distribution": self.init_distribution,
             "activation": keras.activations.serialize(self.activation),
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
@@ -668,6 +804,14 @@ class TabMBackbone(keras.layers.Layer):
     :type hidden_dims: list[int]
     :param k: Number of ensemble members (None for plain MLP).
     :type k: int or None
+    :param ensemble_type: ``'efficient'`` or ``'packed'`` (see :class:`MLPBlock`).
+    :type ensemble_type: str
+    :param ensemble_scaling_in: Per-member input scaling in the efficient ensemble.
+    :type ensemble_scaling_in: bool
+    :param ensemble_scaling_out: Per-member output scaling in the efficient ensemble.
+    :type ensemble_scaling_out: bool
+    :param init_distribution: Initialization of the per-member scaling vectors.
+    :type init_distribution: str
     :param activation: Activation function.
     :type activation: str
     :param dropout_rate: Dropout rate.
@@ -690,6 +834,10 @@ class TabMBackbone(keras.layers.Layer):
             self,
             hidden_dims: List[int],
             k: Optional[int] = None,
+            ensemble_type: Literal['efficient', 'packed'] = 'efficient',
+            ensemble_scaling_in: bool = True,
+            ensemble_scaling_out: bool = True,
+            init_distribution: EnsembleInitDistribution = 'random-signs',
             activation: str = 'relu',
             dropout_rate: float = 0.0,
             use_bias: bool = True,
@@ -702,6 +850,10 @@ class TabMBackbone(keras.layers.Layer):
         super().__init__(**kwargs)
         self.hidden_dims = hidden_dims
         self.k = k
+        self.ensemble_type = ensemble_type
+        self.ensemble_scaling_in = ensemble_scaling_in
+        self.ensemble_scaling_out = ensemble_scaling_out
+        self.init_distribution = init_distribution
         self.activation = activation
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
@@ -716,6 +868,10 @@ class TabMBackbone(keras.layers.Layer):
             MLPBlock(
                 units=units,
                 k=self.k,
+                ensemble_type=self.ensemble_type,
+                ensemble_scaling_in=self.ensemble_scaling_in,
+                ensemble_scaling_out=self.ensemble_scaling_out,
+                init_distribution=self.init_distribution,
                 activation=self.activation,
                 dropout_rate=self.dropout_rate,
                 use_bias=self.use_bias,
@@ -766,6 +922,10 @@ class TabMBackbone(keras.layers.Layer):
         config.update({
             "hidden_dims": self.hidden_dims,
             "k": self.k,
+            "ensemble_type": self.ensemble_type,
+            "ensemble_scaling_in": self.ensemble_scaling_in,
+            "ensemble_scaling_out": self.ensemble_scaling_out,
+            "init_distribution": self.init_distribution,
             "activation": self.activation,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
