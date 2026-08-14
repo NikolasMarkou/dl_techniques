@@ -167,6 +167,13 @@ def create_convunext_variant(
     which differs from the shared builder's ``False`` — it is the frozen historical
     signature of this bias-free entry point and is deliberately kept.
 
+    **The named bias-free variants use ``block_normalization='batchnorm'``**, which
+    is applied HERE as a ``setdefault`` — a caller-supplied value always wins. This
+    is the ONE place in the repo where the bias-free arm departs from the shared
+    builder's ``'layernorm'`` default; a bare
+    :func:`create_convunext_denoiser` call still gets ``'layernorm'``. See the
+    ``# DECISION`` anchor below for why the key is not in ``CONVUNEXT_CONFIGS``.
+
     :param variant: One of ``'tiny'``, ``'small'``, ``'base'``, ``'large'``,
         ``'xlarge'`` (keys of the shared ``CONVUNEXT_CONFIGS``).
     :type variant: str
@@ -189,6 +196,22 @@ def create_convunext_variant(
         ...                                      convnext_version='v1')
     """
     kwargs.setdefault('use_bias', False)
+    # DECISION plan-2026-08-14T092357-0e3d792d/D-014: 'batchnorm' is selected HERE, at
+    # the bias-free VARIANT wrapper, and nowhere else.
+    #   * Do NOT move this key into the shared `CONVUNEXT_CONFIGS` dict — that dict feeds
+    #     BOTH arms, so the bias-ON variants would flip to batchnorm too, which the user
+    #     explicitly does not want.
+    #   * Do NOT change `create_convunext`'s own `block_normalization` default (both arms
+    #     stay 'layernorm'). Two things pin that: the byte-identity tripwire in
+    #     `test_bfconvunext_denoiser.py` (omitted kwarg must equal an explicit
+    #     'layernorm'), and `utils/multiplicative_miyasawa.py`'s omitted-kwarg call, whose
+    #     caller controls the batch size — batchnorm at batch 1 is a real hazard there.
+    #   * Do NOT promote this to an unconditional assignment. `setdefault` is load-bearing:
+    #     a caller passing `block_normalization='layernorm'` must keep it.
+    # Rationale: `ddnm.py` documents that a bias-free ConvUNext is degree-1 homogeneous
+    # only under batchnorm, so the NAMED bias-free variants get it; the raw builder call
+    # keeps its historical graph. decisions.md D-003 (ruling) and D-014 (implementation).
+    kwargs.setdefault('block_normalization', 'batchnorm')
     return _create_convunext_variant(
         variant=variant,
         input_shape=input_shape,
