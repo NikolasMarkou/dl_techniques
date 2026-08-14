@@ -1,85 +1,99 @@
 """
-Segment Anything Model (SAM 1): the end-to-end promptable segmenter.
-====================================================================
+Promptable segmentation with a heavy image encoder and a near-free mask decoder.
 
-:class:`SAM` composes the three SAM 1 components -- image encoder, prompt
-encoder, mask decoder -- into one serializable Keras model with a
-``from_variant`` constructor. It owns preprocessing (normalize + pad),
-orchestration, and the postprocess that lifts low-resolution logits back to the
-original image size.
+The problem SAM 1 solves is not "segment the object" but "segment *an* object,
+given whatever the user points at" -- and a prompt is intrinsically ambiguous.
+A single click on a shirt is a valid request for the shirt, for the person
+wearing it, or for the checked pattern on its sleeve, and no amount of encoder
+capacity can decide which one was meant. The design resolves this by refusing
+to: the decoder emits a small fixed set of masks (three, plus a single-mask
+token used when the caller says the prompt is unambiguous) and a separate head
+predicts each one's IoU against the mask it is trying to be. Ambiguity becomes
+a *ranking* problem the caller can settle, instead of an ill-posed regression
+whose loss averages incompatible answers into a blur.
 
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
-- Dosovitskiy, A. et al. (2020). ViT -- the encoder family.
+The second idea is an asymmetry in where the compute lives. The image encoder is
+a full ViT and costs 89.7M to 637.0M parameters depending on variant; the prompt
+encoder and mask decoder together cost about 4.06M **at every variant**, because
+both run at a fixed `prompt_embed_dim=256` regardless of encoder width. The
+image is encoded once into a `(B, img_size/16, img_size/16, 256)` grid, and each
+subsequent click re-runs only the 4M-parameter tail. That split is what makes
+interactive use viable at all, and it is why the variant table below touches the
+encoder alone.
 
-Key Features:
-------------
-- ``SAM.from_variant('vit_b' | 'vit_l' | 'vit_h')`` builds the three components
-  at matching widths; the prompt encoder and mask decoder are
-  variant-INDEPENDENT (both run at ``prompt_embed_dim=256``).
-- ``call`` takes a DICT (``image``, optional ``points`` / ``boxes`` / ``masks``,
-  ``original_size``) and returns a dict of ``masks``, ``iou_predictions`` and
-  ``low_res_logits``.
-- ``get_build_config`` / ``build_from_config`` materialize the FULL weight set
-  at load time; without them the lazily-built attention and transformer
-  sublayers are restored fresh. See the anchored notes on those methods.
+The image encoder is a plain, non-hierarchical ViT: windowed attention with a
+learnable relative position bias everywhere, interrupted by full-grid global
+blocks at four indices spread evenly through the depth, then a stride-1 neck of
+a 1x1 and a 3x3 convolution that changes only the channel count to 256. The
+grid is fixed by the patch embedding alone -- the neck does not resample. The
+prompt encoder maps points, box corners and mask hints into that same 256-wide
+space through a random-Gaussian Fourier positional encoding that is *shared*
+with `get_dense_pe()`, so a prompt coordinate and an image position are
+expressed in one frame rather than two that must be kept in sync. Points and
+box corners additionally pick up one of four learned type embeddings, with
+`not_a_point_embed` for padding rows and `no_mask_embed` standing in when no
+mask prompt is given.
 
-Architecture Overview:
----------------------
-1. ``preprocess`` -> normalize by ``pixel_mean``/``pixel_std``, pad to
-   ``img_size``.
-2. -> ``image_encoder`` -> ``(B, img_size/16, img_size/16, 256)``.
-3. -> ``prompt_encoder`` -> sparse ``(B, N, 256)`` + dense ``(B, H', W', 256)``.
-4. -> ``mask_decoder`` -> ``low_res_logits (B, N, H'*4, W'*4)`` + ``iou``.
-5. -> ``postprocess_masks`` -> ``masks`` at ``original_size``, optionally
-   binarized at ``mask_threshold``.
+The mask decoder is a two-way transformer of depth 2: tokens attend to the
+image and the image attends back to the tokens, with the positional encoding
+re-added at every attention rather than once at the input so geometry survives
+the residual updates. The head that finally produces a mask is a hypernetwork,
+not a convolution -- a per-mask MLP emits a weight *vector* which is dotted
+against the 4x-upscaled feature map. That is what keeps a per-prompt mask head
+essentially free: the prompt-dependent part is a vector, and the expensive
+spatial part is shared.
 
-Model Variants:
---------------
-Measured with ``count_params()`` after one forward pass per component at
-``img_size=1024`` -- these are this package's own numbers, not reference-PyTorch
-quotes, and this package's layout deviations move them:
+Two places in this file behave in ways a reader would otherwise guess wrong.
+`preprocess` only PADS -- it normalizes and pads to the encoder size, and raises
+`ValueError` on an oversize image rather than resizing it. Resizing here would
+be silently wrong, because reference SAM resizes the raw image *before* the
+model precisely so prompt coordinates can be rescaled by the same factor; a
+hidden resize inside the model would leave every prompt in the wrong frame.
+Callers apply `resize_longest_side` first. And `get_build_config` /
+`build_from_config` deliberately run a full-resolution dummy forward pass on
+every load: the ViT blocks and the two-way transformer build their attention
+and FFN sublayers lazily, so the static `build()` chain alone materializes only
+138 of the reduced fixture's 202 weights, Keras restores those 138, and the
+other 64 are created fresh and random on the first real call -- a mask drift of
+order 1-2 absolute with no error and no warning. A weight *count* cannot detect
+this (both the correct and the broken build report 202/201/321,862 after any
+forward pass), which is why the guards compare index-aligned weight values.
 
-| Variant | Image Encoder | Prompt Encoder | Mask Decoder | Total |
-|---|---:|---:|---:|---:|
-| ``vit_b`` | 89,670,912 | 6,476 | 4,058,340 | 93,735,728 |
-| ``vit_l`` | 308,278,272 | 6,476 | 4,058,340 | 312,343,088 |
-| ``vit_h`` | 637,026,048 | 6,476 | 4,058,340 | 641,090,864 |
+Two behavioural choices are worth stating as choices. `binarize_masks` defaults
+to `True`, which casts the full-resolution `masks` output to `uint8` and makes
+it gradient-dead -- differentiating it returns `None` for every trainable
+variable, silently. It stays the default because it is reference SAM's own
+output contract; `low_res_logits` is the training target at either setting, and
+`binarize_masks=False` is the escape hatch when a differentiable full-resolution
+mask is genuinely needed. Separately, `SAM.call` cannot be traced: it always
+ends in `postprocess_masks`, whose `ops.image.resize` raises under graph mode
+regardless of which key the caller reads. `SAMTrainingModel` in
+`training_model.py` is the `fit()` path -- it drives the submodules directly and
+never reaches the postprocess.
 
-Usage Examples:
---------------
-```python
-from dl_techniques.models.SAM.SAM1 import SAM
-model = SAM.from_variant('vit_b')
-outputs = model({'image': image, 'points': (coords, labels),
-                 'original_size': (1024, 1024)})
-outputs['low_res_logits']    # (B, N, 256, 256) -- the differentiable key
-```
+This package is architecture only, and that is deliberate rather than
+unfinished. `SAM.from_variant('vit_b')` returns a randomly initialized model;
+no official Meta checkpoint has ever been loaded here, no key-mapping layer
+exists, and no accuracy or segmentation-quality claim is made anywhere in the
+package. The parameter counts quoted below are this package's own
+`count_params()` measurements at `img_size=1024`, not reference-PyTorch quotes,
+and this implementation's layout deviations move them: encoder 89,670,912 /
+308,278,272 / 637,026,048 for `vit_b` / `vit_l` / `vit_h`, over a
+variant-independent 6,476 (prompt encoder) + 4,058,340 (mask decoder). Only
+`vit_b` and a reduced fixture are ever forward-passed by the test suite; the two
+larger variants are constructed and parameter-counted only.
 
-Measured caveats:
-----------------
-- **No weights ship and no accuracy claim is made.**
-  ``SAM.from_variant('vit_b')`` builds a RANDOMLY INITIALIZED model. No
-  official Meta SAM checkpoint has ever been loaded in this repository, no
-  key-mapping layer exists, and ``vit_l`` / ``vit_h`` are never forward-passed
-  by any test -- only ``vit_b`` and a reduced fixture are.
-- **``SAM.call`` cannot be traced.** ``postprocess_masks`` runs unconditionally
-  at the end of ``call`` and its ``ops.image.resize`` raises under graph mode,
-  regardless of which output key the caller consumes. Consuming only
-  ``low_res_logits`` does NOT avoid it. Use :class:`SAMTrainingModel` for any
-  ``fit()`` path.
-- **``masks`` is not differentiable at the default.** ``binarize_masks=True``
-  casts it to ``uint8``, so differentiating it returns ``None`` for EVERY
-  trainable variable, silently and with no error. ``low_res_logits`` is the
-  training target; ``binarize_masks=False`` is the escape hatch.
-- The layout control at the reduced test fixture (``img_size=256``,
-  ``patch_size=16``, ``embed_dim=64``, ``depth=4``, ``num_heads=4``,
-  ``out_chans=32``): **202 weights / 201 trainable / 321,862 parameters**, and
-  a ``.keras`` round-trip whose max abs diff on ``low_res_logits`` is exactly
-  ``0.0``. A weight COUNT cannot see a partial restore -- both the correct and
-  the broken build report 202/201/321,862 after any forward pass -- which is why
-  the guards compare index-aligned VALUES.
+References:
+    - Kirillov et al., 2023. Segment Anything.
+      (https://arxiv.org/abs/2304.02643)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. (https://arxiv.org/abs/2103.14030)
+    - Ha et al., 2016. HyperNetworks.
+      (https://arxiv.org/abs/1609.09106)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras

@@ -1,67 +1,109 @@
 """
-The SAM 2 model: the image path, the streaming path, and the variant tables.
-============================================================================
+Streaming video segmentation: SAM's promptable decoder conditioned on a memory bank.
 
-:class:`SAM2` assembles the six components into one ``keras.Model``, owns the
-learned tensors and projections that belong to none of them, and carries
-``SAM2.MODEL_VARIANTS``. That table READS the trunk and neck geometry from
-``Hiera.MODEL_VARIANTS`` and ``SAM2ImageEncoder.MODEL_VARIANTS`` rather than
-restating it, so each geometry has exactly one home. :func:`create_sam2` is the
-factory over it.
+SAM 1 segments a frame from a prompt. Tracking that object through a video is a
+different problem, because the thing that identifies the object on frame 200 is
+not a click but frame 0 -- and everything in between. Running SAM 1 per frame
+loses identity the moment the object is occluded, deforms, or leaves and
+re-enters. SAM 2's answer is to keep the promptable decoder and insert a
+learned recurrence in front of it: before the decoder sees a frame's pixel
+features, those features cross-attend to a bounded memory of the recent past.
+The prompt is then optional on every frame after the first, because the memory
+carries what the prompt used to say.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+That memory is deliberately narrow. A frame's prediction is compressed by the
+memory encoder into a `mem_dim`-wide spatial map -- 8 channels at `tiny`, 64 at
+`hiera_l`, against a `hidden_dim` of 256 for the pixel stream -- so storing
+several frames costs a fraction of storing their features. Memory attention
+therefore runs cross-attention with keys and values at `kv_in_dim = mem_dim`
+while its queries stay at `d_model = hidden_dim`, an asymmetry the component
+agreement check enforces at construction. Alongside the spatial memory the bank
+also carries *object pointers*: single `hidden_dim`-wide vectors, one per
+remembered frame, produced by a 3-layer MLP from whichever decoder output token
+the model's own IoU head rated best. The spatial stream says where the object
+was; the pointer stream says what it looked like.
 
-Key Features:
-------------
-- ``maskmem_tpos_enc``: the ``(num_maskmem, 1, 1, mem_dim)`` per-slot TEMPORAL
-  embedding. The memory bank returns SLOT INDICES; this class turns them into
-  vectors and adds them to the memory positional encoding.
-- ``no_mem_embed`` / ``no_mem_pos_enc``: the empty-memory path, which is what
-  the first frame of a video sees.
-- ``no_obj_ptr``: the learned "no object" pointer, blended in by the object
-  score.
-- ``no_obj_embed_spatial``: ``(1, mem_dim)``, added into the encoded memory in
-  proportion to ``1 - is_obj_appearing``.
-- ``obj_ptr_proj``: a 3-layer MLP (``use_mlp_for_obj_ptr_proj: true``) turning
-  the decoder's selected output token into an object pointer.
-- ``obj_ptr_tpos_proj``: ``Dense(mem_dim)``
-  (``proj_tpos_enc_in_obj_ptrs: true``), projecting the object-pointer
-  TEMPORAL sine encoding down to the memory width so it cannot interfere with
-  the spatial positional encoding.
+The image side is a Hiera trunk -- hierarchical, four stages, window attention,
+width and head count doubling while the grid halves via a max-pool on the
+attention *queries* -- feeding an FPN neck that produces four `d_model` levels
+plus a sine positional map each, of which the coarsest `scalp` levels are
+dropped. The retained stride-16 level is the memory grid; the two finer levels
+are handed to the mask decoder as high-resolution skips, which is why
+`use_high_res_features=True` is required rather than optional. The decoder
+itself is a sibling of SAM 1's, not a subclass: it prepends an object-score
+token to the token block, returns four values instead of two, and can fall back
+between its multimask and single-mask outputs on a stability score.
 
-Architecture Overview:
----------------------
-1. :meth:`SAM2.call` -- the IMAGE path: encoder -> prompt encoder -> decoder.
-2. :meth:`SAM2.stream_step` -- the VIDEO path: encoder -> memory attention ->
-   prompt encoder -> decoder -> memory encoder -> bank.
+Temporal order is carried by exactly one mechanism, and this is the constraint
+most likely to be broken by a well-meaning simplification. Memory attention's
+rotary embedding is spatial-only and is broadcast *identically* across every
+stacked memory frame, so it cannot distinguish frame `t-1` from frame `t-6`.
+The distinction comes from `maskmem_tpos_enc`, a learned
+`(num_maskmem, 1, 1, mem_dim)` table that lives on this class while the memory
+bank returns only slot *indices* into it. The object-pointer tail of the memory
+sequence is separate again: it gets a fixed sine encoding of how many frames
+away each pointer is, projected down to `mem_dim` by `obj_ptr_tpos_proj` so it
+cannot collide with the spatial positional encoding. Folding either into the
+rotary embedding, or zeroing the pointer tail, yields a model that trains
+happily and is temporally blind.
 
-Usage Examples:
---------------
-```python
-from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
-model = create_sam2("tiny")
-outputs = model({"image": images, "points": (coords, labels)})
-```
+Occlusion is likewise marked twice, and both marks are load-bearing.
+`no_obj_ptr` blends into the pointer stream by the object score; the *separate*
+`no_obj_embed_spatial` is added into the encoded spatial memory in proportion to
+`1 - is_appearing`. On top of those two marks, `_suppress_absent_object`
+*erases* the mask itself, overwriting every logit with `NO_OBJ_SCORE = -1024.0`
+on any row the score head calls empty. That value is transcribed, not chosen:
+the memory encoder's `sigmoid(x) * 20 - 10` saturates it to exactly `-10`, and
+`-1024` is representable in float16 so suppression survives `mixed_float16`.
+The threshold is hard (`score > 0`) even when `soft_no_obj_ptr` is set, because
+only the pointer blend may be soft. One consequence a loss must handle:
+`ops.where` passes no gradient through the unselected branch, so a suppressed
+row is gradient-free on the mask path and the score head needs its own explicit
+loss.
 
-Measured caveats:
-----------------
-- **Two entry points, deliberately different in kind.** :meth:`SAM2.call` is
-  traceable under ``tf.function`` and is what ``fit()`` sees; it touches
-  neither the memory bank nor memory attention. :meth:`SAM2.stream_step` is a
-  plain Python method that mutates Python state, is never traced, and never
-  calls ``self(...)``. It follows the ``VideoJEPA.stream_reset`` /
-  ``stream_step`` precedent.
-- **The spatial / temporal split is a correctness constraint, not a layout
-  choice.** The rotary embedding inside memory attention is SPATIAL-ONLY and is
-  broadcast identically across every memory frame, so temporal distinction is
-  carried exclusively by ``maskmem_tpos_enc`` here. Conflating the two produces
-  a model that runs.
-- **There are TWO independent no-object mechanisms.** ``no_obj_ptr`` marks the
-  pointer stream and ``no_obj_embed_spatial`` marks the spatial stream.
-  Shipping only the former leaves an occluded frame's spatial memory
-  indistinguishable from a visible frame's.
+The class has two entry points that differ in kind, not just in arguments.
+`call` is the image path: encoder, prompt encoder, decoder, nothing else. It
+never touches the memory bank or memory attention, and it is traceable, which
+is what `fit()` needs. `stream_step` is the video path -- plain Python that
+mutates the bank, branches on whether the bank is empty, and reads Python
+integers out of its selection policy. It is deliberately never traced and never
+routes through `self(...)`. Because `call` is memory-free, an image-only
+inference is exactly SAM 1's shape at SAM 2's weights; `SAM2TrainingModel`
+supplies the traceable multi-frame path by unrolling a static frame loop over
+the submodules with a fresh, local memory bank.
+
+Two defaults are the shipped *configuration* rather than the reference class
+signature, because this port has no YAML layer to carry a config on top of a
+constructor: `fixed_no_obj_ptr` defaults to `True` and `soft_no_obj_ptr` to
+`False`, matching `sam2.1_hiera_l.yaml`. Taking the reference class defaults
+would ship a model no released checkpoint was ever trained as. For the same
+reason `obj_ptr_proj`, `obj_ptr_tpos_proj` and `no_obj_embed_spatial` have no
+enabling flags at all -- every one of them is silent when absent. Relatedly,
+`MODEL_VARIANTS` here stores only the numbers that live nowhere else; trunk and
+neck geometry is read from `Hiera.MODEL_VARIANTS` and
+`SAM2ImageEncoder.MODEL_VARIANTS`, and `from_variant` refuses an `image_size`
+override for that reason. Only `tiny` and `hiera_l` are shipped: the other
+published SAM 2 sizes' numbers were never read by this implementation and are
+not invented.
+
+No pretrained weights ship, and that is the deliberate position of the whole
+`SAM/` package rather than an omission. SAM 2's released code is under the SAM
+License, which is incompatible with this repository's GPL-3.0, so this is a
+reimplementation from the paper and published configuration numbers -- no
+upstream file copied, no upstream checkpoint loaded, and no accuracy or
+tracking-quality claim made anywhere.
+
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
+      (https://arxiv.org/abs/2408.00714)
+    - Kirillov et al., 2023. Segment Anything.
+      (https://arxiv.org/abs/2304.02643)
+    - Ryali et al., 2023. Hiera: A Hierarchical Vision Transformer without the
+      Bells-and-Whistles. (https://arxiv.org/abs/2306.00989)
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection.
+      (https://arxiv.org/abs/1612.03144)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Union
