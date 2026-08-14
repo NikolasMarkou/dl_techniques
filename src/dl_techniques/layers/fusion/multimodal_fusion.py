@@ -991,12 +991,22 @@ class MultiModalFusion(keras.layers.Layer):
 
         **Cost.** MEASURED trainable parameters, 2 modalities, ``dim=64``,
         default ``num_tensor_projections=8``: ``concatenation`` 8,384;
-        ``tensor_fusion`` 98,880; ``bilinear`` 262,336. Asymptotically
-        ``tensor_fusion`` is ``(P+1) * N * dim^2``-ish -- quadratic in ``dim``,
-        like every other strategy here except ``'bilinear'``, which is
-        ``dim^3``. It is therefore roughly ``12x`` concatenation but *cheaper*
-        than ``'bilinear'`` for any ``dim > 24``; it is not the most expensive
-        strategy in this layer.
+        ``tensor_fusion`` 98,880; ``bilinear`` 262,336. The ``tensor_fusion``
+        count is EXACT, not asymptotic::
+
+            P * (N*dim*dim + dim)   # the P hidden projections
+          + (P*dim*dim + dim)       # the output projection
+          = P * (N + 1) * dim^2 + (P + 1) * dim
+
+        i.e. ``24 * dim^2 + 9 * dim`` at ``P=8, N=2``. Verified against
+        constructed layers at four settings: ``(dim,N,P) = (64,2,8) -> 98,880``,
+        ``(96,2,8) -> 222,048``, ``(48,3,4) -> 37,104``, ``(64,3,8) -> 131,648``,
+        all exact. So the growth is quadratic in ``dim`` and LINEAR in both ``N``
+        and ``P`` -- like every other strategy here except ``'bilinear'``, which
+        is ``dim^3 + 3*dim``. ``tensor_fusion`` is therefore roughly ``12x``
+        concatenation but *cheaper* than ``'bilinear'`` for any ``dim > 24``
+        (at ``dim=24``: 14,040 vs 13,896; at ``dim=25``: 15,225 vs 15,700); it is
+        not the most expensive strategy in this layer.
 
         :param inputs: List of modality tensors.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
