@@ -4,9 +4,25 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of Apple's **MobileCLIP**, an efficient vision-language model designed for high performance on resource-constrained devices. MobileCLIP adapts the powerful zero-shot capabilities of CLIP (Contrastive Language-Image Pre-training) to an architecture optimized for the latency, memory, and power limitations of mobile and edge computing.
+Keras 3 implementations of Apple's **MobileCLIP** family — efficient
+vision-language models that adapt CLIP's zero-shot capabilities to the latency,
+memory, and power limits of mobile and edge hardware.
 
-The architecture is composed of a mobile-friendly image encoder and a configurable Transformer-based text encoder, trained jointly with a contrastive objective.
+**This package ships two models. They are not interchangeable.**
+
+| | `MobileClipModel` (v1) | `MobileClipV2Model` (v2) |
+|---|---|---|
+| Module | `mobile_clip_v1.py` | `mobile_clip_v2.py` |
+| Paper | MobileCLIP (Vasu et al., 2024) | MobileCLIP2 (Faghri et al., 2025) |
+| Image tower | `keras.applications` MobileNetV2 / V3 **substitute** | faithful FastViT **MCi**, from [`models/fastvit/`](../fastvit/README.md) |
+| Text tower | `MobileClipTextEncoder` | the same class, shared |
+| Faithful to the reference? | **No**, by its own recorded decision D-001 | Yes, modulo [X-1..X-5](#16-deviations-v2) |
+| Variant keys | `b`, `s0`, `s1`, `s2` | `mobileclip2_s0/s2/s3/s4`, `mobileclip_s3/s4` |
+| Status | shipped and tested; not deprecated | the faithful port; architecture only, no weights |
+
+Neither model ships pretrained weights, and **v2 makes no accuracy claim** — read
+[§16](#16-deviations-v2) before comparing it against any published number. See
+[§17](#17-v1-vs-v2-which-should-i-use) for how to choose.
 
 ---
 
@@ -27,43 +43,47 @@ The architecture is composed of a mobile-friendly image encoder and a configurab
 13. [Testing & Validation](#13-testing--validation)
 14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
 15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+16. [Deviations from the reference implementation (v2)](#16-deviations-v2)
+17. [v1 vs v2: which should I use?](#17-v1-vs-v2-which-should-i-use)
+18. [Citation](#18-citation)
 
 ---
 
 ## 1. Overview: What is MobileCLIP and Why It Matters
 
-### What is MobileCLIP?
-
-**MobileCLIP** is a highly efficient multimodal model from Apple that brings the power of large-scale vision-language understanding to on-device applications. It follows the same principles as the original CLIP model—learning a shared embedding space between images and text from web-scale data—but does so with a co-designed, asymmetric architecture that prioritizes mobile performance.
+**MobileCLIP** is a highly efficient multimodal model family from Apple that
+brings large-scale vision-language understanding to on-device applications. It
+follows the same principle as the original CLIP — learning a shared embedding
+space between images and text from web-scale data — but with a co-designed,
+asymmetric architecture that prioritizes mobile performance.
 
 ### Key Innovations
 
-1.  **Efficient Image Backbones**: Instead of the large Vision Transformers (ViTs) used in the original CLIP, MobileCLIP employs custom, lightweight convolutional backbones (referred to as MCI0, MCI1, etc.) that are heavily inspired by the MobileNet family.
-2.  **Asymmetric Design**: The model is intentionally asymmetric. The image encoder is made extremely fast and lightweight, as it must run on every input frame in real-time applications. The text encoder, which often runs only once on a small set of text prompts for zero-shot classification, can be comparatively more powerful.
-3.  **Optimized Text Encoder**: The text encoder is a standard Transformer, but its depth and configuration are tailored across different variants to balance performance and accuracy for mobile use cases.
+1. **Efficient image backbones**: instead of the large Vision Transformers used
+   in the original CLIP, MobileCLIP employs custom lightweight hybrid backbones
+   (`mci0`, `mci1`, ...) built on FastViT.
+2. **Asymmetric design**: the model is intentionally lopsided. The image encoder
+   is made extremely fast, as it must run on every input frame in real-time
+   applications. The text encoder, which often runs only once over a small set of
+   prompts for zero-shot classification, can be comparatively more powerful.
+3. **Optimized text encoder**: a standard Transformer whose depth and masking are
+   tailored per variant to balance accuracy against on-device cost.
 
-### Why MobileCLIP Matters
+### Why It Matters
 
-**The Standard CLIP Problem**:
 ```
 Problem: Perform zero-shot classification on a mobile phone.
-Standard CLIP Approach:
-  1. Use the original CLIP model, which has a massive ViT image encoder.
-  2. The model is too large to fit in memory and too slow for real-time inference.
-  3. Result: The application is unusable on-device, forcing developers to rely
-     on a cloud server, which introduces latency and privacy issues.
-```
 
-**MobileCLIP's Solution**:
-```
-MobileCLIP Approach:
-  1. Replace the large image encoder with a hyper-efficient mobile-native CNN.
-  2. Optimize the entire architecture for on-device constraints.
-  3. The model runs directly on the phone with very low latency.
-  4. Benefit: Enables powerful, zero-shot AI capabilities like real-time object
-     recognition with natural language, visual search, and content filtering,
-     all directly on the user's device without needing a network connection.
+Standard CLIP:
+  1. A massive ViT image encoder.
+  2. Too large for memory, too slow for real time.
+  3. Forces a cloud round trip -> latency and privacy costs.
+
+MobileCLIP:
+  1. Replace the image encoder with a hyper-efficient hybrid CNN.
+  2. Optimize the whole architecture for on-device constraints.
+  3. Runs locally, enabling real-time recognition, visual search and
+     content filtering with no network connection.
 ```
 
 ---
@@ -72,7 +92,9 @@ MobileCLIP Approach:
 
 ### The "Last Mile" Problem for Vision-Language Models
 
-While models like CLIP demonstrated a revolutionary leap in zero-shot learning, their immense size and computational cost made them largely inaccessible for deployment on edge devices. This created a "last mile" problem: how do we deliver this powerful technology to the hands of billions of users in a practical way?
+Models like CLIP demonstrated a revolutionary leap in zero-shot learning, but
+their size and computational cost made them largely inaccessible on edge
+devices.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -91,7 +113,8 @@ While models like CLIP demonstrated a revolutionary leap in zero-shot learning, 
 └──────────────────────────────────────────────────────────────┘
 ```
 
-MobileCLIP was specifically designed to solve this. By starting with on-device performance as a primary constraint, it re-architects the vision-language pre-training paradigm to create a model that is "efficient by design," not just a scaled-down version of a larger model.
+MobileCLIP starts from on-device performance as a primary constraint, making the
+model "efficient by design" rather than a scaled-down version of a larger one.
 
 ---
 
@@ -99,130 +122,208 @@ MobileCLIP was specifically designed to solve this. By starting with on-device p
 
 ### The Dual-Encoder Contrastive Architecture
 
-At its core, MobileCLIP uses the same successful dual-encoder, contrastive learning framework as the original CLIP. It consists of two separate neural networks—one for images and one for text—that are trained to map their respective inputs into a shared high-dimensional space.
+Two networks — one for images, one for text — map their inputs into a shared
+space. Features are L2-normalized, scaled by a learnable temperature, and
+compared with a symmetric similarity matrix.
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                         MobileCLIP Architecture                   │
-│                                                                   │
-│  Image Input (Batch) ───►┌─────────────────┐                      │
-│                          │  Image Encoder  │                      │
-│                          │(Efficient CNN)  │───► Image Embeddings │
-│                          └─────────────────┘      (Batch, D)      │
-│                                                       │           │
-│  Text Input (Batch) ───► ┌─────────────────┐          ▼           │
-│                          │  Text Encoder   │                     ┌────────────┐
-│                          │ (Transformer)   │───► Text Embeddings │ Compute NxN│
-│                          └─────────────────┘      (Batch, D)     │ Similarity │
-│                                                       ▲          └────────────┘
-│                                                       │                │
-│                                                       └────────────────▼
-│                                                    Contrastive Loss
-│                (Maximize similarity of correct pairs, minimize for others)
-│
-└──────────────────────────────────────────────────────────────────┘
+{'image': (B,256,256,3)}          {'text': (B,77)}
+        |                                |
+   Image encoder                   Text encoder
+        |                                |
+   (B, embed_dim)                  (B, embed_dim)
+        |                                |
+   L2 normalize                     L2 normalize
+        \________________  _______________/
+                         \/
+       scale = clip(exp(logit_scale), 0, 100)
+                         |
+   {'image_features', 'text_features',
+    'logits_per_image', 'logits_per_text', 'logit_scale'}
 ```
 
-The training process involves showing the model a batch of N (image, text) pairs. It computes an N x N similarity matrix between all image and text embeddings. The goal of the contrastive loss is to maximize the similarity scores on the diagonal (correct pairs) while minimizing the scores for all other incorrect pairings.
+Training shows the model a batch of N (image, text) pairs and computes an N x N
+similarity matrix. The contrastive loss maximizes the diagonal (correct pairs)
+and minimizes everything else.
+
+**The clip on `exp(logit_scale)` is load-bearing, not cosmetic**: an unbounded
+temperature turns a diverging run into `inf` logits and a `nan` loss with no
+other observable symptom. Both v1 and v2 cap it at 100.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `MobileClipImageEncoder`
+### 4.1 The image tower
 
--   **Purpose**: To convert an image into a compact vector embedding with maximum efficiency.
--   **Architecture**:
-    1.  **Backbone**: A lightweight convolutional neural network. The official MobileCLIP uses custom backbones named `mci0`, `mci1`, etc., which are based on efficient principles from models like MobileNet. This implementation allows using any Keras Applications backbone (e.g., `MobileNetV2`).
-    2.  **Projection Head**: The feature map from the backbone is passed to an `ImageProjectionHead`. This head performs global average pooling to create a feature vector and then uses a `Dense` layer to project it into the final shared `embed_dim`.
+**v2 — faithful.** A FastViT MCi hybrid: shallow stages mix tokens with a
+*convolutional* RepMixer, and only the deepest one or two stages use global
+self-attention, at a resolution where the token count has already collapsed to
+64 (or 16). It lives in its own package,
+[`models/fastvit/`](../fastvit/README.md), and is a standalone `keras.Model`.
 
-### 4.2 `MobileClipTextEncoder`
+> **There is no separate image projection in v2.** The tower's terminal `Dense`
+> **is** the CLIP image projection: MobileCLIP's open_clip configs set
+> `"timm_pool": "avg"` with `"timm_proj": null`, and in open_clip's `TimmModel` a
+> non-attention pool asserts that the trunk itself does the projecting and
+> instantiates it with `num_classes=embed_dim`. So `projection_dim` is passed
+> straight through to `FastVitImageEncoder` and its output *is* the image
+> embedding. Stacking another projection on top would be a second, unfaithful
+> one.
 
--   **Purpose**: To convert a sequence of text tokens into a vector embedding that aligns with the image embeddings.
--   **Architecture**:
-    1.  **Token and Positional Embeddings**: Input token IDs are converted to dense vectors, and a learnable positional embedding is added to encode word order.
-    2.  **Transformer Stack**: The sequence is processed by a stack of `TransformerLayer` blocks. These apply self-attention to build context-aware representations.
-    3.  **Feature Extraction**: The output embedding corresponding to the final "end-of-text" (EOT) token is selected as the representative feature for the entire text sequence.
-    4.  **Projection**: This feature vector is projected into the final shared `embed_dim` via a matrix multiplication.
+**v1 — deliberately non-faithful.** `MobileClipImageEncoder` pairs a
+`keras.applications` backbone with an `ImageProjectionHead` (global average pool
++ `Dense` into `embed_dim`). Its in-file decision D-001 (`components.py:18-32`)
+records the substitution: the real MCi backbones did not exist in
+`keras.applications`, so `mci0 -> MobileNetV3Small`, `mci1 -> MobileNetV2`,
+`mci2 -> MobileNetV3Large`, `vit_b16 -> MobileNetV3Large`.
 
-### 4.3 Contrastive Head and `logit_scale`
+> **The strings `mci0`/`mci1`/`mci2` mean opposite things in the two models.** In
+> v2 they name real MCi rows (`models.fastvit.MCI_VARIANTS`); in v1 they are keys
+> of `components._BACKBONE_ALIASES` resolving to MobileNet stand-ins.
 
--   **Purpose**: To compute the final similarity scores for the contrastive loss.
--   **Functionality**:
-    1.  **L2 Normalization**: Both the final image and text features are L2-normalized. This constrains them to a hypersphere, making the dot product equivalent to cosine similarity.
-    2.  **Temperature Scaling**: The similarity scores (logits) are multiplied by a learnable scalar, `logit_scale`. This temperature parameter, initialized to `log(1/0.07)`, controls the sharpness of the distribution over similarities and is critical for stable training.
+### 4.2 `MobileClipTextEncoder` — shared by both
+
+Token embedding + learned positional embedding -> `text_layers` x
+`TransformerLayer` -> `LayerNormalization` -> EOT-token extraction -> projection
+to `embed_dim`. `intermediate_size` is `4 * text_width` in every shipped variant.
+
+This tower is **faithful for both models**: v1's substitution is confined to the
+image branch. v2 shares the class rather than re-implementing it — see
+[§17](#17-v1-vs-v2-which-should-i-use) for why that is a hard constraint, not a
+DRY preference.
+
+### 4.3 Contrastive head and `logit_scale`
+
+Both features are L2-normalized (constraining them to a hypersphere, so the dot
+product is cosine similarity), then multiplied by a learnable scalar
+`logit_scale` initialized to `log(1/0.07)`. This temperature controls the
+sharpness of the similarity distribution and is critical for stable training.
+
+In v2 the towers return **raw, un-normalized** features from their own `call`;
+normalization happens in `encode_image` / `encode_text`, because
+`dl_techniques.utils.clip_utils.compute_clip_logits` documents that it expects
+already-normalized inputs and does not normalize internally.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First MobileCLIP Model (30 seconds)
-
-Let's build the smallest MobileCLIP variant (`s0`) and perform a single forward pass.
+### v2 (the faithful port)
 
 ```python
-import keras
 import numpy as np
+from dl_techniques.models.mobile_clip import MobileClipV2Model
 
-# Local imports from your project structure
-from dl_techniques.models.mobile_clip.mobile_clip_v1 import MobileClipModel
+model = MobileClipV2Model.from_variant('mobileclip2_s0')
 
-# 1. Create a MobileCLIP model from the "s0" variant
-# This implementation requires a custom backbone; we'll use MobileNetV2 for demonstration.
-# Note: To truly replicate MobileCLIP, custom backbones 'mci0', 'mci1' etc. would be needed.
-MobileClipModel.MODEL_VARIANTS['s0']['image_config']['backbone_name'] = 'MobileNetV2'
-model = MobileClipModel.from_variant("s0")
+out = model(
+    {
+        'image': np.zeros((2, 256, 256, 3), dtype='float32'),
+        'text': np.zeros((2, 77), dtype='int32'),
+    },
+    training=False,           # explicit: see the FAQ on training=None
+)
 
-# 2. Build the model with expected input shapes
-model.build({
-    'image': (None, 256, 256, 3),
-    'text': (None, 77)
-})
-print("✅ MobileCLIP model created and built successfully!")
-model.summary()
+sorted(out)
+# ['image_features', 'logit_scale', 'logits_per_image',
+#  'logits_per_text', 'text_features']
+out['logits_per_image'].shape   # (2, 2)
+```
 
-# 3. Create dummy data for a forward pass
-batch_size = 8
-dummy_images = np.random.rand(batch_size, 256, 256, 3).astype("float32")
-dummy_text_tokens = np.random.randint(0, 49408, (batch_size, 77))
+> **Always pass `training=False` explicitly for a deterministic forward.**
+> `StochasticDepth` short-circuits to the identity only when `training is
+> False`; at `training=None` it runs its stochastic path, and every
+> BatchNormalization in the image tower uses batch statistics and updates its
+> moving averages.
 
-# 4. Perform a full forward pass
+### v1
+
+```python
+import numpy as np
+from dl_techniques.models.mobile_clip import MobileClipModel
+
+model = MobileClipModel.from_variant('s0')
+model.build({'image': (None, 256, 256, 3), 'text': (None, 77)})
+
 outputs = model({
-    'image': dummy_images,
-    'text': dummy_text_tokens
+    'image': np.random.rand(8, 256, 256, 3).astype('float32'),
+    'text': np.random.randint(0, 49408, (8, 77)),
 })
+outputs['image_features'].shape   # (8, 512)
+```
 
-# 5. Inspect the outputs
-print(f"\nImage features shape: {outputs['image_features'].shape}") # (B, 512)
-print(f"Text features shape: {outputs['text_features'].shape}")   # (B, 512)
-print(f"Logit scale: {outputs['logit_scale'].numpy():.4f}")```
+Neither model ships a tokenizer. Both expect CLIP's byte-pair encoding with a
+49,408-token vocabulary — pre-trained versions are available in libraries such as
+Hugging Face `transformers` (e.g. `openai/clip-vit-base-patch32`).
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Classes and Creation Functions
+Package surface (`from dl_techniques.models.mobile_clip import ...`):
+
+| Symbol | Kind | What it is |
+|---|---|---|
+| `MobileClipV2Model` | `keras.Model` | The faithful MobileCLIP2 dual encoder. |
+| `create_mobile_clip_v2` | function | Factory over v2's `MODEL_VARIANTS`. |
+| `MobileClipModel` | `keras.Model` | The v1 dual encoder. |
+| `create_mobile_clip_model` | function | Factory over v1's variants. |
+
+> **`MODEL_VARIANTS` is deliberately NOT re-exported at package level** — the two
+> tables are different objects with disjoint keys. v1's is the class attribute
+> `MobileClipModel.MODEL_VARIANTS`; v2's is the module-level
+> `mobile_clip_v2.MODEL_VARIANTS`. Import each from its own module, explicitly.
+
+Submodule components:
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`MobileClipModel`** | `...mobile_clip_v1.MobileClipModel` | The main Keras `Model` for the complete dual-encoder architecture. |
-| **`create_mobile_clip_model`** | `...mobile_clip_v1.create_mobile_clip_model` | Recommended convenience function to create `MobileClipModel` from variants. |
-| **`MobileClipImageEncoder`** | `...components.MobileClipImageEncoder` | The image encoder model, combining a backbone and projection head. |
-| **`MobileClipTextEncoder`** | `...components.MobileClipTextEncoder` | The Transformer-based text encoder layer. |
-| **`ImageProjectionHead`** | `...components.ImageProjectionHead` | A layer for pooling and projecting backbone feature maps. |
+| `MobileClipTextEncoder` | `.components` | The Transformer text encoder — used by **both** models. |
+| `MobileClipImageEncoder` | `.components` | v1's image encoder: backbone + projection head. |
+| `ImageProjectionHead` | `.components` | v1's pooling + projection layer. |
+| `FastVitImageEncoder` | [`models.fastvit`](../fastvit/README.md) | v2's image tower. |
+
+`MobileClipV2Model` methods beyond the Keras surface:
+
+| Method | Purpose |
+|---|---|
+| `from_variant(variant, **kwargs)` | Build from a `MODEL_VARIANTS` key; kwargs override the row. |
+| `encode_image(image, normalize=True, training=None)` | Image branch only. |
+| `encode_text(text, normalize=True, training=None)` | Text branch only. |
+| `compute_logit_scale()` | `clip(exp(logit_scale), 0, logit_scale_max)`. |
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides configurations for the official MobileCLIP variants.
+### v2 — `mobile_clip_v2.MODEL_VARIANTS`
+
+Every row shares `vocab_size=49408` (OpenAI BPE), `context_length=77`,
+`image_size=256`, and `text_intermediate = 4 * text_width`. `use_causal_mask` is
+the **negation** of the JSON config's `no_causal_mask` field.
+
+| Variant | `embed_dim` | `image_backbone` | `text_width` | `text_heads` | `text_layers` | `use_causal_mask` |
+|---|---|---|---|---|---|---|
+| `mobileclip2_s0` | 512 | `mci0` | 512 | 8  | 12 | `False` |
+| `mobileclip2_s2` | 512 | `mci2` | 512 | 8  | 12 | `False` |
+| `mobileclip2_s3` | 768 | `mci3` | 768 | 12 | 12 | `False` |
+| `mobileclip2_s4` | 768 | `mci4` | 768 | 12 | 12 | `False` |
+| `mobileclip_s3`  | 768 | `mci3` | 768 | 12 | 12 | `True`  |
+| `mobileclip_s4`  | 768 | `mci4` | 768 | 12 | 12 | `True`  |
+
+**The table deliberately holds two families.** The four `mobileclip2_s*` rows are
+non-causal (their JSON configs say `"no_causal_mask": true`); the two earlier
+`mobileclip_s3`/`s4` rows are causal. Same image backbones, different text-tower
+attention — that single flag is the only reason both families appear. Do not
+"simplify" it away.
+
+Each row is keyed by the name of the supplied JSON config file it transcribes,
+and `test_model_variants_match_supplied_json_configs` checks it field by field
+against the committed copy at `research/mobileclip2_reference/model_configs/` —
+so this table is verified, not re-derived.
+
+### v1 — `MobileClipModel.MODEL_VARIANTS`
 
 | Variant | Embed Dim | Image Backbone | Image Size | Text Layers | Causal Mask |
 |:---:|:---:|:---:|:---:|:---:|:---:|
@@ -231,249 +332,362 @@ This implementation provides configurations for the official MobileCLIP variants
 | **`s1`** | 512 | `mci1` | 256 | 12 | False |
 | **`s2`** | 512 | `mci2` | 256 | 12 | False |
 
-*Note: The `mci` backbones are custom to the original paper. This implementation uses standard `keras.applications` models as placeholders.*
+*The backbone names are the paper's; this model resolves them to
+`keras.applications` stand-ins (§4.1).*
+
+### Counting parameters
+
+Derive the number rather than trusting one written here:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -c "
+from dl_techniques.models.mobile_clip import MobileClipV2Model
+m = MobileClipV2Model.from_variant('mobileclip2_s0')
+m.build({'image': (None,256,256,3), 'text': (None,77)})
+print(m.count_params())
+"
+```
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Zero-Shot Image Classification
-
-This is the primary use case for MobileCLIP. Classify an image using natural language prompts without any fine-tuning.
+### Zero-shot classification
 
 ```python
-import keras
 import numpy as np
-from dl_techniques.models.mobile_clip.mobile_clip_v1 import create_mobile_clip_model
+from keras import ops
+from dl_techniques.models.mobile_clip import MobileClipV2Model
 
-# Assume you have a text tokenizer
-def tokenize(texts, context_length=77):
-    # This is a placeholder for a real tokenizer (e.g., from huggingface/transformers)
-    # The vocab size should match the model's (49408)
-    return np.random.randint(0, 49408, (len(texts), context_length))
+model = MobileClipV2Model.from_variant('mobileclip2_s0')
 
-# 1. Create the MobileCLIP model
-# Replace backbone for demonstration
-MobileClipModel.MODEL_VARIANTS['s0']['image_config']['backbone_name'] = 'MobileNetV2'
-model = create_mobile_clip_model("s0")
+# `prompts` is (num_classes, 77) int32 — tokenize with the OpenAI BPE
+# tokenizer of your choice (this package ships no tokenizer).
+class_embeddings = model.encode_text(prompts, training=False)      # (C, D)
+image_embedding = model.encode_image(images, training=False)       # (B, D)
 
-# 2. Prepare the image and text prompts
-dummy_image = np.random.rand(1, 256, 256, 3).astype("float32")
-class_descriptions = ["a photo of a dog", "a photo of a cat", "a drawing of a car"]
-text_tokens = tokenize(class_descriptions)
-
-# 3. Get image and text features (the model normalizes them internally)
-image_features = model.encode_image(dummy_image)
-text_features = model.encode_text(text_tokens)
-
-# 4. Compute similarity and find the best match
-similarities = keras.ops.matmul(image_features, keras.ops.transpose(text_features))
-probabilities = keras.ops.softmax(similarities, axis=-1)
-best_match_index = keras.ops.argmax(probabilities, axis=-1)
-
-print(f"Input image is most similar to: '{class_descriptions[best_match_index[0]]}'")
-print(f"Probabilities: {probabilities.numpy().flatten()}")
+logits = model.compute_logit_scale() * ops.matmul(
+    image_embedding, ops.transpose(class_embeddings)
+)                                                                  # (B, C)
+predictions = ops.argmax(logits, axis=-1)
 ```
 
-### Example 2: Getting Separate Embeddings for Downstream Tasks
+Both `encode_*` methods L2-normalize by default. Leave `normalize=True` for
+anything that feeds a similarity or a contrastive loss.
 
-Use the encoders to get high-quality, efficient embeddings for other tasks like visual search or clustering.
+### Embeddings for downstream tasks
+
+The encoders give efficient embeddings for visual search, clustering, or
+retrieval:
 
 ```python
-# (Model creation from Example 1)
-batch_size = 4
-dummy_images = np.random.rand(batch_size, 256, 256, 3).astype("float32")
-dummy_texts = ["a red car", "blue sky", "a running dog", "a sleeping cat"]
-text_tokens = tokenize(dummy_texts)
+image_embeddings = model.encode_image(images, training=False)   # (B, D)
+text_embeddings = model.encode_text(tokens, training=False)     # (B, D)
+```
 
-# Get L2-normalized embeddings
-image_embeddings = model.encode_image(dummy_images)
-text_embeddings = model.encode_text(text_tokens)
+### The image tower on its own
 
-print(f"Image embeddings shape: {image_embeddings.shape}") # (4, 512)
-print(f"Text embeddings shape: {text_embeddings.shape}")   # (4, 512)
+```python
+from dl_techniques.models.fastvit import create_fastvit_image_encoder
+
+# CLIP embedding (the terminal Dense IS the projection)
+tower = create_fastvit_image_encoder('mci0', projection_dim=512)
+
+# Pooled backbone features instead, for dense / transfer use — NOT for CLIP
+backbone = create_fastvit_image_encoder('mci0', projection_dim=None)
+```
+
+### A reduced-depth tower for tests
+
+Full `mci4` at 256 px does not fit comfortably alongside a training job on a
+12 GB card. `image_encoder_kwargs` is forwarded verbatim to
+`FastVitImageEncoder`:
+
+```python
+model = MobileClipV2Model.from_variant(
+    'mobileclip2_s3',
+    image_encoder_kwargs={'layers': (1, 1, 1, 1, 1)},
+)
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning on a Custom Dataset
+### Naming and warm-starting
 
-While designed for zero-shot use, MobileCLIP can be fine-tuned on a specific domain (e.g., medical images, product photos) to improve performance. This requires a custom training loop to implement the contrastive loss.
+`IMAGE_TOWER_NAME` and `TEXT_TOWER_NAME` are module constants in
+`mobile_clip_v2.py` (`"image_encoder"` / `"text_encoder"`).
+`load_weights_from_checkpoint` matches layers **by name**, so a tower that is
+ever warm-started independently must be named identically in every model that
+holds it. Do not rename the towers.
+
+### Substituting a tower
+
+Pass an already-constructed `image_encoder=` / `text_encoder=` to the v2
+constructor. This is the route `from_config` uses, and it is why a
+reduced-depth or otherwise-overridden tower round-trips as itself rather than
+being re-derived from the scalar fields.
+
+Towers are **never** substituted after construction: Keras refuses a post-build
+sub-layer swap, and a pre-build one leaves the discarded tower's variables
+reachable through tracking.
+
+### Overriding the temperature
 
 ```python
-# Create a MobileCLIP model
-model = create_mobile_clip_model("s1")
-# Potentially load pre-trained weights here
-
-def contrastive_loss(image_features, text_features, logit_scale):
-    # Calculate cosine similarity
-    logits_per_image = logit_scale * ops.matmul(image_features, text_features, transpose_b=True)
-    
-    # Symmetrical cross-entropy loss
-    batch_size = ops.shape(logits_per_image)[0]
-    labels = ops.arange(batch_size)
-    
-    loss_img = keras.losses.sparse_categorical_crossentropy(labels, logits_per_image, from_logits=True)
-    loss_txt = keras.losses.sparse_categorical_crossentropy(labels, ops.transpose(logits_per_image), from_logits=True)
-    
-    return (ops.mean(loss_img) + ops.mean(loss_txt)) / 2.0
-
-# In your training loop:
-# with tf.GradientTape() as tape:
-#     outputs = model({'image': images, 'text': texts}, training=True)
-#     loss = contrastive_loss(outputs['image_features'], outputs['text_features'], outputs['logit_scale'])
-#
-# grads = tape.gradient(loss, model.trainable_variables)
-# optimizer.apply_gradients(zip(grads, model.trainable_variables))
+model = MobileClipV2Model.from_variant(
+    'mobileclip2_s0',
+    logit_scale_init=0.0,     # raw log temperature; default is log(1 / 0.07)
+    logit_scale_max=50.0,
+)
 ```
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
+* **Attention cost is already bounded** in v2's image tower — at most 64 tokens.
+  The convolutional stages dominate runtime; reduce `layers` / `embed_dims`
+  before reaching for attention tricks.
+* **No fused inference path exists** (deviation **X-1**). If you need one,
+  implement it as an explicit, separately tested conversion pass over a trained
+  model; do not silently change the blocks' `call()` paths.
+* **Text embeddings for a fixed prompt set are constant.** Compute `encode_text`
+  once and cache it; only `encode_image` needs to run per frame. This is the
+  asymmetry the whole architecture is designed around (§15).
+* **Mixed precision** suits both the Transformer text encoder and the
+  convolutional image tower:
 
-The Transformer-based text encoder and modern CNN backbones are excellent candidates for mixed precision training, which can significantly accelerate training on compatible GPUs.
-
-```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = create_mobile_clip_model("s0")
-```
+  ```python
+  keras.mixed_precision.set_global_policy('mixed_float16')
+  ```
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Schedule
+Use stock `fit()` with `CLIPContrastiveLoss` from `dl_techniques.losses` — this
+repo deliberately avoids custom `train_step` implementations.
 
--   **Optimizer**: **AdamW** is a strong choice due to its effective handling of weight decay, which is crucial for regularizing Transformer-based models.
--   **Learning Rate Schedule**: A **cosine decay** schedule with a linear warmup phase is standard practice and generally yields the best results for training CLIP-style models.
+```python
+from dl_techniques.losses import CLIPContrastiveLoss
 
-### Batch Size is Key
+model.compile(optimizer='adamw', loss=CLIPContrastiveLoss())
+```
 
--   Contrastive learning performance scales directly with **batch size**. A larger batch provides more negative examples for each positive pair, creating a more robust learning signal. The original CLIP was trained with a batch size of over 32,000. For practical training on consumer hardware, techniques like **gradient accumulation** are essential to simulate large batches.
+Notes:
+
+* The model returns a **dict**, not a tensor. Wire the loss against the key your
+  training script actually consumes.
+* **Batch size is the dominant hyperparameter.** Contrastive learning scales
+  with the number of negatives per positive; the original CLIP used batches
+  above 32,000. On consumer hardware, gradient accumulation is essential.
+* **AdamW with cosine decay and linear warmup** is the standard recipe. Weight
+  decay matters for the Transformer branch.
+* `drop_path_rate` (v2) is the **maximum** of one global linear ramp over every
+  block of every stage. Setting it per stage is not expressible and would not
+  reproduce the reference.
+* `dropout_rate` is threaded to both towers; `attention_dropout_rate` reaches
+  the text tower only.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `MobileClipModel` and all its custom components are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+Every class carries `@keras.saving.register_keras_serializable()`, a complete
+`get_config`, and a `compute_output_shape`, so the standard round trip works:
 
 ```python
-# Create and train model
-model = create_mobile_clip_model("s0")
-# ... training ...
-
-# Save the entire model to a single file
-model.save('my_mobile_clip_model.keras')
-
-# Load the model in a new session, including architecture and weights
-loaded_model = keras.models.load_model('my_mobile_clip_model.keras')
-print("✅ MobileCLIP model loaded successfully!")
+model.save('mobileclip2_s0.keras')
+restored = keras.models.load_model('mobileclip2_s0.keras')
 ```
+
+Two v2 implementation details matter if you subclass or extend:
+
+* `get_config` serializes **both towers explicitly** (not merely their variant
+  names), so a checkpoint keeps describing the network it was trained with even
+  if a variant table is later corrected. `from_config` re-materializes them with
+  `deserialize_keras_object`.
+* `get_build_config` / `build_from_config` are overridden because Keras' generic
+  implementation cannot round-trip a **dict** input-shape spec — it warns that
+  the model cannot be built automatically and leaves the restored model unbuilt.
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
-
-Simple tests can validate that all model variants can be created and that forward passes produce correctly shaped outputs.
-
-```python
-import keras
-import numpy as np
-from dl_techniques.models.mobile_clip.mobile_clip_v1 import MobileClipModel
-
-def test_creation_all_variants():
-    """Test model creation for all variants."""
-    for variant in MobileClipModel.MODEL_VARIANTS.keys():
-        # Replace backbone for testing since custom ones aren't available
-        MobileClipModel.MODEL_VARIANTS[variant]['image_config']['backbone_name'] = 'MobileNetV2'
-        model = MobileClipModel.from_variant(variant)
-        assert model is not None
-        print(f"✓ MobileCLIP-{variant} created successfully")
-
-def test_forward_pass_shapes():
-    """Test the output shapes of a full forward pass."""
-    MobileClipModel.MODEL_VARIANTS['s0']['image_config']['backbone_name'] = 'MobileNetV2'
-    model = MobileClipModel.from_variant("s0")
-    batch_size, embed_dim = 4, 512
-    
-    inputs = {
-        'image': np.random.rand(batch_size, 256, 256, 3),
-        'text': np.random.randint(0, 49408, (batch_size, 77))
-    }
-    
-    outputs = model(inputs)
-    assert outputs['image_features'].shape == (batch_size, embed_dim)
-    assert outputs['text_features'].shape == (batch_size, embed_dim)
-    print("✓ Forward pass shapes are correct")
-
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shapes()
-    print("\n✅ All tests passed!")
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
+    tests/test_models/test_mobile_clip/ tests/test_models/test_fastvit/ \
+    tests/test_layers/test_fastvit/ -q
 ```
+
+The suites cover initialization, invalid-config raises, forward shape,
+`compute_output_shape` pre- and post-build, `.keras` save->load compared **by
+value** (`atol=1e-6, rtol=0`), an **elementwise** weight check on the list-held
+per-block sub-layers (counts, variable paths and parameter totals can all match
+while the restored kernels are fresh), gradient flow to every trainable weight,
+and per-class behavioural pins that were each proven RED against a deliberately
+broken variant.
 
 ---
 
 ## 14. Troubleshooting & FAQs
 
-**Issue 1: Training is unstable and the loss becomes `NaN`.**
+**My forward pass is not reproducible.** Pass `training=False` explicitly.
+`StochasticDepth` short-circuits only on `training is False`, and `training=None`
+also puts every BatchNormalization into batch-statistics mode.
 
--   **Cause 1**: The learning rate may be too high.
--   **Cause 2**: The learnable temperature `logit_scale` might be diverging.
--   **Solution**: Use a smaller learning rate and a warmup schedule. The implementation already includes clipping for `logit_scale` to a maximum of 100, which helps prevent divergence.
+**Training is unstable and the loss becomes `NaN`.** Usually the learning rate,
+or a diverging `logit_scale`. Use a warmup schedule and a smaller LR; the
+temperature is already clipped at 100, which prevents the `inf`-logit failure
+mode but not a badly-scaled optimizer.
 
-### Frequently Asked Questions
+**Should I add a projection head on top of v2's image tower?** No — its terminal
+`Dense` already *is* the CLIP image projection. Use `projection_dim=None` only
+when you want pooled backbone features for a non-CLIP purpose.
 
-**Q: What are the `mci0`, `mci1`, and `mci2` backbones?**
+**`ValueError: All per-stage tuples must have one entry per stage`.** A 4-stage
+vs 5-stage mixup in the image tower. `mci0`/`mci1`/`mci2` need 4 entries in every
+per-stage tuple; `mci3`/`mci4` need 5.
 
-A: These are custom, efficient CNN architectures designed by Apple specifically for MobileCLIP. They are not part of standard libraries like `keras.applications`. To perfectly replicate the paper's results, one would need to implement these specific backbones. This implementation uses standard mobile backbones like `MobileNetV2` as a functional replacement.
+**Can I load an official MobileCLIP or MobileCLIP2 checkpoint?** No. No weights
+are ported (deviation **X-4**) and no conversion script exists here.
 
-**Q: What is the main difference between the 'b' and 's' variants?**
+**What is the difference between v1's `b` and `s` variants?** `b` is larger and
+uses a ViT-style image config with a deeper, causally-masked text encoder; the
+`s` variants target on-device use with convolutional backbones and no causal
+mask. `s0` is the smallest, with only 4 text Transformer layers.
 
-A: The **'b' (base)** variant is a larger model designed for higher accuracy, using a ViT-based image encoder and a deeper text encoder with causal masking. The **'s' (small)** variants (`s0`, `s1`, `s2`) are optimized for on-device performance, using efficient CNN backbones and a text encoder without causal masking. The `s0` variant is particularly small, with only 4 Transformer layers in its text encoder.
-
-**Q: Where can I find the correct tokenizer?**
-
-A: The model expects a tokenizer compatible with the original CLIP, which is a byte-pair encoding (BPE) tokenizer with a vocabulary size of 49,408. You can find pre-trained versions of this tokenizer in libraries like Hugging Face's `transformers` (e.g., from the `openai/clip-vit-base-patch32` model).
+**Where can I find the tokenizer?** Neither model ships one. Use a CLIP-compatible
+BPE tokenizer with a 49,408 vocabulary (e.g. Hugging Face
+`openai/clip-vit-base-patch32`).
 
 ---
 
 ## 15. Technical Details
 
-### Asymmetric Design Philosophy
+### Asymmetric design philosophy
 
-A key insight of MobileCLIP is the asymmetric nature of its common use case (zero-shot classification).
--   **Image Encoder**: Must be extremely fast, as it processes a new image for every inference.
--   **Text Encoder**: Can be more computationally expensive. In a classification task with `K` classes, it only needs to run `K` times to create the class embeddings, which can then be reused for many image comparisons.
-This motivates the design of using a hyper-efficient CNN for images while retaining a more powerful (though still optimized) Transformer for text.
+The key insight is the asymmetry of the zero-shot use case:
 
-### Causal Masking in the Text Encoder
+* **Image encoder** — must be extremely fast; it processes a new image on every
+  inference.
+* **Text encoder** — can be more expensive. For `K` classes it runs `K` times to
+  build class embeddings, which are then reused across many images.
 
-The `b` variant uses `use_causal_mask=True` in its text encoder, while the `s` variants use `False`. A causal mask prevents a token from attending to future tokens in the sequence. This is standard for autoregressive language models. Its inclusion in the `b` variant aligns it more closely with large language model architectures, while its exclusion in the `s` variants is likely an efficiency optimization, as it slightly simplifies the attention computation.
+Hence a hyper-efficient hybrid CNN for images and a more powerful Transformer for
+text.
+
+### Causal masking in the text encoder
+
+A causal mask prevents a token from attending to future tokens — standard for
+autoregressive language models. Its use is per-variant, not per-generation: v1's
+`b` sets it, v1's `s*` do not; v2's `mobileclip_s3`/`s4` set it, the four
+`mobileclip2_s*` rows do not (§7).
+
+### v2 reference values
+
+| Detail | Value / rule |
+|---|---|
+| Input resolution | 256 x 256 x 3, channels last |
+| Context length | 77 tokens |
+| Vocabulary | 49408 (OpenAI BPE) — **no tokenizer ships here** |
+| `logit_scale` init | `log(1 / 0.07)`, created in `build()` |
+| `logit_scale` use | `clip(exp(logit_scale), 0, 100)` |
+| Attention heads (image tower) | `dim // 32` |
+| Drop-path schedule | one global linear ramp over `sum(layers)` blocks, sliced stagewise |
+
+More image-tower internals — LayerScale, normalization epsilon, the two SE
+ratios — are in [`models/fastvit/README.md`](../fastvit/README.md) §11.
 
 ---
 
-## 16. Citation
+## 16. Deviations (v2)
 
-This implementation is based on the official MobileCLIP paper from Apple. If you use this model in your research, please cite the original work:
+**These apply to `MobileClipV2Model` only.** v1's single, larger deviation is its
+backbone substitution (§4.1); it is not part of this numbered list.
+
+Every known divergence from the reference carries a stable id. A deviation that
+is silently absorbed makes the port unauditable. The image-tower deviations
+**X-1**, **X-2**, **X-3** and **X-5** are stated in full, with their measurements
+and RED-proofs, in
+[`models/fastvit/README.md` §9](../fastvit/README.md#9-deviations-from-the-reference-implementation);
+summarized here:
+
+| Id | Deviation |
+|---|---|
+| **X-1** | **No structural reparameterization.** Train-time multi-branch form only; no fusion path exists or is tested. The reference release also runs the multi-branch form (`inference_mode=False`), so this matches what it actually executes. |
+| **X-2** | **One `use_bias` for both qkv and the output projection.** The shared `MultiHeadAttention` cannot express timm's unbiased-qkv + biased-proj split, so each attention block is short exactly one bias vector of length `dim`. MEASURED and pinned. |
+| **X-3** | **`mci0`/`mci1`/`mci2` have no local oracle.** They are transcribed from timm upstream, which is not installed here. `mci3`/`mci4` *do* have a real committed oracle. |
+| **X-4** | **No pretrained weights.** Architecture only; **no accuracy claim**. Any comparison against published MobileCLIP2 numbers is invalid by construction. |
+| **X-5** | **`RepMixerBlock` is a different architecture that shares the name.** `layers/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/fastvlm/` and deliberately untouched. Use `layers/fastvit/FastVitRepMixerBlock` for anything that must match timm block-for-block. |
+
+---
+
+## 17. v1 vs v2: which should I use?
+
+**Use v2** for anything that should correspond to the published architecture, or
+that will consume a real MCi tower. **Use v1** only if you already depend on it —
+its checkpoints, its variant keys, or its `keras.applications` backbones.
+
+**v1 is not deprecated by v2 and its semantics are unchanged.** The two coexist
+on purpose: v1's substitution is a recorded, tested decision, not a bug awaiting
+repair.
+
+### Why the text tower is shared rather than duplicated
+
+`MobileClipTextEncoder` owns one of exactly **two** block->keep causal-mask
+adapter sites in `src/` (the other is `layers/heads/vlm/factory.py`). A **third**
+site triggers a mandatory promotion of that adapter into a keep-polarity
+`MaskFactory` variant — an unrelated refactor with its own blast radius.
+
+Re-implementing the text tower for v2 would create that third site for no
+architectural gain: the layer is already dimension-generic (measured at
+768/12/3072 and 512/8/2048, causal on and off) and already carries the
+graph-safe `MaskFactory.create_causal_mask` path that `ops.tril` cannot provide
+on this stack.
+
+The coupling worth naming: if v1's text tower semantics ever change, v2's change
+with them. Both models are covered by `tests/test_models/test_mobile_clip/`, so
+such a change cannot land silently.
+
+---
+
+## 18. Citation
+
+Please cite the original works:
 
 ```bibtex
-@inproceedings{faghri2023mobileclip,
-  title={Mobile{CLIP}: Fast and Efficient On-Device {CLIP}},
-  author={Faghri, Fartash and Varma, Girik and Furlan, L\'{e}o and Sarıyıldız, M. B. and Abs, M. and Ghasemzadeh, Hessam},
-  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) Workshops},
-  year={2023}
+@inproceedings{vasu2024mobileclip,
+  title     = {MobileCLIP: Fast Image-Text Models through Multi-Modal Reinforced Training},
+  author    = {Vasu, Pavan Kumar Anasosalu and Pouransari, Hadi and Faghri, Fartash and
+               Vemulapalli, Raviteja and Tuzel, Oncel},
+  booktitle = {CVPR},
+  year      = {2024}
+}
+
+@article{faghri2025mobileclip2,
+  title   = {MobileCLIP2: Improving Multi-Modal Reinforced Training},
+  author  = {Faghri, Fartash and Vasu, Pavan Kumar Anasosalu and Pouransari, Hadi and
+             Vemulapalli, Raviteja and Tuzel, Oncel},
+  journal = {arXiv preprint arXiv:2508.20691},
+  year    = {2025}
+}
+
+@inproceedings{vasu2023fastvit,
+  title     = {FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization},
+  author    = {Vasu, Pavan Kumar Anasosalu and Gabriel, James and Zhu, Jeff and
+               Tuzel, Oncel and Ranjan, Anurag},
+  booktitle = {ICCV},
+  year      = {2023}
+}
+
+@inproceedings{radford2021clip,
+  title     = {Learning Transferable Visual Models From Natural Language Supervision},
+  author    = {Radford, Alec and Kim, Jong Wook and Hallacy, Chris and others},
+  booktitle = {ICML},
+  year      = {2021}
 }
 ```

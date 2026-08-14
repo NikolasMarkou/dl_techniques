@@ -1,10 +1,15 @@
-"""FastViT (MCi) image tower of MobileCLIP2.
+"""FastViT (MCi) image backbone.
 
 This module assembles the ``layers/fastvit/`` primitives (enumerated once and
-only once, in that package's ``__all__``) into the image encoder that
-MobileCLIP / MobileCLIP2 use as their vision branch, a faithful
-channels-last transcription of timm's ``FastVit`` class restricted to the five
-``MCi`` configurations.
+only once, in that package's ``__all__``) into a complete image encoder — a
+faithful channels-last transcription of timm's ``FastVit`` class restricted to
+the five ``MCi`` configurations.
+
+The tower is a standalone :class:`keras.Model` and is usable on its own; it is
+*also* the vision branch of MobileCLIP / MobileCLIP2, which lives at
+``models/mobile_clip/mobile_clip_v2.py`` and imports
+:class:`FastVitImageEncoder` from here. The one place that dual role shows
+through is the head ``Dense`` — see the next paragraph.
 
 **Architecture**::
 
@@ -24,7 +29,9 @@ channels-last transcription of timm's ``FastVit`` class restricted to the five
         |
     (B, projection_dim)
 
-**The head ``Dense`` is the CLIP image projection, not a classifier.** All four
+**The head ``Dense`` is the CLIP image projection, not a classifier.** It is
+named ``projection_dim`` rather than ``num_classes`` for exactly this reason.
+All four
 MobileCLIP / MobileCLIP2 fastvit configs set ``"timm_proj": null`` with
 ``"timm_pool": "avg"``. In open_clip's ``TimmModel`` a non-attention pool asserts
 that the trunk itself does the projecting and instantiates the trunk with
@@ -126,8 +133,8 @@ _REFERENCE_POS_EMB_SPATIAL_SHAPE = (7, 7)
 #       `mobileclip2.py`, which defines `fastvit_mci3` and `fastvit_mci4` and
 #       nothing else. They are the only two rows with a local provenance. That
 #       file is COMMITTED VERBATIM at `research/mobileclip2_reference/`, and
-#       `tests/test_models/test_mobile_clip_v2/
-#       test_image_encoder.py::test_mci3_mci4_match_supplied_source` PARSES it
+#       `tests/test_models/test_fastvit/
+#       test_model.py::test_mci3_mci4_match_supplied_source` PARSES it
 #       (with `ast` — it is PyTorch/timm code and cannot be imported here) and
 #       cross-checks these two rows field by field. That is a real oracle.
 #

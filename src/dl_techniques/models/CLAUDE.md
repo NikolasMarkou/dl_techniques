@@ -10,6 +10,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `mobilenet/` — MobileNet variants (V1, V2, V3, V4)
 - `resnet/` — ResNet architectures
 - `convnext/` — ConvNeXt
+- `fastvit/` — FastViT MCi image backbone (the assembled tower over `layers/fastvit/`; the image branch of MobileCLIP2, also usable standalone — architecture only, no pretrained weights)
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)
 - `squeezenet/` — SqueezeNet
 - `vit/` — Vision Transformer
@@ -52,8 +53,11 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 
 ### Vision-Language
 - `clip/` — CLIP
-- `mobile_clip/` — MobileCLIP
-- `mobile_clip_v2/` — MobileCLIP2 (faithful FastViT MCi image tower + CLIP text tower; architecture only, no pretrained weights)
+- `mobile_clip/` — MobileCLIP: **both generations in one package**. `mobile_clip_v1.py` is
+  deliberately non-faithful on the image side (`keras.applications` substitutes, its own
+  D-001); `mobile_clip_v2.py` is the faithful MobileCLIP2 (architecture only, no pretrained
+  weights, no accuracy claim). They share `components.py`'s text tower. Neither deprecates
+  the other — see the package README §17
 - `fastvlm/` — FastVLM
 - `nano_vlm/` — NanoVLM
 - `nano_vlm_world_model/` — NanoVLM world model
@@ -106,14 +110,14 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `src/dl_techniques/models/__init__.py` (the parent) is empty — always import
   from the model subpackage, never from `dl_techniques.models` itself.
 - Per-model `<pkg>/__init__.py` is **mixed, and the empty case is no longer a
-  safe default assumption**. Re-measured 2026-08-14: 26 of the 73 model packages
+  safe default assumption**. Re-measured 2026-08-14 (second pass, after the `mobile_clip_v2/` split): 27 of the 73 model packages
   bind a `create_*` factory in their own `__init__.py` (an import, a `def` or an
-  assignment). A plain `grep create_` now agrees at 26 — it used to give one more
+  assignment). A plain `grep create_` now agrees at 27 — it used to give one more
   than the binding count, because `convnext_patch_vae/__init__.py` mentioned its
   factories in a docstring without binding them, and that package has since been
   deleted; the two figures can diverge again the moment any init mentions a
   factory it does not bind. Exemplars of a curated init with `__all__`:
-  `energy_transformer/`, `dino/`, `vit/`. The remaining 47 are empty or
+  `energy_transformer/`, `dino/`, `vit/`. The remaining 46 are empty or
   near-empty and do require importing from the submodule directly. **Read the
   package init before assuming either shape.** (`REPO_MAP.md` § "The factory
   convention is not universal" carries the same derivation.)

@@ -53,7 +53,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
-from dl_techniques.models.mobile_clip_v2.model import MobileClipV2Model
+from dl_techniques.models.mobile_clip.mobile_clip_v2 import MobileClipV2Model
 
 # ---------------------------------------------------------------------
 # Reduced-but-representative configurations.

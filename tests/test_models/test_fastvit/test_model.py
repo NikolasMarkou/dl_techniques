@@ -35,13 +35,13 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.models.mobile_clip_v2.image_encoder import (
+from dl_techniques.models.fastvit.model import (
     MCI_VARIANTS,
     FastVitImageEncoder,
     _resolve_mci_variant,
     create_fastvit_image_encoder,
 )
-from tests.test_models.test_mobile_clip_v2.reference_oracle import (
+from tests.test_models.test_fastvit.reference_oracle import (
     parse_supplied_mci_model_args,
 )
 

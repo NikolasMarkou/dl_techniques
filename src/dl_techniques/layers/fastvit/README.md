@@ -30,7 +30,7 @@ different model.
 | Channel MLP | `FastVitConvMlp`: depthwise 7x7 + BN (no activation) -> 1x1 -> GELU -> drop -> 1x1 -> drop | a different FFN |
 | LayerScale | yes, per-channel, on both the token-mixer and the MLP branch | none |
 | Stochastic depth | yes, per residual branch | none |
-| Consumed by | `models/mobile_clip_v2/` (this port) | **`models/fastvlm/`** |
+| Consumed by | `models/fastvit/` (the assembled MCi tower, in turn used by `models/mobile_clip/`) | **`models/fastvlm/`** |
 
 **Which one do you want?**
 

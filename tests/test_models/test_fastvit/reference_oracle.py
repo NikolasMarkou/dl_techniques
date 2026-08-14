@@ -36,7 +36,7 @@ import json
 import pathlib
 from typing import Any, Dict
 
-#: ``tests/test_models/test_mobile_clip_v2/`` -> repository root.
+#: ``tests/test_models/test_fastvit/`` -> repository root.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 _REFERENCE_DIRNAME = pathlib.Path("research") / "mobileclip2_reference"
