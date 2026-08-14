@@ -557,15 +557,22 @@ class CLIP(keras.Model):
         """Build the model's own weights if a public encoder is called first.
 
         `class_token`, `logit_scale` and the positional embeddings are created in
-        `build`, which Keras runs on `__call__`. `encode_image` and `encode_text`
-        are public entry points that do NOT go through `__call__`, so on a fresh
-        instance they read `self.class_token` as None and fail inside
-        `ops.broadcast_to` with
+        `build`, which Keras runs on `__call__`. `encode_image` is a public entry point that does NOT go through
+        `__call__`, so on a fresh instance it reads `self.class_token` as None
+        and fails inside `ops.broadcast_to` with
 
             ValueError: Attempt to convert a value (None) ... to a Tensor
 
         rather than saying the model is unbuilt. Shapes come from the constructor
         config, so no input is needed to resolve them.
+
+        `encode_text` deliberately does NOT call this. It touches none of the
+        weights `build` creates, and building there would LOCK the layer, so a
+        caller that swaps or taps `text_transformer_layers` after a first
+        `encode_text` -- which is exactly how the causality probe in
+        `tests/test_models/test_clip/test_model.py` reads per-position hidden
+        states -- would hit "You cannot add new elements of state to a layer
+        that is already built".
         """
         if self.built:
             return
@@ -645,7 +652,6 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
-        self._ensure_built()
         # Causal mask. `create_mask` returns BLOCK semantics (True = mask out);
         # the attention layers expect ATTEND semantics, hence the inversion.
         # Without this the tower is bidirectional and the pooled last token is
