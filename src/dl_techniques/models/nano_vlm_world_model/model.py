@@ -479,7 +479,7 @@ class ScoreBasedNanoVLM(keras.Model):
                     latents, text_features, t_tensor, training=False
                 )
 
-            # DECISION plan-2026-08-14T183218-f4c612aa/D-013: hand the denoiser's raw
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-016: hand the denoiser's raw
             # output straight to `step`. Do NOT reinstate a
             # `predict_noise_from_start` conversion here "for symmetry" with the
             # 'epsilon' convention: `step`'s 'sample' branch consumes x_0 DIRECTLY
