@@ -1,3 +1,78 @@
+"""
+Mamba-2 encoder: a stack of state-space-duality blocks with head-scalar state
+decay, grouped B/C projections and an optional parallel gated-MLP path.
+
+Mamba-1 pays for its selectivity with a shape problem. Because each channel of the
+inner dimension carries its own `d_inner x d_state` transition, the recurrence is a
+sequence of small element-wise products that no matrix-multiply unit can help with,
+and the state must stay small — `d_state = 16` in v1 — or the parameter and memory
+cost explodes. Mamba-2 removes the obstruction by restricting `A` to a *scalar per
+head*: `A_log` has shape `(nheads,)`, so the transition is `a_t * I` rather than a
+diagonal matrix, and the whole recurrence collapses to
+
+`h_t = a_t * h_{t-1} + delta_t * (B_t x_t^T)`,  `y_t = C_t^T h_t`
+
+This is the structured-state-space-duality view: unrolled, the map from inputs to
+outputs is a lower-triangular matrix whose entries are `C_i^T (prod_{k} a_k) B_j`,
+which is a *masked attention matrix* with a scalar decay mask in place of a
+softmax. The restriction is what buys the freedom elsewhere — with the state
+transition reduced to one number per head, `d_state` can grow to 128 (the default
+here, eight times v1) at negligible cost, and the state is where a recurrent model's
+capacity actually lives.
+
+The layer's parameterization follows from that duality. `B` and `C` are shared
+across `ngroups` head groups rather than being per-head, exactly as keys and values
+are shared in grouped-query attention and for the same reason. `dt` is emitted
+directly by the input projection as one scalar per head, with no low-rank `dt_rank`
+bottleneck — v1 needed that bottleneck because it produced a `Δ` per inner channel.
+Critically, `z`, `x`, `B`, `C` and `dt` all come out of a *single* `in_proj` at the
+top of the block, before the convolution, whereas v1 computes `Δ, B, C` from the
+post-convolution activations. That reordering is not cosmetic: it makes every
+projection in the block a function of the block input alone, which is what allows
+the block to be sharded across devices without a sequential dependency in the
+middle.
+
+`A` is used as `-exp(A_log)` with `A_log` initialized from `log U(1, 16)`, so decay
+rates are negative by construction and the recurrence is unconditionally stable.
+`dt_bias` is set to the inverse-softplus of a log-uniform draw in `[dt_min, dt_max]`
+so heads begin with a spread of timescales. Setting `d_ssm < d_inner` splits the
+inner width: the first `d_mlp` channels bypass the SSM entirely as a gated MLP
+(`silu(z0) * x0`) and are concatenated back before the output projection, which lets
+a block trade state-space capacity for cheap pointwise capacity.
+
+**The scan here is a sequential `while_loop`, not the SSD chunked-matmul
+algorithm.** The entire practical argument for Mamba-2 is that the scalar-`A`
+structure permits a block-decomposed formulation that runs on matrix-multiply
+hardware and is several times faster than v1's scan. This implementation reproduces
+the architecture and the parameterization but evaluates the recurrence one timestep
+at a time with a `scatter_update` per step, so none of that speedup is present. Use
+it as a correctness reference; do not benchmark it against the paper.
+
+Two behaviours worth knowing before use. The model returns only
+`{'last_hidden_state'}` — there is no LM head and no tied output projection, so a
+task head must be attached externally, and the final normalization is a plain
+`LayerNormalization` regardless of the `rmsnorm` flag (that flag governs the
+in-block SSM-output norm only). And the `'130m'` entry of `MODEL_VARIANTS` carries a
+`'name'` key whose value `'base'` is forwarded verbatim into `keras.Model.__init__`,
+so `from_variant('130m')` yields a model literally named `base`; the key was
+evidently intended as an alias marker and is not one.
+
+Residual handling matches v1: blocks return `(output, running_residual)` and the
+final addition is deferred to the model tail, so a caller stacking blocks manually
+must thread the residual through or end up with no skip connections at all.
+
+References:
+    - Dao and Gu, 2024. Transformers are SSMs: Generalized Models and Efficient
+      Algorithms Through Structured State Space Duality.
+      (https://arxiv.org/abs/2405.21060)
+    - Gu and Dao, 2023. Mamba: Linear-Time Sequence Modeling with Selective State
+      Spaces. (https://arxiv.org/abs/2312.00752)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
+      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+"""
+
 import keras
 from typing import Optional, Union, Any, Dict
 

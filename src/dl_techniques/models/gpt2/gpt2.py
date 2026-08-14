@@ -1,43 +1,82 @@
-"""GPT-2 (Generative Pre-trained Transformer 2) model.
+"""Decoder-only GPT-2 language model with an optionally weight-tied output head.
 
-A decoder-only transformer language model based on the architecture from
-"Language Models are Unsupervised Multitask Learners" (Radford et al., 2019).
+GPT-2 makes one claim about language: every supervised NLP task is a subset of
+next-token prediction, so a single objective `p(x) = prod_i p(x_i | x_<i)` trained
+at sufficient scale on sufficiently varied text acquires the tasks as a side
+effect. Nothing in the architecture encodes that claim; what the architecture must
+do is make the factorization *exact*. Each position may condition on everything to
+its left and on nothing to its right, because a single leaked future token turns
+the training loss into a copying shortcut and the model's perplexity into a
+fiction. Causality is therefore not an option of this model, it is the model.
 
-This implementation reuses the library's ``TextDecoder`` layer for the core
-transformer stack (token/positional embeddings, causal self-attention blocks,
-and final normalization) and adds a weight-tied language modeling head on top.
+The causal constraint is enforced by masking rather than by structure. This
+implementation delegates the whole transformer stack to the library's
+``TextDecoder``, which rebuilds the mask on every forward pass: a lower-triangular
+boolean `causal_mask` in *block* semantics (`True` = suppress), OR-combined with
+the padding mask derived from `attention_mask == 0`, then logically inverted once
+at the end because the attention layers expect *attend* semantics (`True` = allow).
+The inversion is done a single time on the combined mask rather than per component,
+which is why a caller supplying an already-inverted padding mask silently unmasks
+the future — the polarity convention at the model boundary is 1 = attend, 0 = pad.
+The same mask tensor is passed to every layer; there is no per-layer state and no
+KV cache, so autoregressive decoding through this class recomputes the full prefix
+at each step and costs `O(n^2)` per generated token rather than `O(n)`.
 
-Architecture:
+Positions are learned absolute embeddings of size ``max_seq_len``, added to token
+embeddings before the stack. Extrapolation beyond ``max_seq_len`` is not merely
+degraded but undefined, since those rows do not exist; ``TextDecoder.build`` raises
+when the *static* sequence length exceeds the budget. A dynamic (unknown at build
+time) sequence length slips past that guard, so the check is a development aid, not
+a runtime invariant.
 
-.. code-block:: text
+Normalization is pre-norm: each sublayer applies its LayerNorm to the branch input
+and leaves the residual stream unnormalized end to end, with one final LayerNorm
+before the head. Post-norm — the original 2017 encoder-decoder placement, which
+GPT-2 abandoned — puts a normalization on the residual path itself, so gradient
+magnitude at initialization grows with depth and training needs a warmup schedule
+to survive. Pre-norm gives every layer an unobstructed additive path to the loss,
+which is what makes the 48-layer XL variant trainable with a flat schedule. Note
+that ``TextDecoder`` additionally normalizes the embedding sum before the first
+block; the original GPT-2 applies dropout there but no normalization, so this is a
+small deliberate divergence from the reference recipe.
 
-    Input IDs (B, seq_len)
-         │
-         ▼
-    TextDecoder
-    ├─ Token Embedding + Positional Embedding
-    ├─ Embed Norm → Embed Dropout
-    ├─ TransformerLayer × depth (pre-norm, causal self-attention + MLP)
-    └─ Final LayerNorm
-         │
-         ▼
-    Hidden States (B, seq_len, embed_dim)
-         │
-         ▼
-    LM Head: logits = hidden_states @ token_embedding.T  (weight tying)
-         │
-         ▼
-    Logits (B, seq_len, vocab_size)
+The head is the transposed token embedding matrix by default:
+`logits = h @ E^T`. Tying is not only a parameter saving, though at this
+configuration it is a large one — a 100277-row by 768-column embedding is roughly
+77M weights against the ~85M in the small variant's blocks, so untying nearly
+doubles the model. It also couples the input and output representations of a token,
+which regularizes rare tokens whose output row would otherwise receive gradient
+only from the handful of times they are the target. ``tie_word_embeddings=False``
+substitutes an independent bias-free ``Dense``; that is the modern preference at
+multi-billion-parameter scale, where the embedding is a small fraction of the total
+and the coupling costs more capacity than it saves.
 
-Key differences from BERT:
-- Pre-layer normalization (not post-norm)
-- Causal (autoregressive) masking
-- Weight tying between token embeddings and output projection
-- No token type embeddings
+Two departures from the published model are worth stating plainly. The default
+vocabulary is 100277 (Tiktoken ``cl100k_base``), not GPT-2's own 50257-entry BPE
+vocabulary, so a checkpoint from OpenAI will not load against the defaults; pass
+``vocab_size=50257`` for shape compatibility with the original. And ``attention_type``
+and ``ffn_type`` are factory keys rather than fixed choices, so the class describes a
+GPT-2-*shaped* decoder whose mixer and MLP can be swapped; only the defaults
+(``'multi_head'``, ``'mlp'``) reproduce the paper.
+
+No pretrained weights are distributed with this package. ``pretrained=True`` routes
+to ``_download_weights``, which raises ``NotImplementedError`` rather than logging a
+warning and returning a randomly initialized model — the earlier fallback made an
+unavailable download indistinguishable from a successful one at the call site.
+Local checkpoints load by path, with a dummy forward pass first to materialize the
+lazily-built sublayers.
 
 References:
-    Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., & Sutskever, I.
-    (2019). Language Models are Unsupervised Multitask Learners.
+    - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
+      OpenAI technical report.
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language Models.
+      (https://arxiv.org/abs/1608.05859)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer Architecture.
+      (https://arxiv.org/abs/2002.04745)
+    - Kaplan et al., 2020. Scaling Laws for Neural Language Models.
+      (https://arxiv.org/abs/2001.08361)
 """
 
 import os

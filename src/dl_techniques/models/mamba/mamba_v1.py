@@ -1,110 +1,95 @@
 """
-Mamba State Space Model Implementation
-============================================
+Mamba (v1) selective state-space encoder producing contextual hidden states, plus a
+factory that joins it to any NLP task head.
 
-Mamba provides an alternative to the popular Transformer architecture for
-modeling long sequences. It is built upon the structured state space
-model (SSM) paradigm, but introduces a critical "selection" mechanism that
-allows it to operate with linear-time complexity in sequence length,
-a significant improvement over the quadratic complexity of attention.
+Attention buys unrestricted token-to-token routing at a price that is quadratic in
+sequence length; a recurrent state buys `O(L)` at the price of squeezing the entire
+past through a fixed-size vector. Classical structured state-space models take the
+recurrent side of that trade and make it work by being linear and time-*invariant*:
 
-Architecturally, the model consists of a stack of Mamba blocks. Each block
-applies a selective SSM to its input, allowing it to modulate how much
-information is propagated or forgotten at each step based on the content
-of the input sequence itself.
+`h'(t) = A h(t) + B x(t)`,  `y(t) = C h(t) + D x(t)`
 
-The foundational mathematical concept is the linear time-invariant (LTI)
-state space model, a cornerstone of control theory. A continuous-time SSM
-is defined by the differential equations:
-    1. h'(t) = Ah(t) + Bx(t)  (State equation)
-    2. y(t) = Ch(t) + Dx(t)  (Output equation)
-Here, x(t) is the input, h(t) is a latent state vector, and y(t) is the
-output. The matrices (A, B, C, D) are the model parameters that govern
-the system's dynamics.
+discretized with a step `Δ` into `h_k = Ā h_{k-1} + B̄ x_k`, `y_k = C h_k + D x_k`.
+Time-invariance is exactly what makes such a model fast — with fixed `Ā, B̄` the
+whole recurrence is a convolution and can be evaluated by FFT — and it is also
+exactly what makes it weak on language. A system whose dynamics do not depend on
+what it is reading cannot decide to remember one token and discard the next; it
+applies the same decay to everything.
 
-To be used in a deep learning model, this continuous system is discretized
-into a recurrent formulation using a step size Δ:
-    h_k = Āh_{k-1} + B̄x_k
-    y_k = Ch_k + Dx_k
+Mamba's selection mechanism gives up time-invariance to buy that decision. `Δ`, `B`
+and `C` are projected from the input at every position, so the dynamics are
+re-chosen per token: a large `Δ` drives `exp(ΔA)` toward zero and wipes the state
+(reset on a delimiter), a small `Δ` drives it toward one and holds the state across
+irrelevant filler. `A` and `D` remain input-independent, which is what keeps the
+recurrence a *linear* system for any fixed input and therefore keeps it cheap and
+stable; the content-dependence enters only through the coefficients.
 
-where Ā and B̄ are derived from A, B, and Δ. This recurrent form can
-model sequences, but its time-invariant nature (fixed Ā, B̄) limits its
-expressiveness for complex data like language.
+Discretization here follows the reference implementation's asymmetric choice:
+`Ā = exp(ΔA)` is the exact zero-order-hold solution, while `B̄x` is formed as the
+first-order `Δ · B · x` rather than the exact `(ΔA)^-1 (exp(ΔA) - I) ΔB`. The
+approximation is harmless because `B` is itself a learned function of the input and
+can absorb the difference. `A` is stored as `A_log` and used as `-exp(A_log)`, so
+every eigenvalue is negative by construction and `exp(ΔA)` lies in `(0, 1)` for any
+positive `Δ` — the recurrence cannot diverge no matter what the selection network
+emits. The S4D-real initialization fills row `d` of `A` with `[1, 2, ..., d_state]`,
+giving each state channel a distinct decay rate; `dt_proj`'s bias is initialized to
+the inverse-softplus of a log-uniform draw in `[dt_min, dt_max]`, so channels also
+start with a spread of timescales rather than all forgetting at the same rate.
 
-Mamba's key innovation is to make the SSM parameters input-dependent,
-thereby breaking the time-invariance and enabling selectivity. The crucial
-parameters (step size Δ, and projections B and C) are no longer fixed but
-are instead computed dynamically from the input tokens x_k at each time
-step. This allows the model to selectively remember relevant information
-and forget irrelevant details by changing the system dynamics on the fly.
-For instance, a large Δ allows the state to be forgotten quickly, while a
-small Δ preserves it. This content-aware reasoning is what allows Mamba
-to effectively manage long-range dependencies.
+**The scan in this implementation is sequential, not parallel.** `_selective_scan`
+runs a `keras.ops.while_loop` over the time axis, one `scatter_update` per step.
+That is `O(L)` in arithmetic, as the paper promises, but it has no parallelism
+across time and no fused kernel, so wall-clock training throughput is far below
+attention at the sequence lengths where Mamba's asymptotics ought to win. The
+hardware-aware parallel scan the paper relies on is not implemented here; earlier
+revisions of this docstring claimed a "hardware-optimized selective scan" and were
+wrong. Treat this package as an architecturally faithful reference, not a
+performance one.
 
-While this selection mechanism makes the model powerful, it prevents the
-use of a fast parallel convolutional computation method available to LTI
-SSMs. To maintain efficiency, Mamba employs a hardware-aware parallel
-scan algorithm. This algorithm allows the recurrent computation to be
-executed efficiently on modern accelerators like GPUs, achieving linear-time
-complexity while preserving the model's selective capabilities.
+A block projects to `expand * d_model`, splits into a signal path `x` and a gate
+path `z`, runs `x` through a depthwise `Conv1D` with `padding='causal'` and SiLU,
+computes `Δ, B, C` from the convolved signal, scans, adds the `D * x` skip, and
+gates by `silu(z)` before projecting back. Causality is structural rather than
+enforced: the convolution is causal and the recurrence only ever reads `h_{k-1}`,
+so there is no attention mask to get wrong and no way for a future token to leak
+backwards. For the same reason there are no positional embeddings — order is
+carried by the recurrence itself.
 
-The Mamba architecture uses a selective state space mechanism that allows
-the model to efficiently capture long-range dependencies in sequences while
-maintaining linear-time complexity. Unlike attention-based models, Mamba
-uses a data-dependent state space model with learned selective parameters.
+Residual addition is deferred rather than performed inside the block. Each
+`MambaResidualBlock` returns `(mamba_output, running_residual)` and adds the
+*previous* residual before normalizing, with the final addition done once in the
+model's tail. This mirrors the reference implementation's fused add-norm and keeps
+the residual stream unnormalized end to end. The consequence for anyone composing
+blocks by hand is sharp: calling `block(x)` and discarding the second return value
+produces a network with no skip connections at all, and it will still run.
 
-Usage Examples:
---------------
+The embedding is created with `mask_zero=False` deliberately. Nothing in the
+encoder consumes a padding mask — the recurrence has no notion of an ignorable
+position — so `create_mamba_with_head` builds the mask from `input_ids !=
+pad_token_id` at the boundary and hands it to the task head, which is the only
+component that can act on it (masked pooling). Padded positions still update the
+state, so a batch's results depend on its padding; right-padding a causal model
+leaves the valid prefix intact, left-padding does not.
 
-.. code-block:: python
-
-    import keras
-    from dl_techniques.models.mamba import Mamba
-
-    # 1. Create Mamba model with predefined variant
-    mamba_model = Mamba.from_variant("base", vocab_size=50257)
-
-    # 2. Load from local weights file
-    mamba_model = Mamba.from_variant("large", vocab_size=50257,
-                                      pretrained="path/to/weights.keras")
-
-    # 3. Create Mamba with custom configuration
-    mamba_model = Mamba(
-        vocab_size=50257,
-        d_model=768,
-        num_layers=24,
-        d_state=16,
-        d_conv=4,
-        expand=2
-    )
-
-    # 4. Use the model
-    inputs = {
-        "input_ids": keras.random.randint((2, 512), 0, 50257, dtype="int32")
-    }
-    outputs = mamba_model(inputs)
-    print(outputs["last_hidden_state"].shape)  # (2, 512, 768)
-
-Key Features:
-- Linear-time complexity O(L) vs O(L²) for attention
-- Selective state space mechanism with data-dependent parameters
-- Efficient long-range dependency modeling
-- Hardware-optimized selective scan implementation
-- Modular architecture separating encoding from task-specific heads
-
-Architecture:
-    Input (tokens) → Embedding → [MambaLayer × N] → Output (hidden states)
-
-    Each MambaLayer contains:
-    - Input projection (splits into x and z paths)
-    - Causal 1D convolution
-    - Selective SSM with data-dependent Δ, B, C parameters
-    - Output gating and projection
+Two caveats a reader should not have to discover empirically. `pretrained=True`
+logs a warning and returns a randomly initialized model rather than raising, which
+violates this repository's standing rule that an unavailable checkpoint must fail
+loudly, and means a caller can believe it holds trained weights when it does not.
+And `MODEL_VARIANTS` does not reproduce the paper's size table: the published
+790M/1.4B configurations are `d_model` 1536 and 2048 at 48 layers, whereas the
+entries here use 1024 and 1536, so parameter counts will not match the names.
 
 References:
-    - Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with
-      Selective State Spaces. arXiv preprint arXiv:2312.00752.
-      https://arxiv.org/abs/2312.00752
+    - Gu and Dao, 2023. Mamba: Linear-Time Sequence Modeling with Selective State
+      Spaces. (https://arxiv.org/abs/2312.00752)
+    - Gu et al., 2021. Efficiently Modeling Long Sequences with Structured State
+      Spaces. (https://arxiv.org/abs/2111.00396)
+    - Gu et al., 2022. On the Parameterization and Initialization of Diagonal State
+      Space Models. (https://arxiv.org/abs/2206.11893)
+    - Fu et al., 2023. Hungry Hungry Hippos: Towards Language Modeling with State
+      Space Models. (https://arxiv.org/abs/2212.14052)
+    - Smith et al., 2023. Simplified State Space Layers for Sequence Modeling.
+      (https://arxiv.org/abs/2208.04933)
 """
 
 import keras

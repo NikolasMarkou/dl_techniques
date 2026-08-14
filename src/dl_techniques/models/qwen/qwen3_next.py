@@ -1,11 +1,93 @@
 """
-Qwen3 Next Model
-============================================
+Qwen3-Next hybrid decoder: blocks of three gated linear-attention sublayers followed
+by one full gated-attention sublayer, each with its own normalization and optional
+mixture-of-experts feed-forward.
 
-A complete implementation of the Qwen3 Next architecture following the correct block structure:
-- Each block contains 3x Gated DeltaNet layers + 1x Gated Attention layer
-- Each layer has its own Zero-Centered RMSNorm and MoE
-- Proper residual connections throughout
+Softmax attention and linear recurrence fail in opposite directions. Attention can
+retrieve any earlier token exactly, but it stores every key and value, so both its
+compute and its cache grow with the sequence. A gated linear-attention layer folds
+the past into a fixed-size matrix state via an outer-product update, giving `O(L)`
+time and `O(1)` state — but that state is a lossy summary, and exact recall of a
+specific distant token is precisely what a bounded summary cannot promise. Qwen3-Next
+declines to choose. Each `Qwen3NextBlock` runs three linear-attention sublayers and
+then one softmax-attention sublayer, so within every block the cheap mixers do the
+bulk of the contextualization and the expensive one supplies exact global lookup.
+The cost ratio is what makes the hybrid worth building: only one sublayer in four
+holds a KV cache, so cache memory falls to roughly a quarter of a uniformly
+attentive stack of the same effective depth.
+
+`num_layers` counts *blocks*, not sublayers — the `80b_a3b` variant's 12 blocks are
+48 effective layers. Anyone comparing depth or parameter counts against a
+conventional transformer configuration must apply the factor of four.
+
+Normalization is `zero_centered_rms_norm` by default rather than plain RMSNorm. RMS
+normalization divides by the root-mean-square without subtracting a mean, so a
+persistent additive offset in the residual stream survives every layer and eats into
+the dynamic range that the scale weights are calibrated for; the zero-centered
+variant removes it. Every sublayer is pre-norm with its own normalization instance,
+its own optional MoE, and its own residual add — the block is four independent
+residual updates, not one.
+
+Mixture-of-experts is applied per sublayer when configured, replacing the FFN with
+`num_experts` experts of which `num_experts_per_tok` are routed. This decouples
+parameter count from per-token arithmetic: the `80b_a3b` variant routes 8 of 64, so
+it carries eight times the FFN capacity it pays for at inference. The `80b` variant
+sets `num_experts=1`, which is how a dense configuration is expressed here rather
+than by a separate flag. FFN keyword dicts pass through `assemble_ffn_config` rather
+than being written as literals, because the FFN factory raises on a key its target
+type does not accept and `ffn_expansion_factor` is accepted by only a minority of
+the registered types.
+
+Two properties of the masking are important and asymmetric. `call` builds a combined
+causal-plus-padding mask once via `build_causal_attention_mask` — in block semantics
+(`True` = suppress), OR-ing causal with padding, inverted once to the attend
+semantics the attention layers expect — and passes it to each block. The block
+forwards it *only to the gated-attention sublayer*. The three linear-attention
+sublayers receive no mask at all. Causality is still intact there, because a gated
+linear-attention scan is a strictly left-to-right recurrence with causal depthwise
+convolutions and cannot read forward. Padding, however, is not excluded: padded
+positions do enter the recurrent state, so with left-padding the summary a token
+sees is contaminated. Right-padding leaves each valid prefix's state correct. This
+is a property of the architecture as implemented, not an oversight to be patched by
+handing the mask to layers that have no notion of one.
+
+Note that there is no model-level positional embedding. Earlier revisions of this
+package constructed a `self.rope_embedding` and never used it; it was removed.
+Position enters through RoPE inside the gated-attention sublayer and through the
+causal convolutions and ordered recurrence of the linear-attention sublayers. Any
+diagram showing "Token Embeddings -> RoPE" as a model-level stage describes code that
+does not exist.
+
+Stochastic depth, when enabled, uses a linear rate schedule across blocks, so early
+blocks are dropped rarely and late blocks often. The LM head is an independent
+bias-free `Dense`; input and output embeddings are untied. `from_variant` exposes no
+`pretrained` argument, so a request for trained weights cannot be answered silently
+with a random initialization.
+
+With `return_dict=False` (the default) the model returns logits, and
+`create_qwen3_next_classification` pools that return value — so the classifier sits
+on the `vocab_size`-wide logits rather than on hidden states. It works, but it is a
+different and much wider pooling input than the usual recipe, and a classifier
+trained one way is not transferable to the other.
+
+References:
+    - Qwen Team, 2025. Qwen3 Technical Report.
+    - Yang et al., 2024. Gated Linear Attention Transformers with Hardware-Efficient
+      Training. (https://arxiv.org/abs/2312.06635)
+    - Yang et al., 2024. Parallelizing Linear Transformers with the Delta Rule over
+      Sequence Length. (https://arxiv.org/abs/2406.06484)
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive
+      Transformers with Linear Attention. (https://arxiv.org/abs/2006.16236)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
+      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position Embedding.
+      (https://arxiv.org/abs/2104.09864)
+    - Shazeer et al., 2017. Outrageously Large Neural Networks: The Sparsely-Gated
+      Mixture-of-Experts Layer. (https://arxiv.org/abs/1701.06538)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

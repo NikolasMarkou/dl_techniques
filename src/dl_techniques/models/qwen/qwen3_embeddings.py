@@ -1,71 +1,83 @@
 """
-Qwen3 text embedding and reranking.
+Qwen3-style text embedding and reranking towers: a shared transformer trunk read out
+either as a pooled vector or as a two-token relevance judgment.
 
-This module provides Keras 3 implementations of the Qwen3 text embedding and
-reranking models, as detailed in the technical report "Qwen3 Embedding:
-Advancing Text Embedding and Reranking Through Foundation Models". The
-implementations are built using a factory-based, modular architecture,
-allowing for configurable components like attention and normalization layers
-while adhering to modern Keras patterns for robust serialization.
+Retrieval and reranking answer the same question at different budgets. An embedding
+model must reduce a passage to one vector *before* it knows what will be asked of
+it, so every document in a corpus can be encoded once and searched by inner product;
+the compression is the whole point and also the whole limitation. A reranker is
+allowed to read the query and the document together and spend a full forward pass
+per pair, so it can model interactions that no pair of independent vectors can
+represent. The two classes here share a trunk and differ only in the readout, which
+makes the trade explicit: one reads a hidden state, the other reads the language
+modelling head.
 
-**1. Qwen3 Text Embedding: Instruction-Aware Semantic Vectors**
+The embedding readout takes the hidden state at the last non-padding position rather
+than a prepended `[CLS]`. In a decoder-only model that position is the only one that
+has seen the entire sequence, which is the argument for the choice. The index is
+computed as `sum(attention_mask) - 1`, and that arithmetic assumes the padding is on
+the *right*: it counts real tokens rather than locating them, so a left-padded batch
+selects a position inside the padding and returns whatever that slot happens to hold.
+The gather itself is written with `take_along_axis` over an index broadcast to
+`(B, 1, D)` because the index rank must match the tensor's, not because a per-row
+scalar would be conceptually different.
 
-The embedding model leverages a causal transformer (decoder-only) architecture
-to generate dense vector representations of text. Its design is distinguished
-by several key principles that enhance performance on retrieval tasks:
+Two optional post-processing steps follow. `truncate_dim` slices the leading
+components of the vector, which is only meaningful under Matryoshka training — the
+property that a prefix of the vector is itself a usable embedding is created by the
+loss, not by the slice, so truncating an ordinarily-trained model degrades quality
+arbitrarily. L2 normalization projects to the unit sphere, after which inner product
+and cosine similarity coincide and a maximum-inner-product index answers cosine
+queries exactly. Note the order: truncation happens *before* normalization, so a
+truncated vector is a unit vector in its own subspace rather than a slice of a unit
+vector, which is the behaviour a downstream cosine search expects.
 
--   **Instruction-Awareness**: The model is trained to be sensitive to task-
-    specific instructions. For query-like inputs, a formatted instruction
-    (e.g., "Instruct: Retrieve relevant passages...") is prepended to the
-    text. This allows the model to adapt its embedding generation process to
-    the specific semantic context of the task, such as retrieval, classification,
-    or clustering. Documents are embedded without instructions to maintain a
-    general representation.
+The reranker scores a single prompt containing instruction, query and document, and
+converts the model's own next-token distribution into a probability. It reads the
+logits at the last non-padding position, extracts the two entries for the "yes" and
+"no" token ids, and softmaxes over just that pair:
 
--   **Last-Token Pooling**: Unlike BERT-style models that often use a special
-    [CLS] token, the final embedding is derived from the hidden state of the
-    last non-padding token in the sequence. In a causal model, this final state
-    is theoretically positioned to aggregate information from the entire
-    preceding sequence, making it a comprehensive representation.
+`score = softmax([logit_no, logit_yes])[1]`
 
--   **Matryoshka Representation Learning (MRL)**: The model supports generating
-    embeddings of variable dimensions without retraining. By simply truncating
-    the full-dimension embedding vector, users can obtain smaller, more
-    efficient vectors that retain a high degree of semantic quality. This is
-    achieved through specific training techniques that make the initial
-    dimensions of the vector the most informative.
+Restricting the softmax to two entries rather than the full vocabulary is what makes
+the number a calibrated binary probability instead of a quantity dominated by
+whatever else the model might have said. It also means the score depends on the
+tokenizer: `yes_token_id` and `no_token_id` default to 9891 and 2201, and pointing
+this model at a different vocabulary without changing them silently scores two
+unrelated tokens.
 
--   **L2 Normalization**: The final pooled and truncated vector is L2-normalized
-    to produce a unit vector. This standardizes the embeddings, making them
-    directly suitable for efficient similarity calculations using cosine
-    similarity or maximum inner product search (MIPS).
+**These towers are not causal, and that contradicts the pooling rationale.** Neither
+`call` constructs a causal mask; both forward the caller's 2D padding mask directly
+to `TransformerLayer`, and `TransformerLayer` masks only with what it is given. The
+attention is therefore bidirectional, so "the last token has seen the whole prefix"
+is true here only in the trivial sense that every token has seen every other. For an
+embedding model bidirectionality is arguably an advantage and the pooled vector is
+still well-defined. For the reranker it is a genuine defect: the head is trained to
+predict a token from a position that has already attended to the tokens after it.
+The sibling modules `qwen3.py` and `qwen3_next.py` build their masks explicitly
+through `components.build_causal_attention_mask`; this module does not, and earlier
+revisions of this docstring asserted a causal architecture that the code does not
+implement.
 
-**2. Qwen3 Reranking: Generative Relevance Classification**
+Position is encoded with *learned absolute* embeddings (`positional_learned` from
+the embedding factory), not the rotary embeddings used elsewhere in the Qwen family.
+Sequences longer than `max_seq_len` have no encoding to draw on. The trunk's
+attention, FFN and normalization types are all factory keys, so these classes
+describe a configurable transformer in the shape of the published models rather than
+a weight-compatible port; no pretrained weights are distributed and none of the
+published evaluation numbers should be expected from them.
 
-The reranker model reframes the task of relevance scoring from a simple
-similarity calculation to a generative classification problem. It uses the
-advanced reasoning and context-understanding capabilities of a causal
-language model to make a nuanced judgment about a query-document pair.
-
--   **Prompt-Based Judgment**: Instead of comparing two separate embeddings, the
-    reranker processes a single, carefully crafted prompt that includes the
-    instruction, the query, and the document. The prompt concludes by framing
-    the task as a question for the model to answer, asking it to generate either
-    "yes" or "no" to indicate relevance.
-
--   **Probabilistic Scoring**: The final relevance score is not a simple logit
-    but the model's confidence in its judgment. It is calculated as the
-    softmax probability of the "yes" token over the logits of the "yes" and
-    "no" tokens. This approach directly leverages the model's generative
-    pre-training to produce a more reliable and context-aware relevance score.
-    Mathematically, this is expressed as:
-        Score = P("yes" | prompt) = softmax(logits["yes"], logits["no"])[1]
-
-**Foundational References:**
-
--   Zhang, Y., et al. (2025). *Qwen3 Embedding: Advancing Text Embedding and
-    Reranking Through Foundation Models*. arXiv:2506.05176.
--   Vaswani, A., et al. (2017). *Attention Is All You Need*. arXiv:1706.03762.
+References:
+    - Zhang et al., 2025. Qwen3 Embedding: Advancing Text Embedding and Reranking
+      Through Foundation Models. (https://arxiv.org/abs/2506.05176)
+    - Kusupati et al., 2022. Matryoshka Representation Learning.
+      (https://arxiv.org/abs/2205.13147)
+    - Wang et al., 2024. Improving Text Embeddings with Large Language Models.
+      (https://arxiv.org/abs/2401.00368)
+    - Nogueira et al., 2020. Document Ranking with a Pretrained Sequence-to-Sequence
+      Model. (https://arxiv.org/abs/2003.06713)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras

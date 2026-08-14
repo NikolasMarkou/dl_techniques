@@ -1,16 +1,95 @@
 """
-Qwen3 Model Implementation
-=====================================
+Qwen3 decoder-only language model with grouped-query attention, RoPE, and
+mixture-of-experts feed-forward layers at selectable depths.
 
-A complete implementation of the Qwen3 architecture following the same patterns as Qwen3Next:
-- Standard transformer blocks with optional MoE layers
-- Grouped Query Attention with RoPE
-- RMS normalization and SwiGLU feed-forward networks
-- Proper residual connections throughout
+A dense transformer ties two quantities that a language model would rather keep
+apart. Knowledge lives in parameters, so quality wants the parameter count large;
+serving cost lives in the FLOPs spent per token, so deployment wants it small. In a
+dense model there is one number, and raising it raises both. Sparse
+mixture-of-experts breaks the tie: the FFN of a block is replaced by `num_experts`
+independent FFNs plus a linear router that selects `num_experts_per_tok` of them for
+each token. Parameters scale with `num_experts`; arithmetic scales with
+`num_experts_per_tok`. The 30B-coder variant routes 8 of 128 experts, so it carries
+roughly sixteen times the FFN capacity it pays for at inference.
 
-Based on the Qwen3 architecture from:
-- Qwen3: Think Deeper, Act Faster
-- https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct
+The saving is not free, and where it is spent shows in the configuration. Routing
+is discrete, so the loss surface has a combinatorial component that the router must
+learn under gradient signal it only receives for the experts it already selected;
+expert utilization can collapse, and memory bandwidth rather than arithmetic becomes
+the binding constraint. This is why `moe_layers` is a list of *indices* rather than
+a flag: the variants interleave — every third layer for 30b-coder, layers 3/6/9 for
+small — leaving the remaining blocks dense so that a stable, fully-trained pathway
+exists at every depth. A layer not named in `moe_layers` receives `moe_config=None`
+and is an ordinary SwiGLU block.
+
+Attention is grouped-query with rotary position embeddings. GQA shares each key/value
+head across `num_attention_heads // num_key_value_heads` query heads, which shrinks
+the KV cache by exactly that ratio — the dominant memory cost at long context, and
+the reason the 30b-coder variant can quote a 262144-token window at all. RoPE encodes
+position as a rotation of query and key pairs by an angle proportional to absolute
+position, so the score between positions `i` and `j` depends only on `i - j`.
+`rope_theta` is the base of the geometric frequency ladder and is deliberately scaled
+with the context length across variants — 10,000 at 4096 tokens up to 10,000,000 at
+262144. The reason is concrete: the slowest rotation has wavelength on the order of
+`2*pi*theta`, and once the context exceeds it the angles wrap, making distant
+positions numerically indistinguishable from near ones. A large context with a small
+theta is not merely untrained, it is ambiguous.
+
+Causality is imposed at the model, not by the blocks. `TransformerLayer` defaults
+`attention_mask=None`, and both `GroupQueryAttention` and the gated attention used by
+Qwen3Next mask only when a mask is handed to them — neither manufactures a causal
+one. `call` therefore builds the mask once via `build_causal_attention_mask` and
+passes the same tensor to every block. That helper works in *block* semantics
+(`True` = suppress), OR-ing the lower-triangular causal mask with the padding mask
+derived from `attention_mask == 0`, and inverts once at the end to the *attend*
+semantics (`True` = may attend) the attention layers expect. This is a repair, not
+an embellishment: before it existed the stack forwarded only the padding mask, so
+every token attended to its own future and `task_type="generation"` was training
+next-token prediction on a model that had already been shown the answer. Removing or
+bypassing this call reintroduces exactly that.
+
+The FFN keyword dicts are routed through `assemble_ffn_config` rather than passed as
+literals, because they are this model's conveniences rather than the caller's
+request and the FFN factory raises on a key its target type does not accept. Only 6
+of the 21 registered FFN types take `ffn_expansion_factor`, so an unfiltered literal
+made `ffn_type=` fail for most of the registry, blaming a key the user never wrote.
+
+Blocks are pre-norm with RMSNorm and no biases anywhere. Stochastic depth, when
+enabled, follows a linear rate schedule from 0 to `stochastic_depth_rate` across
+depth, so early layers — whose outputs everything downstream depends on — are
+dropped rarely and late layers often. The LM head is an independent bias-free
+`Dense`, not the transposed embedding matrix, so input and output embeddings are
+untied.
+
+One consequence of the `call` signature is worth stating because it is easy to
+misread. With `return_dict=False` (the default) the model returns *logits*, and
+`create_qwen3_classification` pools that returned tensor — so the classifier head
+sits on top of the `vocab_size`-dimensional logits rather than the `hidden_size`
+hidden states. That differs from `models/gemma/gemma3.py`, whose classification
+factory re-traces the backbone's sublayers specifically to reach the hidden states.
+It works, but it is a much wider and differently-conditioned pooling input than the
+usual recipe, and a checkpoint's classifier is not portable between the two shapes.
+
+No pretrained-weight path exists in this package: `from_variant` takes no
+`pretrained` argument, so there is no way for a request for trained weights to be
+answered silently with a random initialization.
+
+References:
+    - Qwen Team, 2025. Qwen3 Technical Report.
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
+      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position Embedding.
+      (https://arxiv.org/abs/2104.09864)
+    - Shazeer et al., 2017. Outrageously Large Neural Networks: The Sparsely-Gated
+      Mixture-of-Experts Layer. (https://arxiv.org/abs/1701.06538)
+    - Fedus et al., 2021. Switch Transformers: Scaling to Trillion Parameter Models
+      with Simple and Efficient Sparsity. (https://arxiv.org/abs/2101.03961)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

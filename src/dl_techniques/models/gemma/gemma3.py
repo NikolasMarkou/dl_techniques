@@ -1,6 +1,98 @@
 """
-A complete implementation of the Gemma 3 architecture following Modern Keras 3
-best practices for custom models, ensuring robustness and serializability.
+Gemma 3 decoder with interleaved sliding-window / global attention and sandwich
+normalization, plus generation and classification task heads.
+
+The problem Gemma 3 is built around is not modelling quality but the cost of
+context. Attention is `O(n^2)` in time and, worse for deployment, the key-value
+cache it must retain is `O(n * layers * kv_heads)` in memory — at a 32k context the
+cache, not the weights, is what will not fit. The architecture attacks that cost on
+two independent axes. Grouped-query attention shrinks the cache by the ratio
+`num_attention_heads / num_key_value_heads`, since only the distinct KV heads are
+stored and the repeat up to the query-head count happens at score time. Interleaved
+attention shrinks it again by giving most layers a bounded window: with the 5:1
+pattern the variants encode, only one layer in six ever needs keys older than
+`sliding_window_size`.
+
+Windowing would be a poor trade if it truly severed long-range dependence, but it
+does not. A token's receptive field through a stack of windowed layers grows
+roughly as `depth * sliding_window_size`, so information still propagates
+backwards, just indirectly and with a hop count. The interleaved full-attention
+layers then supply what stacking cannot: an exact, single-hop route to any earlier
+position, at the price of a full cache in those layers alone. The `layer_types`
+list is the knob for this trade and is validated element-by-element against
+`{'sliding_window', 'full_attention'}` with its length pinned to `num_layers`. Note
+that leaving `layer_types=None` yields *all* full attention — the interleaving is a
+property of the variant tables, not of the constructor defaults.
+
+Each block uses sandwich normalization: RMSNorm before the sublayer and RMSNorm
+again on the sublayer's output, with the residual added afterwards, so the
+computation is `x = x + PostNorm(Attn(PreNorm(x)))` and likewise for the FFN. The
+pre-norm half is the usual conditioning fix. The post-norm half is the part worth
+explaining: in ordinary pre-norm transformers the residual stream's variance
+accumulates across depth without bound, because nothing ever rescales what each
+branch contributes. Normalizing the branch output before the addition caps each
+block's contribution while leaving the residual path itself free of any
+normalization, so gradients still reach layer zero unattenuated. Four RMSNorm
+layers per block is the cost.
+
+Masking happens inside each block rather than once at the model, because the mask
+depends on the block's own `attention_type`. `_create_attention_mask` builds it in
+*block* semantics — `j > i` for the causal part, OR-ed with `(i - j) >= window` to
+cut off the far past — and then inverts it once to the *attend* semantics the
+attention layer expects. The inverted mask is explicitly expanded to `(1, q, k)`
+before use: a rank-2 mask would be interpreted downstream as a padding mask rather
+than a full attention bias, silently discarding causality, so the leading axis is
+load-bearing and not merely cosmetic broadcasting. A caller-supplied
+`attention_mask` (1 = attend, 0 = pad) is cast to boolean and AND-ed in as
+`(batch, 1, k)`, which masks padded *keys* only; padded query rows are left to
+produce garbage that the loss is expected to ignore.
+
+Token embeddings are scaled by `sqrt(hidden_size)` before the first block. With a
+`TruncatedNormal(0.02)` initializer the raw embeddings are far smaller than the
+unit-scale activations the rest of the network is tuned for, and the scaling
+restores that match; the factor is computed once in `__init__` against
+`compute_dtype` rather than per call.
+
+Several things here deliberately diverge from the published Gemma 3, and a reader
+should not assume checkpoint compatibility. There is no QK normalization — the
+grouped-query attention layer supports `qk_norm_type` but this block does not pass
+it. A single RoPE base of 10000 is used for every layer, whereas the report uses a
+much larger base in the global layers specifically so that they remain usable at
+long context; consequently the long-context behaviour of the interleaved pattern
+here is not the paper's. The LM head is an independent `Dense` rather than the
+transposed embedding matrix, so input and output vocabularies are untied. And this
+is a text-only decoder: the vision tower of the multimodal Gemma 3 sizes is not
+part of this package.
+
+Unlike most model packages here, `from_variant` exposes no `pretrained` argument at
+all. That is the strongest form of the house rule that a request for pretrained
+weights must never be answerable with a randomly initialized model: there is no
+argument to pass, so there is no silent fallback to write.
+
+The two task factories build functional models over the same backbone.
+`create_gemma3_classification` re-traces the backbone's embedding, blocks and final
+norm into the functional graph instead of calling the backbone as a unit, because
+it needs the hidden states rather than the vocabulary logits; pooling then goes
+through the shared `SequencePooling` layer so that `cls` and `mean` behave
+identically to the other decoder packages.
+
+References:
+    - Gemma Team, 2025. Gemma 3 Technical Report.
+      (https://arxiv.org/abs/2503.19786)
+    - Gemma Team, 2024. Gemma 2: Improving Open Language Models at a Practical Size.
+      (https://arxiv.org/abs/2408.00118)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
+      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You Need.
+      (https://arxiv.org/abs/1911.02150)
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
+      (https://arxiv.org/abs/2004.05150)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position Embedding.
+      (https://arxiv.org/abs/2104.09864)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
 """
 
 
