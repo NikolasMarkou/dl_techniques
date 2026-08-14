@@ -181,8 +181,21 @@ class FFTMixer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass implementing adaptive spectral filtering."""
-        # 1. Fourier Transform
-        F = tf.signal.fft(keras.ops.cast(inputs, dtype="complex64"))
+        # 1. Fourier Transform along the TOKEN axis.
+        #
+        # ``tf.signal.fft`` transforms the INNERMOST axis. ``inputs`` is
+        # (B, N, D), so calling it directly transformed D — the feature axis —
+        # and the layer performed no token mixing at all, which is the one thing
+        # this architecture exists to do. The sequence axis is therefore moved
+        # to the end for the transform and moved back afterwards.
+        #
+        # ``W_base`` has shape (seq_len, embed_dim), i.e. a gain per frequency
+        # BIN per feature; that shape is only meaningful when the bins index the
+        # token axis. The repo's other Fourier layer does the same thing
+        # explicitly — see layers/attention/fnet_fourier_transform.py:368-374.
+        x_complex = keras.ops.cast(inputs, dtype="complex64")
+        F = keras.ops.transpose(
+            tf.signal.fft(keras.ops.transpose(x_complex, (0, 2, 1))), (0, 2, 1))
 
         # 2. Adaptive Spectral Filtering
         c = keras.ops.mean(inputs, axis=1)
@@ -195,8 +208,9 @@ class FFTMixer(keras.layers.Layer):
         # 3. Nonlinear Activation: modReLU
         F_activated = self._apply_modrelu(F_filtered)
 
-        # 4. Inverse Fourier Transform
-        Y_complex = tf.signal.ifft(F_activated)
+        # 4. Inverse Fourier Transform (same axis handling as the forward FFT)
+        Y_complex = keras.ops.transpose(
+            tf.signal.ifft(keras.ops.transpose(F_activated, (0, 2, 1))), (0, 2, 1))
         Y = keras.ops.real(Y_complex)
 
         # 5. Apply dropout
