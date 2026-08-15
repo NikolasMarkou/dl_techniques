@@ -96,6 +96,7 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
+from dl_techniques.layers.embedding.register_tokens import RegisterTokens
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -624,16 +625,25 @@ class DINOv2VisionTransformer(keras.Model):
         # Do NOT replace with a Dense(name='cls_token_projection') on ones. See decisions.md D-002.
         self.cls_token_layer = ClassTokenPrepend(name="cls_token")
 
-        # DECISION plan_2026-06-15_e2759fbc/D-003: register-token projection hoisted to
+        # DECISION plan_2026-06-15_e2759fbc/D-003: register-token layer hoisted to
         # __init__ (guarded by num_register_tokens>0), same no-weight-creating-layer-in-Lambda
         # rule as D-001. Insertion uses Concatenate, not a Lambda. See decisions.md D-003.
-        self.register_token_projection = None
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-064: the token bank is a real
+        # (1, R, D) add_weight inside RegisterTokens. Do NOT go back to
+        # Dense(embed_dim, use_bias=False) applied to ones((1, R, 1)): the input
+        # feature dim is 1, so the kernel is (1, D) and every one of the R rows is
+        # 1.0 * kernel[0] -- R bit-identical copies of ONE vector on ONE gradient
+        # accumulator, D parameters where the architecture needs R*D. This is the
+        # same "projection-on-ones" hack D-002/D-009 already rejected for the CLS
+        # and mask tokens. See decisions.md D-064.
+        self.register_token_layer = None
         if self.num_register_tokens > 0:
-            self.register_token_projection = layers.Dense(
-                self.embed_dim,
-                use_bias=False,
-                kernel_initializer=initializers.TruncatedNormal(stddev=1e-6),
-                name='register_token_projection'
+            self.register_token_layer = RegisterTokens(
+                num_tokens=self.num_register_tokens,
+                embed_dim=self.embed_dim,
+                initializer=initializers.TruncatedNormal(stddev=1e-6),
+                name='register_tokens'
             )
 
         # Create inputs and build model using functional API
@@ -772,18 +782,9 @@ class DINOv2VisionTransformer(keras.Model):
         # 1+R+N or by moving register insertion before pos_embed -- that would WRONGLY give
         # registers a positional signal. See decisions.md D-009 + tests::test_register_tokens_forward.
         if self.num_register_tokens > 0:
-            reg_base = self.register_token_projection(
-                keras.ops.ones((1, self.num_register_tokens, 1))
-            )
-            # Broadcast reg tokens (1,R,D) to the runtime batch of x via a pure-op Lambda
-            # (no weights), so Concatenate sees a matching batch dim.
-            reg_tokens = layers.Lambda(
-                lambda a: keras.ops.broadcast_to(
-                    a[1],
-                    (keras.ops.shape(a[0])[0], self.num_register_tokens, self.embed_dim)
-                ),
-                name='broadcast_register_tokens'
-            )([x, reg_base])
+            # RegisterTokens reads only the batch size of `x` and emits the
+            # (B, R, D) bank, so no Lambda broadcast is needed any more.
+            reg_tokens = self.register_token_layer(x)
             cls = x[:, :1]
             rest = x[:, 1:]
             x = layers.Concatenate(axis=1, name='add_register_tokens')([cls, reg_tokens, rest])

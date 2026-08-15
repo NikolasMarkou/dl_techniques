@@ -293,6 +293,15 @@ masks = np.zeros((2, 4), dtype=bool)          # 28 // 14 == 2 -> 2*2 == 4 patche
 logits = model([images, masks], training=False)
 
 # `giant` brings SwiGLU and 4 register tokens from its own variant entry.
+# The R register tokens are R INDEPENDENT learnable vectors, a single
+# `(1, R, embed_dim)` weight owned by
+# `dl_techniques.layers.embedding.register_tokens.RegisterTokens`. Until
+# 2026-08-15 they were built as `Dense(embed_dim, use_bias=False)` applied to
+# `ones((1, R, 1))`, whose `(1, embed_dim)` kernel made all R tokens bit-identical
+# copies of one vector — `embed_dim` parameters instead of `R * embed_dim`. That
+# change alters the weight COUNT and LAYOUT, so a DINOv2 checkpoint saved before
+# it with `num_register_tokens > 0` will not load into the current model.
+# They remain position-free (inserted after the positional embedding) by design.
 giant = create_dino_v2(
     "giant", image_size=32, patch_size=16, num_classes=10,
     embed_dim=32, depth=1, num_heads=4,        # shrunk so the example is cheap
