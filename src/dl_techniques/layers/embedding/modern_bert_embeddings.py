@@ -18,8 +18,13 @@ class ModernBertEmbeddings(keras.layers.Layer):
     Computes initial token representations by summing word embeddings and
     segment (token type) embeddings, then applying layer normalization and
     dropout. Unlike classical BERT, this layer omits absolute positional
-    embeddings since positional information is handled by Rotary Position
-    Embeddings (RoPE) within the attention layers. The combined embedding is
+    embeddings: it emits a permutation-equivariant representation and the
+    positional signal is injected by the attention layers downstream. In
+    :class:`~dl_techniques.models.modern_bert.model.ModernBERT`, which is this
+    layer's only consumer, that means Rotary Position Embeddings (RoPE) applied
+    to queries and keys in the global layers and a learnable relative position
+    bias in the windowed layers. A stack built over this layer with neither is
+    permutation-equivariant end to end. The combined embedding is
     ``E = E_word(token_i) + E_segment(type_i)``, followed by LayerNorm and
     Dropout.
 

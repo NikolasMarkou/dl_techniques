@@ -403,8 +403,13 @@ class TestModernBERTAdvancedFeatures:
 
         for i, layer in enumerate(model.encoder_layers):
             is_global = (i + 1) % interval == 0
-            expected_type = "multi_head" if is_global else "window"
+            # Global layers are 'group_query' with num_kv_heads == num_heads,
+            # which is arithmetically plain MHA plus RoPE. See the D-007 anchor
+            # in models/modern_bert/model.py: 'multi_head' cannot carry RoPE.
+            expected_type = "group_query" if is_global else "window"
             assert layer.attention_type == expected_type, f"Layer {i} has wrong attention type"
+            if is_global:
+                assert layer.attention_args["num_kv_heads"] == model.num_heads
 
     def test_pre_ln_and_geglu_config(self):
         """Verify that layers are configured for Pre-LN and GeGLU."""

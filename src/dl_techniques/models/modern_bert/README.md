@@ -120,7 +120,7 @@ ModernBERT retains the core bidirectional Transformer encoder structure but over
 ├───────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  Input IDs ────► ┌────────────────────┐                           │
-│                  │ ModernBertEmbeddings │ (Adds RoPE)             │
+│                  │ ModernBertEmbeddings │ (No positional term)    │
 │                  └──────────┬───────────┘                         │
 │                             │                                     │
 │                  ┌──────────▼───────────┐                         │
@@ -186,21 +186,20 @@ Input (from previous layer)
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `ModernBertEmbeddings` with RoPE
+### 4.1 `ModernBertEmbeddings` (no positional term)
 
 -   **Purpose**: To convert input token IDs into dense vector representations.
 -   **Components**:
     1.  **Token Embeddings**: A standard lookup table for the modern BPE vocabulary (50,368 tokens).
-    2.  **Rotary Positional Embeddings (RoPE)**: Unlike learned positional embeddings, RoPE modifies the queries and keys in the attention mechanism to inject relative positional information. This is a key enabler of the long context window.
-    3.  **Token Type Embeddings**: A learnable embedding to distinguish between different sentences. (Note: While present for BERT compatibility, ModernBERT does not use token type IDs during pre-training).
--   **Functionality**: The token and token type embeddings are summed, followed by a `LayerNormalization` and `Dropout` layer. RoPE is applied within the attention layers.
+    2.  **Token Type Embeddings**: A learnable embedding to distinguish between different sentences. (Note: While present for BERT compatibility, ModernBERT does not use token type IDs during pre-training).
+-   **Functionality**: The token and token type embeddings are summed, followed by a `LayerNormalization` and `Dropout` layer. This layer itself adds **no** positional term and its output is permutation-equivariant; the positional signal is injected downstream, by the attention layers (§ 4.3).
 
 ### 4.2 `TransformerLayer` with Pre-LN and GeGLU
 
 -   **Purpose**: The core building block of the encoder.
 -   **Architecture**:
     1.  **Pre-Normalization**: The input is first passed through a `LayerNormalization` layer.
-    2.  **Multi-Head Attention**: The normalized input is fed into the attention mechanism (either windowed or global), where RoPE is applied.
+    2.  **Multi-Head Attention**: The normalized input is fed into the attention mechanism (either windowed or global). RoPE is applied to the queries and keys of the **global** layers only; see § 4.3 for what the windowed layers use instead.
     3.  **First Residual Connection**: The output of the attention block is added back to the original input.
     4.  **Second Pre-Normalization**: The result of the first residual connection is normalized again.
     5.  **GeGLU Feed-Forward Network**: The normalized result is processed by a gated feed-forward network.
@@ -208,8 +207,11 @@ Input (from previous layer)
 
 ### 4.3 Hybrid Attention
 
--   **Windowed (Local) Attention**: Most layers (2 out of every 3) use windowed attention, where each token can only attend to a fixed-size window of 128 tokens. This reduces complexity from `O(N²)` to `O(N * W)`.
--   **Global Attention**: Every 3rd layer uses standard global attention. This allows information to be exchanged across the entire 8192-token sequence, ensuring that long-range dependencies are captured.
+-   **Global Attention**: Every 3rd layer uses standard global attention with **RoPE** on its queries and keys. This allows information to be exchanged across the entire 8192-token sequence, ensuring that long-range dependencies are captured. It is built as the factory's `group_query` type with `num_kv_heads == num_heads`, which is arithmetically plain multi-head attention — that is the only registry entry that reaches plain self-attention *and* carries RoPE. `multi_head` declares no RoPE parameter, and `create_attention_layer` silently drops keys it does not declare, so `attention_args={"use_rope": True}` on a `multi_head` layer builds cleanly and does nothing.
+-   **Windowed (Local) Attention**: Most layers (2 out of every 3) use windowed attention. **This implementation deviates from the paper**, and the deviation is deliberate and documented rather than hidden: the reused `window` attention layer is a *spatial* one. It reshapes the `(B, L, D)` token sequence into a synthetic `ceil(sqrt(L))`-square grid and attends inside `window_size`-square blocks of that grid. Consequences, both measurable:
+    -   A local layer's neighbourhood is **not** a contiguous 1-D window. With `L=16` and `window_size=2` the grid is 4x4 and token 0's window is `{0, 1, 4, 5}` — tokens 2 and 3 are invisible to it while token 4 is not. Pinned by `tests/test_models/test_modern_bert/test_positional_signal.py::TestLocalWindowAdjacencyIsSynthetic`.
+    -   Whenever `L <= window_size**2` (16384 at the default `window_size=128`) a single window covers the whole padded grid, so the layer is full attention, not `O(N * W)`.
+    Within-window order comes from the layer's learnable Swin-convention relative position bias over that synthetic grid, not from RoPE and not from 1-D token distance. No 1-D sliding-window attention layer exists in `layers/attention/`; adding one is the real fix.
 
 ---
 

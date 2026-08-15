@@ -28,7 +28,17 @@ linear cost, while the periodic global layers stitch the windows together so
 information still crosses the whole sequence -- a token pair `L` apart is
 connected after one global layer, not after `L / window` local ones. This is
 what makes an 8192-token context affordable when dense attention at that length
-would not be.
+would not be. The local layers here are a documented approximation of that
+idea rather than a transcription of it: the windowed attention layer this
+package reuses is a spatial one, so a text sequence is folded into a synthetic
+square grid before windowing (see the class docstring).
+
+Positional information lives entirely in the attention layers, as in the
+paper: the embedding stage sums word and token-type embeddings and adds no
+positional term at all. The global layers therefore apply rotary position
+embeddings to their queries and keys, which is what makes them position-aware;
+without that they would be exactly permutation-equivariant, and a
+permutation-equivariant encoder is not a language model at all.
 
 GeGLU replaces the plain GELU feed-forward. Gating gives the FFN a
 multiplicative interaction its linear-then-activate predecessor lacks, which
@@ -100,6 +110,21 @@ class ModernBERT(keras.Model):
     optionally 'attention_mask' and 'token_type_ids'. It outputs a dictionary
     containing the 'last_hidden_state' and the forwarded 'attention_mask'.
 
+    **Where the positional signal comes from.** The embedding stage carries
+    none — it sums word and token-type embeddings only. Global layers get
+    theirs from RoPE, applied to queries and keys inside the attention layer
+    (``group_query`` with ``num_kv_heads == num_heads``, i.e. plain multi-head
+    attention plus RoPE). Local layers get theirs from a learnable relative
+    position bias over a **synthetic 2-D grid**: ``window`` attention reshapes
+    the ``(B, L, D)`` sequence into a ``ceil(sqrt(L))`` square grid and attends
+    within ``local_attention_window_size``-square blocks of it, so a local
+    layer's neighbourhood is a set of strided runs of tokens rather than a
+    contiguous 1-D window, and for every ``L <= local_attention_window_size**2``
+    (16384 at the default) it degenerates to attention over the whole padded
+    grid. That is a real deviation from the paper's 1-D sliding window; it is
+    documented rather than fixed because no 1-D sliding-window attention layer
+    exists in ``layers/attention/``.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -116,7 +141,7 @@ class ModernBERT(keras.Model):
               ... (Layers with windowed attention)
                │
                ▼
-        TransformerLayerₖ (Pre-LN, Global Attention -> GeGLU FFN)
+        TransformerLayerₖ (Pre-LN, Global Attention + RoPE -> GeGLU FFN)
                │
                ▼
               ... (Alternating local and global attention)
@@ -169,8 +194,16 @@ class ModernBERT(keras.Model):
         layer. E.g., 3 means every 3rd layer is global. Defaults to 3.
     :type global_attention_interval: int
     :param local_attention_window_size: Window size for local (windowed)
-        attention layers. Defaults to 128.
+        attention layers. This is the edge length of a **square spatial**
+        window over the synthetic grid described above, not a 1-D token
+        window. Defaults to 128.
     :type local_attention_window_size: int
+    :param max_position_embeddings: Longest sequence the global layers' RoPE
+        tables are precomputed for; a longer input raises. Defaults to 8192.
+    :type max_position_embeddings: int
+    :param global_rope_theta: RoPE base frequency for the global layers.
+        Defaults to 160000.0.
+    :type global_rope_theta: float
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
     :raises ValueError: If invalid configuration parameters are provided.
@@ -230,6 +263,12 @@ class ModernBERT(keras.Model):
     DEFAULT_INITIALIZER_RANGE = 0.02
     DEFAULT_LAYER_NORM_EPSILON = 1e-12
     DEFAULT_HIDDEN_ACT = "gelu"
+    #: Longest sequence the global layers' RoPE tables are precomputed for.
+    #: A longer input raises in ``RotaryPositionEmbedding.call``.
+    DEFAULT_MAX_POSITION_EMBEDDINGS = 8192
+    #: RoPE base for the global layers. Warner et al. use a large base on the
+    #: global layers precisely because they must resolve 8192-token distances.
+    DEFAULT_GLOBAL_ROPE_THETA = 160000.0
 
     def __init__(
             self,
@@ -247,6 +286,8 @@ class ModernBERT(keras.Model):
             use_bias: bool = False,
             global_attention_interval: int = 3,
             local_attention_window_size: int = 128,
+            max_position_embeddings: int = DEFAULT_MAX_POSITION_EMBEDDINGS,
+            global_rope_theta: float = DEFAULT_GLOBAL_ROPE_THETA,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -255,7 +296,8 @@ class ModernBERT(keras.Model):
         self._validate_config(
             hidden_size, num_layers, num_heads,
             hidden_dropout_prob, attention_probs_dropout_prob,
-            global_attention_interval
+            global_attention_interval, max_position_embeddings,
+            global_rope_theta
         )
 
         # Store all configuration parameters
@@ -273,6 +315,8 @@ class ModernBERT(keras.Model):
         self.use_bias = use_bias
         self.global_attention_interval = global_attention_interval
         self.local_attention_window_size = local_attention_window_size
+        self.max_position_embeddings = max_position_embeddings
+        self.global_rope_theta = global_rope_theta
 
         # Build the model architecture
         self._build_architecture()
@@ -289,7 +333,9 @@ class ModernBERT(keras.Model):
             num_heads: int,
             hidden_dropout_prob: float,
             attention_probs_dropout_prob: float,
-            global_attention_interval: int
+            global_attention_interval: int,
+            max_position_embeddings: int,
+            global_rope_theta: float
     ) -> None:
         """Validate model configuration parameters."""
         if hidden_size <= 0 or num_layers <= 0 or num_heads <= 0:
@@ -310,6 +356,15 @@ class ModernBERT(keras.Model):
             )
         if global_attention_interval <= 0:
             raise ValueError("global_attention_interval must be positive.")
+        if max_position_embeddings <= 0:
+            raise ValueError(
+                "max_position_embeddings must be positive, got "
+                f"{max_position_embeddings}"
+            )
+        if global_rope_theta <= 0:
+            raise ValueError(
+                f"global_rope_theta must be positive, got {global_rope_theta}"
+            )
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings, encoder layers, final norm)."""
@@ -329,9 +384,39 @@ class ModernBERT(keras.Model):
             # Every k-th layer uses global attention, others use windowed.
             is_global = (i + 1) % self.global_attention_interval == 0
 
-            attention_type = "multi_head" if is_global else "window"
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-007
+            # Global layers are 'group_query' with `num_kv_heads == num_heads`
+            # (arithmetically plain MHA) because that is the ONLY registry entry
+            # that reaches plain self-attention AND carries RoPE.
+            #
+            # WHAT NOT TO DO: do NOT "simplify" this back to
+            # `attention_type="multi_head"` with `attention_args={"use_rope":
+            # True}`. `MultiHeadAttention` declares no RoPE parameter, and
+            # `create_attention_layer` FILTERS kwargs to the registry's declared
+            # names and DROPS the rest SILENTLY (factory.py:1425-1427) — so that
+            # spelling constructs, logs, tests and serializes cleanly while doing
+            # nothing. That was the defect: with no positional term anywhere in
+            # the embeddings either, every global layer was exactly
+            # permutation-equivariant. Measured 2026-08-15 on CPU with
+            # `global_attention_interval=1`: `max|P f(x) - f(P x)| = 1.19e-07`
+            # (float32 noise) before, `4.06e-01` after. See decisions.md D-007.
+            #
+            # Local layers stay 'window', which is a SPATIAL layer: it reshapes
+            # a `(B, L, D)` text sequence into a synthetic `ceil(sqrt(L))^2` grid
+            # and attends inside `window_size`-square blocks of it, so its
+            # neighbourhood is not a 1-D token window and, whenever
+            # `L <= window_size^2`, is the whole (padded) sequence. Its order
+            # information is the Swin-convention relative position bias over
+            # that synthetic grid. This is documented, not fixed: no 1-D
+            # sliding-window attention exists in `layers/attention/`.
+            attention_type = "group_query" if is_global else "window"
             attention_args = (
-                {} if is_global
+                {
+                    "num_kv_heads": self.num_heads,
+                    "max_seq_len": self.max_position_embeddings,
+                    "rope_theta": self.global_rope_theta,
+                }
+                if is_global
                 else {"window_size": self.local_attention_window_size}
             )
 
@@ -580,6 +665,8 @@ class ModernBERT(keras.Model):
             "use_bias": self.use_bias,
             "global_attention_interval": self.global_attention_interval,
             "local_attention_window_size": self.local_attention_window_size,
+            "max_position_embeddings": self.max_position_embeddings,
+            "global_rope_theta": self.global_rope_theta,
         })
         return config
 

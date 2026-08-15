@@ -278,43 +278,58 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             )
             return
 
-        # Create frequency tensor: 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
-        inv_freq = 1.0 / (
-            self.rope_theta ** (
-                keras.ops.arange(0, freq_dim, dtype=cache_dtype) * 2.0 / self.rope_dim
-            )
-        )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-021
+        # The tables are materialized by an INITIALIZER, not by `add_weight`
+        # followed by `.assign()`.
+        #
+        # WHAT NOT TO DO: do NOT go back to
+        #     w = self.add_weight(..., initializer='zeros'); w.assign(table)
+        # Keras 3 builds a sublayer that is first reached from a PARENT's
+        # `call()` (i.e. every real model: `Model.__call__` runs a symbolic pass
+        # first) inside a `StatelessScope`, which RECORDS `.assign()` and then
+        # DISCARDS it. The variables therefore stayed at their `'zeros'`
+        # initializer and `cos == sin == 0` for every position, which silently
+        # ZEROES the rotated `rope_dim` slice of q and k — at the
+        # `rope_percentage=1.0` used by `GroupedQueryAttention` that is the whole
+        # head, making attention uniform and the block exactly
+        # permutation-equivariant. Measured 2026-08-15, CPU: a bare
+        # `RotaryPositionEmbedding.build(...)` gave `cos[0] == 1`, while the same
+        # layer reached through a parent's `call()` gave `cos[0] == 0`.
+        # Initializers are honoured at variable-CREATION time and so survive the
+        # stateless scope. The whole table is computed INSIDE the initializer:
+        # a tensor built here and closed over would belong to the symbolic
+        # build pass's scratch `FuncGraph` and raise "cannot be accessed from
+        # here ... out of scope" on the eager pass. See decisions.md D-021.
+        def _table_initializer(trig):
+            def initializer(shape, dtype=None):
+                table_dtype = dtype or cache_dtype
+                # 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
+                inv_freq = 1.0 / (
+                    self.rope_theta ** (
+                        keras.ops.arange(0, shape[1], dtype=table_dtype)
+                        * 2.0 / self.rope_dim
+                    )
+                )
+                positions = keras.ops.arange(shape[0], dtype=table_dtype)
+                return trig(keras.ops.outer(positions, inv_freq))
 
-        # Position indices: [0, 1, 2, ..., max_seq_len-1]
-        positions = keras.ops.arange(self.max_seq_len, dtype=cache_dtype)
+            return initializer
 
-        # Outer product to get all position-frequency combinations
-        # Shape: (max_seq_len, freq_dim)
-        freqs = keras.ops.outer(positions, inv_freq)
-
-        # Compute cos and sin tables
-        cos_table = keras.ops.cos(freqs)
-        sin_table = keras.ops.sin(freqs)
-
-        # Create layer's own weights using add_weight
+        table_shape = (self.max_seq_len, freq_dim)
         self.cos_cached = self.add_weight(
             name='cos_cached',
-            shape=cos_table.shape,
-            initializer='zeros',
+            shape=table_shape,
+            initializer=_table_initializer(keras.ops.cos),
             trainable=False,
             dtype=cache_dtype
         )
         self.sin_cached = self.add_weight(
             name='sin_cached',
-            shape=sin_table.shape,
-            initializer='zeros',
+            shape=table_shape,
+            initializer=_table_initializer(keras.ops.sin),
             trainable=False,
             dtype=cache_dtype
         )
-
-        # Assign the computed values
-        self.cos_cached.assign(cos_table)
-        self.sin_cached.assign(sin_table)
 
     def call(
         self,
