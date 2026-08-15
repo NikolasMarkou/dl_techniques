@@ -10,7 +10,11 @@ your model with its own package's factory and pass it to ``make_logits_fn``.
 
 ``_log_softmax`` and ``_nucleus_sample`` keep their leading underscore (they are
 internal by name) but are exported because the test suite and the sampler's
-callers pin their exact numerics.
+callers pin their exact numerics. ``_nucleus_sample`` returns
+``(token_id, log_prob)`` -- the log probability is taken over the truncated and
+renormalized nucleus, which is the density the token was drawn from and the one
+the MH acceptance ratio needs; the caller cannot recover it from a
+full-vocabulary log-softmax.
 """
 from dl_techniques.models.power_sampling.config import PowerSamplingConfig
 from dl_techniques.models.power_sampling.protocols import TokenizerProtocol, LogitsFn

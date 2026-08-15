@@ -188,7 +188,7 @@ Every token is drawn through `_sample_token`, which builds the proposal distribu
 3. **Temperature scaling**: divide by the temperature.
 4. **Nucleus (top-p) sampling**: keep the smallest set of tokens whose cumulative probability reaches `top_p`, renormalize, and sample.
 
-The proposal log-prob is read from the scaled (post-temperature) log-softmax; the target log-prob is the base-model log-softmax divided by temperature.
+The proposal log-prob is returned by the nucleus draw itself — the log probability of the drawn token under the **truncated, renormalized** distribution of step 4, which is the distribution the token actually came from. It is deliberately *not* the scaled (post-temperature) full-vocabulary log-softmax: those two agree only when `top_p = 1.0`, and they are the `q(x|x')/q(x'|x)` factor of the MH ratio, so reading the untruncated one biases acceptance whenever top-p excludes real mass (measured at `top_p = 0.5` over a linear logit ramp: 0.602 nats apart). The target log-prob is the base-model log-softmax divided by temperature — base, i.e. before masking, penalty and truncation, because it must describe `p^alpha` and not the proposal.
 
 ---
 
@@ -551,7 +551,7 @@ A: Almost always a wrong `text_slice_start`. It must equal the vision-token sequ
 
 ## 15. Testing & Validation
 
-The engine is exercised by a keras-free mock suite (a mock model returning `{"logits": ...}` plus a char-level mock tokenizer) covering: config defaults; `_log_softmax`/`_nucleus_sample` numerics; `make_logits_fn` for dict / plain-tensor / VLM-offset outputs; `generate_standard`; `mcmc_power_sample` (acceptance ratio in `[0, 1]`, output length); `max_swap`; `generate_text` dispatch + `ValueError` on a bad method; CLS-prepend on/off; and the no-config-mutation invariant.
+The engine is exercised by a keras-free mock suite (a mock model returning `{"logits": ...}` plus a char-level mock tokenizer) covering: config defaults; `_log_softmax`/`_nucleus_sample` numerics (including that the nucleus draw reports the renormalized density it sampled from, with the degenerate `top_p = 1.0` twin as the anti-vacuity control); the MH chain proposing from the state it just accepted; the eager `pad_token_id` precondition; `make_logits_fn` for dict / plain-tensor / VLM-offset outputs; `generate_standard`; `mcmc_power_sample` (acceptance ratio in `[0, 1]`, output length); `max_swap`; `generate_text` dispatch + `ValueError` on a bad method; CLS-prepend on/off; and the no-config-mutation invariant.
 
 Run the scoped suite (no GPU required):
 

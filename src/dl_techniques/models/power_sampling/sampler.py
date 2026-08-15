@@ -230,8 +230,10 @@ class PowerSampler:
         :param temperature: Sampling temperature.
         :param recent_tokens: Recent token IDs for repetition penalty.
         :return: ``(token_id, log_prob_norm, log_prob_unnorm)`` where
-            ``log_prob_norm`` is the log probability under the proposal
-            (temperature-scaled + nucleus) and ``log_prob_unnorm`` is
+            ``log_prob_norm`` is the log probability under the proposal —
+            special-token masking, repetition penalty, temperature scaling
+            **and** the renormalized top-p nucleus, i.e. the exact distribution
+            the token was drawn from — and ``log_prob_unnorm`` is
             ``(1/temperature) * log p(token)`` under the base model.
         """
         cfg = self.config
@@ -260,12 +262,13 @@ class PowerSampler:
         # Temperature scaling
         scaled_logits = working_logits / temperature
 
-        # Nucleus (top-p) sampling
-        token_id = _nucleus_sample(scaled_logits, cfg.top_p)
+        # Nucleus (top-p) sampling. The proposal log-probability comes back
+        # from the draw itself: it is the density over the truncated,
+        # renormalized nucleus, which _log_softmax(scaled_logits) is not.
+        token_id, log_prob_norm = _nucleus_sample(scaled_logits, cfg.top_p)
 
-        # Log probabilities for MCMC
-        scaled_log_probs = _log_softmax(scaled_logits)
-        log_prob_norm = scaled_log_probs[token_id]
+        # Target (power) log-probability: alpha * log p(token) under the BASE
+        # model, i.e. before masking, repetition penalty and truncation.
         log_prob_unnorm = base_log_probs[token_id] / temperature
 
         return int(token_id), float(log_prob_norm), float(log_prob_unnorm)

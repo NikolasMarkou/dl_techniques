@@ -122,17 +122,20 @@ class TestOps:
     def test_nucleus_sample_in_range(self):
         np.random.seed(0)
         logits = np.random.randn(VOCAB).astype("float32")
-        tok = _nucleus_sample(logits, top_p=0.92)
+        tok, log_prob = _nucleus_sample(logits, top_p=0.92)
         assert isinstance(tok, int)
         assert 0 <= tok < VOCAB
+        assert log_prob <= 0.0  # it is a log probability of a kept token
 
     def test_nucleus_sample_argmax_dominant(self):
         """One-hot-dominant logits + low top_p -> returns the argmax."""
         np.random.seed(0)
         logits = np.full(VOCAB, -50.0, dtype="float32")
         logits[7] = 50.0
-        tok = _nucleus_sample(logits, top_p=0.1)
+        tok, log_prob = _nucleus_sample(logits, top_p=0.1)
         assert tok == 7
+        # Sole member of the nucleus -> renormalized probability exactly 1.
+        assert abs(log_prob) <= 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +395,95 @@ class TestSampler:
         # exercise the single-fn batched fallback in _batched_generate via mcmc
         ids2, info2 = s.mcmc_power_sample("a")
         assert 0.0 <= info2["acceptance_ratio"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# C-30(c): the acceptance ratio must use the density it actually drew from
+# ---------------------------------------------------------------------------
+def _nucleus_reference_log_prob(logits, top_p, token_id):
+    """Oracle for ``q(token | logits)`` under nucleus sampling.
+
+    Written from the DEFINITION of top-p sampling, not from ``ops.py``: take
+    the smallest set of highest-probability tokens whose cumulative probability
+    reaches ``top_p``, renormalize over that set, and read off the token's
+    probability. Tokens outside the set have probability 0.
+
+    :return: ``log q(token)``, or ``-inf`` if the token was truncated away.
+    """
+    p = np.exp(logits - logits.max())
+    p = p / p.sum()
+    order = np.argsort(p)[::-1]
+    cum = np.cumsum(p[order])
+    keep = int(np.searchsorted(cum, top_p)) + 1  # smallest set reaching top_p
+    kept = order[:keep]
+    if token_id not in kept:
+        return float("-inf")
+    return float(np.log(p[token_id] / p[kept].sum()))
+
+
+class TestProposalDensityIsTheTruncatedOne:
+    """C-30(c): ``log_prob_norm`` must be the density the token was drawn from.
+
+    ``_nucleus_sample`` draws from the top-p truncated distribution
+    RENORMALIZED over the surviving tokens. ``_sample_token``'s docstring
+    already promises ``log_prob_norm`` is "the log probability under the
+    proposal (temperature-scaled + nucleus)", but it was read off
+    ``_log_softmax(scaled_logits)`` — the FULL vocabulary — so the
+    ``q(x|x')/q(x'|x)`` term of the MH ratio was built from a distribution
+    nothing ever sampled from.
+
+    The two assertions below are twins on purpose. At ``top_p = 1.0`` nothing is
+    truncated and the two densities coincide exactly, which is why a guard
+    written only at that point is blind; the low-``top_p`` arm carries the
+    ``> 1e-6`` separation that makes the first arm non-vacuous. Do not collapse
+    them onto one case. CPU, ``np.random`` seeded.
+    """
+
+    def _sample(self, top_p, seed=0):
+        np.random.seed(seed)
+        logits = np.linspace(2.0, -2.0, VOCAB).astype("float32")
+        cfg = PowerSamplingConfig(top_p=top_p, mcmc_steps=1)
+        s = PowerSampler(
+            None, CharTokenizer(), cfg,
+            logits_fn=lambda ids: logits,
+        )
+        token_id, log_prob_norm, _ = s._sample_token(logits, temperature=1.0)
+        return logits, token_id, log_prob_norm
+
+    def test_truncating_top_p_uses_the_renormalized_density(self):
+        """top_p=0.5 excludes real mass: the two densities must disagree."""
+        logits, token_id, log_prob_norm = self._sample(top_p=0.5)
+
+        expected = _nucleus_reference_log_prob(logits, 0.5, token_id)
+        full = float(_log_softmax(logits)[token_id])
+
+        assert np.isfinite(expected)  # the drawn token survived truncation
+        assert abs(log_prob_norm - expected) <= 1e-6
+        # Anti-vacuity control: truncation really did remove mass here, so the
+        # full-vocabulary value is a DIFFERENT number.
+        assert abs(log_prob_norm - full) > 1e-6
+
+    def test_top_p_one_is_the_degenerate_twin(self):
+        """top_p=1.0 truncates nothing: the two densities must coincide."""
+        logits, token_id, log_prob_norm = self._sample(top_p=1.0)
+
+        expected = _nucleus_reference_log_prob(logits, 1.0, token_id)
+        full = float(_log_softmax(logits)[token_id])
+
+        assert abs(log_prob_norm - expected) <= 1e-6
+        assert abs(log_prob_norm - full) <= 1e-6  # coincide, hence blind here
+
+    def test_nucleus_sample_returns_the_log_prob_of_what_it_drew(self):
+        """The primitive itself reports the density it sampled from."""
+        np.random.seed(1)
+        logits = np.linspace(3.0, -3.0, VOCAB).astype("float32")
+        token_id, log_prob = _nucleus_sample(logits, top_p=0.6)
+
+        assert isinstance(token_id, int)
+        assert 0 <= token_id < VOCAB
+        assert abs(
+            log_prob - _nucleus_reference_log_prob(logits, 0.6, token_id)
+        ) <= 1e-6
 
 
 # ---------------------------------------------------------------------------
