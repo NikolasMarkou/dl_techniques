@@ -44,6 +44,26 @@ This combination of strong photometric and geometric augmentations is crucial fo
 preventing overfitting and learning robust, generalizable visual
 representations from limited labeled data.
 
+Two properties of this layer are easy to get wrong and are therefore stated here.
+
+**CutMix mixes across batch rows, so it is only sound when the supervision target
+is mixed by the same box.** `call()` returns the mixed image alone and is
+correct only for a *target-free* consumer (an unsupervised or
+consistency-on-the-image-alone view). A supervised consumer must instead use
+:meth:`StrongAugmentation.augment_with_mix`, which additionally returns the mix
+descriptor `(mix_mask, perm_indices)`, and apply that same descriptor to every
+target with :meth:`StrongAugmentation.apply_mix_to_target`. Mixing the image
+without the target teaches the network another scene's label over the cut
+rectangle — pure label noise on roughly `cutmix_prob` of all batches.
+
+**Color jitter can leave the input's valid range, so the range is a declared
+contract, not an assumption.** `input_value_range` names the interval the caller
+guarantees its images live in; the jitter result is clipped back into it. Pass
+`None` for inputs with no bounded range (mean-zero standardized images, images
+in `[-1, +1]`), where clipping to `[0, 1]` would destroy every negative pixel on
+the training path only — a train/eval divergence that no shape or finiteness
+assertion can see.
+
 References:
     - Yun, S., et al. (2019). CutMix: Regularization Strategy to Train Strong
       Classifiers with Localizable Features. *ICCV*.
@@ -71,6 +91,11 @@ class StrongAugmentation(keras.layers.Layer):
     factors, while CutMix pastes a random rectangular patch from a shuffled
     batch image onto the original: ``x_new = M * x_perm + (1-M) * x``.
 
+    Supervised callers must use :meth:`augment_with_mix` +
+    :meth:`apply_mix_to_target` rather than ``call``, so the CutMix box that was
+    pasted into the image is also pasted into the target. See the module
+    docstring.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -83,7 +108,7 @@ class StrongAugmentation(keras.layers.Layer):
         │  Color Jitter                    │
         │  brightness: I * alpha           │
         │  contrast: (I-mu)*beta + mu      │
-        │  clip to [0, 1]                  │
+        │  clip to input_value_range        │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
@@ -102,6 +127,11 @@ class StrongAugmentation(keras.layers.Layer):
     :type cutmix_ratio_range: tuple[float, float]
     :param color_jitter_strength: Strength of color jittering.
     :type color_jitter_strength: float
+    :param input_value_range: Declared ``(min, max)`` range of the input images,
+        used to clip the color-jitter result back into a valid range. Pass
+        ``None`` to disable clipping entirely, which is what standardized or
+        ``[-1, +1]`` inputs require. Defaults to ``(0.0, 1.0)``.
+    :type input_value_range: tuple[float, float] or None
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
     """
@@ -111,6 +141,7 @@ class StrongAugmentation(keras.layers.Layer):
             cutmix_prob: float = 0.5,
             cutmix_ratio_range: Tuple[float, float] = (0.1, 0.5),
             color_jitter_strength: float = 0.2,
+            input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -128,14 +159,28 @@ class StrongAugmentation(keras.layers.Layer):
                 f"cutmix_ratio_range must be (min, max) with 0 <= min <= max <= 1, "
                 f"got {cutmix_ratio_range}"
             )
+        if input_value_range is not None:
+            if (len(input_value_range) != 2
+                    or not (input_value_range[0] < input_value_range[1])):
+                raise ValueError(
+                    f"input_value_range must be (min, max) with min < max, or None "
+                    f"to disable clipping; got {input_value_range}"
+                )
 
         self.cutmix_prob = cutmix_prob
         self.cutmix_ratio_range = cutmix_ratio_range
         self.color_jitter_strength = color_jitter_strength
+        self.input_value_range = (
+            None if input_value_range is None else tuple(input_value_range)
+        )
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """
         Apply strong augmentations to input images.
+
+        Returns the mixed image only. A caller that has a supervision target for
+        ``inputs`` must use :meth:`augment_with_mix` instead — CutMix mixes across
+        batch rows, and a target left unmixed becomes label noise.
 
         :param inputs: Input images tensor with shape ``(batch_size, height, width, channels)``.
         :type inputs: keras.KerasTensor
@@ -144,16 +189,73 @@ class StrongAugmentation(keras.layers.Layer):
         :return: Augmented images tensor with same shape as input.
         :rtype: keras.KerasTensor
         """
-        if not training:
-            return inputs
-
-        # Apply color jittering
-        x = self._apply_color_jitter(inputs)
-
-        # Apply CutMix with probability
-        x = self._apply_cutmix(x)
-
+        x, _ = self.augment_with_mix(inputs, training=training)
         return x
+
+    def augment_with_mix(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None,
+    ) -> Tuple[keras.KerasTensor, Optional[Tuple[keras.KerasTensor, keras.KerasTensor]]]:
+        """Augment images and return the CutMix descriptor alongside them.
+
+        Interface contract (this method has 2+ callers — ``call`` and every
+        supervised consumer):
+
+        * Returns ``(x_aug, mix)``. ``x_aug`` has the same shape and dtype as
+          ``inputs``.
+        * ``mix`` is ``None`` when ``training`` is falsy (nothing was applied),
+          otherwise the pair ``(mix_mask, perm_indices)``: ``mix_mask`` has shape
+          ``(height, width, 1)`` and is ``1.0`` inside the pasted box and ``0.0``
+          elsewhere (identically ``0.0`` when the per-batch probability gate did
+          not fire); ``perm_indices`` is the ``(batch_size,)`` donor permutation.
+        * Feed that pair unchanged to :meth:`apply_mix_to_target` for every
+          target tensor that shares ``inputs``' batch and spatial layout.
+        * Failure mode: none — the method never raises for a rank-4 input; the
+          probability gate is symbolic, so the returned shapes are static and the
+          call is graph-traceable inside ``model.fit``.
+
+        :param inputs: Input images tensor ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Tuple of augmented images and the mix descriptor (or ``None``).
+        :rtype: tuple
+        """
+        if not training:
+            return inputs, None
+
+        x = self._apply_color_jitter(inputs)
+        x, mix_mask, perm_indices = self._apply_cutmix(x)
+        return x, (mix_mask, perm_indices)
+
+    def apply_mix_to_target(
+            self,
+            target: keras.KerasTensor,
+            mix: Optional[Tuple[keras.KerasTensor, keras.KerasTensor]],
+    ) -> keras.KerasTensor:
+        """Apply the CutMix box from :meth:`augment_with_mix` to a target tensor.
+
+        Interface contract: ``target`` must share the batch and spatial axes of
+        the images the descriptor came from; its channel count is free (a depth
+        map, a depth+validity-mask pair, a one-hot label map). ``mix=None``
+        returns ``target`` unchanged, so callers need no branch of their own.
+
+        :param target: Supervision target ``(batch_size, height, width, ...)``.
+        :type target: keras.KerasTensor
+        :param mix: The ``(mix_mask, perm_indices)`` pair, or ``None``.
+        :type mix: tuple or None
+        :return: Target with the same rectangle replaced by the donor's target.
+        :rtype: keras.KerasTensor
+        """
+        if mix is None:
+            return target
+        mix_mask, perm_indices = mix
+        mask = ops.cast(mix_mask, target.dtype)
+        target_perm = ops.take(target, perm_indices, axis=0)
+        return ops.multiply(target, ops.subtract(1.0, mask)) + ops.multiply(
+            target_perm, mask
+        )
 
     def _apply_color_jitter(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -187,19 +289,34 @@ class StrongAugmentation(keras.layers.Layer):
         mean_val = ops.mean(x, axis=[1, 2, 3], keepdims=True)
         x = ops.multiply(ops.subtract(x, mean_val), contrast_factor) + mean_val
 
-        # Clip to valid range
-        x = ops.clip(x, 0.0, 1.0)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-014
+        # Clip back into the *declared* input range only. Do NOT restore an
+        # unconditional `ops.clip(x, 0.0, 1.0)` here: this layer runs on the
+        # training path only, so for standardized or [-1, +1] inputs (which is
+        # what `src/train/depth_anything/` feeds — see
+        # `src/train/common/megadepth.py`, "rgb: float32 in [-1, +1]") that
+        # clamps every negative pixel to 0 during training while evaluation
+        # sees the untouched image. Shape and finiteness assertions cannot see
+        # it. `input_value_range=None` is the correct setting for such inputs.
+        if self.input_value_range is not None:
+            x = ops.clip(x, self.input_value_range[0], self.input_value_range[1])
 
         return x
 
-    def _apply_cutmix(self, x: keras.KerasTensor) -> keras.KerasTensor:
+    def _apply_cutmix(
+            self,
+            x: keras.KerasTensor,
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
         """
         Apply CutMix augmentation.
 
         :param x: Input images tensor.
         :type x: keras.KerasTensor
-        :return: CutMix-augmented images tensor.
-        :rtype: keras.KerasTensor
+        :return: Tuple of the CutMix-augmented images, the ``(H, W, 1)`` mix mask
+            (already multiplied by the symbolic probability gate) and the
+            ``(batch_size,)`` donor permutation. The last two are what lets a
+            caller mix the supervision target by the same box.
+        :rtype: tuple
         """
         # Apply CutMix with probability. Use a symbolic gate (no Python `if`)
         # so the layer is graph-traceable inside `model.fit`.
@@ -234,10 +351,7 @@ class StrongAugmentation(keras.layers.Layer):
 
         # Create mask
         mask = ops.zeros((height, width, 1))
-        ones_patch = ops.ones((cut_h, cut_w, 1))
 
-        # Apply patch to mask (simplified approach)
-        # In practice, you might want to use more sophisticated masking
         mask = ops.where(
             ops.logical_and(
                 ops.logical_and(
@@ -253,19 +367,18 @@ class StrongAugmentation(keras.layers.Layer):
             mask
         )
 
-        # Apply mask to all channels — dynamic last-dim multiple supports
-        # arbitrary channel counts (1, 3, 4, ...). Fixes Known Issues #9.
-        channels = ops.shape(x)[-1]
-        mask = ops.tile(mask, [1, 1, channels])
-
         # Multiply the mask by the symbolic apply-gate so mask=0 when not
         # applying; this is equivalent to the original `if not should_apply`.
+        # The mask keeps its trailing singleton axis and broadcasts over any
+        # channel count (1, 3, 4, ...) — for the image here and, unchanged, for
+        # a target with a different channel count in `apply_mix_to_target`.
         mask = mask * gate
 
         # Mix images
-        x = ops.multiply(x, ops.subtract(1.0, mask)) + ops.multiply(x_perm, mask)
+        mask_x = ops.cast(mask, x.dtype)
+        x = ops.multiply(x, ops.subtract(1.0, mask_x)) + ops.multiply(x_perm, mask_x)
 
-        return x
+        return x, mask, perm_indices
 
     def compute_output_shape(
             self,
@@ -287,6 +400,7 @@ class StrongAugmentation(keras.layers.Layer):
             "cutmix_prob": self.cutmix_prob,
             "cutmix_ratio_range": self.cutmix_ratio_range,
             "color_jitter_strength": self.color_jitter_strength,
+            "input_value_range": self.input_value_range,
         })
         return config
 

@@ -19,8 +19,9 @@ src/dl_techniques/models/depth_anything/
 > On-step EMA decay is provided by `TeacherEMACallback` with cosine/linear
 > schedules, and `DepthAnything.from_pretrained_encoder(path)` loads encoder
 > weights from a saved `.keras` checkpoint and re-syncs the teacher.
-> `StrongAugmentation` now supports any number of channels and applies
-> per-sample brightness/contrast factors. Save/load round-trip is verified
+> `StrongAugmentation` supports any number of channels, applies per-sample
+> brightness/contrast factors, and mixes the depth target by the same CutMix box
+> as the image (the mixing now happens in `train_step`, not in `call`). Save/load round-trip is verified
 > end-to-end on CPU (max-abs-diff = 0.0). The legacy Conv-BN-ReLU encoder
 > is preserved behind `encoder_kind='placeholder'` for back-compat.
 >
@@ -51,7 +52,16 @@ It is composed of three sub-networks:
 Forward path (`call`):
 
 ```
-x → [augmentation if training] → encoder → [_features_to_spatial if ViT] → decoder → depth
+x → encoder → [_features_to_spatial if ViT] → decoder → depth
+```
+
+`call` does **not** augment. CutMix mixes across batch rows, so the depth
+target has to be mixed by the same rectangle, and only the training path holds
+a target: `train_step` calls `_augment_with_targets(x, [y, ...])`, which returns
+the augmented image together with every identically-mixed target. Both training
+paths go through it — the labeled path for `y`, the semi-supervised path a
+second time for the teacher's pseudo-depth. `model(x, training=True)` is a plain
+un-augmented forward pass.
 ```
 
 `train_step` accepts two input shapes:
@@ -86,6 +96,7 @@ DepthAnything(
                                                          'feature':0.1},
     cutmix_prob:            float = 0.5,
     color_jitter_strength:  float = 0.2,
+    input_value_range:      Optional[Tuple[float,float]] = (0.0, 1.0),
     use_feature_alignment:  bool  = True,
     encoder_kind:           str   = 'real',           # 'real' | 'placeholder'
     enable_semi_supervised: bool  = False,
@@ -155,10 +166,21 @@ lifts features back to input resolution.
 
 ### `StrongAugmentation` (in `dl_techniques.layers.strong_augmentation`)
 
-CutMix + color jitter. Used by `DepthAnything` during `training=True` forward
-passes. Two recent fixes (D-005 + follow-up):
+CutMix + color jitter. Used by `DepthAnything` from inside `train_step`, not
+from `call`.
 
-* `keras.random.uniform/shuffle` now used in place of nonexistent
+* `call(x, training=True)` returns the mixed image alone and is correct only
+  for a target-free consumer. A supervised consumer uses
+  `augment_with_mix(x, training=True) -> (x_aug, (mix_mask, perm_indices))` and
+  feeds that descriptor to `apply_mix_to_target(target, mix)` for every target
+  sharing the batch and spatial axes — the channel count is free, so a
+  `(B,H,W,2)` depth+validity target works unchanged.
+* `input_value_range` is the caller's **declared** input range; colour jitter
+  clips its result back into it. `None` disables clipping, which is what
+  standardized or `[-1, +1]` images need — `src/train/depth_anything/` sets it,
+  since `src/train/common/megadepth.py` emits RGB in `[-1, +1]` and clipping
+  those to `[0, 1]` would zero every negative pixel on the training path only.
+* `keras.random.uniform/shuffle` is used in place of the nonexistent
   `keras.ops.random.*`.
 * Cutmix gating uses a symbolic mask multiplier (no Python `if`), so the
   layer is fully graph-traceable inside `model.fit`.
@@ -230,9 +252,13 @@ model.fit(paired_ds, epochs=100, steps_per_epoch=len(labeled_ds),
 ```
 
 The semi-supervised `train_step` adds two losses on top of the labeled loss:
-**FAL** between pooled student/teacher features on `x_unlab`, and **L1
-pseudo-label consistency** between the student's depth on `x_unlab` and the
-teacher's stop-gradient depth pseudo-labels.
+**FAL** between pooled student/teacher features, and **L1 pseudo-label
+consistency** between the student's depth and the teacher's stop-gradient depth
+pseudo-labels. In both terms the student sees the *augmented* unlabeled batch
+while the teacher reads the *clean* one — that asymmetry is the recipe — and the
+teacher's pseudo-depth is then mixed by the same CutMix box the student's input
+received, so the consistency term never asks the student to reproduce another
+scene's depth over the cut rectangle.
 
 ### Serialization
 
@@ -260,6 +286,7 @@ Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
 | `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
 | `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`. |
 | `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`. |
+| `input_value_range`      | `Tuple[float,float]` \| `None` | `(0.0, 1.0)`                       | Declared input range for the colour-jitter clip. `None` for standardized / `[-1,+1]` inputs. |
 | `use_feature_alignment`  | `bool`                     | `True`                                 | Builds `frozen_encoder` (weight-shared at build). |
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
@@ -330,9 +357,17 @@ folded into the work below. Item numbers are kept stable for traceability.
   (`_train_step_semi_supervised`: labeled + FAL + pseudo-label
   consistency). The D-003 anchor is preserved at the labeled
   `compute_loss` call.
-* **#9** — `_apply_cutmix` mask now tiles to `ops.shape(x)[-1]`
-  (channels dynamic, supports 1/3/4); brightness/contrast factors are
-  per-sample with shape `(B, 1, 1, 1)` so each image gets distinct jitter.
+* **#9** — `_apply_cutmix`'s mask keeps its trailing singleton axis and
+  broadcasts over any channel count (1/3/4, and a target's); brightness/contrast
+  factors are per-sample with shape `(B, 1, 1, 1)` so each image gets distinct
+  jitter.
+* **C-2 / C-19** — `_apply_cutmix` returns the paste box and the donor
+  permutation, `train_step` mixes image and target together, the
+  feature-alignment term no longer bypasses `self.augmentation`, and the
+  colour-jitter clip follows `input_value_range`. RED-proven in
+  `tests/test_layers/test_strong_augmentation.py::TestTargetAwareCutMix` /
+  `::TestDeclaredInputValueRange` and
+  `tests/test_models/test_depth_anything/test_depth_anything.py::TestTrainPathAugmentation`.
 * **Multi-epoch FAL stability test** — added at
   `tests/test_models/test_depth_anything/test_depth_anything.py`
   (`TestMultiEpochFALStability`): 3 epochs * 2 steps semi-sup synthetic;

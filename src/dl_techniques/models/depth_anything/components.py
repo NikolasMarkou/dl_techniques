@@ -9,8 +9,9 @@ as a depth map or a segmentation mask.
 
 This decoder is not a Transformer-based decoder. Instead, it is a lightweight and
 effective convolutional head. It progressively refines the feature maps from the
-encoder, gradually reducing the channel dimensionality while maintaining the spatial
-resolution to produce the final dense output.
+encoder, gradually reducing the channel dimensionality while raising the spatial
+resolution by `upsample_factor` (1, i.e. unchanged, by default) to produce the
+final dense output.
 
 Architectural Design:
 
@@ -22,20 +23,27 @@ Architectural Design:
         the `dims` parameter. For example, `dims=[256, 128, 64]` would create three
         such blocks, reducing the channel dimension from the input's size down to 64.
 
-2.  **No Upsampling:**
-    -   A key characteristic of this specific decoder design is that it **does not
-        perform any spatial upsampling**. It assumes that the input features from the
-        encoder already have the desired output spatial resolution.
-    -   This is common in DPT variants where the encoder is designed to preserve
-        spatial detail or where features from multiple scales are fused *before*
-        being passed to this final decoder head.
+2.  **Optional Bilinear Upsampling:**
+    -   `upsample_factor` controls how much spatial resolution the decoder
+        recovers. It must be a power of two no greater than `2 ** len(dims)`, and
+        `log2(upsample_factor)` `2x` `UpSampling2D` blocks are placed after the
+        leading non-final conv stages; the remaining stages keep the resolution.
+    -   `upsample_factor=1`, the default, is the no-upsampling case: the input
+        features are assumed to already carry the output resolution, as in DPT
+        variants whose encoder preserves spatial detail or whose multi-scale
+        features are fused *before* this head. `models/depth_anything/model.py`
+        does not use that default — it passes the encoder stride (16), so a
+        `H/16 x W/16` feature map returns to full resolution.
 
 3.  **Final Output Projection:**
     -   After the sequence of refining blocks, a final `3x3 Conv2D` layer is used to
         project the features into the desired number of `output_channels`.
-    -   This final layer also applies an `output_activation` (e.g., `sigmoid` for
-        depth estimation between 0 and 1, or `softmax` for multi-class segmentation)
-        to format the output for the specific prediction task.
+    -   This final layer applies `output_activation`, which defaults to `linear`
+        — deliberately, and `DepthAnything` depends on it: affine-invariant and
+        scale-shift depth losses need the output unconstrained so the network can
+        choose its own scale (see `model.py`'s module docstring). Bounded
+        activations such as `sigmoid` belong only to a pipeline whose target
+        genuinely lives in `[0, 1]`; `softmax` suits multi-class segmentation.
 
 In summary, the `DPTDecoder` acts as a simple but effective "prediction head" that
 takes a high-dimensional feature map from a powerful encoder and translates it into a
@@ -84,7 +92,9 @@ class DPTDecoder(keras.layers.Layer):
         4D tensor with shape: `(batch_size, height, width, channels)`
 
     Output shape:
-        4D tensor with shape: `(batch_size, height, width, output_channels)`
+        4D tensor with shape:
+        `(batch_size, height * upsample_factor, width * upsample_factor,
+        output_channels)`
 
     Returns:
         A 4D tensor representing the decoded dense predictions.

@@ -13,6 +13,10 @@ Covers:
   `((x_lab, x_unlab), y_lab)`).
 - StrongAugmentation forward pass (D-005 keras.random + D-005-followup
   graph-mode cutmix gate).
+- C-2/C-19: augmentation runs in the training path and carries the depth
+  target and the teacher pseudo-label through the same CutMix box; `call`
+  augments nothing; the feature-alignment term does not bypass the
+  augmentation (`TestTrainPathAugmentation`).
 
 All tests force CPU at module import time (via `CUDA_VISIBLE_DEVICES=""`)
 and use 64x64 images with `vit_s` to keep total runtime well under a minute.
@@ -516,3 +520,226 @@ class TestDatasetPairing:
             assert tuple(x_unlab.shape) == (2, 16, 16, 3)
             assert tuple(y_lab.shape) == (2, 16, 16, 2)
         assert n == 3
+
+
+# ---------------------------------------------------------------------
+# C-2 / C-19 — augmentation runs in the training path, with the targets.
+#
+# The CutMix box is read off the *image* here too (constant-valued synthetic
+# scenes + `color_jitter_strength=0.0`), never off the mask the implementation
+# returned, so "the target was mixed by the same box" is an equality between two
+# independently derived pixel sets.
+# ---------------------------------------------------------------------
+
+_SCENE_A, _SCENE_B = 0.0, 1.0
+_DEPTH_A, _DEPTH_B = 3.0, 11.0
+
+
+@pytest.fixture
+def pinned_reverse_permutation(monkeypatch):
+    """Pin CutMix's donor permutation to the batch reversal.
+
+    `keras.random.shuffle` returns the identity for a 2-row batch about half the
+    time, and an identity permutation makes every donor its own row — the probe
+    would then measure nothing while still passing.
+    """
+    monkeypatch.setattr(
+        keras.random, "shuffle", lambda x, **kwargs: keras.ops.flip(x, axis=0)
+    )
+
+
+def _augmenting_model(small_image_shape):
+    m = DepthAnything(
+        encoder_kind="placeholder",
+        encoder_type="vit_s",
+        image_shape=small_image_shape,
+        use_feature_alignment=True,
+        enable_semi_supervised=True,
+        cutmix_prob=1.0,
+        color_jitter_strength=0.0,
+    )
+    _ = m(keras.ops.zeros((1,) + small_image_shape))
+    m.augmentation.cutmix_ratio_range = (0.5, 0.5)
+    return m
+
+
+class TestTrainPathAugmentation:
+
+    def test_call_applies_no_random_augmentation(self, small_image_shape):
+        """`call(training=True)` must be a plain forward pass.
+
+        With augmentation inside `call()` the same input produced a different
+        output on every training-mode invocation (a fresh CutMix box and jitter
+        factors per call). Batch-norm in training mode is itself deterministic
+        for a fixed batch, so any residual difference here is the augmentation.
+        """
+        m = _augmenting_model(small_image_shape)
+        x = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        y0 = np.asarray(m(x, training=True))
+        y1 = np.asarray(m(x, training=True))
+        diff = float(np.max(np.abs(y0 - y1)))
+        assert diff == pytest.approx(0.0, abs=1e-6), (
+            f"call(training=True) is still randomly augmenting: max diff {diff}"
+        )
+
+    def test_augment_with_targets_mixes_target_by_the_image_box(
+        self, small_image_shape, pinned_reverse_permutation
+    ):
+        """The helper both training paths use mixes image and target as one."""
+        m = _augmenting_model(small_image_shape)
+        h, w, c = small_image_shape
+        x = np.stack([
+            np.full((h, w, c), _SCENE_A, dtype="float32"),
+            np.full((h, w, c), _SCENE_B, dtype="float32"),
+        ])
+        y = np.stack([
+            np.full((h, w, 1), _DEPTH_A, dtype="float32"),
+            np.full((h, w, 1), _DEPTH_B, dtype="float32"),
+        ])
+        x_aug, (y_mix,) = m._augment_with_targets(x, [y])
+        x_aug, y_mix = np.asarray(x_aug), np.asarray(y_mix)
+
+        cut = np.isclose(x_aug[0, :, :, 0], _SCENE_B)
+        assert cut.sum() > 0, "liveness: no pixel of row 0 was replaced"
+        assert np.all(np.isclose(y_mix[0, :, :, 0][cut], _DEPTH_B)), (
+            "depth target's cut region does not carry the donor's depth"
+        )
+        assert np.all(
+            np.isclose(y_mix[0, :, :, 0][np.isclose(x_aug[0, :, :, 0], _SCENE_A)],
+                       _DEPTH_A)
+        ), "depth target outside the cut region no longer carries the original depth"
+
+    def test_augment_with_targets_is_a_no_op_without_the_layer(
+        self, small_image_shape
+    ):
+        """Callers that opt out (`model.augmentation = None`) need no branch."""
+        m = _augmenting_model(small_image_shape)
+        m.augmentation = None
+        x = np.zeros((2,) + small_image_shape, dtype="float32")
+        y = np.ones((2,) + small_image_shape[:2] + (1,), dtype="float32")
+        x_out, (y_out,) = m._augment_with_targets(x, [y])
+        np.testing.assert_allclose(np.asarray(x_out), x)
+        np.testing.assert_allclose(np.asarray(y_out), y)
+
+    def test_labeled_train_step_routes_the_depth_target_through_augmentation(
+        self, small_image_shape
+    ):
+        """The labeled path must hand its target to the augmentation helper."""
+        m = _augmenting_model(small_image_shape)
+        m.compile(optimizer=keras.optimizers.AdamW(1e-4))
+        seen = []
+        original = m._augment_with_targets
+
+        def recorder(x, targets):
+            seen.append([np.asarray(t).shape for t in targets])
+            return original(x, targets)
+
+        m._augment_with_targets = recorder
+        x = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        y = keras.random.uniform((2,) + small_image_shape[:2] + (1,), 0.0, 1.0)
+        m._train_step_labeled(x, y)
+
+        assert seen == [[(2,) + small_image_shape[:2] + (1,)]], (
+            "the labeled depth target did not reach the augmentation helper: "
+            f"recorded target shapes = {seen}"
+        )
+
+    def test_consistency_target_is_mixed_like_the_student_input(
+        self, small_image_shape
+    ):
+        """C-2(b): the pseudo-label must travel through the same mix as x_unlab.
+
+        A pseudo-label read off the clean batch and compared against a student
+        that saw a CutMixed batch penalizes the student for the donor's scene.
+        The recorder pins that the teacher's depth is one of the tensors handed
+        to `_augment_with_targets`, and that it is the teacher's output rather
+        than some other tensor of the same shape. The teacher's output is
+        captured *inside* the same step: the labeled forward that precedes it
+        updates the decoder's batch-norm moving statistics, so a pseudo-label
+        recomputed after the step is a different tensor for a reason unrelated
+        to this assertion.
+        """
+        m = _augmenting_model(small_image_shape)
+        m.compile(optimizer=keras.optimizers.AdamW(1e-4))
+        x_lab = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        x_unlab = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        y = keras.random.uniform((2,) + small_image_shape[:2] + (1,), 0.0, 1.0)
+
+        pseudo_seen = []
+        original_pseudo = m._pseudo_label_depth
+
+        def pseudo_recorder(x_in):
+            out = original_pseudo(x_in)
+            pseudo_seen.append(np.asarray(out))
+            return out
+
+        m._pseudo_label_depth = pseudo_recorder
+
+        seen = []
+        original = m._augment_with_targets
+
+        def recorder(x, targets):
+            seen.append((np.asarray(x), [np.asarray(t) for t in targets]))
+            return original(x, targets)
+
+        m._augment_with_targets = recorder
+        m._train_step_semi_supervised(x_lab, x_unlab, y)
+
+        assert len(pseudo_seen) == 1, "the teacher pseudo-label was not computed once"
+        expected_pseudo = pseudo_seen[0]
+
+        assert len(seen) == 2, (
+            "the unlabeled branch never augmented anything with a target: "
+            f"{len(seen)} call(s) to _augment_with_targets"
+        )
+        unlab_x, unlab_targets = seen[1]
+        np.testing.assert_allclose(unlab_x, np.asarray(x_unlab), atol=1e-6)
+        assert len(unlab_targets) == 1, (
+            "the unlabeled branch augmented its image without the pseudo-label: "
+            f"{len(unlab_targets)} target(s)"
+        )
+        np.testing.assert_allclose(
+            unlab_targets[0], expected_pseudo, atol=1e-5,
+            err_msg="the tensor mixed alongside x_unlab is not the teacher pseudo-depth",
+        )
+
+    def test_feature_alignment_does_not_bypass_augmentation(
+        self, small_image_shape, pinned_reverse_permutation
+    ):
+        """C-2(c): the FAL student features come from the augmented batch.
+
+        With CutMix certain to fire and the donor permutation pinned away from
+        the identity, the student encoder must see a batch that differs from the
+        raw `x_unlab`; a call that bypassed `self.augmentation` would see the raw
+        one. The pin is load-bearing: an identity permutation makes the augmented
+        batch bit-identical to the raw one and the probe passes either way.
+        """
+        m = _augmenting_model(small_image_shape)
+        m.compile(optimizer=keras.optimizers.AdamW(1e-4))
+        x_lab = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        x_unlab = keras.random.uniform((2,) + small_image_shape, 0.0, 1.0)
+        y = keras.random.uniform((2,) + small_image_shape[:2] + (1,), 0.0, 1.0)
+
+        # Patch `call`, not `__call__`: Python resolves dunder methods on the
+        # type, so an instance-level `__call__` is never consulted and the
+        # recorder would stay empty — a probe that passes for the wrong reason.
+        seen = []
+        original_encoder_call = m.encoder.call
+
+        def recorder(inputs, *args, **kwargs):
+            seen.append(np.asarray(inputs))
+            return original_encoder_call(inputs, *args, **kwargs)
+
+        m.encoder.call = recorder
+        m._train_step_semi_supervised(x_lab, x_unlab, y)
+        assert seen, "recorder never fired — the probe would be vacuous"
+
+        raw = np.asarray(x_unlab)
+        bypassed = [
+            s for s in seen
+            if s.shape == raw.shape and np.allclose(s, raw, atol=1e-6)
+        ]
+        assert not bypassed, (
+            "the student encoder was called on the raw unlabeled batch — the "
+            "feature-alignment term is bypassing self.augmentation"
+        )

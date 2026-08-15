@@ -20,6 +20,15 @@ its pretrained initialization by aligning student features to a frozen
 counterpart's — semantic priors are what let a depth model reason about object
 boundaries it never saw supervised.
 
+Color jitter is a per-image photometric perturbation, so "the same image" holds
+under it and the asymmetry above is exactly the intended one. CutMix is not: it
+pastes a rectangle taken from *another row of the batch*, which changes what the
+correct answer is over that rectangle. Augmentation therefore does not happen in
+`call()`, where no target is in scope; `train_step` calls
+`_augment_with_targets`, which mixes the image and every target — the labeled
+depth map, and the teacher's pseudo-depth on the unlabeled branch — by one
+shared box. `call(x, training=True)` is a plain un-augmented forward pass.
+
 `DepthAnything` implements the **V1** recipe. V2's defining moves — replacing
 real labeled data with synthetic renderings and distilling through a large
 teacher onto pseudo-labeled real images — are not present.
@@ -168,10 +177,17 @@ class DepthAnything(keras.Model):
         loss_weights: Dict of strings to floats, weights for different loss components.
             Keys: 'labeled', 'unlabeled', 'feature'.
             Defaults to {'labeled': 1.0, 'unlabeled': 0.5, 'feature': 0.1}.
-        cutmix_prob: Float, probability of applying CutMix augmentation.
+        cutmix_prob: Float, probability of applying CutMix augmentation. The
+            augmentation runs inside `train_step`, not inside `call`, so that
+            the depth target is CutMixed by the same box as the image.
             Defaults to 0.5.
         color_jitter_strength: Float, strength of color jittering augmentation.
             Defaults to 0.2.
+        input_value_range: Tuple of two floats or None, the declared value range
+            of the input images. Color jitter clips its result back into this
+            range. Pass None for standardized or `[-1, +1]` inputs — see
+            `create_depth_anything` for the full contract.
+            Defaults to (0.0, 1.0).
         use_feature_alignment: Boolean, whether to use feature alignment loss.
             Defaults to True.
         **kwargs: Additional keyword arguments for the Model base class.
@@ -216,6 +232,7 @@ class DepthAnything(keras.Model):
         encoder_kind: str = 'real',
         enable_semi_supervised: bool = False,
         encoder: Optional[keras.Model] = None,
+        input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
         input_shape: Optional[Tuple[int, int, int]] = None,
         **kwargs: Any
     ) -> None:
@@ -255,6 +272,9 @@ class DepthAnything(keras.Model):
         }
         self.cutmix_prob = cutmix_prob
         self.color_jitter_strength = color_jitter_strength
+        self.input_value_range = (
+            None if input_value_range is None else tuple(input_value_range)
+        )
         self.use_feature_alignment = use_feature_alignment
         self.encoder_kind = encoder_kind
         self.enable_semi_supervised = bool(enable_semi_supervised)
@@ -358,6 +378,7 @@ class DepthAnything(keras.Model):
         self.augmentation = StrongAugmentation(
             cutmix_prob=self.cutmix_prob,
             color_jitter_strength=self.color_jitter_strength,
+            input_value_range=self.input_value_range,
             name='strong_augmentation',
         )
 
@@ -541,6 +562,10 @@ class DepthAnything(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass through the model.
 
+        This is the plain encoder → decoder path. It does **not** augment: strong
+        augmentation is applied by `train_step` (see `_augment_with_targets`),
+        where the depth target is in scope and can be CutMixed by the same box.
+
         Args:
             inputs: Input tensor with shape (batch_size, height, width, 3)
                 or tuple of (labeled, unlabeled) tensors for training.
@@ -558,11 +583,6 @@ class DepthAnything(keras.Model):
             x = x_labeled
         else:
             x = inputs
-
-        # Apply augmentation during training. (`augmentation` is created in
-        # build(); tests/users may set it to None to bypass strong aug.)
-        if training and self.augmentation is not None:
-            x = self.augmentation(x, training=training)
 
         # Extract features. ViT returns (B, N+1, D); placeholder returns 4-D.
         features = self.encoder(x, training=training)
@@ -624,12 +644,50 @@ class DepthAnything(keras.Model):
         pseudo = self.decoder(feat, training=False)
         return ops.stop_gradient(pseudo)
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-014
+    # Strong augmentation lives here, in the training path, and NOT in `call()`.
+    # CutMix pastes a rectangle taken from another batch row; when the call sat
+    # inside `call()` no target was in scope, so the image was mixed and the
+    # depth map was not — every cut region supervised one scene's pixels against
+    # another scene's depth, on ~`cutmix_prob` of all batches. Do not move the
+    # augmentation back into `call()` and do not add a second augmentation call
+    # anywhere: every consumer of an augmented image must receive it from this
+    # method together with its identically-mixed targets.
+    def _augment_with_targets(
+        self,
+        x: keras.KerasTensor,
+        targets: List[keras.KerasTensor],
+    ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
+        """Strongly augment ``x`` and apply the same CutMix box to each target.
+
+        Interface contract (called from both training paths):
+
+        * Returns ``(x_aug, mixed_targets)`` with ``len(mixed_targets) ==
+          len(targets)``, each entry shaped like its input.
+        * Every target must share ``x``'s batch and spatial axes; channel counts
+          are free (depth alone, or depth + validity mask).
+        * When ``self.augmentation`` is ``None`` — tests and callers that opt out
+          of strong augmentation set it so — the inputs are returned unchanged.
+
+        Args:
+            x: Image batch ``(B, H, W, C)``.
+            targets: Tensors to mix by the same box as ``x``.
+
+        Returns:
+            The augmented images and the identically mixed targets.
+        """
+        if self.augmentation is None:
+            return x, list(targets)
+        x_aug, mix = self.augmentation.augment_with_mix(x, training=True)
+        return x_aug, [self.augmentation.apply_mix_to_target(t, mix) for t in targets]
+
     def _train_step_labeled(
         self,
         x: keras.KerasTensor,
         y: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Labeled-only path: single forward + compute_loss + backprop."""
+        """Labeled-only path: augment image+target together, forward, backprop."""
+        x, (y,) = self._augment_with_targets(x, [y])
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
             # Keras-3 canonical train_step — replaces deprecated
@@ -653,7 +711,15 @@ class DepthAnything(keras.Model):
         x_unlab: keras.KerasTensor,
         y: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Semi-supervised path: labeled compute_loss + FAL + consistency."""
+        """Semi-supervised path: labeled compute_loss + FAL + consistency.
+
+        Both branches take the teacher's view from the *clean* batch and the
+        student's from the *augmented* one — that asymmetry is the whole recipe.
+        What is not part of the recipe is CutMix mixing across batch rows without
+        the target following: the pseudo-label is therefore mixed by the same box
+        as the student's input before the consistency term compares them.
+        """
+        x_lab, (y,) = self._augment_with_targets(x_lab, [y])
         with tf.GradientTape() as tape:
             # ---- labeled supervision ----
             y_pred = self(x_lab, training=True)
@@ -662,8 +728,19 @@ class DepthAnything(keras.Model):
 
             # ---- semi-sup branch: FAL + consistency ----
             if self.use_feature_alignment and self.frozen_encoder is not None:
-                # Feature-Alignment-Loss on unlabeled features.
-                feat_student = self.encoder(x_unlab, training=True)
+                # The teacher's pseudo-depth is read off the clean batch, then
+                # mixed by the same box the student's input received.
+                pseudo = self._pseudo_label_depth(x_unlab)
+                x_unlab_aug, (pseudo,) = self._augment_with_targets(
+                    x_unlab, [pseudo]
+                )
+
+                # Feature-Alignment-Loss on unlabeled features. The student sees
+                # the augmented batch here too — reading `self.encoder(x_unlab)`
+                # directly would bypass `self.augmentation` and reduce the term
+                # to a train/eval-mode difference between two initially
+                # identical encoders.
+                feat_student = self.encoder(x_unlab_aug, training=True)
                 feat_teacher = self.frozen_encoder(x_unlab, training=False)
                 # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
                 if len(feat_student.shape) == 4:
@@ -675,10 +752,10 @@ class DepthAnything(keras.Model):
                 fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
                 loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
-                # Pseudo-label consistency: L1 between student depth on
-                # x_unlab and teacher's stop-gradient pseudo-depth.
-                y_pred_unlab = self(x_unlab, training=True)
-                pseudo = self._pseudo_label_depth(x_unlab)
+                # Pseudo-label consistency: L1 between student depth on the
+                # augmented batch and the teacher's identically mixed,
+                # stop-gradient pseudo-depth.
+                y_pred_unlab = self(x_unlab_aug, training=True)
                 consistency = ops.mean(ops.abs(y_pred_unlab - pseudo))
                 loss = loss + self.loss_weights.get('unlabeled', 0.5) * consistency
 
@@ -736,6 +813,7 @@ class DepthAnything(keras.Model):
             "loss_weights": self.loss_weights,
             "cutmix_prob": self.cutmix_prob,
             "color_jitter_strength": self.color_jitter_strength,
+            "input_value_range": self.input_value_range,
             "use_feature_alignment": self.use_feature_alignment,
             "encoder_kind": self.encoder_kind,
             "enable_semi_supervised": self.enable_semi_supervised,
@@ -852,9 +930,25 @@ def create_depth_anything(
     use_feature_alignment: bool = True,
     encoder_kind: str = 'real',
     enable_semi_supervised: bool = False,
+    input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
     input_shape: Optional[Tuple[int, int, int]] = None,
 ) -> DepthAnything:
     """Create and build Depth Anything model instance.
+
+    **Input contract.** The model does not normalize its inputs, but the strong
+    augmentation it applies during training does need to know their range: color
+    jitter scales brightness and contrast and its result is clipped back into
+    `input_value_range`. The default `(0.0, 1.0)` says "the caller feeds images
+    in `[0, 1]`". Pass `input_value_range=None` for standardized (mean-zero) or
+    `[-1, +1]` images — the trainer in `src/train/depth_anything/` does, because
+    `src/train/common/megadepth.py` emits RGB in `[-1, +1]`, and clipping those
+    to `[0, 1]` would flatten every negative pixel to zero on the training path
+    only, while evaluation saw the untouched image.
+
+    Augmentation runs inside `train_step`, not inside `call`: CutMix mixes across
+    batch rows, so the depth target has to be mixed by the same rectangle, and
+    only the training path has the target. Calling `model(x, training=True)`
+    directly therefore returns an *un-augmented* forward pass.
 
     Args:
         encoder_type: String, type of ViT encoder to use.
@@ -877,6 +971,9 @@ def create_depth_anything(
             Defaults to 0.5.
         color_jitter_strength: Float, strength of color jittering augmentation.
             Defaults to 0.2.
+        input_value_range: Tuple of two floats or None, the declared value range
+            of the input images (see "Input contract" above).
+            Defaults to (0.0, 1.0).
         use_feature_alignment: Boolean, whether to use feature alignment loss.
             Defaults to True.
 
@@ -914,6 +1011,7 @@ def create_depth_anything(
         loss_weights=loss_weights,
         cutmix_prob=cutmix_prob,
         color_jitter_strength=color_jitter_strength,
+        input_value_range=input_value_range,
         use_feature_alignment=use_feature_alignment,
         encoder_kind=encoder_kind,
         enable_semi_supervised=enable_semi_supervised,

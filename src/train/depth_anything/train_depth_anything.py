@@ -115,6 +115,10 @@ class DepthAnythingTrainingConfig:
     enable_semi_supervised: bool = False   # adds FAL term on unlabeled batches inside train_step
     cutmix_prob: float = 0.5
     color_jitter_strength: float = 0.2
+    # MegaDepthDataset emits RGB in [-1, +1] (src/train/common/megadepth.py, module
+    # docstring). `None` disables the color-jitter clip: clipping this data to
+    # [0, 1] would zero every negative pixel on the training path only.
+    input_value_range: Optional[Tuple[float, float]] = None
 
     # Training
     batch_size: int = 16
@@ -383,6 +387,7 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
         use_feature_alignment=config.use_feature_alignment,
         cutmix_prob=config.cutmix_prob,
         color_jitter_strength=config.color_jitter_strength,
+        input_value_range=config.input_value_range,
         encoder_kind=config.encoder_kind,
         enable_semi_supervised=config.enable_semi_supervised,
     )
@@ -675,7 +680,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cutmix-prob", type=float, default=0.5,
-        help="Probability of applying CutMix during training",
+        help=(
+            "Probability of applying CutMix during training. The depth target is "
+            "mixed by the same box as the image (model.train_step)."
+        ),
     )
     parser.add_argument(
         "--color-jitter-strength", type=float, default=0.2,

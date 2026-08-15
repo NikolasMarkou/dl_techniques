@@ -90,7 +90,7 @@ on this machine.
 | `--ema-decay-end`             | `0.999`                                   | EMA decay asymptote at the end of the run. |
 | `--ema-warmup-steps`          | `0`                                       | Number of training steps before EMA updates begin. |
 | `--use-feature-alignment`     | off                                       | Enables `frozen_encoder` (weight-shared teacher; EMA via `update_teacher_ema`). Default off. |
-| `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`. |
+| `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`. The depth target is CutMixed by the same box as the image, inside `DepthAnything.train_step`. |
 | `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`. |
 | `--epochs`                    | `100`                                     | |
 | `--batch-size`                | `16`                                      | |
