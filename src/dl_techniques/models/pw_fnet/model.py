@@ -608,6 +608,11 @@ class Upsample(keras.layers.Layer):
 # PW-FNet Main Model
 # ---------------------------------------------------------------------
 
+#: Number of encoder/decoder levels. FIXED by the architecture -- see the
+#: `# DECISION .../D-052` anchor in `PW_FNet.__init__` before changing it.
+_NUM_SCALES = 2
+
+
 @keras.saving.register_keras_serializable()
 class PW_FNet(keras.Model):
     """
@@ -629,10 +634,23 @@ class PW_FNet(keras.Model):
             computational cost. Typical values: 32-64. Must be positive.
         middle_blk_num: Number of PW-FNet blocks in the bottleneck. More blocks
             capture more complex patterns. Typical values: 4-12. Must be non-negative.
-        enc_blk_nums: List of block counts for each encoder level. Length determines
-            number of scales. Typical: [2, 2] for 2 levels. Must be non-empty.
-        dec_blk_nums: List of block counts for each decoder level. Should match
-            enc_blk_nums length. Typical: [2, 2]. Must be non-empty.
+        enc_blk_nums: Block counts for the two encoder levels, ``[level1, level2]``.
+            **Must have exactly 2 entries** -- the depth of this architecture is
+            FIXED, not derived from this list. See the note below.
+        dec_blk_nums: Block counts for the two decoder levels,
+            ``[decoder_level2, decoder_level1]``. **Must have exactly 2 entries.**
+
+    Note:
+        **The number of scales is NOT configurable, and this list does not set
+        it.** The encoder/decoder/output topology is written out explicitly
+        (``down1``/``down2``, ``up2``/``up1``, ``output_l2``/``output_l1``/
+        ``output_l0``) and ``call`` returns exactly three tensors, so a third
+        entry has nowhere to go. These two lists set only HOW MANY blocks run at
+        each of the two levels. A length other than 2 raises ``ValueError``;
+        until 2026-08-15 the docstring said "length determines number of
+        scales", ``[2, 2, 2]`` silently built a 2-level network and dropped the
+        third entry, and ``[2]`` raised ``IndexError`` from the middle of
+        ``__init__`` instead of from validation.
         normalization_type: Type of normalization to use throughout the model.
             Supports all types from the normalization factory: 'layer_norm',
             'rms_norm', 'zero_centered_rms_norm', 'band_rms', 'dynamic_tanh', etc.
@@ -731,6 +749,27 @@ class PW_FNet(keras.Model):
             raise ValueError(
                 f"enc_blk_nums and dec_blk_nums must have same length, "
                 f"got {len(enc_blk_nums)} and {len(dec_blk_nums)}"
+            )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-052
+        # Validate the FIXED depth here rather than generalizing the model to N
+        # scales. The two-level structure is intrinsic, not unfinished: the
+        # encoder, decoder and OUTPUT HEADS are each written out by name
+        # (`down1`/`down2`, `up2`/`up1`, `output_l2`/`output_l1`/`output_l0`)
+        # and `call` returns a 3-element list that the multi-scale loss and
+        # every caller unpack positionally. Generalizing would change the
+        # RETURN ARITY with the block list -- a silent contract break for every
+        # existing consumer, to buy a depth knob nothing asks for. DO NOT
+        # replace this check with a loop over `len(enc_blk_nums)` without first
+        # changing that return contract deliberately.
+        # See decisions.md D-052.
+        if len(enc_blk_nums) != _NUM_SCALES:
+            raise ValueError(
+                f"PW_FNet has a FIXED {_NUM_SCALES}-level encoder/decoder and "
+                f"returns exactly 3 output scales, so enc_blk_nums and "
+                f"dec_blk_nums must each have exactly {_NUM_SCALES} entries "
+                f"(blocks per level), got {len(enc_blk_nums)}: "
+                f"{list(enc_blk_nums)}. These lists set the block COUNT at each "
+                f"level, not the number of levels."
             )
         if any(n < 0 for n in enc_blk_nums):
             raise ValueError("All values in enc_blk_nums must be non-negative")
@@ -874,9 +913,16 @@ class PW_FNet(keras.Model):
             List of three restored images at different scales:
             [full_resolution, half_resolution, quarter_resolution].
         """
-        # Downsample original input for multi-scale supervision targets
-        input_l1 = keras.layers.AveragePooling2D(pool_size=2)(inputs)
-        input_l2 = keras.layers.AveragePooling2D(pool_size=2)(input_l1)
+        # Downsample the original input for the multi-scale supervision
+        # targets. `ops.average_pool` is a stateless op, NOT a layer: two
+        # `keras.layers.AveragePooling2D(...)` objects used to be CONSTRUCTED
+        # here on every trace, so they were never tracked by the model, never
+        # appeared in `model.layers`, and were rebuilt per call for zero
+        # parameters. Do not reintroduce a layer here.
+        input_l1 = ops.average_pool(
+            inputs, pool_size=2, strides=2, padding="valid")
+        input_l2 = ops.average_pool(
+            input_l1, pool_size=2, strides=2, padding="valid")
 
         # -- Encoder Path --
         # Initial feature extraction

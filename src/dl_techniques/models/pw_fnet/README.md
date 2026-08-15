@@ -353,8 +353,16 @@ plt.show()
 | `img_channels` | `int` | Number of channels for input/output images (e.g., 3 for RGB). | `3` |
 | `width` | `int` | The base channel width of the network. Controls model capacity. | `32` |
 | `middle_blk_num` | `int` | Number of `PW_FNet_Block`s in the bottleneck. | `4` |
-| `enc_blk_nums` | `List[int]` | List of block counts for each encoder stage (from high-res to low-res). | `[2, 2]` |
-| `dec_blk_nums` | `List[int]` | List of block counts for each decoder stage (from low-res to high-res). | `[2, 2]` |
+| `enc_blk_nums` | `List[int]` | Block counts for the two encoder stages (high-res, then low-res). **Exactly 2 entries.** | `[2, 2]` |
+| `dec_blk_nums` | `List[int]` | Block counts for the two decoder stages (low-res, then high-res). **Exactly 2 entries.** | `[2, 2]` |
+
+> **The depth is FIXED at 2 levels; these lists do not set it.** The encoder,
+> decoder and the three output heads are written out by name, and the model
+> returns exactly three scales, so a third entry has nowhere to go. Passing a
+> list of any other length raises `ValueError`. Before 2026-08-15 the docstring
+> claimed the length determined the number of scales: `[2, 2, 2]` silently
+> built a 2-level network and dropped the third entry, and `[2]` raised
+> `IndexError` from the middle of the constructor.
 
 ### 6.2 `PW_FNet_Block` (Layer Class)
 
