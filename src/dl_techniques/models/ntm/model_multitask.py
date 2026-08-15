@@ -39,7 +39,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -136,7 +136,30 @@ class NTMMultiTask(keras.Model):
 
         super().build(input_shape)
 
-    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-059
+    # `call` MUST declare `training` and forward it explicitly. Keras 3
+    # propagates `training` through a single mutable `CallContext` slot that
+    # every nested `__call__` overwrites, so a `call` that neither accepts nor
+    # forwards it leaves `NeuralTuringMachine` reading whatever the slot last
+    # held rather than what this model was invoked with.
+    #
+    # MEASURED, and it CORRECTS the finding that prompted this: `NTMConfig` has
+    # NO dropout knob and there is no dropout, batch norm or any other
+    # training-sensitive layer anywhere in the NTM stack today, so this is a
+    # LATENT fix -- it changes no number now, and the "configured dropout never
+    # activated during fit()" harm the review described does not exist. It is
+    # shipped because the next training-sensitive sub-layer added below this
+    # point would be silently stuck in inference mode with nothing to catch it.
+    # The guard therefore records the propagated VALUE
+    # (`tests/test_models/test_ntm/test_determinism_and_training_flag.py`)
+    # rather than asserting a numeric difference there is no mechanism to
+    # produce. DO NOT replace it with a dropout-based assertion.
+    # See decisions.md D-059.
+    def call(
+            self,
+            inputs: List[keras.KerasTensor],
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
         """
         Forward pass.
 
@@ -144,6 +167,10 @@ class NTMMultiTask(keras.Model):
             inputs: List containing:
                 - sequence_input: Tensor of shape (Batch, Seq_Len, Dim)
                 - task_id_input: Tensor of shape (Batch, Num_Tasks)
+            training: Training-mode flag, forwarded explicitly to the NTM layer
+                rather than left to Keras' ambient ``CallContext``. Nothing in
+                the NTM stack is training-sensitive today, so this currently
+                changes no output; see the ``D-059`` anchor above.
 
         Returns:
             Output tensor of shape (Batch, Seq_Len, Output_Dim)
@@ -170,7 +197,7 @@ class NTMMultiTask(keras.Model):
         ntm_input = ops.concatenate([x, task_broadcasted], axis=-1)
 
         # 4. Pass to NTM
-        return self.ntm_layer(ntm_input)
+        return self.ntm_layer(ntm_input, training=training)
 
     def compute_output_shape(self, input_shape: List[Tuple]) -> Tuple[int, int, int]:
         """

@@ -14,8 +14,10 @@ Improvements over V1
   zero.
 * **Configurable backbone.** Stem can be the legacy two-conv stack or any
   ResNet variant from :mod:`dl_techniques.models.resnet`. Stage-2 pretraining
-  flow accepts ``stem_pretrained=True`` (delegates to ResNet's existing
-  download fallback) or a local weights path string.
+  flow accepts a local weights path string; ``stem_pretrained=True`` raises
+  ``NotImplementedError`` from ``create_resnet`` (no public ResNet weights
+  ship with ``dl_techniques``, and it refuses rather than quietly handing back
+  a randomly initialized backbone).
 * **Standard ``compile/fit``.** The model returns the classification length
   tensor directly. Margin / cross-entropy loss flows through the standard
   Keras workflow — no custom ``train_step`` / ``test_step`` and no dict outputs.
@@ -71,11 +73,17 @@ class CapsNetV2(keras.Model):
             (``"resnet18"``, ``"resnet34"``, ``"resnet50"``,
             ``"resnet101"``, ``"resnet152"``). Defaults to ``"legacy"``.
         stem_pretrained: Pretrained-weight option for ResNet stems.
-            ``False`` (default) means random init. ``True`` attempts to
-            download weights via the ResNet's URL config (which contains
-            placeholder URLs in this repo — graceful fallback to random
-            init on download failure). A string is treated as a local
-            path to a ``.keras`` weights file.
+            ``False`` (default) means random init. ``True`` **raises
+            ``NotImplementedError``** — no public ResNet weights ship with
+            ``dl_techniques``, and :func:`dl_techniques.models.resnet.create_resnet`
+            refuses unconditionally rather than returning a randomly
+            initialized backbone to a caller who asked for pretrained one.
+            (Until 2026-08-15 this entry promised that a download failure
+            would quietly leave the stem randomly initialized. No such path
+            exists: it went away with the placeholder URL table, and the
+            sibling :func:`create_capsnet_v2_pretrained` docstring has
+            documented the raise since.)
+            A string is treated as a local path to a ``.keras`` weights file.
         primary_capsules: Number of primary capsules per spatial location
             in the legacy stem. Defaults to ``32``.
         primary_capsule_dim: Dimension of each primary capsule. Defaults

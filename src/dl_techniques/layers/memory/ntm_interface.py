@@ -219,6 +219,12 @@ class NTMConfig:
     :type shift_range: int
     :param use_memory_init: Whether to learn initial memory state.
     :type use_memory_init: bool
+    :param memory_init_seed: Seed for the symmetry-breaking random initial
+        memory used when ``use_memory_init`` is ``False``. It is a FIXED
+        (stateless) seed, so the same model returns the same values from
+        repeated ``predict`` calls; see the ``D-058`` anchor in
+        ``baseline_ntm.py``.
+    :type memory_init_seed: int
     :param epsilon: Small constant for numerical stability.
     :type epsilon: float
     """
@@ -232,6 +238,7 @@ class NTMConfig:
     addressing_mode: AddressingMode = AddressingMode.HYBRID
     shift_range: int = 3
     use_memory_init: bool = True
+    memory_init_seed: int = 42
     epsilon: float = 1e-6
 
     def __post_init__(self) -> None:
@@ -279,6 +286,7 @@ class NTMConfig:
             "addressing_mode": self.addressing_mode.name,
             "shift_range": self.shift_range,
             "use_memory_init": self.use_memory_init,
+            "memory_init_seed": self.memory_init_seed,
             "epsilon": self.epsilon,
         }
 

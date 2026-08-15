@@ -111,6 +111,10 @@ class CapsNet(keras.Model):
         self.downweight = downweight
         self.reconstruction_weight = reconstruction_weight
 
+        # Metric names `_update_metrics` has already warned about, so a
+        # per-step warning does not flood a multi-hour run's log.
+        self._skipped_metric_names = set()
+
         self.conv_layers = []
         self.batch_norm_layers = []
         self.activation_layers = []
@@ -336,6 +340,61 @@ class CapsNet(keras.Model):
 
         return self.decoder(decoder_input)
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-057
+    # A bare `except: continue` here dropped ANY metric whose signature or shape
+    # did not match `(y, outputs["length"])` from training AND from the returned
+    # logs, silently and with no warning -- a user's metric could simply never
+    # appear, and `except:` also swallowed `KeyboardInterrupt` and
+    # `SystemExit`. It is narrowed to the shape/dtype family a wrong-arity
+    # metric actually raises, and it WARNS once per metric name so the drop is
+    # visible in the log. DO NOT re-widen it to a bare `except`, and DO NOT
+    # convert it to a raise: `CapsNet` returns a DICT and a stock metric like
+    # `keras.metrics.Accuracy` legitimately wants the `length` head, so some
+    # mismatch is expected and must not abort a multi-hour run.
+    # See decisions.md D-057.
+    def _update_metrics(self, y: Any, outputs: Dict[str, Any]) -> None:
+        """Update every compiled metric, warning about ones that cannot take the data.
+
+        Args:
+            y: The batch's labels, one-hot encoded.
+            outputs: The dict this model's ``call`` returns; ``CapsuleAccuracy``
+                consumes it whole, every other metric gets ``outputs["length"]``.
+
+        Returns:
+            None -- metrics are updated in place.
+
+        Failure mode: a metric that raises ``ValueError``/``TypeError``/
+        ``tf.errors.InvalidArgumentError`` (wrong arity, wrong shape, wrong
+        dtype) is SKIPPED with a one-time WARNING naming it. Anything else
+        propagates.
+        """
+        for metric in self.metrics:
+            if isinstance(metric, CapsuleAccuracy):
+                metric.update_state(y, outputs)
+                continue
+            try:
+                metric.update_state(y, outputs["length"])
+            except (ValueError, TypeError, tf.errors.InvalidArgumentError) as error:
+                if metric.name not in self._skipped_metric_names:
+                    self._skipped_metric_names.add(metric.name)
+                    # MEASURED: `self.metrics` yields Keras' `CompileMetrics`
+                    # WRAPPER, not the individual metrics, so one misshaped
+                    # metric takes the whole container down with it. Name the
+                    # contents, or the warning points at 'compile_metrics' and
+                    # the user cannot tell which of their metrics is at fault.
+                    contained = [
+                        inner.name
+                        for inner in getattr(metric, "metrics", []) or []
+                    ]
+                    detail = f" containing {contained}" if contained else ""
+                    logger.warning(
+                        f"CapsNet: metric '{metric.name}' "
+                        f"({type(metric).__name__}){detail} cannot consume "
+                        f"(y, outputs['length']) and is being SKIPPED for the "
+                        f"whole run -- it will be missing from the training "
+                        f"logs entirely. Underlying error: {error}"
+                    )
+
     def train_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
         """Custom training step with margin loss and reconstruction loss."""
         x, y = data
@@ -366,17 +425,7 @@ class CapsNet(keras.Model):
 
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        # Update metrics manually - avoiding deprecated compiled_metrics
-        for metric in self.metrics:
-            if isinstance(metric, CapsuleAccuracy):
-                metric.update_state(y, outputs)
-            else:
-                # For other metrics, try to update with appropriate format
-                try:
-                    metric.update_state(y, outputs["length"])
-                except:
-                    # If that fails, skip this metric
-                    continue
+        self._update_metrics(y, outputs)
 
         results = {}
         for metric in self.metrics:
@@ -414,17 +463,7 @@ class CapsNet(keras.Model):
         if self.losses:
             total_loss += ops.sum(self.losses)
 
-        # Update metrics manually - avoiding deprecated compiled_metrics
-        for metric in self.metrics:
-            if isinstance(metric, CapsuleAccuracy):
-                metric.update_state(y, outputs)
-            else:
-                # For other metrics, try to update with appropriate format
-                try:
-                    metric.update_state(y, outputs["length"])
-                except:
-                    # If that fails, skip this metric
-                    continue
+        self._update_metrics(y, outputs)
 
         results = {}
         for metric in self.metrics:

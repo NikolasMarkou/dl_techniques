@@ -83,6 +83,7 @@ class NTMMemory(BaseMemory):
         memory_size: int,
         memory_dim: int,
         epsilon: float = 1e-6,
+        memory_init_seed: int = 42,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -91,6 +92,7 @@ class NTMMemory(BaseMemory):
             epsilon=epsilon,
             **kwargs,
         )
+        self.memory_init_seed = memory_init_seed
 
     def initialize_state(self, batch_size: int) -> MemoryState:
         """
@@ -106,10 +108,13 @@ class NTMMemory(BaseMemory):
         :return: Initial memory state with small random values.
         :rtype: MemoryState
         """
+        # See the D-058 anchor on `NTMCell.get_initial_state` for why this seed
+        # is fixed rather than absent.
         memory = keras.random.normal(
             (batch_size, self.memory_size, self.memory_dim),
             mean=0.0,
             stddev=1e-3,
+            seed=self.memory_init_seed,
         )
         usage = ops.zeros((batch_size, self.memory_size))
         return MemoryState(memory=memory, usage=usage)
@@ -1187,10 +1192,21 @@ class NTMCell(keras.layers.Layer):
                 (batch_size, self.config.memory_size, self.config.memory_dim),
             )
         else:
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-058
+            # A FIXED seed, so this draw is stateless and identical on every
+            # call. DO NOT drop it: without a seed `keras.random.normal` draws
+            # from the global stateful stream, so with `use_memory_init=False`
+            # the initial memory differed on every invocation and
+            # `model.predict(x)` twice returned DIFFERENT values (stddev 1e-3 --
+            # small, and exactly the size that makes a numeric test flaky rather
+            # than red). The draw still breaks symmetry across memory slots,
+            # which is its whole purpose; nothing here wanted per-call variation.
+            # See decisions.md D-058.
             memory = keras.random.normal(
                 (batch_size, self.config.memory_size, self.config.memory_dim),
                 mean=0.0,
                 stddev=1e-3,
+                seed=self.config.memory_init_seed,
             )
         states.append(memory)
 

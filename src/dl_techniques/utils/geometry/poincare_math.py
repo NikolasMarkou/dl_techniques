@@ -23,7 +23,6 @@ References:
 
 import keras
 from keras import ops
-import tensorflow as tf
 from typing import Union
 
 # ---------------------------------------------------------------------
@@ -98,8 +97,47 @@ class PoincareMath:
         Mathematical Operation:
             ||x|| = max(sqrt(sum(x_i^2)), eps)
         """
+        _raw, floored = self.norm_and_floored_norm(x, axis=axis, keepdims=keepdims)
+        return floored
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-056
+    # `safe_norm` FLOORS its result at `eps`, so a caller that then tests
+    # `safe_norm(...) < eps` is testing `eps < eps` -- never true. That is
+    # exactly what `exp_map_0` and `log_map_0` did, which made the documented
+    # `tanh(x)/x -> 1` and `atanh(x)/x -> 1` limiting branches at the origin
+    # DEAD: the stated protection was not the protection in force. This helper
+    # returns BOTH norms so the branch test uses the RAW norm and the division
+    # uses the floored one. DO NOT go back to a single return value and test the
+    # result against `eps`.
+    #
+    # NOT part of this fix, and do not resurrect it: an earlier review claimed
+    # this function produced NaN GRADIENTS at the origin. That claim was
+    # WITHDRAWN after measurement -- TF 2.18's `tf.norm` backward returns 0, not
+    # NaN, at the origin. The defect here is the dead branch, nothing else.
+    # See decisions.md D-056.
+    def norm_and_floored_norm(
+            self,
+            x: keras.KerasTensor,
+            axis: int = -1,
+            keepdims: bool = False
+    ) -> tuple:
+        """Return ``(raw_norm, max(raw_norm, eps))`` for ``x``.
+
+        Args:
+            x: Input tensor of shape (..., D).
+            axis: Axis along which to compute the norm. Defaults to -1.
+            keepdims: Whether to keep the reduced dimension. Defaults to False.
+
+        Returns:
+            A 2-tuple. The FIRST element is the true Euclidean norm and is what
+            a near-origin test must be compared against; the SECOND is that
+            norm floored at ``self.eps`` and is what a division must use.
+
+        Failure mode: none -- pure arithmetic, no raise, no state. Callers that
+        need only the floored value should call :meth:`safe_norm`.
+        """
         norm = ops.norm(x, axis=axis, keepdims=keepdims)
-        return ops.maximum(norm, self.eps)
+        return norm, ops.maximum(norm, self.eps)
 
     def project(
             self,
@@ -136,7 +174,7 @@ class PoincareMath:
 
         cond = norm_x >= max_r
         projected = x * (max_r / norm_x)
-        return tf.where(cond, projected, x)
+        return ops.where(cond, projected, x)
 
     def exp_map_0(
             self,
@@ -171,11 +209,13 @@ class PoincareMath:
             This operation is differentiable and preserves the origin: exp_0(0) = 0.
         """
         sqrt_c = ops.sqrt(c)
-        norm_v = self.safe_norm(v, axis=-1, keepdims=True)
+        # The branch test uses the RAW norm; the division uses the floored one.
+        # See the D-056 anchor on `norm_and_floored_norm`.
+        raw_norm_v, norm_v = self.norm_and_floored_norm(v, axis=-1, keepdims=True)
 
         scale = ops.tanh(sqrt_c * norm_v) / (sqrt_c * norm_v)
 
-        return tf.where(norm_v < self.eps, v, v * scale)
+        return ops.where(raw_norm_v < self.eps, v, v * scale)
 
     def log_map_0(
             self,
@@ -211,13 +251,15 @@ class PoincareMath:
             atanh(1) = infinity. This operation inverts exp_map_0: log_0(exp_0(v)) = v.
         """
         sqrt_c = ops.sqrt(c)
-        norm_y = self.safe_norm(y, axis=-1, keepdims=True)
+        # The branch test uses the RAW norm; the division uses the floored one.
+        # See the D-056 anchor on `norm_and_floored_norm`.
+        raw_norm_y, norm_y = self.norm_and_floored_norm(y, axis=-1, keepdims=True)
 
         max_r = (1.0 / sqrt_c) - self.boundary_eps
         norm_y = ops.minimum(norm_y, max_r)
 
         scale = ops.arctanh(sqrt_c * norm_y) / (sqrt_c * norm_y)
-        return tf.where(norm_y < self.eps, y, y * scale)
+        return ops.where(raw_norm_y < self.eps, y, y * scale)
 
     def mobius_add(
             self,
