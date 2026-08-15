@@ -36,10 +36,22 @@ class TestForward:
         assert not np.any(np.isnan(keras.ops.convert_to_numpy(y)))
 
     def test_side_loss_variant_builds(self):
-        model = create_darkir_model(img_channels=3, width=16, use_side_loss=True)
+        enc_blk_nums = [1, 2, 3]
+        model = create_darkir_model(
+            img_channels=3, width=16, use_side_loss=True,
+            enc_blk_nums=enc_blk_nums, dec_blk_nums=[3, 1, 1],
+        )
         out = model(_images(), training=False)
-        # primary restored image is always present
+        # Two outputs, and the second one is at BOTTLENECK resolution. The
+        # `_primary(out)`-only assertion this replaced passed identically for a
+        # single-output model, so it could not see C-23 at all.
+        assert isinstance(out, (list, tuple)) and len(out) == 2, type(out)
         assert _primary(out).shape[1:] == (SPATIAL, SPATIAL, 3)
+
+        factor = 2 ** len(enc_blk_nums)
+        assert tuple(out[1].shape[1:]) == (
+            SPATIAL // factor, SPATIAL // factor, 3,
+        ), out[1].shape
 
 
 class TestKerasRoundTrip:

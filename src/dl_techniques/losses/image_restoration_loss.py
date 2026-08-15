@@ -621,6 +621,10 @@ class DarkIRCompositeLoss(keras.losses.Loss):
 
     Notes:
         - SSIM computation uses TensorFlow backend (not available in keras.ops)
+        - SSIM loss only computed if ssim_weight > 0. This matters beyond the
+          saved compute: `tf.image.ssim` raises on inputs smaller than its
+          11x11 window, so `ssim_weight=0.0` is what makes this loss usable on
+          low-resolution auxiliary outputs.
         - VGG loss only computed if perceptual_weight > 0
     """
 
@@ -666,9 +670,18 @@ class DarkIRCompositeLoss(keras.losses.Loss):
         loss = self.charbonnier_weight * self.charb_loss(y_true, y_pred)
 
         # Structural similarity loss (1 - SSIM)
-        # Note: SSIM is not available in keras.ops, using TF backend
-        ssim_val = tf.image.ssim(y_true, y_pred, max_val=1.0)
-        loss = loss + self.ssim_weight * (1.0 - ssim_val)
+        # Note: SSIM is not available in keras.ops, using TF backend.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-044: gated on the weight,
+        # exactly as the perceptual term below already is. `tf.image.ssim`'s
+        # 11x11 Gaussian window RAISES on any side shorter than 11 px, so an
+        # ungated call made `ssim_weight=0.0` a term the caller could not
+        # actually switch off: it still decided whether the loss was usable at
+        # all. Do not "simplify" this back to an unconditional call — the
+        # bottleneck deep-supervision head in `models/darkir/` supervises maps
+        # as small as 4x4.
+        if self.ssim_weight > 0:
+            ssim_val = tf.image.ssim(y_true, y_pred, max_val=1.0)
+            loss = loss + self.ssim_weight * (1.0 - ssim_val)
 
         # Perceptual loss (optional) - returns (B,)
         if self.vgg_loss is not None:

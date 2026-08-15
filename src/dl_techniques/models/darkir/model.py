@@ -87,7 +87,10 @@ the way down, and the skip-connection `Add` then fails on mismatched shapes.
 bottleneck features captured between the middle encoder blocks and the middle
 decoder blocks. Note that this tap is at bottleneck resolution: the side output
 has shape `(B, H / 2**stages, W / 2**stages, img_channels)`, not full resolution,
-so any auxiliary loss against it must downsample the target first. This differs
+so any auxiliary loss against it must downsample the target first —
+`src/train/darkir/train_darkir.py --side-loss` is the in-repo wiring that does
+so, and until it existed this flag built a model whose second output no loss in
+the repo could be applied to. This differs
 from the paper, whose auxiliary supervision is applied to a full-resolution
 enhanced image produced by a distinct low-light branch; the single shared trunk
 here does not reproduce that two-branch split.
@@ -1428,14 +1431,22 @@ def create_darkir_model(
             Defaults to [1, 4, 9]. All values must be positive.
         extra_depth_wise: Boolean, whether to use extra depthwise convolution
             in all blocks. Adds inductive bias. Defaults to True.
-        use_side_loss: Boolean, whether to return intermediate output for
-            deep supervision. When True, returns [main_output, side_output].
-            Defaults to False.
+        use_side_loss: Boolean, whether to return an intermediate output for
+            deep supervision. When True, returns [main_output, side_output],
+            and the side output is at BOTTLENECK resolution
+            (H / 2**len(enc_blk_nums)), not full resolution. A caller that
+            compiles a single full-resolution loss against both outputs will
+            build fine and die at the first fit() step on a shape mismatch;
+            the target for the side output must be downsampled by the same
+            factor. `src/train/darkir/train_darkir.py --side-loss` is the
+            in-repo reference for that wiring. Defaults to False.
 
     Returns:
         keras.Model: The constructed DarkIR model.
             - If use_side_loss=False: Single output of shape (B, H, W, img_channels)
-            - If use_side_loss=True: Two outputs [main, side] for multi-task learning
+            - If use_side_loss=True: Two outputs, [main, side], with shapes
+              (B, H, W, img_channels) and
+              (B, H // 2**len(enc_blk_nums), W // 2**len(enc_blk_nums), img_channels)
 
     Input shape:
         4D tensor with shape: `(batch, height, width, img_channels)`.
@@ -1627,7 +1638,15 @@ def create_darkir_model(
 
     # === Optional Side Loss ===
     if use_side_loss:
-        # Create a side output from the middle features
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-044: the tap stays at
+        # bottleneck resolution and the TRAINER downsamples the target to meet
+        # it. Do NOT "fix" this by upsampling `side_out` to full resolution so
+        # that a single full-resolution loss happens to apply: that would make
+        # the auxiliary gradient pass through an interpolation the main path
+        # does not use, and it would still not be the paper's mechanism (a
+        # separate full-resolution low-light branch, see the module docstring).
+        # A caller wiring this flag must produce a matching downsampled target;
+        # `src/train/darkir/train_darkir.py --side-loss` does exactly that.
         side_out = layers.Conv2D(
             img_channels,
             kernel_size=3,

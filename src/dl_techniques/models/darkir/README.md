@@ -229,7 +229,7 @@ A utility layer often used in modern vision architectures (e.g., NAFNet, DarkIR)
 | `dec_blk_nums` | List[int] | `[3, 1, 1]` | Number of blocks per decoder stage. Should match encoder length. |
 | `dilations` | List[int] | `[1, 4, 9]` | Dilation rates for the parallel branches in every block. |
 | `extra_depth_wise`| bool | `True` | Adds an extra depthwise conv layer for better inductive bias. |
-| `use_side_loss` | bool | `False` | If True, returns `[final_output, middle_output]` for deep supervision. |
+| `use_side_loss` | bool | `False` | If True, returns `[final_output, side_output]` for deep supervision. **`side_output` is at BOTTLENECK resolution** — `H / 2**len(enc_blk_nums)`, i.e. 1/8 at the defaults — so its target must be downsampled by the same factor. See §8 Example 2. |
 
 ---
 
@@ -255,11 +255,22 @@ model.summary()
 
 Deep supervision (Side Loss) helps gradients flow to the middle of the network, improving convergence for deep models.
 
+**The side output is at bottleneck resolution, not full resolution.** Passing
+`y_train` to both outputs — as an earlier revision of this README did — builds
+fine and then dies at the first `fit()` step on a shape mismatch. The auxiliary
+target must be downsampled by `2 ** len(enc_blk_nums)`.
+
 ```python
+import tensorflow as tf
+
+enc_blk_nums = [1, 2, 3]
+factor = 2 ** len(enc_blk_nums)          # 8 at the defaults
+
 model = create_darkir_model(
     img_channels=3,
     width=32,
-    use_side_loss=True
+    enc_blk_nums=enc_blk_nums,
+    use_side_loss=True,
 )
 
 # Loss weights: Main output gets 1.0, Side output gets 0.5
@@ -269,9 +280,19 @@ model.compile(
     loss_weights=[1.0, 0.5]
 )
 
-# y_train must be passed twice or adapted in data pipeline
-model.fit(x_train, [y_train, y_train], epochs=10)
+def attach_side_target(x, y):
+    h, w = tf.shape(y)[1], tf.shape(y)[2]
+    return x, (y, tf.image.resize(y, (h // factor, w // factor), method='area'))
+
+ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(8)
+model.fit(ds.map(attach_side_target), epochs=10)
 ```
+
+`src/train/darkir/train_darkir.py --side-loss` is the shipped version of this
+wiring (`attach_side_targets` / `side_output_downsample_factor`), including a
+Charbonnier-only side loss — SSIM's 11x11 window does not fit a bottleneck map
+below 88px input, and `DarkIRCompositeLoss` skips the SSIM term entirely when
+`ssim_weight=0.0`.
 
 ---
 
