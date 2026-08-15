@@ -53,15 +53,23 @@ the model emits a warning rather than silently proceeding when it is absent; pas
 a precomputed `inputs['scale']` bypasses the question entirely.
 
 Two implementation properties are worth knowing before trusting long horizons. The
-sampling loop re-runs the whole stacked LSTM over the conditioning window with the
-current value appended, once per horizon step per sample, because a stacked
-`keras.layers.LSTM` does not carry state across separate invocations here. That costs
-`num_samples * prediction_len` full-sequence passes, and it means the context at
-horizon step `t` is the conditioning range plus the single most recent draw — earlier
-draws and their covariates do not re-enter the context. Separately, the negative
+sampling loop re-runs the whole stacked LSTM over the conditioning window plus every
+draw made so far, once per horizon step per sample, because a stacked
+`keras.layers.LSTM` does not carry state across separate invocations here, so the
+prefix has to be replayed rather than resumed. That costs `num_samples *
+prediction_len` full-sequence passes over a sequence that grows from
+`conditioning_len + 1` to `conditioning_len + prediction_len`, which is the price of
+being ancestral: until 2026-08-15 the context was the conditioning range plus only
+the *single most recent* draw, which made an H-step forecast H nearly independent
+one-step-ahead forecasts and multi-step quantiles too narrow. Separately, the negative
 binomial path samples by moment matching to a Gaussian clipped at zero rather than by
-a Gamma-Poisson draw, and `negative_binomial_loss` drops the `lgamma` terms; both are
-approximations of the exact distribution and are marked as such at the call sites.
+a Gamma-Poisson draw — an approximation, marked as such at the call site.
+`negative_binomial_loss` is no longer among the approximations: it dropped
+`lgamma(z + r) - lgamma(r)`, and since `r = 1 / alpha` those terms are not constant
+in the parameters, so the gradient with respect to `alpha` was wrong rather than
+merely offset and dispersion was mis-estimated for every count model. Only the
+parameter-free `-lgamma(z + 1)` normalizer is now omitted, which shifts the value by
+a constant and leaves the gradient exact.
 
 Both loss functions ignore `y_true` and read the target out of `y_pred`, because
 `call` returns the target alongside the parameters. That keeps the likelihood
@@ -90,6 +98,7 @@ from typing import Optional, Union, Literal, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import log_gamma
 from dl_techniques.layers.time_series.deepar_blocks import (
     ScaleLayer,
     GaussianLikelihoodHead,
@@ -566,16 +575,10 @@ class DeepAR(keras.Model, ForecastMixin):
             axis=-1
         )
 
-        # Pass through LSTM to get final hidden state
-        hidden = encoder_inputs
-        for lstm in self.lstm_layers:
-            hidden = lstm(hidden, training=training)
-
-        # Get last hidden state to initialize decoder
-        # For prediction, we need to maintain LSTM states across steps
-        # However, Keras LSTM doesn't easily expose this in functional API
-        # We'll use a simpler approach: use the last encoder output
-        last_hidden = hidden[:, -1:, :]  # (batch, 1, hidden_dim)
+        # No encoder-only pass here: the decoder loop below replays
+        # `encoder_inputs` as the prefix of every sequence it runs, so a
+        # separate pass would be a whole stacked-LSTM forward whose result is
+        # discarded. One was computed here (`last_hidden`) and never read.
 
         # Generate samples
         all_samples = []
@@ -585,6 +588,16 @@ class DeepAR(keras.Model, ForecastMixin):
             current_value = conditioning_scaled[:, -1:, :]  # (batch, 1, target_dim)
 
             sample_trajectory = []
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-038
+            # The decoder steps consumed SO FAR, kept so step t's context is the
+            # conditioning window plus draws 1..t. Until 2026-08-15 the context
+            # was `[encoder_inputs, decoder_input]` -- the window plus only the
+            # single most recent draw -- which made an H-step forecast H nearly
+            # independent one-step-ahead forecasts and multi-step quantiles too
+            # narrow. Do NOT drop this list to shorten the sequence: ancestral
+            # sampling is defined by conditioning on the whole drawn prefix.
+            # See decisions.md D-038.
+            decoder_history = []
 
             for t in range(prediction_len):
                 # Get covariates for this time step
@@ -595,11 +608,14 @@ class DeepAR(keras.Model, ForecastMixin):
                     [current_value, current_covariates],
                     axis=-1
                 )
+                decoder_history.append(decoder_input)
 
-                # Extend last_hidden to match sequence length
-                # This is a simplified approach; ideally we'd maintain LSTM state
+                # Re-run the stacked LSTM over the conditioning window plus
+                # every decoder step drawn so far. A stacked `keras.layers.LSTM`
+                # does not carry state across separate invocations here, so the
+                # prefix has to be replayed rather than resumed.
                 decoder_input_seq = ops.concatenate(
-                    [encoder_inputs, decoder_input],
+                    [encoder_inputs] + decoder_history,
                     axis=1
                 )
 
@@ -768,29 +784,47 @@ class DeepAR(keras.Model, ForecastMixin):
         """
         Negative Binomial negative log-likelihood loss.
 
+        With shape ``r = 1 / alpha`` and success probability
+        ``p = r / (r + mu) = 1 / (1 + alpha * mu)``, the log-pmf is::
+
+            log p(z) = lgamma(z + r) - lgamma(r) - lgamma(z + 1)
+                       + r * log(p) + z * log(1 - p)
+
+        and this returns the mean of its negation, less the parameter-free
+        ``-lgamma(z + 1)`` normalizer. Dropping a term that does not depend on
+        ``mu`` or ``alpha`` shifts the value by a constant and leaves the
+        gradient exact; it is dropped because it is ``nan`` for any target
+        below ``-1``, and a mis-specified target should not turn the loss into
+        a ``nan`` when it can simply be a large number.
+
         Args:
             y_true: Not used (target is in y_pred).
             y_pred: Dictionary with 'mu', 'alpha', 'target'.
 
         Returns:
-            Negative log-likelihood.
+            Negative log-likelihood, up to an additive constant.
         """
         mu = y_pred['mu']
         alpha = y_pred['alpha']
         target = y_pred['target']
 
-        # Negative Binomial NLL (simplified, ignoring Gamma terms)
-        # Full formula involves lgamma functions
-        # Approximation: -log p(z|μ,α) ≈ key terms
-
-        # p = 1 / (1 + α*μ)
-        # r = 1 / α
-
         eps = 1e-7
         p = 1.0 / (1.0 + alpha * mu + eps)
+        r = 1.0 / (alpha + eps)
 
-        # Simplified NLL (main terms)
-        nll = -ops.log(p + eps) / alpha - target * ops.log(1.0 - p + eps)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-039
+        # The `lgamma(z + r) - lgamma(r)` pair is NOT a constant that may be
+        # dropped for training: `r = 1 / alpha`, so both terms depend on alpha
+        # and their omission makes d(loss)/d(alpha) systematically wrong rather
+        # than merely offset -- dispersion is mis-estimated for every count
+        # model. It was omitted here as "simplified, ignoring Gamma terms".
+        # Do NOT drop it again. `log_gamma` exists because `keras.ops` has no
+        # `lgamma` in Keras 3.8. See decisions.md D-039.
+        log_binomial = log_gamma(target + r) - log_gamma(r)
+
+        nll = -(log_binomial
+                + r * ops.log(p + eps)
+                + target * ops.log(1.0 - p + eps))
 
         return ops.mean(nll)
 

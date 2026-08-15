@@ -6,7 +6,7 @@ from typing import Tuple
 
 from dl_techniques.utils.tensors import \
     power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel, \
-    resolve_training_factor
+    resolve_training_factor, log_gamma
 
 
 @pytest.fixture
@@ -352,3 +352,55 @@ class TestResolveTrainingFactor:
 
         assert float(run(tf.constant(True))) == 1.0
         assert float(run(tf.constant(False))) == 0.0
+
+
+class TestLogGamma:
+    """`log_gamma` is a shared helper; `keras.ops` has no `lgamma` in Keras 3.8.
+
+    Accuracy is pinned against `scipy.special.gammaln`, which is an independent
+    implementation, and differentiability is asserted directly because that is
+    the whole reason a Lanczos series is used instead of `math.lgamma`.
+    """
+
+    XS = np.array([0.5, 1.0, 1.5, 2.0, 3.7, 10.0, 100.0, 1e4, 1e6],
+                  dtype=np.float64)
+
+    def test_matches_scipy_gammaln_in_float64(self):
+        from scipy.special import gammaln
+        import keras
+
+        got = keras.ops.convert_to_numpy(
+            log_gamma(keras.ops.convert_to_tensor(self.XS))
+        )
+        assert_allclose(got, gammaln(self.XS), rtol=1e-12, atol=1e-12)
+
+    def test_known_exact_values(self):
+        """Gamma(1) = Gamma(2) = 1, so log Gamma is 0 at both."""
+        import keras
+
+        got = keras.ops.convert_to_numpy(
+            log_gamma(keras.ops.convert_to_tensor(
+                np.array([1.0, 2.0], dtype=np.float64)))
+        )
+        assert_allclose(got, [0.0, 0.0], atol=1e-12)
+
+    def test_is_differentiable_and_matches_digamma(self):
+        """d/dx log Gamma(x) = digamma(x). `math.lgamma` cannot do this."""
+        from scipy.special import digamma
+        import keras
+
+        x = tf.Variable(np.array([0.7, 2.0, 9.0, 250.0], dtype=np.float64))
+        with tf.GradientTape() as tape:
+            y = log_gamma(x)
+        grad = keras.ops.convert_to_numpy(tape.gradient(y, x))
+
+        assert grad is not None, "log_gamma is not differentiable"
+        assert_allclose(grad, digamma(np.asarray(x)), rtol=1e-8)
+
+    def test_shape_is_preserved(self):
+        import keras
+
+        x = keras.ops.convert_to_tensor(
+            np.abs(np.random.default_rng(0).normal(size=(2, 3, 4))) + 0.5
+        )
+        assert tuple(log_gamma(x).shape) == (2, 3, 4)

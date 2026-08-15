@@ -169,7 +169,12 @@ Loop: Feed z_sample_t back as input for next step
 The most critical component for stability.
 -   **Forward**: Divides input by a scale factor $ \nu $ (usually $ 1 + \text{mean}(z_{history}) $).
 -   **Inverse**: Multiplies model outputs by the scale factor to restore original magnitude.
--   Handles the logic differently for Mean (linear scaling) vs Standard Deviation (sqrt scaling) or Variance.
+-   The layer itself applies exactly one multiplication or division; the choice of scale
+    belongs to the call site. Gaussian $\mu$ **and** $\sigma$ both use $\nu$ — the forward
+    path divides $z$ by $\nu$ exactly once, so $\sigma$ is a first-moment-scale quantity,
+    not a variance. Only the negative-binomial shape $\alpha$ uses $1/\sqrt{\nu}$.
+    This bullet claimed "sqrt scaling" for the standard deviation until 2026-08-15; no call
+    site ever did that, and acting on it would re-introduce an already-fixed defect.
 
 ### 4.2 `GaussianLikelihoodHead`
 

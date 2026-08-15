@@ -17,6 +17,15 @@ from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
+# Floor applied to every strictly-positive likelihood parameter (sigma, mu and
+# alpha). Softplus underflows to exactly 0.0 in float32 for logits below about
+# -103, and every downstream use of these parameters -- log(sigma), division by
+# sigma, 1/alpha, lgamma(1/alpha) -- is an inf or a NaN at 0. Small enough not
+# to distort a trained model, large enough to survive float16.
+MIN_LIKELIHOOD_PARAM: float = 1e-6
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class ScaleLayer(keras.layers.Layer):
     """
@@ -30,10 +39,21 @@ class ScaleLayer(keras.layers.Layer):
     Scale is computed as:
         ``nu = mean(conditioning_range) + epsilon``
 
-    Forward scaling divides by ``nu``, while inverse scaling multiplies by
-    ``nu`` (for means) or scales by ``sqrt(nu)`` (for standard deviations in
-    the Gaussian case) or ``1/sqrt(nu)`` (for shape parameters in the Negative
-    Binomial case).
+    Forward scaling divides by ``nu``; inverse scaling multiplies by whatever
+    ``scale`` the caller passes. The layer itself has no per-parameter policy —
+    it applies exactly one multiplication or division — so the choice of scale
+    belongs to the call site:
+
+    - Gaussian ``mu`` **and** ``sigma``: ``nu``. The forward path divides ``z``
+      by ``nu`` exactly once, so ``mu = nu * mu~`` and ``sigma = nu * sigma~``;
+      ``sigma`` is a first-moment-scale quantity here, not a variance.
+    - Negative-binomial shape ``alpha``: ``1 / sqrt(nu)``.
+
+    This docstring said until 2026-08-15 that inverse scaling uses ``sqrt(nu)``
+    "for standard deviations in the Gaussian case". That is wrong, it was never
+    what any call site did, and the diagram three paragraphs below (``x * nu``)
+    always contradicted it. It is recorded here because a repair driven from the
+    old sentence would re-introduce a defect that has already been fixed once.
 
     **Architecture Overview:**
 
@@ -148,7 +168,7 @@ class GaussianLikelihoodHead(keras.layers.Layer):
 
     The mathematical operations are:
         ``mu(h) = W_mu^T h + b_mu``
-        ``sigma(h) = log(1 + exp(W_sigma^T h + b_sigma))``
+        ``sigma(h) = max(softplus(W_sigma^T h + b_sigma), 1e-6)``
 
     **Architecture Overview:**
 
@@ -166,7 +186,7 @@ class GaussianLikelihoodHead(keras.layers.Layer):
                    ▼                      ▼
                 mu (mean)          ┌──────────────┐
                    │               │  Softplus    │
-                   │               │  log(1+exp)  │
+                   │               │  + 1e-6 floor│
                    │               └──────┬───────┘
                    │                      │
                    │                      ▼
@@ -230,9 +250,17 @@ class GaussianLikelihoodHead(keras.layers.Layer):
         """
         mu = self.mu_projection(inputs)
 
-        # Softplus activation to ensure sigma > 0
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-037
+        # `ops.softplus`, NOT the hand-spelled `ops.log(1.0 + ops.exp(x))`.
+        # The literal spelling overflows: a float32 logit above ~88 makes
+        # `exp` inf, so sigma is inf and the loss NaN; a logit below ~-104
+        # underflows `exp` to exactly 0, so sigma is 0, `log(sigma)` is -inf
+        # and `(target - mu) / sigma` divides by zero. `ops.softplus` is the
+        # numerically stable form. The `maximum` floor is a second, independent
+        # guard: softplus itself underflows to 0 in float32 below about -103.
+        # Do NOT "simplify" either back. See decisions.md D-037.
         sigma_logits = self.sigma_projection(inputs)
-        sigma = ops.log(1.0 + ops.exp(sigma_logits))
+        sigma = ops.maximum(ops.softplus(sigma_logits), MIN_LIKELIHOOD_PARAM)
 
         return mu, sigma
 
@@ -279,8 +307,8 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
     parameters must be positive, enforced via softplus activation.
 
     The mathematical operations are:
-        ``mu(h) = log(1 + exp(W_mu^T h + b_mu))``
-        ``alpha(h) = log(1 + exp(W_alpha^T h + b_alpha))``
+        ``mu(h) = max(softplus(W_mu^T h + b_mu), 1e-6)``
+        ``alpha(h) = max(softplus(W_alpha^T h + b_alpha), 1e-6)``
 
     Distribution properties:
         ``E[z] = mu``
@@ -302,7 +330,7 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
                    ▼                      ▼
             ┌──────────────┐     ┌──────────────────┐
             │  Softplus    │     │  Softplus        │
-            │  log(1+exp)  │     │  log(1+exp)      │
+            │  + 1e-6 floor│     │  + 1e-6 floor    │
             └──────┬───────┘     └────────┬─────────┘
                    │                      │
                    ▼                      ▼
@@ -364,12 +392,15 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
         :return: Tuple of (mu, alpha) tensors.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Softplus activation to ensure both params > 0
+        # Softplus + floor, for the reasons given at the Gaussian head
+        # (D-037). `alpha` matters more here than `sigma` does there: the
+        # negative-binomial NLL divides by it and takes `lgamma(1 / alpha)`,
+        # so an `alpha` of exactly 0 is an immediate inf.
         mu_logits = self.mu_projection(inputs)
-        mu = ops.log(1.0 + ops.exp(mu_logits))
+        mu = ops.maximum(ops.softplus(mu_logits), MIN_LIKELIHOOD_PARAM)
 
         alpha_logits = self.alpha_projection(inputs)
-        alpha = ops.log(1.0 + ops.exp(alpha_logits))
+        alpha = ops.maximum(ops.softplus(alpha_logits), MIN_LIKELIHOOD_PARAM)
 
         return mu, alpha
 
