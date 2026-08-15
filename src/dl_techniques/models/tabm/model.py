@@ -709,9 +709,14 @@ class TabMModel(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
+        # ``description`` is variant METADATA, not a constructor argument: __init__
+        # forwards unrecognized **kwargs to keras.Model.__init__, which raises on
+        # them. Pop it before the splat below, matching fnet/model.py:598,
+        # time_series/tirex/model.py:747 and mamba/mamba_v1.py:451.
+        description = config.pop("description", "")
 
         logger.info(f"Creating TabM-{variant.upper()} model")
-        logger.info(f"Configuration: {config['description']}")
+        logger.info(f"Configuration: {description}")
 
         return cls(
             n_num_features=n_num_features,
