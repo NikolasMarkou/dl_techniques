@@ -4,8 +4,19 @@ Example script demonstrating MiniVec2VecAligner usage.
 This script shows how to:
 1. Generate synthetic aligned embedding spaces
 2. Use MiniVec2VecAligner to recover the alignment
-3. Evaluate alignment quality
+3. Evaluate alignment quality **in the frame the map was fitted in**
 4. Test serialization
+
+The third point is the part that is easy to get wrong, and this script used to
+get it wrong. `align` mean-centers both spaces and L2-normalizes every row, and
+it does NOT store the two mean vectors — `call` is only `X @ W`. Applying `W`
+to raw embeddings therefore evaluates the map in a frame it was never fitted
+in. The bug was invisible here because the synthetic fixture is generated
+already unit-normed and near-zero-mean, so `align_frame` was very close to the
+identity on it. Real embedding spaces are not centered, and there the same code
+silently reports a much worse alignment than the model actually learned.
+`align_frame` below is the one place that reproduces the fitted frame; both
+evaluation and the "transform new embeddings" demo go through it.
 """
 
 import os
@@ -24,6 +35,8 @@ def generate_synthetic_data(
         n_samples: int = 25000,
         n_eval: int = 5000,
         embed_dim: int = 128,
+        n_clusters: int = 20,
+        cluster_noise: float = 0.3,
         seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -32,10 +45,26 @@ def generate_synthetic_data(
     Creates two embedding spaces where space_B is a random orthogonal
     transformation of space_A. This provides ground truth for evaluation.
 
+    The base cloud is a MIXTURE of `n_clusters` gaussians, not isotropic noise.
+    That is not decoration: stage 2 of the algorithm matches the two spaces by
+    solving a quadratic assignment between their k-means centroid Gram
+    matrices, so a cloud with no cluster structure gives it nothing to match
+    and the whole pipeline returns a map no better than chance. MEASURED with
+    isotropic data at these defaults: final Frobenius error 5.23 against
+    ||Q||_F = sqrt(embed_dim), i.e. no recovery at all.
+
+    Keep `align`'s `approx_clusters` matched to `n_clusters`. Also measured:
+    with 20 modes and `approx_clusters=8`, k-means finds a different arbitrary
+    8-way grouping in each space, the centroid sets are then not permutations
+    of one another, and recovery fails exactly as it does on isotropic data
+    (5.31). With both at 20 the error is 0.157.
+
     Args:
         n_samples: Number of samples for alignment.
         n_eval: Number of samples for evaluation.
         embed_dim: Embedding dimensionality.
+        n_clusters: Number of gaussian modes in the base cloud.
+        cluster_noise: Standard deviation around each mode.
         seed: Random seed for reproducibility.
 
     Returns:
@@ -46,11 +75,14 @@ def generate_synthetic_data(
 
     logger.info("Generating synthetic data...")
 
-    # Create base embeddings (normalized)
-    base_embeddings = np.random.randn(
-        n_samples + n_eval,
-        embed_dim
-    ).astype(np.float32)
+    # Create base embeddings from a gaussian mixture, then normalize.
+    centers = np.random.randn(n_clusters, embed_dim).astype(np.float32) * 3.0
+    labels = np.random.randint(0, n_clusters, size=n_samples + n_eval)
+    base_embeddings = (
+        centers[labels]
+        + np.random.randn(n_samples + n_eval, embed_dim).astype(np.float32)
+        * cluster_noise
+    )
     base_embeddings /= np.linalg.norm(base_embeddings, axis=1, keepdims=True)
 
     # Create a random orthogonal matrix (ground truth transformation)
@@ -70,6 +102,27 @@ def generate_synthetic_data(
     )
 
     return XA_align, XB_align, XA_eval, XB_eval, random_matrix
+
+
+def align_frame(X: np.ndarray, mean: np.ndarray) -> np.ndarray:
+    """Reproduce ``align``'s preprocessing for new embeddings.
+
+    ``MiniVec2VecAligner.align`` centers each space by the mean of the arrays
+    it was given and then L2-normalizes every row (``model.py``, stage 1). Those
+    means are local to that call, so a caller applying ``W`` later must pass the
+    SAME mean here — the one computed over the alignment set, not over the new
+    batch.
+
+    Args:
+        X: Raw embeddings, shape ``(n, embedding_dim)``.
+        mean: The ``(1, embedding_dim)`` mean of the space these embeddings
+            belong to, computed over the ALIGNMENT set.
+
+    Returns:
+        Embeddings in the frame ``W`` maps between.
+    """
+    Xp = X - mean
+    return Xp / np.linalg.norm(Xp, axis=1, keepdims=True)
 
 
 def compute_top1_accuracy(
@@ -149,6 +202,8 @@ def evaluate_alignment(
         aligner: MiniVec2VecAligner,
         XA_eval: np.ndarray,
         XB_eval: np.ndarray,
+        mean_A: np.ndarray,
+        mean_B: np.ndarray,
         ground_truth_W: Optional[np.ndarray] = None,
         stage: str = "final"
 ) -> Dict[str, float]:
@@ -159,19 +214,25 @@ def evaluate_alignment(
         aligner: Trained MiniVec2VecAligner model.
         XA_eval: Evaluation source embeddings.
         XB_eval: Evaluation target embeddings.
+        mean_A: Mean of the source space over the ALIGNMENT set.
+        mean_B: Mean of the target space over the ALIGNMENT set.
         ground_truth_W: Optional ground truth transformation for error computation.
         stage: Stage name for logging.
 
     Returns:
         Dictionary of evaluation metrics.
     """
-    # Transform evaluation embeddings
-    aligned_A = ops.convert_to_numpy(aligner(XA_eval))
+    # Transform evaluation embeddings IN THE FITTED FRAME. Both sides go
+    # through `align_frame`: `W` maps processed-A to processed-B, so comparing
+    # against a raw `XB_eval` would be a second frame error on the target side.
+    XA_proc = align_frame(XA_eval, mean_A)
+    XB_proc = align_frame(XB_eval, mean_B)
+    aligned_A = ops.convert_to_numpy(aligner(XA_proc))
 
     # Compute metrics
     metrics = {
-        'top1_accuracy': compute_top1_accuracy(aligned_A, XB_eval),
-        'mean_cosine_sim': compute_mean_cosine_similarity(aligned_A, XB_eval)
+        'top1_accuracy': compute_top1_accuracy(aligned_A, XB_proc),
+        'mean_cosine_sim': compute_mean_cosine_similarity(aligned_A, XB_proc)
     }
 
     # Add transformation error if ground truth available
@@ -257,7 +318,7 @@ def run_alignment_example(
         refine2_clusters: int = 200,
         smoothing_alpha: float = 0.5,
         seed: Optional[int] = 42
-) -> MiniVec2VecAligner:
+) -> Tuple[MiniVec2VecAligner, np.ndarray, np.ndarray]:
     """
     Run complete alignment example with evaluation and testing.
 
@@ -276,7 +337,9 @@ def run_alignment_example(
         seed: Random seed for reproducibility.
 
     Returns:
-        Trained MiniVec2VecAligner model.
+        Tuple of ``(aligner, mean_A, mean_B)``. The two means are returned, not
+        just the model, because ``W`` is only meaningful together with the frame
+        it was fitted in and the model does not carry it — see ``align_frame``.
     """
     logger.info("=" * 70)
     logger.info("Mini-Vec2Vec Alignment Example")
@@ -290,9 +353,17 @@ def run_alignment_example(
         seed=seed
     )
 
-    # ===== Step 2: Create and Build Model =====
+    # The frame `align` will fit in: the mean of each space over the ALIGNMENT
+    # set. `align` computes these internally and does not keep them, so anything
+    # that applies `W` afterwards has to recompute them from the same arrays.
+    mean_A = XA_align.mean(axis=0, keepdims=True)
+    mean_B = XB_align.mean(axis=0, keepdims=True)
+
+    # ===== Step 2: Create Model =====
     logger.info("\n--- Initializing MiniVec2VecAligner ---")
     aligner = MiniVec2VecAligner(embedding_dim=embed_dim)
+    # `align` builds the model itself; the explicit build here is only so the
+    # BEFORE-alignment evaluation below has a `W` to read.
     aligner.build(input_shape=(None, embed_dim))
     logger.info(f"Model created with embedding_dim={embed_dim}")
 
@@ -301,6 +372,8 @@ def run_alignment_example(
         aligner,
         XA_eval,
         XB_eval,
+        mean_A,
+        mean_B,
         ground_truth_W,
         stage="BEFORE alignment"
     )
@@ -328,6 +401,8 @@ def run_alignment_example(
         aligner,
         XA_eval,
         XB_eval,
+        mean_A,
+        mean_B,
         ground_truth_W,
         stage="AFTER alignment"
     )
@@ -348,7 +423,7 @@ def run_alignment_example(
         )
     logger.info("=" * 70)
 
-    return aligner
+    return aligner, mean_A, mean_B
 
 
 if __name__ == "__main__":
@@ -359,14 +434,16 @@ if __name__ == "__main__":
     on synthetic data. For real-world applications, these may need tuning.
     """
     # Run example with default parameters
-    trained_aligner = run_alignment_example()
+    trained_aligner, mean_A, mean_B = run_alignment_example()
 
-    # Example of using the trained aligner for new embeddings
+    # Example of using the trained aligner for new embeddings. The raw batch is
+    # put into the fitted frame FIRST — feeding `new_embeddings` straight in
+    # would apply `W` in a frame it was not fitted in.
     logger.info("\n--- Example: Transform New Embeddings ---")
     new_embeddings = np.random.randn(100, 128).astype(np.float32)
     new_embeddings /= np.linalg.norm(new_embeddings, axis=1, keepdims=True)
 
-    transformed = trained_aligner(new_embeddings)
+    transformed = trained_aligner(align_frame(new_embeddings, mean_A))
     logger.info(
         f"Transformed {new_embeddings.shape[0]} embeddings: "
         f"{new_embeddings.shape} -> {transformed.shape}"

@@ -96,9 +96,9 @@ from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
 source_embeddings = np.load('source_embeddings.npy')
 target_embeddings = np.load('target_embeddings.npy')
 
-# 1. Initialize the aligner
+# 1. Initialize the aligner. `align` builds it, so the explicit build() is
+#    optional and only needed if you want to read `W` beforehand.
 aligner = MiniVec2VecAligner(embedding_dim=128)
-aligner.build(input_shape=(None, 128))
 
 # 2. Run the alignment process
 history = aligner.align(
@@ -106,16 +106,26 @@ history = aligner.align(
     XB=target_embeddings,
 )
 
-# 3. Transform new source embeddings into the aligned space
+# 3. Transform new source embeddings into the aligned space.
+#    `W` maps the CENTERED, UNIT-NORMALIZED source frame to the centered,
+#    unit-normalized target frame, and the two mean vectors are local to
+#    `align` -- the model does not store them. Reproduce the frame yourself,
+#    using the mean of the ALIGNMENT set (not of the new batch):
+mean_A = source_embeddings.mean(axis=0, keepdims=True)
+
+def to_aligned_frame(X):
+    Xp = X - mean_A
+    return Xp / np.linalg.norm(Xp, axis=1, keepdims=True)
+
 new_source_data = np.random.rand(100, 128)
-aligned_embeddings = aligner(new_source_data)
+aligned_embeddings = aligner(to_aligned_frame(new_source_data))
 
 # 4. Save the fitted model for later use
 aligner.save('mini_vec2vec_aligner.keras')
 
 # 5. Load and reuse
 loaded_aligner = keras.models.load_model('mini_vec2vec_aligner.keras')
-realigned_embeddings = loaded_aligner(new_source_data)
+realigned_embeddings = loaded_aligner(to_aligned_frame(new_source_data))
 ```
 
 ## 4. Detailed Usage
@@ -126,7 +136,7 @@ The `aligner` expects NumPy arrays. The internal algorithm will handle centering
 
 -   **Format**: NumPy arrays or tensors convertible to NumPy.
 -   **Shape**: `(n_samples, embedding_dim)`.
--   **Preprocessing**: The `align` method automatically centers the data and normalizes all vectors to the unit hypersphere.
+-   **Preprocessing**: The `align` method automatically centers the data and normalizes all vectors to the unit hypersphere. It does **not** keep the mean vectors, and `call` is only `X @ W`, so anything you transform afterwards must be put into the same frame first -- see step 3 of the quick start. `example_alignment.py::align_frame` is the shipped version of that helper.
 
 ### Running the Alignment
 

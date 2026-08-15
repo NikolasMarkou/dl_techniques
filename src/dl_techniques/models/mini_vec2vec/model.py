@@ -143,11 +143,9 @@ class MiniVec2VecAligner(keras.Model):
             of the model.
 
     Example:
-        >>> # Create aligner
+        >>> # Create aligner. `align` builds it; an explicit build() is only
+        >>> # needed to read `W` before fitting.
         >>> aligner = MiniVec2VecAligner(embedding_dim=128)
-        >>>
-        >>> # Build model
-        >>> aligner.build(input_shape=(None, 128))
         >>>
         >>> # Align two embedding spaces
         >>> history = aligner.align(
@@ -158,8 +156,14 @@ class MiniVec2VecAligner(keras.Model):
         ...     refine1_iterations=50
         ... )
         >>>
-        >>> # Transform new embeddings
-        >>> aligned_embeddings = aligner(source_embeddings)
+        >>> # Transform new embeddings IN THE FITTED FRAME: `align` centered
+        >>> # and L2-normalized both spaces and did not keep the means, so
+        >>> # reproduce them from the alignment set (see the module docstring
+        >>> # and `example_alignment.align_frame`).
+        >>> mean_A = source_embeddings.mean(axis=0, keepdims=True)
+        >>> centered = source_embeddings - mean_A
+        >>> in_frame = centered / np.linalg.norm(centered, axis=1, keepdims=True)
+        >>> aligned_embeddings = aligner(in_frame)
         >>>
         >>> # Save model
         >>> aligner.save('mini_vec2vec_aligner.keras')
@@ -317,13 +321,24 @@ class MiniVec2VecAligner(keras.Model):
             sim_A = centroids_A @ centroids_A.T
             sim_B = centroids_B @ centroids_B.T
 
-            # Step 3: Find correspondence with QAP (using 2-OPT)
-            # We maximize Tr(P @ sim_A @ P.T @ sim_B) by setting A=-sim_A
+            # Step 3: Find correspondence with QAP.
+            # We maximize Tr(P @ sim_A @ P.T @ sim_B) by setting A=-sim_A.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-050: `method='faq'`,
+            # NOT `'2opt'`. MEASURED on EXACTLY solvable instances (sim_B is a
+            # true permutation of sim_A, so the optimum is known and reachable):
+            # over 12 instances at k in {5, 8, 12, 20}, '2opt' recovered the
+            # permutation in 6 and returned a strictly WORSE objective in the
+            # other 6 — at k = 20, this package's own `approx_clusters` default,
+            # it failed 2 of 3 (objective 25.97 vs the optimal 30.72). 'faq'
+            # was exact in 12 of 12. With the anchor permutation wrong the
+            # relative representations of the two spaces are not comparable,
+            # every pseudo-pair is noise, and the whole pipeline returns a map
+            # no better than chance. Do not revert to '2opt' without re-running
+            # that comparison.
             res = quadratic_assignment(
                 -sim_A,
                 sim_B,
-                method='2opt',
-                options={'rng': None}
+                method='faq',
             )
             permutation_indices = res.col_ind
 
@@ -535,6 +550,19 @@ class MiniVec2VecAligner(keras.Model):
             raise ValueError(
                 f"smoothing_alpha must be in (0, 1], got {smoothing_alpha}"
             )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-049: `align` builds the
+        # model itself. Every stage below writes through `self.W.assign(...)`,
+        # so on a FRESH aligner — the state both this method's and the class's
+        # docstring examples start from — it used to die with
+        # `AttributeError: 'NoneType' object has no attribute 'assign'`, from
+        # inside stage 3, after minutes of k-means and QAP work. The shape is
+        # fully determined by `embedding_dim`, which is a constructor argument,
+        # so there is nothing to infer and nothing for the caller to decide.
+        # Do NOT replace this with a raise: `build` takes no information the
+        # object does not already have.
+        if not self.built:
+            self.build((None, self.embedding_dim))
 
         # Ensure input is numpy for sklearn/scipy compatibility
         XA = ops.convert_to_numpy(XA)
