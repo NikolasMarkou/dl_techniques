@@ -1,8 +1,8 @@
 """Memory read controller — top-K STE retrieval + gated injection.
 
-This module implements the read-tap of the dual-tap memory architecture.
-Step 3 (this commit) implements the retrieval and gating; Step 4 will add
-the four anti-collapse aux losses on top.
+This module implements the read-tap of the dual-tap memory architecture:
+top-K retrieval, the gated injection, and the anti-collapse aux losses
+that keep the long-term bank from collapsing onto a few slots.
 
 Algorithm (per F-004 §3-§4)::
 
@@ -75,12 +75,24 @@ class MemoryReadController(keras.layers.Layer):
     :param layer_norm_eps: LayerNorm epsilon for ``V_proj`` norm.
     :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
-    Aux-loss enable flags (default ``False`` — Step 4 will turn them on):
+    Aux-loss enable flags (default ``False``):
         - ``enable_gate_entropy``
         - ``enable_load_balance``
         - ``enable_z_loss``
         - ``enable_diversity``
         - ``enable_infonce``
+
+    These flags are **static graph shape**, not a runtime switch. They are
+    read as ordinary Python booleans inside :meth:`call`, so their value at
+    the moment the enclosing ``train_function`` is traced decides, once and
+    for all, whether the corresponding ``add_loss`` term exists in the
+    graph. Flipping one from a ``keras.callbacks.Callback`` during
+    ``fit()`` changes nothing: Keras traces ``train_function`` *before*
+    ``on_train_begin`` and rebuilds it only from ``compile()``. Set them at
+    construction. The **runtime** curriculum switch is the ``aux_scale``
+    tensor argument of :meth:`call` — a value derived from the model's
+    ``current_phase`` ``Variable`` and multiplied into every term, so it is
+    read fresh on every traced step.
 
     Sublayer names carry ``memory_`` for keys/values/projections and
     ``gate_`` for the gate. Routing to the memory optimizer does **not**
@@ -105,7 +117,8 @@ class MemoryReadController(keras.layers.Layer):
         initializer_range: float = 0.02,
         gate_init_bias: float = -3.0,
         layer_norm_eps: float = 1e-5,
-        # Aux loss enable flags (Step 4 wires them in).
+        # Aux loss enable flags. STATIC graph shape — see the class
+        # docstring; the runtime switch is `call`'s `aux_scale`.
         enable_gate_entropy: bool = False,
         enable_load_balance: bool = False,
         enable_z_loss: bool = False,
@@ -263,6 +276,7 @@ class MemoryReadController(keras.layers.Layer):
         k_wm: Any,
         v_wm: Any,
         wm_padding_mask: Any,
+        aux_scale: Optional[Any] = None,
         training: Optional[bool] = None,
     ) -> Any:
         """Run retrieval and return ``g * V_proj`` (gated injection).
@@ -271,7 +285,7 @@ class MemoryReadController(keras.layers.Layer):
 
            **Positional-7 signature (D3).** This ``call`` takes seven
            positional tensor inputs (``x_r``, ``k_lt``, ``v_lt``, ``k_wm``,
-           ``v_wm``, ``wm_padding_mask``, ``training``). It is **not**
+           ``v_wm``, ``wm_padding_mask``, ``aux_scale``). It is **not**
            compatible with the Keras Functional API — Functional models
            expect ``call(inputs, ...)`` with at most one tensor input. The
            parent :class:`WaveFieldMemoryLLM` is a subclassed
@@ -285,6 +299,11 @@ class MemoryReadController(keras.layers.Layer):
         :param v_wm: Working-memory values, shape ``(B, max_seq_len, d_v)``.
         :param wm_padding_mask: Padding mask for WM positions, shape
             ``(B, max_seq_len)``. 1.0 on real positions, 0.0 on padded.
+        :param aux_scale: Scalar multiplied into every aux loss before
+            ``add_loss``. Pass a **tensor read from a ``Variable``** (the
+            parent model passes ``current_phase != PHASE_WARMUP``) to switch
+            the anti-collapse losses on and off inside an already-traced
+            graph. ``None`` means ``1.0`` — the standalone / eager default.
         :param training: Forwarded for parity (no dropout here).
         :returns: Gated injection ``g * V_proj`` of shape ``(B, T, D)``.
             Caller is responsible for the residual add.
@@ -386,12 +405,18 @@ class MemoryReadController(keras.layers.Layer):
         g = ops.sigmoid(self.W_g(x_r))  # (B, T, D)
         injection = g * v_proj
 
-        # 10. Anti-collapse aux losses (Step 4).
-        # All gated by enable flags so phase-1 disables them all. Each loss
-        # is computed only when training=True to avoid double-accumulation
-        # at eval time (LESSONS — `add_loss` semantics).
-        # D4: also short-circuit when no aux loss is enabled — saves a few
-        # bool checks + the function call in Phase 1 / unscheduled use.
+        # 10. Anti-collapse aux losses.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the enable flags
+        # below decide which terms EXIST in the graph; the curriculum's
+        # on/off switch is the `aux_scale` TENSOR, multiplied into every
+        # term further down in `_maybe_add_aux_losses`. Do NOT move the
+        # phase test back into this Python `if`: a callback flipping
+        # `self.enable_*` mid-`fit()` cannot reach an already-traced
+        # `train_function` (Keras rebuilds it only from `compile()`), so the
+        # 4-phase curriculum silently never enabled a single aux loss. See
+        # decisions.md D-016.
+        # Each loss is still computed only when training=True to avoid
+        # double-accumulation at eval time (LESSONS — `add_loss` semantics).
         any_aux_enabled = (
             self.enable_gate_entropy
             or self.enable_load_balance
@@ -409,6 +434,7 @@ class MemoryReadController(keras.layers.Layer):
                 k_lt=k_lt,
                 v_lt=v_lt,
                 v_proj=v_proj,
+                aux_scale=aux_scale,
             )
 
         return injection
@@ -429,7 +455,7 @@ class MemoryReadController(keras.layers.Layer):
         return (input_shape[0], input_shape[1], self.embed_dim)
 
     # ------------------------------------------------------------------
-    # Aux losses (Step 4)
+    # Aux losses
     # ------------------------------------------------------------------
 
     def _maybe_add_aux_losses(
@@ -441,11 +467,27 @@ class MemoryReadController(keras.layers.Layer):
         k_lt: Any,
         v_lt: Any,
         v_proj: Any,
+        aux_scale: Optional[Any] = None,
     ) -> None:
         """Compute and add the four (+ optional z-loss) anti-collapse aux
-        losses via :meth:`self.add_loss`. Each is gated by an enable flag
-        so phase-1 (or eager testing) can short-circuit all of them.
+        losses via :meth:`self.add_loss`.
+
+        Two independent gates apply to every term. The ``enable_*`` flags
+        are Python booleans and decide whether a term is emitted into the
+        graph at all (static, decided at trace time). ``aux_scale`` is a
+        scalar multiplied into whatever is emitted, and is the gate the
+        4-phase curriculum drives at runtime — pass the model's
+        ``current_phase``-derived tensor, or ``None`` for ``1.0``.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — every term goes
+        # through `_add`, so the runtime phase gate cannot be forgotten at
+        # one of the six sites. Do NOT call `self.add_loss` directly here.
+        def _add(term: Any) -> None:
+            if aux_scale is None:
+                self.add_loss(term)
+            else:
+                self.add_loss(term * ops.cast(aux_scale, term.dtype))
+
         # 1. Gate entropy: maximize H(g) by adding `lambda * (-H_mean)`.
         if self.enable_gate_entropy:
             eps = 1e-7
@@ -453,7 +495,7 @@ class MemoryReadController(keras.layers.Layer):
             ent = -(g_clip * ops.log(g_clip)
                      + (1.0 - g_clip) * ops.log(1.0 - g_clip))  # (B, T, D)
             ent_mean = ops.mean(ent)
-            self.add_loss(self.lambda_gate_entropy * (-ent_mean))
+            _add(self.lambda_gate_entropy * (-ent_mean))
 
         # 2. Load balance: only over the M_LT slice (first S_lt columns).
         # routing_lt: (B, T, H, S_lt). soft_lt: (B, T, H, S_lt).
@@ -467,14 +509,14 @@ class MemoryReadController(keras.layers.Layer):
                 * float(self.s_lt)
                 * ops.sum(ops.stop_gradient(f_i) * p_i)
             )
-            self.add_loss(lb)
+            _add(lb)
 
         # 3. Z-loss on the M_LT slice (logsumexp(sim_lt))^2.
         if self.enable_z_loss:
             sim_lt = sim_clipped[..., :self.s_lt]  # (B, T, H, S_lt)
             lse = ops.logsumexp(sim_lt, axis=-1)
             zl = self.lambda_z_loss * ops.mean(lse * lse)
-            self.add_loss(zl)
+            _add(zl)
 
         # 4. Key diversity: subsample `diversity_subsample` keys from K_lt
         # and add lambda * mean(off-diagonal cos-sim ** 2).
@@ -500,7 +542,7 @@ class MemoryReadController(keras.layers.Layer):
             eye = ops.eye(n_sub, dtype=cos.dtype)
             cos_off = cos * (1.0 - eye)
             div = self.lambda_diversity * ops.mean(cos_off * cos_off)
-            self.add_loss(div)
+            _add(div)
 
         # 4b. O6 — V_lt diversity. Mirrors the K_lt diversity loss but
         # over the value bank to keep retrieved values from collapsing
@@ -521,7 +563,7 @@ class MemoryReadController(keras.layers.Layer):
             eye_v = ops.eye(n_sub_v, dtype=cos_v.dtype)
             cos_v_off = cos_v * (1.0 - eye_v)
             div_v = self.lambda_v_diversity * ops.mean(cos_v_off * cos_v_off)
-            self.add_loss(div_v)
+            _add(div_v)
 
         # 5. B2 — proper InfoNCE contrastive loss.
         # DECISION plan_2026-05-09_0f39a086/D-001 — the previous
@@ -591,7 +633,7 @@ class MemoryReadController(keras.layers.Layer):
             )  # (B, T, 1 + n_neg)
             log_probs = ops.log_softmax(all_logits / tau, axis=-1)
             nce = -ops.mean(log_probs[..., 0])  # -log P(positive)
-            self.add_loss(self.lambda_infonce * nce)
+            _add(self.lambda_infonce * nce)
 
     def _build_wm_mask(
         self, t: Any, wm_padding_mask: Any,

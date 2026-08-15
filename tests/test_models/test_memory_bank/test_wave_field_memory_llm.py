@@ -322,10 +322,9 @@ class TestWarmupMemoryKeys:
         from sklearn.cluster import MiniBatchKMeans
 
         m = _build_tiny()
-        # Capture W_Q kernel before warmup (it's frozen in the warmup
-        # — the read controller is non-trainable in P1 path-effect
-        # only after _set_memory_trainable, but we don't call the
-        # scheduler here so the kernel value is the init we'll inspect).
+        # Capture W_Q kernel before warmup. `warmup_memory_keys` only
+        # reads it (no optimizer runs), so this is the init value the
+        # projection below is derived from.
         wq = np.asarray(m.read_controller.W_Q.kernel)
         wq_avg = wq.reshape(m.embed_dim, m.num_heads, m.d_k).mean(axis=1)
 

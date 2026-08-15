@@ -4,8 +4,13 @@ Provides:
     - ``LongTermMemoryBank`` / ``WorkingMemoryBank`` — key/value memory stores.
     - ``MemoryWriteController`` — projects pre-block hidden state into M_WM.
     - ``MemoryReadController`` — top-K STE retrieval + gated injection +
-      4 anti-collapse aux losses.
-    - ``PhaseScheduler`` — 4-phase curriculum callback.
+      anti-collapse aux losses, scaled at runtime by the ``aux_scale``
+      gate the model derives from ``current_phase``.
+    - ``PhaseScheduler`` — 4-phase curriculum callback. It assigns the
+      model's ``current_phase`` ``Variable`` (and zeroes the backbone
+      optimizer's learning rate for the frozen phase); it flips no Python
+      attribute, because ``fit()`` traces ``train_function`` before the
+      first callback hook runs.
     - ``WaveFieldMemoryLLM`` — sibling-stack memory-augmented model, with
       ``MODEL_VARIANTS`` ("tiny", "small", "medium", "large", "xl") and the
       ``create_wave_field_memory_llm`` factory over them.
