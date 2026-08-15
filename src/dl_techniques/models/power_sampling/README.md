@@ -332,7 +332,7 @@ Vocabulary metadata (`vocab_size`, special-token ids) is intentionally **not** p
 | `repetition_window` | `50` | Number of recent tokens considered for the repetition penalty. |
 | `special_token_ids` | `set()` | Token ids masked to `-1e9` (never generated). Empty by default — supply your model's ids. |
 | `cls_token_id` | `None` | Token prepended to every prompt. `None` => no prepend and nothing stripped from the output. |
-| `pad_token_id` | `None` | Right-padding token id. Required when `ctx_len` is set; otherwise unused. |
+| `pad_token_id` | `None` | Right-padding token id. Required when `ctx_len` is set, **and** when `mcmc_steps >= 2` on the wrapped-model path (proposal batches are ragged and get right-padded). Both are refused eagerly by `PowerSampler.__init__`. |
 | `ctx_len` | `None` | Fixed context length for fixed-shape models. `None` => variable-length forward, no padding. |
 
 ---
@@ -341,7 +341,7 @@ Vocabulary metadata (`vocab_size`, special-token ids) is intentionally **not** p
 
 ### Example 1: GPT-2 via `tiktoken`
 
-A GPT-2-like model returning `{"logits": float32[B, T, V]}`, driven by the `tiktoken` GPT-2 encoding. GPT-2 needs no CLS prepend; supply `pad_token_id` / `ctx_len` only if your model is fixed-shape.
+A GPT-2-like model returning `{"logits": float32[B, T, V]}`, driven by the `tiktoken` GPT-2 encoding. GPT-2 needs no CLS prepend; supply `ctx_len` only if your model is fixed-shape, and `pad_token_id` if your model is fixed-shape *or* you use MCMC with `mcmc_steps >= 2`.
 
 ```python
 import tiktoken
@@ -355,7 +355,7 @@ config = PowerSamplingConfig(
     mcmc_steps=10,
     block_num=8,
     max_tokens=128,
-    pad_token_id=enc.eot_token,         # only needed for fixed-shape forward
+    pad_token_id=enc.eot_token,         # fixed-shape forward, and MCMC proposal batches
     ctx_len=1024,                       # fixed context window; omit for variable-length
 )
 sampler = PowerSampler(model, enc, config)
@@ -474,7 +474,7 @@ sampler = PowerSampler(model, tokenizer, PowerSamplingConfig(), logits_fn=logits
 
 ### Variable-length forward (`ctx_len=None`)
 
-Leaving `ctx_len=None` (the default) runs an unpadded variable-length forward pass — appropriate for models that accept dynamic sequence lengths. No `pad_token_id` is required in this mode.
+Leaving `ctx_len=None` (the default) runs an unpadded variable-length forward pass — appropriate for models that accept dynamic sequence lengths. No `pad_token_id` is required in this mode **for single-sequence generation** (`generate_standard`, or MCMC at `mcmc_steps=1`). MCMC at `mcmc_steps >= 2` still needs one: the proposals are re-generated from random cut points, so the proposal batch holds prefixes of unequal length and is right-padded to the batch maximum. `PowerSampler.__init__` refuses that combination up front rather than letting it surface mid-run from inside `make_batch_logits_fn`.
 
 ### Supplying a pre-built `logits_fn`
 

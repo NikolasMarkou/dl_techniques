@@ -392,3 +392,81 @@ class TestSampler:
         # exercise the single-fn batched fallback in _batched_generate via mcmc
         ids2, info2 = s.mcmc_power_sample("a")
         assert 0.0 <= info2["acceptance_ratio"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# C-30(a): the documented default configuration must not die mid-generation
+# ---------------------------------------------------------------------------
+class TestPadTokenIsRequiredEagerly:
+    """The pad-token precondition of batched MCMC proposals is checked eagerly.
+
+    Regime this needs, and why: the config under test is exactly the one the
+    package's own module docstring blesses — "supply only the IDs your model
+    needs", i.e. ``pad_token_id=None``/``ctx_len=None`` — with the shipped
+    ``mcmc_steps`` default (10) left alone. Before the fix, construction
+    SUCCEEDED and the run died several forward passes later inside
+    ``make_batch_logits_fn``'s closure with ``ValueError: pad_id is required
+    for a variable-length batch with unequal prefix lengths (lengths=[4, 4,
+    3])`` — a message naming the closure parameter ``pad_id``, not the
+    ``PowerSamplingConfig.pad_token_id`` field the caller has to set. "It
+    raised either way" is therefore NOT the property under test: the assertions
+    below pin WHERE it raises (construction) and WHICH field it names.
+
+    Every other MCMC test in this file passes ``pad_token_id=0, ctx_len=16``,
+    which is why the suite never saw this.
+    """
+
+    def test_documented_default_config_raises_at_construction(self):
+        """Construction refuses pad_token_id=None with mcmc_steps >= 2."""
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2)  # docstring shape
+        assert cfg.pad_token_id is None and cfg.ctx_len is None
+        assert cfg.mcmc_steps >= 2  # shipped default, not overridden here
+
+        with pytest.raises(ValueError) as exc:
+            PowerSampler(DictMockLM(), CharTokenizer(), cfg)
+
+        msg = str(exc.value)
+        assert "pad_token_id" in msg  # the FIELD, not the closure's `pad_id`
+        assert "mcmc_steps" in msg
+
+    def test_per_call_mcmc_steps_override_is_also_refused(self):
+        """A config that passes at construction is re-checked per call.
+
+        ``mcmc_steps=1`` batches nothing, so it is admissible; raising it to 3
+        at the call site reintroduces the ragged batch and must raise there.
+        """
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2, mcmc_steps=1)
+        s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)  # must not raise
+
+        for method in (s.mcmc_power_sample, s.max_swap):
+            with pytest.raises(ValueError, match="pad_token_id"):
+                method("abc", mcmc_steps=3)
+
+    def test_injected_logits_fn_needs_no_pad_id(self):
+        """Anti-vacuity: the guard must not reject the never-batched path.
+
+        With an explicit ``logits_fn=``, ``_batched_generate`` loops the
+        single-position closure and no padding is ever performed, so
+        ``pad_token_id=None`` is correct there. A guard keyed on
+        ``mcmc_steps >= 2`` alone would fail this test.
+        """
+        fn = lambda ids: np.zeros(VOCAB, dtype="float32")
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2, mcmc_steps=3)
+        s = PowerSampler(None, CharTokenizer(), cfg, logits_fn=fn)
+
+        random.seed(0)
+        np.random.seed(0)
+        _, info = s.mcmc_power_sample("abc")
+        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+
+    def test_pad_token_id_supplied_still_runs(self):
+        """Anti-vacuity: supplying the field makes the same config run."""
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=2, mcmc_steps=3,
+        )
+        s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
+
+        random.seed(0)
+        np.random.seed(0)
+        _, info = s.mcmc_power_sample("abc")
+        assert 0.0 <= info["acceptance_ratio"] <= 1.0

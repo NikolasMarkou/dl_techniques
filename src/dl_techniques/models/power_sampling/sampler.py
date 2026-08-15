@@ -41,7 +41,9 @@ Usage::
     # NO GPT-2/CliffordNet IDs (cls/pad/special are None/empty, ctx_len=None).
     config = PowerSamplingConfig(
         cls_token_id=50257,               # optional; None => no CLS prepend
-        pad_token_id=50260,               # required only for fixed ctx_len
+        pad_token_id=50260,               # required for fixed ctx_len AND for
+                                          # mcmc_steps >= 2 (ragged proposal
+                                          # batches are right-padded)
         special_token_ids={50257, 50258, 50259, 50260},
         ctx_len=511,                      # None => variable-length forward
     )
@@ -102,6 +104,10 @@ class PowerSampler:
         ``PowerSamplingConfig()`` if ``None``.
     :param logits_fn: Optional explicit single-position :data:`LogitsFn`
         override (the unambiguous path for injecting a closure).
+    :raises ValueError: If ``config.mcmc_steps >= 2`` while a wrapped model is
+        driven with ``pad_token_id=None`` and ``ctx_len=None`` — the proposal
+        batch is ragged and cannot be padded. See
+        :meth:`_require_pad_id_for_batched_proposals`.
     """
 
     def __init__(
@@ -134,6 +140,48 @@ class PowerSampler:
                 pad_id=cfg.pad_token_id,
                 logits_key="logits",
             )
+
+        self._require_pad_id_for_batched_proposals(cfg.mcmc_steps)
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-017: the pad-token
+    # precondition of the batched proposal path is checked HERE, eagerly, at
+    # construction and again when a per-call `mcmc_steps` override raises the
+    # proposal count. Do NOT rely on `make_batch_logits_fn`'s inner `fn` to
+    # report it: that raise fires mid-generation, names the closure's `pad_id`
+    # parameter rather than the `PowerSamplingConfig.pad_token_id` field the
+    # caller must set, and only fires on the batches that happen to be ragged —
+    # so a run can proceed for several blocks before dying. The four guarded
+    # conditions are each load-bearing; widening the check to "mcmc_steps >= 2"
+    # alone would reject the injected-`logits_fn` path, which never batches and
+    # needs no pad id (`test_logits_fn_injection` covers exactly that config).
+    # See decisions.md D-017.
+    def _require_pad_id_for_batched_proposals(self, steps: int) -> None:
+        """Refuse a config whose MCMC proposals cannot be batched.
+
+        :param steps: Number of MCMC proposals per block (config value or a
+            per-call override).
+        :raises ValueError: If ``steps >= 2`` while the sampler drives a
+            wrapped model through the batched closure with
+            ``pad_token_id=None`` and ``ctx_len=None``.
+        """
+        if steps < 2:
+            return  # one proposal per block: batch of 1, never ragged
+        if self._batch_logits_fn is None:
+            return  # injected logits_fn: the batched path loops the single fn
+        cfg = self.config
+        if cfg.ctx_len is not None:
+            return  # fixed-shape path; pad_id already validated by the closure
+        if cfg.pad_token_id is not None:
+            return
+        raise ValueError(
+            "PowerSamplingConfig.pad_token_id is required when mcmc_steps >= 2 "
+            f"(got mcmc_steps={steps}, pad_token_id=None, ctx_len=None). MCMC "
+            "proposals are re-generated from random cut points, so the batch "
+            "holds prefixes of unequal length and must be right-padded. Fix: "
+            "pass pad_token_id=<your model's pad id> (any id works if the "
+            "model ignores padded positions), or set mcmc_steps=1, or inject a "
+            "pre-built closure via logits_fn= (that path is never batched)."
+        )
 
     # -----------------------------------------------------------------
     # Low-level helpers
@@ -354,6 +402,8 @@ class PowerSampler:
         max_tok = max_tokens if max_tokens is not None else cfg.max_tokens
         blocks = block_num if block_num is not None else cfg.block_num
 
+        self._require_pad_id_for_batched_proposals(steps)
+
         alpha = 1.0 / temp
         logger.info(
             f"MCMC power sampling: alpha={alpha:.1f}, "
@@ -469,6 +519,8 @@ class PowerSampler:
         steps = mcmc_steps if mcmc_steps is not None else cfg.mcmc_steps
         max_tok = max_tokens if max_tokens is not None else cfg.max_tokens
         blocks = block_num if block_num is not None else cfg.block_num
+
+        self._require_pad_id_for_batched_proposals(steps)
 
         logger.info(
             f"Max-swap power sampling: temp={temp}, "

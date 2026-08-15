@@ -42,8 +42,14 @@ class PowerSamplingConfig:
         supply the model's special-token IDs to mask them out.
     :param cls_token_id: Token ID prepended to every prompt. If ``None`` (the
         default), no CLS token is prepended and none is stripped from the output.
-    :param pad_token_id: Token ID used for right-padding to a fixed length.
-        Required when ``ctx_len`` is set (fixed-shape models); otherwise unused.
+    :param pad_token_id: Token ID used for right-padding. Required when
+        ``ctx_len`` is set (fixed-shape models), and also when ``mcmc_steps
+        >= 2`` on the wrapped-model path: MCMC proposals are re-generated from
+        random cut points, so the proposal batch holds prefixes of unequal
+        length and must be right-padded to the batch maximum. Both cases are
+        refused eagerly by :class:`~dl_techniques.models.power_sampling.sampler.PowerSampler`
+        at construction. Unused only for single-proposal or injected-closure
+        sampling.
     :param ctx_len: Context window length for fixed-shape forward passes. If
         ``None`` (the default), the model receives the variable-length sequence
         unpadded; if set, sequences are right-padded to this length with
