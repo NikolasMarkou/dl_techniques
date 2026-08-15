@@ -22,8 +22,17 @@ INPUT_SHAPE = (32, 32, 3)
 
 
 def _encoder(shape=INPUT_SHAPE):
+    """A /16 encoder, matching the default decoder_depth=4 (16x upsampling).
+
+    This used to be a /4 encoder, which violated MAE's scale contract: the
+    decoder emitted 128x128 for a 32x32 input and `compute_loss` could not
+    broadcast. The forward test asserted only rank and channel count, so it
+    passed on a model that could not train.
+    """
     inp = keras.Input(shape=shape)
     x = keras.layers.Conv2D(8, 3, strides=2, padding="same", activation="relu")(inp)
+    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
+    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
     x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
     return keras.Model(inp, x, name="tiny_mae_encoder")
 
@@ -43,9 +52,12 @@ class TestMAE:
         out = _model()(_images(), training=False)
         assert {"reconstruction", "mask", "masked_input", "encoded"} <= set(out)
         recon = out["reconstruction"]
-        # reconstruction is a 4D image batch with the input's channel count
+        # reconstruction is a 4D image batch at the INPUT's resolution. The
+        # spatial assertion is the one that matters: rank+channels alone passed
+        # against a decoder emitting 128x128 for a 32x32 input.
         assert recon.shape.rank == 4
         assert int(recon.shape[0]) == 2 and int(recon.shape[-1]) == INPUT_SHAPE[-1]
+        assert tuple(int(d) for d in recon.shape[1:3]) == INPUT_SHAPE[:2]
         assert not np.any(np.isnan(keras.ops.convert_to_numpy(recon)))
 
     def test_invalid_encoder_raises(self):

@@ -35,7 +35,12 @@ The encoder must return a **4-D** `(B, H', W', C)` feature map — a constructor
 `ConvDecoder` upsamples exactly 2x per entry in `decoder_dims`. The encoder's
 total downsampling factor must therefore equal `2 ** len(decoder_dims)`, which is
 `2 ** decoder_depth` (16x by default) when `decoder_dims` is auto-configured.
-Mismatch surfaces as a broadcast failure in the loss, not as a clear error.
+The constructor now checks this and raises a `ValueError` naming both the
+encoder's actual feature-map size and the decoder's upsampling factor. Until
+2026-08-15 it did not, and a mismatch surfaced only as a broadcast failure
+inside `compute_loss` on the first training step — `call()` itself succeeds and
+returns a reconstruction at the wrong resolution, so a shape-only forward test
+passes on a model that cannot train.
 
 Two behaviours are deliberate and look like bugs from the outside. `PatchMasking`
 generates a mask only when `training` is true, returning an all-zero mask
@@ -169,6 +174,9 @@ class MaskedAutoencoder(keras.Model):
 
         self.encoder_channels = main_shape[-1]
 
+        self._resolve_decoder_dims()
+        self._validate_scale_contract(main_shape)
+
         # 1. Masking Layer
         self.masking = PatchMasking(
             patch_size=patch_size,
@@ -183,10 +191,15 @@ class MaskedAutoencoder(keras.Model):
         # Metrics
         self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
 
-    def _create_decoder(self) -> ConvDecoder:
-        """Create or configure the decoder."""
+    def _resolve_decoder_dims(self) -> None:
+        """Auto-configure `decoder_dims` when it was left unspecified.
+
+        Split out of `_create_decoder` so the effective list — and therefore the
+        decoder's `2 ** len(decoder_dims)` upsampling factor — exists before the
+        scale contract is checked and before any sub-layer is constructed.
+        """
         if self.decoder_dims is None:
-            # Auto-configure decoder dimensions: gradually reduce from encoder dim
+            # Gradually reduce from the encoder's channel count.
             decoder_dims = []
             current_dim = self.encoder_channels
             for _ in range(self.decoder_depth):
@@ -194,6 +207,60 @@ class MaskedAutoencoder(keras.Model):
                 decoder_dims.append(current_dim)
             self.decoder_dims = decoder_dims
 
+    def _validate_scale_contract(
+        self,
+        main_shape: Tuple[Optional[int], ...]
+    ) -> None:
+        """Check the encoder's downsampling against the decoder's upsampling.
+
+        `ConvDecoder` upsamples exactly 2x per entry in `decoder_dims`, so the
+        encoder must downsample by exactly `2 ** len(decoder_dims)` for the
+        reconstruction to come back out at the input resolution. A mismatch is
+        not caught anywhere downstream: `call()` succeeds, and only
+        `compute_loss` fails, as a broadcast error between two spatial shapes
+        that names neither the encoder nor the decoder.
+        """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-035
+        # Validate the resolved SPATIAL sizes, not a downsampling ratio. A ratio
+        # comparison silently accepts a 33x33 -> 8x8 encoder (floor division
+        # gives 4 either way) whose decoder then emits 128x128 against a 33x33
+        # target. Do NOT "simplify" this back to `in_h // enc_h == factor`.
+        # See decisions.md D-035.
+        upsample_factor = 2 ** len(self.decoder_dims)
+        input_h, input_w = self.input_shape_config[0], self.input_shape_config[1]
+        encoder_h, encoder_w = main_shape[1], main_shape[2]
+
+        if encoder_h is None or encoder_w is None:
+            # A dynamic encoder feature map cannot be checked statically; the
+            # 4-D check above is all this constructor can promise.
+            return
+
+        decoded_h = encoder_h * upsample_factor
+        decoded_w = encoder_w * upsample_factor
+        if decoded_h == input_h and decoded_w == input_w:
+            return
+
+        ratio = input_h // encoder_h if encoder_h else 0
+        is_power_of_two = ratio > 0 and ratio & (ratio - 1) == 0
+        suggestion = (
+            f"decoder_depth={int(np.log2(ratio))}"
+            if is_power_of_two and encoder_h * ratio == input_h
+            else "an encoder whose downsampling factor is a power of two"
+        )
+
+        raise ValueError(
+            f"Encoder/decoder scale mismatch. The encoder maps "
+            f"{input_h}x{input_w} to a {encoder_h}x{encoder_w} feature map, "
+            f"but the decoder upsamples by {upsample_factor}x "
+            f"({len(self.decoder_dims)} decoder_dims entries, 2x each), so the "
+            f"reconstruction would be {decoded_h}x{decoded_w} against a "
+            f"{input_h}x{input_w} target. Use {suggestion} (or pass a "
+            f"decoder_dims list of that length), or change the encoder's "
+            f"strides so it downsamples by exactly {upsample_factor}x."
+        )
+
+    def _create_decoder(self) -> ConvDecoder:
+        """Create the decoder over the already-resolved `decoder_dims`."""
         return ConvDecoder(
             decoder_dims=self.decoder_dims,
             output_channels=self.input_shape_config[-1],
