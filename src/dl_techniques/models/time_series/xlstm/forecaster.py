@@ -40,9 +40,8 @@ TiRex: the validity mask is used only for those NaN-safe statistics and is **not
 concatenated onto the features, so the network cannot distinguish an imputed zero
 from an observed one. The NaN replacement runs even when `use_normalization=False`,
 which is deliberate — a NaN reaching the block stack is unrecoverable, whereas a
-zero is merely a bad sample. For multivariate input the de-normalization uses the
-statistics of the **last** feature, the standing convention in this package for
-which column is the target.
+zero is merely a bad sample. Which statistics the de-normalization uses depends on
+what the head emits, and is spelled out below.
 
 The head is fed a single pooled vector: after the final normalization the time axis
 is collapsed by a mean with `keepdims=True`, giving `(B, 1, embed_dim)`. Keeping
@@ -66,6 +65,17 @@ and logging a warning instead of interpolating, since an interpolated 0.95 from 
 model that only learned 0.9 would look calibrated while being nothing of the kind;
 the median is taken as the point forecast because it minimizes absolute error under
 the quantile loss.
+
+The reversible instance-norm is inverted differently for the two heads, and it has
+to be. Normalization is per-channel, so `mean` and `std` are `(B, 1, F)`. The
+quantile head's `(B, H, Q)` output is Q quantiles of ONE series — by convention the
+last feature — so it is inverted with that feature's `(B, 1, 1)` stats. The point
+head's `(B, H, F)` output is one value per feature and is inverted with the full
+`(B, 1, F)` stats. Until 2026-08-15 both paths used the last feature's stats, a
+convention inherited verbatim from TiRex, where there is only ever one target. Under
+`num_features > 1` in point mode that rescaled channels `0..F-2` by another series'
+standard deviation and shifted them by its mean, which produces finite, plausible
+numbers in the wrong units and is invisible at `num_features=1`.
 
 Two further deliberate choices. `normalization_kwargs` is stored exactly as passed,
 including the `None` sentinel, with `or {}` applied only at the factory call site,
@@ -496,7 +506,19 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
 
         # 8. DENORMALIZE OUTPUT (undo the reversible instance-norm).
         if self.use_normalization:
-            norm_mean, norm_std = self._get_target_stats(mean, std)
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-036
+            # The de-normalization statistics are head-dependent and must stay
+            # so. The quantile head emits Q quantiles of ONE series (the last
+            # feature), so it takes that feature's (B,1,1) stats. The point head
+            # emits one value per FEATURE, so every channel must be inverted
+            # with its OWN (B,1,F) stats. Do NOT unify these onto
+            # `_get_target_stats`: broadcasting the last feature's mean/std
+            # across F channels rescales channels 0..F-2 by another series'
+            # units — finite, plausible, and silently wrong. See D-036.
+            if self.use_quantile_head:
+                norm_mean, norm_std = self._get_target_stats(mean, std)
+            else:
+                norm_mean, norm_std = mean, std
             outputs = (outputs * norm_std) + norm_mean
 
         return outputs
@@ -509,9 +531,13 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         """
         Extract normalization stats for the target (last) feature.
 
-        For multivariate inputs the target is assumed to be the last feature.
-        Returns stats shaped ``(Batch, 1, 1)`` so they broadcast against both
-        quantile predictions ``(B, H, Q)`` and point predictions ``(B, H, F)``.
+        Used by the **quantile** head only, whose ``(B, H, Q)`` output is Q
+        quantiles of a single series. For multivariate inputs that series is
+        assumed to be the last feature. Returns stats shaped ``(Batch, 1, 1)``.
+
+        The point head does **not** use this: it emits ``(B, H, F)``, one value
+        per feature, and is inverted with the full ``(B, 1, F)`` stats in
+        :meth:`call`.
 
         Args:
             mean: Mean tensor of shape ``(Batch, 1, Features)``.
