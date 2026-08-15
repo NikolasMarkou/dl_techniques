@@ -307,8 +307,32 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             dtype="float32",
         )
 
-        # I-9: do NOT manually build sub-layers — Keras builds them lazily on
-        # first call. ``super().build`` marks this model as built.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-041
+        # Build EXACTLY the sub-layers `call()` runs, and no others. I-9 used to
+        # read "do NOT manually build sub-layers -- Keras builds them lazily on
+        # first call", which is true only for a class that does NOT override
+        # `build`. Because this one does, `keras.Model.build_from_config` takes
+        # the `self.build(input_shape)` branch instead of the build-by-run
+        # branch, so on `load_model` the sub-layers did not exist when weights
+        # were restored and any `quantile_head_config` model could not be
+        # reloaded. Do NOT add `quantile_head` when it is None, and do NOT
+        # build anything `call()` skips: an unused sub-layer creates weights
+        # the lazy path never created, silently changing the `.keras` layout.
+        # See decisions.md D-041 and plans/SYSTEM.md.
+        self.ema_layer.build(input_shape)
+
+        if self.quantile_head is not None:
+            # `call()` always feeds the featurizer a single-channel slope:
+            # rank-2 input is expanded to (B, T, 1), and rank-3 input with more
+            # than one feature is refused in `call()`.
+            featurizer_input_shape = (input_shape[0], input_shape[1], 1)
+            self.slope_featurizer.build(featurizer_input_shape)
+            self.quantile_head.build(
+                self.slope_featurizer.compute_output_shape(
+                    featurizer_input_shape
+                )
+            )
+
         super().build(input_shape)
 
     def call(

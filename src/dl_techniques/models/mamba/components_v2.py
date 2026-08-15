@@ -37,10 +37,10 @@ class Mamba2Layer(keras.layers.Layer):
                          ▼                     │
                      Selective SSM → y_ssm     │
                                      │         │
-                                     ▼         │
-                                  RMSNorm      │
-                                     │         │
                                      └─ Gating ┤
+                                         │     │
+                                         ▼     │
+                                      RMSNorm  │
                                          │     │
                                          ▼     ▼
                             [MLP output, SSM output]
@@ -58,8 +58,16 @@ class Mamba2Layer(keras.layers.Layer):
         rest using a gated MLP. Defaults to the full inner dimension.
     :param rmsnorm: Whether to apply RMS normalization to the SSM output.
     :param norm_epsilon: Epsilon value for normalization layers.
-    :param norm_before_gate: Whether to apply normalization before the
-        multiplicative gate, as in the official implementation.
+    :param norm_before_gate: Where the gated RMSNorm sits relative to the
+        multiplicative gate. ``False`` (the default, and what the reference
+        Mamba-2 implementation does) computes ``norm(y * silu(z))`` -- the gate
+        is applied first and the product is normalized, which is the whole
+        point of a *gated* norm. ``True`` computes ``norm(y) * silu(z)``.
+        This defaulted to ``True`` and described that as "as in the official
+        implementation" until 2026-08-15; the reference defaults it to
+        ``False``. Both branches use the same ``norm`` weights, so the flip
+        changes numerics but not the ``.keras`` layout -- a checkpoint trained
+        under the old default must set ``norm_before_gate=True`` explicitly.
     :param dt_min: Minimum value for the step size Δ.
     :param dt_max: Maximum value for the step size Δ.
     :param bias: Whether to use bias in linear projections.
@@ -77,7 +85,7 @@ class Mamba2Layer(keras.layers.Layer):
             d_ssm: Optional[int] = None,
             rmsnorm: bool = True,
             norm_epsilon: float = 1e-5,
-            norm_before_gate: bool = True,
+            norm_before_gate: bool = False,
             dt_min: float = 0.001,
             dt_max: float = 0.1,
             dt_init_floor: float = 1e-4,
@@ -144,7 +152,14 @@ class Mamba2Layer(keras.layers.Layer):
         self.out_proj = keras.layers.Dense(self.d_model, use_bias=bias, name="out_proj")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # A_log initialization (per head)
+        # A_log initialization (per head).
+        # `np.random`, deliberately and MEASURED: `keras.utils.set_random_seed`
+        # calls `np.random.seed(seed)`, so two seeded builds of this layer
+        # produce bit-identical `A_log` and `dt_bias` (max diff exactly 0.0).
+        # Drawing with `keras.random` instead would mean converting a backend
+        # tensor to numpy inside `build()` to feed `Constant`, which is not
+        # graph-safe. Pinned by
+        # `tests/test_models/test_mamba/test_build_and_reload.py`.
         A_init = np.log(np.random.uniform(1, 16, size=self.nheads))
         self.A_log = self.add_weight(
             name="A_log",
@@ -174,6 +189,30 @@ class Mamba2Layer(keras.layers.Layer):
             initializer=keras.initializers.Constant(inv_dt),
             trainable=True,
         )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-042
+        # Build EXACTLY the sub-layers `call()` runs. This class overrides
+        # `build`, so `build_from_config` takes the `self.build(input_shape)`
+        # branch rather than the build-by-run branch; without these lines a
+        # standalone `.keras` reload -- or embedding in any parent that also
+        # overrides `build` -- restores weights into sub-layers that do not
+        # exist. `Mamba2` itself masked this by having no `build` override.
+        # `self.norm` is built only when `rmsnorm` is set, because `call` only
+        # runs it then: building an unused sub-layer creates weights the lazy
+        # path never created and silently changes the `.keras` layout.
+        # Sibling that gets this right: `components.py::MambaLayer.build`.
+        # See decisions.md D-042 and plans/SYSTEM.md.
+        conv_dim = self.d_ssm + 2 * self.ngroups * self.d_state
+        conv_input_shape = (input_shape[0], input_shape[1], conv_dim)
+
+        self.in_proj.build(input_shape)
+        self.conv1d.build(conv_input_shape)
+        self.activation.build(conv_input_shape)
+        if self.rmsnorm:
+            self.norm.build((input_shape[0], input_shape[1], self.d_ssm))
+        # `call` concatenates the d_mlp-wide MLP path onto the d_ssm-wide SSM
+        # path, and d_mlp = d_inner - d_ssm, so out_proj always sees d_inner.
+        self.out_proj.build((input_shape[0], input_shape[1], self.d_inner))
 
         super().build(input_shape)
 
@@ -364,6 +403,20 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             rmsnorm=self.rmsnorm,
             norm_epsilon=self.norm_epsilon,
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build both sub-layers `call()` runs: the pre-norm and the Mamba2Layer.
+
+        This class had no `build` at all, which is safe only while every parent
+        leaves it on Keras' build-by-run path. `Mamba2Layer` now overrides
+        `build` (D-042), so an explicit one here keeps the two consistent and
+        makes a standalone reload of this block work. Both sub-layers see the
+        block's own input shape: `call` runs `self.norm` on the residual sum
+        (same shape as the input) and feeds its output straight to `self.mamba2`.
+        """
+        self.norm.build(input_shape)
+        self.mamba2.build(input_shape)
+        super().build(input_shape)
 
     def call(
             self,
