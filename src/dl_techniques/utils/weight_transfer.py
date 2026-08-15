@@ -23,6 +23,15 @@ Typical use::
         skip_prefixes=("head_primary_", "head_aux_"),
     )
     logger.info(report.summary_string())
+
+Two functions live here, and they are not interchangeable:
+
+* :func:`load_weights_from_checkpoint` — partial, name-matched transfer between
+  two *different* architectures. A zero-layer result is a legitimate outcome, so
+  it reports rather than raises (several trainers assert on the report).
+* :func:`load_weights_or_raise` — whole-file ``.keras`` restore into the *same*
+  architecture. A load that restores nothing is always a defect there, so it
+  raises.
 """
 
 from __future__ import annotations
@@ -87,6 +96,99 @@ class TransferReport:
             if len(self.shape_mismatch) > 10:
                 lines.append(f"    ... ({len(self.shape_mismatch) - 10} more)")
         return "\n".join(lines)
+
+
+# DECISION plan-2026-08-14T233721-d4f9beb2/D-070: this is a SECOND function, not a
+# change to `load_weights_from_checkpoint`. Do NOT "unify" them by making the
+# transfer function raise when it loads zero layers: `src/train/beit/
+# train_classification.py` and `src/train/energy_transformer/
+# train_classification.py` build their own warm-start guards precisely BECAUSE it
+# does not raise there, and `tests/test_train/test_beit/test_warm_start.py` pins
+# that ("if this ever goes RED, load_weights_from_checkpoint grew a real
+# no-overlap guard"). The two functions also use different mechanisms —
+# layer-by-layer `set_weights` from a loaded source model vs `model.load_weights`
+# on the file. See decisions.md D-070.
+def load_weights_or_raise(
+    model: keras.Model,
+    weights_path: str,
+    skip_mismatch: bool = False,
+) -> int:
+    """``model.load_weights`` that refuses to succeed while restoring nothing.
+
+    ``keras.Model.load_weights(path, skip_mismatch=True)`` returns normally when a
+    checkpoint's variable names or shapes do not line up with *model*: every
+    variable is left at its initialized value and nothing is reported. The call
+    site then logs "loaded weights from ..." and hands back an untrained model.
+    This wrapper snapshots the variable values, loads, and counts how many
+    actually changed — a load that changes zero variables raises.
+
+    Use this for the whole-file ``.keras`` restore path (a checkpoint of the SAME
+    architecture). For a partial, name-matched transfer between DIFFERENT
+    architectures — a pretrain trunk into a fine-tune model — use
+    :func:`load_weights_from_checkpoint` instead; a zero-layer result is a
+    legitimate (if usually unintended) outcome there, and several trainers under
+    ``src/train/`` deliberately assert on its report rather than on an exception.
+
+    :param model: A **built** Keras model. Weights can only be restored into
+        variables that already exist, so call the model once (or ``build``) first;
+        the probe input is model-specific, which is why it is not done here.
+    :param weights_path: Path to the weights file.
+    :param skip_mismatch: Forwarded to ``load_weights``. ``False`` (default) is
+        strict — a shape mismatch raises rather than being silently skipped.
+    :returns: The number of variables whose value changed.
+    :raises FileNotFoundError: *weights_path* does not exist.
+    :raises ValueError: *model* is not built; the load failed; or the load
+        completed without changing a single variable.
+    """
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+    if not model.built:
+        raise ValueError(
+            "model must be built before loading weights (call it once on a probe "
+            "input, or invoke model.build(input_shape), first)."
+        )
+
+    try:
+        logger.info(f"Loading weights from {weights_path}")
+        before = [keras.ops.convert_to_numpy(v) for v in model.weights]
+        model.load_weights(weights_path, skip_mismatch=skip_mismatch)
+        after = [keras.ops.convert_to_numpy(v) for v in model.weights]
+    except Exception as e:
+        raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+
+    changed = sum(
+        1 for b, a in zip(before, after)
+        if b.shape != a.shape or not np.array_equal(b, a)
+    )
+    total = len(model.weights)
+
+    if changed == 0:
+        raise ValueError(
+            f"Loading {weights_path} changed none of this model's {total} "
+            "variables. Nothing was restored -- the file's variable names or "
+            "shapes do not match this model. Check the architecture config, "
+            "or use keras.models.load_model() to load the saved model as-is."
+        )
+
+    if changed == total:
+        logger.info(f"Loaded {weights_path}: all {total} variables changed value.")
+    elif skip_mismatch:
+        logger.warning(
+            f"Loaded {weights_path} with skip_mismatch=True: {changed} of "
+            f"{total} variables changed value. The other {total - changed} were "
+            "either skipped for a shape mismatch or already equal to the stored "
+            "value -- this function cannot tell those two apart, so verify the "
+            "load if a mismatch was not intended."
+        )
+    else:
+        # Strict load: nothing was skipped, so the unchanged variables were
+        # already equal to what the file holds (common for zero/one-init
+        # variables of an untrained checkpoint).
+        logger.info(
+            f"Loaded {weights_path}: {changed} of {total} variables changed "
+            f"value; the other {total - changed} already held the stored value."
+        )
+    return changed
 
 
 def _matches_any_prefix(name: str, prefixes: Sequence[str]) -> bool:

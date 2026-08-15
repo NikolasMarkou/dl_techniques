@@ -67,7 +67,6 @@ References:
 
 import os
 import keras
-import numpy as np
 from typing import Optional, Union, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -75,6 +74,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers import (
     FFNType,
     AttentionType,
@@ -596,8 +596,10 @@ class DistilBERT(keras.Model):
            ``skip_mismatch=True`` makes a *partial* load succeed silently — any
            variable whose shape does not line up is left at its initialized
            value. To keep that from being indistinguishable from a real load,
-           this method counts the variables whose values actually changed and
-           logs the count, and it raises if *nothing* changed.
+           the shared loader
+           (:func:`dl_techniques.utils.weight_transfer.load_weights_or_raise`)
+           counts the variables whose values actually changed and logs the
+           count, and it raises if *nothing* changed.
 
         :param weights_path: Path to the weights file (``.keras`` format).
         :type weights_path: str
@@ -619,75 +621,44 @@ class DistilBERT(keras.Model):
                 )
         """
         # DECISION plan-2026-08-10T183739-b007f435/D-024
-        # Two things here are deliberate and must not be "simplified":
-        #   1. the dummy input uses keras.random.randint, NOT
-        #      keras.random.uniform(..., dtype="int32") -- Keras rejects an
-        #      integer dtype on uniform ("requires a floating point dtype"),
-        #      which made this whole method raise on every unbuilt model;
-        #   2. there is no `by_name` argument. Keras 3's Model.load_weights has
-        #      NO by_name parameter and raises `Invalid keyword arguments:
-        #      {'by_name': True}`; the old signature accepted one and forwarded
-        #      it, so the built path raised too.
-        # The changed-variable count below is not decoration: with
-        # skip_mismatch=True a load that restores NOTHING is otherwise
-        # indistinguishable from a load that restores everything.
-        # See decisions.md D-012 (the defect) and D-024 (this fix).
+        # The dummy input uses keras.random.randint, NOT
+        # keras.random.uniform(..., dtype="int32") -- Keras rejects an integer
+        # dtype on uniform ("requires a floating point dtype"), which made this
+        # whole method raise on every unbuilt model. And there is no `by_name`
+        # argument: Keras 3's Model.load_weights has NO by_name parameter and
+        # raises `Invalid keyword arguments: {'by_name': True}`.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-070
+        # The restored-variable count that used to be inline here now lives in
+        # `utils.weight_transfer.load_weights_or_raise`, because gpt2 and
+        # wave_field had the same unconditional `skip_mismatch=True` load with no
+        # check at all. Do NOT re-inline it: this method was the repo's ONLY
+        # implementation of the check, which is exactly why the other three sites
+        # never got one. See decisions.md D-012, D-024 and D-070.
+        # The existence check is repeated here, ahead of the build, on purpose:
+        # `load_weights_or_raise` also performs it, but only AFTER this method has
+        # spent a full forward pass materializing the model. Fail on a bad path
+        # before paying for that.
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
-        try:
-            # Build the model if needed -- weights can only be restored into
-            # variables that already exist.
-            if not self.built:
-                dummy_input = {
-                    "input_ids": keras.random.randint(
-                        (1, 128), 0, self.vocab_size, dtype="int32"
-                    ),
-                    "attention_mask": keras.ops.ones((1, 128), dtype="int32")
-                }
-                self(dummy_input, training=False)
+        # Build first -- weights can only be restored into variables that exist.
+        # The probe length is clamped to `max_position_embeddings`: a hardcoded
+        # 128 overflows the position-embedding table of any model configured
+        # shorter than that (`DistilBERT.from_variant("tiny",
+        # max_position_embeddings=64)` died in a GatherV2 with
+        # `indices[0,64] = 64 is not in [0, 64)`), so the unbuilt route was
+        # unreachable for exactly the small configurations tests use.
+        if not self.built:
+            seq_len = min(128, self.max_position_embeddings)
+            dummy_input = {
+                "input_ids": keras.random.randint(
+                    (1, seq_len), 0, self.vocab_size, dtype="int32"
+                ),
+                "attention_mask": keras.ops.ones((1, seq_len), dtype="int32")
+            }
+            self(dummy_input, training=False)
 
-            logger.info(f"Loading weights from {weights_path}")
-
-            before = [keras.ops.convert_to_numpy(v) for v in self.weights]
-            self.load_weights(weights_path, skip_mismatch=skip_mismatch)
-            after = [keras.ops.convert_to_numpy(v) for v in self.weights]
-
-        except Exception as e:
-            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
-
-        changed = sum(
-            1 for b, a in zip(before, after)
-            if b.shape != a.shape or not np.array_equal(b, a)
-        )
-        total = len(self.weights)
-
-        if changed == 0:
-            raise ValueError(
-                f"Loading {weights_path} changed none of this model's {total} "
-                "variables. Nothing was restored -- the file's variable names or "
-                "shapes do not match this model. Check the architecture config, "
-                "or use keras.models.load_model() to load the saved model as-is."
-            )
-
-        if changed == total:
-            logger.info(f"Loaded {weights_path}: all {total} variables changed value.")
-        elif skip_mismatch:
-            logger.warning(
-                f"Loaded {weights_path} with skip_mismatch=True: {changed} of "
-                f"{total} variables changed value. The other {total - changed} were "
-                "either skipped for a shape mismatch or already equal to the stored "
-                "value -- this method cannot tell those two apart, so verify the "
-                "load if a mismatch was not intended."
-            )
-        else:
-            # Strict load: nothing was skipped, so the unchanged variables were
-            # already equal to what the file holds (common for zero/one-init
-            # variables of an untrained checkpoint).
-            logger.info(
-                f"Loaded {weights_path}: {changed} of {total} variables changed "
-                f"value; the other {total - changed} already held the stored value."
-            )
+        load_weights_or_raise(self, weights_path, skip_mismatch=skip_mismatch)
 
     # `_download_weights` raises instead of falling back to random init. The
     # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on

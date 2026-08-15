@@ -64,7 +64,10 @@ to ``_download_weights``, which raises ``NotImplementedError`` rather than loggi
 warning and returning a randomly initialized model — the earlier fallback made an
 unavailable download indistinguishable from a successful one at the call site.
 Local checkpoints load by path, with a dummy forward pass first to materialize the
-lazily-built sublayers.
+lazily-built sublayers, and through
+``utils.weight_transfer.load_weights_or_raise``: the load runs with
+``skip_mismatch=True``, and a checkpoint whose names or shapes do not match this
+model would otherwise restore NOTHING and return normally.
 
 References:
     - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
@@ -89,6 +92,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 
 # ---------------------------------------------------------------------
@@ -477,8 +481,12 @@ class GPT2(keras.Model):
                         0, model.vocab_size, (1, 32)
                     ).astype(np.int32)
                     model(dummy, training=False)
-                model.load_weights(weights_path, skip_mismatch=True)
-                logger.info(f"Loaded weights from {weights_path}")
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: do NOT go back
+                # to a bare `model.load_weights(path, skip_mismatch=True)`. A
+                # checkpoint whose variable names or shapes do not match restores
+                # NOTHING, returns normally, and the log line below then reported
+                # a successful load of an untrained model. See decisions.md D-070.
+                load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
                 # DECISION plan_2026-05-11_a9e8e6f6/D-001
                 # pretrained=True (boolean) routes through _download_weights,

@@ -34,6 +34,7 @@ import pytest
 from dl_techniques.utils.weight_transfer import (
     TransferReport,
     load_weights_from_checkpoint,
+    load_weights_or_raise,
 )
 
 
@@ -338,3 +339,94 @@ class TestErrorPaths:
 
         with pytest.raises(ValueError, match="built"):
             load_weights_from_checkpoint(tgt_unbuilt, ckpt)
+
+
+# ---------------------------------------------------------------------------
+# load_weights_or_raise -- the whole-file restore path
+# ---------------------------------------------------------------------------
+
+
+class TestLoadWeightsOrRaise:
+    """``model.load_weights(path, skip_mismatch=True)`` can restore NOTHING.
+
+    It returns normally when the checkpoint's variable names or shapes do not
+    line up with the target: every variable is left at its initialized value and
+    nothing is reported. Three sites did exactly that with an unconditional
+    ``skip_mismatch=True`` and then logged "Loaded weights from ..." --
+    ``gpt2/gpt2.py:480``, ``wave_field/model.py:745`` and ``:769``.
+    ``distilbert/model.py`` was the repo's only implementation of the check;
+    ``load_weights_or_raise`` is that check, shared.
+
+    Note both arms are needed. A test that only asserts the raise is passed by a
+    function that raises unconditionally, which would break every real load.
+    """
+
+    def test_matching_checkpoint_still_loads(self, tmp_path):
+        """Anti-vacuity: a real load must succeed and change real variables."""
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+
+        tgt = _build_classifier()
+        changed = load_weights_or_raise(tgt, ckpt)
+
+        assert changed > 0
+        assert changed <= len(tgt.weights)
+        # And the values really are the source's.
+        for s_layer, t_layer in zip(src.layers, tgt.layers):
+            assert _weights_equal(s_layer.get_weights(), t_layer.get_weights())
+
+    def test_nonmatching_checkpoint_raises_naming_the_cause(self, tmp_path):
+        """A checkpoint that restores nothing must raise, not log success.
+
+        MEASURED, and it is not what the layer names suggest: ``load_weights``
+        on a ``.keras`` file matches STRUCTURALLY (by position in the saved
+        object graph), not by ``layer.name``. A target with entirely different
+        names but a coincidentally matching first-layer shape still restores
+        that layer. So the "restores nothing" case is built from SHAPES: every
+        layer here is shaped so that nothing in the checkpoint fits, and with
+        ``skip_mismatch=True`` every variable is skipped. At HEAD this returned
+        normally and the call site logged a successful load.
+        """
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+
+        inp = keras.Input(shape=(_INPUT_DIM,), name="input")
+        x = keras.layers.Dense(9, activation="relu", name="totally_other_a")(inp)
+        out = keras.layers.Dense(13, name="totally_other_b")(x)
+        tgt = keras.Model(inp, out, name="other")
+
+        with pytest.raises(ValueError, match="changed none of this model"):
+            load_weights_or_raise(tgt, ckpt, skip_mismatch=True)
+
+    def test_the_raise_is_about_the_changed_count_not_the_exception(self, tmp_path):
+        """Pin the *count*, not merely "no exception escaped".
+
+        A load into a model whose variables already hold the checkpoint's values
+        changes zero variables and is reported as a failure -- deliberately: this
+        function cannot distinguish "already equal" from "never restored", and
+        treating the ambiguous case as success is the defect it exists to close.
+        """
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+
+        tgt = _build_classifier()
+        assert load_weights_or_raise(tgt, ckpt) > 0
+
+        # Second load into the now-identical model: zero variables change.
+        with pytest.raises(ValueError, match="changed none of this model"):
+            load_weights_or_raise(tgt, ckpt)
+
+    def test_missing_file_raises_file_not_found(self, tmp_path):
+        tgt = _build_classifier()
+        with pytest.raises(FileNotFoundError):
+            load_weights_or_raise(tgt, os.path.join(str(tmp_path), "nope.keras"))
+
+    def test_unbuilt_model_raises(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt_unbuilt = keras.Sequential(
+            [keras.layers.Dense(5, name="head_seg")], name="unbuilt"
+        )
+        assert not tgt_unbuilt.built, "fixture precondition: target must be unbuilt"
+        with pytest.raises(ValueError, match="built"):
+            load_weights_or_raise(tgt_unbuilt, ckpt)

@@ -775,3 +775,42 @@ class TestWaveFieldDecoderBlockIsolation:
             f"(max |delta| between an all-ones and a half-zero mask = "
             f"{delta:.4e})"
         )
+
+
+# ---------------------------------------------------------------------
+# pretrained="<path>" -- the local-path door (C-4b, D-070)
+# ---------------------------------------------------------------------
+
+
+class TestWaveFieldPretrainedLocalPathIsVerified:
+    """``from_variant`` loads a local path with an unconditional
+    ``skip_mismatch=True``. A checkpoint whose variables do not line up restores
+    NOTHING and returns normally; before D-070 the next line logged a successful
+    load, so the caller got an untrained model and no error.
+    """
+
+    def test_mismatched_checkpoint_raises_naming_the_cause(self, tmp_path):
+        other = keras.Sequential(
+            [keras.layers.Input(shape=(4,)), keras.layers.Dense(3, name="d")]
+        )
+        ckpt = str(tmp_path / "not_a_wave_field.keras")
+        other.save(ckpt)
+
+        with pytest.raises(ValueError, match="changed none of this model"):
+            WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+
+    def test_matching_checkpoint_still_loads(self, tmp_path):
+        """Anti-vacuity: the real warm-start path must still work."""
+        src = WaveFieldLLM.from_variant("tiny", vocab_size=64)
+        probe = np.random.randint(0, 64, (1, 8)).astype("int32")
+        src(probe, training=False)
+        ckpt = str(tmp_path / "wave_field_tiny.keras")
+        src.save(ckpt)
+
+        loaded = WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(src(probe, training=False)["logits"]),
+            keras.ops.convert_to_numpy(loaded(probe, training=False)["logits"]),
+            rtol=1e-6,
+            atol=1e-6,
+        )

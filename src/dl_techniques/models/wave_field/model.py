@@ -104,7 +104,11 @@ Other deliberate choices:
   concrete I/O errors for the same reason; broadening it to `Exception` would swallow
   that `NotImplementedError` and reinstate the bug. A local checkpoint is loaded by
   passing `pretrained="/path/to/file.keras"`, with `skip_mismatch=True` so a differing
-  vocabulary does not block the rest of the weights.
+  vocabulary does not block the rest of the weights — through
+  `utils.weight_transfer.load_weights_or_raise`, which refuses a load that changes
+  none of the model's variables. `skip_mismatch=True` makes a checkpoint that matches
+  NOTHING restore nothing and return normally, which read as success here until
+  2026-08-15.
 - The class default `vocab_size` is 50261 — tiktoken `gpt2`'s 50257 plus 4 special
   tokens — matching the training script's default so direct instantiation cannot
   silently disagree with the trainer (D-005).
@@ -137,6 +141,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
@@ -742,8 +747,12 @@ class WaveFieldLLM(keras.Model):
                         0, model.vocab_size, (1, 32),
                     ).astype("int32")
                     model(dummy, training=False)
-                model.load_weights(weights_path, skip_mismatch=True)
-                logger.info(f"Loaded weights from {weights_path}")
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: do NOT go back
+                # to a bare `model.load_weights(path, skip_mismatch=True)`. A
+                # non-matching checkpoint restores NOTHING and returns normally,
+                # so the old log line reported a successful load of an untrained
+                # model. See decisions.md D-070.
+                load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
                 # DECISION plan-2026-08-13T091555-230c101d/D-005
                 # Do NOT broaden this except clause to `Exception`: that would
@@ -766,8 +775,9 @@ class WaveFieldLLM(keras.Model):
                             0, model.vocab_size, (1, 32),
                         ).astype("int32")
                         model(dummy, training=False)
-                    model.load_weights(resolved_path, skip_mismatch=True)
-                    logger.info(f"Loaded weights from {resolved_path}")
+                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: same guard on
+                    # the downloaded-mirror path.
+                    load_weights_or_raise(model, resolved_path, skip_mismatch=True)
 
         return model
 

@@ -24,7 +24,9 @@ Shared utilities used across the library — tensor operations, geometry, maskin
 - `forecastability_analyzer.py` — `ForecastabilityAssessor`: permutation entropy, AMI-based delay estimation, Cao's embedding dimension, baseline benchmarking, and forecastability scoring [0-100]
 - `deep_supervision.py` — Deep-supervision output helpers (auxiliary heads, weight scheduling glue)
 - `drop_path.py` — `linear_drop_path_rates(num_blocks, max_rate)`: computes per-block stochastic-depth (drop-path) rates for transformer/ConvNeXt block stacks. The actual drop-path layer is `StochasticDepth` in `dl_techniques/layers/stochastic_depth.py`
-- `weight_transfer.py` — `load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)`: layer-by-layer weight transfer from a saved `.keras` model. Use this instead of `model.load_weights(by_name=True)` (broken in Keras 3.8 for `.keras` files)
+- `weight_transfer.py` — two loaders, deliberately not interchangeable:
+  - `load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)`: layer-by-layer *partial* transfer between different architectures (a pretrain trunk into a fine-tune model). Use this instead of `model.load_weights(by_name=True)` (broken in Keras 3.8 for `.keras` files). A zero-layer result **reports rather than raises** — `src/train/beit/` and `src/train/energy_transformer/` build their own warm-start guards on that report
+  - `load_weights_or_raise(model, weights_path, skip_mismatch)`: whole-file `.keras` restore into the **same** architecture, returning the number of variables whose value changed and raising when that is zero. `model.load_weights(path, skip_mismatch=True)` restores nothing and returns normally when names or shapes do not match, so never call it bare
 - `yolo_decode.py` — YOLOv12 output decoder (anchors-free decoding to boxes + scores)
 
 ### Subpackages

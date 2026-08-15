@@ -657,3 +657,45 @@ class TestGPT2AttentionMask:
             f"(max |delta| = {leak:.4e}); the masked run's 0.0 would then be "
             f"explained by causality alone and prove nothing about masking"
         )
+
+
+# ---------------------------------------------------------------------
+# pretrained="<path>" -- the local-path door (C-4b, D-070)
+# ---------------------------------------------------------------------
+
+
+class TestPretrainedLocalPathIsVerified:
+    """The route the `pretrained=True` error message points callers at.
+
+    ``from_variant`` loads a local path with an unconditional
+    ``skip_mismatch=True``. A checkpoint whose variables do not line up restores
+    NOTHING, ``load_weights`` returns normally, and before D-070 the next line
+    logged "Loaded weights from ..." -- the same "silently untrained model" the
+    `pretrained=True` contract exists to prevent, one door over.
+    """
+
+    def test_mismatched_checkpoint_raises_naming_the_cause(self, tmp_path):
+        other = keras.Sequential(
+            [keras.layers.Input(shape=(4,)), keras.layers.Dense(3, name="d")]
+        )
+        ckpt = str(tmp_path / "not_a_gpt2.keras")
+        other.save(ckpt)
+
+        with pytest.raises(ValueError, match="changed none of this model"):
+            GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+
+    def test_matching_checkpoint_still_loads(self, tmp_path):
+        """Anti-vacuity: the real warm-start path must still work."""
+        src = GPT2.from_variant("tiny", vocab_size=64)
+        src(_random_ids((1, 8), 64), training=False)
+        ckpt = str(tmp_path / "gpt2_tiny.keras")
+        src.save(ckpt)
+
+        loaded = GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        x = _random_ids((1, 8), 64)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(src(x, training=False)["logits"]),
+            keras.ops.convert_to_numpy(loaded(x, training=False)["logits"]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
