@@ -16,6 +16,19 @@ logistic sigmoid (``expit``); ``keras.ops`` has no backend-agnostic ``erfinv`` /
 to float32 on return. ``__call__`` accepts a Python float or ``np.ndarray`` and
 returns the same kind (scalar in -> scalar out, array in -> array out).
 
+Time convention and direction
+-----------------------------
+``t = 0`` is clean data and ``t = 1`` is pure noise (fixed by the trainer's
+``x_t = (1 - tau)*x0 + tau*x1`` with target ``v = x1 - x0``), so reverse sampling
+runs from the noise end DOWN to the data end with a negative Euler step.
+:class:`LogitNormalSchedule` is strictly DECREASING in its uniform argument
+(``t_ = 1 - expit(...)``), i.e. ``schedule(0)`` is the NOISE end and
+``schedule(1)`` the data end -- the opposite ordering to
+:func:`make_step_intervals`, which ascends. A sampler must therefore walk the
+uniform grid FORWARD to walk ``t`` downward; ``pipeline.py`` does exactly that
+(D-002). ``make_step_intervals`` returning an ascending grid is not a statement
+about sampling direction.
+
 These are plain frozen dataclasses / functions mirroring the PyTorch module; no
 ``keras.layers.Layer`` is involved (nothing here is trainable or serialized into
 a ``.keras`` graph).
@@ -136,12 +149,17 @@ def get_schedule_for_resolution(
 def make_step_intervals(num_steps: int) -> np.ndarray:
     """Default linear step schedule used by the v4 eval config.
 
+    This is the UNIFORM grid the schedule warps, not the sampler's time
+    sequence: it ascends, while :class:`LogitNormalSchedule` maps it to a
+    strictly DECREASING ``t``. Its ordering says nothing about integration
+    direction (see the module docstring's time-convention note).
+
     Args:
         num_steps: Number of sampling steps.
 
     Returns:
         A float32 ``np.ndarray`` of shape ``(num_steps + 1,)`` linearly spaced
-        on ``[0, 1]`` (endpoints inclusive).
+        on ``[0, 1]`` (endpoints inclusive), strictly ascending.
     """
     return np.linspace(0.0, 1.0, num_steps + 1, dtype=np.float32)
 

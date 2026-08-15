@@ -36,6 +36,12 @@ The transformer regresses a **rectified-flow velocity** `v = x1 - x0` (noise
 minus data). Sampling runs a small Euler loop over a logit-normal time grid with
 classifier-free guidance, then the VAE decoder maps the final latent to pixels.
 
+**Time convention**: `t = 0` is clean data, `t = 1` is pure noise (fixed by the
+trainer's `x_t = (1 - tau)*x0 + tau*x1`, target `v = x1 - x0`). Sampling starts
+from noise at the top of the grid and integrates **down**, so the Euler step
+`s - t` is negative and the `t` fed to the transformer descends monotonically —
+the same convention as `models/sd3_mmdit/`.
+
 ---
 
 ## 2. Architecture
@@ -101,13 +107,22 @@ and `SamplerParameters` with named presets `V4_QUALITY_48`, `V4_DEFAULT_20`,
 `V4_TURBO_12`. This is **eager / NumPy** (uses `scipy.special.ndtri`/`expit`); it
 is NOT part of the differentiable graph and nothing here is serialized.
 
+`LogitNormalSchedule` is strictly **decreasing** in its uniform argument
+(`t_ = 1 - expit(...)`), so `schedule(0)` is the noise end and `schedule(1)` the
+data end — the reverse of `make_step_intervals`, which ascends. The sampler walks
+the uniform grid forward in order to walk `t` downward.
+
 ### Pipeline — `pipeline.py`
 
 `Ideogram4Pipeline` is a plain orchestration class (not a `keras.Model`) that
 holds a trained transformer + autoencoder + config and runs **Euler denoise (with
 CFG) then decode**. Conditioning is the `llm_features` tensor passed to
 `__call__`. By default ONE shared transformer serves both CFG branches; pass
-`unconditional_transformer=` to recover PyTorch's two-model form.
+`unconditional_transformer=` to recover PyTorch's two-model form. The Euler loop
+keeps its index descending (that is the order `guidance_schedule` is written in)
+and indexes the step grid in reverse, which is what makes `t` descend noise ->
+data with a negative `dt` (D-002; pinned by
+`tests/test_models/test_ideogram4/test_sampler_direction.py`).
 
 ### Loss — `losses/flow_matching_velocity_loss.py`
 
@@ -202,7 +217,7 @@ tests/test_layers/test_embedding/test_multi_axis_rope.py
 tests/test_layers/test_embedding/test_scalar_sinusoidal_embedding.py
 tests/test_layers/test_attention/test_ideogram4_attention.py
 tests/test_layers/test_transformers/test_ideogram4_block.py
-tests/test_models/test_ideogram4/        # test_config, test_transformer, test_vae, test_scheduler, test_pipeline
+tests/test_models/test_ideogram4/        # test_config, test_transformer, test_vae, test_scheduler, test_pipeline, test_sampler_direction
 tests/test_losses/test_flow_matching_velocity_loss.py
 tests/test_train/test_ideogram4/test_train_smoke.py
 ```

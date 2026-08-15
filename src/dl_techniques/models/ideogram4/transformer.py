@@ -11,8 +11,8 @@ why a handful of Euler steps can integrate it. What the transformer itself pins 
 narrow: `t` is a scalar in `[0, 1]` (`ScalarSinusoidalEmbedding(input_range=(0.0,
 1.0))`), it may be per-sample `(B,)` or per-token `(B, L)`, and the output is a
 velocity in the latent's own channel space. Everything about *which* endpoint `t = 0`
-denotes lives outside this module, and the two sites in this package do not agree --
-see the divergence note below.
+denotes lives outside this module; the convention the package settles on is stated in
+the note below.
 
 The structurally distinctive choice is that there is no cross-attention anywhere.
 Rather than keeping conditioning in a separate tower and injecting it through
@@ -64,17 +64,18 @@ placement is unusual but is replicated exactly rather than normalized away.
 
 Deliberate choices and divergences:
 
-- **The time convention is inconsistent within this package, and the transformer
-  does not arbitrate it.** `src/train/ideogram4/train_ideogram4.py` trains with
-  `x_t = (1 - tau) * x0 + tau * x1` and target `v = x1 - x0`, i.e. `t = 0` is clean
-  data and the velocity points from data toward noise. `pipeline.py` starts from pure
-  noise and integrates `z += v * (s - t)` where `LogitNormalSchedule` is *decreasing*
-  in its uniform argument, so its loop drives `t` upward from ~0 to ~1 with a POSITIVE
-  step -- the opposite endpoint assignment, and a velocity signed data-minus-noise.
-  A checkpoint trained by the trainer and sampled by the pipeline is therefore fed an
-  inverted time and integrated with an inverted velocity sign. Reconcile the two
-  before reading anything into end-to-end samples; do not assume the module's `[0, 1]`
-  range implies either convention.
+- **The time convention, settled: `t = 0` is clean data, `t = 1` is pure noise, and
+  the velocity points data -> noise.** `src/train/ideogram4/train_ideogram4.py` trains
+  with `x_t = (1 - tau) * x0 + tau * x1` for `x1 ~ N(0, I)` and target `v = x1 - x0`,
+  which fixes that assignment; `pipeline.py`'s sampler follows it, seeding pure noise
+  at the top of the time grid and integrating DOWN, so its `z += v * (s - t)` runs with
+  `s < t` (a negative step) and the `t` it evaluates the transformer at descends
+  monotonically toward the data end. Because `LogitNormalSchedule` is strictly
+  DECREASING in its uniform argument, the loop reads its step grid in reverse to obtain
+  that descent -- see the D-002 derivation at the loop itself. This is the same
+  convention as `models/sd3_mmdit/`, which implements the identical rectified flow, so
+  the two packages' schedulers and samplers can be read against each other. The module's
+  `[0, 1]` range alone still implies nothing; the endpoints are fixed by the trainer.
 - Conditioning is a PRECOMPUTED `llm_features` call input (D1). The reference
   conditions on 13 stacked hidden-state taps of Qwen3-VL-8B; that model has no Keras
   equivalent, so the text tower is out of scope and this is not an end-to-end

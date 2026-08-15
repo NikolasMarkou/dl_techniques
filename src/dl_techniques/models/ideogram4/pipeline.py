@@ -21,6 +21,18 @@ Faithful bits ported from PyTorch
   (``LLM_TOKEN_INDICATOR`` on text, ``OUTPUT_IMAGE_INDICATOR`` on image).
 - ``__call__``: the Euler denoise loop with ASYMMETRIC CFG
   ``v = gw * pos_v + (1 - gw) * neg_v`` and the update ``z += v * (s - t)``.
+
+Time convention
+---------------
+``t = 0`` is clean data and ``t = 1`` is pure noise, fixed by the trainer
+(``src/train/ideogram4/train_ideogram4.py``: ``x_t = (1 - tau)*x0 + tau*x1``
+with ``x1 ~ N(0, I)``, target ``v = x1 - x0``), so the regressed velocity points
+data -> noise. Reverse sampling therefore starts at the NOISE end of the time
+grid -- which is what the initial ``z`` draw is -- and descends to the data end,
+making ``s - t`` NEGATIVE at every step. ``LogitNormalSchedule`` is strictly
+DECREASING in its uniform argument, so the loop indexes ``step_intervals`` in
+reverse to obtain that descent (D-002; the derivation sits at the loop). Same
+convention as ``models/sd3_mmdit/``, the identical rectified flow.
 - ``_decode``: unpatchify ``(B, gh, gw, p, p, c)`` -> ``(B, gh*p, gw*p, c)``
   [NHWC], optional latent denorm (shift/scale), VAE decode, clamp to ``[-1, 1]``.
 
@@ -435,8 +447,30 @@ class Ideogram4Pipeline:
 
         # --- Euler loop: i from num_steps-1 down to 0. ---
         for i in range(num_steps - 1, -1, -1):
-            t_val = float(schedule(float(step_intervals[i + 1])))
-            s_val = float(schedule(float(step_intervals[i])))
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-002: `step_intervals`
+            # is indexed in REVERSE of the loop index so `t` descends from the
+            # noise end to the data end. Derivation: the trainer
+            # (src/train/ideogram4/train_ideogram4.py) uses
+            # `x_t = (1 - tau)*x0 + tau*x1` with `x1 ~ N(0, I)` and target
+            # `v = x1 - x0`, so `t = 0` is clean data, `t = 1` is noise, and
+            # reverse sampling must run t_max -> t_min with dt < 0.
+            # `step_intervals` ASCENDS 0 -> 1 while `LogitNormalSchedule` is
+            # strictly DECREASING (`t_ = 1 - expit(...)`), so
+            # `schedule(step_intervals[j])` descends in `j`. With `i` descending,
+            # `j = num_steps - 1 - i` ascends, which makes t_val > s_val, i.e.
+            # dt = s_val - t_val < 0 at every step; the first executed iteration
+            # sits at `schedule(step_intervals[0]) ~ t_max`, the endpoint the
+            # pure-noise `z` seeded above actually corresponds to, and the last
+            # lands on `schedule(step_intervals[num_steps]) ~ t_min`. The
+            # trajectory is continuous: step i's s_val is step (i-1)'s t_val.
+            # Do NOT instead swap t_val/s_val on the forward index -- with `i`
+            # descending that walks `t` backwards between iterations. Do NOT
+            # ascend `i` either: `guidance_schedule` is in LOOP-INDEX order
+            # (scheduler.SamplerParameters: index 0 is the LAST, polish step).
+            # See decisions.md D-002.
+            j = num_steps - 1 - i
+            t_val = float(schedule(float(step_intervals[j])))
+            s_val = float(schedule(float(step_intervals[j + 1])))
             gw_i = gw_per_step[i]
 
             # Shape (B, 1) -- NOT (B,). ScalarSinusoidalEmbedding squeezes a
