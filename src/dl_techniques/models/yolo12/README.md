@@ -42,7 +42,7 @@ This is a powerful computer vision model that can perform multiple, distinct tas
 1.  **Shared Backbone Efficiency**: By sharing the most computationally expensive part of the network (the feature extractor), the model avoids redundant calculations. This makes it significantly faster and more memory-efficient than running separate models for each task.
 2.  **Implicit Regularization**: Training multiple tasks simultaneously encourages the shared backbone to learn more general and robust features. One task's learning process can help regularize and improve the performance of another, a phenomenon known as "knowledge transfer."
 3.  **Flexible Task Composition**: The architecture is fully modular. You can enable or disable tasks like `DETECTION`, `SEGMENTATION`, and `CLASSIFICATION` with a simple configuration flag. Crucially, it supports **separate class counts for each task** (e.g., 80 detection classes, but only 1 segmentation class).
-4.  **Named Dictionary Outputs**: For clarity in multi-task scenarios, the model returns a dictionary where keys correspond to task names (e.g., `{'detection': ..., 'segmentation': ...}`).
+4.  **Named Dictionary Outputs**: For clarity in multi-task scenarios, the model returns a dictionary where keys correspond to task names (e.g., `{'detection': ..., 'segmentation': ...}`). With exactly ONE task configured it returns that task's tensor directly — see Example 1.
 
 ### Why It Matters
 

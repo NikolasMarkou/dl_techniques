@@ -313,7 +313,20 @@ class YOLOv12MultiTask(keras.Model):
             classification_output = classification_head(feature_maps)
             task_outputs[VisionTaskType.CLASSIFICATION.value] = classification_output
 
-        outputs = task_outputs
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-048: with exactly ONE task
+        # configured the model emits that task's TENSOR, not a one-entry dict.
+        # This line used to be an unconditional `outputs = task_outputs`, which
+        # made the module docstring's "or single tensor for single tasks" and
+        # README.md:264's "The output will be a single tensor, not a
+        # dictionary" both false, and made README Example 1's
+        # `model.predict(images).shape` raise `AttributeError: 'dict' object
+        # has no attribute 'shape'`. Do NOT normalize this the other way (always
+        # a dict): a single-task model compiled with a bare loss/metric list is
+        # the common case, and Keras keys losses by output name for a dict.
+        if len(task_outputs) == 1:
+            outputs = next(iter(task_outputs.values()))
+        else:
+            outputs = task_outputs
 
         return inputs, outputs
 

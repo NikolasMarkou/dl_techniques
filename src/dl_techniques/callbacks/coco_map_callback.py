@@ -166,7 +166,10 @@ class COCOMAPCallback(keras.callbacks.Callback):
         for bi in range(n_batches):
             x, _ = self.val_loader[bi]
             preds = self.model(x, training=False)
-            det = preds.get(self.detection_head_key)
+            # A detection-ONLY YOLOv12 emits the detection tensor directly
+            # rather than a one-entry dict (multitask.py, D-048 of
+            # plan-2026-08-14T233721-d4f9beb2), so accept both shapes.
+            det = preds.get(self.detection_head_key) if isinstance(preds, dict) else preds
             if det is None:
                 logger.warning(
                     f"COCOMAPCallback: model output missing "
