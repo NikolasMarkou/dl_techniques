@@ -423,6 +423,13 @@ fine_tune_model = create_convnext_v2(
     pretrained="path/to/convnext_v2_base_imagenet.keras"
 )
 
+# Passing `input_shape` here is optional. Until 2026-08-15 it was mandatory in
+# practice: the pre-load dummy forward used `input_shape` verbatim, and the default
+# `(None, None, 3)` made it build `(1, None, None, 3)` and fail, with the enclosing
+# handler re-reporting the failure as "Failed to load weights from ..." and hiding
+# the cause. With no spatial dims given, the load now materializes weights at
+# 224x224 (`PRETRAINED_BUILD_SPATIAL`); the model stays fully convolutional.
+
 # 2. The model will load the backbone weights and skip the original classifier.
 # You can now fine-tune this model on your custom dataset.
 fine_tune_model.compile(

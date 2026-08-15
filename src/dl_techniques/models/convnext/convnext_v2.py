@@ -94,8 +94,12 @@ class ConvNeXtV2(keras.Model):
         use_softorthonormal_regularizer: Boolean, whether to use soft
             orthonormal regularization in blocks.
         include_top: Boolean, whether to include the classification head.
-        input_shape: Tuple, input shape. If None and include_top=True,
-            uses (224, 224, 3) for ImageNet. Must be provided for non-ImageNet inputs.
+        input_shape: Tuple, input shape. ``None`` resolves to ``(None, None, 3)``
+            -- the model is fully convolutional and global-pools before the head,
+            so a concrete spatial size is optional. It is required only where a
+            downstream consumer needs static spatial dims; a checkpoint load with
+            unspecified spatial dims materializes weights at
+            ``PRETRAINED_BUILD_SPATIAL`` (224).
         **kwargs: Additional keyword arguments for the Model base class.
 
     Raises:
@@ -379,6 +383,39 @@ class ConvNeXtV2(keras.Model):
 
         return x
 
+    # ---------------------------------------------------------------------
+
+    # Spatial size used to materialize weights before a checkpoint load when the
+    # model was constructed with the default, fully-shape-agnostic
+    # `input_shape=(None, None, 3)`. 224 is the ImageNet size these checkpoints
+    # are trained at, and it is the size the factory docstrings already promise.
+    PRETRAINED_BUILD_SPATIAL = 224
+
+    def _pretrained_build_shape(self) -> Tuple[int, ...]:
+        """Concrete `(H, W, C)` for the pre-load dummy forward.
+
+        DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve the None spatial
+        dims instead of passing `self.input_shape` through. Do NOT go back to
+        `keras.random.normal((1,) + tuple(self.input_shape))`: the DEFAULT
+        `input_shape` is `(None, None, 3)`, so that built `(1, None, None, 3)`
+        and made the factories' own documented `pretrained=<local path>` call
+        fail for every caller who did not also pass a concrete `input_shape`.
+        The channel count is never defaulted -- a `None` there is a real
+        configuration error and is raised as one. See decisions.md D-067.
+        """
+        height, width, channels = self.input_shape
+        if channels is None:
+            raise ValueError(
+                "Cannot materialize weights for a checkpoint load: input_shape "
+                f"{self.input_shape} has no channel count. Pass a concrete "
+                "input_shape=(height, width, channels) to the constructor."
+            )
+        height = self.PRETRAINED_BUILD_SPATIAL if height is None else height
+        width = self.PRETRAINED_BUILD_SPATIAL if width is None else width
+        return (int(height), int(width), int(channels))
+
+    # ---------------------------------------------------------------------
+
     def load_pretrained_weights(
             self,
             weights_path: str,
@@ -415,7 +452,9 @@ class ConvNeXtV2(keras.Model):
         try:
             # Build model if not already built (weight transfer needs a built target)
             if not self.built:
-                dummy_input = keras.random.normal((1,) + tuple(self.input_shape))
+                dummy_input = keras.random.normal(
+                    (1,) + self._pretrained_build_shape()
+                )
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
@@ -437,7 +476,12 @@ class ConvNeXtV2(keras.Model):
                 logger.info("All weights loaded successfully.")
 
         except Exception as e:
-            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+            # `from e` so the real cause survives; this wrapper used to be the
+            # only thing a caller saw.
+            raise ValueError(
+                f"Failed to load weights from {weights_path}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     # `_download_weights` raises instead of falling back to random init. The
     # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
@@ -491,7 +535,8 @@ class ConvNeXtV2(keras.Model):
             variant: String, one of "atto", "femto", "pico", "nano",
                 "tiny", "base", "large", "huge"
             num_classes: Integer, number of output classes
-            input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
+            input_shape: Tuple, input shape. None resolves to (None, None, 3);
+                a pretrained load then materializes weights at 224x224.
             pretrained: Boolean or string. If True, loads pretrained weights from
                 default URL. If string, treats it as a path to local weights file.
             weights_dataset: String, dataset for pretrained weights.
