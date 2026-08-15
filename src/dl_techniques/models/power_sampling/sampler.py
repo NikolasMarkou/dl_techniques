@@ -87,8 +87,10 @@ class PowerSampler:
     """Power-distribution sampling for any causal LM/VLM + any tokenizer.
 
     Forward passes run on whatever device the injected model uses; post-logit
-    sampling uses NumPy on CPU. MCMC proposals within each block are generated
-    in parallel via batched forward passes for high GPU utilization.
+    sampling uses NumPy on CPU. MCMC proposals are generated in parallel via
+    batched forward passes for high GPU utilization, but only across a run of
+    rejections: an acceptance moves the chain state, so the proposals queued
+    behind it are discarded and re-generated from the new state.
 
     The sampler is fully decoupled from concrete model/tokenizer types: it is
     driven by a :data:`LogitsFn` closure (single-position) plus an optional
@@ -367,6 +369,40 @@ class PowerSampler:
 
         return seqs, log_probs_norm, log_probs_unnorm
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-018: proposals are batched
+    # ONLY across a run of rejections. Do NOT restore the previous shape --
+    # one pre-loop `_batched_generate` for all `steps` proposals, consumed by
+    # an acceptance loop that mutates `gen` -- it generated proposal i+1 from
+    # a prefix of the PRE-BLOCK state and then compared it against the
+    # POST-acceptance target log-probs, so an accepted improvement was silently
+    # overwritten by the next stale proposal. A rejection leaves the chain
+    # state unchanged, so the proposals still queued behind it remain valid
+    # draws from q(.|x) and stay batched; an acceptance moves the state, so
+    # everything queued behind it is discarded and re-drawn from the new state.
+    # The cut points themselves are pre-drawn per block on purpose: idx ~
+    # Uniform[c, t-1] does not depend on the state. See decisions.md D-018.
+    def _batch_proposals(
+        self,
+        gen: List[int],
+        indices: List[int],
+        t: int,
+        temperature: float,
+    ) -> Tuple[List[List[int]], List[List[float]], List[List[float]]]:
+        """Generate one batch of proposals, all cut from the CURRENT state.
+
+        :param gen: The current chain state (token ids).
+        :param indices: Cut points still owed in this block; every proposal
+            regenerates ``gen[idx:]`` from ``gen[:idx]``.
+        :param t: Block-invariant sequence length (a proposal replaces the
+            suffix, so ``len(gen)`` is unchanged by an acceptance).
+        :param temperature: Proposal temperature.
+        :return: ``(proposals, log_probs_norm, log_probs_unnorm)``, one entry
+            per index, in the order given.
+        """
+        prefixes = [list(gen[:idx]) for idx in indices]
+        num_tokens = [t - idx for idx in indices]
+        return self._batched_generate(prefixes, num_tokens, temperature)
+
     # -----------------------------------------------------------------
     # MCMC Power Sampling
     # -----------------------------------------------------------------
@@ -383,8 +419,12 @@ class PowerSampler:
 
         Samples from *p^alpha* where ``alpha = 1 / temperature``.  The
         generation is split into ``block_num`` blocks; after each block,
-        ``mcmc_steps`` proposals are generated **in parallel** via batched
-        forward passes and evaluated with Metropolis-Hastings acceptance.
+        ``mcmc_steps`` proposals are evaluated with Metropolis-Hastings
+        acceptance.  Each proposal regenerates the suffix of the **current**
+        chain state from its own cut point; proposals are batched across a run
+        of rejections (which leave the state unchanged) and re-generated after
+        every acceptance, so the chain is a valid sequential MH chain rather
+        than a set of proposals scored against a state they never saw.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -440,38 +480,40 @@ class PowerSampler:
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # Generate all MCMC proposals in parallel (batched)
+            # Cut points are drawn once per block: idx ~ Uniform[c, t-1] is
+            # independent of the chain state, so pre-drawing them changes
+            # nothing about the kernel. The CONTINUATIONS are not.
             t = len(gen)
             indices = [random.randint(c, t - 1) for _ in range(steps)]
-            prefixes = [list(gen[:idx]) for idx in indices]
-            num_tokens = [t - idx for idx in indices]
 
-            props, lp_props_list, target_lp_props_list = (
-                self._batched_generate(prefixes, num_tokens, temp)
-            )
-
-            # Evaluate acceptance for each proposal
-            for i in range(steps):
-                attempts += 1
-                idx = indices[i]
-                s = len(props[i])
-
-                lp_cur = log_probs_norm[idx - c: s - c]
-                target_lp_cur = log_probs_unnorm[idx - c: s - c]
-
-                # Metropolis-Hastings acceptance criterion
-                log_r = (
-                    sum(target_lp_props_list[i]) + sum(lp_cur)
-                    - sum(target_lp_cur) - sum(lp_props_list[i])
+            i = 0
+            while i < steps:
+                props, lp_props_list, target_lp_props_list = (
+                    self._batch_proposals(gen, indices[i:], t, temp)
                 )
 
-                if np.random.rand() < np.exp(min(log_r, 0.0)):
-                    acceptances += 1
-                    gen = list(props[i])
-                    log_probs_norm[idx - c:] = list(lp_props_list[i])
-                    log_probs_unnorm[idx - c:] = list(
-                        target_lp_props_list[i],
+                for k, idx in enumerate(indices[i:]):
+                    attempts += 1
+                    i += 1
+                    s = len(props[k])
+
+                    lp_cur = log_probs_norm[idx - c: s - c]
+                    target_lp_cur = log_probs_unnorm[idx - c: s - c]
+
+                    # Metropolis-Hastings acceptance criterion
+                    log_r = (
+                        sum(target_lp_props_list[k]) + sum(lp_cur)
+                        - sum(target_lp_cur) - sum(lp_props_list[k])
                     )
+
+                    if np.random.rand() < np.exp(min(log_r, 0.0)):
+                        acceptances += 1
+                        gen = list(props[k])
+                        log_probs_norm[idx - c:] = list(lp_props_list[k])
+                        log_probs_unnorm[idx - c:] = list(
+                            target_lp_props_list[k],
+                        )
+                        break  # the rest of this batch is stale; re-batch
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -503,8 +545,9 @@ class PowerSampler:
 
         Like :meth:`mcmc_power_sample` but always accepts proposals that
         improve the trajectory probability (greedy at the trajectory
-        level).  Approximates sampling from *p^infinity*.  Proposals are
-        generated in parallel via batched forward passes.
+        level).  Approximates sampling from *p^infinity*.  Proposals follow the
+        same chain discipline: batched across rejections, re-generated from the
+        state left behind by every accepted swap.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -554,34 +597,35 @@ class PowerSampler:
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # Generate all proposals in parallel (batched)
+            # Same chain discipline as mcmc_power_sample: cut points once per
+            # block, continuations re-derived from the state after each swap.
             t = len(gen)
             indices = [random.randint(c, t - 1) for _ in range(steps)]
-            prefixes = [list(gen[:idx]) for idx in indices]
-            num_tokens = [t - idx for idx in indices]
 
-            props, lp_props_list, target_lp_props_list = (
-                self._batched_generate(prefixes, num_tokens, temp)
-            )
+            i = 0
+            while i < steps:
+                props, lp_props_list, target_lp_props_list = (
+                    self._batch_proposals(gen, indices[i:], t, temp)
+                )
 
-            # Evaluate acceptance for each proposal
-            for i in range(steps):
-                attempts += 1
-                idx = indices[i]
-                s = len(props[i])
+                for k, idx in enumerate(indices[i:]):
+                    attempts += 1
+                    i += 1
+                    s = len(props[k])
 
-                target_lp_cur = log_probs_unnorm[idx - c: s - c]
+                    target_lp_cur = log_probs_unnorm[idx - c: s - c]
 
-                # Deterministic: accept if trajectory probability improves
-                log_r = sum(target_lp_props_list[i]) - sum(target_lp_cur)
+                    # Deterministic: accept if trajectory probability improves
+                    log_r = sum(target_lp_props_list[k]) - sum(target_lp_cur)
 
-                if log_r > 0:
-                    acceptances += 1
-                    gen = list(props[i])
-                    log_probs_norm[idx - c:] = list(lp_props_list[i])
-                    log_probs_unnorm[idx - c:] = list(
-                        target_lp_props_list[i],
-                    )
+                    if log_r > 0:
+                        acceptances += 1
+                        gen = list(props[k])
+                        log_probs_norm[idx - c:] = list(lp_props_list[k])
+                        log_probs_unnorm[idx - c:] = list(
+                            target_lp_props_list[k],
+                        )
+                        break  # the rest of this batch is stale; re-batch
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)

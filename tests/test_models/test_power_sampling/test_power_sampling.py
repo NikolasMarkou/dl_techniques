@@ -395,6 +395,150 @@ class TestSampler:
 
 
 # ---------------------------------------------------------------------------
+# C-30(b): the chain must propose from the state it just accepted
+# ---------------------------------------------------------------------------
+class CounterLM:
+    """Deterministic stub whose every emitted token is its own call counter.
+
+    Two properties make the chain readable, and both are properties of the
+    STUB, not of the sampler:
+
+    1. **No token is ever emitted twice.** The winning logit is placed at
+       ``counter % vocab`` and the counter advances once per batch row, so a
+       token's value says exactly *when* it was generated. Position ``p`` of the
+       final sequence therefore identifies which generation produced it.
+    2. **Later calls are strictly more confident** (the losing logits sink by
+       ``0.5`` per call), so a later proposal always has a higher trajectory
+       log-probability than an earlier one. This is what lets ``max_swap``'s
+       ``log_r > 0`` rule accept every proposal in a correct chain.
+    """
+
+    def __init__(self, vocab: int = VOCAB):
+        self.vocab = vocab
+        self.counter = 0
+
+    def __call__(self, arr, training=False):
+        a = np.asarray(arr)
+        B, T = a.shape
+        out = np.empty((B, T, self.vocab), dtype="float32")
+        for b in range(B):
+            k = self.counter
+            self.counter += 1
+            out[b] = -5.0 - 0.5 * k
+            out[b, :, k % self.vocab] = 5.0
+        return {"logits": out}
+
+
+class TestChainProposesFromTheAcceptedState:
+    """C-30(b): proposal i+1 must be cut from the state acceptance i produced.
+
+    **Oracle, derived from the Metropolis-Hastings definition — not from the
+    sampler.** An MH step draws ``y ~ q(.|x)`` where ``x`` is the CURRENT state
+    and accepts or rejects it; the next step draws from ``q(.|x')`` with ``x'``
+    the state that step left behind. Here ``q(.|x)`` regenerates ``x[idx:]``
+    from ``x[:idx]``, so proposal 2 (cut at 5) must share its first 5 tokens
+    with the state proposal 1 left behind — not with the pre-block state.
+
+    **Scenario** (fully scripted; nothing is read off the implementation):
+    prompt ``"ab"`` -> ``c = 2``; one block of 4 tokens -> ``t = 6``; cut points
+    forced to ``[4, 5]`` by patching ``random.randint``; acceptance forced by
+    patching ``np.random.rand`` to ``0.0`` (``0.0 < exp(min(log_r, 0))`` for any
+    finite ``log_r``). The stub emits token ``k`` on its ``k``-th call, so the
+    naive block lays down tokens ``0,1,2,3`` at positions ``2,3,4,5``.
+
+    A correct chain then: accepts proposal 1, which rewrites positions 4-5 with
+    freshly generated tokens (values ``>= 4``); cuts proposal 2 at position 5 of
+    THAT state, so position 4 keeps its post-acceptance value.
+    A stale chain instead replays ``pre_block[:5]``, restoring the naive block's
+    token at position 4 and discarding acceptance 1 entirely.
+
+    **Measured against the pre-fix sampler** (restored from a ``cp`` backup):
+    ``mcmc_power_sample`` returned ``[31, 31, 0, 1, 2, 5]`` -- position 4 back to
+    the naive block's token ``2`` -- and ``max_swap`` accepted only ``1`` of 2
+    proposals, because the stale proposal was scored against the already-updated
+    bookkeeping. Post-fix both return ``[31, 31, 0, 1, 4, 7]`` with 2
+    acceptances.
+    """
+
+    PRE_BLOCK_TOKEN_AT_4 = 2  # the naive block's 3rd token (stub call #2)
+
+    def _run(self, monkeypatch, method, force_accept):
+        m = CounterLM()
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=1, mcmc_steps=2,
+            temperature=0.25,
+        )
+        s = PowerSampler(m, CharTokenizer(), cfg)
+
+        cut_points = iter([4, 5] * 8)
+        monkeypatch.setattr(random, "randint", lambda a, b: next(cut_points))
+        if force_accept:
+            monkeypatch.setattr(np.random, "rand", lambda *a: 0.0)
+
+        return getattr(s, method)("ab")
+
+    def test_mcmc_second_proposal_is_cut_from_the_accepted_state(
+        self, monkeypatch,
+    ):
+        """Position 4 must carry a post-acceptance token, not the block's."""
+        ids, info = self._run(monkeypatch, "mcmc_power_sample", True)
+
+        assert info["acceptances"] == 2  # both forced through
+        assert ids[:4] == [31, 31, 0, 1]  # untouched by either cut point
+        # Every token generated after the naive block has value >= 4 (the stub
+        # emitted 0..3 there), so this is the MH property, spelled numerically.
+        assert ids[4] != self.PRE_BLOCK_TOKEN_AT_4
+        assert ids[4] >= 4
+
+    def test_max_swap_second_proposal_is_scored_against_its_own_state(
+        self, monkeypatch,
+    ):
+        """A greedy chain of strictly-improving proposals accepts all of them.
+
+        ``max_swap`` has no ``rand`` draw to patch: acceptance is ``log_r > 0``,
+        and the stub guarantees a later proposal is strictly more probable than
+        an earlier one, so a chain that proposes from its own state accepts
+        both. Against the stale chain the second proposal was generated before
+        the first was accepted, so it was scored against the updated
+        bookkeeping and lost -- 1 acceptance, not 2.
+        """
+        ids, info = self._run(monkeypatch, "max_swap", False)
+
+        assert info["acceptances"] == 2
+        assert ids[:4] == [31, 31, 0, 1]
+        assert ids[4] >= 4
+        assert ids[5] >= 4
+
+    def test_a_rejection_leaves_the_queued_proposals_valid(self, monkeypatch):
+        """Anti-vacuity: rejections must NOT trigger a re-batch.
+
+        A rejected proposal leaves the chain state unchanged, so the proposals
+        already generated behind it are still valid draws from ``q(.|x)`` and
+        must be consumed as-is. With every proposal rejected the final sequence
+        must be exactly the naive block, and all ``mcmc_steps`` attempts must
+        still be counted -- a fix that re-batched on rejection too would burn
+        extra forward passes for the same answer.
+        """
+        m = CounterLM()
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=1, mcmc_steps=4,
+            temperature=0.25,
+        )
+        s = PowerSampler(m, CharTokenizer(), cfg)
+        cut_points = iter([4, 5, 4, 5] * 8)
+        monkeypatch.setattr(random, "randint", lambda a, b: next(cut_points))
+        monkeypatch.setattr(np.random, "rand", lambda *a: 1.0)  # reject all
+
+        ids, info = s.mcmc_power_sample("ab")
+
+        assert info["acceptances"] == 0
+        assert info["total_steps"] == 4
+        assert ids == [31, 31, 0, 1, 2, 3]  # the untouched naive block
+        # 4 naive calls + one batch of 4 proposals (2 rows need a 2nd token).
+        assert m.counter == 10
+
+
+# ---------------------------------------------------------------------------
 # C-30(a): the documented default configuration must not die mid-generation
 # ---------------------------------------------------------------------------
 class TestPadTokenIsRequiredEagerly:
