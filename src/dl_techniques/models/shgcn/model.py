@@ -370,9 +370,13 @@ class SHGCNNodeClassifier(keras.Model):
         """
         embeddings = self.backbone(inputs, training=training)
 
-        logits = self.classifier(embeddings)
+        # NOT `logits`: `self.classifier` is
+        # `Dense(num_classes, activation='softmax')`, so these rows already sum
+        # to 1. The name mattered -- a caller who compiled
+        # `from_logits=True` on the strength of it got a silently wrong loss.
+        probabilities = self.classifier(embeddings)
 
-        return logits
+        return probabilities
 
     def get_config(self) -> dict:
         """Get model configuration for serialization."""
@@ -625,7 +629,9 @@ def create_shgcn_node_classifier(
 
     Returns:
         A configured SHGCNNodeClassifier. It is called with
-        ``[features, adjacency]`` and returns class logits.
+        ``[features, adjacency]`` and returns class PROBABILITIES -- its head
+        is ``Dense(num_classes, activation='softmax')``, so compile with
+        ``from_logits=False`` (the Keras default).
 
     Raises:
         ValueError: If any argument is outside its valid range.

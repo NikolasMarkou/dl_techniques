@@ -623,6 +623,25 @@ class PowerMLP(keras.Model):
         # Allow kwargs to override variant defaults
         config.update(kwargs)
 
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-054
+        # A caller-supplied `hidden_units` used to be accepted by
+        # `config.update(kwargs)` and then UNCONDITIONALLY overwritten by the
+        # variant's own list on the next line -- silently discarded. Refuse it
+        # by name instead. Do NOT make it win: `from_variant` exists to build
+        # the variant's architecture, and the value it would have to honour is
+        # the INNER list (without the `[input_dim] + ... + [num_classes]`
+        # wrapping this line adds), which no caller can be expected to guess.
+        # `PowerMLP(hidden_units=...)` is the direct constructor for that.
+        # See decisions.md D-054.
+        if "hidden_units" in kwargs:
+            raise ValueError(
+                f"from_variant('{variant}') builds the variant's own "
+                f"hidden_units and cannot honour a caller-supplied one "
+                f"(got {kwargs['hidden_units']!r}); it was silently discarded "
+                f"before 2026-08-15. Use PowerMLP(hidden_units=..., k=...) "
+                f"directly for a custom architecture."
+            )
+
         # Construct the full hidden_units list
         base_hidden_units = cls.MODEL_VARIANTS[variant]["hidden_units"]
         config["hidden_units"] = [input_dim] + base_hidden_units + [num_classes]
@@ -735,7 +754,7 @@ def create_power_mlp(
     k: int = 3,
     optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
     learning_rate: float = 0.001,
-    loss: Union[str, keras.losses.Loss] = "categorical_crossentropy",
+    loss: Optional[Union[str, keras.losses.Loss]] = None,
     metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
     **kwargs: Any
 ) -> PowerMLP:
@@ -753,7 +772,10 @@ def create_power_mlp(
             applied. Defaults to "adam".
         learning_rate: Learning rate for optimizer. Only used if optimizer is
             a string. Defaults to 0.001.
-        loss: Loss function name or instance. Defaults to "categorical_crossentropy".
+        loss: Loss function name or instance. ``None`` (the default) DERIVES a
+            categorical cross-entropy whose ``from_logits`` matches the model's
+            actual ``output_activation`` -- ``True`` for the default linear
+            output, ``False`` for softmax. Pass a value to override.
         metrics: List of metric names or instances. If None, defaults to ['accuracy'].
         **kwargs: Additional arguments for PowerMLP constructor, such as
             dropout_rate, batch_normalization, output_activation, etc.
@@ -762,19 +784,54 @@ def create_power_mlp(
         Compiled PowerMLP model ready for training with model.fit().
 
     Example:
+        >>> # The documented default: linear output, cross-entropy on LOGITS.
+        >>> model = create_power_mlp(hidden_units=[784, 128, 64, 10], k=3)
+        >>> model.loss.from_logits
+        True
+        >>>
+        >>> # Softmax output: the derived loss follows it.
         >>> model = create_power_mlp(
         ...     hidden_units=[784, 128, 64, 10],
-        ...     k=3,
-        ...     optimizer='adam',
-        ...     learning_rate=0.001,
-        ...     loss='categorical_crossentropy',
-        ...     metrics=['accuracy'],
-        ...     dropout_rate=0.2
+        ...     output_activation='softmax',
+        ...     dropout_rate=0.2,
         ... )
+        >>> model.loss.from_logits
+        False
         >>> model.fit(x_train, y_train, epochs=10, validation_split=0.2)
     """
     # Create model
     model = PowerMLP(hidden_units=hidden_units, k=k, **kwargs)
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-053
+    # DERIVE the default loss from the model's ACTUAL output activation. DO NOT
+    # restore the `loss="categorical_crossentropy"` default: `PowerMLP` defaults
+    # to `output_activation=None` (linear), and a string loss compiles with
+    # `from_logits=False`, so the documented example fed UNNORMALIZED
+    # real-valued outputs to a cross-entropy that renormalizes by
+    # `output/sum(output)` and clips. With mixed-sign activations that
+    # denominator can approach zero and negatives clip to `epsilon`: finite,
+    # meaningless, no error, and it trains happily on the wrong objective. Do
+    # NOT "fix" it by defaulting `output_activation` to softmax instead --
+    # that would silently change the OUTPUT of every existing caller that
+    # relies on the linear default, whereas this changes only the loss of a
+    # caller who passed neither. Both sibling factories
+    # (`create_power_mlp_regressor`, `create_power_mlp_binary_classifier`) pass
+    # `loss=` explicitly and are unaffected.
+    # See decisions.md D-053.
+    if loss is None:
+        emits_probabilities = (
+            model.output_activation is keras.activations.softmax
+            or model.output_activation is keras.activations.sigmoid
+        )
+        loss = keras.losses.CategoricalCrossentropy(
+            from_logits=not emits_probabilities
+        )
+        logger.info(
+            f"create_power_mlp: no loss given; derived "
+            f"CategoricalCrossentropy(from_logits={not emits_probabilities}) "
+            f"from output_activation="
+            f"{keras.activations.serialize(model.output_activation)!r}."
+        )
 
     # Handle optimizer
     if isinstance(optimizer, str):
