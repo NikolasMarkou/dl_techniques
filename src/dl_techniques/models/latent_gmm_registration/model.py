@@ -472,10 +472,14 @@ def compute_gmm_params(
         axis=1
     )  # Shape: (B, K, 3)
 
-    # Normalize by total responsibility (pi) to get component means
+    # Normalize by the TOTAL responsibility sum_i gamma_ik -- not by `pi`, which is
+    # that sum divided by N. Dividing by the mean instead of the sum inflated every
+    # component mean by exactly N (and, through compute_rigid_transform's centroids,
+    # the estimated translation with it).
     # Add epsilon to avoid division by zero for components with negligible weight
-    pi_expanded = keras.ops.expand_dims(pi, axis=-1) + 1e-8  # (B, K, 1)
-    mu = weighted_sum / pi_expanded  # Shape: (B, K, 3)
+    gamma_sum = keras.ops.sum(gamma, axis=1, keepdims=False)  # (B, K)
+    gamma_sum_expanded = keras.ops.expand_dims(gamma_sum, axis=-1) + 1e-8  # (B, K, 1)
+    mu = weighted_sum / gamma_sum_expanded  # Shape: (B, K, 3)
 
     return pi, mu
 

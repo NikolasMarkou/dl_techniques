@@ -206,10 +206,15 @@ inputs = (source_pc, target_pc)
 gamma_x = model.correspondence_net((local_x, global_x))
 
 # Compute the centers of the Gaussian components
-from dl_techniques.models.latent_gmm import compute_gmm_params
+from dl_techniques.models.latent_gmm_registration import compute_gmm_params
 weights, means = compute_gmm_params(source_pc, gamma_x)
 
 # 'means' shape is (B, num_gaussians, 3)
+# These are responsibility-weighted centroids in the point cloud's own coordinate
+# frame -- mu_k = sum_i(gamma_ik * x_i) / sum_i(gamma_ik) -- so they are directly
+# comparable with the input coordinates and independent of the point count.
+# 'weights' (pi) are the mixing coefficients, mean responsibility per component,
+# summing to 1 across components.
 # These act like keypoints describing the object
 ```
 
