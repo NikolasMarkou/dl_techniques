@@ -26,8 +26,10 @@ Streaming inference (D-007)
 - :meth:`stream_reset(B)` — set internal embedding buffer to ``None``.
 - :meth:`stream_step(frame)` — encode one frame, append to the rolling
   ``K``-length buffer, run the predictor on the current buffer (up to
-  ``K`` frames), and emit the last frame's patch-prediction
-  ``(B, H_p, W_p, D)``. O(1) amortized per call once the buffer is full.
+  ``K`` frames), project the last position through the horizon head the
+  training loss supervises, and emit the ``h``-step forecast
+  ``(B, H_p, W_p, D)`` in encoder (``z``) space. O(1) amortized per call
+  once the buffer is full.
 
 The streaming path reuses the predictor on a growing (then rolling)
 ``(B, t, H_p, W_p, D)`` tensor with ``t ≤ K``; predictor accepts arbitrary
@@ -623,11 +625,22 @@ class VideoJEPA(keras.Model):
     def stream_step(
         self,
         frame: keras.KerasTensor,
+        horizon: Optional[int] = None,
     ) -> keras.KerasTensor:
-        """Advance the stream by one frame and return its patch prediction.
+        """Advance the stream by one frame and return its patch forecast.
 
         :param frame: ``(B, H, W, C)`` single-frame pixel tensor.
-        :return: ``(B, H_p, W_p, D)`` patch-prediction for the latest frame.
+        :param horizon: which configured prediction horizon ``h`` to emit.
+            ``None`` (default) selects ``min(config.predict_horizons)`` —
+            the shortest-range forecast, and with the default
+            ``predict_horizons = (1,)`` the next frame. Must be a member of
+            ``config.predict_horizons``; anything else raises ``ValueError``,
+            because no head was trained for it.
+        :return: ``(B, H_p, W_p, D)`` prediction of the encoder embedding
+            ``h`` frames after the one just pushed, in the same ``z`` space
+            the encoder emits.
+        :raises ValueError: if ``horizon`` is not in
+            ``config.predict_horizons``.
 
         Rolling buffer (D-007): keeps the last ``K`` encoded frame grids in
         ``_stream_buf: (B, t, H_p, W_p, D)`` with ``t ≤ K``. The predictor
@@ -636,6 +649,24 @@ class VideoJEPA(keras.Model):
         """
         cfg = self.config
         K = cfg.history_size_k
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-043: the streaming output
+        # must be the SAME quantity training supervises, so it goes through
+        # `pred_heads[h_idx]` — the raw predictor output is not supervised in
+        # z-space at all when `mask_prediction_enabled=False`, and is
+        # supervised only as a same-timestep reconstruction when it is on.
+        # Do NOT "simplify" this back to `self.predictor(buf)[:, -1]`, and do
+        # NOT default `horizon` to `max(predict_horizons)` or to a fixed 1:
+        # `min(...)` is the shortest-range head, is always a configured
+        # horizon, and equals 1 under the default `(1,)`.
+        if horizon is None:
+            horizon = min(cfg.predict_horizons)
+        if horizon not in cfg.predict_horizons:
+            raise ValueError(
+                f"horizon={horizon} has no trained prediction head; "
+                f"config.predict_horizons is {cfg.predict_horizons!r}."
+            )
+        h_idx = cfg.predict_horizons.index(horizon)
 
         # Encode single frame: (B, H, W, C) → (B, H_p, W_p, D).
         enc = self.encoder(frame, training=False)
@@ -655,7 +686,10 @@ class VideoJEPA(keras.Model):
             self._stream_buf, training=False
         )  # (B, t, H_p, W_p, D)
 
-        return pred[:, -1]  # (B, H_p, W_p, D)
+        # The heads are pointwise (Dense over the last axis), so projecting
+        # the slice is identical to slicing the projection and costs t times
+        # less.
+        return self.pred_heads[h_idx](pred[:, -1])  # (B, H_p, W_p, D)
 
     # ------------------------------------------------------------------
     # Serialization
