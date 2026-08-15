@@ -354,19 +354,39 @@ class HierarchicalReasoningCore(keras.layers.Layer):
 
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         """
-        # Create initial states for reasoning modules
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-030: `h_init`/`l_init` are
+        # NON-TRAINABLE, and that is not a downgrade — it is what they always
+        # were in fact. They are read ONLY by `reset_carry`, so they enter the
+        # computation as cycle 0's carry, and `call` applies
+        # `keras.ops.stop_gradient` to the incoming `z_h`/`z_l` UNCONDITIONALLY
+        # before the one gradient-carrying step (truncated BPTT, the reference
+        # HRM's 1-step approximation). Every path from these two variables to
+        # the loss therefore crosses that barrier. MEASURED on CPU before this
+        # change: `tape.gradient(loss, core.h_init)` was `None`, likewise
+        # `l_init`, while the SAME tape returned max|g| = 1.335 for
+        # `core.lm_head.kernel` — so the `None` was a real gradient barrier, not
+        # a dead tape.
+        #
+        # Do NOT "fix" this by removing the `stop_gradient` in `call`: that is
+        # the truncated-BPTT design, it is what bounds activation memory to one
+        # step regardless of `h_cycles`/`l_cycles`, and unrolling it would
+        # diverge from the reference HRM (which likewise carries these two as
+        # non-trainable BUFFERS, not parameters). Do NOT re-add
+        # `trainable=True` to make `count_params()` look larger: the optimizer
+        # never updated them, so a "trainable" report was a false claim about
+        # 2 * embed_dim parameters. See decisions.md D-030.
         self.h_init = self.add_weight(
             name="h_init",
             shape=(self.embed_dim,),
             initializer=keras.initializers.TruncatedNormal(stddev=1.0),
-            trainable=True
+            trainable=False
         )
 
         self.l_init = self.add_weight(
             name="l_init",
             shape=(self.embed_dim,),
             initializer=keras.initializers.TruncatedNormal(stddev=1.0),
-            trainable=True
+            trainable=False
         )
 
         # Build sub-layers in computational order

@@ -26,7 +26,12 @@ gradients recorded. Backpropagation therefore covers a single update applied to 
 converged state, not the whole `h_cycles * l_cycles` unroll. Memory is constant in
 the cycle counts, which is what makes large cycle settings affordable, and the
 assumption being made is that the earlier cycles are approximating a fixed point
-whose gradient the last step adequately represents.
+whose gradient the last step adequately represents. One consequence is worth naming
+because it looks like an omission: the core's `h_init` / `l_init` initial states are
+NON-TRAINABLE. They are read only when a halted sequence's carry is reset, so they
+enter as cycle 0's state and every path from them to the loss crosses that same
+`stop_gradient`. They were declared `trainable=True` for a long time and never once
+received a gradient; they are buffers in the reference implementation too.
 
 Halting is learned as a two-action Q-value problem. A `q_head` reads `z_h`'s first
 position and emits `q_halt` and `q_continue`; a sequence halts when
@@ -51,10 +56,14 @@ Two implementation details exist because this must run under `tf.function`, whic
 the regime `fit()` uses. The complete-forward loop has a STATIC trip count of
 `halt_max_steps` and no Python `break`: `all_finished` is a symbolic scalar, so an
 `if` on it raises `OperatorNotAllowedInGraphError` and only ever worked eagerly.
-Instead, once `done` is true both carry and outputs are frozen by `ops.where`, which
-reproduces the break exactly — continuing to step would reset the halted sequences
-(a halted sequence's states are reset on the next step) and silently restart their
-reasoning, returning a different answer. For the same reason `is_last_step` is used
+Instead, once a sequence is done its carry and outputs are frozen by `ops.where`, which
+reproduces the break exactly — continuing to step would reset the halted sequence
+(a halted sequence's states are reset on the next step) and silently restart its
+reasoning, returning a different answer. That freeze is keyed on the *per-sequence*
+`carry["halted"]` mask, not on the batch-global `all_finished` scalar: gating on
+`ops.all(halted)` meant an early-halting sequence kept being restarted until the
+batch's slowest member finished, and the caller received its restarted partial run
+instead of the answer it halted on. For the same reason `is_last_step` is used
 inside an `ops.where` rather than a Python `if`: it is a per-sequence `(batch,)`
 tensor and a truth-test on it is ambiguous eagerly and illegal in graph mode.
 
@@ -92,6 +101,7 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
 
 # ---------------------------------------------------------------------
@@ -575,24 +585,55 @@ class HierarchicalReasoningModel(keras.Model):
         #
         # ``is_last_step`` forces every sequence to halt by ``halt_max_steps``,
         # so that is the true bound (the ``* 2`` safety factor was dead). Once
-        # ``done`` goes true we freeze both carry and outputs, which reproduces
-        # the old break exactly: continuing to step would otherwise RESET the
-        # halted sequences (``_forward_step`` resets on ``halted``) and restart
-        # their reasoning, silently returning a different answer.
-        carry, outputs, done = self._forward_step(carry, batch, training=training)
+        # a sequence is done we freeze its carry and its outputs, which
+        # reproduces the old break exactly: continuing to step would otherwise
+        # RESET the halted sequence (``_forward_step`` resets on ``halted``) and
+        # restart its reasoning, silently returning a different answer.
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-031: the freeze predicate is
+        # the PER-SEQUENCE ``carry["halted"]`` mask, NOT the batch-global
+        # ``all_finished`` scalar (``ops.all(halted)``) that ``_forward_step``
+        # returns as its third value. With the scalar, a sequence that halts at
+        # step 2 in a batch whose slowest member runs to step 8 was reset and
+        # re-run six more times, and the dict returned to the caller held, for
+        # that sequence, the output of a RESTARTED PARTIAL RUN — not the answer
+        # it halted on. Nothing raised; the batch-global gate is only correct
+        # for a batch that halts in lockstep, which is exactly what an ACT model
+        # is built not to do. ``all_finished`` is deliberately left in
+        # ``_forward_step``'s return tuple: it is that method's PUBLIC step-mode
+        # contract (``call`` returns it to external drivers), and narrowing the
+        # tuple here would be an unrelated API break.
+        #
+        # Do NOT hoist ``ops.reshape(done, ...)`` out of ``_freeze``: the leaves
+        # of ``carry``/``outputs`` have DIFFERENT ranks (``steps`` is
+        # ``(batch,)``, ``logits`` is ``(batch, seq, vocab)``), so the broadcast
+        # shape must be derived per leaf. This is the same idiom
+        # ``_forward_step`` already uses for ``reset_mask``. See decisions.md
+        # D-031.
+        carry, outputs, _ = self._forward_step(carry, batch, training=training)
+        done = carry["halted"]
+
+        def _freeze(mask, held, fresh):
+            broadcast = keras.ops.reshape(
+                mask, [-1] + [1] * (len(held.shape) - 1))
+            return keras.ops.where(broadcast, held, fresh)
 
         for _ in range(self.halt_max_steps - 1):
-            next_carry, next_outputs, next_done = self._forward_step(
+            next_carry, next_outputs, _ = self._forward_step(
                 carry, batch, training=training)
 
-            # ``done`` is a scalar bool and broadcasts against every leaf.
+            frozen = done
             carry = keras.tree.map_structure(
-                lambda held, fresh: keras.ops.where(done, held, fresh),
+                lambda held, fresh: _freeze(frozen, held, fresh),
                 carry, next_carry)
             outputs = keras.tree.map_structure(
-                lambda held, fresh: keras.ops.where(done, held, fresh),
+                lambda held, fresh: _freeze(frozen, held, fresh),
                 outputs, next_outputs)
-            done = done | next_done
+
+            # Post-merge, ``carry["halted"]`` is ``where(frozen, True, fresh)``
+            # for an already-frozen sequence and the fresh halt decision
+            # otherwise — i.e. the accumulated per-sequence done mask.
+            done = carry["halted"]
 
         return outputs
 
@@ -880,6 +921,7 @@ def create_hierarchical_reasoning_model(
         variant: Optional[str] = None,
         optimizer: Union[str, keras.optimizers.Optimizer] = "adamw",
         learning_rate: float = 1e-4,
+        loss: Optional[keras.losses.Loss] = None,
         **kwargs: Any
 ) -> HierarchicalReasoningModel:
     """Create and optionally compile a Hierarchical Reasoning Model.
@@ -905,11 +947,21 @@ def create_hierarchical_reasoning_model(
             - "base": 27M params, paper configuration, 40.3% ARC-AGI
             - "large": 156.7M params, high-capacity reasoning
         optimizer: Optimizer for compilation. Paper uses Adam-atan2 (scale-invariant).
+            Pass `None` to skip compilation and drive the model from your own
+            training loop (this is what `src/train/hrm/train_hrm.py` does).
         learning_rate: Learning rate. Paper uses 1e-4 with linear warmup.
+        loss: Loss used when compiling. Defaults to
+            `{"logits": StableMaxCrossEntropy()}`, so the compiled model trains
+            with `fit(batch, {"logits": labels})`. This supervises the LM head
+            ONLY — the Q-learning halting term couples two model *outputs* and
+            cannot be expressed as a per-output Keras loss, so ACT supervision
+            requires `src/train/hrm/train_hrm.py`'s loop (or your own `loss=`
+            plus a `compute_loss` override). Ignored when `optimizer` is
+            `None`.
         **kwargs: Additional arguments for HierarchicalReasoningModel constructor.
 
     Returns:
-        HierarchicalReasoningModel instance, optionally compiled.
+        HierarchicalReasoningModel instance, compiled unless `optimizer=None`.
 
     Example:
         >>> # Reproduce paper ARC-AGI results
@@ -954,15 +1006,51 @@ def create_hierarchical_reasoning_model(
             **kwargs
         )
 
-    # Optional compilation
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-032: this branch now actually
+    # CALLS `model.compile(...)`. It used to resolve the optimizer, set its
+    # learning rate, log it and DISCARD it, while both this function's summary
+    # line and its `Returns:` promised an "optionally compiled" model — so a
+    # caller who followed the docstring got an uncompiled model and
+    # `ValueError: You must call compile() before using the model.` on `.fit()`
+    # (measured). The default loss is a PER-OUTPUT dict keyed on `"logits"`, so
+    # `fit(batch, {"logits": labels})` works with the stock `fit` and no custom
+    # `train_step` / `compute_loss`.
+    #
+    # It is deliberately NOT the package's own `HRMLoss`. `HRMLoss.call` takes
+    # the model's whole output DICT and a `{"labels": ...}` target, but Keras 3's
+    # `CompileLoss` BROADCASTS a single `Loss` object across each output key and
+    # then pairs it against a same-keyed target — measured, both
+    # `fit(batch, {"labels": ...})` and `fit(batch, labels)` raise
+    # `KeyError: The path: ('logits',) ... can't be found in either the model's
+    # output (y_pred) or in the labels (y_true)`. The Q-learning term cannot be
+    # written as a per-output Keras loss at all, because it couples
+    # `q_halt_logits` with `target_q_continue` and BOTH are model outputs, not
+    # labels. So ACT/Q supervision needs a loop that calls `HRMLoss` directly —
+    # which is exactly why `src/train/hrm/train_hrm.py` exists and drives this
+    # model with its own `create_hrm_loss` and `GradientTape`.
+    #
+    # Do NOT "upgrade" this default to `create_hrm_loss()` without also adding a
+    # `compute_loss` override; it will compile and then fail at the first
+    # `fit()` step. Do NOT restore the "log the optimizer and return" form to
+    # keep the factory loss-agnostic: `optimizer=None` is already the
+    # loss-agnostic route and returns an uncompiled model. See decisions.md
+    # D-032.
     if optimizer is not None:
         if isinstance(optimizer, str):
             optimizer = keras.optimizers.get(optimizer)
-            if hasattr(optimizer, 'learning_rate'):
-                optimizer.learning_rate = learning_rate
+        if hasattr(optimizer, 'learning_rate'):
+            optimizer.learning_rate = learning_rate
 
-        # Note: Actual loss and metrics would depend on the specific use case
-        logger.info(f"Created Hierarchical Reasoning Model with optimizer {optimizer}")
+        model.compile(
+            optimizer=optimizer,
+            loss=loss if loss is not None else {
+                "logits": StableMaxCrossEntropy()
+            },
+        )
+        logger.info(
+            f"Created and compiled Hierarchical Reasoning Model with optimizer "
+            f"{optimizer}"
+        )
 
     else:
         logger.info("Created Hierarchical Reasoning Model (uncompiled)")
