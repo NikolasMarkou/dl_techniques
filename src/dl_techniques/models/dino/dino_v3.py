@@ -54,7 +54,8 @@ The rotation implemented here is real and live, but it is not the paper's.
 offers EMA centering only. **Register tokens are not implemented in this model**;
 `dino_v2.DINOv2VisionTransformer` has them. **High-resolution adaptation and
 distillation from a large pretrained teacher are not implemented**, and no
-pretrained weights are shipped — `pretrained=True` only logs a warning.
+pretrained weights are shipped — `pretrained=True` raises `NotImplementedError`
+rather than handing back a randomly initialized model.
 
 The variant table is the only place in the DINO trio where `patch_size=None`
 resolves to something other than a constant: `giant` carries `(14, 14)` and
@@ -654,8 +655,8 @@ def create_dino_v3(
         rope_percentage: Fraction of each head's dimensions that are rotated.
             Ignored unless ``positional_embedding_type='rope'``. ``0.0`` is legal
             but leaves the model with NO positional information at all.
-        pretrained: If True, logs a warning and is otherwise ignored — NO pretrained
-            DINOv3 weights are shipped with this repository.
+        pretrained: Must be False. `True` raises `NotImplementedError` — NO
+            pretrained DINOv3 weights are shipped with this repository.
         **kwargs: Additional arguments for the model constructor, e.g.
             ``stochastic_depth_rate``, ``normalization_type``.
 
@@ -664,11 +665,19 @@ def create_dino_v3(
 
     Raises:
         TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
+        NotImplementedError: If ``pretrained=True`` (no checkpoints shipped).
     """
     reject_input_shape(kwargs, "create_dino_v3")
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented for DINOv3.")
+        raise NotImplementedError(
+            f"No pretrained DINOv3 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_dino_v3('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
 
     # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `patch_size=None` defers to
     # the variant. Do NOT give this parameter a concrete default (e.g. `= 16`):

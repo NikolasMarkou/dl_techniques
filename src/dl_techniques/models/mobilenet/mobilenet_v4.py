@@ -68,12 +68,13 @@ mixer. And its `num_heads` defaults to 8, so a stage width that is not divisible
 by 8 raises; `width_multiplier` values that break that divisibility on
 `dims[5]`/`dims[6]` will fail at construction rather than silently degrade.
 
-`pretrained=True` on `create_mobilenetv4` logs a warning and returns a randomly
-initialized model. No checkpoints ship with this package; combined with the
-hand-written stage tables above, this model should be treated as an architecture sketch to
-train from scratch, not as a MobileNetV4 reimplementation. Newer packages here
-(see `resnet/model.py`) raise on `pretrained=True` rather than returning random
-weights, and this module predates that contract. The mutable list defaults on
+`pretrained=True` on `create_mobilenetv4` raises `NotImplementedError`. No
+checkpoints ship with this package; combined with the hand-written stage tables
+above, this model should be treated as an architecture sketch to train from
+scratch, not as a MobileNetV4 reimplementation. It used to log a warning and
+return a randomly initialized model; the contract in `resnet/model.py` now holds
+here too. Warm-start from a local file with `model.load_weights(path)`.
+The mutable list defaults on
 `__init__` (`depths`, `dims`, `block_types`, `strides`, `attention_stages`) are a
 known defect inherited by copy-paste across this package: they are never mutated
 in place, so they are currently harmless, but they should not be copied into new
@@ -571,7 +572,8 @@ def create_mobilenetv4(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, multiplier for filter dimensions
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV4 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -582,8 +584,15 @@ def create_mobilenetv4(
         >>> model = create_mobilenetv4("hybrid_medium", num_classes=1000)
         >>> model = create_mobilenetv4("medium", width_multiplier=0.75)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV4 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv4('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
 
     model = MobileNetV4.from_variant(
         variant,

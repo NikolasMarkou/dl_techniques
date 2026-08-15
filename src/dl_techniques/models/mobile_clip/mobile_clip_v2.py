@@ -79,9 +79,9 @@ requires passing ``training=False`` explicitly: the image tower's stochastic-dep
 branches take their stochastic path at ``training=None``.
 
 No pretrained weights are ported. ``create_mobile_clip_v2(pretrained=True)``
-warns and returns a randomly initialized model rather than raising. See the
-package ``README.md`` §16 for the deviations that void any comparison against
-published numbers.
+raises ``NotImplementedError`` rather than handing back a randomly initialized
+model. See the package ``README.md`` §16 for the deviations that void any
+comparison against published numbers.
 
 References:
     - Vasu et al., 2023. MobileCLIP: Fast Image-Text Models through Multi-Modal
@@ -1003,9 +1003,19 @@ def create_mobile_clip_v2(
 ) -> MobileClipV2Model:
     """
     Convenience function to create MobileCLIP2 models.
+
+    :raises NotImplementedError: If ``pretrained=True`` — no MobileCLIP2
+        checkpoints ship with this package.
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileCLIP2 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobile_clip_v2('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
     model = MobileClipV2Model.from_variant(variant, **kwargs)
     return model
 

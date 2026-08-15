@@ -49,11 +49,11 @@ released model uses ReLU6, which matters if low-precision quantization is the go
 And the classifier ends in a softmax, so this model emits probabilities, not
 logits: compile it with `from_logits=False`.
 
-`pretrained=True` on `create_mobilenetv1` logs a warning and returns a randomly
-initialized model. No checkpoints are distributed with this package, and the
-warning is easy to miss, so pretrained weights should be treated as unsupported
-here — the house contract elsewhere in `models/` (see `resnet/model.py`) is to
-raise instead of silently handing back random weights, and this module predates it.
+`pretrained=True` on `create_mobilenetv1` raises `NotImplementedError`. No
+checkpoints are distributed with this package. It used to log a warning and return
+a randomly initialized model; the warning was easy to miss, so the house contract
+elsewhere in `models/` (see `resnet/model.py`) now holds here too. Warm-start from
+a local file with `model.load_weights(path)`.
 
 References:
     - Howard et al., 2017. MobileNets: Efficient Convolutional Neural Networks for
@@ -388,7 +388,8 @@ def create_mobilenetv1(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, additional multiplier applied on top of variant default
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV1 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -399,8 +400,15 @@ def create_mobilenetv1(
         >>> model = create_mobilenetv1("small", num_classes=10, input_shape=(32, 32, 3))
         >>> model = create_mobilenetv1("pico", num_classes=100)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented for MobileNetV1")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV1 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv1('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
 
     model = MobileNetV1.from_variant(
         variant,

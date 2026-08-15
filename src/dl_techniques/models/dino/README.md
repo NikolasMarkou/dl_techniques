@@ -92,7 +92,7 @@ corresponding paper has and this code does not.
 | Sinkhorn-Knopp centering | **NOT IMPLEMENTED** (EMA centering only) | **NOT IMPLEMENTED** | **NOT IMPLEMENTED** |
 | High-res adaptation / distillation from a large pretrained teacher | — | — | **NOT IMPLEMENTED** |
 | `get_last_selfattention()` (attention-map extraction) | **raises `NotImplementedError`** | not defined | **raises `NotImplementedError`** |
-| Pretrained weights | none shipped | `pretrained=True` logs a warning and is ignored | `pretrained=True` logs a warning and is ignored |
+| Pretrained weights | none shipped | `pretrained=True` raises `NotImplementedError` | `pretrained=True` raises `NotImplementedError` |
 | `.keras` round-trip | tested | tested | tested |
 
 ### `norm_last_layer` on `DINOHead` — what is and is not reproduced
@@ -672,8 +672,9 @@ silent omission again.
    `return_attention_weights` / `return_attention_scores` flag to its attention sub-layer.
    `GroupedQueryAttention` already supports it; `MultiHeadAttention` does not. Fixing this
    properly means touching a shared layer used across the repository.
-8. **Pretrained weights.** None are shipped for any version. `pretrained=True` logs a
-   warning and is otherwise ignored.
+8. **Pretrained weights.** None are shipped for any version. `pretrained=True` raises
+   `NotImplementedError`; build with `pretrained=False` and warm-start from a local
+   checkpoint with `model.load_weights(path)`.
 9. **Attributing the improved 60-epoch configuration to one of its two changes.** The
    IMPROVED verdict (`research/2026_dino_ssl_measurements.md` § 1) belongs to the PAIR (`ema_warmup_epochs 0 -> 1.0`,
    `teacher_temp_final 0.07 -> 0.04`). The two mechanisms were separated only at 8 epochs

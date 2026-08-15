@@ -61,10 +61,10 @@ two feature tensors and the scale, never the similarity matrices, and it emits
 check for ``None`` rather than for key presence.
 
 No pretrained weights are distributed. ``create_mobile_clip_model(pretrained=True)``
-logs a warning and returns a randomly initialized model rather than raising,
-which means an unavailable checkpoint is indistinguishable from a successful
-load at the call site — the opposite of the contract the newer model packages in
-this library hold themselves to.
+raises ``NotImplementedError``. It used to log a warning and return a randomly
+initialized model, which made an unavailable checkpoint indistinguishable from a
+successful load at the call site; warm-start from a local file with
+``model.load_weights(path)`` instead.
 
 References:
     - Vasu et al., 2023. MobileCLIP: Fast Image-Text Models through Multi-Modal
@@ -463,9 +463,19 @@ def create_mobile_clip_model(
 ) -> MobileClipModel:
     """
     Convenience function to create Mobile CLIP models.
+
+    :raises NotImplementedError: If ``pretrained=True`` — no MobileCLIP
+        checkpoints ship with this package.
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileCLIP weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobile_clip_model('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
     model = MobileClipModel.from_variant(variant, **kwargs)
     return model
 

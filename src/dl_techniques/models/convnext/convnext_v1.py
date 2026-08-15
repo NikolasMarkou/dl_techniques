@@ -736,23 +736,22 @@ def create_convnext_v1(
         ConvNeXtV1 model instance
 
     Example:
-        >>> # Create ConvNeXt-Tiny with pretrained ImageNet weights
-        >>> model = create_convnext_v1("tiny", pretrained=True)
+        >>> # Create ConvNeXt-Tiny (randomly initialized; no weights ship here)
+        >>> model = create_convnext_v1("tiny")
         >>>
         >>> # Create ConvNeXt-Base as feature extractor
-        >>> model = create_convnext_v1("base", pretrained=True, include_top=False)
+        >>> model = create_convnext_v1("base", include_top=False)
         >>>
-        >>> # Fine-tune on CIFAR-10 with pretrained backbone
+        >>> # Fine-tune on CIFAR-10 from a local checkpoint
         >>> model = create_convnext_v1(
         ...     "small",
         ...     num_classes=10,
         ...     input_shape=(32, 32, 3),
-        ...     pretrained=True,
+        ...     pretrained="path/to/weights.keras",
         ...     weights_input_shape=(224, 224, 3)
         ... )
         >>>
-        >>> # Load from local weights
-        >>> model = create_convnext_v1("large", pretrained="path/to/weights.keras")
+        >>> # `pretrained=True` raises NotImplementedError -- pass a local path.
     """
     model = ConvNeXtV1.from_variant(
         variant,

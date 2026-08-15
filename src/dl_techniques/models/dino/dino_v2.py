@@ -60,8 +60,10 @@ final. This distinction is load-bearing for `ffn_type` and `num_register_tokens`
 when `'mlp'` was both the default and the promotion trigger for `giant`'s SwiGLU,
 a caller who explicitly asked `giant` for MLP was silently upgraded with no way to
 opt out. `patch_size=None` resolves to 14 for every v2 variant, since
-`MODEL_VARIANTS` carries no per-variant patch size. `pretrained=True` only logs a
-warning; no DINOv2 weights are shipped with this repository.
+`MODEL_VARIANTS` carries no per-variant patch size. No DINOv2 weights are shipped
+with this repository, so `pretrained=True` raises `NotImplementedError` rather
+than returning a randomly initialized model; warm-start from a local checkpoint
+with `model.load_weights(path)` instead.
 
 References:
     - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
@@ -1280,7 +1282,8 @@ def create_dino_v2(
         stochastic_depth_rate: Maximum stochastic depth rate.
         ffn_type: Type of FFN. ``None`` defers to the variant ('swiglu' for
             'giant', 'mlp' otherwise).
-        pretrained: Whether to load pretrained weights (not implemented).
+        pretrained: Must be False. `True` raises `NotImplementedError` — no
+            DINOv2 checkpoints ship with this package.
         **kwargs: Additional arguments for the model.
 
     Returns:
@@ -1311,8 +1314,20 @@ def create_dino_v2(
     """
     reject_input_shape(kwargs, "create_dino_v2")
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise instead of warning.
+    # Do NOT go back to `logger.warning(...)` and continuing: the call then
+    # succeeds, the weights are random, and the ONLY thing separating that from a
+    # real load is a log line the caller usually never sees. Do NOT "fix" this by
+    # widening `pretrained` to accept a path string either — build with
+    # `pretrained=False` and call `model.load_weights(path)`. See decisions.md D-069.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained DINOv2 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_dino_v2('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
 
     if patch_size is None:
         patch_size = _DEFAULT_PATCH_SIZE

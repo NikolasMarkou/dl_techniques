@@ -59,11 +59,11 @@ the same round-to-multiple-of-8 rule V2 uses, so it reproduces the paper's
 `alpha` family; it does not scale the head's 1280/1024 projection independently of
 that rule.
 
-`pretrained=True` on `create_mobilenetv3` logs a warning and returns a randomly
-initialized model. No checkpoints ship with this package, so pretrained weights
-are effectively unsupported: the call succeeds, the weights are random, and only a
-log line distinguishes that from success. Newer packages here (see
-`resnet/model.py`) raise instead; this module predates that contract.
+`pretrained=True` on `create_mobilenetv3` raises `NotImplementedError`. No
+checkpoints ship with this package. It used to succeed with random weights, with
+only a log line distinguishing that from a real load; the contract in
+`resnet/model.py` now holds here too. Warm-start from a local file with
+`model.load_weights(path)`.
 
 References:
     - Howard et al., 2019. Searching for MobileNetV3.
@@ -449,7 +449,8 @@ def create_mobilenetv3(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, multiplier for filter dimensions
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV3 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -465,8 +466,15 @@ def create_mobilenetv3(
         >>> # Create with custom width multiplier
         >>> model = create_mobilenetv3("large", width_multiplier=0.75)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV3 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv3('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras')."
+        )
 
     model = MobileNetV3.from_variant(
         variant,

@@ -68,9 +68,11 @@ requirement, `H % patch_size == 0`, is raised by `PatchEmbedding2D`.
 
 The classification head emits raw logits — layer-norm, global average pooling, a
 dense layer with no activation — so compile with `from_logits=True`.
-`create_swin_transformer(pretrained=True)` logs a warning and returns a randomly
-initialized model; no checkpoints ship with this package, so pretrained weights
-should be treated as unsupported here rather than as silently available.
+No checkpoints ship with this package, so `create_swin_transformer(pretrained=True)`
+raises `NotImplementedError`. It used to log a warning and return a randomly
+initialized model, which made an unavailable checkpoint indistinguishable from a
+successful load at the call site; warm-start from a local file with
+`model.load_weights(path)` instead.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
@@ -733,7 +735,8 @@ def create_swin_transformer(
         variant: String, model variant ("tiny", "small", "base", "large").
         num_classes: Integer, number of output classes.
         input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
-        pretrained: Boolean, load pretrained weights (not implemented yet).
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no Swin checkpoints ship with this package.
         **kwargs: Additional arguments passed to model constructor.
 
     Returns:
@@ -759,8 +762,15 @@ def create_swin_transformer(
         )
         ```
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained Swin Transformer weights are distributed with "
+            f"dl_techniques (requested variant '{variant}'). Build the "
+            f"architecture with pretrained=False and warm-start from a local "
+            f"checkpoint instead: model = create_swin_transformer('{variant}', "
+            f"...); model.load_weights('/path/to/weights.keras')."
+        )
 
     return SwinTransformer.from_variant(
         variant,
