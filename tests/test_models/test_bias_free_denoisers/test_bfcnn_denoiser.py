@@ -21,6 +21,8 @@ from dl_techniques.models.bias_free_denoisers.bfcnn import (
 )
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
+from .conftest import HOMOGENEITY_RTOL, HOMOGENEITY_SCALES, fit_one_step
+
 
 class TestBFCNNDenoiser:
     """Test suite for Bias-Free CNN Denoiser implementation."""
@@ -253,33 +255,42 @@ class TestBFCNNDenoiser:
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
 
-    def test_scaling_invariance_property(self, test_image_grayscale):
-        """Test the scaling invariance property of the bias-free model."""
+    def test_scaling_invariance_property(self, test_image_grayscale, homogeneity_probe):
+        """A TRAINED, factory-built BFCNN is degree-1 homogeneous.
+
+        Reaches the model through ``create_bfcnn_denoiser`` at its defaults -- NOT through
+        ``src/train/bfunet/train_bfcnn_denoiser.py``, which is where the ``'batchnorm'`` ->
+        ``BiasFreeBatchNorm`` remap used to live and which therefore masked this defect
+        from every trainer-side test.
+
+        The ``fit_one_step`` call is the entire point: on an untrained model stock
+        ``BatchNormalization`` has ``moving_mean == 0`` and is exactly homogeneous, so the
+        pre-2026-08-15 version of this test passed against a model that did not have the
+        property. See ``conftest.py`` for the tolerance derivation and the measured
+        pre-fix / post-fix numbers.
+        """
         model = create_bfcnn_denoiser(
             input_shape=(64, 64, 1),
-            num_blocks=3,
-            filters=32,
-            final_activation='linear'  # Important for scaling invariance
+            num_blocks=2,
+            filters=8,
+            final_activation='linear',  # required: any other activation is not homogeneous
         )
+        fit_one_step(model)
 
-        # Test scaling invariance: if input is scaled by α, output is scaled by α
-        alpha = 2
-        scaled_input = alpha * test_image_grayscale
+        for c in HOMOGENEITY_SCALES:
+            err = homogeneity_probe(model, test_image_grayscale, c)
+            assert err < HOMOGENEITY_RTOL, (
+                f"homogeneity violated at c={c}: relative error {err:.3e} exceeds "
+                f"{HOMOGENEITY_RTOL:.0e}. A trained bias-free denoiser must satisfy "
+                "f(c*x) = c*f(x) to float32 round-off"
+            )
 
-        original_output = model(test_image_grayscale)
-        scaled_output = model(scaled_input)
-
-        # The outputs should be related by the same scaling factor
-        # Allow for numerical tolerance - real implementations may have small deviations
-        # due to batch normalization, numerical precision, etc.
-        expected_scaled_output = alpha * original_output
-
-        # Use more relaxed tolerance to account for implementation details
-        np.testing.assert_allclose(
-            scaled_output.numpy(),
-            expected_scaled_output.numpy(),
-            rtol=1e-1,  # Relaxed tolerance for practical implementations
-            atol=1e-1   # Increased for numerical stability
+        moving_means = [w for w in model.weights if 'moving_mean' in w.path]
+        assert not moving_means, (
+            "the factory-built BFCNN still contains "
+            f"{len(moving_means)} moving_mean variable(s) -- it is using stock "
+            "BatchNormalization, whose moving_mean subtraction is an additive constant "
+            "that breaks f(c*x) = c*f(x)"
         )
 
     def test_different_batch_sizes(self, grayscale_input_shape):

@@ -18,7 +18,11 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.layers.bias_free_conv2d import (
+    BiasFreeConv2D,
+    BiasFreeResidualBlock,
+    resolve_denoiser_normalization,
+)
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations
@@ -88,9 +92,15 @@ def create_bfcnn_denoiser(
         initial_kernel_size: Integer or tuple, size of the first convolutional kernels. Defaults to 5.
         kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
         activation: String or callable, activation function. Defaults to 'relu'.
-        normalization_type: String, normalization used inside the residual blocks;
-            forwarded to ``BiasFreeResidualBlock`` (e.g. ``'batchnorm'``, ``'layernorm'``,
-            ``'bias_free_batchnorm'``). Defaults to ``'batchnorm'`` (current behavior).
+        normalization_type: String, normalization used inside the residual blocks; one of
+            ``'batchnorm'``, ``'layernorm'``, ``'bias_free_batchnorm'``. Defaults to
+            ``'batchnorm'``. **In this bias-free denoiser, ``'batchnorm'`` means the
+            variance-only ``BiasFreeBatchNorm``** (no ``moving_mean``, no beta), i.e. it is
+            an exact synonym of ``'bias_free_batchnorm'``; the resolution happens in
+            ``resolve_denoiser_normalization``. Stock ``keras.layers.BatchNormalization``
+            subtracts ``moving_mean`` at inference and is NOT degree-1 homogeneous, so it is
+            not reachable from this builder. ``'layernorm'`` is a per-input normalization and
+            is scale-INVARIANT (degree-0), not homogeneous.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'glorot_uniform'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
@@ -126,6 +136,13 @@ def create_bfcnn_denoiser(
     if filters <= 0:
         raise ValueError(f"filters must be positive, got {filters}")
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
+    # BiasFreeBatchNorm inside a bias-free denoiser. Do NOT pass `normalization_type`
+    # straight through to BiasFreeResidualBlock -- that reaches stock BatchNormalization,
+    # whose moving_mean subtraction breaks f(a*x)=a*f(x) once training has moved it off
+    # zero. See decisions.md D-020 and the anchor in layers/bias_free_conv2d.py.
+    block_normalization_type = resolve_denoiser_normalization(normalization_type)
+
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
@@ -146,7 +163,7 @@ def create_bfcnn_denoiser(
             filters=filters,
             kernel_size=kernel_size,
             activation=activation,
-            normalization_type=normalization_type,
+            normalization_type=block_normalization_type,
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             name=f'residual_block_{i}'

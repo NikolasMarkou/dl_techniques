@@ -121,8 +121,9 @@ class BFCNNTrainingConfig(BFUnetTrainingConfig):
     kernel_size: int = 3            # kernel for the residual blocks
     # NOTE: block activation/normalization are inherited from BFUnetTrainingConfig
     # (block_activation='leaky_relu', block_activation_alpha=0.1, block_normalization=
-    # 'batchnorm' -> mapped to the real BiasFreeBatchNorm in build_model, D-006). BFCNN
-    # no longer carries a local `activation` field / --activation flag (retired, D-004).
+    # 'batchnorm', which the BFCNN model factory itself resolves to the real
+    # BiasFreeBatchNorm, D-020). BFCNN no longer carries a local `activation` field /
+    # --activation flag (retired, D-004).
 
     def __post_init__(self):
         super().__post_init__()
@@ -147,17 +148,14 @@ def build_model(config: BFCNNTrainingConfig) -> keras.Model:
     build_model passes only the closed BFCNN kwarg set.
     """
     input_shape = (config.patch_size, config.patch_size, config.channels)
-    # DECISION plan_2026-07-05_2199bb8e/D-006: map trainer 'batchnorm' -> real homogeneous
-    # BiasFreeBatchNorm (variance-only, no moving_mean/beta -> degree-1 homogeneous at
-    # inference), NOT stock keras.BatchNormalization(center=False) which subtracts
-    # moving_mean and breaks f(ax)=a*f(x). 'layernorm' passes through unchanged. Do NOT
-    # revert this to bare 'batchnorm' -> the residual blocks would silently rebuild stock
-    # BN and the model would stop being homogeneous. See decisions.md D-006.
-    norm = (
-        "bias_free_batchnorm"
-        if config.block_normalization == "batchnorm"
-        else config.block_normalization
-    )
+    # The local 'batchnorm' -> 'bias_free_batchnorm' remap that used to sit here
+    # (plan_2026-07-05_2199bb8e/D-006) was DELETED by
+    # plan-2026-08-14T233721-d4f9beb2/D-020 because the decision MOVED, not because it was
+    # wrong: `create_bfcnn_denoiser` / `create_bfcnn_variant` now resolve it themselves via
+    # `layers/bias_free_conv2d.resolve_denoiser_normalization`. D-006's guarantee -- the
+    # residual blocks never rebuild stock BN -- still holds, and now holds for a caller who
+    # reaches the model factory without going through this trainer. Do NOT re-add a remap
+    # here; two copies of one decision is what made the model API wrong.
     # Exact slope 0.1 requires a LeakyReLU INSTANCE — the bare string "leaky_relu" resolves
     # to Keras slope 0.2. Shared across stem + N blocks (safe: BiasFreeConv2D wraps it in a
     # per-block Activation and dict-serializes it, A7).
@@ -171,7 +169,7 @@ def build_model(config: BFCNNTrainingConfig) -> keras.Model:
             config.variant,
             input_shape=input_shape,
             activation=act,
-            normalization_type=norm,
+            normalization_type=config.block_normalization,
         )
     # variant == "custom" (validated in __post_init__)
     return create_bfcnn_denoiser(
@@ -181,7 +179,7 @@ def build_model(config: BFCNNTrainingConfig) -> keras.Model:
         initial_kernel_size=config.initial_kernel_size,
         kernel_size=config.kernel_size,
         activation=act,
-        normalization_type=norm,
+        normalization_type=config.block_normalization,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name="bfcnn_denoiser_custom",
     )

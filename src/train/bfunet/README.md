@@ -138,11 +138,13 @@ in the per-trainer sections below.
 
 > **All three trainers now default to `block_activation=leaky_relu` (alpha `0.1`) and
 > `block_normalization=batchnorm`.** For the ConvUNeXt / plain-U-Net / BFCNN denoisers, `batchnorm`
-> resolves to the real degree-1-homogeneous `BiasFreeBatchNorm`: ConvUNeXt already used it via its
-> ConvNeXt blocks, and BFCNN + the plain U-Net were switched onto it (their `BiasFreeConv2D` /
-> `BiasFreeResidualBlock` `'batchnorm'` opt into the additive `'bias_free_batchnorm'` value). As a
-> result **all three are now degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is a
-> valid scaled score (Miyasawa/Tweedie).
+> resolves to the real degree-1-homogeneous `BiasFreeBatchNorm`, and **all three resolve it inside
+> the MODEL builder, not here**: ConvUNeXt via its ConvNeXt blocks, and the plain U-Net + BFCNN via
+> `layers/bias_free_conv2d.resolve_denoiser_normalization`, which `create_bfunet_denoiser` /
+> `create_bfcnn_denoiser` call themselves. The trainer forwards `--block-normalization` unchanged.
+> As a result **all three are degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is
+> a valid scaled score (Miyasawa/Tweedie) — and so is a denoiser someone builds through the model
+> factory without this trainer, which was NOT true before 2026-08-15 (plan `d4f9beb2`, D-020).
 
 **Noise curriculum** — training sweeps `sigma_max` from a narrow low-noise range up to a wide one:
 
@@ -268,8 +270,8 @@ Model-specific flags (beyond the shared set):
 
 > **`--activation` was retired.** BFCNN now uses the shared `--block-activation` /
 > `--block-activation-alpha` knobs (default `leaky_relu` slope `0.1`), and its residual blocks run
-> the real variance-only `BiasFreeBatchNorm` (the trainer maps `block_normalization=batchnorm` →
-> the additive `'bias_free_batchnorm'` option), so the trainer-built BFCNN is now degree-1
+> the real variance-only `BiasFreeBatchNorm` (the BFCNN model builder itself resolves
+> `normalization_type='batchnorm'` to `'bias_free_batchnorm'`), so every BFCNN is degree-1
 > homogeneous — previously it used stock `relu` + `BatchNormalization(center=False)` and was not.
 
 ```bash

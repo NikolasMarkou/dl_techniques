@@ -1,10 +1,20 @@
 """Bias-free 2D convolutional building block for scaling-invariant networks.
 
-Removes all additive constants (convolution bias and batch normalization
-center/beta) to enable better generalization across noise levels in image
-denoising tasks. The forward computation is
-``y = activation(BN(Conv2D(x)))`` where both BN and Conv2D are bias-free,
-ensuring that ``f(alpha * x) = alpha * f(x)`` for any positive scalar alpha.
+Removes the convolution bias and the normalization beta to enable better
+generalization across noise levels in image denoising tasks. The forward
+computation is ``y = activation(Norm(Conv2D(x)))``.
+
+Dropping beta is necessary but NOT sufficient for degree-1 homogeneity
+``f(alpha * x) = alpha * f(x)``. Of the three ``normalization_type`` values only
+``'bias_free_batchnorm'`` delivers it: ``'batchnorm'`` is stock
+``BatchNormalization(center=False)``, which still subtracts a ``moving_mean``
+that training moves off zero (an additive constant), and ``'layernorm'`` divides
+by a per-input std, making it scale-*invariant* (degree-0) rather than
+equivariant. The ``'batchnorm'`` spelling is kept as-is here on purpose: it is
+the name every ``.keras`` config written before ``'bias_free_batchnorm'`` existed
+carries, so redefining it would change the layer class those checkpoints reload
+into. Bias-free denoiser *models* therefore map the name at the model level via
+:func:`resolve_denoiser_normalization` below, not here.
 
 Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
 Convolutional Neural Networks" (Mohan et al., ICLR 2020).
@@ -20,6 +30,66 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from ..utils.logger import logger
 from .norms.bias_free_batch_norm import BiasFreeBatchNorm
+
+# ---------------------------------------------------------------------
+
+
+def resolve_denoiser_normalization(normalization_type: str) -> str:
+    """Resolve a bias-free *denoiser model's* normalization name to a layer name.
+
+    This is the MODEL-level policy for the bias-free denoiser family
+    (``models/bias_free_denoisers/``): inside a model whose entire reason to exist
+    is degree-1 homogeneity ``f(a*x) = a*f(x)``, the name ``'batchnorm'`` means the
+    homogeneous variance-only :class:`~dl_techniques.layers.norms.bias_free_batch_norm.BiasFreeBatchNorm`,
+    never stock ``keras.layers.BatchNormalization``. Every other name passes through
+    unchanged, so the function is idempotent and the set of reachable layer types is
+    unchanged.
+
+    It exists so that the ``'batchnorm'`` -> ``BiasFreeBatchNorm`` decision has exactly
+    ONE home. Call it from a model builder, never from a layer: the LAYER vocabulary of
+    :class:`BiasFreeConv2D` / :class:`BiasFreeResidualBlock` is deliberately left intact
+    (there, ``'batchnorm'`` still builds stock BN), which is what keeps every ``.keras``
+    checkpoint saved before this function existed reloading byte-identically -- layers
+    deserialize from their own serialized ``normalization_type``, never through a builder.
+
+    Interface contract:
+
+    :param normalization_type: A layer-level normalization name. Any string is accepted;
+        validation is the caller's job (the builders and the layers both already raise on
+        an unknown value, and adding a raise here would break deserialization of configs
+        written under an older default).
+    :type normalization_type: str
+    :return: ``'bias_free_batchnorm'`` when given ``'batchnorm'``; the input unchanged
+        otherwise.
+    :rtype: str
+
+    Example::
+
+        >>> resolve_denoiser_normalization('batchnorm')
+        'bias_free_batchnorm'
+        >>> resolve_denoiser_normalization('layernorm')
+        'layernorm'
+    """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' is resolved to
+    # BiasFreeBatchNorm HERE, at the bias-free denoiser MODEL level, and nowhere else.
+    #   * Do NOT push this mapping down into BiasFreeConv2D / BiasFreeResidualBlock. Their
+    #     'batchnorm' branch must keep building stock BatchNormalization(center=False):
+    #     that is the layer vocabulary a saved config names, so redefining it would silently
+    #     change the layer class every pre-existing .keras denoiser reloads into.
+    #   * Do NOT re-add the mapping to `src/train/bfunet/train_unet_denoiser.py` or
+    #     `train_bfcnn_denoiser.py`. Those two copies (plan_2026-07-05_2199bb8e D-006/D-007,
+    #     deleted here) were correct compensations placed one level too high: a caller using
+    #     `create_bfunet_denoiser` / `create_bfcnn_denoiser` directly never went through them
+    #     and got stock BN. Their "Do NOT revert" guarantee -- never stock BN -- is preserved,
+    #     and now holds for the model API too.
+    #   * Do NOT raise on an unrecognized value here; the builders validate before calling.
+    # Measured (CPU, one fit() step, model factory at defaults): stock BN gives a relative
+    # homogeneity error of 6.8e-03 (bfunet) / 1.3e-02 (bfcnn); BiasFreeBatchNorm gives
+    # 0.0 at c=0.5 and 1.1e-06 at c=3.0 (float32 round-off). See decisions.md D-020.
+    if normalization_type == 'batchnorm':
+        return 'bias_free_batchnorm'
+    return normalization_type
+
 
 # ---------------------------------------------------------------------
 

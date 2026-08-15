@@ -19,12 +19,16 @@ the noisy-image distribution.
 
 The constraint is fragile in a way that is easy to miss. Homogeneity is only
 degree-one if *nothing* in the graph adds a constant, and ordinary
-normalization layers do. `block_normalization` therefore selects between
-`bias_free_batchnorm`, which preserves it exactly, and `batchnorm` /
-`layernorm`, which do not -- layer normalization in particular subtracts a
-per-sample mean and breaks homogeneity outright. Choosing a normalization here
-is choosing whether the model still has the property the architecture exists
-for.
+normalization layers do. `block_normalization` therefore selects between the
+variance-only `BiasFreeBatchNorm`, which preserves homogeneity exactly, and
+`layernorm`, which does not -- layer normalization subtracts a per-sample mean
+and divides by a per-sample std, making it scale-*invariant* rather than
+scale-equivariant. Inside this model `batchnorm` is a synonym for
+`bias_free_batchnorm`, resolved once in `resolve_denoiser_normalization`: stock
+`keras.layers.BatchNormalization` subtracts a `moving_mean` that training moves
+off zero, so it is not reachable from this builder at all. Choosing a
+normalization here is choosing whether the model still has the property the
+architecture exists for.
 
 Structurally this is a standard U-Net: an encoder of bias-free convolution
 blocks with downsampling, a bottleneck, and a decoder that upsamples and
@@ -86,7 +90,11 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.layers.bias_free_conv2d import (
+    BiasFreeConv2D,
+    BiasFreeResidualBlock,
+    resolve_denoiser_normalization,
+)
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.match_channels import MatchChannels
 
@@ -203,6 +211,17 @@ def create_bfunet_denoiser(
             the decoder skip. **Ignored when use_laplacian_pyramid=False.** Defaults to 0
             (byte-identical no-op: adds ZERO layers, renames nothing).
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to True.
+        block_normalization: String, one of 'batchnorm', 'layernorm', 'bias_free_batchnorm'.
+            Defaults to 'batchnorm'. **'batchnorm' is an exact synonym of
+            'bias_free_batchnorm' here** — the variance-only ``BiasFreeBatchNorm`` (no
+            moving_mean, no beta, degree-1 homogeneous at inference). Stock
+            ``keras.layers.BatchNormalization`` is deliberately not reachable from this
+            builder: its moving_mean subtraction breaks f(a*x)=a*f(x). 'layernorm' is a
+            per-input normalization and is scale-INVARIANT (degree-0), not homogeneous.
+            Applied to every encoder / bottleneck / decoder block **and to the
+            deep-supervision heads** (unlike ConvUNext, whose head norm is out of scope).
+        dropout_rate: Float in [0.0, 1.0), dropout applied after the activation inside every
+            block and inside the deep-supervision heads. Defaults to 0.0 (no Dropout sublayer).
         model_name: String, name for the model. Defaults to 'bias_free_unet'.
 
     Returns:
@@ -261,6 +280,13 @@ def create_bfunet_denoiser(
         raise ValueError(
             "block_normalization must be 'batchnorm', 'layernorm' or 'bias_free_batchnorm', "
             f"got {block_normalization}")
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
+    # BiasFreeBatchNorm inside a bias-free denoiser. `block_norm` -- NOT the raw
+    # `block_normalization` argument -- is what every block, and the deep-supervision head,
+    # must receive: the raw value reaches stock BatchNormalization, whose moving_mean
+    # subtraction breaks f(a*x)=a*f(x) once training has moved it off zero. See decisions.md
+    # D-020 and the anchor in layers/bias_free_conv2d.py.
+    block_norm = resolve_denoiser_normalization(block_normalization)
     if downsample_pool_type not in ('max', 'average'):
         raise ValueError(
             f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}")
@@ -338,7 +364,7 @@ def create_bfunet_denoiser(
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
                     use_batch_norm=True,
-                    normalization_type=block_normalization,
+                    normalization_type=block_norm,
                     dropout_rate=dropout_rate,
                     name=f'encoder_level_{level}_conv_{block_idx}'
                 )(x)
@@ -350,7 +376,7 @@ def create_bfunet_denoiser(
                         activation=activation,
                         kernel_initializer=kernel_initializer,
                         kernel_regularizer=kernel_regularizer,
-                        normalization_type=block_normalization,
+                        normalization_type=block_norm,
                         dropout_rate=dropout_rate,
                         name=f'encoder_level_{level}_residual_block_{block_idx}'
                     )(x)
@@ -362,7 +388,7 @@ def create_bfunet_denoiser(
                         kernel_initializer=kernel_initializer,
                         kernel_regularizer=kernel_regularizer,
                         use_batch_norm=True,
-                        normalization_type=block_normalization,
+                        normalization_type=block_norm,
                         dropout_rate=dropout_rate,
                         name=f'encoder_level_{level}_conv_{block_idx}'
                     )(x)
@@ -408,7 +434,7 @@ def create_bfunet_denoiser(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
-                    normalization_type=block_normalization,
+                    normalization_type=block_norm,
                     dropout_rate=dropout_rate,
                     name=f'skip_highfreq_block_{level}_{hf_idx}'
                 )(skip)
@@ -434,7 +460,7 @@ def create_bfunet_denoiser(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                normalization_type=block_normalization,
+                normalization_type=block_norm,
                 dropout_rate=dropout_rate,
                 name=f'bottleneck_residual_block_{block_idx}'
             )(x)
@@ -446,7 +472,7 @@ def create_bfunet_denoiser(
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 use_batch_norm=True,
-                normalization_type=block_normalization,
+                normalization_type=block_norm,
                 dropout_rate=dropout_rate,
                 name=f'bottleneck_conv_{block_idx}'
             )(x)
@@ -513,7 +539,7 @@ def create_bfunet_denoiser(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
-                    normalization_type=block_normalization,
+                    normalization_type=block_norm,
                     dropout_rate=dropout_rate,
                     name=f'decoder_level_{level}_residual_block_{block_idx}'
                 )(x)
@@ -525,7 +551,7 @@ def create_bfunet_denoiser(
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
                     use_batch_norm=True,
-                    normalization_type=block_normalization,
+                    normalization_type=block_norm,
                     dropout_rate=dropout_rate,
                     name=f'decoder_level_{level}_conv_{block_idx}'
                 )(x)
@@ -536,6 +562,11 @@ def create_bfunet_denoiser(
 
         if enable_deep_supervision and level > 0:
             # Create supervision output at current scale from a branch
+            # The supervision head is IN SCOPE for `block_normalization` (unlike
+            # ConvUNext's, which documents its head LayerNorm as deliberately out of
+            # scope). It feeds gradient straight into the decoder, so leaving it on stock
+            # BN while every block used BiasFreeBatchNorm made that gradient
+            # scale-dependent. `dropout_rate` is forwarded for the same reason.
             supervision_branch = BiasFreeConv2D(
                 filters=initial_filters,
                 kernel_size=3,
@@ -543,6 +574,8 @@ def create_bfunet_denoiser(
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 use_batch_norm=True,
+                normalization_type=block_norm,
+                dropout_rate=dropout_rate,
                 name=f'supervision_intermediate_level_{level}'
             )(x)
 
