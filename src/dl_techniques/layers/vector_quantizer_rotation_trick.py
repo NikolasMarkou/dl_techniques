@@ -70,9 +70,15 @@ optimizer's learning rate and momentum state. Dead-code expiration counts
 consecutive calls in which a code receives no assignments and reinitializes
 entries past a threshold from vectors in the current batch, recovering capacity
 lost to codebook collapse. A one-shot k-means warm start seeds the codebook
-from accumulated encoder statistics on the first training batches, avoiding the
-large initial mismatch between a randomly initialized codebook and the encoder
-distribution.
+from accumulated encoder statistics, avoiding the large initial mismatch between
+a randomly initialized codebook and the encoder distribution. It runs in
+`warm_start_codebook`, eagerly and before training, NOT inside `call`: until
+2026-08-15 it lived in `call`, where reading its own `kmeans_init_done` flag
+meant `np.asarray` on a graph tensor -- which raises the moment anyone calls
+`model.fit()` -- and where its accumulator was a plain Python list appended to
+inside a traced function, so `kmeans_init_steps > 1` collected one trace's worth
+of data rather than N batches. Every k-means test called the layer eagerly, the
+one regime in which neither failure is visible.
 
 This implementation is a strict superset of a standard vector quantizer.
 Setting `gradient_mode='ste'` with `num_heads=1`, `distance_mode='euclidean'`,
@@ -174,8 +180,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     :param ema_decay: EMA decay rate.
     :param epsilon: Numerical floor for norms / EMA / cosine.
     :param num_heads: Number of independent codebook heads (channel split).
-    :param kmeans_init: Run a one-shot k-means warm start on first training call.
-    :param kmeans_init_steps: Number of mini-batches to accumulate for k-means.
+    :param kmeans_init: Enable the one-shot k-means warm start. This flag does
+        NOT trigger it: the warm start runs scikit-learn and assigns a variable,
+        neither of which is graph-safe, so it is performed by
+        :meth:`warm_start_codebook`, called eagerly before training.
+        :class:`~dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick`
+        calls it for you from its ``fit`` override.
+    :param kmeans_init_steps: Number of mini-batches the caller should collect
+        before invoking :meth:`warm_start_codebook`.
     :param kmeans_seed: Deterministic numpy seed for k-means.
     :param dead_code_threshold: Consecutive unused-call count after which a
         code is re-initialised. 0 disables.
@@ -277,7 +289,6 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         self.ema_embeddings = None
         self.dead_code_unused = None
         self.kmeans_init_done = None
-        self._kmeans_accum = []  # python list, NOT a weight
 
         # K-means availability check (deferred to first use)
         if self.kmeans_init:
@@ -384,13 +395,15 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # Flatten everything but channels: (..., D) -> (N, D)
         flat_inputs = keras.ops.reshape(inputs, (-1, self.embedding_dim))
 
-        # K-means warm start (Python side; one-shot)
-        if (
-                self.kmeans_init
-                and training is True
-                and float(keras.ops.convert_to_numpy(self.kmeans_init_done)) < 0.5
-        ):
-            self._maybe_kmeans_init(flat_inputs)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-040
+        # NO k-means work here. `call()` is traced: it ran
+        # `float(keras.ops.convert_to_numpy(self.kmeans_init_done))`, which on
+        # the TF backend is `np.asarray(graph_tensor)` and RAISES under
+        # `model.fit()`, and it appended to a plain Python list, which
+        # accumulates once per TRACE rather than once per batch, so
+        # `kmeans_init_steps > 1` silently saw one batch. The warm start now
+        # lives in `warm_start_codebook`, called eagerly before training.
+        # Do NOT move it back inside `call` in any form. See decisions.md D-040.
 
         # Reshape to (N, H, head_dim)
         flat_heads = keras.ops.reshape(flat_inputs, (-1, self.num_heads, self.head_dim))
@@ -665,8 +678,37 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     # k-means warm start
     # ------------------------------------------------------------------
 
-    def _maybe_kmeans_init(self, flat_inputs: keras.KerasTensor) -> None:
-        """Accumulate batches then run MiniBatchKMeans once."""
+    def warm_start_codebook(self, batches: Any) -> None:
+        """Initialise the codebook from encoder outputs by MiniBatchKMeans.
+
+        Interface contract (public entry point, called from
+        :meth:`dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick.warm_start_codebook`
+        and usable directly for a standalone quantizer):
+
+        - **Parameters**: ``batches`` — either one array-like of shape
+          ``(N, embedding_dim)`` or a sequence of such arrays, which are
+          concatenated. These are the ENCODER OUTPUTS the quantizer will see,
+          already flattened over every non-channel axis.
+        - **Returns**: ``None``. It assigns ``self.embeddings`` and sets
+          ``kmeans_init_done`` to 1.0.
+        - **Failure mode**: ``RuntimeError`` if scikit-learn is missing;
+          ``ValueError`` if the layer is not built, if ``kmeans_init`` is
+          ``False`` (there is no ``kmeans_init_done`` variable in that case),
+          or if the last axis is not ``embedding_dim``. A head with fewer
+          samples than clusters logs a warning and pads from the current
+          codebook rather than failing.
+
+        **Call this EAGERLY, before training.** It runs scikit-learn and
+        assigns a variable, neither of which is graph-safe; it must never be
+        reached from inside ``call()``.
+
+        :param batches: Encoder outputs, ``(N, embedding_dim)`` or a sequence
+            of such arrays.
+        :type batches: Any
+        :raises RuntimeError: If scikit-learn is not installed.
+        :raises ValueError: If the layer is unbuilt, ``kmeans_init`` is False,
+            or the feature dimension does not match ``embedding_dim``.
+        """
         try:
             from sklearn.cluster import MiniBatchKMeans
         except ImportError as exc:  # defensive — already checked in __init__
@@ -674,16 +716,36 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
                 "kmeans_init=True requires scikit-learn."
             ) from exc
 
-        # Accumulate this batch's encoder vectors as a numpy array.
-        # flat_inputs shape (N, D); reshape per head to (N*H, head_dim).
-        np_inputs = np.asarray(keras.ops.convert_to_numpy(flat_inputs))
-        np_heads = np_inputs.reshape(-1, self.num_heads, self.head_dim)
-        self._kmeans_accum.append(np_heads)
+        if not self.built:
+            raise ValueError(
+                "warm_start_codebook requires a built layer: the codebook "
+                "variable does not exist yet. Call the layer once, or build "
+                "it explicitly, first."
+            )
+        if not self.kmeans_init:
+            raise ValueError(
+                "warm_start_codebook requires kmeans_init=True; with "
+                "kmeans_init=False there is no kmeans_init_done variable to "
+                "mark, and the codebook keeps its initializer's values."
+            )
 
-        if len(self._kmeans_accum) < self.kmeans_init_steps:
-            return  # need more batches
+        if isinstance(batches, (list, tuple)):
+            arrays = [np.asarray(keras.ops.convert_to_numpy(b)) for b in batches]
+        else:
+            arrays = [np.asarray(keras.ops.convert_to_numpy(batches))]
 
-        all_batches = np.concatenate(self._kmeans_accum, axis=0)  # (N_total, H, D_h)
+        flat = [a.reshape(-1, a.shape[-1]) for a in arrays]
+        for a in flat:
+            if a.shape[-1] != self.embedding_dim:
+                raise ValueError(
+                    f"warm_start_codebook expects vectors of width "
+                    f"embedding_dim={self.embedding_dim}, got {a.shape[-1]}."
+                )
+
+        all_batches = np.concatenate(
+            [a.reshape(-1, self.num_heads, self.head_dim) for a in flat],
+            axis=0,
+        )  # (N_total, H, D_h)
         new_codebook = np.zeros(
             (self.num_heads, self.num_embeddings, self.head_dim), dtype=np.float32
         )
@@ -721,11 +783,21 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
 
         self.embeddings.assign(new_codebook)
         self.kmeans_init_done.assign(1.0)
-        self._kmeans_accum = []
         logger.info(
             f"kmeans_init: codebook initialised from "
             f"{all_batches.shape[0]} samples across {self.num_heads} head(s)."
         )
+
+    @property
+    def is_codebook_warm_started(self) -> bool:
+        """True once :meth:`warm_start_codebook` has run.
+
+        Reads the ``kmeans_init_done`` variable EAGERLY. Never call this from
+        inside ``call()`` -- that is the graph read this defect was.
+        """
+        if not self.kmeans_init or self.kmeans_init_done is None:
+            return False
+        return float(keras.ops.convert_to_numpy(self.kmeans_init_done)) >= 0.5
 
     # ------------------------------------------------------------------
     # aux losses

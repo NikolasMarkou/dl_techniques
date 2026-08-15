@@ -329,29 +329,52 @@ class TestDeadCode:
 # ============================================================================
 
 class TestKMeansInit:
-    def test_kmeans_init_changes_codebook(self, base_config, sample_input_2d):
+    """The warm start is an EAGER, explicit call -- never a side effect of `call`.
+
+    These two tests drove the layer eagerly through `call(training=True)` until
+    2026-08-15, which is exactly the regime that hid the defect they were
+    supposed to cover (see `test_kmeans_graph_mode.py`).
+    """
+
+    def test_warm_start_changes_codebook(self, base_config, sample_input_2d):
         base_config["kmeans_init"] = True
         base_config["kmeans_init_steps"] = 1
         layer = VectorQuantizerRotationTrick(**base_config)
         _ = layer(sample_input_2d, training=False)  # build
         cb_before = ops.convert_to_numpy(layer.embeddings).copy()
+        assert not layer.is_codebook_warm_started
         assert float(ops.convert_to_numpy(layer.kmeans_init_done)) < 0.5
-        _ = layer(sample_input_2d, training=True)
+
+        flat = ops.reshape(sample_input_2d, (-1, base_config["embedding_dim"]))
+        layer.warm_start_codebook(flat)
+
         cb_after = ops.convert_to_numpy(layer.embeddings)
+        assert layer.is_codebook_warm_started
         assert float(ops.convert_to_numpy(layer.kmeans_init_done)) > 0.5
         assert not np.allclose(cb_before, cb_after)
 
-    def test_kmeans_init_runs_only_once(self, base_config, sample_input_2d):
+    def test_call_does_not_warm_start(self, base_config, sample_input_2d):
+        """A training call must leave the flag alone: `call` does no k-means."""
         base_config["kmeans_init"] = True
         layer = VectorQuantizerRotationTrick(**base_config)
         _ = layer(sample_input_2d, training=True)
-        cb_after_first = ops.convert_to_numpy(layer.embeddings).copy()
-        # second training call must NOT re-run k-means (gradient updates may
-        # change codebook but only marginally; we check the flag).
-        assert float(ops.convert_to_numpy(layer.kmeans_init_done)) > 0.5
-        _ = layer(sample_input_2d, training=True)
-        # flag stays at 1
-        assert float(ops.convert_to_numpy(layer.kmeans_init_done)) > 0.5
+        assert float(ops.convert_to_numpy(layer.kmeans_init_done)) < 0.5
+        assert not layer.is_codebook_warm_started
+
+    def test_warm_start_requires_a_built_layer(self, base_config, sample_input_2d):
+        base_config["kmeans_init"] = True
+        layer = VectorQuantizerRotationTrick(**base_config)
+        flat = ops.reshape(sample_input_2d, (-1, base_config["embedding_dim"]))
+        with pytest.raises(ValueError, match="built"):
+            layer.warm_start_codebook(flat)
+
+    def test_warm_start_requires_kmeans_init(self, base_config, sample_input_2d):
+        base_config["kmeans_init"] = False
+        layer = VectorQuantizerRotationTrick(**base_config)
+        _ = layer(sample_input_2d, training=False)
+        flat = ops.reshape(sample_input_2d, (-1, base_config["embedding_dim"]))
+        with pytest.raises(ValueError, match="kmeans_init=True"):
+            layer.warm_start_codebook(flat)
 
 
 # ============================================================================
