@@ -59,7 +59,24 @@ class NAM(keras.Model):
     The model uses Adaptive Computation Time (ACT) from TRM to dynamically
     decide how many reduction steps are needed. Simple expressions like
     ``1 + 2`` take 1 step; complex expressions like ``(1 + 2) * (3 + 4)``
-    take 3 steps.
+    take 3 steps. That is true at inference as well as during training: both
+    branches halt on ``q_halt > 0`` (D-033). It was NOT true before
+    2026-08-15 — inference halted on ``halt_max_steps`` alone, so every
+    sequence ran the full budget and the sentence above was false. Note that
+    ``q_halt`` only earns its keep if the trainer supervises it;
+    ``src/train/nam/train_nam.py`` does so via ``--w-halt`` (D-034), and
+    ``--w-halt 0`` reproduces the untrained-head behaviour.
+
+    .. note::
+
+       **This model is driven by a training loop, not by Keras.** ``call``
+       takes ``(carry, batch)`` rather than an ``inputs``-first signature, so
+       ``predict()``, ``fit()`` and ``.save()``-with-build-config cannot drive
+       it; ``src/train/nam/train_nam.py`` calls it directly in a hand-rolled
+       ACT unroll. This is an accepted limitation, not an oversight: the
+       recursion needs a carry no single input tensor can supply, and
+       reordering the parameters would break the trainer and every saved build
+       config for a benefit nothing here asks for.
 
     :param config: NAM configuration (dataclass or dict).
     :type config: Union[NAMConfig, Dict[str, Any]]
@@ -342,7 +359,26 @@ class NAM(keras.Model):
             step_ok = ops.greater_equal(steps, min_steps)
             new_halted = ops.logical_and(new_halted, step_ok)
         else:
-            new_halted = is_last_step
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-033: inference consults
+            # the LEARNED `q_halt` too, mirroring the training branch above minus
+            # the exploration term. This used to be `new_halted = is_last_step`
+            # alone, so every sequence ran the full `halt_max_steps` at eval and
+            # the trained ACT head was INERT at exactly the moment adaptivity is
+            # claimed — contradicting this class's own docstring ("simple
+            # expressions like ``1 + 2`` take 1 step"). `halt_exploration_prob`
+            # and `halt_max_steps` bought nothing measurable.
+            #
+            # The predicate is `q_halt > 0`, NOT `q_halt > q_continue`: that is
+            # what the training branch uses, and the two branches must agree or
+            # the head is trained against one rule and read under another. It is
+            # the same choice `tiny_recursive_model` exposes as
+            # `no_act_continue=True`. `q_continue` is therefore NOT on NAM's
+            # halting path at all; do not "restore symmetry" by switching this
+            # to a two-action comparison without also changing the training
+            # branch and adding the Bellman arm to the trainer's `L_halt`.
+            # See decisions.md D-033.
+            halt_signal = ops.greater(q_halt, ops.cast(0.0, q_halt.dtype))
+            new_halted = ops.logical_or(is_last_step, halt_signal)
 
         # --- Result readout ---
         # Pool hidden state for final prediction

@@ -94,7 +94,11 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `vq_vae/` — VQ-VAE
 - `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
 - `lewm/` — Latent-energy world model
-- `nam/` — Neural additive model
+- `nam/` — Neural Arithmetic **Module**: a tree-transformer parse + NTM memory + TRM
+  halting stack that evaluates arithmetic expressions. **Not** a Neural Additive Model —
+  there is no per-feature additive model anywhere in the package. This entry said
+  "Neural additive model" until 2026-08-15; `nam/model.py`'s own module docstring has
+  always said Module.
 - `fnet/` — FNet (Fourier)
 - `fftnet/` — FFTNet
 - `pw_fnet/` — Patchwise FNet
