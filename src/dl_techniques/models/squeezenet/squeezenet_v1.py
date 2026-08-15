@@ -385,7 +385,11 @@ class SqueezeNetV1(keras.Model):
         """Build all Fire modules with optional pooling and bypass."""
         bypass_indices = []
         if self.use_bypass == "simple":
-            bypass_indices = [2, 4, 6, 8]  # Fire3, 5, 7, 9 (0-indexed: 2, 4, 6, 7)
+            # Fire modules are named fire{idx+2}, so the paper's simple-bypass
+            # positions fire3/5/7/9 are idx = 1, 3, 5, 7 -- and those are exactly
+            # the positions whose input and output widths match (128->128,
+            # 256->256, 384->384, 512->512), which the Add below requires.
+            bypass_indices = [1, 3, 5, 7]  # fire3, fire5, fire7, fire9
         elif self.use_bypass == "complex":
             bypass_indices = list(range(len(self.fire_configs)))
 

@@ -169,7 +169,9 @@ class TestSqueezeNetV1:
         ]
 
         for shape in test_shapes:
-            # Use the less aggressive v1.1 for small inputs to avoid pooling errors
+            # v1.1 pools later, so it keeps more spatial resolution on small
+            # inputs. (Measured 2026-08-15: "1.0" at (32, 32, 3) does build and
+            # forward -- the older "to avoid pooling errors" note was stale.)
             variant = "1.1" if shape[0] < 64 else "1.0"
 
             model = SqueezeNetV1.from_variant(

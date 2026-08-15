@@ -491,11 +491,15 @@ class SqueezeNoduleNetV2(keras.Model):
         x = globalpool(x)
         self.head_layers.append(globalpool)
 
-        # Softmax activation for binary classification
-        if self.num_classes == 2:
-            activation = 'sigmoid'
-        else:
-            activation = 'softmax'
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-063: softmax at EVERY
+        # num_classes, including 2. Do NOT restore the num_classes == 2 ->
+        # 'sigmoid' special case: the head is Conv2D(num_classes) -> GAP, so with
+        # sigmoid the two outputs are independent and do not sum to 1, while the
+        # package's own num_classes=2 examples are compiled with
+        # categorical_crossentropy. SqueezeNetV1 softmaxes on the same argument.
+        # A single-logit sigmoid head would be the other consistent option; it is
+        # rejected because it changes the output SHAPE. See decisions.md D-063.
+        activation = 'softmax'
 
         final_activation = layers.Activation(activation, name='predictions')
         x = final_activation(x)

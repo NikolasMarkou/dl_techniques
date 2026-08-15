@@ -138,16 +138,28 @@ class TestSqueezeNoduleNetV2:
         assert features.shape[-1] == expected_channels
 
     def test_binary_classification_head(self, num_classes_binary, sample_data_2d):
-        """Test that binary classification uses sigmoid activation."""
+        """Binary classification uses softmax, like every other class count.
+
+        Updated for D-063 (C-9): the head is Conv2D(num_classes) -> GAP, so the
+        previous num_classes == 2 -> sigmoid special case emitted two INDEPENDENT
+        scores that did not sum to 1, disagreeing with SqueezeNetV1 and with this
+        package's own categorical_crossentropy examples.
+        """
         model = SqueezeNoduleNetV2(num_classes=num_classes_binary, input_shape=sample_data_2d.shape[1:])
 
-        # The last layer should be an Activation layer with sigmoid
+        # The last layer should be an Activation layer with softmax
         assert isinstance(model.head_layers[-1], keras.layers.Activation)
-        assert model.head_layers[-1].activation.__name__ == 'sigmoid'
+        assert model.head_layers[-1].activation.__name__ == 'softmax'
 
         outputs = model(sample_data_2d)
         assert outputs.shape == (sample_data_2d.shape[0], num_classes_binary)
         assert np.all(outputs.numpy() >= 0) and np.all(outputs.numpy() <= 1)
+        np.testing.assert_allclose(
+            outputs.numpy().sum(axis=-1),
+            np.ones(sample_data_2d.shape[0]),
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
     def test_model_compilation(self, num_classes, input_shape_2d):
         """Test model compilation with different optimizers and losses."""

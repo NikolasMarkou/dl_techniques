@@ -387,7 +387,9 @@ bypass_model = create_squeezenet_v1(
     input_shape=(224, 224, 3)
 )
 
-# The Add layers in the summary show where the bypass connections are
+# The Add layers in the summary show where the bypass connections are:
+# add_fire3, add_fire5, add_fire7, add_fire9 -- the four positions where the
+# input and output widths of a Fire module match (128, 256, 384, 512).
 bypass_model.summary()
 ```
 
