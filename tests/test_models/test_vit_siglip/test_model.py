@@ -707,12 +707,19 @@ class TestSigLIPFactoryFunctions:
         assert model.num_classes == 1000
 
     def test_factory_function_validation(self):
-        """Test validation in factory functions."""
+        """Test validation in factory functions.
+
+        The factory no longer carries its own copy of these checks (C-15): the
+        duplicate pre-empted the constructor's newer even-patch_size guard, so it
+        was deleted and the constructor is now the single validator. The only
+        visible change is the wording of the input_shape message ("3-tuple"
+        instead of "3-element").
+        """
         # Invalid parameters should raise errors
         with pytest.raises(ValueError, match="num_classes must be positive"):
             create_siglip_vision_transformer(num_classes=-1)
 
-        with pytest.raises(ValueError, match="input_shape must be a 3-element"):
+        with pytest.raises(ValueError, match="input_shape must be a 3-tuple"):
             create_siglip_vision_transformer(input_shape=(224, 224))
 
         with pytest.raises(ValueError, match="patch_size must be positive"):

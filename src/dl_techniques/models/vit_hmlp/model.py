@@ -9,8 +9,11 @@ the model can partially see what it is being asked to reconstruct. The hMLP stem
 resolves the tension by keeping the improvement and refusing the leak.
 
 It processes each patch INDEPENDENTLY through a hierarchy of linear projections
-with normalization and non-linearity between them, doubling the granularity at
-each step: 2x2, then 4x4, then 8x8, then the full 16x16 patch. Because no
+with normalization and non-linearity between them, halving the token grid at each
+step. As implemented (`layers/hierarchical_mlp_stem.py`) the hierarchy starts with
+a 4x4 stride-4 convolution and then stacks 2x2 stride-2 stages, so for the default
+16-pixel patch it is THREE stages covering 4x4 -> 8x8 -> 16x16 pixels; there is no
+2x2-pixel stage. Because no
 operation ever crosses a patch boundary, masking before the stem and masking
 after it produce identical results — which is exactly the property BeiT and MAE
 need, and exactly what a convolutional stem cannot offer. The cost is under 1%
@@ -93,7 +96,7 @@ class ViTHMLP(keras.Model):
     Input Images (batch, height, width, channels)
            ↓
     HierarchicalMLPStem → Patches (batch, num_patches, embed_dim)
-      ↓ 2×2 → 4×4 → 8×8 → 16×16 pixel processing
+      ↓ 4×4 → 8×8 → 16×16 pixel processing (three stages, 4x4 stride-4 first)
            ↓
     Add CLS Token → (batch, seq_len, embed_dim)
            ↓
@@ -109,7 +112,7 @@ class ViTHMLP(keras.Model):
     ```
 
     **hMLP Stem Processing**:
-    1. **Progressive Resolution**: Patches processed at 2×2, 4×4, 8×8, 16×16 pixel scales
+    1. **Progressive Resolution**: Patches processed at 4×4, 8×8, 16×16 pixel scales
     2. **Independent Processing**: No cross-patch information leakage (SSL compatible)
     3. **Hierarchical Features**: Each scale contributes to final patch representation
     4. **Efficient Implementation**: <1% computational overhead vs standard linear projection
@@ -789,7 +792,7 @@ class ViTHMLP(keras.Model):
         patch_h, patch_w = self.patch_size
         img_h, img_w = self.input_shape_config[:2]
         logger.info(f"Patches per dimension: {img_h // patch_h} x {img_w // patch_w}")
-        logger.info("hMLP Stem Processing: 2×2 → 4×4 → 8×8 → 16×16 pixels")
+        logger.info("hMLP Stem Processing: 4×4 → 8×8 → 16×16 pixels (patch_size=16)")
 
 
 # ---------------------------------------------------------------------

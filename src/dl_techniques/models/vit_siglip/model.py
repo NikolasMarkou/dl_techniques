@@ -284,6 +284,20 @@ class SigLIPVisionTransformer(keras.Model):
             if patch_h <= 0 or patch_w <= 0:
                 raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
 
+        # The two-stage SigLIP stem is Conv2D(k=s=patch//2) then Conv2D(k=s=2),
+        # so its total stride is 2*(patch//2) -- equal to `patch` only when
+        # `patch` is EVEN. With an odd patch size the stem emits a different
+        # token count than the declared `num_patches`, and `call`'s reshape dies
+        # with an opaque error at the first forward instead of here.
+        if patch_h % 2 != 0 or patch_w % 2 != 0:
+            raise ValueError(
+                f"patch_size must be even in both dimensions, got {patch_size}: "
+                f"the two-stage patch-embedding stem has total stride "
+                f"2*(patch//2), which equals the patch size only for even "
+                f"values (an odd {patch_h} would give a stride of "
+                f"{2 * (patch_h // 2)})."
+            )
+
         # Validate divisibility for patch extraction
         if img_h % patch_h != 0:
             raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
@@ -863,42 +877,11 @@ def create_siglip_vision_transformer(
         )
         ```
     """
-    # Validate basic parameters before model creation
-    if num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {num_classes}")
-
-    if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
-        raise ValueError(f"input_shape must be a 3-element tuple/list, got {input_shape}")
-
-    if any(dim <= 0 for dim in input_shape):
-        raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
-
-    # Validate patch_size and ensure compatibility with input_shape
-    if isinstance(patch_size, int):
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        patch_h = patch_w = patch_size
-    else:
-        if not isinstance(patch_size, (tuple, list)) or len(patch_size) != 2:
-            raise ValueError(f"patch_size must be int or 2-element tuple/list, got {patch_size}")
-        patch_h, patch_w = patch_size
-        if patch_h <= 0 or patch_w <= 0:
-            raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
-
-    img_h, img_w = input_shape[:2]
-    if img_h % patch_h != 0:
-        raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
-    if img_w % patch_w != 0:
-        raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
-
-    # Calculate and validate number of patches
-    num_patches = (img_h // patch_h) * (img_w // patch_w)
-    if num_patches <= 0:
-        raise ValueError(f"Number of patches must be positive, got {num_patches}")
-    if num_patches > 10000:  # Reasonable upper limit
-        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
-
-    # Create model instance
+    # Argument validation lives in SigLIPVisionTransformer.__init__ and is NOT
+    # repeated here: this factory used to carry a second, hand-kept copy of the
+    # num_classes / input_shape / patch_size / divisibility checks, which is how
+    # the even-patch_size constraint (C-15) could be added to the constructor and
+    # still be pre-empted by the older duplicate.
     model = SigLIPVisionTransformer(
         input_shape=input_shape,
         num_classes=num_classes,
@@ -920,8 +903,15 @@ def create_siglip_vision_transformer(
         **kwargs
     )
 
+    if model.num_patches > 10000:  # Reasonable upper limit
+        logger.warning(
+            f"Large number of patches ({model.num_patches}) may cause memory issues"
+        )
+
     logger.info(f"SigLIPVisionTransformer-{scale} created successfully")
-    logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")
+    logger.info(
+        f"Configuration: {model.num_patches} patches, {num_classes} classes"
+    )
     return model
 
 

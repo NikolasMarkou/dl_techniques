@@ -310,6 +310,21 @@ class VisionEncoder(keras.layers.Layer):
             raise ValueError(
                 f"img_size ({img_size}) must be divisible by patch_size ({patch_size})"
             )
+        # The multi-stage stems reach `patch_size` as a PRODUCT of strides, and
+        # integer division silently rounds: 'siglip' is 2*(patch//2) and 'conv' is
+        # 2*2*(patch//4), which equal `patch` only for the divisibilities below.
+        # Without this the encoder constructs, then dies in an opaque reshape at
+        # the first forward because the token count is not `num_patches`.
+        # (Same defect as vit_siglip/model.py, C-15.)
+        _stem_stride_divisor = {'siglip': 2, 'conv': 4}.get(patch_embed_type)
+        if _stem_stride_divisor and patch_size % _stem_stride_divisor != 0:
+            raise ValueError(
+                f"patch_embed_type='{patch_embed_type}' needs a patch_size "
+                f"divisible by {_stem_stride_divisor}, got {patch_size}: its "
+                f"multi-stage stem's total stride would be "
+                f"{_stem_stride_divisor * (patch_size // _stem_stride_divisor)} "
+                f"instead of {patch_size}."
+            )
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if depth <= 0:
