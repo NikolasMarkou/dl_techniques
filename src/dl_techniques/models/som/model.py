@@ -344,6 +344,57 @@ class SOMModel(keras.Model):
         """
         return self.som_layer(inputs, training=training)
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-062
+    # EVERY inference-time BMU lookup goes through here, in CHUNKS.
+    # `SOMLayer._find_bmu` broadcasts to `(batch, num_neurons, input_dim)`, so
+    # passing an entire unbatched dataset materializes one intermediate of that
+    # size: the class docstring's own MNIST example (`map_size=(20,20)`,
+    # `input_dim=784`, 60000 samples) is a ~75 GB float32 tensor. Five call
+    # sites did exactly that. DO NOT call `self.som_layer(...)` directly on a
+    # full dataset again -- `train()` already batches its own loop, and these
+    # sites now mirror it. The chunking is mathematically inert: BMU assignment
+    # is per-sample and `training=False` updates nothing, so results are
+    # IDENTICAL to the unbatched path, not merely close.
+    # See decisions.md D-062.
+    def _bmu_indices_in_batches(
+            self,
+            x: np.ndarray,
+            batch_size: int = 1024
+    ) -> np.ndarray:
+        """Return the BMU grid coordinates for ``x``, one chunk at a time.
+
+        Args:
+            x: Samples of shape ``(n_samples, ...)``. Flattened to
+                ``(n_samples, input_dim)`` before lookup, matching what
+                :meth:`train` does per batch.
+            batch_size: Rows per forward pass. Must be positive. The default
+                1024 keeps the ``(batch, num_neurons, input_dim)`` intermediate
+                bounded regardless of dataset size.
+
+        Returns:
+            Integer array of shape ``(n_samples, 2)`` with the grid coordinates
+            of each sample's Best Matching Unit -- exactly what a single
+            unbatched ``self.som_layer(x, training=False)`` would return.
+
+        Failure mode: raises ``ValueError`` for a non-positive ``batch_size``.
+        An empty ``x`` returns an empty ``(0, 2)`` array rather than raising.
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        if x.shape[0] == 0:
+            # Before the reshape: `np.reshape(0, -1)` cannot infer a dimension
+            # from an empty array and raises.
+            return np.zeros((0, 2), dtype="int32")
+        flat = x.reshape(x.shape[0], -1)
+
+        chunks = []
+        for start in range(0, flat.shape[0], batch_size):
+            chunk = ops.convert_to_tensor(flat[start:start + batch_size])
+            bmu_indices, _ = self.som_layer(chunk, training=False)
+            chunks.append(ops.convert_to_numpy(bmu_indices))
+        return np.concatenate(chunks, axis=0)
+
     def train(
             self,
             x_train: np.ndarray,
@@ -430,6 +481,22 @@ class SOMModel(keras.Model):
         if total_iterations == 0:
             total_iterations = epochs  # Degenerate case: empty training set.
         self.som_layer.max_iterations.assign(float(total_iterations))
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-061
+        # RESET the counter, not just the budget. `SOMLayer.call` does
+        # `iterations.assign_add(...)`, so after a first `train(x, epochs=E)`
+        # the counter sits exactly AT `max_iterations`. Rewriting the same
+        # budget on a SECOND `train()` call therefore left the decayed learning
+        # rate clamped at 0 for the whole run: the second call performed ZERO
+        # adaptation and reported a flat quantization error, silently. Every
+        # existing test calls `train()` exactly once, so nothing saw it.
+        # DO NOT "fix" this by enlarging the budget instead, and DO NOT touch
+        # the units of `total_iterations` above -- that earlier fix (samples,
+        # not batches) is CORRECT and is what made this reachable, by changing
+        # the budget from a value the counter overran to one it lands exactly
+        # on. Reverting it would re-hide this defect behind a worse one.
+        # See decisions.md D-061.
+        self.som_layer.iterations.assign(0.0)
 
         history = {'mean_quantization_error': []}
 
@@ -530,9 +597,7 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_train)
 
         unique_classes = np.unique(y_train)
 
@@ -614,9 +679,7 @@ class SOMModel(keras.Model):
                 "Call fit_class_prototypes() first."
             )
 
-        x_test_tensor = ops.convert_to_tensor(x_test.reshape(x_test.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_test_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_test)
 
         # Convert BMUs to tuples for lookup
         bmu_tuples = [tuple(bmu) for bmu in bmu_indices]
@@ -800,9 +863,7 @@ class SOMModel(keras.Model):
 
             The legend is placed outside the plot area to avoid obscuring data.
         """
-        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_data)
 
         plt.figure(figsize=figsize)
 
@@ -1000,9 +1061,7 @@ class SOMModel(keras.Model):
             The hit histogram helps diagnose training issues and choose appropriate
             map sizes for the dataset.
         """
-        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_data)
 
         # Create histogram
         hit_histogram = np.zeros((self.som_layer.map_size[0], self.som_layer.map_size[1]))
@@ -1125,9 +1184,7 @@ class SOMModel(keras.Model):
 
         if x_train is not None:
             # Find BMUs for all training samples
-            x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
-            train_bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
-            train_bmu_indices = ops.convert_to_numpy(train_bmu_indices)
+            train_bmu_indices = self._bmu_indices_in_batches(x_train)
 
             # Find samples with BMUs close to the query's BMU
             distances = np.sum((train_bmu_indices - bmu_index) ** 2, axis=1)
