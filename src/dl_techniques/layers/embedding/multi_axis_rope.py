@@ -63,7 +63,12 @@ class Ideogram4MRoPE(keras.layers.Layer):
     three axes according to ``mrope_section`` (see module docstring).
 
     The shared inverse-frequency vector is stored as a non-trainable weight via
-    ``add_weight(trainable=False)`` so it survives ``.keras`` serialization.
+    ``add_weight(trainable=False)`` so it survives ``.keras`` serialization. Its
+    value is supplied by an ``initializer`` callable and never by a post-creation
+    ``.assign()``: surviving serialization and being correctly initialized are
+    different properties, and the ``.assign()`` form was silently discarded by the
+    ``StatelessScope`` of Keras 3's symbolic build pass, leaving the vector all
+    zeros (and mRoPE the identity) in every real model. See the ``build`` anchor.
 
     :param head_dim: Per-head dimensionality. Must be a positive even integer.
     :type head_dim: int
@@ -174,14 +179,33 @@ class Ideogram4MRoPE(keras.layers.Layer):
 
         # Stored as a NON-TRAINABLE weight so it serializes (raw tensor attrs
         # do not round-trip through .keras).
+        #
+        # WHAT NOT TO DO: do NOT restore
+        #     self.inv_freq = self.add_weight(..., initializer="zeros")
+        #     self.inv_freq.assign(inv_freq_values.astype("float32"))
+        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever this
+        # layer is first reached from a PARENT's `call()` -- i.e. in every real model
+        # and on every factory-built (`mrope_ideogram4`) path -- and that scope
+        # RECORDS the `.assign()` and then DISCARDS it. Measured on CPU 2026-08-15:
+        # a direct `.build(...)` gives `inv_freq[0] == 1.0`, while through a parent's
+        # `call()` the whole vector was zero, so every rotary angle was 0 and mRoPE
+        # was the identity (cos == 1, sin == 0) at every position -- position ids had
+        # no effect at all. Being a non-trainable weight makes the value SERIALIZE;
+        # it does not make it CORRECT. Initializers are honoured at variable-CREATION
+        # time and so survive the stateless scope. Same defect and same fix as
+        # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
+        # `inv_freq_values` is NumPy, so closing over it carries no `FuncGraph`
+        # tensor (a `keras.ops` tensor computed here would raise "out of scope").
+        inv_freq_f32 = inv_freq_values.astype("float32")
         self.inv_freq = self.add_weight(
             name="inv_freq",
             shape=(self._half,),
-            initializer="zeros",
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
+                inv_freq_f32, dtype=dtype or "float32"
+            ),
             trainable=False,
             dtype="float32",
         )
-        self.inv_freq.assign(inv_freq_values.astype("float32"))
 
         # DECISION plan_2026-06-12_59a18a10/D-003: the t/h/w band interleave is
         # implemented as a STATIC one-hot select over the stacked (3, ...) freqs,
@@ -192,15 +216,21 @@ class Ideogram4MRoPE(keras.layers.Layer):
         # dynamic `keras.ops.scatter`/`slice_update` in call(): position ids are
         # dynamic but the slot->axis map is not, and scatter on the freq axis is
         # not reliably XLA-traceable across backends. See decisions.md D-003.
+        # Materialized by an INITIALIZER for the same reason as `inv_freq` above:
+        # an `.assign()` inside the symbolic build pass is discarded, and an
+        # all-zero selector zeroes the selected frequency for EVERY slot, not just
+        # the h/w bands. Measured on CPU 2026-08-15: direct `.build(...)` gives
+        # `select_onehot[0, 0] == 1.0`, through a parent's `call()` it was `0.0`.
         onehot = np.eye(3, dtype="float32")[self._source_axis]  # (half, 3)
         self._select_onehot = self.add_weight(
             name="select_onehot",
             shape=(self._half, 3),
-            initializer="zeros",
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
+                onehot, dtype=dtype or "float32"
+            ),
             trainable=False,
             dtype="float32",
         )
-        self._select_onehot.assign(onehot)
 
         super().build(input_shape)
 

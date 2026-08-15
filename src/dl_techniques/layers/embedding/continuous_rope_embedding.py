@@ -192,16 +192,25 @@ class ContinuousRoPE(keras.layers.Layer):
         arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=np.float32)
         omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / self.effective_dim_per_wave))
 
-        # Create layer's own weights
+        # `omega` comes from an INITIALIZER, never from `add_weight(...)` +
+        # `.assign()`: Keras 3 discards an `.assign()` issued inside the
+        # `StatelessScope` of the symbolic build pass that runs whenever this layer
+        # is first reached from a PARENT's `call()`, which left the table all-zero
+        # in every real model (measured on CPU 2026-08-15: direct `.build(...)`
+        # gives `omega[0] == 1.0`, through a parent's `call()` it was `0.0`), and an
+        # all-zero omega makes every rotary angle 0, i.e. RoPE is the identity.
+        # Same defect and same fix as `rotary_position_embedding.py`; the full
+        # rationale is at that module's `# DECISION` anchor. See decisions.md D-027.
+        # `omega_vals` is NumPy, so closing over it carries no `FuncGraph` tensor.
         self.omega = self.add_weight(
             name="omega",
             shape=omega_vals.shape,
-            initializer="zeros",
+            initializer=lambda shape, dtype=None: keras.ops.cast(
+                keras.ops.convert_to_tensor(omega_vals),
+                dtype or self.variable_dtype,
+            ),
             trainable=False,
         )
-
-        # Set the omega values
-        self.omega.assign(omega_vals)
 
         # Always call parent build at the end
         super().build(input_shape)

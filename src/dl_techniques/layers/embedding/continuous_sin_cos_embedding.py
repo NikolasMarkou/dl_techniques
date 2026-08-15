@@ -268,16 +268,38 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=arange_dtype)
         omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / self.effective_dim_per_wave))
 
-        # Create layer's own weights
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-027
+        # `omega` is materialized by an INITIALIZER, never by `add_weight`
+        # followed by `.assign()`.
+        #
+        # WHAT NOT TO DO: do NOT restore
+        #     self.omega = self.add_weight(..., initializer="zeros")
+        #     self.omega.assign(omega_vals)
+        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever a
+        # sublayer is first reached from a PARENT's `call()` -- i.e. in every real
+        # model -- and that scope RECORDS the `.assign()` and then DISCARDS it. The
+        # weight therefore kept its `"zeros"` initializer, so every frequency was 0
+        # and the embedding collapsed to a constant, coordinate-independent vector.
+        # Measured on CPU 2026-08-15: a direct `.build(...)` gives `omega[0] == 1.0`;
+        # the same layer reached through a parent layer's `call()` gave
+        # `omega[0] == 0.0` with the whole table all-zero. Initializers are honoured
+        # at variable-CREATION time and so survive the stateless scope. Same defect,
+        # same fix as `rotary_position_embedding.py` (D-021). See decisions.md D-027.
+        #
+        # `omega_vals` is a NumPy array (not a `keras.ops` tensor), so closing over
+        # it is safe: a tensor computed in `build()` would belong to the symbolic
+        # pass's scratch `FuncGraph` and raise "out of scope" on the eager pass.
+        # The cast preserves D-008's float64-policy invariant: `omega_vals` is
+        # already float64 exactly when `variable_dtype` is float64.
         self.omega = self.add_weight(
             name="omega",
             shape=omega_vals.shape,
-            initializer="zeros",
+            initializer=lambda shape, dtype=None: keras.ops.cast(
+                keras.ops.convert_to_tensor(omega_vals),
+                dtype or self.variable_dtype,
+            ),
             trainable=False,
         )
-
-        # Set the omega values
-        self.omega.assign(omega_vals)
 
         # Always call parent build at the end
         super().build(input_shape)
