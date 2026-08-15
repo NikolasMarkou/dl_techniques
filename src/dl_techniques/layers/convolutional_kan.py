@@ -39,6 +39,7 @@ References
 """
 
 import keras
+import numpy as np
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable
 
@@ -289,15 +290,32 @@ class KANvolution(keras.layers.Layer):
                 trainable=True,
             )
 
-        # Fixed grid points for B-spline interpolation in range [-1, 1]
-        grid_values = ops.linspace(-1.0, 1.0, self.grid_size + 1)
+        # Fixed grid points for B-spline interpolation in range [-1, 1].
+        #
+        # Materialized by an INITIALIZER, never by `add_weight(initializer='zeros')`
+        # followed by `.assign()`. Keras 3 runs a symbolic build pass inside a
+        # `StatelessScope` whenever this layer is first reached from a PARENT's
+        # `call()` -- i.e. in every real model -- and that scope RECORDS the
+        # `.assign()` and then DISCARDS it, leaving the knot vector all zeros: every
+        # knot collapses onto a single point, so `_compute_bspline_basis` measures
+        # every distance from the same location and the "learnable univariate
+        # function" degenerates. Measured on CPU 2026-08-15: `grid[0]` is -1.0 on a
+        # direct `.build(...)` and 0.0 through a parent layer's `call()`. See the
+        # DECISION anchor in `layers/time_series/nbeats_blocks.py`
+        # (`TrendBlock._create_polynomial_basis`) and decisions.md D-028.
+        #
+        # `np.linspace` (not `ops.linspace`) on purpose: a `keras.ops` tensor created
+        # in `build()` belongs to the symbolic pass's scratch `FuncGraph` and raises
+        # "out of scope" when the initializer later runs on the eager pass.
+        grid_values = np.linspace(-1.0, 1.0, self.grid_size + 1, dtype='float32')
         self.grid = self.add_weight(
             name='grid',
             shape=(self.grid_size + 1,),
-            initializer='zeros',
+            initializer=lambda shape, dtype=None: ops.cast(
+                ops.convert_to_tensor(grid_values), dtype or self.variable_dtype
+            ),
             trainable=False,
         )
-        self.grid.assign(grid_values)
 
         logger.info("KANvolution layer built successfully")
 

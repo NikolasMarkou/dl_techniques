@@ -246,16 +246,42 @@ class KANLinear(keras.layers.Layer):
         # weight so it persists during saving/loading but isn't updated by gradient descent.
         # Size: grid_size + 1 (intervals) + 2 * spline_order (padding)
         grid_length = self.grid_size + 2 * self.spline_order + 1
+
+        # The INITIAL knot sequence comes from an `initializer` callable; it is NOT
+        # written by `_set_grid_from_range` here.
+        #
+        # WHAT NOT TO DO: do NOT restore
+        #     self.grid = self.add_weight(..., initializer="zeros")
+        #     self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
+        # `_set_grid_from_range` ends in `self.grid.assign(...)`, and Keras 3 runs a
+        # symbolic build pass inside a `StatelessScope` whenever this layer is first
+        # reached from a PARENT's `call()` -- i.e. in every real model, and on every
+        # `create_ffn_layer(ffn_type='kan')` path, where the layer is never touched
+        # directly at all. That scope RECORDS the assign and then DISCARDS it, so the
+        # knot vector stayed all zeros: every knot collapses onto one point and the
+        # Cox-de Boor recursion in `_compute_bspline_basis` runs over a degenerate
+        # knot vector. Measured on CPU 2026-08-15: `grid[0]` is -4.3999996 on a direct
+        # `.build(...)` and 0.0 through a parent layer's `call()`.
+        #
+        # This is why the two writers are deliberately SEPARATED:
+        #   * initial value      -> this `initializer`, honoured at variable-CREATION
+        #                           time, which is what survives the stateless scope;
+        #   * runtime adaptation -> `_set_grid_from_range` / `update_grid_from_samples`,
+        #                           a real `.assign()` issued from user code in a real
+        #                           scope, long after `build()`. That path is unchanged
+        #                           and must keep working.
+        # See the DECISION anchor in `layers/time_series/nbeats_blocks.py`
+        # (`TrendBlock._create_polynomial_basis`) and decisions.md D-028.
         self.grid = self.add_weight(
             name="grid",
             shape=(grid_length,),
-            initializer="zeros",  # Initialized properly immediately below
+            initializer=lambda shape, dtype=None: keras.ops.cast(
+                self._compute_grid_values(self.grid_range[0], self.grid_range[1]),
+                dtype or self.dtype,
+            ),
             trainable=False,
             dtype=self.dtype,
         )
-
-        # Initialize the grid based on the configured range
-        self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
 
         super().build(input_shape)
 
@@ -299,6 +325,13 @@ class KANLinear(keras.layers.Layer):
         self, start: Union[float, keras.KerasTensor], stop: Union[float, keras.KerasTensor]
     ) -> None:
         """Calculate and assign grid values to the state variable.
+
+        This is the RUNTIME grid-adaptation writer only (``update_grid_from_samples``).
+        It must not be used to supply the grid's initial value from ``build()``: an
+        ``.assign()`` issued during Keras 3's symbolic build pass is recorded by the
+        surrounding ``StatelessScope`` and discarded, leaving the knots all zero. The
+        initial knot sequence comes from the ``grid`` weight's ``initializer`` instead
+        (see the anchor in ``build``).
 
         :param start: Range minimum (Python float or scalar tensor).
         :type start: Union[float, keras.KerasTensor]
