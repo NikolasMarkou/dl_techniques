@@ -293,7 +293,19 @@ backbone = create_mobilenetv4(
 
 # The output is the feature map from the final stage
 # For a 256x256 input, the output shape will be (None, 8, 8, 320)
-backbone.summary()```
+backbone.summary()
+```
+
+All four versions share this contract: `include_top=False` returns the **4-D feature map**,
+never a pooled vector. Until 2026-08-15 V1 alone applied its global average pooling
+unconditionally and returned `(batch, channels)`, so a detection or segmentation head built
+against V2/V3/V4 silently received the wrong rank from V1. If you want the pooled vector,
+add one `keras.layers.GlobalAveragePooling2D()` yourself.
+
+`summary()` on a never-called model now runs a real dummy forward pass to materialize the
+weights. `keras.Model.build(...)` alone does not: on a subclassed model it only marks the
+model built, and all four versions previously printed a summary whose parameter count was
+exactly 0.
 
 ---
 

@@ -84,6 +84,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.models.mobilenet.common import materialize_for_summary
 
 # ---------------------------------------------------------------------
 
@@ -363,10 +364,10 @@ class MobileNetV2(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model if it hasn't been built yet
-        if not self.built:
-            input_tensor = keras.Input(shape=self.input_shape_config)
-            self.build(input_tensor.shape)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass; the
+        # keras.Input + build(shape) route marked the model built without creating
+        # any sub-layer weights. See decisions.md D-065.
+        materialize_for_summary(self, self.input_shape_config)
 
         super().summary(**kwargs)
 

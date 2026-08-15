@@ -103,6 +103,7 @@ from typing import List, Tuple, Optional, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.models.mobilenet.common import materialize_for_summary
 
 # ---------------------------------------------------------------------
 
@@ -521,11 +522,12 @@ class MobileNetV4(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model on a dummy input if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build(self._input_shape)
-            # In Keras 3, it's better to build by calling with dummy data
-            # self(ops.zeros((1, *self._input_shape)))
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass. The
+        # old `self.build(self._input_shape)` passed the UNBATCHED 3-tuple where
+        # Model.build() expects the batch shape, and even the batch-shaped form
+        # materializes no sub-layer weights on a subclassed model. See
+        # decisions.md D-065.
+        materialize_for_summary(self, self._input_shape)
 
         super().summary(**kwargs)
 

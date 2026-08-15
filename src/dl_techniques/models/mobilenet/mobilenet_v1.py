@@ -31,7 +31,9 @@ paper's thirteen separable blocks — 64; 128/s2, 128; 256/s2, 256; 512/s2 then 
 at 512; 1024/s2, 1024 — with all downsampling done by the depthwise stride rather
 than by pooling. The head pools globally, reshapes to `1x1xC`, applies dropout and
 then a `1x1` convolution as the classifier, which is the paper's form and is
-arithmetically a dense layer.
+arithmetically a dense layer. The global pooling belongs to that head: with
+`include_top=False` the model returns the 4-D feature map of the last block, matching
+V2/V3/V4, and a caller who wants the pooled vector adds the pooling layer.
 
 Two implementation details are easy to get wrong. The head's `Reshape` target is
 hardcoded to `int(1024 * width_multiplier)`, so `include_top=True` is bound to the
@@ -72,6 +74,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlock
+from dl_techniques.models.mobilenet.common import materialize_for_summary
 
 # ---------------------------------------------------------------------
 
@@ -207,11 +210,10 @@ class MobileNetV1(keras.Model):
             )
             self.depthwise_blocks.append(block)
 
-        # Global average pooling
-        self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
-
-        # Classification head
+        # Classification head (the global pool is part of it -- D-066)
         if self.include_top:
+            self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
+
             # Shape layer to ensure correct dimensions
             self.reshape = layers.Reshape((1, 1, int(1024 * self.width_multiplier)), name='reshape')
 
@@ -248,11 +250,17 @@ class MobileNetV1(keras.Model):
         for block in self.depthwise_blocks:
             x = block(x, training=training)
 
-        # Global average pooling
-        x = self.global_avg_pool(x)
-
-        # Classification head
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-066: pooling belongs to the
+        # HEAD. Do NOT move `global_avg_pool` back outside this branch: applied
+        # unconditionally it made `include_top=False` return a 2-D pooled vector,
+        # where V2/V3/V4 all return the 4-D feature map, so a detection or
+        # segmentation head silently received the wrong rank. A caller who wants
+        # the pooled vector adds one GlobalAveragePooling2D. See decisions.md D-066.
         if self.include_top:
+            # Global average pooling
+            x = self.global_avg_pool(x)
+
+            # Classification head
             x = self.reshape(x)
             x = self.dropout(x, training=training)
             x = self.classifier_conv(x)
@@ -338,9 +346,12 @@ class MobileNetV1(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build((None, *self._input_shape))
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass.
+        # Do NOT go back to `self.build((None, *self._input_shape))`: for a
+        # subclassed model that only MARKS the model built and materializes no
+        # sub-layer weights, so the summary and the count_params() line below both
+        # reported exactly 0. See decisions.md D-065.
+        materialize_for_summary(self, self._input_shape)
 
         super().summary(**kwargs)
 

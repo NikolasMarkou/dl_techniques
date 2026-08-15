@@ -226,10 +226,12 @@ class TestMobileNetV1:
         output = model(sample_inputs['cifar'])
         assert output.shape == (4, 10)
 
-        # As a feature extractor
+        # As a feature extractor. Updated for D-066 (C-11): the global pooling
+        # belongs to the head, so include_top=False returns the 4-D feature map,
+        # matching V2/V3/V4. This assertion previously pinned the defect.
         model_no_top = MobileNetV1.from_variant("large", include_top=False, input_shape=(32, 32, 3))
         features = model_no_top(sample_inputs['cifar'])
-        assert len(features.shape) == 2  # (batch, channels) after GlobalAveragePooling
+        assert len(features.shape) == 4  # (batch, h, w, channels) feature map
 
     @pytest.mark.parametrize("input_shape, sample_shape", [
         ((28, 28, 1), (2, 28, 28, 1)),   # Grayscale
