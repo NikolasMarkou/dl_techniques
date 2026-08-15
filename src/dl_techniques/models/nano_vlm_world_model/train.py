@@ -218,26 +218,89 @@ class ScoreVLMTrainer:
         self.ema_decay = ema_decay
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
-        # EMA model for inference
-        if use_ema:
-            self.ema_model = keras.models.clone_model(model)
-            self.ema_model.set_weights(model.get_weights())
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-022
+        # Every piece of trainer state that owns a variable is created by
+        # `_ensure_state`, EAGERLY, on the first step — not here and not inside
+        # `_train_step_fn`.
+        #
+        # WHAT NOT TO DO:
+        #   * Do NOT go back to `self.ema_model = keras.models.clone_model(model)`
+        #     followed by `set_weights(model.get_weights())` in this constructor.
+        #     `model` is an UNBUILT subclassed `keras.Model` at this point, so
+        #     `clone_model` returns an unbuilt clone and `get_weights()` returns
+        #     `[]` — the copy was `set_weights([])`, `_update_ema` zipped two
+        #     empty lists forever, and `train_score_vlm` saved that inert clone as
+        #     EVERY epoch checkpoint.
+        #   * Do NOT let the model, the optimizer slots or the accumulators be
+        #     created by the first trace of `_train_step_fn`. TensorFlow rejects
+        #     that outright on the second trace: "tf.function only supports
+        #     singleton tf.Variables created on the first call".
+        # See decisions.md D-022.
+        self.ema_model = None
+        self._state_ready = False
 
         # Metrics
         self.train_loss = keras.metrics.Mean(name='train_loss')
         self.vision_loss = keras.metrics.Mean(name='vision_loss')
         self.text_loss = keras.metrics.Mean(name='text_loss')
 
-        # Gradient accumulation
+        # Gradient accumulation. Both become variables in `_ensure_state`; a
+        # Python int here would be folded to a constant at trace time (D-023).
         self.accumulated_gradients = None
-        self.accumulation_counter = 0
+        self.accumulation_counter = None
 
         logger.info(
             f"Initialized ScoreVLM trainer with EMA={use_ema}, "
             f"grad_accum={gradient_accumulation_steps}"
         )
 
-    @tf.function
+    def _ensure_state(
+            self,
+            images: keras.KerasTensor,
+            text_tokens: keras.KerasTensor
+    ) -> None:
+        """Build the model, the optimizer slots, the EMA clone and the
+        accumulators — once, eagerly, before the first trace.
+
+        Interface contract (1 call site, :meth:`train_step`; it is a separate
+        method so the whole variable-creating half stays OUTSIDE the
+        ``tf.function``): idempotent, no return value, safe to call on every
+        step. Requires a real batch because a subclassed ``keras.Model`` has no
+        other way to be built.
+        """
+        if self._state_ready:
+            return
+
+        sample = {'images': images, 'text': text_tokens}
+        if not self.model.built:
+            self.model(sample, training=False)
+
+        # Adam/AdamW slot variables, created here rather than by the first
+        # `apply_gradients` inside the traced step.
+        self.optimizer.build(self.model.trainable_variables)
+
+        if self.use_ema:
+            ema_model = keras.models.clone_model(self.model)
+            # Unconditional: whether `clone_model` returns a BUILT clone for a
+            # subclassed model is a Keras implementation detail, and the whole
+            # defect was a `set_weights` against an unbuilt pair. A redundant
+            # forward pass is cheaper than a guard that cannot be falsified.
+            ema_model(sample, training=False)
+            ema_model.set_weights(self.model.get_weights())
+            self.ema_model = ema_model
+            logger.info(
+                f"EMA clone built with {len(self.ema_model.weights)} weights"
+            )
+
+        if self.gradient_accumulation_steps > 1:
+            self.accumulated_gradients = [
+                tf.Variable(tf.zeros_like(v), trainable=False)
+                for v in self.model.trainable_variables
+            ]
+        self.accumulation_counter = tf.Variable(0, dtype=tf.int64, trainable=False)
+
+        self._state_ready = True
+
     def train_step(
             self,
             images: keras.KerasTensor,
@@ -253,6 +316,31 @@ class ScoreVLMTrainer:
         Returns:
             Dictionary of metrics
         """
+        self._ensure_state(images, text_tokens)
+        return self._train_step_fn(images, text_tokens)
+
+    def _apply_accumulated_gradients(self) -> tf.Tensor:
+        """Apply the accumulated gradients, then zero them. A ``tf.cond`` branch."""
+        self.optimizer.apply_gradients(
+            zip(
+                [tf.convert_to_tensor(g) for g in self.accumulated_gradients],
+                self.model.trainable_variables
+            )
+        )
+        for accumulator in self.accumulated_gradients:
+            accumulator.assign(tf.zeros_like(accumulator))
+        self.accumulation_counter.assign(0)
+        if self.use_ema:
+            self._update_ema()
+        return tf.constant(0)
+
+    @tf.function
+    def _train_step_fn(
+            self,
+            images: keras.KerasTensor,
+            text_tokens: keras.KerasTensor
+    ) -> Dict[str, float]:
+        """The traced half of :meth:`train_step`. Creates no variables."""
         with tf.GradientTape() as tape:
             # Forward pass: model adds noise internally and denoises
             outputs = self.model(
@@ -272,34 +360,35 @@ class ScoreVLMTrainer:
 
         # Accumulate or apply gradients
         if self.gradient_accumulation_steps > 1:
-            if self.accumulated_gradients is None:
-                self.accumulated_gradients = [
-                    tf.zeros_like(g) if g is not None else None
-                    for g in gradients
-                ]
-
-            # Accumulate
-            for i, grad in enumerate(gradients):
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-023
+            # The counter is a `tf.Variable` and the release is a `tf.cond`.
+            #
+            # WHAT NOT TO DO: do NOT reinstate the Python-int counter and the
+            # Python `if self.accumulation_counter >= ...`. Inside this
+            # `@tf.function` that comparison is evaluated ONCE, at trace time,
+            # against the constant 0 — so at the shipped
+            # `gradient_accumulation_steps=4` it folded to `False` and
+            # `optimizer.apply_gradients` was never emitted into the graph at
+            # all. Nothing on the Python side then changes, so no retrace ever
+            # happens and the model never trains, while `train_loss.result()`
+            # keeps returning a moving number. Eager execution HIDES this
+            # entirely; a probe for it must run traced. Likewise the
+            # accumulators must be variables: a Python list re-bound to graph
+            # tensors does not survive the step.
+            # See decisions.md D-023.
+            for accumulator, grad in zip(self.accumulated_gradients, gradients):
                 if grad is not None:
-                    self.accumulated_gradients[i] = (
-                            self.accumulated_gradients[i] + grad
-                    )
+                    accumulator.assign_add(grad)
 
-            self.accumulation_counter += 1
+            self.accumulation_counter.assign_add(1)
 
-            # Apply when accumulated enough
-            if self.accumulation_counter >= self.gradient_accumulation_steps:
-                self.optimizer.apply_gradients(
-                    zip(self.accumulated_gradients, self.model.trainable_variables)
-                )
-
-                # Reset
-                self.accumulated_gradients = None
-                self.accumulation_counter = 0
-
-                # Update EMA
-                if self.use_ema:
-                    self._update_ema()
+            tf.cond(
+                self.accumulation_counter >= tf.constant(
+                    self.gradient_accumulation_steps, dtype=tf.int64
+                ),
+                self._apply_accumulated_gradients,
+                lambda: tf.constant(0)
+            )
         else:
             # Direct gradient application
             self.optimizer.apply_gradients(
@@ -342,10 +431,16 @@ class ScoreVLMTrainer:
             )
 
     def reset_metrics(self) -> None:
-        """Reset all metrics."""
-        self.train_loss.reset_states()
-        self.vision_loss.reset_states()
-        self.text_loss.reset_states()
+        """Reset all metrics.
+
+        The method is ``reset_state``, singular. ``keras.metrics.Metric`` has
+        never defined ``reset_states`` in Keras 3 (only ``layers/rnn`` does), so
+        the plural spelling raised ``AttributeError`` at the first statement of
+        epoch 0 in :func:`train_score_vlm` and hid every other defect behind it.
+        """
+        self.train_loss.reset_state()
+        self.vision_loss.reset_state()
+        self.text_loss.reset_state()
 
     def get_model_for_inference(self) -> keras.Model:
         """Get model for inference (EMA if available)."""
