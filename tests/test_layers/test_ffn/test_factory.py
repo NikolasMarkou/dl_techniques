@@ -1471,18 +1471,6 @@ def _b_transformer_decoder():
     return b.ffn_layer
 
 
-def _b_models_detr():
-    from dl_techniques.models.detr.model import DETR, DetrTransformer
-    backbone = keras.Sequential([keras.layers.Conv2D(32, 1)])
-    transformer = DetrTransformer(
-        hidden_dim=32, num_heads=2, num_encoder_layers=1,
-        num_decoder_layers=1, ffn_dim=64,
-    )
-    m = DETR(num_classes=3, num_queries=4, backbone=backbone,
-             transformer=transformer, hidden_dim=32)
-    return m.bbox_embed
-
-
 def _b_models_dino_v2():
     from dl_techniques.models.dino.dino_v2 import DINOv2Block
     b = DINOv2Block(dim=16, num_heads=2)
@@ -1590,7 +1578,6 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
         _b_progressive_focused_transformer,
     "layers/transformers/transformer.py": _b_transformer,
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
-    "models/detr/model.py": _b_models_detr,
     "models/dino/dino_v2.py": _b_models_dino_v2,
     "models/fftnet/model.py": _b_models_fftnet,
     "models/gemma/components.py": _b_models_gemma,

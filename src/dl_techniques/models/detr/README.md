@@ -8,6 +8,7 @@ A modern Keras 3 implementation of DETR (DEtection TRansformer), the groundbreak
 - [Key Innovations](#key-innovations)
 - [Architecture](#architecture)
 - [Implementation Features](#implementation-features)
+- [Deviations from the paper](#deviations-from-the-paper)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Detailed Usage](#detailed-usage)
@@ -166,6 +167,22 @@ This implementation leverages the latest Keras 3 features and best practices:
 - Multiple FFN architectures
 - Configurable activation functions
 
+## Deviations from the paper
+
+Read this before comparing numbers with the reference implementation.
+
+| Item | This implementation | Paper |
+|:---|:---|:---|
+| Padding mask | Honoured **above the backbone**: nearest-downsampled to the feature grid and applied as a key mask in encoder self-attention and decoder cross-attention. The convolutional backbone is *not* masked, so padding still leaks into feature cells within one receptive field of the boundary. | Same — the reference also masks only the transformer. |
+| Positional encoding | Added to the running `memory` at the input of **every** encoder layer, so it accumulates down the stack; the decoder adds `query_embed` to the whole decoder input the same way. | Re-injected into `Q` and `K` only, identically at every layer, never into `V`. |
+| Backbone tap | `conv4_block6_out` (C4, stride 16), frozen by default. | C5 (stride 32), fine-tuned at a reduced learning rate. |
+| Decoder output norm | None; auxiliary outputs are read raw from each decoder layer. | Final `LayerNorm` on the decoder stack. |
+| Pretrained weights | ImageNet weights for the ResNet backbone only. Nothing above it is pretrained; there is no DETR checkpoint. | Full COCO-trained detector. |
+
+The positional-encoding accumulation is a deliberate simplification, not a bug
+report — but it does mean encoder layer *k* sees the encoding scaled roughly
+*k* times, which is not what the paper computes.
+
 ## Installation
 
 ```bash
@@ -220,7 +237,9 @@ model = keras.models.load_model("detr_model.keras")
 image = load_and_preprocess_image("image.jpg")  # Shape: (H, W, 3)
 image_batch = np.expand_dims(image, axis=0)     # Shape: (1, H, W, 3)
 
-# Create dummy mask (False = valid pixel, True = padding)
+# Mask: False = valid pixel, True = padding. It is honoured (see "Deviations
+# from the paper"): padded positions are excluded from encoder self-attention
+# and decoder cross-attention. All-False here means "no padding".
 mask = np.zeros((1, image.shape[0], image.shape[1]), dtype=bool)
 
 # Run inference
@@ -555,7 +574,8 @@ config = {
 
 ```python
 # Class head: Linear layer → (num_classes + 1)
-# Bbox head: 3-layer MLP → 4 (x, y, w, h)
+# Bbox head: Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4), then sigmoid
+#            (three Dense layers, as in the paper)
 ```
 
 **Purpose**: Convert decoder outputs to class and box predictions
@@ -1010,7 +1030,10 @@ def predict_objects(model, image_path, confidence_threshold=0.7):
     image_batch = np.expand_dims(image_padded, axis=0)
     mask_batch = np.expand_dims(mask, axis=0)
     
-    # Predict
+    # Predict. The mask is applied to encoder self-attention and decoder
+    # cross-attention, so the letterbox padding contributes nothing there; it
+    # still reaches feature cells within one backbone receptive field of the
+    # boundary (see "Deviations from the paper").
     predictions = model([image_batch, mask_batch], training=False)
     
     # Extract predictions

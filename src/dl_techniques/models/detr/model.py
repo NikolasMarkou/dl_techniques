@@ -42,11 +42,16 @@ immediately afterwards to match the rest of the graph's NHWC layout.
 
 Several places depart from the paper, deliberately or as unfinished work, and a
 reader comparing against the reference implementation should know which is which.
-The padding mask is **accepted and then discarded**: `call` takes an
-`(images, padding_mask)` tuple but passes `None` into the transformer, because
-the mask arrives as `(B, H*W)` while `TransformerLayer` expects a `(B, T, T)`
-attention mask. Batches of mixed-size images padded to a common canvas will
-therefore attend to their own padding. Positional encodings are added to the
+The padding mask **is** honoured, but only above the backbone. `call` takes an
+`(images, padding_mask)` tuple with `True` for padding at image resolution,
+nearest-downsamples it onto the stride-16 feature grid, inverts it into a keep
+mask and passes it to encoder self-attention and decoder cross-attention as a
+rank-2 `(B, S)` key mask (both attention layers broadcast it to `(B, 1, 1, S)`
+themselves, so the `(B, T, S)` form is never materialized). What this does NOT
+do is mask the convolutional backbone: a padded canvas still leaks into the
+feature cells within one receptive field of the boundary, exactly as in the
+reference implementation, so masking suppresses the padding's contribution to
+attention and not its contribution to the features. Positional encodings are added to the
 *input* of each encoder layer rather than to queries and keys only, so values
 carry positional content too, and because the addition is applied to the running
 `memory` at every layer the encoding accumulates across the stack instead of being
@@ -97,7 +102,6 @@ from typing import Optional, Dict, Any, List, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.transformers import TransformerLayer, TransformerDecoderLayer, FFNType, NormalizationType
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import PositionEmbeddingSine2D
 
@@ -250,7 +254,11 @@ class DetrTransformer(layers.Layer):
 
         Args:
             src: Source features (batch_size, H*W, hidden_dim)
-            mask: Padding mask (batch_size, H*W) -- currently unused (see fix 1i)
+            mask: Key KEEP mask (batch_size, H*W), 1 for a real feature position
+                and 0 for one that came from image padding. ``None`` attends to
+                everything. Note the polarity: this is the inverse of the
+                ``padding_mask`` :class:`DETR` accepts, which is True FOR
+                padding; :meth:`DETR.call` does the inversion.
             query_embed: Object query embeddings (num_queries, hidden_dim)
             pos_embed: Positional encodings (batch_size, H*W, hidden_dim)
             training: Training mode flag
@@ -258,11 +266,21 @@ class DetrTransformer(layers.Layer):
         Returns:
             List of decoder outputs, one per layer
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: a 2-D (B, S) key mask
+        # is passed STRAIGHT THROUGH to both attentions. `MultiHeadCrossAttention`
+        # expands a rank-2 mask to (B, 1, 1, S) itself, so do NOT "fix" this by
+        # materializing the (B, T, S) form the parameter names suggest: at
+        # DETR's stride-16 feature maps S is a few thousand and the square form
+        # costs O(S^2) per image for information the broadcast already carries.
+        # The previous code passed None here and the whole mask was discarded.
+
         # Encoder forward pass
         memory = src
         for encoder_layer in self.encoder_layers:
             # Add positional encoding to the input for each encoder layer
-            memory = encoder_layer(memory + pos_embed, training=training)
+            memory = encoder_layer(
+                memory + pos_embed, attention_mask=mask, training=training
+            )
 
         # Decoder forward pass (fix 1f)
         batch_size = keras.ops.shape(src)[0]
@@ -278,6 +296,7 @@ class DetrTransformer(layers.Layer):
             tgt = decoder_layer(
                 tgt + query_embed_expanded,
                 memory,
+                cross_attention_mask=mask,
                 training=training
             )
             decoder_outputs.append(tgt)
@@ -372,15 +391,24 @@ class DETR(models.Model):
         # Prediction heads
         self.class_embed = layers.Dense(num_classes + 1, name="class_embed")
 
-        # Bbox prediction head using FFN factory
-        # Note: MLP with 3 layers for bbox prediction
-        self.bbox_embed = create_ffn_layer(
-            'mlp',
-            hidden_dim=hidden_dim,
-            output_dim=4,
-            activation='relu',
-            dropout_rate=0.0,
-            name="bbox_embed"
+        # Box prediction head: the paper's 3-layer perceptron,
+        # `Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4)`.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-047: built explicitly, NOT
+        # via `create_ffn_layer('mlp', ...)`. That factory key is `MLPBlock`,
+        # which is `fc1 -> act -> dropout -> fc2` — TWO Dense layers
+        # (`layers/ffn/mlp.py:215,225`) — while this comment, the module
+        # docstring and README.md:558 all claimed three, as does the paper. No
+        # depth-configurable MLP exists in `layers/ffn/` (checked the whole
+        # registry), so a local Sequential is the honest construction; do not
+        # "restore reuse" by swapping the factory back in without first adding
+        # a depth parameter there.
+        self.bbox_embed = keras.Sequential(
+            [
+                layers.Dense(hidden_dim, activation='relu', name="bbox_fc1"),
+                layers.Dense(hidden_dim, activation='relu', name="bbox_fc2"),
+                layers.Dense(4, name="bbox_fc3"),
+            ],
+            name="bbox_embed",
         )
 
         # Query embeddings
@@ -472,9 +500,31 @@ class DETR(models.Model):
         # accessing .embeddings before the Embedding layer is built).
         query_embed_weights = self.query_embed(keras.ops.arange(self.num_queries))
 
-        # fix 1i: mask_flat is (B, H*W); TransformerLayer expects (B,T,T) attention_mask shape.
-        # Masking support deferred -- pass None for now.
-        hs = self.transformer(src, None, query_embed_weights, pos_embed_flat, training=training)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: the padding mask is
+        # PROPAGATED. It arrives at image resolution and True means padding, so
+        # it is nearest-downsampled onto the feature grid, flattened and
+        # INVERTED into the keep-mask the attention layers take. Nearest, not
+        # area/bilinear: `apply_attention_mask`'s keep predicate is binary
+        # (`> 0`), so an interpolated 0.5 would read as full keep — a
+        # half-padded boundary cell must be a definite decision, and nearest
+        # keeps it valid, matching the reference implementation's
+        # `interpolate(mask, size)[0] > 0.5` on the padding polarity.
+        key_keep_mask = None
+        if padding_mask is not None:
+            mask_f = keras.ops.cast(padding_mask, projected_features.dtype)
+            if len(mask_f.shape) == 3:
+                mask_f = keras.ops.expand_dims(mask_f, axis=-1)
+            mask_small = keras.ops.image.resize(
+                mask_f, size=(height, width), interpolation="nearest",
+            )
+            key_keep_mask = 1.0 - keras.ops.reshape(
+                mask_small, (batch_size, height * width)
+            )
+
+        hs = self.transformer(
+            src, key_keep_mask, query_embed_weights, pos_embed_flat,
+            training=training,
+        )
 
         # Apply prediction heads to all decoder outputs
         outputs_class = [self.class_embed(h) for h in hs]
