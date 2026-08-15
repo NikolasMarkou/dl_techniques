@@ -82,9 +82,15 @@ class MemoryReadController(keras.layers.Layer):
         - ``enable_diversity``
         - ``enable_infonce``
 
-    Variable-name prefixes are ``memory_`` for keys/values/projections and
-    ``gate_`` for the gate (so the custom ``train_step`` routes their
-    gradients to the memory optimizer).
+    Sublayer names carry ``memory_`` for keys/values/projections and
+    ``gate_`` for the gate. Routing to the memory optimizer does **not**
+    depend on those names: the custom ``train_step`` matches the leading
+    component of ``Variable.path``, which for every weight in this
+    controller is the controller's own layer name
+    (``memory_read_controller``). Under Keras 3 a sublayer's weights are
+    named ``kernel``/``bias``/``gamma`` — the parent layer's name appears
+    only in ``.path`` — so a ``.name``-based match would route every one
+    of them, ``gate_W_g`` included, to the backbone optimizer.
     """
 
     def __init__(

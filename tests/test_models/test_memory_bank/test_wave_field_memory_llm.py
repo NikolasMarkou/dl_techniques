@@ -98,7 +98,41 @@ class TestForwardShape:
 # ---------------------------------------------------------------------
 
 
+#: Every trainable variable of `_build_tiny()` that belongs to the memory
+#: partition, enumerated from the architecture rather than from
+#: `split_trainable_by_prefix`'s own output: the long-term bank's two
+#: slots, the write controller's working-memory projections, and the read
+#: controller's query/output/norm/temperatures **and its gate**.
+#: Re-derive with `[v.path for v in m.trainable_variables]`.
+EXPECTED_MEMORY_PATHS = {
+    "memory_lt_bank/memory_K_lt",
+    "memory_lt_bank/memory_V_lt",
+    "memory_write_controller/memory_wm_bank/memory_wm_W_K/kernel",
+    "memory_write_controller/memory_wm_bank/memory_wm_W_V/kernel",
+    "memory_write_controller/memory_wm_bank/memory_wm_W_V/bias",
+    "memory_read_controller/memory_read_log_temp",
+    "memory_read_controller/memory_read_log_temp_nce",
+    "memory_read_controller/memory_read_W_Q/kernel",
+    "memory_read_controller/memory_read_W_out/kernel",
+    "memory_read_controller/memory_read_W_out/bias",
+    "memory_read_controller/memory_read_out_norm/gamma",
+    "memory_read_controller/memory_read_out_norm/beta",
+    "memory_read_controller/gate_W_g/kernel",
+    "memory_read_controller/gate_W_g/bias",
+}
+
+
 class TestVariableSplit:
+    """Routing tests run against a **real built model**, never a hand-rolled
+    stand-in: the defect this class guards was that `Variable.name` under
+    Keras 3 is the bare weight name (`"kernel"`), not the Keras-2-style
+    `"<layer>/<weight>"` that a fake would have to invent.
+    """
+
+    @staticmethod
+    def _split_paths(model):
+        mem, bb = split_trainable_by_prefix(model.trainable_variables)
+        return {v.path for v in mem}, {v.path for v in bb}
 
     def test_split_partitions_all(self):
         m = _build_tiny()
@@ -115,56 +149,106 @@ class TestVariableSplit:
         b_ids = {id(v) for v in backbone_vars}
         assert m_ids.isdisjoint(b_ids)
 
-    def test_memory_vars_have_memory_or_gate_prefix(self):
-        m = _build_tiny()
-        memory_vars, _ = split_trainable_by_prefix(m.trainable_variables)
-        for v in memory_vars:
-            assert "memory_" in v.name or "gate_" in v.name
+    def test_read_gate_is_routed_to_the_memory_optimizer(self):
+        """The gate is the whole point of the split.
 
-    def test_memory_vars_routed_by_leading_component(self):
-        """R3+R4: matching is on the leading component (Keras layer name),
-        not arbitrary substring inside the variable's full path."""
+        `MemoryReadController.W_g` is a `Dense(name="gate_W_g")` biased to
+        `sigmoid(-3) ~= 0.04`, i.e. ~96% of the memory injection is
+        bypassed at init and training is what opens it. Under Keras 3 its
+        weights are named `"kernel"`/`"bias"`; the layer name reaches the
+        router only through `Variable.path`. Matching `Variable.name`
+        routes the gate to the backbone optimizer, which the reference
+        recipe runs 30x slower (1e-5 vs 3e-4).
+        """
         m = _build_tiny()
-        memory_vars, backbone_vars = split_trainable_by_prefix(
-            m.trainable_variables,
-        )
-        # Every memory variable's leading path component must start with
-        # `memory_` or `gate_` — the new strict rule.
-        for v in memory_vars:
-            head = v.name.split("/", 1)[0]
-            assert head.startswith("memory_") or head.startswith("gate_"), (
-                f"memory variable leading-component does not match: {v.name}"
+        mem_paths, bb_paths = self._split_paths(m)
+        for gate_path in (
+            "memory_read_controller/gate_W_g/kernel",
+            "memory_read_controller/gate_W_g/bias",
+        ):
+            assert gate_path in mem_paths, (
+                f"the read gate {gate_path!r} was routed to the BACKBONE "
+                f"optimizer; backbone set = {sorted(bb_paths)}"
             )
-        # No backbone variable's leading component starts with the prefixes.
-        for v in backbone_vars:
-            head = v.name.split("/", 1)[0]
-            assert not (
-                head.startswith("memory_") or head.startswith("gate_")
-            ), f"backbone variable leading-component matched: {v.name}"
 
-    def test_split_handles_synthetic_substring_traps(self):
-        """A variable whose mid-path contains 'memory_' but whose head
-        does NOT must route to backbone under the new rule."""
+    def test_memory_partition_is_live(self):
+        """Anti-vacuity: a split returning two empty lists, or one holding
+        only bare `add_weight` scalars, must not pass the tests above."""
+        m = _build_tiny()
+        mem_paths, bb_paths = self._split_paths(m)
+        assert mem_paths, "memory partition is empty"
+        assert bb_paths, "backbone partition is empty"
+        dense_kernels = {p for p in mem_paths if p.endswith("/kernel")}
+        assert dense_kernels, (
+            "memory partition holds no Dense kernel — only directly "
+            f"`add_weight`-created variables reached it: {sorted(mem_paths)}"
+        )
 
-        class _Fake:
-            def __init__(self, name):
-                self.name = name
+    def test_memory_partition_matches_the_enumerated_subtrees(self):
+        """Set equality against `EXPECTED_MEMORY_PATHS`, enumerated from the
+        architecture rather than from the function under test."""
+        m = _build_tiny()
+        mem_paths, _ = self._split_paths(m)
+        assert mem_paths == EXPECTED_MEMORY_PATHS, (
+            f"missing: {sorted(EXPECTED_MEMORY_PATHS - mem_paths)}; "
+            f"unexpected: {sorted(mem_paths - EXPECTED_MEMORY_PATHS)}"
+        )
 
-        vars_ = [
-            _Fake("token_embeddings/embeddings"),       # backbone
-            _Fake("memory_K_lt"),                        # memory (leading)
-            _Fake("blocks/0/ffn/dense_kernel_memory_x"), # MUST be backbone
-            _Fake("gate_W_g/kernel"),                    # memory (leading)
-            _Fake(""),                                   # defensive backbone
+    def test_backbone_gate_proj_is_not_captured(self):
+        """The real substring trap, with real Keras 3 paths.
+
+        `WaveFieldAttention` puts a `gate_proj` Dense in **every** backbone
+        block, so its weights' paths contain a component starting with
+        `gate_`. Matching any path component (rather than the leading one)
+        would hand 2 backbone variables per block to the memory optimizer.
+        No synthetic name is needed to express this case.
+        """
+        m = _build_tiny()
+        mem_paths, bb_paths = self._split_paths(m)
+        traps = {p for p in mem_paths | bb_paths if "/gate_proj/" in p}
+        assert len(traps) == 2 * m.depth, (
+            f"expected 2 gate_proj weights per block, found {sorted(traps)}"
+        )
+        assert traps <= bb_paths, (
+            "backbone attention gate_proj weights were captured by the "
+            f"memory optimizer: {sorted(traps & mem_paths)}"
+        )
+
+    def test_model_owned_weights_route_by_bare_name(self):
+        """The fallback arm, exercised.
+
+        `memory_current_phase` / `memory_global_step` are created by the
+        model on itself, so their path is `<model name>/...` — a leading
+        component that matches no prefix (and the model's own name is
+        uniquified per instance, so it cannot be spelled literally here).
+        They are non-trainable and so never reach `train_step`'s split
+        today; routing the full variable list is what makes the arm
+        observable.
+        """
+        m = _build_tiny()
+        mem, _ = split_trainable_by_prefix(m.variables)
+        mem_paths = {v.path for v in mem}
+        for own in ("memory_current_phase", "memory_global_step"):
+            assert any(p.endswith(f"/{own}") for p in mem_paths), (
+                f"model-owned {own!r} routed to backbone; memory paths = "
+                f"{sorted(mem_paths)}"
+            )
+
+    def test_no_backbone_weight_name_carries_a_memory_prefix(self):
+        """Pins the fallback arm's safety: routing also matches the bare
+        `Variable.name` (so a weight the model creates on *itself*, whose
+        path is prefixed by the model name, still routes to memory). That
+        arm is only safe while no backbone weight is *named* `memory_*` /
+        `gate_*` — Keras names them `kernel`/`bias`/`gamma`/`beta`, and
+        `WaveFieldAttention` names its own `wave_*`/`field_coupling`.
+        """
+        m = _build_tiny()
+        _, backbone_vars = split_trainable_by_prefix(m.trainable_variables)
+        offenders = [
+            v.path for v in backbone_vars
+            if v.name.startswith("memory_") or v.name.startswith("gate_")
         ]
-        mem, bb = split_trainable_by_prefix(vars_)
-        mem_names = {v.name for v in mem}
-        bb_names = {v.name for v in bb}
-        assert "memory_K_lt" in mem_names
-        assert "gate_W_g/kernel" in mem_names
-        assert "blocks/0/ffn/dense_kernel_memory_x" in bb_names
-        assert "token_embeddings/embeddings" in bb_names
-        assert "" in bb_names
+        assert offenders == [], offenders
 
 
 # ---------------------------------------------------------------------

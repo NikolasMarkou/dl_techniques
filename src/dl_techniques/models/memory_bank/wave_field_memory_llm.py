@@ -15,9 +15,13 @@ Key implementation notes (per F-002, F-004, LESSONS):
   modification.
 - Phase counter and global step live as ``add_weight(trainable=False)`` so
   they survive ``model.save`` / ``load_model`` round-trips.
-- Custom :meth:`train_step` splits trainable variables by name prefix
-  (``memory_`` / ``gate_`` -> memory optimizer; everything else ->
-  backbone optimizer).
+- Custom :meth:`train_step` splits trainable variables by the leading
+  component of ``Variable.path`` — the Keras 3 layer-qualified property —
+  falling back to the bare ``Variable.name`` for weights the model creates
+  on itself (``memory_`` / ``gate_`` -> memory optimizer; everything else
+  -> backbone optimizer). ``Variable.name`` alone is **not** the
+  layer-qualified name under Keras 3; see
+  :func:`split_trainable_by_prefix`.
 - :meth:`compile` accepts both ``backbone_optimizer`` and
   ``memory_optimizer`` and registers the backbone with Keras while
   keeping the memory optimizer as a model attribute.
@@ -83,26 +87,54 @@ def split_trainable_by_prefix(
     variables: List[Any],
     memory_prefixes: Tuple[str, ...] = ("memory_", "gate_"),
 ) -> Tuple[List[Any], List[Any]]:
-    """Partition ``variables`` into ``(memory_vars, backbone_vars)`` by
-    matching the **leading path component** of each variable's ``.name``
-    against ``memory_prefixes``.
+    """Partition ``variables`` into ``(memory_vars, backbone_vars)``.
 
-    Keras variable names compose as ``<layer_name>/<weight_name>`` (and
-    nested paths add further ``/`` components). R3+R4: we split on ``/``
-    and check whether the leading component **starts with** any prefix.
-    This is stricter than the previous substring match — a stray
-    ``"memory_"`` somewhere mid-path no longer leaks variables across
-    optimizers.
+    Under Keras 3 a variable carries **two** names, and they are not the
+    same string: ``Variable.name`` is the bare weight name handed to
+    ``add_weight`` (``"kernel"``, ``"bias"``, ``"gamma"``), while the
+    layer-qualified hierarchy lives in the separate ``Variable.path``
+    property (``"memory_read_controller/gate_W_g/kernel"``). Matching
+    ``.name`` therefore sees only weights created by a literal
+    ``add_weight(name="memory_...")`` call and never sees a sublayer's
+    weights, whatever its parent layer is called.
 
-    :returns: ``(memory_vars, backbone_vars)``. Variables with empty or
-        missing names are routed to backbone (defensive).
+    A variable is routed to memory when **either**:
+
+    - the **leading component of** ``.path`` starts with a prefix — the
+      memory subtrees (``memory_lt_bank``, ``memory_read_controller``,
+      ``memory_write_controller``) are top-level attributes of the model,
+      so every weight beneath them, including the read gate
+      ``memory_read_controller/gate_W_g/kernel``, matches here; or
+    - the bare ``.name`` starts with a prefix — this covers weights the
+      model creates on **itself** via ``add_weight``, whose path is
+      prefixed by the model's own name (``wave_field_memory_llm/
+      memory_global_step``) and so has a non-matching leading component.
+
+    Matching *any* path component is deliberately **not** done: the
+    backbone's :class:`WaveFieldAttention` contains a ``gate_proj`` Dense
+    in every block, so an any-component rule would hand 2 variables per
+    block to the memory optimizer.
+
+    :param variables: Keras 3 variables to partition.
+    :param memory_prefixes: Prefixes marking the memory partition.
+    :returns: ``(memory_vars, backbone_vars)``. Variables with an empty or
+        missing path and name are routed to backbone (defensive).
     """
     memory_vars: List[Any] = []
     backbone_vars: List[Any] = []
     for v in variables:
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-015 — match on
+        # `.path` (leading component) plus the bare `.name`. Do NOT go
+        # back to `.name` alone: under Keras 3 that is the bare weight
+        # name, so every Dense/LayerNormalization weight in the memory
+        # controllers — the read gate above all — silently trained on the
+        # backbone optimizer. And do NOT relax to an any-component path
+        # match: `block_*/attention/gate_proj/*` would be captured.
+        path = getattr(v, "path", "") or ""
         name = getattr(v, "name", "") or ""
-        head = name.split("/", 1)[0]
-        if any(head.startswith(p) for p in memory_prefixes):
+        head = path.split("/", 1)[0]
+        if any(head.startswith(p) or name.startswith(p)
+               for p in memory_prefixes):
             memory_vars.append(v)
         else:
             backbone_vars.append(v)
@@ -537,9 +569,10 @@ class WaveFieldMemoryLLM(keras.Model):
         grads = tape.gradient(loss, trainable_vars)
 
         # R3+R4: drop None-gradient pairs first, then route via
-        # `split_trainable_by_prefix` (leading-component match). Keeps
-        # routing logic in one place; train_step no longer encodes the
-        # prefix policy inline.
+        # `split_trainable_by_prefix` (leading `.path` component, or the
+        # bare `.name` for model-owned weights). Keeps routing logic in
+        # one place; train_step no longer encodes the prefix policy
+        # inline.
         live = [(g, v) for g, v in zip(grads, trainable_vars) if g is not None]
         if live:
             live_grads = [g for g, _ in live]
