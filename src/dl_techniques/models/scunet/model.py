@@ -13,8 +13,14 @@ Key Features
   skip connections.
 - Strided Conv2D downsampling / Conv2DTranspose upsampling (factor 2 per stage → total
   factor 64 = 2^6).
-- Reflection padding so arbitrary input resolutions divisible-by-64 constraint is met,
-  cropped back to the original size on output.
+- Reflection padding so arbitrary input resolutions meet the divisible-by-64
+  constraint, cropped back to the original size on output. The pad is computed with
+  `keras.ops`, so a dynamic build — `SCUNet()(keras.Input((None, None, 3)))` — works
+  and one built model serves every concrete size. Two limits survive on that path:
+  a reflect pad must be strictly smaller than the extent it pads, so heights or
+  widths below 33 still fail inside `MirrorPad` (statically-shaped calls get a named
+  `ValueError` instead), and `window_size` divisibility is checked at construction
+  against `input_resolution`, not against the tensor.
 - Linearly-scheduled stochastic depth across all blocks.
 
 Architecture
@@ -483,13 +489,23 @@ class SCUNet(keras.Model):
 
         h, w = ops.shape(x)[1], ops.shape(x)[2]
 
-        # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps)
-        padding_bottom = int(np.ceil(h / 64) * 64 - h)
-        padding_right = int(np.ceil(w / 64) * 64 - w)
+        # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps).
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-045: computed with `%`,
+        # UNCONDITIONALLY, and never through numpy. `ops.shape` yields a scalar
+        # TENSOR for any extent that is `None`, so the previous
+        # `int(np.ceil(h / 64) * 64 - h)` raised inside numpy — with no
+        # model-level message — for the natural fully-convolutional build
+        # `SCUNet()(keras.Input((None, None, 3)))`, which the module docstring
+        # advertises as supported. Do NOT reintroduce the `if padding > 0`
+        # guard around the pad or the crop either: it is a Python branch on a
+        # possibly-symbolic value, and a zero-width pad/full-extent crop is
+        # already a no-op. On a fully static input `h`/`w` are plain ints and
+        # `(-h) % 64` is the same number `ceil` produced.
+        padding_bottom = (-h) % 64
+        padding_right = (-w) % 64
 
-        if padding_bottom > 0 or padding_right > 0:
-            paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
-            x = ops.pad(x, paddings, mode="REFLECT")
+        paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
+        x = ops.pad(x, paddings, mode="REFLECT")
 
         # Encoder path with skip connections
         x1 = self.m_head(x)
@@ -506,9 +522,8 @@ class SCUNet(keras.Model):
         x = self.m_up1(x + x2, training=training)
         x = self.m_tail(x + x1)
 
-        # Remove padding
-        if padding_bottom > 0 or padding_right > 0:
-            x = x[:, :h, :w, :]
+        # Remove padding (a no-op when nothing was padded; see D-045)
+        x = x[:, :h, :w, :]
 
         return x
 
