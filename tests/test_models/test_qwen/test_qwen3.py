@@ -785,7 +785,7 @@ class TestQwen3ModelErrorHandling:
             create_qwen3("tiny", task_type="classification", num_labels=-1)
 
         # Invalid pooling strategy
-        with pytest.raises(ValueError, match="pooling_strategy must be 'cls' or 'mean'"):
+        with pytest.raises(ValueError, match="pooling_strategy must be 'last', 'cls' or 'mean'"):
             create_qwen3("tiny", task_type="classification", num_labels=3, pooling_strategy="max")
 
 

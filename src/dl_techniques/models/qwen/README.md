@@ -140,3 +140,10 @@ The classification head pools with the shipped `SequencePooling` layer rather th
 hand-rolled masked mean. That layer is parameter-free, so the choice does not change any
 checkpoint — but do not re-inline a bespoke pooling branch here; see the `DECISION` comment in
 `qwen3.py` at `create_qwen3_classification`.
+
+Both classification factories default to `pooling_strategy="last"`: the last position kept by
+`attention_mask`. These backbones are strictly causally masked, so position 0 attends only to
+itself and the old `"cls"` default made the pooled vector a function of the first token id
+alone — measured 0.000e+00 logit movement when a non-first token changed. `"cls"` is still
+accepted, for bidirectional-era checkpoints only; a classifier trained under it does not
+reload comparably against the new default.

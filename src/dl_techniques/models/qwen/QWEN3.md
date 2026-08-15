@@ -118,7 +118,7 @@ classifier = create_qwen3(
     config_or_variant="small", 
     task_type="classification", 
     num_labels=5,
-    pooling_strategy="cls"
+    pooling_strategy="last"  # default; the last token kept by attention_mask
 )
 
 # Compile for classification

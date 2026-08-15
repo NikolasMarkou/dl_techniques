@@ -268,6 +268,9 @@ model = create_gemma3(
     num_labels=3,
     pooling_strategy="mean" # Use mean pooling over the sequence
 )
+# The default is "last" (the last position kept by `attention_mask`). Gemma 3's
+# blocks are causally masked, so `"cls"` would pool a position that attended only
+# to itself; it is accepted only for bidirectional-era checkpoints.
 
 # Compile with appropriate loss for classification
 model.compile(

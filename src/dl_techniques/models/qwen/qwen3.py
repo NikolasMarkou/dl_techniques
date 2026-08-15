@@ -652,7 +652,7 @@ def create_qwen3_generation(config: Dict[str, Any]) -> keras.Model:
 def create_qwen3_classification(
     config: Dict[str, Any],
     num_labels: int,
-    pooling_strategy: str = "cls",
+    pooling_strategy: str = "last",
     classifier_dropout: Optional[float] = None,
 ) -> keras.Model:
     """
@@ -667,9 +667,15 @@ def create_qwen3_classification(
             `Qwen3` base model.
         num_labels: The number of output labels for the classification task.
         pooling_strategy: The method to pool the sequence output.
-            - "cls": Use the output of the first token (CLS token).
+            - "last": Use the output at the LAST position kept by
+              `attention_mask` — the only position that has attended to the
+              whole sequence under this backbone's causal mask.
             - "mean": Use the mean of all token outputs (respecting attention mask).
-            Defaults to "cls".
+            - "cls": Use the output of the first token. Under a causal mask this
+              position attends only to itself, so the pooled vector is a
+              function of the first token id ALONE; it is kept only for
+              bidirectional-era checkpoints.
+            Defaults to "last".
         classifier_dropout: The dropout rate for the classification head. If
             `None`, it defaults to the `dropout_rate` from the main `config`.
             Defaults to `None`.
@@ -679,8 +685,21 @@ def create_qwen3_classification(
     """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
-    if pooling_strategy not in ["cls", "mean"]:
-        raise ValueError(f"pooling_strategy must be 'cls' or 'mean', got '{pooling_strategy}'")
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: the default is "last", not
+    # "cls". `Qwen3` is STRICTLY CAUSALLY MASKED, so position 0 attends only to
+    # itself and `cls` pooling makes the classifier a function of the first token
+    # id alone — measured on CPU at HEAD: changing token 3 of an 8-token input
+    # moved the logits by exactly 0.000e+00 under `cls`, while changing token 0
+    # moved them by 3.519e-02. The failure is SILENT (loss decreases; accuracy
+    # plateaus at the first-token prior). Do NOT restore "cls" as the default,
+    # and do NOT "simplify" `last` to `inputs[:, -1, :]`: SequencePooling's
+    # `last` resolves the last position KEPT BY THE MASK, so it skips right
+    # padding, which a bare -1 index does not. See decisions.md D-029.
+    if pooling_strategy not in ["last", "cls", "mean"]:
+        raise ValueError(
+            f"pooling_strategy must be 'last', 'cls' or 'mean', got "
+            f"'{pooling_strategy}'"
+        )
 
     logger.info(f"Creating Qwen3 classification model with {num_labels} labels.")
     logger.info(f"Using pooling strategy: '{pooling_strategy}'")
@@ -700,6 +719,8 @@ def create_qwen3_classification(
     # hand-rolled cls/mean if/else across qwen3/qwen3_next/gemma3 (and qwen3_som, deleted at
     # plan-2026-08-10-3649c19e). Do NOT re-inline
     # a bespoke masked-mean here; SequencePooling('mean') reproduces it exactly (probe: 0.0).
+    # The `mask=attention_mask` argument is LOAD-BEARING for `last` (D-029): it is
+    # what makes the gather land on the last REAL token rather than on padding.
     pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
         sequence_output, mask=attention_mask
     )

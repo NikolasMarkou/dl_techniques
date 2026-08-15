@@ -73,8 +73,10 @@ The two task factories build functional models over the same backbone.
 `create_gemma3_classification` re-traces the backbone's embedding, blocks and final
 norm into the functional graph instead of calling the backbone as a unit, because
 it needs the hidden states rather than the vocabulary logits; pooling then goes
-through the shared `SequencePooling` layer so that `cls` and `mean` behave
-identically to the other decoder packages.
+through the shared `SequencePooling` layer so that every strategy behaves
+identically to the other decoder packages. It defaults to `last` — the last
+position kept by `attention_mask` — because the blocks are causally masked and
+`cls` would pool a position that attended only to itself.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
@@ -523,15 +525,27 @@ def create_gemma3_generation(config: Dict[str, Any]) -> keras.Model:
 def create_gemma3_classification(
     config: Dict[str, Any],
     num_labels: int,
-    pooling_strategy: str = "cls",
+    pooling_strategy: str = "last",
     classifier_dropout: Optional[float] = None,
 ) -> keras.Model:
-    """Creates a Gemma3 model for sequence classification tasks."""
+    """Creates a Gemma3 model for sequence classification tasks.
+
+    ``pooling_strategy`` is one of ``"last"`` (default — the last position kept
+    by ``attention_mask``, the only one that has attended to the whole sequence
+    under this backbone's causal mask), ``"mean"`` (mask-aware mean) or
+    ``"cls"`` (first position; a function of the first token id alone here, kept
+    only for bidirectional-era checkpoints).
+    """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
-    if pooling_strategy not in ["cls", "mean"]:
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default "last", not "cls" —
+    # Gemma3's blocks are strictly causally masked (sliding-window and full
+    # layers alike), so `cls` pools a position that attended only to itself.
+    # Same mechanism, same measurement and the same do-not-restore instruction
+    # as `qwen/qwen3.py`. See decisions.md D-029.
+    if pooling_strategy not in ["last", "cls", "mean"]:
         raise ValueError(
-            f"pooling_strategy must be 'cls' or 'mean', got "
+            f"pooling_strategy must be 'last', 'cls' or 'mean', got "
             f"'{pooling_strategy}'"
         )
 

@@ -600,7 +600,7 @@ def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
 def create_qwen3_next_classification(
     config: Dict[str, Any],
     num_labels: int,
-    pooling_strategy: str = "cls",
+    pooling_strategy: str = "last",
     classifier_dropout: Optional[float] = None,
 ) -> keras.Model:
     """
@@ -615,9 +615,15 @@ def create_qwen3_next_classification(
             `Qwen3Next` base model.
         num_labels: The number of output labels for the classification task.
         pooling_strategy: The method to pool the sequence output.
-            - "cls": Use the output of the first token (CLS token).
+            - "last": Use the output at the LAST position kept by
+              `attention_mask` — the only position that has attended to the
+              whole sequence under this backbone's causal mask.
             - "mean": Use the mean of all token outputs (respecting attention mask).
-            Defaults to "cls".
+            - "cls": Use the output of the first token. Under a causal mask this
+              position attends only to itself, so the pooled vector is a
+              function of the first token id ALONE; it is kept only for
+              bidirectional-era checkpoints.
+            Defaults to "last".
         classifier_dropout: The dropout rate for the classification head. If
             `None`, it defaults to the `dropout_rate` from the main `config`.
             Defaults to `None`.
@@ -627,8 +633,15 @@ def create_qwen3_next_classification(
     """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
-    if pooling_strategy not in ["cls", "mean"]:
-        raise ValueError(f"pooling_strategy must be 'cls' or 'mean', got '{pooling_strategy}'")
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default "last", not "cls" —
+    # this backbone is strictly causally masked, so `cls` pools a position that
+    # attended only to itself. Same mechanism, same measurement and the same
+    # do-not-restore instruction as `qwen3.py`. See decisions.md D-029.
+    if pooling_strategy not in ["last", "cls", "mean"]:
+        raise ValueError(
+            f"pooling_strategy must be 'last', 'cls' or 'mean', got "
+            f"'{pooling_strategy}'"
+        )
 
     logger.info(f"Creating Qwen3 Next classification model with {num_labels} labels.")
     logger.info(f"Using pooling strategy: '{pooling_strategy}'")
