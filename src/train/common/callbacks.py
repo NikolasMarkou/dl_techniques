@@ -1,6 +1,7 @@
 """Common callback and learning rate schedule utilities for training scripts."""
 
 import os
+import re
 import json
 import keras
 from datetime import datetime
@@ -55,12 +56,112 @@ def best_checkpoint_path(results_dir: str) -> str:
     return os.path.join(results_dir, BEST_CHECKPOINT_FILENAME)
 
 
+# ---------------------------------------------------------------------
+# Monitor-direction resolution
+# ---------------------------------------------------------------------
+
+# Metric-name tokens whose direction is DOWN (smaller is better).
+#
+# Both registries hold only tokens that are UNAMBIGUOUS as metric names,
+# because a Keras multi-output monitor key embeds the OUTPUT LAYER's name
+# (`val_<output_name>_<metric_name>`). `darkir`'s first output is the
+# `layers.Add(name="final_residual")`, so `val_final_residual_psnr` is a real
+# monitor key in this repo -- a generic token like `residual`, `score`, `std`
+# or `variance` in either set would resolve it off the layer name and get the
+# direction exactly backwards. Do not add one.
+_MINIMIZE_METRIC_TOKENS = frozenset({
+    'loss', 'error', 'err', 'mae', 'mse', 'rmse', 'nrmse', 'mape', 'smape',
+    'msle', 'nll', 'nlpd', 'logloss', 'crossentropy', 'perplexity', 'ppl',
+    'wer', 'cer', 'fid', 'kid', 'lpips', 'absrel', 'sqrel', 'rmselog',
+    'crps', 'pinball', 'divergence', 'kld', 'entropy', 'quantization',
+})
+
+# Metric-name tokens whose direction is UP (larger is better).
+_MAXIMIZE_METRIC_TOKENS = frozenset({
+    'accuracy', 'acc', 'psnr', 'ssim', 'msssim', 'iou', 'miou', 'jaccard',
+    'map', 'ap', 'f1', 'fbeta', 'dice', 'auc', 'auroc', 'auprc', 'prauc',
+    'precision', 'recall', 'sensitivity', 'specificity', 'r2', 'bleu',
+    'rouge', 'meteor', 'cider', 'kappa', 'mcc', 'purity', 'nmi', 'ari',
+    'delta1', 'delta2', 'delta3', 'topk', 'top1', 'top3', 'top5',
+    'likelihood',
+})
+
+
+# DECISION plan-2026-08-14T233721-d4f9beb2/D-051
+# Resolve the selection DIRECTION from a metric-name token registry, never from
+# a substring test. DO NOT restore `monitor_mode = 'max' if 'accuracy' in
+# monitor else 'min'`: every maximize metric whose name lacks the substring
+# "accuracy" -- `val_psnr`, `val_iou`, `val_box_iou`, `val_map`, `val_f1`,
+# `val_dice`, `val_auc`, `val_ssim` -- got `mode='min'`, so
+# `EarlyStopping(restore_best_weights=True)` RESTORED and `ModelCheckpoint`
+# SAVED the WORST epoch. `train_sam3.py` (D-041) measured the cost of exactly
+# this class of selection error at box IoU 0.2360 vs an achievable 0.2724.
+# DO NOT delegate to Keras' own `mode='auto'` either: it is resolved at
+# `on_train_begin`/`on_epoch_end` by looking for a compiled metric OBJECT whose
+# `.name` equals the monitor minus its `val_` prefix and reading that object's
+# `_direction`, and it RAISES `ValueError` when it cannot find one. Every
+# multi-output monitor in this repo (`train_darkir.py`'s
+# `f"val_{model.output_names[0]}_psnr"`) is prefixed with the output name and
+# therefore matches no metric object -- so `auto` would turn a silently-wrong
+# selection into a mid-run crash. Minimize tokens are tested FIRST so a
+# composite name like `dice_loss` or `iou_loss` still resolves to `min`.
+# See decisions.md D-051.
+def resolve_monitor_mode(monitor: str, mode: Optional[str] = None) -> str:
+    """Resolve the ``mode`` for a monitored metric from its name.
+
+    Args:
+        monitor: The metric key that will be read out of the epoch ``logs``,
+            e.g. ``'val_loss'``, ``'val_accuracy'``, ``'val_psnr'``,
+            ``'val_output_1_psnr'``. Split into lowercase alphanumeric tokens;
+            a leading ``val`` token is dropped.
+        mode: Explicit override. ``'min'`` or ``'max'`` is returned unchanged;
+            ``None`` (the default) means "infer from ``monitor``".
+
+    Returns:
+        ``'min'`` or ``'max'``, suitable for ``keras.callbacks.EarlyStopping``
+        and ``keras.callbacks.ModelCheckpoint``.
+
+    Failure mode: raises ``ValueError`` for an explicit ``mode`` that is
+    neither ``'min'`` nor ``'max'`` (a typo there would otherwise make Keras
+    warn and silently fall back to ``'auto'``). An UNRECOGNIZED metric name
+    never raises -- it falls back to ``'min'``, which is what the old
+    substring heuristic returned for it, and logs a WARNING naming the metric
+    so the caller can pass ``mode=`` explicitly. Add the token to
+    ``_MAXIMIZE_METRIC_TOKENS`` / ``_MINIMIZE_METRIC_TOKENS`` rather than
+    re-deriving a direction at a call site.
+    """
+    if mode is not None:
+        if mode not in ('min', 'max'):
+            raise ValueError(
+                f"monitor_mode must be 'min', 'max' or None; got {mode!r}."
+            )
+        return mode
+
+    tokens = {token for token in re.split(r'[^a-z0-9]+', monitor.lower()) if token}
+    tokens.discard('val')
+
+    if tokens & _MINIMIZE_METRIC_TOKENS:
+        return 'min'
+    if tokens & _MAXIMIZE_METRIC_TOKENS:
+        return 'max'
+
+    logger.warning(
+        f"Unrecognized monitor metric '{monitor}': its optimization direction "
+        f"is not in the token registry, so checkpoint selection falls back to "
+        f"mode='min'. If '{monitor}' is a metric to MAXIMIZE, pass "
+        f"monitor_mode='max' to create_callbacks (or add its token to "
+        f"train.common.callbacks._MAXIMIZE_METRIC_TOKENS)."
+    )
+    return 'min'
+
+
 def create_callbacks(
         model_name: str,
         results_dir_prefix: str = "model",
         output_root: str = "results",
         run_dir: Optional[str] = None,
         monitor: str = 'val_accuracy',
+        monitor_mode: Optional[str] = None,
         patience: int = 15,
         use_lr_schedule: bool = True,
         analyzer_epoch_frequency: int = 1,
@@ -89,6 +190,11 @@ def create_callbacks(
         Default None preserves the timestamped-dir behavior.
     monitor : str
         Metric to monitor for checkpointing/early stopping.
+    monitor_mode : Optional[str]
+        Selection direction for `monitor`: 'min', 'max', or None (default) to
+        infer it from the metric name via :func:`resolve_monitor_mode`. Pass it
+        explicitly for a metric whose name that function does not recognize --
+        it logs a WARNING naming the metric and falls back to 'min'.
     patience : int
         Early stopping patience.
     use_lr_schedule : bool
@@ -118,7 +224,7 @@ def create_callbacks(
         results_dir = os.path.join(output_root, f"{results_dir_prefix}_{model_name}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
-    monitor_mode = 'max' if 'accuracy' in monitor else 'min'
+    monitor_mode = resolve_monitor_mode(monitor, monitor_mode)
 
     callbacks = [
         keras.callbacks.EarlyStopping(

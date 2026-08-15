@@ -1396,10 +1396,14 @@ class TestEvaluation:
 
         Two things are pinned, because either alone is insufficient:
         the monitored key must be an ACHIEVED metric this module computes, and
-        the mode must be ``max``. ``train.common.create_callbacks`` derives
-        ``mode`` as ``'max' if 'accuracy' in monitor else 'min'``, so routing
-        ``val_box_iou`` through it unchanged would select the WORST epoch --
-        silently, and in the direction that looks like a result.
+        the mode must be ``max``. ``train.common.create_callbacks`` USED to
+        derive ``mode`` as ``'max' if 'accuracy' in monitor else 'min'``, so
+        routing ``val_box_iou`` through it unchanged would have selected the
+        WORST epoch -- silently, and in the direction that looks like a result.
+        That helper was fixed (plan-2026-08-14T233721-d4f9beb2/D-051, guarded by
+        ``tests/test_train/test_common_callbacks.py``); this test still pins the
+        mode locally because ``build_callbacks`` still constructs these two
+        callbacks itself.
         """
         from train.sam3.train_sam3 import build_callbacks
 

@@ -1286,10 +1286,16 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     # the majority of the selection scalar is a provably constant term. On seed
     # 3 that selected epoch 6 over epoch 29 on a **0.07%** val_loss margin and
     # cost box IoU 0.2360 vs 0.2724 -- and 0.2360 became the headline. The two
-    # callbacks are REBUILT rather than re-configured because
-    # `train.common.create_callbacks` derives `mode` as
-    # `'max' if 'accuracy' in monitor else 'min'`, so passing `val_box_iou`
-    # through it would silently select the WORST epoch. See decisions.md D-041.
+    # callbacks are REBUILT rather than re-configured so that this file owns the
+    # whole selection contract (metric, mode, patience, filepath) in one place.
+    # UPDATED (plan-2026-08-14T233721-d4f9beb2/D-051): the direction hazard this
+    # comment used to cite is GONE. `train.common.create_callbacks` no longer
+    # derives `mode` as `'max' if 'accuracy' in monitor else 'min'`; it resolves
+    # it from a metric-name registry that knows `iou` is a maximize metric, and
+    # it now accepts an explicit `monitor_mode=`. Routing `val_box_iou` through
+    # it would resolve to `max` today. The rebuild is kept anyway -- it is not
+    # load-bearing for the direction any more, only for locality.
+    # See decisions.md D-041 and D-051.
     callbacks = [callback for callback in callbacks
                  if not isinstance(callback, (keras.callbacks.EarlyStopping,
                                               keras.callbacks.ModelCheckpoint))]
@@ -1307,10 +1313,11 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     # `GAP_SELECTION_METRIC` the `EarlyStopping` monitor and do NOT repoint
     # `best_model.keras` at it -- that changes which weights `fit` RESTORES
     # (`restore_best_weights=True`), i.e. a new variable that needs its own
-    # control arm, not a config tweak. `mode="max"` is HARDCODED for the same
-    # reason D-041 rebuilds the two callbacks above: `create_callbacks` derives
-    # `mode` as `'max' if 'accuracy' in monitor else 'min'`, which would select
-    # the WORST epoch here. `nan` is expected on any run without the
+    # control arm, not a config tweak. `mode="max"` is HARDCODED because this
+    # callback is built here rather than by `create_callbacks` -- the old
+    # `'max' if 'accuracy' in monitor else 'min'` hazard this comment used to
+    # cite was fixed in plan-2026-08-14T233721-d4f9beb2/D-051 and no longer
+    # applies. `nan` is expected on any run without the
     # all-category export and is MEASURED-safe (see GAP_SELECTION_METRIC).
     # See decisions.md D-003.
     callbacks.append(keras.callbacks.ModelCheckpoint(

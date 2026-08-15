@@ -10,7 +10,7 @@ from train.common.args import (
 )
 from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS, build_raw_image_dataset, ElementMapFn, IMAGENETTE_TFDS_NAME, IMAGENETTE_NUM_CLASSES, DATASET_NUM_CLASSES, SUPPORTED_DATASETS
 from train.common.optimizer import build_optimizer
-from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback
+from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback, resolve_monitor_mode
 from train.common.augment import augment_patch, augment_pair
 from train.common.evaluation import (
     validate_model_loading,
@@ -139,6 +139,7 @@ __all__ = [
     "create_base_argument_parser",
     "create_clm_loss_fn",
     "create_callbacks",
+    "resolve_monitor_mode",
     "create_classification_results",
     "create_learning_rate_schedule",
     "create_nlp_callbacks",

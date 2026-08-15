@@ -478,6 +478,7 @@ create_callbacks(
     model_name: str,                          # used in directory naming + analyzer
     results_dir_prefix: str = "model",        # results/{prefix}_{name}_{timestamp}/
     monitor: str = 'val_accuracy',            # metric for EarlyStopping + ModelCheckpoint
+    monitor_mode: Optional[str] = None,       # 'min'/'max'; None = infer from the metric name
     patience: int = 15,                       # EarlyStopping patience
     use_lr_schedule: bool = True,             # True = skip ReduceLROnPlateau
     analyzer_epoch_frequency: int = 1,        # EpochAnalyzerCallback frequency
@@ -506,13 +507,46 @@ create_callbacks(
 | Denoising / Segmentation | `val_loss` | min |
 | Time-series / NLP pretrain | `val_loss` | min |
 | Detection | `val_loss` | min |
-| Custom metric | `val_psnr`, `val_f1`, etc. | auto (`max` if 'accuracy' in name, else `min`) |
+| Custom metric | `val_psnr`, `val_f1`, `val_box_iou`, etc. | inferred by `resolve_monitor_mode` (see below) |
+
+**The mode is resolved from a metric-name TOKEN REGISTRY, not a substring test.**
+`train.common.resolve_monitor_mode(monitor, mode=None)` lowercases the monitor key, splits
+it into alphanumeric tokens, drops a leading `val`, and matches against
+`_MINIMIZE_METRIC_TOKENS` first (so `val_dice_loss` is a loss, not a Dice coefficient) then
+`_MAXIMIZE_METRIC_TOKENS`. An unrecognized name logs a WARNING naming the metric and falls
+back to `'min'`; pass `monitor_mode='max'` (or add the token) rather than working around it
+at the call site.
+
+Until 2026-08-15 this was `monitor_mode = 'max' if 'accuracy' in monitor else 'min'`, so
+**every** maximize metric whose name lacks the substring `accuracy` — `val_psnr`, `val_iou`,
+`val_box_iou`, `val_map`, `val_f1`, `val_dice`, `val_auc`, `val_ssim`, `val_precision`,
+`val_recall` — got `mode='min'`, and `EarlyStopping(restore_best_weights=True)` restored,
+and `ModelCheckpoint` saved, the **worst** epoch. Of the 61 measured `create_callbacks` /
+`create_nlp_callbacks` call sites, exactly one was affected: `src/train/darkir/train_darkir.py`
+(`val_psnr`, and `f"val_{model.output_names[0]}_psnr"` under `--side-loss`). `train_sam3.py`
+had already discovered the trap and worked around it by rebuilding both callbacks locally.
+
+**Two registry rules, both measured, both load-bearing:**
+- A Keras multi-output monitor key embeds the OUTPUT LAYER's name
+  (`val_<output_name>_<metric_name>`). darkir's first output is
+  `layers.Add(name="final_residual")`, so `val_final_residual_psnr` is a real key here — a
+  generic token like `residual`, `score`, `std` or `variance` in either registry would
+  resolve it off the layer name and invert the direction. Keep both sets unambiguous.
+- Keras' own `mode='auto'` is NOT a substitute. It resolves at epoch end by finding a
+  compiled metric OBJECT whose `.name` equals the monitor minus `val_` and reading its
+  `_direction`, and **raises `ValueError`** when it finds none — which is exactly the
+  multi-output case above. Delegating would trade a silently-wrong selection for a mid-run crash.
+
+Guarded by `tests/test_train/test_common_callbacks.py` (59 tests), whose third class is an
+explicit anti-vacuity control: the directions the old heuristic already got right must stay
+unchanged.
 
 ## What Lives in `train.common` vs. Locally
 
 **Use from `train.common`:**
 - `setup_gpu(gpu_id)` — GPU memory growth + device selection. Always pass `args.gpu`.
 - `create_callbacks(...)` — standard callbacks. See API reference above.
+- `resolve_monitor_mode(monitor, mode=None)` — the ONE producer of a checkpoint-selection direction. Call it instead of re-deriving `'min'`/`'max'` from a metric name at a call site.
 - `create_base_argument_parser(description, default_dataset)` — standard argparse. Only for vision/classification scripts that use `load_dataset()`.
 - `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` — cosine, exponential, constant. **Now defined in `dl_techniques.optimization.schedule`** and re-exported from `train.common`; both import paths work and resolve to the same object.
 - `load_dataset(name, batch_size, image_size)` — MNIST, CIFAR-10/100, ImageNet only.
