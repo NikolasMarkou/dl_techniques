@@ -692,7 +692,50 @@ class MultiModalFusion(keras.layers.Layer):
         if handler is None:
             raise ValueError(f"Unknown fusion strategy: {self.fusion_strategy}")
 
+        if self.fusion_strategy not in self.LENGTH_AGNOSTIC_STRATEGIES:
+            self._require_equal_sequence_lengths(inputs)
+
         return handler(inputs, training)
+
+    #: The two strategies that can fuse modalities of DIFFERENT sequence
+    #: length. Every other strategy either concatenates on the feature axis or
+    #: broadcasts element-wise on axis 1, and so requires equal lengths.
+    LENGTH_AGNOSTIC_STRATEGIES = frozenset({'cross_attention', 'attention_pooling'})
+
+    def _require_equal_sequence_lengths(
+        self,
+        inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+    ) -> None:
+        """Refuse statically-unequal sequence lengths, naming the strategy.
+
+        Interface contract (1 call site, :meth:`call`, guarding the six
+        strategies outside :attr:`LENGTH_AGNOSTIC_STRATEGIES`): raises
+        ``ValueError`` when every input has a statically-known sequence length
+        and they are not all equal; returns ``None`` otherwise. A symbolic build
+        with a ``None`` sequence axis is legal and is NEVER refused here — the
+        check is deliberately blind to it rather than guessing.
+
+        :param inputs: The modality tensors, as passed to :meth:`call`.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+
+        :raises ValueError: If the statically-known sequence lengths differ.
+        """
+        lengths = [
+            t.shape[1] for t in inputs
+            if len(t.shape) > 2 and t.shape[1] is not None
+        ]
+        if len(lengths) != len(inputs) or len(set(lengths)) <= 1:
+            return
+
+        raise ValueError(
+            f"fusion_strategy='{self.fusion_strategy}' requires all modality "
+            "inputs to share the same sequence length, because it combines them "
+            "on the feature axis (concatenation) or element-wise on the sequence "
+            f"axis; got sequence lengths {lengths} for inputs of shapes "
+            f"{[tuple(t.shape) for t in inputs]}. Use "
+            "fusion_strategy='cross_attention' or 'attention_pooling' for "
+            "modalities of different sequence length."
+        )
 
     def _call_cross_attention(
         self,
@@ -1026,21 +1069,17 @@ class MultiModalFusion(keras.layers.Layer):
         # the requirement, and points at no alternative. Do NOT "fix" it by padding
         # or slicing to a common length either — that would silently change the
         # semantics of the fusion. See decisions.md D-007.
-        lengths = [
-            t.shape[1] for t in inputs
-            if len(t.shape) > 2 and t.shape[1] is not None
-        ]
-        # Only decide on statically-known lengths: a symbolic build with a `None`
-        # sequence axis is legal and must not be refused here.
-        if len(lengths) == len(inputs) and len(set(lengths)) > 1:
-            raise ValueError(
-                "fusion_strategy='tensor_fusion' requires all modality inputs to "
-                "share the same sequence length, because it concatenates them on "
-                f"the feature axis; got sequence lengths {lengths} for inputs of "
-                f"shapes {[tuple(t.shape) for t in inputs]}. Use "
-                "fusion_strategy='cross_attention' or 'attention_pooling' for "
-                "modalities of different sequence length."
-            )
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-024
+        # The check itself MOVED, verbatim in effect, to
+        # `_require_equal_sequence_lengths`, called once from `call()` for every
+        # strategy outside `LENGTH_AGNOSTIC_STRATEGIES`. It is not re-run here.
+        # WHAT NOT TO DO: do not re-inline it into this method. `tensor_fusion`
+        # was never the only strategy with this requirement — `concatenation`
+        # concatenates on the same axis with the same precondition, and
+        # `addition`/`multiplication`/`gated`/`bilinear` broadcast on axis 1 — so
+        # a per-method copy is how five of the six ended up unguarded while this
+        # one was fixed. See decisions.md D-024.
 
         # Concatenate all modalities
         concatenated = keras.ops.concatenate(inputs, axis=-1)

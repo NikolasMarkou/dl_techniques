@@ -22,7 +22,14 @@ and everything about the interaction is delegated to a configurable
 read the other while keeping both streams intact; the pooling and tensor-product
 strategies collapse them more aggressively; concatenation barely interacts them
 at all. The trade is depth of interaction against parameter count and sequence
-length, and it is meant to be swept, not decided in this file.
+length, and it is meant to be swept, not decided in this file. Six of the eight
+carry a precondition this model cannot satisfy by construction: everything except
+``'cross_attention'`` and ``'attention_pooling'`` combines the streams on the
+feature axis or broadcasts them element-wise on the sequence axis, and so needs
+the vision and text lengths to be EQUAL. The vision length is pinned by
+``img_size``/``patch_size``; the text length is the caller's. Those six now raise
+a ``ValueError`` naming the strategy on the first call instead of dying inside a
+backend ``ConcatOp``.
 
 Two consequences of that delegation are not obvious from the call graph. First,
 the vision encoder is forced to ``output_mode='none'`` during config validation
@@ -32,12 +39,20 @@ Second, the fusion layer's output shape is strategy-dependent, so ``call``
 branches on the *type* of what it returns — cross-attention yields a tuple of two
 streams, which are concatenated along the sequence axis with vision first, while
 the other strategies yield a single tensor that is used as-is. The vocabulary
-projection is then applied to the whole combined sequence. That means the logits
-tensor contains one row per vision token as well as one per text token, and those
-leading rows predict nothing: ``generate`` slices them off with
-``logits[:, vision_seq_len:, :]``, and any loss computed against this model must
-slice the same way or it will train the head to predict tokens for image
-patches.
+projection is then applied to the whole combined sequence. **Under
+cross-attention only**, the logits tensor therefore contains one row per vision
+token as well as one per text token, and those leading rows predict nothing:
+``generate`` slices them off, and any loss computed against this model must slice
+the same way or it will train the head to predict tokens for image patches. Under
+every other sequence-preserving strategy the fused tensor is already one row per
+position at the single shared length and there is no vision prefix to slice —
+slicing one off left an EMPTY axis, which ``generate`` then indexed. That is why
+``generate`` now accepts ``'cross_attention'`` and refuses the other seven by
+name: ``'attention_pooling'`` has no per-token row at all (rank 2), and the
+remaining six require both streams at the same length, which autoregression
+breaks the moment it appends a token to a fixed-length vision stream. The fused
+length itself is asked of ``MultiModalFusion.compute_output_shape`` rather than
+re-derived here, so ``compute_output_shape`` and ``call`` cannot drift apart.
 
 Note that vision tokens are *not* spliced into the text token sequence in the
 LLaVA sense — the text tower runs on text alone and the modalities only meet
@@ -571,7 +586,46 @@ class NanoVLM(keras.Model):
 
         Returns:
             Generated token sequence of shape [batch_size, total_length]
+
+        Raises:
+            ValueError: If the configured fusion strategy is anything other than
+                ``'cross_attention'``. See the D-025 anchor below.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-025
+        # `generate()` supports 'cross_attention' and nothing else, and says so.
+        #
+        # WHAT NOT TO DO: do NOT re-open this loop to the other seven strategies
+        # by "handling" their output shape. The loop is structurally incompatible
+        # with them, and each fails differently:
+        #   * 'attention_pooling' returns rank 2 — there is no per-text-token
+        #     logit row to sample from at all.
+        #   * the other six require the vision and text streams to have EQUAL
+        #     sequence lengths (they combine on the feature axis or broadcast on
+        #     the sequence axis). Autoregression appends one token per step while
+        #     the vision length is fixed by img_size/patch_size, so the
+        #     precondition can hold for at most ONE step. Measured 2026-08-15:
+        #     with the prompt padded to the vision length, step 2 raises
+        #     "requires all modality inputs to share the same sequence length".
+        # Before this guard the loop ran for every strategy and sliced a
+        # vision-length prefix off a tensor that had none, leaving an EMPTY axis
+        # that `text_logits[:, -1, :]` then indexed. See decisions.md D-025.
+        strategy = self.fusion_config['fusion_strategy']
+        if strategy != 'cross_attention':
+            raise ValueError(
+                f"generate() requires fusion_strategy='cross_attention', got "
+                f"'{strategy}'. Only cross_attention keeps the vision and text "
+                "streams separate, which is what lets this loop take the last "
+                "TEXT position's logits and append a token. "
+                + (
+                    "'attention_pooling' pools the sequence away entirely "
+                    "(output is rank 2), so no per-token logit row exists."
+                    if strategy == 'attention_pooling' else
+                    f"'{strategy}' needs both streams at the same sequence "
+                    "length, which autoregression breaks the moment it appends "
+                    "a token to a fixed-length vision stream."
+                )
+            )
+
         # Process images once (cached for generation)
         vision_features = self.vision_encoder(images, training=False)
 
@@ -588,13 +642,13 @@ class NanoVLM(keras.Model):
                     {'input_ids': current_tokens}, training=False
                 )
 
-            # Fuse modalities
-            fused = self.fusion_layer([vision_features, text_features], training=False)
-            if isinstance(fused, tuple):
-                vision_fused, text_fused = fused
-                combined = ops.concatenate([vision_fused, text_fused], axis=1)
-            else:
-                combined = fused
+            # Fuse modalities. Only 'cross_attention' reaches this loop (see the
+            # D-025 refusal at the top of the method), so the fusion layer always
+            # returns the two streams separately here.
+            vision_fused, text_fused = self.fusion_layer(
+                [vision_features, text_features], training=False
+            )
+            combined = ops.concatenate([vision_fused, text_fused], axis=1)
 
             # Get logits and sample next token
             # Shared-embedding tie at call time (mirrors call(); see D-001 anchor above).
@@ -608,7 +662,7 @@ class NanoVLM(keras.Model):
             else:
                 logits = self.output_projection(combined)
 
-            # Extract text logits (skip vision_heads tokens)
+            # Extract text logits (skip the vision prefix)
             vision_seq_len = ops.shape(vision_features)[1]
             text_logits = logits[:, vision_seq_len:, :]
             next_token_logits = text_logits[:, -1, :]  # Last text position
@@ -669,13 +723,36 @@ class NanoVLM(keras.Model):
         )
         vision_seq_len = vision_output_shape[1]
 
-        # Combined sequence length (strategy dependent)
-        if self.fusion_config['fusion_strategy'] == 'attention_pooling':
-            # Pooling strategies return fixed size
-            combined_seq_len = 1
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-026
+        # The fused length is asked of the fusion layer; it is not re-derived.
+        #
+        # WHAT NOT TO DO: do NOT restore `combined_seq_len = vision_seq_len +
+        # text_seq_len` for every non-'attention_pooling' strategy. That
+        # contradicted `MultiModalFusion.compute_output_shape`, which returns a
+        # per-modality tuple for 'cross_attention' and `input_shape[0][1]` — the
+        # VISION length alone — for all six sequence-preserving strategies. Only
+        # 'cross_attention' sums, and only because this model concatenates the
+        # tuple on axis 1 itself; the sum was wrong for the other six and the
+        # hard-coded 1 was wrong for 'attention_pooling', which pools to rank 2.
+        # See decisions.md D-026.
+        text_feature_dim = self.fusion_config.get('dim', self.text_config['embed_dim'])
+        fused_shape = self.fusion_layer.compute_output_shape([
+            (batch_size, vision_seq_len, vision_output_shape[-1]),
+            (batch_size, text_seq_len, text_feature_dim),
+        ])
+
+        if self.fusion_config['fusion_strategy'] == 'cross_attention':
+            # A per-modality shape list; `call` concatenates them on axis 1.
+            vision_part, text_part = fused_shape
+            if vision_part[1] is None or text_part[1] is None:
+                combined_seq_len = None
+            else:
+                combined_seq_len = vision_part[1] + text_part[1]
+        elif len(fused_shape) == 2:
+            # Pooled to (batch, dim): the logits lose the sequence axis too.
+            return (batch_size, self.vocab_size)
         else:
-            # Most strategies preserve or combine sequences
-            combined_seq_len = vision_seq_len + (text_seq_len or 512)
+            combined_seq_len = fused_shape[1]
 
         return (batch_size, combined_seq_len, self.vocab_size)
 
@@ -730,18 +807,24 @@ def create_nanovlm(
     Example:
         ```python
         # Create different variants
-        mini_model = create_nanovlm('mini', fusion_strategy='concatenation')
+        mini_model = create_nanovlm('mini', fusion_strategy='cross_attention')
         base_model = create_nanovlm('base', fusion_strategy='cross_attention')
         large_model = create_nanovlm('large', fusion_strategy='cross_attention')
         ```
 
-        `'tensor_fusion'` is deliberately absent from these examples: it
-        concatenates on the FEATURE axis and therefore requires the vision and
-        text streams to have the same sequence length. Every variant here fixes
-        the vision length from `img_size`/`patch_size` (197 tokens for
-        `'mini'`/`'base'`, 577 for `'large'`) against a caller-chosen text
-        length, so it raises a `ValueError` naming the requirement unless the
-        two happen to match.
+        Only `'cross_attention'` and `'attention_pooling'` can fuse streams of
+        DIFFERENT sequence length. The other six — `'concatenation'`,
+        `'tensor_fusion'`, `'addition'`, `'multiplication'`, `'gated'` and
+        `'bilinear'` — combine on the feature axis or broadcast element-wise on
+        the sequence axis, so they require the vision and text lengths to be
+        equal. Every variant here fixes the vision length from
+        `img_size`/`patch_size` (197 tokens for `'mini'`/`'base'`, 577 for
+        `'large'`) against a caller-chosen text length, so those six raise a
+        `ValueError` naming the strategy and the requirement on the first call
+        unless the two happen to match. (Construction cannot decide it: the text
+        length is not known until a batch arrives.) All eight strategies can be
+        TRAINED at matched lengths, but `generate()` accepts `'cross_attention'`
+        alone and refuses the rest by name — see its own docstring.
     """
     variants = {
         'mini': {
