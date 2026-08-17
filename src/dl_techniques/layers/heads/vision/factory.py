@@ -17,7 +17,11 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 from ...activations import ActivationType
 from ...standard_blocks import ConvBlock, DenseBlock
 from ...ffn.factory import create_ffn_layer, FFNType
-from ...attention import create_attention_layer, AttentionType
+from ...attention import AttentionType
+from ...attention.factory import (
+    create_attention_layer,
+    assemble_attention_config,
+)
 from ...norms import create_normalization_layer, NormalizationType
 from .task_types import VisionTaskType, TaskConfiguration, CommonTaskConfigurations
 
@@ -139,10 +143,21 @@ class BaseVisionHead(keras.layers.Layer):
                     name=f'{self.name}_cbam'
                 )
             else:
+                # DECISION plan-2026-08-17T183311-79c63e38/D-023
+                # `dim` is THIS head's own convenience, not the caller's
+                # expressed intent, and 8 of the 32 registered attention types
+                # do not declare it ('cbam' is handled above; 'channel',
+                # 'spatial', the four 'tripseN', 'capsule_routing', 'hopfield',
+                # 'non_local' are not). Since `create_attention_layer` RAISES on
+                # an undeclared key (D-011), passing it unconditionally is a hard
+                # construction failure for those types. Pre-filter, exactly as
+                # `layers/transformers/free_transformer.py` does.
                 self.attention = create_attention_layer(
                     self.attention_type,
-                    dim=self.hidden_dim,
-                    name=f'{self.name}_attention'
+                    name=f'{self.name}_attention',
+                    **assemble_attention_config(
+                        self.attention_type, {'dim': self.hidden_dim}
+                    )
                 )
 
         # Optional FFN block

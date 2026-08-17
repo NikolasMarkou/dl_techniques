@@ -328,9 +328,9 @@ from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 seq_cls_task = NLPTaskConfig(
     name="sentiment_analysis",
-    task_type=NLPTaskType.SEQUENCE_CLASSIFICATION,
+    task_type=NLPTaskType.TEXT_CLASSIFICATION,
     num_classes=3,
-    vocab_size=50257
+    vocabulary_size=50257
 )
 
 model = create_mamba_with_head(

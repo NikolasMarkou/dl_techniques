@@ -589,9 +589,9 @@ def create_mamba_with_head(
             # Define a task for sequence classification
             seq_cls_task = NLPTaskConfig(
                 name="sentiment_analysis",
-                task_type=NLPTaskType.SEQUENCE_CLASSIFICATION,
+                task_type=NLPTaskType.TEXT_CLASSIFICATION,
                 num_classes=3,
-                vocab_size=50257  # Mamba needs vocab_size at creation
+                vocabulary_size=50257  # Mamba needs the vocabulary at creation
             )
 
             # Create the full model with a Mamba-130m encoder
@@ -610,25 +610,47 @@ def create_mamba_with_head(
         f"Creating Mamba-{mamba_variant} with a '{task_config.name}' head."
     )
 
-    if not hasattr(task_config, 'vocab_size') or not task_config.vocab_size:
+    # The field is `vocabulary_size`. `NLPTaskConfig` is a dataclass and has
+    # never had a `vocab_size` field, so the previous `hasattr(task_config,
+    # 'vocab_size')` guard could not be satisfied by ANY config object and this
+    # function raised on every call; the docstring and README examples passed
+    # `vocab_size=...` to `NLPTaskConfig`, which is a `TypeError` before this
+    # line is ever reached. Both examples are corrected above / in README § 9.
+    if not getattr(task_config, 'vocabulary_size', None):
         raise ValueError(
-            "The `task_config` must have a 'vocab_size' attribute "
+            "The `task_config` must set 'vocabulary_size' "
             "to create a Mamba model."
         )
 
     # 1. Create the foundational Mamba model
     mamba_encoder = Mamba.from_variant(
         mamba_variant,
-        vocab_size=task_config.vocab_size,
+        vocab_size=task_config.vocabulary_size,
         pretrained=pretrained,
         **mamba_config_overrides,
     )
 
     # 2. Create the task head
+    # DECISION plan-2026-08-17T183311-79c63e38/D-023: pool the LAST token, not
+    # the first. `BaseNLPHead` defaults to `pooling_type='cls'`, which is right
+    # for the bidirectional encoders that make up most of its consumers and
+    # WRONG here: `Mamba` is a strictly causal selective SSM, so the hidden state
+    # at position 0 is a function of token 0 alone and a 'cls'-pooled classifier
+    # is a function of the first token id and nothing else. Measured on CPU with
+    # an 8-token input before this line existed: perturbing token 5 moved the
+    # logits by exactly 0.000e+00, while perturbing token 0 moved them by
+    # 6.205e-02. The failure is SILENT -- the loss falls and accuracy plateaus at
+    # the first-token prior. Same defect and same remedy as qwen3's D-029.
+    # `head_config_overrides` still wins, so a caller can opt back out.
+    # Do NOT "simplify" 'last' to `inputs[:, -1, :]`: SequencePooling's 'last'
+    # resolves the last position KEPT BY THE MASK, which is why the
+    # `attention_mask` built below is load-bearing rather than decorative.
+    head_kwargs = {'pooling_type': 'last'}
+    head_kwargs.update(head_config_overrides)
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=mamba_encoder.d_model,  # Pass Mamba's hidden size
-        **head_config_overrides,
+        **head_kwargs,
     )
 
     # 3. Define inputs and build the end-to-end model

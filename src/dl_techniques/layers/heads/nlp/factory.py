@@ -16,11 +16,25 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 from ...activations import ActivationType
 from ...standard_blocks import DenseBlock
 from ...ffn import create_ffn_layer, FFNType
-from ...attention import create_attention_layer, AttentionType
+from ...attention import AttentionType
+from ...attention.factory import (
+    create_attention_layer,
+    assemble_attention_config,
+)
 from ...norms import create_normalization_layer, NormalizationType
 from ...sequence_pooling import SequencePooling
 
 from .task_types import NLPTaskType, NLPTaskConfig
+
+# ---------------------------------------------------------------------
+
+# The pooling strategies BaseNLPHead delegates to the shared SequencePooling
+# facade. Declared once because two sites read it -- the construction guard in
+# `_create_common_layers` and the dispatch in `_pool_sequence` -- and a value
+# present in only one of them either creates an unused pooler or falls through
+# to `_pool_sequence`'s "Unknown pooling type" raise. The inline 'attention'
+# strategy is deliberately NOT in here (D-002, quoted below).
+_DELEGATED_POOLING_STRATEGIES = ('cls', 'mean', 'max', 'last')
 
 # ---------------------------------------------------------------------
 # Base NLP Head Class
@@ -44,8 +58,10 @@ class BaseNLPHead(keras.layers.Layer):
     :type activation_type: ActivationType
     :param use_pooling: Whether to use pooling for sequence-level tasks.
     :type use_pooling: bool
-    :param pooling_type: Type of pooling ('mean', 'max', 'cls', 'attention').
-    :type pooling_type: Literal['mean', 'max', 'cls', 'attention']
+    :param pooling_type: Type of pooling ('mean', 'max', 'cls', 'last',
+        'attention'). ``'last'`` is mask-aware and is the correct choice for a
+        CAUSAL backbone -- see the decision note beside ``_create_common_layers``.
+    :type pooling_type: Literal['mean', 'max', 'cls', 'last', 'attention']
     :param use_intermediate: Whether to use intermediate dense layer.
     :type use_intermediate: bool
     :param intermediate_size: Size of intermediate layer if used.
@@ -72,7 +88,7 @@ class BaseNLPHead(keras.layers.Layer):
             normalization_type: NormalizationType = 'layer_norm',
             activation_type: ActivationType = 'gelu',
             use_pooling: bool = True,
-            pooling_type: Literal['mean', 'max', 'cls', 'attention'] = 'cls',
+            pooling_type: Literal['mean', 'max', 'cls', 'last', 'attention'] = 'cls',
             use_intermediate: bool = True,
             intermediate_size: Optional[int] = None,
             use_task_attention: bool = False,
@@ -141,9 +157,24 @@ class BaseNLPHead(keras.layers.Layer):
         # would change pooled values AND break serialization of existing
         # checkpoints. DO NOT replace the inline `attention` branch below with
         # SequencePooling('attention'). See decisions.md D-002.
+        #
+        # DECISION plan-2026-08-17T183311-79c63e38/D-023: 'last' is admitted
+        # here (the allow-list moved to `_DELEGATED_POOLING_STRATEGIES` above).
+        # The class DEFAULT stays 'cls' -- it is correct for the bidirectional
+        # encoders that dominate this head's consumers (bert, distilbert, fnet,
+        # modern_bert, tree_transformer). A CAUSAL backbone must pass
+        # `pooling_type='last'` explicitly, as `models/mamba/mamba_v1.py::
+        # create_mamba_with_head` now does: under 'cls' the classifier reads
+        # position 0, which in a causal model has attended to nothing but
+        # itself, so the whole classifier is a function of the first token id.
+        # Measured on the Mamba consumer, CPU, 8 tokens: perturbing token 5
+        # moved the logits by exactly 0.000e+00 under 'cls' while token 0 moved
+        # them by 6.205e-02. Do NOT "simplify" 'last' to `inputs[:, -1, :]`:
+        # SequencePooling's 'last' resolves the last position KEPT BY THE MASK,
+        # so it skips right padding, which a bare -1 index does not.
         self.sequence_pooler = None
         self.attention_pooling = None
-        if self.use_pooling and self.pooling_type in ('cls', 'mean', 'max'):
+        if self.use_pooling and self.pooling_type in _DELEGATED_POOLING_STRATEGIES:
             self.sequence_pooler = SequencePooling(
                 strategy=self.pooling_type,
                 name=f"{self.name}_sequence_pooler"
@@ -162,25 +193,30 @@ class BaseNLPHead(keras.layers.Layer):
         # Optional task-specific attention
         self.task_attention = None
         if self.use_task_attention:
-            # Map attention parameters correctly
-            attn_params = {
-                'dropout_rate': self.task_config.dropout_rate,
-                'name': f"{self.name}_attention"
-            }
-
-            if self.attention_type == 'multi_head':
-                attn_params['dim'] = self.hidden_size
-                attn_params['num_heads'] = 8
-            else:
-                attn_params['dim'] = self.hidden_size
-                if self.attention_type in ['window', 'sliding_window']:
-                    attn_params['window_size'] = 7
-                if self.attention_type in ['multi_head', 'window', 'sliding_window']:
-                    attn_params['num_heads'] = 8
+            # DECISION plan-2026-08-17T183311-79c63e38/D-023
+            # Pre-filter OUR OWN generic defaults to the ones this
+            # `attention_type` accepts, the same shape as
+            # `layers/transformers/free_transformer.py` (D-011). `dim` and
+            # `dropout_rate` used to be injected UNCONDITIONALLY for every
+            # attention type, and 14 of the 32 registered types declare neither
+            # or one of them ('fnet', 'cbam', 'channel', 'spatial', the four
+            # 'tripseN', 'capsule_routing', 'hopfield', 'non_local', 'beit',
+            # 'energy', 'mobile_mqa'). Since `create_attention_layer` RAISES on
+            # an undeclared key (D-011) that is a hard construction failure for
+            # any non-default `attention_type` -- latent only because nothing in
+            # the tree sets one today. Do NOT "fix" it by declaring `dim` on
+            # those registry entries: their classes do not accept it either.
+            attn_defaults = {'dim': self.hidden_size}
+            if self.attention_type in ('multi_head', 'window', 'sliding_window'):
+                attn_defaults['num_heads'] = 8
+            if self.attention_type in ('window', 'sliding_window'):
+                attn_defaults['window_size'] = 7
+            attn_defaults['dropout_rate'] = self.task_config.dropout_rate
 
             self.task_attention = create_attention_layer(
                 self.attention_type,
-                **attn_params
+                name=f"{self.name}_attention",
+                **assemble_attention_config(self.attention_type, attn_defaults)
             )
 
         # Optional intermediate layer
@@ -224,7 +260,9 @@ class BaseNLPHead(keras.layers.Layer):
         # shared SequencePooling facade (created in _create_common_layers).
         # The 'attention' branch stays inline — do NOT route it through
         # SequencePooling (different mechanism + weights). See decisions.md.
-        if self.pooling_type in ('cls', 'mean', 'max'):
+        if self.pooling_type in _DELEGATED_POOLING_STRATEGIES:
+            # The `mask=` argument is LOAD-BEARING for 'last' (D-023): it is what
+            # makes the gather land on the last REAL token rather than on padding.
             return self.sequence_pooler(sequence, mask=attention_mask)
 
         elif self.pooling_type == 'attention':
