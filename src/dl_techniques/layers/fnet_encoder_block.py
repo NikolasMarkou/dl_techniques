@@ -35,16 +35,23 @@ class FNetEncoderBlock(keras.layers.Layer):
     """
     Complete FNet encoder block with Fourier mixing and feed-forward components.
 
-    Implements a POST-normalization encoder block that replaces self-attention
-    with parameter-free Fourier-based token mixing, followed by a configurable
-    feed-forward network. The architecture follows the structure
-    [sublayer -> residual -> norm] for both the Fourier mixing and FFN stages,
-    i.e. the residual is added FIRST and the sum is then normalized
-    (``x = Norm(input + branch)``, as drawn below and implemented in ``call``).
-    This is the original FNet/BERT arrangement, not the pre-norm
-    ``x = input + branch(Norm(input))`` variant.
-    Uses factory patterns for normalization and FFN layer creation, supporting
-    all dl_techniques normalization and FFN types.
+    Replaces self-attention with parameter-free Fourier-based token mixing,
+    followed by a configurable feed-forward network. ``normalization_position``
+    selects between the two residual arrangements:
+
+    * ``'post'`` (default, and the original FNet/BERT arrangement) —
+      [sublayer -> residual -> norm]: the residual is added FIRST and the sum is
+      then normalized, ``x = Norm(input + branch(input))``. This is what the
+      diagram below draws.
+    * ``'pre'`` — ``x = input + branch(Norm(input))``: the branch INPUT is
+      normalized and the residual stream is left untouched, so gradients reach
+      the input through an unnormalized path. A pre-norm stack needs a final
+      normalization after the last block, which :class:`FNet` adds.
+
+    The two arrangements use the SAME two normalization layers and therefore the
+    same weight tree; only the order of operations differs. Uses factory patterns
+    for normalization and FFN layer creation, supporting all dl_techniques
+    normalization and FFN types.
 
     **Architecture Overview:**
 
@@ -90,6 +97,9 @@ class FNetEncoderBlock(keras.layers.Layer):
     :type normalization_type: NormalizationType
     :param normalization_kwargs: Optional normalization-specific parameters.
     :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param normalization_position: ``'post'`` (default) or ``'pre'``; see the
+        class description. Anything else raises ``ValueError``.
+    :type normalization_position: str
     :param ffn_type: Type of feed-forward network to use. Defaults to 'mlp'.
     :type ffn_type: FFNType
     :param ffn_kwargs: Optional FFN-specific parameters.
@@ -112,6 +122,7 @@ class FNetEncoderBlock(keras.layers.Layer):
         fourier_config: Optional[Dict[str, Any]] = None,
         normalization_type: NormalizationType = 'layer_norm',
         normalization_kwargs: Optional[Dict[str, Any]] = None,
+        normalization_position: str = 'post',
         ffn_type: FFNType = 'mlp',
         ffn_kwargs: Optional[Dict[str, Any]] = None,
         use_stochastic_depth: bool = False,
@@ -125,6 +136,11 @@ class FNetEncoderBlock(keras.layers.Layer):
             raise ValueError(f"intermediate_dim must be positive, got {intermediate_dim}")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if normalization_position not in ('pre', 'post'):
+            raise ValueError(
+                f"normalization_position must be 'pre' or 'post', "
+                f"got {normalization_position!r}"
+            )
 
         # Store configuration
         self.intermediate_dim = intermediate_dim
@@ -132,6 +148,7 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.fourier_config = fourier_config or {}
         self.normalization_type = normalization_type
         self.normalization_kwargs = normalization_kwargs or {}
+        self.normalization_position = normalization_position
         self.ffn_type = ffn_type
         self.ffn_kwargs = ffn_kwargs or {}
         self.use_stochastic_depth = use_stochastic_depth
@@ -274,13 +291,43 @@ class FNetEncoderBlock(keras.layers.Layer):
         :return: Output tensor of same shape as input.
         :rtype: keras.KerasTensor
         """
-        # Fourier mixing with residual connection (pass mask)
-        #
-        # This block is POST-norm: the residual is added FIRST and the sum is
-        # then normalized. Drop-path therefore wraps the BRANCH output
-        # (`fourier_output` / `ffn_output`) before it enters the add -- never the
-        # residual sum and never the normalized result. Dropping the sum would
-        # delete the skip path itself, which is the opposite of stochastic depth.
+        # Drop-path wraps the BRANCH output (`fourier_output` / `ffn_output`)
+        # before it enters the add -- never the residual sum and never the
+        # normalized result, in either normalization position. Dropping the sum
+        # would delete the skip path itself, which is the opposite of stochastic
+        # depth.
+        if self.normalization_position == 'pre':
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: pre-norm normalizes
+            # the BRANCH INPUT and leaves the residual stream untouched
+            # (`x + branch(Norm(x))`). Do NOT express it as
+            # `Norm(x) + branch(Norm(x))` or by normalizing the sum -- both
+            # reinstate a normalization on the skip path, which is the property
+            # pre-norm exists to remove, and would make a deep stack behave like
+            # post-norm again. `FNet` adds the stack-final norm that this
+            # arrangement requires. See decisions.md D-071.
+            fourier_output = self.fourier_transform(
+                self.fourier_layer_norm(inputs, training=training),
+                attention_mask=attention_mask,
+                training=training,
+            )
+            if self.fourier_stochastic_depth is not None:
+                fourier_output = self.fourier_stochastic_depth(
+                    fourier_output, training=training
+                )
+            residual = inputs + fourier_output
+
+            ffn_output = self.ffn_layer(
+                self.output_layer_norm(residual, training=training),
+                training=training,
+            )
+            if self.ffn_stochastic_depth is not None:
+                ffn_output = self.ffn_stochastic_depth(
+                    ffn_output, training=training
+                )
+            return residual + ffn_output
+
+        # POST-norm (default, the original FNet/BERT arrangement): the residual
+        # is added FIRST and the sum is then normalized.
         fourier_output = self.fourier_transform(
             inputs, attention_mask=attention_mask, training=training
         )
@@ -343,6 +390,7 @@ class FNetEncoderBlock(keras.layers.Layer):
             'fourier_config': self.fourier_config,
             'normalization_type': self.normalization_type,
             'normalization_kwargs': self.normalization_kwargs,
+            'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
             'ffn_kwargs': self.ffn_kwargs,
             'use_stochastic_depth': self.use_stochastic_depth,

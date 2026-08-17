@@ -41,10 +41,18 @@ correctly.
 
 Everything else is a standard encoder: BERT-style embeddings, then
 `num_layers` blocks of `Fourier mix -> residual -> norm -> FFN -> residual ->
-norm` (post-normalization, with optional stochastic depth on each branch),
-emitting `{"last_hidden_state", "attention_mask"}` with no pooler and no task
-head, so a single encoder can back several heads at once. Four preset variants
-span tiny through large.
+norm` (post-normalization by default, with optional stochastic depth on each
+branch), emitting `{"last_hidden_state", "attention_mask"}` with no pooler and
+no task head, so a single encoder can back several heads at once. Four preset
+variants span tiny through large.
+
+`normalization_position='pre'` switches every block to `x = input +
+branch(Norm(input))` and adds the stack-final normalization that arrangement
+requires; `position_embedding_type` selects between a learned absolute table and
+a fixed sinusoidal one. Both are real knobs as of 2026-08-15 — until then each
+was validated, stored and serialized while the value never reached the layer that
+would have honoured it, so `normalization_position='pre'` built a post-norm stack
+and `position_embedding_type` was ignored entirely.
 
 No pretrained weights are distributed with this package. `pretrained=True`
 raises `NotImplementedError` rather than warning and returning a randomly
@@ -79,6 +87,7 @@ from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
+from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 
@@ -149,14 +158,20 @@ class FNet(keras.Model):
     :type layer_norm_eps: float
     :param pad_token_id: ID of padding token. Defaults to 0.
     :type pad_token_id: int
-    :param position_embedding_type: Type of position embedding.
-        Defaults to "absolute".
+    :param position_embedding_type: How positional information is produced --
+        ``'learned'`` (default; BERT's learned absolute table) or
+        ``'sinusoidal'``. Forwarded to :class:`BertEmbeddings`, which raises on
+        anything else. The legacy spelling ``'absolute'`` is normalized to
+        ``'learned'``; it was this model's default while the value was never
+        forwarded at all.
     :type position_embedding_type: str
     :param normalization_type: Type of normalization layer.
         Defaults to "layer_norm".
     :type normalization_type: str
-    :param normalization_position: Position of normalization ('pre' or 'post').
-        Defaults to "post".
+    :param normalization_position: ``'post'`` (default, the original FNet
+        arrangement, ``x = Norm(input + branch(input))``) or ``'pre'``
+        (``x = input + branch(Norm(input))``, plus a stack-final normalization
+        this model owns). Forwarded to every :class:`FNetEncoderBlock`.
     :type normalization_position: str
     :param ffn_type: Type of feed-forward network. Defaults to "mlp".
     :type ffn_type: str
@@ -243,7 +258,7 @@ class FNet(keras.Model):
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
-        position_embedding_type: str = "absolute",
+        position_embedding_type: str = "learned",
         normalization_type: NormalizationType = "layer_norm",
         normalization_position: NormalizationPositionType = "post",
         ffn_type: FFNType = "mlp",
@@ -273,11 +288,15 @@ class FNet(keras.Model):
         :type layer_norm_eps: float
         :param pad_token_id: ID of the padding token.
         :type pad_token_id: int
-        :param position_embedding_type: Type of position embedding.
+        :param position_embedding_type: ``'learned'`` (default) or
+            ``'sinusoidal'``; forwarded to :class:`BertEmbeddings`. ``'absolute'``
+            is accepted as the legacy spelling of ``'learned'``.
         :type position_embedding_type: str
         :param normalization_type: Type of normalization layer.
         :type normalization_type: str
-        :param normalization_position: Position of normalization ('pre'/'post').
+        :param normalization_position: ``'post'`` (default) or ``'pre'``;
+            forwarded to every :class:`FNetEncoderBlock`. ``'pre'`` also adds a
+            stack-final normalization.
         :type normalization_position: str
         :param ffn_type: Type of feed-forward network.
         :type ffn_type: str
@@ -303,6 +322,17 @@ class FNet(keras.Model):
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.pad_token_id = pad_token_id
+        # `'absolute'` was this model's default until 2026-08-15, while the value
+        # was never forwarded to `BertEmbeddings` -- which has no such value at
+        # all (`VALID_POSITION_EMBEDDING_TYPES` is `('learned', 'sinusoidal')`)
+        # and defaulted to `'learned'`. Now that the value IS forwarded, the
+        # legacy spelling is normalized ONCE, here, so every stored config and
+        # every `get_config()` carries the single live spelling. This is a rename
+        # of a value that always meant BERT's learned absolute table, not a
+        # silent fallback: anything else `BertEmbeddings` does not recognize
+        # still raises there.
+        if position_embedding_type == "absolute":
+            position_embedding_type = "learned"
         self.position_embedding_type = position_embedding_type
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
@@ -351,6 +381,12 @@ class FNet(keras.Model):
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings and encoder layers)."""
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: `position_embedding_type`
+        # is FORWARDED. It used to be validated, stored and serialized here while
+        # `BertEmbeddings` silently used its own default ('learned'), so
+        # `FNet(position_embedding_type='sinusoidal')` built a learned table. Do
+        # NOT drop the argument from this call to "keep the default stable" --
+        # that is the bug. See decisions.md D-071.
         self.embeddings = BertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
@@ -360,6 +396,7 @@ class FNet(keras.Model):
             layer_norm_eps=self.layer_norm_eps,
             dropout_rate=self.hidden_dropout_prob,
             normalization_type=self.normalization_type,
+            position_embedding_type=self.position_embedding_type,
             name="embeddings",
         )
 
@@ -377,12 +414,24 @@ class FNet(keras.Model):
                 intermediate_dim=self.intermediate_size,
                 dropout_rate=self.hidden_dropout_prob,
                 normalization_type=self.normalization_type,
+                normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=drop_path_rates[i],
                 name=f"encoder_layer_{i}",
             )
             self.encoder_layers.append(encoder_layer)
+
+        # A pre-norm stack leaves its last residual sum unnormalized, so the
+        # model owns the stack-final normalization. Built only for 'pre': adding
+        # it unconditionally would change every existing post-norm checkpoint's
+        # weight tree.
+        self.final_norm = None
+        if self.normalization_position == 'pre':
+            self.final_norm = create_normalization_layer(
+                normalization_type=self.normalization_type,
+                name="final_norm",
+            )
 
     def call(
         self,
@@ -436,6 +485,9 @@ class FNet(keras.Model):
             hidden_states = encoder_layer(
                 hidden_states, attention_mask=attention_mask, training=training
             )
+
+        if self.final_norm is not None:
+            hidden_states = self.final_norm(hidden_states, training=training)
 
         return {
             "last_hidden_state": hidden_states,

@@ -165,6 +165,10 @@ class Qwen3NextBlock(keras.layers.Layer):
             divisible by num_heads for efficient attention computation.
         num_heads: Integer, number of attention heads. Must be positive and
             should divide evenly into dim for optimal head dimension.
+        num_kv_heads: Optional integer, number of key/value heads for
+            grouped-query attention in the block's `GatedAttention` sublayer.
+            None (the default) means one K/V head per query head, i.e. plain
+            multi-head attention. Must divide num_heads.
         head_dim: Optional integer, dimension per attention head. If None,
             defaults to dim // num_heads. Must be positive if specified.
         max_seq_len: Integer, maximum sequence length for RoPE embeddings
@@ -250,6 +254,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             self,
             dim: int,
             num_heads: int,
+            num_kv_heads: Optional[int] = None,
             head_dim: Optional[int] = None,
             max_seq_len: int = 4096,
             moe_config: Optional[Any] = None,  # MoEConfig or dict
@@ -281,6 +286,12 @@ class Qwen3NextBlock(keras.layers.Layer):
         # Store configuration
         self.dim = dim
         self.num_heads = num_heads
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: forwarded to
+        # `GatedAttention`. `None` keeps one K/V head per query head (plain MHA),
+        # which is what this block did unconditionally until 2026-08-15 while
+        # `Qwen3Next` validated, stored and serialized a `num_key_value_heads`
+        # that reached nothing. See decisions.md D-071.
+        self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.max_seq_len = max_seq_len
         self.normalization_type = normalization_type
@@ -344,6 +355,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         self.attention_layer = GatedAttention(
             dim=self.dim,
             num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
             head_dim=self.head_dim,
             max_seq_len=self.max_seq_len,
             dropout_rate=self.dropout_rate,
@@ -479,6 +491,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         config.update({
             "dim": self.dim,
             "num_heads": self.num_heads,
+            "num_kv_heads": self.num_kv_heads,
             "head_dim": self.head_dim,
             "max_seq_len": self.max_seq_len,
             "moe_config": self.moe_config.to_dict() if self.moe_config else None,

@@ -126,10 +126,9 @@ class Qwen3Next(keras.Model):
            ▼
     Token Embeddings (vocab_size=151k, dim=2048)
            │
-           ▼
-    RoPE Position Embeddings (theta=1M)
-           │
-           ▼
+           ▼          (no model-level positional stage: position enters inside
+           │           the blocks, via RoPE in the gated-attention sublayer and
+           │           the causal convolutions of the linear-attention ones)
     Qwen3NextBlock₁:
         3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
         1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
@@ -154,7 +153,13 @@ class Qwen3Next(keras.Model):
         hidden_size: Integer, dimensionality of encoder layers. Defaults to 2048.
         num_layers: Integer, number of transformer blocks. Defaults to 12.
         num_attention_heads: Integer, number of attention heads. Defaults to 16.
-        num_key_value_heads: Integer, number of key-value heads for GQA. Defaults to 4.
+        num_key_value_heads: Integer, number of key/value heads for grouped-query
+            attention in each block's gated-attention sublayer. Must divide
+            num_attention_heads. Defaults to 4, so the default model has a KV
+            cache num_attention_heads // num_key_value_heads times smaller than
+            plain MHA. Live as of 2026-08-15: before that this value was
+            validated, stored, serialized and printed by summary() while never
+            reaching the attention layer, so every model was plain MHA.
         max_seq_len: Integer, maximum sequence length. Defaults to 8192.
         num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
         num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
@@ -374,6 +379,13 @@ class Qwen3Next(keras.Model):
             block = Qwen3NextBlock(
                 dim=self.hidden_size,
                 num_heads=self.num_attention_heads,
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: this is the line
+                # that was missing. `num_key_value_heads` was validated (:313),
+                # stored (:258), serialized (:502) and printed by `summary()`
+                # (:540) while reaching nothing, so every model was plain MHA and
+                # `num_key_value_heads=1` bought no KV-cache saving at all. See
+                # decisions.md D-071.
+                num_kv_heads=self.num_key_value_heads,
                 head_dim=self.head_dim,
                 max_seq_len=self.max_seq_len,
                 moe_config=moe_config,

@@ -168,6 +168,12 @@ class GatedAttention(keras.layers.Layer):
     :type dim: int
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int
+    :param num_kv_heads: Number of key/value heads (grouped-query attention).
+        ``None`` (default) means one K/V head per query head, i.e. plain
+        multi-head attention. Must divide ``num_heads``; each K/V head is then
+        shared by ``num_heads // num_kv_heads`` query heads, shrinking the K/V
+        projections and the KV cache by that factor.
+    :type num_kv_heads: int or None
     :param head_dim: Optional dimension per attention head. If ``None``,
         defaults to ``dim // num_heads``.
     :type head_dim: int or None
@@ -241,6 +247,7 @@ class GatedAttention(keras.layers.Layer):
             self,
             dim: int,
             num_heads: int,
+            num_kv_heads: Optional[int] = None,
             head_dim: Optional[int] = None,
             max_seq_len: int = 4096,
             rope_percentage: float = 0.5,
@@ -280,8 +287,29 @@ class GatedAttention(keras.layers.Layer):
             )
 
         # Store ALL configuration parameters for serialization
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: grouped-query attention.
+        # `num_kv_heads=None` means "one K/V head per query head", which is plain
+        # MHA and is byte-identical to the pre-2026-08-15 layer -- same K/V
+        # projection widths, same weight names, same values. Do NOT give this a
+        # concrete default: a non-None value changes the k_linear/v_linear output
+        # width and therefore the checkpoint. See decisions.md D-071.
         self.dim = dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if self.num_kv_heads <= 0:
+            raise ValueError(f"num_kv_heads must be positive, got {self.num_kv_heads}")
+        if self.num_kv_heads > num_heads:
+            raise ValueError(
+                f"num_kv_heads ({self.num_kv_heads}) cannot exceed num_heads "
+                f"({num_heads})"
+            )
+        if num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by num_kv_heads "
+                f"({self.num_kv_heads}); each K/V head is shared by "
+                f"num_heads // num_kv_heads query heads"
+            )
+        self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.max_seq_len = max_seq_len
         self.rope_percentage = rope_percentage
@@ -301,6 +329,9 @@ class GatedAttention(keras.layers.Layer):
         # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
         # This requires an additional projection layer to match dimensions
         self.attention_dim = self.num_heads * self.head_dim
+        # K and V are projected to num_kv_heads * head_dim, which is the whole
+        # point of GQA: the KV cache shrinks by num_kv_groups.
+        self.kv_dim = self.num_kv_heads * self.head_dim
 
         # DECISION plan_2026-06-14_ab855e7e/D-001: precompute the static attention
         # scale as a Python float (math.sqrt, NOT ops.sqrt on a cast scalar). An
@@ -339,7 +370,7 @@ class GatedAttention(keras.layers.Layer):
             name="q_linear"
         )
         self.k_linear = layers.Dense(
-            self.attention_dim,
+            self.kv_dim,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -348,7 +379,7 @@ class GatedAttention(keras.layers.Layer):
             name="k_linear"
         )
         self.v_linear = layers.Dense(
-            self.attention_dim,
+            self.kv_dim,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -513,6 +544,7 @@ class GatedAttention(keras.layers.Layer):
         # Compute intermediate shapes
         linear_output_shape = (batch_size, seq_len, self.dim)
         qkv_shape = (batch_size, seq_len, self.attention_dim)
+        kv_shape = (batch_size, seq_len, self.kv_dim)
 
         # Build QKV projections - MUST be built explicitly
         self.q_linear.build(linear_output_shape)
@@ -521,8 +553,8 @@ class GatedAttention(keras.layers.Layer):
 
         # Build normalization layers
         self.q_norm.build(qkv_shape)
-        self.k_norm.build(qkv_shape)
-        self.v_norm.build(qkv_shape)
+        self.k_norm.build(kv_shape)
+        self.v_norm.build(kv_shape)
 
         # Build RoPE (it expects reshaped input: [batch, seq, heads, head_dim])
         rope_input_shape = (batch_size, seq_len, self.num_heads, self.head_dim)
@@ -747,12 +779,22 @@ class GatedAttention(keras.layers.Layer):
         # [batch, seq, attention_dim] -> [batch, seq, num_heads, head_dim]
         # Shape: (B, S, attention_dim) -> (B, S, H, head_dim)
         q_reshaped = ops.reshape(q_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
-        v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
+        v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
         # Apply Partial RoPE to Q and K (not V)
         q_rope = self.rope(q_reshaped, training=training)
         k_rope = self.rope(k_reshaped, training=training)
+
+        # GQA: expand each K/V head to the query heads that share it. RoPE is
+        # applied BEFORE the expansion so it is computed once per K/V head, and
+        # `ops.repeat` (not `ops.tile`) is what puts the copies of one head
+        # ADJACENT -- head g of the expanded tensor must be kv head g //
+        # num_kv_groups. `ops.tile` would interleave the groups instead and
+        # silently pair each query head with the wrong K/V head.
+        if self.num_kv_groups > 1:
+            k_rope = ops.repeat(k_rope, self.num_kv_groups, axis=2)
+            v_reshaped = ops.repeat(v_reshaped, self.num_kv_groups, axis=2)
 
         # Apply scaled dot-product attention
         # Shape: 3x (B, S, H, head_dim) -> (B, S, H, head_dim)
@@ -802,6 +844,7 @@ class GatedAttention(keras.layers.Layer):
         config.update({
             'dim': self.dim,
             'num_heads': self.num_heads,
+            'num_kv_heads': self.num_kv_heads,
             'head_dim': self.head_dim,
             'max_seq_len': self.max_seq_len,
             'rope_percentage': self.rope_percentage,

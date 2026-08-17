@@ -419,7 +419,7 @@ modern_fnet = FNet.from_variant(
     "base",
     # Pass kwargs down to FNetEncoderBlock
     normalization_type="rms_norm",
-    normalization_position="pre", # Pre-Norm is generally more stable
+    normalization_position="pre", # x = input + branch(Norm(input)), plus a stack-final norm
     ffn_type="swiglu"
 )
 ```
