@@ -1647,3 +1647,41 @@ class TestGroupedQueryAttention:
         y_ref = _forward(ref, x)
         np.testing.assert_allclose(y_gqa, y_ref, atol=1e-6)
         assert np.max(np.abs(y_gqa)) > 1e-3, "vacuous: outputs are ~zero"
+
+    def test_the_gqa_layout_break_fails_loudly_but_only_under_the_default(self):
+        """The checkpoint break, and the limit of step 38's guard. D-071.
+
+        The iteration-1 review asked whether `load_weights_or_raise` would catch
+        a partial restore caused by the narrowed K/V layout. Measured answer:
+        only the `skip_mismatch=False` default protects it. The guard's
+        condition is `changed == 0`, and a partial restore is not zero -- so
+        `skip_mismatch=True` returns successfully having left K/V projections
+        and K/V norms at their initial values. Pinned here so the day someone
+        widens the guard, this test tells them it moved.
+        """
+        from dl_techniques.utils.weight_transfer import load_weights_or_raise
+
+        def stack(num_kv_heads):
+            inp = keras.Input(shape=(6, 32))
+            x = inp
+            for i in range(3):
+                x = _ga(num_kv_heads=num_kv_heads, name=f"ga{i}")(x)
+            return models.Model(inp, x)
+
+        old = stack(None)   # pre-step-39 widths
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "old.weights.h5")
+            old.save_weights(path)
+
+            strict = stack(2)
+            with pytest.raises(ValueError, match="could not be loaded"):
+                load_weights_or_raise(strict, path, skip_mismatch=False)
+
+            lenient = stack(2)
+            restored = load_weights_or_raise(lenient, path, skip_mismatch=True)
+
+        total = len(lenient.weights)
+        assert 0 < restored < total, (
+            f"expected a PARTIAL restore ({restored}/{total}); if this is now "
+            f"all-or-nothing the guard or the layout changed"
+        )

@@ -290,9 +290,21 @@ class GatedAttention(keras.layers.Layer):
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: grouped-query attention.
         # `num_kv_heads=None` means "one K/V head per query head", which is plain
         # MHA and is byte-identical to the pre-2026-08-15 layer -- same K/V
-        # projection widths, same weight names, same values. Do NOT give this a
-        # concrete default: a non-None value changes the k_linear/v_linear output
-        # width and therefore the checkpoint. See decisions.md D-071.
+        # projection widths, same weight names, same values.
+        #
+        # WHAT NOT TO DO: do NOT give this a concrete default. Any non-None
+        # value is a WEIGHT-LAYOUT BREAK, not a behavioural knob: `k_linear` and
+        # `v_linear` project to `kv_dim` instead of `attention_dim` (see below)
+        # and `k_norm`/`v_norm` are built at `kv_dim` in `build()`. At the
+        # shipped Qwen3-Next shape -- `num_attention_heads=16,
+        # num_key_value_heads=4` -- that is a 4x narrowing of FOUR weights per
+        # block, so every `.keras` checkpoint written before 2026-08-15 fails to
+        # load. `None` is what keeps that break opt-in.
+        #
+        # Before this parameter existed, `Qwen3Next` validated, stored,
+        # serialized and printed a `num_key_value_heads` that reached no code at
+        # all: every model was plain MHA and `num_key_value_heads=1` bought no
+        # KV-cache saving whatsoever. See decisions.md D-071.
         self.dim = dim
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -369,6 +381,13 @@ class GatedAttention(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer,
             name="q_linear"
         )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: K and V project to
+        # `kv_dim`, Q to `attention_dim`. These are the two of the four narrowed
+        # weights that live in `__init__`; the other two are `k_norm`/`v_norm`,
+        # built at `kv_shape` in `build()`. Do NOT "restore symmetry" by giving
+        # K/V `attention_dim` again -- the whole KV-cache saving IS the narrower
+        # width, and it is what makes GQA a checkpoint break. See decisions.md
+        # D-071.
         self.k_linear = layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
@@ -551,7 +570,12 @@ class GatedAttention(keras.layers.Layer):
         self.k_linear.build(linear_output_shape)
         self.v_linear.build(linear_output_shape)
 
-        # Build normalization layers
+        # Build normalization layers.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: K/V norms are built at
+        # `kv_shape`, NOT `qkv_shape` -- they normalize the K/V projections,
+        # which are `kv_dim` wide under GQA. Building them at `qkv_shape` gives
+        # scale vectors 4x too wide at the shipped Qwen3-Next 16/4 shape and the
+        # forward pass then fails or silently mis-scales. See decisions.md D-071.
         self.q_norm.build(qkv_shape)
         self.k_norm.build(kv_shape)
         self.v_norm.build(kv_shape)

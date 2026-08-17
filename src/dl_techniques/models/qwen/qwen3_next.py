@@ -383,8 +383,25 @@ class Qwen3Next(keras.Model):
                 # that was missing. `num_key_value_heads` was validated (:313),
                 # stored (:258), serialized (:502) and printed by `summary()`
                 # (:540) while reaching nothing, so every model was plain MHA and
-                # `num_key_value_heads=1` bought no KV-cache saving at all. See
-                # decisions.md D-071.
+                # `num_key_value_heads=1` bought no KV-cache saving at all.
+                #
+                # Wiring it up is a CHECKPOINT BREAK, and deliberately so: every
+                # variant here ships `num_attention_heads=16,
+                # num_key_value_heads=4`, which narrows `k_linear`, `v_linear`,
+                # `k_norm` and `v_norm` 4x per block. Any `.keras` file written
+                # from this model before 2026-08-15 no longer loads; it must be
+                # retrained.
+                #
+                # MEASURED 2026-08-17: `load_weights(skip_mismatch=False)` -- the
+                # default -- raises with "A total of 4 objects could not be
+                # loaded" PER BLOCK, so that path fails loudly. But
+                # `skip_mismatch=True` RETURNS SUCCESSFULLY with only 3 of every
+                # 10 variables restored, and `load_weights_or_raise` does NOT
+                # catch it: its condition is `changed == 0`, and a partial
+                # restore is not zero. Do NOT pass `skip_mismatch=True` when
+                # loading a checkpoint into this model -- it will hand you a
+                # model whose K/V projections and K/V norms are random.
+                # See decisions.md D-071.
                 num_kv_heads=self.num_key_value_heads,
                 head_dim=self.head_dim,
                 max_seq_len=self.max_seq_len,
