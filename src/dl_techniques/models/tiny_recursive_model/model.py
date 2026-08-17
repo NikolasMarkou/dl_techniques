@@ -126,7 +126,9 @@ class TRM(keras.Model):
             based halting (False). Default is True.
         rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
             Default is 10000.0.
-        attention_type (str): Type of attention mechanism to use. Default is 'multi_head'.
+        attention_type (str): Type of attention mechanism to use. Default is
+            'group_query' (with `num_kv_heads == num_heads`, arithmetically
+            plain MHA) — the only plain-self-attention type that carries RoPE.
         ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
         normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
         normalization_position (str): Position of normalization ('pre' or 'post').
@@ -151,7 +153,11 @@ class TRM(keras.Model):
         halt_exploration_prob: float = 0.1,
         no_act_continue: bool = True,
         rope_theta: float = 10000.0,
-        attention_type: AttentionType = 'multi_head',
+        # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
+        # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
+        # components.py. `TRM` passes this value down explicitly, so it
+        # overrides the component default and must agree with it.
+        attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
         normalization_position: NormalizationPositionType = 'post',
@@ -464,7 +470,12 @@ def create_trm(
     halt_exploration_prob: float = 0.1,
     no_act_continue: bool = True,
     rope_theta: float = 10000.0,
-    attention_type: AttentionType = 'multi_head',
+    # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
+    # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
+    # components.py. A 'multi_head' default here would re-impose the defect on
+    # every model built through this factory, because the value is passed down
+    # explicitly and overrides the component default.
+    attention_type: AttentionType = 'group_query',
     ffn_type: FFNType = 'swiglu',
     normalization_type: NormalizationType = 'rms_norm',
     normalization_position: NormalizationPositionType = 'post',
@@ -494,7 +505,8 @@ def create_trm(
         no_act_continue: Use simple halting (True) vs Q-learning (False).
             Default True.
         rope_theta: Theta for Rotary Position Embedding. Default 10000.0.
-        attention_type: Type of attention mechanism.
+        attention_type: Type of attention mechanism. Default 'group_query';
+            'multi_head' carries no RoPE.
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization layer.
         normalization_position: ``pre`` or ``post`` normalization.
