@@ -1375,3 +1375,275 @@ class TestRoPECarriesPosition:
         # Both head counts must appear on axis 1 -- q at num_heads, k at
         # num_kv_heads -- or the tensors were not the q/k pair we think.
         assert {s[1] for s in seen} == {num_heads, num_kv_heads}
+
+
+# ---------------------------------------------------------------------------
+# Grouped-query attention (plan-2026-08-14T233721-d4f9beb2, step 39.2, D-071)
+# ---------------------------------------------------------------------------
+#
+# Step 39 shipped `num_kv_heads` -- a new public parameter, a narrowed weight
+# layout and a new head-expansion code path -- with ZERO tests. Its commit
+# reported "267 passed", which was 267 passes of tests that never constructed
+# `num_kv_heads != None`. Everything below constructs it.
+
+
+def _ga(seq_len=6, dim=32, **kwargs):
+    cfg = dict(dim=dim, num_heads=8, max_seq_len=64, rope_percentage=1.0,
+               dropout_rate=0.0)
+    cfg.update(kwargs)
+    return GatedAttention(**cfg)
+
+
+def _forward(layer, x):
+    """Through a parent model's call(), the realistic build path."""
+    inp = keras.Input(shape=x.shape[1:])
+    return ops.convert_to_numpy(models.Model(inp, layer(inp))(x))
+
+
+class TestGroupedQueryAttention:
+    """The `num_kv_heads` path: widths, head mapping, config, equivalence."""
+
+    def test_none_is_exactly_num_heads(self):
+        """`None` must mean "one K/V head per query head", i.e. plain MHA.
+
+        This is the promise the D-071 anchor makes to every existing
+        checkpoint: a layer built without `num_kv_heads` must be
+        indistinguishable from one built with `num_kv_heads=num_heads`.
+        """
+        keras.utils.set_random_seed(7)
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=(2, 6, 32)).astype("float32")
+
+        a, b = _ga(num_kv_heads=None), _ga(num_kv_heads=8)
+        ya, yb = _forward(a, x), _forward(b, x)
+
+        assert a.num_kv_heads == b.num_kv_heads == 8
+        assert a.num_kv_groups == b.num_kv_groups == 1
+        assert a.kv_dim == b.kv_dim == a.attention_dim
+
+        # Same architecture => same weight shapes, so weights transfer, so the
+        # outputs must agree EXACTLY once they do.
+        b.set_weights(a.get_weights())
+        np.testing.assert_allclose(_forward(b, x), ya, atol=0.0, rtol=0.0)
+        assert np.max(np.abs(ya)) > 0.0, "vacuous: the layer emitted zeros"
+        del yb
+
+    @pytest.mark.parametrize("num_kv_heads,groups", [(8, 1), (4, 2), (2, 4), (1, 8)])
+    def test_kv_projection_and_norm_widths_follow_num_kv_heads(
+        self, num_kv_heads, groups
+    ):
+        """The narrowed weight layout, asserted rather than assumed.
+
+        `k_linear`/`v_linear` project to `kv_dim`, not `attention_dim`, and
+        `k_norm`/`v_norm` are built at `kv_dim`. At the shipped Qwen3-Next
+        shape (16 heads / 4 KV heads) that is a 4x narrowing of four weights
+        per block -- a real checkpoint break, recorded in D-071.
+        """
+        layer = _ga(num_kv_heads=num_kv_heads)
+        layer.build((None, 6, 32))
+
+        assert layer.num_kv_groups == groups
+        assert layer.kv_dim == num_kv_heads * layer.head_dim
+
+        assert layer.q_linear.kernel.shape[-1] == layer.attention_dim
+        assert layer.k_linear.kernel.shape[-1] == layer.kv_dim
+        assert layer.v_linear.kernel.shape[-1] == layer.kv_dim
+
+        # The Q/K norms are per-feature over the projection width; K's must
+        # follow K's width or a GQA layer cannot even be built.
+        k_norm_w = layer.k_norm.weights
+        assert k_norm_w, "k_norm has no weights; this assertion is vacuous"
+        for w in k_norm_w:
+            assert w.shape[-1] == layer.kv_dim
+        for w in layer.q_norm.weights:
+            assert w.shape[-1] == layer.attention_dim
+
+    def test_one_kv_head_means_every_query_head_sees_the_same_k(self):
+        """At `num_kv_heads=1` the expansion must broadcast a single K/V head.
+
+        Asserted on the expansion itself: `repeat` of a 1-head tensor must give
+        H identical heads. If the expansion dropped or reordered heads this
+        fails.
+        """
+        layer = _ga(num_kv_heads=1)
+        layer.build((None, 6, 32))
+        assert layer.num_kv_groups == layer.num_heads
+
+        one = np.arange(2 * 6 * 1 * 4, dtype="float32").reshape(2, 6, 1, 4)
+        expanded = ops.convert_to_numpy(
+            ops.repeat(ops.convert_to_tensor(one), layer.num_kv_groups, axis=2)
+        )
+        assert expanded.shape[2] == layer.num_heads
+        for h in range(layer.num_heads):
+            np.testing.assert_allclose(expanded[:, :, h, :], one[:, :, 0, :],
+                                       atol=0.0, rtol=0.0)
+
+    def test_repeat_not_tile_puts_group_members_adjacent(self):
+        """The isolating mutation the D-071 anchor's reasoning demands.
+
+        The anchor claims `ops.repeat` (not `ops.tile`) is what makes query
+        head g read K/V head `g // num_kv_groups`. Nothing asserted it. Here
+        both are computed and the required mapping is checked against
+        `repeat`, then shown to be VIOLATED by `tile` -- so the test cannot
+        pass if the implementation is switched.
+        """
+        num_kv_heads, num_heads = 2, 8
+        groups = num_heads // num_kv_heads
+        # Head j carries the constant value j, so a head's identity is readable
+        # straight off the tensor.
+        k = np.arange(num_kv_heads, dtype="float32").reshape(1, 1, num_kv_heads, 1)
+        k = np.tile(k, (1, 3, 1, 4))
+        kt = ops.convert_to_tensor(k)
+
+        repeated = ops.convert_to_numpy(ops.repeat(kt, groups, axis=2))
+        tiled = ops.convert_to_numpy(ops.tile(kt, (1, 1, groups, 1)))
+
+        expected = np.array(
+            [h // groups for h in range(num_heads)], dtype="float32"
+        )
+        got_repeat = repeated[0, 0, :, 0]
+        got_tile = tiled[0, 0, :, 0]
+
+        np.testing.assert_allclose(got_repeat, expected, atol=0.0, rtol=0.0)
+        # Anti-vacuity: `tile` must NOT satisfy it, or this proves nothing.
+        assert not np.allclose(got_tile, expected), (
+            "tile and repeat agree here, so this test cannot detect an "
+            "inverted group-to-head mapping"
+        )
+        # And name what tile would have done: interleaved the groups.
+        np.testing.assert_allclose(
+            got_tile,
+            np.array([h % num_kv_heads for h in range(num_heads)], dtype="float32"),
+            atol=0.0, rtol=0.0,
+        )
+
+    @pytest.mark.parametrize("num_kv_heads", [None, 8, 4, 2, 1])
+    def test_get_config_round_trip_carries_num_kv_heads(self, num_kv_heads):
+        """A parameter that does not survive `get_config` is a parameter that
+        silently resets to MHA on every `.keras` reload."""
+        layer = _ga(num_kv_heads=num_kv_heads)
+        config = layer.get_config()
+        assert "num_kv_heads" in config
+
+        restored = GatedAttention.from_config(config)
+        assert restored.num_kv_heads == layer.num_kv_heads
+        assert restored.num_kv_groups == layer.num_kv_groups
+        assert restored.kv_dim == layer.kv_dim
+
+    def test_full_keras_round_trip_preserves_values_under_gqa(self):
+        """Save/load must restore the narrowed weights, not fresh ones.
+
+        A shape-only check passes when a nested container silently restores
+        re-initialized kernels; only a VALUE comparison sees it.
+        """
+        keras.utils.set_random_seed(21)
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=(2, 6, 32)).astype("float32")
+
+        layer = _ga(num_kv_heads=2)
+        inp = keras.Input(shape=(6, 32))
+        model = models.Model(inp, layer(inp))
+        before = ops.convert_to_numpy(model(x))
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "gqa.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+            after = ops.convert_to_numpy(reloaded(x))
+
+        np.testing.assert_allclose(after, before, atol=1e-6)
+        assert np.max(np.abs(before)) > 1e-3, "vacuous: outputs are ~zero"
+
+    @pytest.mark.parametrize(
+        "num_kv_heads,message",
+        [
+            (0, "must be positive"),
+            (-1, "must be positive"),
+            (16, "cannot exceed num_heads"),
+            (3, "must be divisible"),
+        ],
+    )
+    def test_invalid_groupings_are_refused_at_construction(
+        self, num_kv_heads, message
+    ):
+        """An indivisible grouping has no head mapping; it must not build one."""
+        with pytest.raises(ValueError, match=message):
+            _ga(num_kv_heads=num_kv_heads)
+
+    def test_gqa_shrinks_the_parameter_count(self):
+        """The whole point of GQA. Pre-step-39 this number did not move at all,
+        which is how a serialized, `summary()`-printed knob stayed inert."""
+        counts = {}
+        for kv in (8, 4, 1):
+            layer = _ga(num_kv_heads=kv)
+            layer.build((None, 6, 32))
+            counts[kv] = int(sum(np.prod(w.shape) for w in layer.weights))
+
+        assert counts[8] > counts[4] > counts[1], counts
+
+    def test_gqa_equals_mha_whose_kv_weights_are_the_group_expansion(self):
+        """The group->query head mapping, read off the LAYER.
+
+        `test_repeat_not_tile_puts_group_members_adjacent` above pins what
+        `repeat` means but computes both candidates itself, so it cannot fail
+        when the layer changes. This one can: it builds an ordinary
+        `num_kv_heads=num_heads` layer whose K/V projections are the GQA
+        layer's projections expanded GROUP-ADJACENTLY (head h of the reference
+        gets K/V head `h // num_kv_groups`), and requires the two to agree
+        exactly.
+
+        If the implementation used `ops.tile`, the GQA layer would pair query
+        head h with K/V head `h % num_kv_heads` while the reference pairs it
+        with `h // num_kv_groups`, and the outputs diverge. Verified RED by
+        substituting `ops.tile` for `ops.repeat` in `GatedAttention.call`.
+        """
+        keras.utils.set_random_seed(99)
+        rng = np.random.default_rng(17)
+        dim, num_heads, num_kv_heads = 32, 8, 2
+        groups = num_heads // num_kv_heads
+        x = rng.normal(size=(2, 6, dim)).astype("float32")
+
+        gqa = _ga(num_heads=num_heads, num_kv_heads=num_kv_heads)
+        ref = _ga(num_heads=num_heads, num_kv_heads=num_heads)
+        gqa.build((None, 6, dim))
+        ref.build((None, 6, dim))
+
+        head_dim = gqa.head_dim
+
+        def expand_last(arr):
+            """(..., num_kv_heads*head_dim) -> (..., num_heads*head_dim),
+            group-adjacent: output head h carries input head h // groups."""
+            lead = arr.shape[:-1]
+            a = arr.reshape(*lead, num_kv_heads, head_dim)
+            a = np.repeat(a, groups, axis=-2)
+            return a.reshape(*lead, num_heads * head_dim)
+
+        # Copy every weight across by NAME-independent position, expanding the
+        # four that are narrowed under GQA.
+        narrowed = set()
+        for sub in (gqa.k_linear, gqa.v_linear, gqa.k_norm, gqa.v_norm):
+            narrowed.update(id(w) for w in sub.weights)
+
+        gqa_w, ref_w = gqa.weights, ref.weights
+        assert len(gqa_w) == len(ref_w), "layers are not structurally parallel"
+
+        new_ref = []
+        expanded_count = 0
+        for gw, rw in zip(gqa_w, ref_w):
+            v = ops.convert_to_numpy(gw)
+            if id(gw) in narrowed:
+                v = expand_last(v)
+                expanded_count += 1
+            assert v.shape == tuple(rw.shape), (gw.path, v.shape, rw.shape)
+            new_ref.append(v)
+
+        assert expanded_count == 4, (
+            f"expected exactly 4 narrowed weights under GQA, expanded "
+            f"{expanded_count}; the weight layout has changed"
+        )
+        ref.set_weights(new_ref)
+
+        y_gqa = _forward(gqa, x)
+        y_ref = _forward(ref, x)
+        np.testing.assert_allclose(y_gqa, y_ref, atol=1e-6)
+        assert np.max(np.abs(y_gqa)) > 1e-3, "vacuous: outputs are ~zero"
