@@ -1419,3 +1419,53 @@ class TestMultiHeadLatentAttentionMaskPolarity:
             f"exact, so the mask polarity is INVERTED (the inverted-polarity "
             f"control measures {inverted:.6g})"
         )
+
+
+# ---------------------------------------------------------------------------
+# RoPE axis order (plan-2026-08-14T233721-d4f9beb2, step 39.1, D-083)
+# ---------------------------------------------------------------------------
+
+
+class TestRoPECarriesPosition:
+    """MLA's decoupled RoPE must actually carry position.
+
+    This layer was the worse of the two victims of the `(B, S, H, D)` frame:
+    `RotaryPositionEmbedding.call` reads its sequence length from
+    `ops.shape(inputs)[2]`, so `q_pe` -- shape `(B, S_q, H, rope_dim)` -- was
+    rotated by its HEAD INDEX, while `k_pe` carries an explicit singleton head
+    axis, `(B, S_kv, 1, rope_dim)`, and was read as sequence length 1 and so
+    rotated by position 0 alone: `cos = 1`, `sin = 0`, the IDENTITY. Q and K
+    were therefore rotated by completely unrelated angles and no
+    relative-position signal survived.
+    """
+
+    def test_permuting_two_tokens_changes_the_output(self):
+        """Pre-fix: 4.47e-08 (float32 noise). Post-fix: 4.52e-03.
+
+        The signal here is smaller than `GatedAttention`'s because MLA rotates
+        only the decoupled `qk_rope_head_dim` slice of the score, not the whole
+        head -- but the pre-fix value is five orders of magnitude below it and
+        is indistinguishable from exact permutation equivariance.
+        """
+        keras.utils.set_random_seed(1234)
+        dim, seq, batch = 32, 8, 2
+        layer = MultiHeadLatentAttention(
+            dim=dim, num_heads=8, kv_latent_dim=16, max_seq_len=64,
+        )
+
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(batch, seq, dim)).astype("float32")
+        perm = np.arange(seq)
+        perm[1], perm[2] = perm[2], perm[1]
+
+        inp = keras.Input(shape=(seq, dim))
+        model = keras.Model(inp, layer(inp))
+
+        y = keras.ops.convert_to_numpy(model(x))
+        y_perm_in = keras.ops.convert_to_numpy(model(x[:, perm, :]))
+        defect = float(np.max(np.abs(y[:, perm, :] - y_perm_in)))
+
+        assert defect > 1e-4, (
+            f"MLA is permutation-equivariant (defect {defect:.3e}); its "
+            f"decoupled RoPE is carrying no positional signal."
+        )

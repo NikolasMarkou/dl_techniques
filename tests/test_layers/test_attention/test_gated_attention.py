@@ -1233,3 +1233,145 @@ class TestGatedAttentionRescueFollowsTheConfiguredProbabilityAxis:
             _float32_reference("degenerate"),
             atol=_MP_ATOL[dtype_policy],
         )
+
+
+# ---------------------------------------------------------------------------
+# RoPE axis order (plan-2026-08-14T233721-d4f9beb2, step 39.1, D-083)
+# ---------------------------------------------------------------------------
+#
+# These tests exist because `GatedAttention.call` handed RoPE a `(B, S, H, D)`
+# tensor while `RotaryPositionEmbedding.call` reads its sequence length from
+# `ops.shape(inputs)[2]`. Axis 2 in that frame is HEADS, so every token was
+# rotated by the angle for its HEAD INDEX and the layer carried no positional
+# information at all. Nothing in the 267-test suite noticed, because a per-head
+# constant rotation is orthogonal and cancelled between q and k.
+
+
+def _positional_defect(layer, dim, seq=8, batch=2, seed=0):
+    """max|f(x)[perm] - f(x[perm])| for a swap of tokens 1 and 2.
+
+    A layer whose positional embedding works is NOT permutation-equivariant, so
+    this is large. A positionless layer returns float32 noise.
+
+    The layer is reached through a parent model's `call()` -- the realistic
+    build path, and the one that exposed the sibling `.assign()` defect (D-021).
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(batch, seq, dim)).astype("float32")
+    perm = np.arange(seq)
+    perm[1], perm[2] = perm[2], perm[1]
+
+    inp = keras.Input(shape=(seq, dim))
+    model = models.Model(inp, layer(inp))
+
+    y = ops.convert_to_numpy(model(x))
+    y_perm_in = ops.convert_to_numpy(model(x[:, perm, :]))
+    return float(np.max(np.abs(y[:, perm, :] - y_perm_in)))
+
+
+class TestRoPECarriesPosition:
+    """RoPE must contribute an actual positional signal, under every grouping."""
+
+    @pytest.mark.parametrize("num_kv_heads", [None, 8, 2, 1])
+    def test_permuting_two_tokens_changes_the_output(self, num_kv_heads):
+        """The headline assertion.
+
+        Pre-fix this measured 3.58e-07 at `num_kv_heads=None` and 2.98e-07 at
+        `num_kv_heads=2` -- float32 noise, i.e. EXACT permutation equivariance.
+        Post-fix: 1.05e+00 and 7.36e-01. The threshold sits ~4 orders of
+        magnitude above the noise floor and ~4 below the signal.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = GatedAttention(
+            dim=32, num_heads=8, num_kv_heads=num_kv_heads, max_seq_len=64,
+            rope_percentage=1.0,
+        )
+        assert _positional_defect(layer, dim=32) > 1e-3
+
+    def test_paired_query_and_kv_heads_get_the_same_rotation(self):
+        """Pins the DEFINITION the two tests above are graded against.
+
+        NOTE: this one does not fail when `GatedAttention` regresses -- it calls
+        `RotaryPositionEmbedding` directly and does the transpose itself, so it
+        passes both ways. It is here to make the expected property checkable on
+        its own terms; the LAYER is guarded by the two tests above, both of
+        which were verified RED against the pre-fix source.
+
+        Derived from the RoPE DEFINITION, not from the implementation: the
+        rotation angle at sequence position p is p * inv_freq -- a function of
+        POSITION ONLY. So if a query head and the K/V head it is paired with
+        carry the same vector, RoPE must return them bit-identical, whatever
+        the head grouping is.
+
+        Pre-fix the angle was a function of the HEAD INDEX instead, so query
+        head h was rotated by angle h and its paired K/V head by angle
+        h // num_kv_groups. Measured 4.04e+00 pre-fix, exactly 0.0 post-fix.
+        """
+        from dl_techniques.layers.embedding.rotary_position_embedding import (
+            RotaryPositionEmbedding,
+        )
+
+        b, s, h, hkv, d = 1, 6, 8, 2, 8
+        groups = h // hkv
+        rng = np.random.default_rng(11)
+        base = rng.normal(size=(b, s, d)).astype("float32")
+        q = np.repeat(base[:, :, None, :], h, axis=2)
+        k = np.repeat(base[:, :, None, :], hkv, axis=2)
+
+        rope = RotaryPositionEmbedding(
+            head_dim=d, max_seq_len=64, rope_percentage=1.0
+        )
+        rope.build((b, h, s, d))
+
+        def apply(t):
+            r = rope(ops.convert_to_tensor(np.transpose(t, (0, 2, 1, 3))))
+            return np.transpose(ops.convert_to_numpy(r), (0, 2, 1, 3))
+
+        q_rot = apply(q)
+        k_rot = np.repeat(apply(k), groups, axis=2)
+
+        np.testing.assert_allclose(q_rot, k_rot, atol=0.0, rtol=0.0)
+
+        # Anti-vacuity: the rotation must not be the identity, or the equality
+        # above would hold for any axis order at all.
+        assert np.max(np.abs(q_rot - q)) > 1.0
+
+    def test_rope_is_called_with_the_sequence_on_axis_2(self):
+        """Pins the CONVENTION at the call site, not just its consequence.
+
+        `RotaryPositionEmbedding` reads `ops.shape(inputs)[2]` as the sequence
+        length. This records every tensor the layer actually hands it and
+        requires axis 2 to be the sequence, distinguishable here because
+        `seq_len` (7) differs from both `num_heads` (8) and `num_kv_heads` (2).
+        """
+        seq_len, num_heads, num_kv_heads, dim = 7, 8, 2, 32
+        layer = GatedAttention(
+            dim=dim, num_heads=num_heads, num_kv_heads=num_kv_heads,
+            max_seq_len=64, rope_percentage=1.0,
+        )
+
+        seen = []
+        original_call = layer.rope.call
+
+        def recording_call(inputs, *args, **kwargs):
+            seen.append(tuple(inputs.shape))
+            return original_call(inputs, *args, **kwargs)
+
+        layer.rope.call = recording_call
+
+        inp = keras.Input(shape=(seq_len, dim))
+        model = models.Model(inp, layer(inp))
+        model(np.zeros((2, seq_len, dim), dtype="float32"))
+
+        assert seen, "RoPE was never invoked; this test proves nothing."
+        # Keras may trace `call` more than once; every invocation must agree.
+        for shape in seen:
+            assert len(shape) == 4, shape
+            assert shape[2] == seq_len, (
+                f"RoPE was handed {shape}: axis 2 is {shape[2]}, not the "
+                f"sequence length {seq_len}. It will index its "
+                f"position-indexed table by the wrong axis."
+            )
+        # Both head counts must appear on axis 1 -- q at num_heads, k at
+        # num_kv_heads -- or the tensors were not the q/k pair we think.
+        assert {s[1] for s in seen} == {num_heads, num_kv_heads}

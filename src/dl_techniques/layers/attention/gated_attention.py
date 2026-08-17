@@ -556,8 +556,12 @@ class GatedAttention(keras.layers.Layer):
         self.k_norm.build(kv_shape)
         self.v_norm.build(kv_shape)
 
-        # Build RoPE (it expects reshaped input: [batch, seq, heads, head_dim])
-        rope_input_shape = (batch_size, seq_len, self.num_heads, self.head_dim)
+        # Build RoPE in the frame `call()` actually hands it: (B, H, S, head_dim).
+        # See the D-083 anchor in `call()` -- axis 2 must be the SEQUENCE axis.
+        # `RotaryPositionEmbedding.build` only validates rank and the last axis,
+        # so the old `(batch, seq, heads, head_dim)` here built identical
+        # variables; it is corrected because it documented the wrong convention.
+        rope_input_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
         self.rope.build(rope_input_shape)
 
         # Build dropout if used
@@ -782,9 +786,43 @@ class GatedAttention(keras.layers.Layer):
         k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
         v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
-        # Apply Partial RoPE to Q and K (not V)
-        q_rope = self.rope(q_reshaped, training=training)
-        k_rope = self.rope(k_reshaped, training=training)
+        # Apply Partial RoPE to Q and K (not V).
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083: RoPE is applied in the
+        # (B, H, S, D) frame, which costs two transposes per call.
+        #
+        # WHAT NOT TO DO: do NOT pass the (B, S, H, D) tensors straight to
+        # `self.rope(...)`. `RotaryPositionEmbedding.call` reads its sequence
+        # length from `ops.shape(inputs)[2]` and indexes its table as
+        # `cos_cached[:seq_len]`, and that table is POSITION-indexed by
+        # construction (`positions = arange(shape[0])`). In the (B, S, H, D)
+        # frame axis 2 is HEADS, so every token at head h was rotated by the
+        # angle for POSITION h -- a per-head constant, carrying no position
+        # information at all.
+        #
+        # This was not a cosmetic mismatch. Measured 2026-08-17, CPU, on the
+        # (B, S, H, D) frame: permuting two input tokens moved the layer output
+        # by 3.58e-07 at `num_kv_heads=None` and 2.98e-07 at `num_kv_heads=2` --
+        # float32 noise, i.e. the layer was EXACTLY permutation-equivariant and
+        # RoPE contributed no positional signal whatsoever. It stayed invisible
+        # because a per-head constant rotation R_h is orthogonal and was applied
+        # to BOTH q and k of the same head, so `(R_h q).(R_h k) = q.k` and plain
+        # MHA was merely a no-op. Grouped-query attention broke that alibi: k
+        # head j is rotated by R_j and then `repeat`-ed onto query head h != j,
+        # so the angles no longer cancel. Measured on the definitional pairing
+        # identity (paired q/k heads carrying the same vector must leave RoPE
+        # bit-identical, because the rotation angle is a function of POSITION
+        # only): 4.04e+00 in the (B, S, H, D) frame, exactly 0.0e+00 here.
+        # `group_query_attention.py` has always transposed first; this is now
+        # the single convention. See decisions.md D-083.
+        q_rope = ops.transpose(
+            self.rope(ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
+            (0, 2, 1, 3),
+        )
+        k_rope = ops.transpose(
+            self.rope(ops.transpose(k_reshaped, (0, 2, 1, 3)), training=training),
+            (0, 2, 1, 3),
+        )
 
         # GQA: expand each K/V head to the query heads that share it. RoPE is
         # applied BEFORE the expansion so it is computed once per K/V head, and
