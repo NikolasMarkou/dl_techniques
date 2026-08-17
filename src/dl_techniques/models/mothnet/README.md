@@ -234,6 +234,17 @@ print(f"\n✅ Cyborg SVM Accuracy: {accuracy:.4f}")
 | **`train_hebbian`** | `...mothnet.model.MothNet.train_hebbian`| The custom training method for MothNet. |
 | **`create_cyborg_features`** | `...mothnet.model.create_cyborg_features`| Utility to create augmented datasets. |
 
+> **`train_hebbian` builds the model itself.** Every snippet in this document goes
+> `MothNet(...)` straight to `train_hebbian(...)` with no intervening `build()` or
+> forward pass, and that is the supported contract: the method builds against the
+> feature count of the `x` it is given if the model is not built yet, and is a
+> no-op on an already-built model (so it never discards learned Hebbian weights).
+> Until 2026-08-18 it did not, and every one of those snippets — including the
+> "CRITICAL TEST" in § 11 — raised `TypeError: 'NoneType' object is not callable`
+> on the first mini-batch, because `__init__` leaves the three sublayers `None`
+> and only `build()` creates them. Labels straight from
+> `keras.utils.to_categorical` (float64) are also cast for you.
+
 ---
 
 ## 7. Configuration & Key Hyperparameters

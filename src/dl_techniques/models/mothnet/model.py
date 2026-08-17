@@ -465,6 +465,22 @@ class MothNet(keras.Model):
         this loss. The loss should generally decrease as the Hebbian associations
         strengthen, but it's not being directly optimized.
         """
+        # DECISION plan-2026-08-17T183311-79c63e38/D-017
+        # `build()` is what CREATES the three sublayers; `__init__` leaves them
+        # `None`. Every documented path -- the "Usage Paradigms" above and all
+        # four README snippets -- goes straight from the constructor to here.
+        #
+        # WHAT NOT TO DO: do not remove this, and do not "simplify" it to a
+        # `self(x[:1])` warm-up call. Without it the first mini-batch below is
+        # `None(batch_x_tensor, training=True)` -> `TypeError: 'NoneType' object
+        # is not callable`, and the only path that ever worked was the class
+        # docstring's `Example`, which calls `model.build(...)` by hand.
+        # The guard is `self.built`, so an already-built model keeps its learned
+        # Hebbian weights -- rebuilding would silently discard them.
+        # See decisions.md D-017.
+        if not self.built:
+            self.build((None, x.shape[-1]))
+
         num_samples = x.shape[0]
         history = {'loss': []}
 
@@ -482,9 +498,13 @@ class MothNet(keras.Model):
                 batch_x = x_shuffled[i:i+batch_size]
                 batch_y = y_shuffled[i:i+batch_size]
 
-                # Convert to tensors
-                batch_x_tensor = keras.ops.convert_to_tensor(batch_x)
-                batch_y_tensor = keras.ops.convert_to_tensor(batch_y)
+                # Cast, do not merely convert: `keras.utils.to_categorical` --
+                # which this method's own docstring instructs callers to use --
+                # returns float64, and `hebbian_update` then raised
+                # "`x` and `y` must have the same dtype, got tf.float64 !=
+                # tf.float32" against the float32 mushroom-body output.
+                batch_x_tensor = keras.ops.cast(batch_x, self.compute_dtype)
+                batch_y_tensor = keras.ops.cast(batch_y, self.compute_dtype)
 
                 # Forward pass through AL and MB to get pre-synaptic activations
                 al_output = self.antennal_lobe(batch_x_tensor, training=True)
