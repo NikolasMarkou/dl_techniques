@@ -369,6 +369,19 @@ class CapsNet(keras.Model):
         propagates.
         """
         for metric in self.metrics:
+            # DECISION plan-2026-08-17T183311-79c63e38/D-021
+            # Skip the loss tracker. Keras' `Trainer.metrics` yields
+            # `self._loss_tracker` (a `keras.metrics.Mean` named "loss") FIRST,
+            # and `Mean.update_state(values, sample_weight)` accepts
+            # `(y_onehot, lengths)` without complaint because both are
+            # (B, num_classes) -- so this loop silently accumulated
+            # mean(y * lengths) into the loss tracker. No exception ever fired,
+            # and it stayed invisible only because `results.update({"loss":
+            # total_loss})` overwrites the reported value afterwards;
+            # `model.metrics[0].result()` was garbage. Do NOT replace this with
+            # a name check: the tracker is identified by identity, not by name.
+            if metric is getattr(self, "_loss_tracker", None):
+                continue
             if isinstance(metric, CapsuleAccuracy):
                 metric.update_state(y, outputs)
                 continue
@@ -426,6 +439,11 @@ class CapsNet(keras.Model):
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         self._update_metrics(y, outputs)
+        # The tracker `_update_metrics` deliberately skips is fed HERE, with the
+        # quantity it is named for.
+        loss_tracker = getattr(self, "_loss_tracker", None)
+        if loss_tracker is not None:
+            loss_tracker.update_state(total_loss)
 
         results = {}
         for metric in self.metrics:
@@ -440,10 +458,24 @@ class CapsNet(keras.Model):
         return results
 
     def test_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Custom test step with margin loss and reconstruction loss."""
+        """Custom test step with margin loss and reconstruction loss.
+
+        Evaluation runs the decoder on the PREDICTED class, not the true one:
+        the reconstruction reported by ``evaluate()`` must be reachable at
+        inference time.
+        """
         x, y = data
 
-        outputs = self(x, training=False, mask=y)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-021
+        # No `mask=y` here. `_reconstruct` takes `reconstruction_mask = mask`
+        # whenever mask is not None, so passing the labels teacher-forced the
+        # decoder and made `evaluate()`'s reconstruction loss optimistic by
+        # construction -- the inference branch (argmax over the capsule lengths)
+        # was unreachable from this method. `train_step` DOES pass `mask=y`, and
+        # that is correct: masking by the true class during training is the
+        # paper's own recipe (Sabour et al. 2017 § 4.1). Do NOT "restore
+        # symmetry" between the two steps. See decisions.md D-021.
+        outputs = self(x, training=False)
 
         margin_loss_value = ops.mean(capsule_margin_loss(
             outputs["length"],  # y_pred
@@ -464,6 +496,11 @@ class CapsNet(keras.Model):
             total_loss += ops.sum(self.losses)
 
         self._update_metrics(y, outputs)
+        # The tracker `_update_metrics` deliberately skips is fed HERE, with the
+        # quantity it is named for.
+        loss_tracker = getattr(self, "_loss_tracker", None)
+        if loss_tracker is not None:
+            loss_tracker.update_state(total_loss)
 
         results = {}
         for metric in self.metrics:
@@ -518,16 +555,22 @@ class CapsNet(keras.Model):
         self,
         filepath: str,
         overwrite: bool = True,
-        save_format: str = "keras"
     ) -> None:
-        """Save the model to a file."""
+        """Save the model to a file.
+
+        `filepath` must end in `.keras` (preferred) or `.h5`; Keras 3 selects
+        the format from the extension. The `save_format` parameter this method
+        used to forward was removed in Keras 3 and RAISES for any path Keras
+        cannot classify, so passing it turned an "unknown extension" error into
+        a deprecation error naming the wrong cause.
+        """
         # Ensure directory exists
         directory = os.path.dirname(filepath)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
 
         # Save model
-        self.save(filepath, overwrite=overwrite, save_format=save_format)
+        self.save(filepath, overwrite=overwrite)
         logger.info(f"Model saved to {filepath}")
 
     @classmethod
