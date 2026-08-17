@@ -632,15 +632,29 @@ ResNet comes in 5 standard sizes, each optimized for different compute/accuracy 
 
 ### Variant Comparison Table
 
-| Variant | Blocks | Type | Params | FLOPs | Top-1 Acc* | Top-5 Acc* | Use Case |
-|---------|--------|------|--------|-------|------------|------------|----------|
-| **ResNet-18** | [2,2,2,2] | Basic | 11.7M | 1.8G | 69.8% | 89.1% | Mobile, embedded |
-| **ResNet-34** | [3,4,6,3] | Basic | 21.8M | 3.7G | 73.3% | 91.4% | Edge devices |
-| **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | 4.1G | 76.1% | 93.0% | **Most popular** |
-| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.5M | 7.8G | 77.4% | 93.6% | High accuracy |
-| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.2M | 11.6G | 78.3% | 94.1% | Best accuracy |
+| Variant | Blocks | Type | Params | Use Case |
+|---------|--------|------|--------|----------|
+| **ResNet-18** | [2,2,2,2] | Basic | 11.7M | Mobile, embedded |
+| **ResNet-34** | [3,4,6,3] | Basic | 21.8M | Edge devices |
+| **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | **Most popular** |
+| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.5M | High accuracy |
+| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.2M | Best accuracy |
 
-*ImageNet validation accuracy with single crop
+> **No accuracy numbers are quoted anywhere in this README, and that is deliberate.**
+> This table used to carry `Top-1 Acc*` and `Top-5 Acc*` columns footnoted "*ImageNet
+> validation accuracy with single crop", and the per-variant sections below repeated a
+> `Performance (ImageNet)` block each. Those were the figures from He et al. (2015),
+> presented as though they described this implementation. **No pretrained weights exist
+> for any architecture in this repository** — `resnet/model.py`'s `_download_weights`
+> raises `NotImplementedError` by design, as do all nine sibling packages since
+> `5d62167d0` — so nothing here has ever been evaluated on ImageNet and no accuracy
+> claim about it can be true. This package is an **architecture**, like
+> [`mobile_clip/`](../mobile_clip/README.md) §17. For the reference numbers, read the
+> paper (linked at the end of this file); to obtain numbers for *this* code, train it
+> and measure.
+>
+> The `Params` column is architectural, not measured on a checkpoint, and is
+> re-derivable with `create_resnet(variant, num_classes=1000).count_params()`.
 
 ### Detailed Variant Specifications
 
@@ -668,12 +682,6 @@ Best for:
   • When inference speed is critical
   • Mobile and embedded systems
 
-Performance (ImageNet):
-  • Top-1 accuracy: 69.8%
-  • Inference time*: ~5ms per image
-  • Memory: ~45MB
-  
-* On NVIDIA V100 GPU
 ```
 
 #### ResNet-34 (Balanced Lightweight)
@@ -700,10 +708,6 @@ Best for:
   • Video analysis
   • When you need better than ResNet-18 but can't afford ResNet-50
 
-Performance (ImageNet):
-  • Top-1 accuracy: 73.3%
-  • Inference time*: ~8ms per image
-  • Memory: ~83MB
 ```
 
 #### ResNet-50 (Most Popular)
@@ -731,11 +735,6 @@ Best for:
   • General-purpose image classification
   • Pretrained weights widely available
 
-Performance (ImageNet):
-  • Top-1 accuracy: 76.1%
-  • Inference time*: ~12ms per image
-  • Memory: ~98MB
-  
 Why most popular:
   • Sweet spot for accuracy vs. efficiency
   • Extensive pretrained weights
@@ -768,10 +767,6 @@ Best for:
   • Fine-grained classification
   • Research and benchmarking
 
-Performance (ImageNet):
-  • Top-1 accuracy: 77.4%
-  • Inference time*: ~20ms per image
-  • Memory: ~171MB
 ```
 
 #### ResNet-152 (Maximum Accuracy)
@@ -799,11 +794,6 @@ Best for:
   • Offline processing with time budget
   • Research on very deep networks
 
-Performance (ImageNet):
-  • Top-1 accuracy: 78.3%
-  • Inference time*: ~30ms per image
-  • Memory: ~232MB
-  
 Historical note:
   • Won ImageNet 2015 competition
   • First to break 80% top-5 accuracy barrier
@@ -1094,22 +1084,17 @@ for epoch in range(num_epochs):
 
 ### Performance Impact
 
+> An "Empirical Results (ResNet-50 on CIFAR-10)" block used to stand here, quoting
+> 93.5% vs 94.2% final accuracy and 45 vs 48 minutes of training time. **No such run
+> exists.** It was never produced by this code, no result directory or checkpoint
+> backs it, and it was removed for the same reason as the ImageNet table in §6: a
+> number in a README is indistinguishable from a measurement to every reader. The
+> qualitative benefits below are architectural claims about deep supervision and are
+> stated as such.
+
 ```
-Empirical Results (ResNet-50 on CIFAR-10):
-
-Without Deep Supervision:
-  • Convergence: 80 epochs to 92% accuracy
-  • Final accuracy: 93.5%
-  • Training time: 45 minutes
-
-With Deep Supervision:
-  • Convergence: 50 epochs to 92% accuracy  (38% faster!)
-  • Final accuracy: 94.2%  (0.7% improvement)
-  • Training time: 48 minutes  (minimal overhead)
-
-Benefits:
-  ✓ 38% faster convergence
-  ✓ 0.7% better final accuracy
+Benefits (qualitative, from the deep-supervision literature — not measured here):
+  ✓ Faster convergence
   ✓ More stable training (lower variance)
   ✓ Better intermediate features
 ```

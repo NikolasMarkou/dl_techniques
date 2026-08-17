@@ -206,3 +206,56 @@ if __name__ == "__main__":
     import pytest, sys
 
     sys.exit(pytest.main([__file__, "-vvv"]))
+
+
+# ---------------------------------------------------------------------
+# The README's accuracy claims (C-5)
+# ---------------------------------------------------------------------
+
+
+class TestReadmeQuotesNoAccuracy:
+    """`models/resnet/README.md` used to print a per-variant ImageNet Top-1/Top-5
+    table, footnoted only "*ImageNet validation accuracy with single crop", plus a
+    `Performance (ImageNet)` block per variant and an "Empirical Results (ResNet-50 on
+    CIFAR-10)" comparison.
+
+    Every one of those was the published paper's number (or, for the CIFAR block, no
+    number at all — no such run exists) presented as though it described this
+    implementation. NO pretrained weights exist for any architecture in this repo:
+    `_download_weights` raises `NotImplementedError` by design. A prose claim is only
+    testable by executing something, so this test executes the refusal and then reads
+    the file.
+    """
+
+    @staticmethod
+    def _readme() -> str:
+        import pathlib
+
+        return (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "src" / "dl_techniques" / "models" / "resnet" / "README.md"
+        ).read_text()
+
+    def test_the_premise_holds_no_pretrained_weights_are_obtainable(self):
+        """The fact the deletions rest on. If this ever goes RED the README may
+        legitimately quote a number again — but only a MEASURED one."""
+        import pytest
+
+        from dl_techniques.models.resnet.model import ResNet as _ResNet
+
+        with pytest.raises(NotImplementedError):
+            _ResNet.from_variant("resnet18", num_classes=10, pretrained=True)
+
+    def test_no_top1_or_top5_claim_survives_outside_the_explanation(self):
+        readme = self._readme()
+        # The one surviving mention is the blockquote explaining what was removed and
+        # why; it is deliberately quoted there and nowhere else.
+        assert readme.count("Top-1 Acc") <= 1
+        assert readme.count("Top-5 Acc") <= 1
+        assert "Top-1 accuracy:" not in readme
+        assert "Performance (ImageNet):" not in readme
+
+    def test_the_explanation_is_present_rather_than_a_silent_deletion(self):
+        readme = self._readme()
+        assert "No accuracy numbers are quoted anywhere in this README" in readme
+        assert "No pretrained weights exist" in readme

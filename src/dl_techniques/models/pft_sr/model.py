@@ -404,9 +404,37 @@ class PFTSR(keras.Model):
         """
         Build nearest neighbor + conv upsampler.
 
+        Only power-of-two scales are reachable here: the stage count is
+        ``int(log2(scale))`` doubling stages, so any other scale would silently emit
+        the wrong resolution (``scale=3`` gives one stage, i.e. a 2x output for a 3x
+        request).
+
         Returns:
             Sequential model for upsampling.
+
+        Raises:
+            ValueError: If ``scale`` is not a power of two.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-078
+        # This upsampler can only realize powers of two, and it used to accept anything.
+        # `_build_pixelshuffle_upsampler` has always raised for unsupported scales; this
+        # branch did not, so `PFTSR(scale=3, upsampler='nearest+conv')` built happily and
+        # returned a 2x image for a 3x request. The module docstring named the defect and
+        # shipped it anyway. `create_pft_sr` hardcodes `upsampler='pixelshuffle'`, so only
+        # direct `PFTSR(...)` construction reaches here — which is exactly why it went
+        # unnoticed, not a reason to leave it. Do NOT "fix" this by rounding the stage
+        # count up: three doubling stages give 8x, not 3x. See decisions.md D-078.
+        if self.scale < 1 or (self.scale & (self.scale - 1)) != 0:
+            raise ValueError(
+                f"Unsupported scale for upsampler='nearest+conv': {self.scale}. "
+                f"This upsampler stacks int(log2(scale)) doubling stages, so it can "
+                f"only realize powers of two (1, 2, 4, 8, ...); scale={self.scale} "
+                f"would silently emit a "
+                f"{2 ** max(self.scale.bit_length() - 1, 0) if self.scale > 0 else 0}x "
+                f"image. "
+                f"Use upsampler='pixelshuffle' (supports 2, 3 and 4) instead."
+            )
+
         layers = []
 
         for i in range(int(keras.ops.log2(self.scale))):

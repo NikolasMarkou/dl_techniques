@@ -93,3 +93,67 @@ class TestPFTSR:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestNearestUpsamplerScaleValidation:
+    """`_build_nearest_upsampler` stacks `int(log2(scale))` doubling stages.
+
+    At `scale=3` that is ONE stage — a 2x output for a 3x request. The module docstring
+    named the defect and the model shipped it anyway; `_build_pixelshuffle_upsampler`
+    has always raised for unsupported scales, so only this branch was unguarded.
+    `create_pft_sr` hardcodes `upsampler='pixelshuffle'`, which is why the hole was
+    reachable only through direct `PFTSR(...)` construction.
+    """
+
+    @staticmethod
+    def _build(scale):
+        """The upsampler is constructed in `build()`, not `__init__` — same as the
+        pixelshuffle branch, whose `raise` has always fired at the same moment. So the
+        guard must be reached through a build, not a bare constructor call."""
+        model = PFTSR(
+            scale=scale,
+            upsampler="nearest+conv",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        model.build((None, 16, 16, 3))
+        return model
+
+    @pytest.mark.parametrize("scale", [3, 5, 6, 7, 12])
+    def test_a_non_power_of_two_scale_raises(self, scale):
+        with pytest.raises(ValueError, match=r"nearest\+conv"):
+            self._build(scale)
+
+    @pytest.mark.parametrize("scale", [2, 4, 8])
+    def test_a_power_of_two_scale_still_builds(self, scale):
+        """Anti-vacuity: the guard must not simply reject everything."""
+        assert self._build(scale).scale == scale
+
+    def test_the_realized_scale_is_the_requested_one(self):
+        """The property the raise protects: what built must actually upsample by
+        `scale`. A guard that admits a scale it cannot realize is no guard."""
+        model = PFTSR(
+            scale=4,
+            upsampler="nearest+conv",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        x = np.random.default_rng(0).random((1, 16, 16, 3)).astype("float32")
+        out = model(x, training=False)
+        assert tuple(out.shape[1:3]) == (64, 64)
+
+    def test_the_pixelshuffle_upsampler_still_supports_three(self):
+        """The guard is specific to `nearest+conv`; scale=3 remains legal elsewhere."""
+        model = PFTSR(
+            scale=3,
+            upsampler="pixelshuffle",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        assert model.scale == 3

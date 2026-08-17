@@ -50,10 +50,23 @@ emits probabilities, not logits, and must be compiled with `from_logits=False`.
 With `include_top=False` the model returns the `complex64` convolutional feature
 map instead, which most downstream real-valued Keras layers will refuse.
 
-Six variants ladder the same shape rather than changing it, and measure (at
-`(32, 32, 3)`, 10 classes) ~55k parameters for `nano`, ~102k for `tiny` and
-~928k for `base`. `imagenet` restates `conv_strides=2`, which is already the
-constructor default, so that entry is inert.
+Six variants ladder the same shape rather than changing it. THIS PARAGRAPH IS THE
+ONLY HOME FOR THE PARAMETER COUNTS in this package — a second, contradicting set
+lived 620 lines below in `create_coshnet`'s docstring (it claimed ~50k for `tiny`
+and ~800k for `base`, which are neither variant's number; the labels had shifted
+one rung when `nano` was added) and was DELETED rather than corrected, because a
+count restated in two places is a hand-maintained invariant that will drift again.
+Re-derive with:
+
+    create_coshnet(v, num_classes=10, input_shape=(32, 32, 3)).count_params()
+
+Measured 2026-08-17: `nano` 55,282, `tiny` 101,850, `base` 927,632, `large`
+4,630,858, `cifar10` 592,282, `imagenet` 5,627,466 total parameters. Only about
+40-90% of those are trainable — the shearlet transform contributes a large fixed,
+non-trainable filter bank (`nano`: 22,514 trainable of 55,282). Pinned by
+`tests/test_models/test_coshnet/test_model.py::TestDocumentedParameterCounts`.
+`imagenet` restates `conv_strides=2`, which is already the constructor default, so
+that entry is inert.
 
 Construction is functional, not subclassed: `__init__` traces the graph and hands
 `inputs`/`outputs` to `keras.Model.__init__`, which is what registers the
@@ -674,8 +687,8 @@ def create_coshnet(
     Args:
         variant: String, model variant. Options:
             - "nano": Minimal model for resource-constrained environments
-            - "tiny": Small model (~50k parameters)
-            - "base": Standard model (~800k parameters)
+            - "tiny": Small model
+            - "base": Standard model
             - "large": Larger model for complex datasets
             - "cifar10": Optimized for CIFAR-10 classification
             - "imagenet": Scaled for ImageNet-style inputs

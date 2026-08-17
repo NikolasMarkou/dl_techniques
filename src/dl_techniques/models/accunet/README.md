@@ -514,18 +514,23 @@ at the start of the forward pass — **resize your inputs to a multiple of 16
 before feeding the model** (the trainer in `src/train/accunet/` does this for
 you).
 
-Verified parameter counts (`base_filters=32, num_classes=1, input=224x224`):
-~16.8 M trainable parameters (call `model.count_params()` to check).
-
 ### Choosing `base_filters`
 
 This parameter controls the overall capacity of the model. The number of filters at each encoder level will be `[base_filters, base_filters*2, ..., base_filters*16]`.
 
-| `base_filters` | Model Size (approx.) | Use Case |
-| :---: | :---: | :--- |
-| **16** | ~4.5 M params | Lightweight tasks, fast inference. |
-| **32 (Default)** | ~16.8 M params | Good balance for most medical/natural image tasks. |
-| **64** | ~66.5 M params | Very complex tasks, large datasets, high-resolution images. |
+| `base_filters` | Use Case |
+| :---: | :--- |
+| **16** | Lightweight tasks, fast inference. |
+| **32 (Default)** | Good balance for most medical/natural image tasks. |
+| **64** | Very complex tasks, large datasets, high-resolution images. |
+
+**Parameter counts are not quoted here.** This file used to carry two of them — a
+"Verified parameter counts ... ~16.8 M trainable" line and a `~4.5 M / ~16.8 M /
+~66.5 M` column in the table above — and all of them were wrong, contradicting
+`model.py`'s own docstring by about 25%. The single home for the measured counts,
+together with the one-line command that re-derives them, is the module docstring of
+`model.py`; they are pinned by
+`tests/test_models/test_accunet/test_model.py::TestDocumentedParameterCounts`.
 
 ### Choosing `mlfc_iterations`
 

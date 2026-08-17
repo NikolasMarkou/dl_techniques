@@ -689,3 +689,68 @@ class TestAccUNetPublicSurface:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+class TestDocumentedParameterCounts:
+    """Re-derive every parameter count `model.py`'s module docstring prints.
+
+    `accunet/README.md` used to carry a contradicting set ("**Verified** parameter
+    counts ... ~16.8 M trainable", plus a ~4.5 M / ~16.8 M / ~66.5 M scaling table).
+    Every one of those was wrong. Prose claims are only testable by executing the code,
+    so this class executes it; the shape of the guard follows
+    `tests/test_repo_map_numbers.py`.
+    """
+
+    # The exact figures printed in `models/accunet/model.py`'s module docstring.
+    DOCUMENTED = {
+        16: (3_406_008, 3_376_782),
+        32: (13_426_216, 13_367_806),
+        64: (53_310_216, 53_193_438),
+    }
+
+    @pytest.mark.parametrize("base_filters", sorted(DOCUMENTED))
+    def test_the_documented_count_is_the_measured_count(self, base_filters):
+        expected_total, expected_trainable = self.DOCUMENTED[base_filters]
+        model = create_acc_unet(
+            input_channels=3,
+            num_classes=1,
+            base_filters=base_filters,
+            input_shape=(256, 256),
+        )
+        trainable = int(sum(np.prod(v.shape) for v in model.trainable_weights))
+        assert model.count_params() == expected_total
+        assert trainable == expected_trainable
+
+    def test_the_count_really_is_resolution_independent(self):
+        """The premise that makes a single documented number legitimate.
+
+        All spatial dependence lives in weightless `Resizing` layers, so two input
+        sizes must give the identical count. If this ever fails, the docstring must
+        start naming a resolution.
+        """
+        small = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=32, input_shape=(128, 128)
+        )
+        large = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=32, input_shape=(256, 256)
+        )
+        assert small.count_params() == large.count_params()
+
+    def test_the_readme_points_at_the_single_home_rather_than_restating_it(self):
+        """One home for the number. A corrected second copy would just drift again.
+
+        Asserted structurally (the README names `model.py` as the home) rather than by
+        forbidding a substring: the README's own explanation of what was removed
+        necessarily quotes the retired figures, and a substring ban would make that
+        explanation unwriteable.
+        """
+        import pathlib
+
+        readme = (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "src" / "dl_techniques" / "models" / "accunet" / "README.md"
+        ).read_text()
+        assert "Parameter counts are not quoted here" in readme
+        assert "module docstring of\n`model.py`" in readme
+        # No live claim survives in the scaling table.
+        assert "| **32 (Default)** | Good balance" in readme

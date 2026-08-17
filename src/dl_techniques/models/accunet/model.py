@@ -65,8 +65,25 @@ contract still holds at run time, it just cannot be verified at trace time.
 
 The head applies its activation: sigmoid for `num_classes == 1`, softmax
 otherwise. The model therefore emits probabilities, not logits, and must be
-compiled with `from_logits=False`. At the default `base_filters=32` a 3-channel
-binary model has ~13.4M parameters.
+compiled with `from_logits=False`.
+
+THIS PARAGRAPH IS THE ONLY HOME FOR AccUNet'S PARAMETER COUNTS. A contradicting
+set lived in `README.md` — a "**Verified** parameter counts ... ~16.8 M trainable"
+sentence plus a scaling table quoting ~4.5 M / ~16.8 M / ~66.5 M — and every one of
+those numbers was wrong. They were deleted rather than corrected: the count is
+resolution-independent (all size dependence lives in weightless `Resizing` layers,
+confirmed by measuring at both 128x128 and 256x256 and getting identical totals),
+so two sets of numbers for the same model could never both be right, and a count
+restated in two files is a hand-maintained invariant that will drift again.
+Re-derive with:
+
+    create_acc_unet(input_channels=3, num_classes=1,
+                    base_filters=BF, input_shape=(256, 256)).count_params()
+
+Measured 2026-08-17 (3-channel binary model, identical at every input size):
+`base_filters=16` 3,406,008 total / 3,376,782 trainable; `base_filters=32` (the
+default) 13,426,216 / 13,367,806; `base_filters=64` 53,310,216 / 53,193,438.
+Pinned by `tests/test_models/test_accunet/test_model.py::TestDocumentedParameterCounts`.
 
 References:
     - Ibtehaz & Kihara, 2023. ACC-UNet: A Completely Convolutional UNet Model

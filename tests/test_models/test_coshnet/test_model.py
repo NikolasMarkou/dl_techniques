@@ -6,7 +6,11 @@ create_coshnet factory, a forward pass, and the M2 full .keras
 save -> load -> identical-output round-trip.
 
 `create_coshnet(variant, num_classes, input_shape)` -> CoShNet.from_variant.
-NHWC float32 image input; classifier head returns logits (B, num_classes).
+NHWC float32 image input; the classifier head is `Dense(activation="softmax")`,
+so it returns PROBABILITIES, not logits — compile with `from_logits=False`. The
+method below used to be named `test_forward_logits_shape` and this line used to say
+"logits"; nothing asserted the rows summed to 1, so the contradiction with
+`model.py:515-521` survived.
 """
 
 import os
@@ -53,11 +57,19 @@ class TestConstruction:
 
 class TestForward:
 
-    def test_forward_logits_shape(self):
+    def test_forward_returns_a_probability_distribution(self):
         model = create_coshnet("base", NUM_CLASSES, INPUT_SHAPE)
         out = model(_images(), training=False)
         assert tuple(out.shape) == (2, NUM_CLASSES)
-        assert not np.any(np.isnan(keras.ops.convert_to_numpy(out)))
+        values = keras.ops.convert_to_numpy(out)
+        assert not np.any(np.isnan(values))
+        # The head is `Dense(num_classes, activation="softmax")`. Asserting the shape
+        # alone cannot tell probabilities from logits, which is how the suite came to
+        # call this output "logits" while the module docstring correctly told callers
+        # to compile with `from_logits=False`.
+        np.testing.assert_allclose(values.sum(axis=-1), 1.0, atol=1e-5)
+        assert np.all(values >= 0.0)
+        assert np.all(values <= 1.0)
 
 
 class TestKerasRoundTrip:
@@ -79,3 +91,48 @@ class TestKerasRoundTrip:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestDocumentedParameterCounts:
+    """Re-derive every count `model.py`'s module docstring prints.
+
+    The factory docstring 620 lines below used to carry a SECOND, contradicting set
+    ("tiny (~50k parameters)", "base (~800k parameters)") — neither variant's number.
+    The labels had shifted one rung when `nano` was added: ~55k is nano's figure, not
+    tiny's. That set was deleted rather than corrected, and this class is what keeps
+    the surviving one honest.
+    """
+
+    # The exact figures printed in `models/coshnet/model.py`'s module docstring,
+    # measured at (32, 32, 3) with 10 classes.
+    DOCUMENTED_TOTAL = {
+        "nano": 55_282,
+        "tiny": 101_850,
+        "base": 927_632,
+        "large": 4_630_858,
+        "cifar10": 592_282,
+        "imagenet": 5_627_466,
+    }
+
+    @pytest.mark.parametrize("variant", sorted(DOCUMENTED_TOTAL))
+    def test_the_documented_count_is_the_measured_count(self, variant):
+        model = create_coshnet(variant, num_classes=10, input_shape=(32, 32, 3))
+        assert model.count_params() == self.DOCUMENTED_TOTAL[variant]
+
+    def test_nano_trainable_share_is_the_documented_one(self):
+        """The docstring's one trainable-vs-total figure. The shearlet filter bank is a
+        large FIXED contribution, so quoting only `count_params()` would overstate what
+        the optimizer touches by more than 2x on `nano`."""
+        model = create_coshnet("nano", num_classes=10, input_shape=(32, 32, 3))
+        trainable = int(sum(np.prod(v.shape) for v in model.trainable_weights))
+        assert trainable == 22_514
+        assert trainable < model.count_params()
+
+    def test_the_factory_docstring_no_longer_restates_a_count(self):
+        """One home for the number: the module docstring. A second copy drifted once
+        already and would drift again."""
+        import inspect
+
+        doc = inspect.getdoc(create_coshnet) or ""
+        assert "~50k" not in doc
+        assert "~800k" not in doc
