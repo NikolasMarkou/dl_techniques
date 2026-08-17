@@ -488,7 +488,10 @@ class GenericBlock(NBeatsBlock):
         Backcast             Forecast
         (batch, B*in_dim)    (batch, F*out_dim)
 
-    :param basis_initializer: Initializer for basis matrices.
+    :param basis_initializer: Initializer for the two basis matrices. Defaults to
+        ``Orthogonal(gain=0.1)`` — a small-gain orthogonal map, which keeps the block's
+        contribution to the residual stack small at initialization. Any Keras initializer
+        (or its string name) is honoured; this argument is read, not merely stored.
     :type basis_initializer: str or keras.initializers.Initializer
     :param basis_regularizer: Optional regularizer for basis matrices.
     :type basis_regularizer: keras.regularizers.Regularizer or None
@@ -497,19 +500,27 @@ class GenericBlock(NBeatsBlock):
 
     def __init__(
             self,
-            basis_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            basis_initializer: Union[str, keras.initializers.Initializer, None] = None,
             basis_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-072
+        # `basis_initializer` used to be validated, stored and serialized while both Dense
+        # basis layers hardcoded `Orthogonal(gain=0.1)`, so the argument had no effect.
+        # Do NOT "fix" this by giving the parameter the usual `'glorot_uniform'` default and
+        # passing it through: that silently replaces the small-gain orthogonal map the block
+        # was tuned around and changes every existing GenericBlock's initialization. The
+        # default is `None`, which resolves to the historical `Orthogonal(gain=0.1)`; an
+        # explicit value is now actually used. See decisions.md D-072.
+        if basis_initializer is None:
+            # Small-gain orthogonal init keeps the block's residual contribution small.
+            basis_initializer = keras.initializers.Orthogonal(gain=0.1)
+
         # Store configuration
         self.basis_initializer = keras.initializers.get(basis_initializer)
         self.basis_regularizer = keras.regularizers.get(basis_regularizer)
-
-        # CREATE sub-layers specific to GenericBlock in __init__
-        # Use orthogonal initialization with small gain for stability
-        orthogonal_init = keras.initializers.Orthogonal(gain=0.1)
 
         # For Generic Block, the projection is just a large matrix multiplication
         # We project from flattened theta to flattened time series directly.
@@ -517,7 +528,7 @@ class GenericBlock(NBeatsBlock):
             self.backcast_length * self.input_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=orthogonal_init,
+            kernel_initializer=self.basis_initializer,
             kernel_regularizer=self.basis_regularizer,
             name='backcast_basis'
         )
@@ -525,7 +536,7 @@ class GenericBlock(NBeatsBlock):
             self.forecast_length * self.output_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=orthogonal_init,
+            kernel_initializer=self.basis_initializer,
             kernel_regularizer=self.basis_regularizer,
             name='forecast_basis'
         )

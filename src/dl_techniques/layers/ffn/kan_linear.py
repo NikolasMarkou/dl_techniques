@@ -302,21 +302,32 @@ class KANLinear(keras.layers.Layer):
         grid_points = keras.ops.linspace(
             start, stop, self.grid_size + 1, dtype=self.dtype
         )
+        return self._extend_knots(grid_points)
 
-        # Calculate grid spacing step size
-        h = (grid_points[1] - grid_points[0])
+    def _extend_knots(
+        self, grid_points: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Pad an interior knot sequence with ``spline_order`` knots at each end.
 
-        # Generate index ranges for extensions
+        The interior sequence need not be uniformly spaced — the left and right
+        extensions are generated from the *boundary* spacing (``t_1 - t_0`` and
+        ``t_n - t_{n-1}``) so that a non-uniform, quantile-matched interior is
+        extended consistently at both ends.
+
+        :param grid_points: Monotone interior knots of shape ``(grid_size + 1,)``.
+        :type grid_points: keras.KerasTensor
+        :return: Full knot sequence of shape ``(grid_size + 2 * spline_order + 1,)``.
+        :rtype: keras.KerasTensor
+        """
+        h_left = grid_points[1] - grid_points[0]
+        h_right = grid_points[-1] - grid_points[-2]
+
         start_indices = keras.ops.arange(-self.spline_order, 0, dtype=self.dtype)
         end_indices = keras.ops.arange(1, self.spline_order + 1, dtype=self.dtype)
 
-        # Extend grid on the left
-        extended_knots_start = start_indices * h + grid_points[0]
+        extended_knots_start = start_indices * h_left + grid_points[0]
+        extended_knots_end = end_indices * h_right + grid_points[-1]
 
-        # Extend grid on the right
-        extended_knots_end = end_indices * h + grid_points[-1]
-
-        # Concatenate to form complete knot sequence
         return keras.ops.concatenate(
             [extended_knots_start, grid_points, extended_knots_end], axis=0
         )
@@ -440,8 +451,10 @@ class KANLinear(keras.layers.Layer):
     def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
         """Adapt the B-spline knot grid to the empirical distribution of ``x``.
 
-        Estimates per-feature quantile boundaries from a data batch and writes the
-        new knot sequence into the ``grid`` weight via ``assign``. Fully
+        Estimates per-feature quantile boundaries from a data batch, averages them
+        across features, and writes the resulting (generally non-uniform) knot
+        sequence into the ``grid`` weight via ``assign``. The interior quantiles are
+        kept — this is a genuine quantile match, not a min/max range update. Fully
         tensor-based, so it runs in both eager and ``@tf.function``/graph contexts.
         ``grid_range`` is the configured *initial* range and is intentionally not
         mutated here — the ``grid`` weight is the adapted source of truth and
@@ -472,13 +485,23 @@ class KANLinear(keras.layers.Layer):
         # Shape: (grid_size + 1, input_features)
         grid_points_per_feature = keras.ops.take(x_sorted, indices, axis=0)
 
-        # Average across features to find a unified range for the layer
+        # Average across features to find a unified knot sequence for the layer.
+        # Averaging a monotone-per-column matrix is monotone, so the result is a
+        # valid (generally NON-uniform) knot sequence.
         # Shape: (grid_size + 1,)
         new_grid_points = keras.ops.mean(grid_points_per_feature, axis=1)
 
-        # Re-calculate and assign the grid weight values. Endpoints stay tensors
-        # (no host-side materialization), keeping this graph-compatible.
-        self._set_grid_from_range(new_grid_points[0], new_grid_points[-1])
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-074
+        # This used to be `self._set_grid_from_range(new_grid_points[0],
+        # new_grid_points[-1])`, which threw away every interior quantile and rebuilt a
+        # UNIFORM knot sequence between the min and the max — a range update wearing the
+        # name "quantile matching". The interior knots are now kept, which is the whole
+        # point of adapting the grid to the empirical distribution. Do NOT revert to the
+        # min/max spelling on the grounds that it is "simpler": on skewed data a uniform
+        # grid leaves most knots in a region holding almost no samples, and the two
+        # spellings are indistinguishable on uniformly distributed x, so a test written on
+        # uniform data will not notice. See decisions.md D-074.
+        self.grid.assign(self._extend_knots(new_grid_points))
 
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]

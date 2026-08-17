@@ -168,7 +168,9 @@ class PRISMModel(keras.Model, ForecastMixin):
             head. Defaults to 3 (typically 10th, 50th, 90th percentiles).
         quantile_levels: Optional list of quantile levels (e.g., [0.1, 0.5, 0.9]).
             Used for documentation and API responses. Length must match num_quantiles.
-            If None, generates linear space.
+            If None and ``num_quantiles`` equals ``len(DEFAULT_QUANTILES)``, defaults to
+            ``DEFAULT_QUANTILES`` ([0.1, 0.5, 0.9]); at any other length it falls back to
+            evenly spaced interior levels ``np.linspace(0, 1, num_quantiles + 2)[1:-1]``.
         enforce_monotonicity: Whether to enforce non-crossing quantiles
             (Q_i <= Q_{i+1}). Only used when use_quantile_head=True. Defaults to True.
         kernel_initializer: Initializer for kernel weights. Defaults to "glorot_uniform".
@@ -261,10 +263,22 @@ class PRISMModel(keras.Model, ForecastMixin):
             self.quantile_levels = quantile_levels
         else:
             if use_quantile_head:
-                # Generate roughly evenly spaced quantiles if not provided
-                self.quantile_levels = list(
-                    np.linspace(0, 1, num_quantiles + 2)[1:-1]
-                )
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-075
+                # `DEFAULT_QUANTILES = [0.1, 0.5, 0.9]` was dead: this branch always ran
+                # `np.linspace(0, 1, 5)[1:-1] = [0.25, 0.5, 0.75]`, contradicting the
+                # constructor docstring's "typically 10th, 50th, 90th percentiles". The
+                # named constant is now the default at its own length. Do NOT replace the
+                # linspace fallback with an unconditional `DEFAULT_QUANTILES`: that would
+                # silently give a 5-quantile head 3 levels and re-break the
+                # `len(quantile_levels) == num_quantiles` invariant this class validates
+                # two branches above. See decisions.md D-075.
+                if num_quantiles == len(self.DEFAULT_QUANTILES):
+                    self.quantile_levels = list(self.DEFAULT_QUANTILES)
+                else:
+                    # No canonical set at this length: fall back to evenly spaced levels.
+                    self.quantile_levels = list(
+                        np.linspace(0, 1, num_quantiles + 2)[1:-1]
+                    )
             else:
                 self.quantile_levels = None
 

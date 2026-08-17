@@ -213,7 +213,11 @@ class NTMConfig:
     :type controller_dim: int
     :param controller_type: Type of controller ('lstm', 'gru', 'feedforward').
     :type controller_type: str
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
     :param shift_range: Range of allowed shifts for location addressing.
     :type shift_range: int
@@ -446,7 +450,11 @@ class BaseHead(keras.layers.Layer, ABC):
     :type memory_size: int
     :param memory_dim: Dimension of each memory slot.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
     :param shift_range: Range of allowed shifts for location addressing.
     :type shift_range: int

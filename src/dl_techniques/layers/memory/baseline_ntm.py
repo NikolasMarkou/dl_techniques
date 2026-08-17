@@ -233,7 +233,11 @@ class NTMReadHead(BaseHead):
     :type memory_size: int
     :param memory_dim: Dimension of each memory slot.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
     :param shift_range: Range of allowed shifts for location addressing.
     :type shift_range: int
@@ -286,30 +290,44 @@ class NTMReadHead(BaseHead):
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
-        self.gate_dense = layers.Dense(
-            1,
-            activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gate",
-        )
-        self.shift_dense = layers.Dense(
-            shift_range,
-            activation="softmax",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="shift",
-        )
-        self.gamma_dense = layers.Dense(
-            1,
-            activation="softplus",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gamma",
-        )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # `addressing_mode` used to be threaded in, stored and serialized while
+        # `compute_addressing` ran content -> gate -> shift -> sharpen unconditionally, so
+        # `AddressingMode.CONTENT` round-tripped with NO effect. Under CONTENT the three
+        # location-addressing projections are NOT created at all. Do NOT "simplify" this by
+        # always creating them and only skipping their use in `call` — that reinstates the
+        # very defect (parameters that exist, train and serialize while nothing reads them)
+        # this branch closes, and it makes the CONTENT checkpoint carry HYBRID-shaped
+        # weights. See decisions.md D-073.
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense = layers.Dense(
+                1,
+                activation="sigmoid",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gate",
+            )
+            self.shift_dense = layers.Dense(
+                shift_range,
+                activation="softmax",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="shift",
+            )
+            self.gamma_dense = layers.Dense(
+                1,
+                activation="softplus",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gamma",
+            )
+        else:
+            self.gate_dense = None
+            self.shift_dense = None
+            self.gamma_dense = None
 
     def build(self, input_shape: tuple) -> None:
         """
@@ -320,9 +338,10 @@ class NTMReadHead(BaseHead):
         """
         self.key_dense.build(input_shape)
         self.beta_dense.build(input_shape)
-        self.gate_dense.build(input_shape)
-        self.shift_dense.build(input_shape)
-        self.gamma_dense.build(input_shape)
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense.build(input_shape)
+            self.shift_dense.build(input_shape)
+            self.gamma_dense.build(input_shape)
         super().build(input_shape)
 
     def content_addressing(
@@ -367,15 +386,28 @@ class NTMReadHead(BaseHead):
         # 1. Project controller output to head parameters
         key = self.key_dense(controller_output)
         beta = self.beta_dense(controller_output)
-        gate = self.gate_dense(controller_output)
-        shift = self.shift_dense(controller_output)
-        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 2. Content Addressing
         key_expanded = ops.expand_dims(key, axis=1)
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Under CONTENT the content weights ARE the addressing: no interpolation with the
+        # previous weights, no circular shift, no sharpening. `prev_weights` is therefore
+        # unused in this mode by construction, which is exactly what "content-only
+        # addressing" means. See decisions.md D-073.
+        if self.addressing_mode is not AddressingMode.HYBRID:
+            return content_weights, HeadState(
+                weights=content_weights,
+                key=key,
+                beta=beta,
+            )
+
+        gate = self.gate_dense(controller_output)
+        shift = self.shift_dense(controller_output)
+        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 3. Interpolation (Gating)
         gated_weights = gate * content_weights + (1.0 - gate) * prev_weights
@@ -463,7 +495,11 @@ class NTMWriteHead(BaseHead):
     :type memory_size: int
     :param memory_dim: Dimension of each memory slot.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
     :param shift_range: Range of allowed shifts for location addressing.
     :type shift_range: int
@@ -516,30 +552,38 @@ class NTMWriteHead(BaseHead):
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
-        self.gate_dense = layers.Dense(
-            1,
-            activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gate",
-        )
-        self.shift_dense = layers.Dense(
-            shift_range,
-            activation="softmax",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="shift",
-        )
-        self.gamma_dense = layers.Dense(
-            1,
-            activation="softplus",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gamma",
-        )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Same branch as NTMReadHead: under CONTENT the location-addressing projections do
+        # not exist. See decisions.md D-073.
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense = layers.Dense(
+                1,
+                activation="sigmoid",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gate",
+            )
+            self.shift_dense = layers.Dense(
+                shift_range,
+                activation="softmax",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="shift",
+            )
+            self.gamma_dense = layers.Dense(
+                1,
+                activation="softplus",
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gamma",
+            )
+        else:
+            self.gate_dense = None
+            self.shift_dense = None
+            self.gamma_dense = None
 
         # Write-specific parameters
         self.erase_dense = layers.Dense(
@@ -568,9 +612,10 @@ class NTMWriteHead(BaseHead):
         """
         self.key_dense.build(input_shape)
         self.beta_dense.build(input_shape)
-        self.gate_dense.build(input_shape)
-        self.shift_dense.build(input_shape)
-        self.gamma_dense.build(input_shape)
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense.build(input_shape)
+            self.shift_dense.build(input_shape)
+            self.gamma_dense.build(input_shape)
         self.erase_dense.build(input_shape)
         self.add_dense.build(input_shape)
         super().build(input_shape)
@@ -617,9 +662,6 @@ class NTMWriteHead(BaseHead):
         # 1. Project parameters
         key = self.key_dense(controller_output)
         beta = self.beta_dense(controller_output)
-        gate = self.gate_dense(controller_output)
-        shift = self.shift_dense(controller_output)
-        gamma = self.gamma_dense(controller_output) + 1.0
         erase = self.erase_dense(controller_output)
         add = self.add_dense(controller_output)
 
@@ -628,6 +670,21 @@ class NTMWriteHead(BaseHead):
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Content-only addressing: the content weights are the final weights.
+        if self.addressing_mode is not AddressingMode.HYBRID:
+            return content_weights, HeadState(
+                weights=content_weights,
+                key=key,
+                beta=beta,
+                erase_vector=erase,
+                add_vector=add,
+            )
+
+        gate = self.gate_dense(controller_output)
+        shift = self.shift_dense(controller_output)
+        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 3. Interpolation
         gated_weights = gate * content_weights + (1.0 - gate) * prev_weights

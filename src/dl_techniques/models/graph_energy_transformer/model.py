@@ -136,7 +136,8 @@ class GraphEnergyTransformerBackbone(keras.Model):
           "node_mask":     (B, N),        # rank-2 per-node validity (1 = real, 0 = PAD)
           "pe":            (B, N, pe_dim), # only when `use_pe` (Laplacian eigenvectors)
           "node_replace_mask": (B, N) bool # optional — masked-node pretext (mask-token apply)
-          "target_index":  (B,)            # variant B only; read by the head, not the trunk
+          "target_index":  (B,)            # variant B only; accepted and NOT read by anything
+                                           # (the head takes a static index-0 slice — see D-003)
         }
 
     ``embed`` reads ``node_features`` / ``pe`` / ``node_replace_mask``; ``call`` additionally
@@ -721,7 +722,12 @@ class GraphAnomalyDetector(keras.Model):
 
     Input shape:
         The variant-B graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
-        "node_mask": (B, N), "target_index": (B,)}``.
+        "node_mask": (B, N), "target_index": (B,)}``. ``target_index`` is accepted for
+        forward-compatibility and is **ignored**: the readout is a static ``g[:, 0, :]``
+        slice, so the target node must be at index 0 (which the fraud subgraph sampler
+        guarantees). Passing any other value changes nothing — it does not raise, and it
+        does not move the readout. Pinned by
+        ``test_model.py::TestTargetIndexIsIgnored``. See D-003.
 
     Output shape:
         ``(batch, 1)`` — a single anomaly logit per target node.
