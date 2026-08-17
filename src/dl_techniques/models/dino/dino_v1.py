@@ -35,9 +35,12 @@ takes precedence over `include_top`: the DINO head, else a classifier `Dense` wh
 
 Two places in the code look wrong until you know why they are not. First,
 `qkv_bias` is forwarded to the attention factory spelled `use_bias`, not
-`qkv_bias`, and unconditionally. The attention registry silently drops an
+`qkv_bias`, and unconditionally. The attention registry USED TO silently drop an
 unrecognized keyword rather than raising, so the natural spelling built a bias-free
-attention while the caller believed otherwise. Second, the projection head's
+attention while the caller believed otherwise; since 2026-08-17
+(plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer` raises on such a
+key, so the same mistake would now fail loudly at construction — the spelling here
+is still `use_bias` because that is the name the registry accepts. Second, the projection head's
 pre-projection L2 normalization is computed in `variable_dtype` rather than
 `compute_dtype`. Under `mixed_float16` the sum of squares over `bottleneck_dim`
 overflows fp16 long before any individual activation does, and `x / inf` is zero —
@@ -700,12 +703,15 @@ class DINOv1(keras.Model):
             # either half of the old form
             # (`{"qkv_bias": ...} if attention_type == "multi_head_attention"`):
             # the gate string was never a registry key (the key is
-            # `multi_head`), and `create_attention_layer` SILENTLY DROPS an
-            # unrecognized kwarg rather than raising (MEASURED: passing
-            # qkv_bias=True yields a layer with use_bias=False and zero bias
-            # weights) — so both halves were independently dead. Sibling
-            # factories disagree on this (`create_ffn_layer` RAISES); never
-            # infer this behaviour, execute it.
+            # `multi_head`), and `create_attention_layer` USED TO SILENTLY DROP
+            # an unrecognized kwarg rather than raising (MEASURED at the time:
+            # passing qkv_bias=True yielded a layer with use_bias=False and zero
+            # bias weights) — so both halves were independently dead. HISTORICAL
+            # as of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): the
+            # factory now RAISES on an undeclared key, in line with
+            # `create_ffn_layer`, so the old form would fail at construction
+            # rather than quietly. The instruction stands either way: never
+            # infer a factory's drop-or-raise behaviour, execute it.
             block = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,

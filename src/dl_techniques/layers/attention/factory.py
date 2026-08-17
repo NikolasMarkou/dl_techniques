@@ -67,7 +67,7 @@ pass and would change raised message text that tests match on.
 """
 
 import keras
-from typing import Dict, Any, Literal, Optional, List
+from typing import Dict, Any, Literal, Mapping, Optional, List, Sequence
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -1063,7 +1063,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'qk_norm_type': 'zero_centered_rms_norm',
             'qk_norm_kwargs': None,
             'gate_activation_type': 'sigmoid',
-            'gate_activation_args': None
+            'gate_activation_args': None,
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011
+            # `num_kv_heads` is DECLARED here, and this addition is the one
+            # exception to the FROZEN PUBLIC SURFACE note at the top of this
+            # module (see decisions.md D-008/D-011). `GatedAttention.__init__`
+            # has always ACCEPTED it (gated_attention.py:250, default `None`
+            # meaning "one K/V head per query head"); the entry omitted it, so
+            # `tests/test_layers/test_factory_registry_drift.py::
+            # test_registry_declares_every_constructor_param[attention:gated]`
+            # was RED. Do NOT "fix" that red node by deleting the parameter or
+            # by exempting the entry: with the strict raise below, an undeclared
+            # `num_kv_heads` turns a silently-ignored-but-supported parameter
+            # into a hard ValueError for a genuinely supported feature. The
+            # declaration must land in the SAME commit as the raise.
+            'num_kv_heads': None
         },
         'use_case': (
             'Transformer language and sequence models that benefit from gated, '
@@ -1382,6 +1396,99 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     )
 
 
+#: The stable substring every strict dropped-key ``ValueError`` from
+#: :func:`create_attention_layer` carries. Guards match on THIS constant rather
+#: than re-typing the phrase, so rewording the message cannot silently blind them
+#: (and so the phrase has exactly one home). Mirrors ``layers/ffn/factory.py``
+#: and ``layers/embedding/factory.py``'s constants of the same name -- same
+#: contract, same wording, deliberately.
+#: NOTE for test authors: the ``(s)`` makes this string a REGEX with a group, so
+#: ``pytest.raises(match=...)`` needs ``re.escape()`` around it (or use a plain
+#: ``in str(excinfo.value)`` substring check, as the FFN tests do).
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
+
+#: Keys accepted by :func:`create_attention_layer` that are NOT registry
+#: parameters. ``name`` is bound by the function's own signature (it never
+#: reaches ``**kwargs``), so it is listed here only for wrapper pre-filtering
+#: through :func:`assemble_attention_config`, which builds the dict a wrapper
+#: later splats.
+_ATTENTION_CONFIG_PASSTHROUGH_KEYS: Sequence[str] = ('name',)
+
+
+def assemble_attention_config(
+        attention_type: str,
+        wrapper_config: Mapping[str, Any],
+        caller_args: Optional[Mapping[str, Any]] = None,
+        *,
+        passthrough: Sequence[str] = _ATTENTION_CONFIG_PASSTHROUGH_KEYS,
+) -> Dict[str, Any]:
+    """Pre-filter a WRAPPER's own generic attention conveniences, then merge the CALLER's.
+
+    Interface contract (call sites: ``MixedSequentialBlock.__init__`` and
+    ``FreeTransformerLayer.__init__``):
+
+    * ``wrapper_config`` -- the wrapper layer's OWN generic conveniences
+      (``dim``/``num_heads`` derived from its own hyperparameters,
+      ``dropout_rate``, ``use_bias``, the initializers/regularizers it hands
+      down, ...). It is INTERSECTED with ``ATTENTION_REGISTRY[attention_type]``'s
+      ``required_params | optional_params``, plus ``passthrough``. Keys the
+      target type does not accept are dropped HERE, silently and correctly --
+      they are this wrapper's defaults, not anybody's expressed intent.
+    * ``caller_args`` -- the end user's own ``attention_args`` dict. Merged on
+      top of the filtered result **verbatim, never filtered**, and therefore
+      still reaches :func:`create_attention_layer`, which RAISES on a key the
+      type does not accept. A caller key the type does not accept must stay
+      visible to the factory so the factory can complain about it; filtering it
+      here would turn the caller's typo back into a silent drop.
+    * Returns a NEW dict; neither input is mutated.
+    * Raises ``ValueError`` naming the available types if ``attention_type`` is
+      not in ``ATTENTION_REGISTRY``.
+
+    # DECISION plan-2026-08-17T183311-79c63e38/D-011
+    This is the attention twin of ``layers/ffn/factory.py::assemble_ffn_config``
+    (D-017/D-023) and it owns the MERGE, not just the filter -- that is why it
+    takes two dicts instead of one. Do NOT "simplify" it to a single-dict filter
+    that call sites apply AFTER merging their ``attention_args`` in: that
+    ordering makes the pre-filter EAT the caller's keys, so a caller typo can
+    never reach the raise below. With the merge inside, a call site cannot
+    express the wrong order.
+
+    It is a deliberate near-copy rather than a shared generic helper: the FFN,
+    embedding and attention factories each bind their own module-level registry
+    and their own frozen public surface, and unifying the three is a refactor of
+    three public APIs, not a de-duplication. Recorded rather than silently
+    repeated.
+
+    :param attention_type: An ``ATTENTION_REGISTRY`` key.
+    :type attention_type: str
+    :param wrapper_config: The wrapper's own generic config; filtered.
+    :type wrapper_config: Mapping[str, Any]
+    :param caller_args: The caller's explicit args; NEVER filtered.
+    :type caller_args: Optional[Mapping[str, Any]]
+    :param passthrough: Keys kept regardless of the registry intersection.
+    :type passthrough: Sequence[str]
+    :return: The assembled config dict for :func:`create_attention_layer`.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If ``attention_type`` is not a registered attention type.
+    """
+    info = ATTENTION_REGISTRY.get(attention_type)
+    if info is None:
+        raise ValueError(
+            f"Unknown attention_type '{attention_type}'. "
+            f"Available: {sorted(ATTENTION_REGISTRY)}."
+        )
+
+    accepted = (
+        set(info['required_params'])
+        | set(info['optional_params'])
+        | set(passthrough)
+    )
+    config = {k: v for k, v in wrapper_config.items() if k in accepted}
+    if caller_args:
+        config.update(caller_args)
+    return config
+
+
 def create_attention_layer(
         attention_type: AttentionType,
         name: Optional[str] = None,
@@ -1399,13 +1506,80 @@ def create_attention_layer(
     :param name: Optional name for the layer instance.
     :type name: Optional[str]
     :param kwargs: Type-specific parameters for the attention layer. See
-        ``get_attention_info()`` for detailed parameter specifications.
+        ``get_attention_info()`` for detailed parameter specifications. This is
+        STRICT: any key ``attention_type`` does not accept raises rather than
+        being silently dropped. A wrapper that wants to offer generic
+        conveniences should pre-filter them through
+        :func:`assemble_attention_config` before calling here.
     :return: A fully configured and instantiated attention layer.
     :rtype: keras.layers.Layer
     :raises ValueError: If attention_type is invalid, required parameters are missing,
-        parameter values are out of valid ranges, or layer construction fails.
+        parameter values are out of valid ranges, a supplied keyword is not a
+        parameter of ``attention_type`` (the message then carries
+        :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
     :raises TypeError: If parameter types are incompatible with the target layer class.
     """
+    # DECISION plan-2026-08-17T183311-79c63e38/D-011
+    # RAISE, do not drop. This factory used to filter `kwargs` against the
+    # registry's declared names and discard the rest without a word, and that
+    # silent drop has now masked two real defects in this tree: TRM advertised
+    # `rope_theta` on every constructor and handed it to `'multi_head'`, which
+    # declares no RoPE parameter at all (the whole reasoning stack was exactly
+    # permutation-equivariant, D-007), and `MixedSequentialBlock`'s `'window'`
+    # branch has been passing a `normalization` choice that `WindowAttention`
+    # does not have a parameter for since it was written. Same class of defect
+    # as the recorded `ffn_type` regression, same fix as the sibling factories:
+    # `layers/ffn/factory.py` (D-023) and `layers/embedding/factory.py`.
+    #
+    # Both halves of the predicate are load-bearing, as at the FFN site:
+    #
+    # * subtracting `valid_param_names` (required | optional), NOT just
+    #   `required_params`. The narrower right-hand side is the tempting
+    #   "simplification" and it is CATASTROPHIC: every optional parameter
+    #   anyone passes becomes an error.
+    # * reading `kwargs` rather than the merged `params` dict. These are
+    #   EXTENSIONALLY EQUAL today, because `params` is `optional_params`
+    #   updated with `kwargs` and `optional_params`'s keys are a subset of
+    #   `valid_param_names` by construction. The `kwargs` form is kept because
+    #   it stays correct if that subset relation ever breaks -- i.e. if a
+    #   registry entry gains an `optional_params` key its class does not accept
+    #   -- where the `params` form would then blame the caller for the
+    #   registry's own bug.
+    #
+    # PLACEMENT IS LOAD-BEARING, and this is where copying
+    # `layers/ffn/factory.py:808-820` verbatim goes wrong: that factory has no
+    # outer error wrapper, this one does. The `except (TypeError, ValueError)`
+    # below RE-WRAPS every ValueError into a generic "Please verify parameter
+    # compatibility" message, which would swallow the wording AND bury
+    # STRICT_DROPPED_KEY_MARKER inside a nested message. So the check runs
+    # BEFORE the `try`. Do NOT move it inside, and do not "tidy" it by folding
+    # it into the existing filter at the merge step. Measured by asserting the
+    # message TEXT, not the exception type:
+    # `tests/test_layers/test_attention/test_attention_factory.py::
+    # TestStrictDroppedKeys`.
+    #
+    # Unknown-`attention_type` calls fall through untouched: `info` is None
+    # here, so they keep their existing failure mode from
+    # `validate_attention_config` inside the `try`.
+    _info = ATTENTION_REGISTRY.get(attention_type)
+    if _info is not None:
+        _valid_param_names = set(_info['required_params']) | set(
+            _info['optional_params'].keys()
+        )
+        dropped = sorted(set(kwargs) - _valid_param_names)
+        if dropped:
+            raise ValueError(
+                f"create_attention_layer('{attention_type}'): "
+                f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
+                f"'{attention_type}' ({_info['class'].__name__}) accepts only "
+                f"{sorted(_valid_param_names)}. "
+                f"Either you mistyped one of those names, or you chose the "
+                f"wrong attention_type for the parameters you are passing. If "
+                f"these keys are a WRAPPER's own generic defaults rather than "
+                f"an explicit request, pre-filter them with "
+                f"assemble_attention_config() instead of passing them here."
+            )
+
     try:
         # Validate configuration before proceeding
         validate_attention_config(attention_type, **kwargs)

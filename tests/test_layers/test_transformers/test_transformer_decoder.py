@@ -497,8 +497,12 @@ class TestMasklessSelfAttentionTypes:
       At the module's usual `DEC_SEQ = 8` it dies earlier and unrelatedly on
       `seq_len N=8 must be divisible by pooling_factor ** (num_levels - 1) = 16`.
     * `fnet` -- NOT a construction-time error, contrary to the plan. It
-      constructs fine (the attention factory silently drops the `dim` /
-      `num_heads` the decoder injects rather than rejecting them) and its
+      constructed fine at the time of measurement: the attention factory then
+      silently dropped the `dim` / `num_heads` the decoder injects rather than
+      rejecting them. (That factory is strict as of 2026-08-17,
+      plan-2026-08-17T183311-79c63e38/D-011, so the same injection would now
+      raise -- but the decoder stopped injecting them for `fnet` before that,
+      see `test_fnet_self_attention_params_match_TransformerLayer`.) Its
       `call()` DOES accept `attention_mask`. It dies at run time inside
       `FNetFourierTransform.call` with
       `InvalidArgumentError: Incompatible shapes: [2,8,64] vs. [1,8,8,1]` --
@@ -594,12 +598,17 @@ class TestMasklessSelfAttentionTypes:
     def test_fnet_self_attention_params_match_TransformerLayer(self):
         """`fnet` is parameter-free; neither dispatcher may inject dim/num_heads.
 
-        Measured: the attention factory does NOT reject the injected
-        `dim`/`num_heads` -- it drops them silently, so this is not what made
-        `fnet` fail (the plan predicted it was). It is fixed anyway because the
-        FFN factory already turned exactly this silent drop into a hard raise
-        (D-023), and the decoder should not be the one site left holding a
-        latent break.
+        Measured when this test was written: the attention factory did NOT reject
+        the injected `dim`/`num_heads` -- it dropped them silently, so this is not
+        what made `fnet` fail (the plan predicted it was). It was fixed anyway
+        because the FFN factory had already turned exactly this silent drop into a
+        hard raise (D-023), and the decoder should not be the one site left holding
+        a latent break.
+
+        RE-MEASURED 2026-08-17: that prediction came true. `create_attention_layer`
+        is now strict (plan-2026-08-17T183311-79c63e38/D-011) and RAISES on
+        `dim`/`num_heads` for `fnet`, so this equality is no longer a tidiness
+        guard -- it is what keeps both dispatchers constructible at all.
         """
         dec = TransformerDecoderLayer(
             hidden_size=self.HIDDEN, num_heads=self.HEADS,

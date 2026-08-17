@@ -392,10 +392,15 @@ class ModernBERT(keras.Model):
             # WHAT NOT TO DO: do NOT "simplify" this back to
             # `attention_type="multi_head"` with `attention_args={"use_rope":
             # True}`. `MultiHeadAttention` declares no RoPE parameter, and
-            # `create_attention_layer` FILTERS kwargs to the registry's declared
-            # names and DROPS the rest SILENTLY (factory.py:1425-1427) — so that
-            # spelling constructs, logs, tests and serializes cleanly while doing
-            # nothing. That was the defect: with no positional term anywhere in
+            # `create_attention_layer` USED TO FILTER kwargs to the registry's
+            # declared names and DROP the rest SILENTLY — so that spelling
+            # constructed, logged, tested and serialized cleanly while doing
+            # nothing. HISTORICAL as of 2026-08-17
+            # (plan-2026-08-17T183311-79c63e38/D-011): the factory now RAISES on
+            # an undeclared key, so the shortcut fails loudly instead. The
+            # instruction is unchanged — `'group_query'` is still the only entry
+            # that is plain self-attention AND carries RoPE. That was the defect:
+            # with no positional term anywhere in
             # the embeddings either, every global layer was exactly
             # permutation-equivariant. Measured 2026-08-15 on CPU with
             # `global_attention_interval=1`: `max|P f(x) - f(P x)| = 1.19e-07`

@@ -120,11 +120,15 @@ def _permute_patch_blocks(images, order):
 class TestDINOv3RoPE:
     """RoPE must be LIVE, not merely configured.
 
-    ``create_attention_layer`` SILENTLY DROPS an unknown key (MEASURED, D-010 —
-    the opposite of ``create_ffn_layer``, which raises), so a rope kwarg sent to
-    an attention type that does not accept it yields a working-looking model with
-    RoPE entirely absent, and every shape/forward/round-trip test still passes.
-    "It built without error" therefore proves NOTHING here.
+    ``create_attention_layer`` SILENTLY DROPPED an unknown key (MEASURED, D-010 —
+    then the opposite of ``create_ffn_layer``, which raises), so a rope kwarg sent
+    to an attention type that does not accept it yielded a working-looking model
+    with RoPE entirely absent, and every shape/forward/round-trip test still passed.
+    HISTORICAL as of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): that
+    factory now raises too. The guard is NOT redundant — the raise only catches an
+    UNDECLARED key, while the failure this class pins is a rope kwarg the target
+    type declares and never wires, plus the ``.assign()``-in-``build()`` trap below.
+    "It built without error" therefore still proves NOTHING here.
     """
 
     def test_rope_path_wires_a_real_rotation_into_every_block(self):

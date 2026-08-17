@@ -17,7 +17,9 @@ import pytest
 
 from dl_techniques.layers.attention.factory import (
     ATTENTION_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
     AttentionType,
+    assemble_attention_config,
     create_attention_layer,
     create_attention_from_config,
     validate_attention_config,
@@ -98,10 +100,15 @@ class TestRegistryIntegrity:
 
     @pytest.mark.parametrize('attn_type', sorted(ATTENTION_REGISTRY.keys()))
     def test_registry_keys_are_real_ctor_args(self, attn_type):
-        """No registry param may be silently dropped — each must be a ctor arg.
+        """No registry param may be lost — each must be a ctor arg.
 
         Guards against the inverse of the F4 bug (a registry key that the class
         does not accept would raise TypeError at construction).
+
+        Note on the wording: since 2026-08-17
+        (plan-2026-08-17T183311-79c63e38/D-011) an UNDECLARED caller key raises
+        rather than being silently dropped, so this direction — a key the registry
+        declares but the class cannot take — is the one the raise cannot help with.
         """
         info = ATTENTION_REGISTRY[attn_type]
         cls = info['class']
@@ -239,3 +246,125 @@ class TestFactoryHelpers:
     def test_get_requirements_roundtrip(self):
         req = get_attention_requirements('anchor')
         assert 'head_dim' in req['optional_params']
+
+
+# ==============================================================================
+# Strict dropped-key behaviour (plan-2026-08-17T183311-79c63e38/D-011)
+# ==============================================================================
+
+class TestStrictDroppedKeys:
+    """`create_attention_layer` REFUSES a key the target type does not declare.
+
+    Before 2026-08-17 the factory filtered `kwargs` against the registry and
+    discarded the rest without a word, which is how TRM shipped a
+    permutation-equivariant reasoning stack: it handed `max_seq_len`/`rope_theta`
+    to `'multi_head'`, which declares no RoPE parameter, and both keys evaporated.
+
+    Every assertion here reads the MESSAGE TEXT, not just the exception type. That
+    is deliberate and it is what the tests would otherwise miss: the factory body
+    is wrapped in a `try/except (TypeError, ValueError)` that re-raises ANY
+    ValueError as a generic "Please verify parameter compatibility" message. A
+    `pytest.raises(ValueError)` alone passes just as happily against that wrapper,
+    so it cannot tell the strict raise apart from an unrelated construction
+    failure, and it would not have caught the raise being placed inside the `try`.
+    """
+
+    def test_undeclared_key_raises_and_names_every_dropped_key(self):
+        with pytest.raises(ValueError) as excinfo:
+            create_attention_layer(
+                'multi_head', dim=8, rope_theta=10000.0, max_seq_len=64
+            )
+        message = str(excinfo.value)
+        assert STRICT_DROPPED_KEY_MARKER in message, message
+        assert 'rope_theta' in message, message
+        assert 'max_seq_len' in message, message
+        assert 'multi_head' in message, message
+        # the raise must NOT be the outer wrapper's generic re-raise
+        assert 'Please verify parameter compatibility' not in message, (
+            "the strict raise was swallowed by the factory's outer "
+            "`except (TypeError, ValueError)` re-wrap -- it must fire BEFORE the "
+            f"`try`. Got: {message}"
+        )
+
+    def test_the_same_keys_construct_fine_under_group_query(self):
+        """Control: the keys are not intrinsically bad, the TYPE is."""
+        layer = create_attention_layer(
+            'group_query', dim=8, num_heads=2, num_kv_heads=2,
+            rope_theta=10000.0, max_seq_len=64,
+        )
+        assert layer is not None
+        assert layer.rope_theta == 10000.0
+        assert layer.max_seq_len == 64
+
+    def test_gated_accepts_num_kv_heads_through_the_factory(self):
+        """D-008: declared in the same commit as the raise, or it inverts.
+
+        `GatedAttention.__init__` has always accepted `num_kv_heads`; the registry
+        entry did not declare it. Under the raise that turns a supported feature
+        into a hard failure, so the declaration is part of this change.
+        """
+        layer = create_attention_layer(
+            'gated', dim=32, num_heads=4, num_kv_heads=2
+        )
+        assert layer.num_kv_heads == 2
+
+    def test_unknown_type_keeps_its_own_failure_mode(self):
+        """The strict check must not intercept an unknown `attention_type`."""
+        with pytest.raises(ValueError) as excinfo:
+            create_attention_layer('does_not_exist', dim=64, nonsense=1)
+        message = str(excinfo.value)
+        assert STRICT_DROPPED_KEY_MARKER not in message, message
+        assert 'does_not_exist' in message, message
+
+    def test_every_registry_default_survives_its_own_type(self):
+        """No entry declares a key its own strict check would then reject."""
+        for attn_type, params in sorted(MINIMAL_PARAMS.items()):
+            info = ATTENTION_REGISTRY[attn_type]
+            declared = set(info['required_params']) | set(info['optional_params'])
+            assert set(params) <= declared, (
+                f"MINIMAL_PARAMS['{attn_type}'] carries {sorted(set(params) - declared)}, "
+                f"which the entry does not declare -- the strict factory would raise"
+            )
+
+
+class TestAssembleAttentionConfig:
+    """The wrapper-side pre-filter that makes the raise livable.
+
+    Interface contract lives at the function; these pin the two halves callers
+    get wrong: wrapper defaults ARE filtered, caller args are NOT.
+    """
+
+    def test_wrapper_defaults_are_filtered(self):
+        config = assemble_attention_config(
+            'multi_head',
+            {'dim': 8, 'num_heads': 2, 'bias_initializer': 'zeros'},
+        )
+        assert 'bias_initializer' not in config
+        assert config == {'dim': 8, 'num_heads': 2}
+
+    def test_caller_args_are_never_filtered(self):
+        """A caller typo must survive to the factory, which is what raises."""
+        config = assemble_attention_config(
+            'multi_head', {'dim': 8, 'num_heads': 2}, {'rope_theta': 1.0}
+        )
+        assert config['rope_theta'] == 1.0
+        with pytest.raises(ValueError) as excinfo:
+            create_attention_layer('multi_head', **config)
+        assert STRICT_DROPPED_KEY_MARKER in str(excinfo.value)
+
+    def test_caller_args_win_over_wrapper_defaults(self):
+        config = assemble_attention_config(
+            'multi_head', {'dim': 8, 'num_heads': 2}, {'num_heads': 4}
+        )
+        assert config['num_heads'] == 4
+
+    def test_inputs_are_not_mutated(self):
+        wrapper = {'dim': 8, 'num_heads': 2, 'bias_initializer': 'zeros'}
+        caller = {'num_heads': 4}
+        assemble_attention_config('multi_head', wrapper, caller)
+        assert wrapper == {'dim': 8, 'num_heads': 2, 'bias_initializer': 'zeros'}
+        assert caller == {'num_heads': 4}
+
+    def test_unknown_type_raises_naming_the_available_types(self):
+        with pytest.raises(ValueError, match="Unknown attention_type"):
+            assemble_attention_config('does_not_exist', {'dim': 8})

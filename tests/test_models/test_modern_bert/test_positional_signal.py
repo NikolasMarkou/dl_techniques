@@ -86,7 +86,11 @@ class TestGlobalLayersArePositionAware:
         assert rope is not None, (
             f"{type(attention).__name__} has no RoPE machinery at all; passing "
             "an unknown key such as use_rope=True through "
-            "create_attention_layer is silently dropped, not honoured."
+            "create_attention_layer was silently dropped, not honoured (that "
+            "factory raises on such a key since 2026-08-17, "
+            "plan-2026-08-17T183311-79c63e38/D-011 — but a wrong attention_type "
+            "with no rope kwarg at all, which is what this asserts against, "
+            "still builds happily)."
         )
         cos = np.asarray(ops.convert_to_numpy(rope.cos_cached))
         # cos(0 * w) == 1 for every frequency; the zero-initializer value is 0.

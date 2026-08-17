@@ -716,9 +716,13 @@ class TestTiRexAttentionType:
 
     def test_window_still_builds_and_forward_passes(self):
         """`'window'` remains selectable end-to-end. `attention_window_size` stays
-        wired through `attention_args` for BOTH types — the attention factory drops
-        keyword arguments the target type does not declare, so the global path does
-        not need a branch."""
+        wired through `attention_args` for BOTH types, so the global path does not
+        need a branch — but the reason CHANGED on 2026-08-17
+        (plan-2026-08-17T183311-79c63e38/D-011). It used to be the attention factory
+        dropping keyword arguments the target type does not declare; that factory now
+        RAISES on them, and it is `MixedSequentialBlock` that scopes `window_size` to
+        the types accepting it. This test is what would go red if that scoping were
+        removed."""
         window_model = TiRexCore(**self._block_config('window', 2))
         global_model = TiRexCore(**self._block_config('multi_head', 2))
 
@@ -770,6 +774,89 @@ class TestTiRexAttentionType:
             "global_span_reaches_distant_token: token 0 did NOT reach the last "
             f"position under 'multi_head' (delta {global_last}) — attention_type "
             "is not reaching the factory")
+
+
+class TestTiRexUnderTheStrictAttentionFactory:
+    """TiReX still constructs now that `create_attention_layer` REFUSES undeclared keys.
+
+    `TiRexCore` wires `attention_args={'window_size': ...}` unconditionally, at every
+    `attention_type`, and documents the knob as "used only when
+    `attention_type='window'`". Before 2026-08-17 that worked because the attention
+    factory silently dropped the key on the types that do not declare it. Since
+    plan-2026-08-17T183311-79c63e38/D-011 it raises, and `MixedSequentialBlock` is
+    what scopes the key instead.
+
+    Two failure modes are pinned here, because they are on DIFFERENT paths and only
+    one of them was foreseen:
+
+    * the DEFAULT path (`'multi_head'`), which does not declare `window_size`;
+    * the `'window'` path, which was ALSO broken -- for a different reason. The
+      block's `'window'` branch injected `normalization='softmax'`, a key
+      `WindowAttention` has no parameter for, so it breaks with an EMPTY caller
+      dict. That is the configuration the knob exists for.
+    """
+
+    def _config(self, **overrides) -> Dict[str, Any]:
+        config = {
+            'patch_size': 4,
+            'embed_dim': 16,
+            'num_blocks': 1,
+            'num_heads': 2,
+            'block_types': ['transformer'],
+            'quantile_levels': [0.5],
+            'prediction_length': 4,
+            'dropout_rate': 0.0,
+        }
+        config.update(overrides)
+        return config
+
+    def test_default_construction_survives_the_strict_factory(self):
+        """RED before the block-side repair: ValueError naming `window_size`."""
+        model = TiRexCore(**self._config())
+
+        assert model.attention_type == 'multi_head'
+        assert model.blocks[0].attention_args == {'window_size': 8}
+        attention = model.blocks[0].attention_layer
+        assert type(attention).__name__ == 'MultiHeadAttention'
+        # the conditional key was scoped away, not smuggled in
+        assert not hasattr(attention, 'window_size')
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(model(x, training=False)) == (2, 4, 1)
+
+    def test_window_construction_survives_the_strict_factory(self):
+        """RED before the `normalization` removal: ValueError naming it."""
+        model = TiRexCore(**self._config(
+            attention_type='window', attention_window_size=2
+        ))
+
+        attention = model.blocks[0].attention_layer
+        assert type(attention).__name__ == 'WindowAttention'
+        # the knob the parameter doc scopes to this type actually arrives
+        assert attention.window_size == 2
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(model(x, training=False)) == (2, 4, 1)
+
+    def test_a_misspelled_attention_arg_is_now_loud(self):
+        """The scoping allowlist is one key wide, not a licence to swallow the dict.
+
+        Why this can fail if the implementation is wrong: if the block filtered its
+        whole merged kwarg dict against the registry instead of only its own
+        defaults plus the documented-conditional `window_size`, this would build
+        cleanly and the strict factory would be unreachable from here.
+        """
+        from dl_techniques.layers.time_series.mixed_sequential_block import (
+            MixedSequentialBlock,
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            MixedSequentialBlock(
+                embed_dim=16, num_heads=2, block_type='transformer',
+                attention_type='multi_head',
+                attention_args={'dropout_ratee': 0.5},
+            )
+        assert 'dropout_ratee' in str(excinfo.value)
 
 
 if __name__ == "__main__":

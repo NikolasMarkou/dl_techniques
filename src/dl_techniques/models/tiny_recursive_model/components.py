@@ -144,9 +144,9 @@ class TRMReasoningModule(keras.layers.Layer):
         # applied INSIDE attention; `MultiHeadAttention` declares no RoPE
         # parameter at all (its registry allowlist is ['dim'] plus nine optional
         # keys, none of them `max_seq_len` or `rope_theta`), and
-        # `create_attention_layer` filters kwargs against that allowlist and
-        # drops the rest SILENTLY. So that spelling constructs, forward-passes,
-        # serializes and tests cleanly with RoPE entirely absent — which is
+        # `create_attention_layer` USED TO filter kwargs against that allowlist
+        # and drop the rest SILENTLY. So that spelling constructed,
+        # forward-passed, serialized and tested cleanly with RoPE absent — which is
         # exactly what shipped: with no positional term in the embedding stage
         # either, `TRMReasoningModule` was exactly permutation-equivariant.
         # MEASURED on CPU by
@@ -154,6 +154,13 @@ class TRMReasoningModule(keras.layers.Layer):
         # `max|P f(x) - f(P x)| = 7.7486e-07` (float32 noise) before this
         # change. Same defect and same fix as ModernBERT's D-007 and DINOv3's
         # D-010. See decisions.md D-007.
+        #
+        # As of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011)
+        # `create_attention_layer` no longer drops silently — it RAISES on any
+        # key the target type does not declare — so reverting the default to
+        # 'multi_head' would now be a hard ValueError on the rope keys rather
+        # than a silently position-blind model. The fix does not depend on that:
+        # 'group_query' is what actually carries RoPE.
         attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',

@@ -63,7 +63,11 @@ from typing import Optional, Union, Any, Dict, Tuple
 from .transformer import TransformerLayer
 from ..ffn.factory import create_ffn_layer, FFN_REGISTRY, FFNType
 from ..norms import create_normalization_layer, NormalizationType
-from ..attention.factory import create_attention_layer, AttentionType
+from ..attention.factory import (
+    create_attention_layer,
+    assemble_attention_config,
+    AttentionType,
+)
 
 # ---------------------------------------------------------------------
 
@@ -398,7 +402,13 @@ class FreeTransformerLayer(TransformerLayer):
     :type use_free_transformer: bool
     :param num_latent_bits: Number of latent bits ``H`` (``2^H`` categories).
     :type num_latent_bits: int
-    :param encoder_attention_type: Encoder attention type. Default: ``'multi_head'``.
+    :param encoder_attention_type: Encoder attention type. Default:
+        ``'multi_head_cross'`` (the encoder is a cross-attention block: Q=zeta,
+        K/V=sequence). This docstring previously said ``'multi_head'``, which
+        never matched the code; the mismatch mattered because ``'multi_head'``
+        declares neither ``bias_initializer`` nor ``bias_regularizer``, so the
+        DOCUMENTED default was the configuration this layer's own generic
+        defaults broke once ``create_attention_layer`` became strict.
     :type encoder_attention_type: AttentionType
     :param encoder_ffn_type: Encoder FFN type. Default: ``'swiglu'``.
     :type encoder_ffn_type: FFNType
@@ -464,20 +474,46 @@ class FreeTransformerLayer(TransformerLayer):
 
         # The encoder is a cross-attention block (Q=zeta, K/V=sequence); it is
         # inherently non-causal, so no causal flag is needed.
-        encoder_attn_args = (encoder_attention_args or {}).copy()
+        # DECISION plan-2026-08-17T183311-79c63e38/D-011
+        # Pre-filter OUR OWN generic defaults to the ones this
+        # `encoder_attention_type` accepts, exactly as the FFN bundle below
+        # does (D-013). These eight are this layer's conveniences, not the
+        # caller's expressed intent, so filtering them is correct.
+        #
+        # This was live at the DOCUMENTED default. The class docstring names
+        # `'multi_head'` as the default `encoder_attention_type`;
+        # `'multi_head'` declares neither `bias_initializer` nor
+        # `bias_regularizer`, so both were handed to the factory and discarded
+        # without a word -- and once `create_attention_layer` raises (D-011),
+        # that same configuration becomes a hard construction failure. The code
+        # default is `'multi_head_cross'`, which accepts both, which is why no
+        # test in the tree ever saw it. Do NOT "fix" this by declaring the two
+        # keys on `'multi_head'`'s registry entry: `MultiHeadAttention` does not
+        # accept them either.
+        #
+        # As at the FFN site: this pre-filter deliberately does NOT cover the
+        # caller's own `encoder_attention_args`, which `assemble_attention_config`
+        # merges on top VERBATIM and which therefore still reaches the factory's
+        # raise -- that is how a misspelled key stays findable.
+        encoder_attn_config = assemble_attention_config(
+            self.encoder_attention_type,
+            {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'dropout_rate': self.attention_dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_regularizer': self.bias_regularizer,
+            },
+            encoder_attention_args,
+        )
 
         self.encoder_attention = create_attention_layer(
             attention_type=self.encoder_attention_type,
-            dim=self.hidden_size,
-            num_heads=self.num_heads,
-            dropout_rate=self.attention_dropout_rate,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
             name='encoder_attention',
-            **encoder_attn_args
+            **encoder_attn_config
         )
 
         self.encoder_attention_norm = create_normalization_layer(

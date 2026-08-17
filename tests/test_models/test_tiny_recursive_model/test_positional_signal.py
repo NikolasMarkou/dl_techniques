@@ -4,9 +4,13 @@ TRM's package docstring and every one of its constructors advertise a
 ``rope_theta``, and ``TRMReasoningModule`` duly forwarded
 ``{'max_seq_len': ..., 'rope_theta': ...}`` into ``TransformerLayer``. But the
 default ``attention_type`` was ``'multi_head'``, and ``MultiHeadAttention``
-declares no RoPE parameter at all — ``create_attention_layer`` filters kwargs
-against the target type's registry allowlist and drops the rest silently, so
-both keys evaporated. The whole reasoning stack was therefore exactly
+declares no RoPE parameter at all — ``create_attention_layer`` filtered kwargs
+against the target type's registry allowlist and dropped the rest silently, so
+both keys evaporated. (That silent drop is HISTORICAL as of 2026-08-17,
+plan-2026-08-17T183311-79c63e38/D-011: the factory now RAISES on an undeclared
+key, so the pre-fix configuration would fail at construction rather than ship a
+position-blind model. This file's probes are unchanged and still valid — they
+assert positional SIGNAL, not the factory's error behaviour.) The whole reasoning stack was therefore exactly
 permutation-equivariant: a bag of tokens wearing a reasoner's interface.
 
 The probe reads a **per-position** output (``logits``). A pooled read would be
@@ -100,8 +104,11 @@ class TestTRMIsPositionAware:
         rope = getattr(attention, "rope", None)
         assert rope is not None, (
             f"{type(attention).__name__} has no RoPE machinery at all; the "
-            "`max_seq_len`/`rope_theta` handed to create_attention_layer are "
-            "silently dropped, not honoured."
+            "`max_seq_len`/`rope_theta` handed to create_attention_layer were "
+            "silently dropped, not honoured (that factory raises on them since "
+            "2026-08-17, plan-2026-08-17T183311-79c63e38/D-011, so this assertion "
+            "now guards against a rope-free attention_type rather than a silent "
+            "kwarg drop)."
         )
         cos = np.asarray(ops.convert_to_numpy(rope.cos_cached))
         # cos(0 * w) == 1 for every frequency; the zero-initializer value is 0.

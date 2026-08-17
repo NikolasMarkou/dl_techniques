@@ -51,9 +51,20 @@ depth. The knob exists because the two answers differ in kind, not degree — a
 windowed stack cannot form a single long-range association at any depth cheaply, and
 a global stack pays quadratically for one it may not need — and because a model whose
 attention span is fixed in the source cannot be compared against the paper it cites.
-`attention_window_size` stays wired through `attention_args` under both settings; the
-attention factory filters keyword arguments against the target type's own parameter
-list, so an unused `window_size` is dropped rather than raising. The remaining block
+`attention_window_size` stays wired through `attention_args` under both settings, and as
+of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011) it is `MixedSequentialBlock`, not the
+attention factory, that scopes it. `create_attention_layer` used to filter keyword
+arguments against the target type's own parameter list and drop the rest rather than
+raising; it is now STRICT and raises on any key the target type does not declare, which
+this model's unconditional `attention_args={'window_size': ...}` would otherwise trip at
+its own `'multi_head'` default. The block treats `window_size` as a documented-conditional
+key and removes it on the branches whose attention type does not accept it, so both paths
+now behave as this docstring has always described:
+`'multi_head'` genuinely ignores the knob, and `'window'` genuinely uses it. That second
+half was itself broken until the same commit — the block's `'window'` branch was injecting
+a `normalization='softmax'` key `WindowAttention` has no parameter for, which the old
+silent drop hid. Every OTHER `attention_args` key still reaches the factory verbatim, so a
+misspelled one is now a loud `ValueError` instead of a silent no-op. The remaining block
 internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and Mish
 activations throughout.
 
@@ -164,13 +175,18 @@ class TiRexCore(keras.Model, ForecastMixin):
         use_normalization: Boolean, whether to apply reversible per-instance
             normalization to the inputs.
         attention_window_size: Integer, window width in tokens, used only when
-            `attention_type='window'`.
+            `attention_type='window'`. Wired through `attention_args`
+            unconditionally; `MixedSequentialBlock` drops it on the attention
+            types that do not accept it (see the module docstring), so on every
+            other setting it is genuinely inert rather than merely tolerated.
         attention_type: String, attention factory key used by every block.
             Defaults to `'multi_head'` — full/global self-attention, `O(L^2)` in the
             number of patch tokens, matching the published TiRex. `'window'` selects
             the local-window variant at `O(L*attention_window_size)`. Any other key
             from `layers/attention/factory.py`'s registry is accepted and validated
-            there.
+            there — note that the factory is now STRICT about parameters it does
+            not declare, so a type whose constructor rejects `dim`/`num_heads`
+            fails loudly at construction instead of silently.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -331,8 +347,18 @@ class TiRexCore(keras.Model, ForecastMixin):
             # and the default is the paper's `'multi_head'` (the factory's key for
             # full self-attention; there is no key spelled `'global'`). Existing
             # windowed behaviour is one keyword away, and `window_size` stays wired
-            # unconditionally because the factory filters unknown kwargs by the
-            # target type's parameter list.
+            # unconditionally.
+            #
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011
+            # That last clause used to be justified by the attention factory
+            # filtering unknown kwargs against the target type's parameter list.
+            # It no longer does: `create_attention_layer` RAISES on any key the
+            # type does not declare. `MixedSequentialBlock` is now what scopes
+            # `window_size` (its `_CONDITIONAL_ATTENTION_ARG_KEYS` allowlist).
+            # Do NOT "fix" this by making the line below conditional on
+            # `self.attention_type` -- that pushes registry knowledge into every
+            # block consumer, which is exactly what the block-side repair
+            # exists to avoid.
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,

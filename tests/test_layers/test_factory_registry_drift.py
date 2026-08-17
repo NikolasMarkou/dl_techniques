@@ -21,10 +21,16 @@ applied. Measured before this guard existed::
 reproduces, for `embedding` ONLY.** `create_embedding_layer` now RAISES
 `ValueError: ... unsupported parameter(s) [...]` on any key it would have dropped, so the
 call above is a loud failure rather than a silent one, and `create_ffn_layer` has raised
-since an earlier plan. The silent-discard sentence above still holds VERBATIM for the other
-five registry factories (`attention`, `activations`, `mixtures`, `logic`,
-`sequence_pooling`), which is why this guard is still repo-wide and still necessary.
-Note also that the raise does NOT subsume this guard even for `embedding`: a parameter
+since an earlier plan.
+
+**UPDATE 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): `attention` joined them.**
+`create_attention_layer` now raises the same
+`ValueError: ... unsupported parameter(s) [...]` (its own
+`STRICT_DROPPED_KEY_MARKER`, imported below) on any key the target type does not declare.
+The silent-discard sentence at the top of this docstring still holds VERBATIM for the
+remaining FOUR registry factories (`activations`, `mixtures`, `logic`, `sequence_pooling`),
+which is why this guard is still repo-wide and still necessary.
+Note also that the raise does NOT subsume this guard even for `embedding` or `attention`: a parameter
 REGISTERED but absent from the class ctor, or registered and never wired, passes the filter
 untouched and can only be caught by the registry-vs-ctor comparison below.
 
@@ -158,6 +164,7 @@ import pytest
 
 from dl_techniques.layers.attention.factory import (
     ATTENTION_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER as ATTENTION_STRICT_DROPPED_KEY_MARKER,
     create_attention_layer,
 )
 from dl_techniques.layers.attention.window_attention import (
@@ -427,12 +434,15 @@ def test_registry_declares_every_constructor_param(factory, type_name, target, i
     instead.
 
     The FAILURE MODE is factory-specific, and saying only "silently" is no longer
-    accurate for the whole set this test parametrizes: `create_ffn_layer` RAISES on a
-    caller key it cannot place (`layers/ffn/factory.py`, the `STRICT_DROPPED_KEY_MARKER`
-    predicate), so for the `ffn` family the drift surfaces as a loud construction failure
-    at a parameter the class genuinely accepts. The other families still drop the value
-    without raising, which is where "silently" still applies. Either way the registry is
-    wrong and this test is what says so.
+    accurate for the whole set this test parametrizes: `create_ffn_layer`,
+    `create_embedding_layer` and (since 2026-08-17,
+    plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer` RAISE on a
+    caller key they cannot place (the `STRICT_DROPPED_KEY_MARKER` predicate in each
+    factory), so for those three families the drift surfaces as a loud construction failure
+    at a parameter the class genuinely accepts. `attention:gated`'s `num_kv_heads` was
+    exactly that case and is why it had to be declared in the same commit as the raise.
+    The remaining families still drop the value without raising, which is where "silently"
+    still applies. Either way the registry is wrong and this test is what says so.
     """
     signature = _signature_params(target)
     declared = set(info.get("required_params", [])) | set(
@@ -442,9 +452,11 @@ def test_registry_declares_every_constructor_param(factory, type_name, target, i
     assert not missing, (
         f"{factory} registry entry '{type_name}' ({getattr(target, '__name__', target)}) "
         f"does not declare {missing}, which its constructor accepts. create_{factory}_* "
-        f"FILTERS kwargs against this registry, so a caller passing any of these has the "
-        f"value SILENTLY DISCARDED and gets the class default. Add them to "
-        f"'optional_params' with their real constructor defaults."
+        f"FILTERS kwargs against this registry, so a caller passing any of these either "
+        f"has the value SILENTLY DISCARDED and gets the class default (activations, "
+        f"mixtures, logic, sequence_pooling) or gets a hard ValueError for a parameter the "
+        f"class genuinely supports (ffn, embedding, attention -- the strict families). Add "
+        f"them to 'optional_params' with their real constructor defaults."
     )
 
 
@@ -1543,29 +1555,41 @@ def test_real_wrapper_pins_are_derived_not_exempted():
 
 
 def test_pinned_param_is_genuinely_unsettable():
-    """The pin is a real TypeError, not a modelling convenience -- and the factory eats it.
+    """The pin is a real TypeError, not a modelling convenience -- and the factory REFUSES it.
 
     Why this can fail if the implementation is wrong: if `partition_mode` were in fact settable
     through the wrapper, excluding it from the MISSING set would be exactly the silent-drop bug
     this file exists to catch, and the first assertion would red.
 
-    The second half pins BEHAVIOR THIS GUARD DOES NOT FIX: `create_attention_layer('window',
-    partition_mode='zigzag')` silently discards the kwarg and returns a grid layer. That is the
-    generic registry filter doing its job -- the 'window' door IS the grid door and
-    'window_zigzag' is the zigzag one -- but the caller gets no signal. Recorded here so the
-    behavior is a decision on the record rather than an accident, and so that a future change
-    making it settable breaks a test instead of drifting in unnoticed.
+    The second half pins the CALLER-FACING half of the same pin: the param is unsettable
+    through `create_attention_layer('window', ...)` too, and a caller who tries is told so.
+    The mechanism CHANGED on 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): this used to
+    read `layer.partition_mode == "grid"`, i.e. it recorded the factory SILENTLY DISCARDING the
+    kwarg and returning a grid layer -- correct behavior with no signal, recorded here as a
+    deliberate decision rather than an accident. `create_attention_layer` is now strict and
+    RAISES on any key the target type does not declare, so the same pin is now enforced loudly.
+    The test's intent is unchanged (the 'window' door IS the grid door, 'window_zigzag' is the
+    zigzag one, and a caller cannot override that); only "silently ignored" became "loudly
+    refused". `partition_mode` must still NOT be declared on the registry entry -- declaring it
+    would hand `WindowAttention` the argument twice, which is the PHANTOM direction
+    `test_registry_declares_no_param_the_target_rejects` guards.
     """
     with pytest.raises(TypeError, match="multiple values .*partition_mode"):
         create_grid_window_attention(
             dim=32, window_size=4, num_heads=4, partition_mode="zigzag"
         )
 
-    layer = create_attention_layer(
-        "window", dim=32, window_size=4, num_heads=4, partition_mode="zigzag"
+    with pytest.raises(ValueError) as excinfo:
+        create_attention_layer(
+            "window", dim=32, window_size=4, num_heads=4, partition_mode="zigzag"
+        )
+    message = str(excinfo.value)
+    assert ATTENTION_STRICT_DROPPED_KEY_MARKER in message, (
+        "attention:window no longer refuses partition_mode through the strict dropped-key "
+        "path -- if the wrapper stopped pinning it, the registry must declare it "
+        "(test_real_wrapper_pins_are_derived_not_exempted covers the derivation) and this "
+        f"expectation must be rewritten deliberately. Got: {message}"
     )
-    assert layer.partition_mode == "grid", (
-        "attention:window now honors partition_mode -- if the wrapper stopped pinning it, the "
-        "registry must declare it (test_real_wrapper_pins_are_derived_not_exempted covers "
-        "the derivation) and this expectation must be rewritten deliberately"
+    assert "partition_mode" in message, (
+        f"the refusal must NAME the offending key, not just fail: {message}"
     )

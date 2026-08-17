@@ -26,9 +26,12 @@ multi-head attention that happens to rotate Q and K. Two alternatives were
 rejected for concrete reasons. Applying `RotaryPositionEmbedding` to the token
 stream before the projections destroys the relative-position property the
 mechanism is defined by, because the rotation must act on Q and K *after* they are
-projected. Passing rope arguments to the `multi_head` type does not work either
-and does not complain: the attention factory silently drops unknown keys, so such
-a model builds, forward-passes and round-trips with RoPE entirely absent.
+projected. Passing rope arguments to the `multi_head` type does not work either:
+until 2026-08-17 it did not even complain — the attention factory silently dropped
+unknown keys, so such a model built, forward-passed and round-tripped with RoPE
+entirely absent. `create_attention_layer` now raises on those keys
+(plan-2026-08-17T183311-79c63e38/D-011), so the mistake is loud rather than silent;
+the reason `'group_query'` is used here is unchanged.
 
 Under `'rope'` the learned absolute table is omitted, never stacked on top of the
 rotation. Two independent position signals would be redundant, and the learned
@@ -405,10 +408,15 @@ class DINOv3(keras.Model):
         # 2.22e-06 at magnitude 10.88.
         #
         # WHAT NOT TO DO: do NOT "simplify" this to `multi_head` plus a rope kwarg.
-        # `create_attention_layer` SILENTLY DROPS an unknown key (D-010, MEASURED —
-        # the opposite of `create_ffn_layer`, which raises), so
-        # `attention_type='multi_head', attention_args={'rope_theta': ...}` builds,
-        # forward-passes and round-trips with RoPE entirely absent.
+        # `create_attention_layer` USED TO SILENTLY DROP an unknown key (D-010,
+        # MEASURED at the time — the opposite of `create_ffn_layer`, which raises),
+        # so `attention_type='multi_head', attention_args={'rope_theta': ...}`
+        # built, forward-passed and round-tripped with RoPE entirely absent.
+        # HISTORICAL as of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011):
+        # that factory now RAISES on the undeclared key, so the shortcut fails at
+        # construction instead of shipping a position-blind model. The guidance is
+        # unchanged — `'group_query'` with `num_kv_heads == num_heads` is the
+        # RoPE-carrying plain-MHA path, and it is what this branch returns.
         if self.positional_embedding_type == 'rope':
             return 'group_query', {
                 'num_kv_heads': self.num_heads,

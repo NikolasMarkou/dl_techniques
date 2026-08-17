@@ -54,8 +54,20 @@ from typing import Optional, Union, Tuple, Callable, Any, Literal, Dict
 from ..ffn import create_ffn_layer, FFNType
 from ..ffn.factory import assemble_ffn_config
 from ..attention import create_attention_layer, AttentionType
+from ..attention.factory import ATTENTION_REGISTRY, assemble_attention_config
 from ..norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.logger import logger
+
+# DECISION plan-2026-08-17T183311-79c63e38/D-011
+# Caller-supplied `attention_args` keys this block is allowed to SCOPE to the
+# attention types that accept them, instead of forwarding them into
+# `create_attention_layer`'s strict raise. Membership here is earned by a
+# documented conditional contract, not by convenience: `window_size` is on the
+# list because `models/time_series/tirex/model.py` wires it at every
+# `attention_type` and documents it as "used only when `attention_type='window'`".
+# Adding a key here removes it from the factory's typo detection for every
+# consumer of this block -- keep the tuple short and justify each entry.
+_CONDITIONAL_ATTENTION_ARG_KEYS: Tuple[str, ...] = ('window_size',)
 
 # ---------------------------------------------------------------------
 
@@ -237,52 +249,101 @@ class MixedSequentialBlock(keras.layers.Layer):
 
         # Attention components (for 'transformer' and 'mixed' modes)
         if self.block_type in ['transformer', 'mixed']:
-            # Prepare attention arguments with required parameters
-            attention_kwargs = self.attention_args.copy()
-
-            # Map attention type to required parameters
+            # THIS BLOCK's own generic conveniences, derived from its own
+            # hyperparameters. They are pre-filtered against `attention_type`
+            # below; the caller's `attention_args` is merged on top VERBATIM so
+            # a caller typo still reaches the factory's raise.
             if self.attention_type == 'multi_head':
-                attention_kwargs.update({
+                attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate
-                })
+                }
             elif self.attention_type == 'window':
-                window_defaults = {
+                # DECISION plan-2026-08-17T183311-79c63e38/D-011
+                # `'normalization': 'softmax'` used to be injected here and is
+                # REMOVED, not relocated. `WindowAttention` has no
+                # `normalization` parameter at all (it is neither in
+                # `ATTENTION_REGISTRY['window']` nor in the class signature), so
+                # the key was discarded on EVERY 'window' construction from the
+                # day it was written -- a dead knob that only became visible
+                # when `create_attention_layer` stopped dropping silently. Do
+                # NOT "restore" it by declaring `normalization` on the registry
+                # entry: the entry's target is the `create_grid_window_attention`
+                # wrapper, and the parameter it would have to forward does not
+                # exist. The live knob for the attention-probability function is
+                # `probability_type` (default 'softmax'), which the registry
+                # does declare -- pass that through `attention_args` if you want
+                # anything other than softmax.
+                attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate,
-                    'window_size': 8,
-                    'normalization': 'softmax'
+                    'window_size': 8
                 }
-                # Allow attention_args to override defaults (e.g. window_size)
-                window_defaults.update(attention_kwargs)
-                attention_kwargs = window_defaults
             elif self.attention_type == 'differential':
-                attention_kwargs.update({
+                attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'head_dim': self.embed_dim // self.num_heads,
                     'dropout_rate': self.dropout_rate
-                })
+                }
             elif self.attention_type in ['anchor', 'perceiver']:
-                attention_kwargs.update({
+                attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate
-                })
+                }
             elif self.attention_type == 'adaptive_multi_head':
-                attention_kwargs.update({
+                attention_defaults = {
                     'num_heads': self.num_heads,
                     'key_dim': self.embed_dim // self.num_heads,
                     'dropout_rate': self.dropout_rate
-                })
+                }
             else:
                 # Default parameters for other attention types
-                attention_kwargs.update({
+                attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads
-                })
+                }
+
+            attention_kwargs = assemble_attention_config(
+                self.attention_type, attention_defaults, self.attention_args
+            )
+
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011
+            # `window_size` is CONDITIONAL by contract, and this is the one
+            # caller key this block is allowed to scope. Consumers wire it
+            # unconditionally on purpose -- `models/time_series/tirex/model.py`
+            # passes `attention_args={'window_size': ...}` at every
+            # `attention_type` and documents the parameter as "used only when
+            # `attention_type='window'`" -- so once the factory raises, TiReX
+            # breaks at its own DEFAULT ('multi_head', which declares no
+            # `window_size`) unless it is dropped HERE.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT fix this at `tirex/model.py:348` by making the caller
+            #     conditional. That pushes registry knowledge -- which type
+            #     accepts which key -- up into every `MixedSequentialBlock`
+            #     consumer; the block is the only place that knows which branch
+            #     it took.
+            #   * Do NOT widen this to filter the whole merged dict. Every OTHER
+            #     caller key must stay visible to `create_attention_layer` so a
+            #     misspelled `attention_args` entry still raises. This tuple is
+            #     an allowlist of documented-conditional keys, not a licence to
+            #     swallow the caller's dict.
+            _accepted = set(
+                ATTENTION_REGISTRY[self.attention_type]['required_params']
+            ) | set(ATTENTION_REGISTRY[self.attention_type]['optional_params'])
+            for conditional_key in _CONDITIONAL_ATTENTION_ARG_KEYS:
+                if conditional_key in attention_kwargs and (
+                        conditional_key not in _accepted):
+                    logger.debug(
+                        f"MixedSequentialBlock: dropping conditional attention "
+                        f"arg '{conditional_key}', which "
+                        f"attention_type='{self.attention_type}' does not accept."
+                    )
+                    attention_kwargs.pop(conditional_key)
 
             self.attention_layer = create_attention_layer(
                 attention_type=self.attention_type,

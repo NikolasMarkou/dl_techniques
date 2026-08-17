@@ -89,8 +89,12 @@ def test_smoke_build_and_forward():
 # Before the fix, `attention_args` was gated on the string
 # "multi_head_attention", which is not a registry key (the key is
 # "multi_head"), so the gate never fired. Both halves of the old expression
-# were independently dead: `create_attention_layer` SILENTLY DROPS an
-# unrecognized `qkv_bias` kwarg instead of raising.
+# were independently dead: `create_attention_layer` SILENTLY DROPPED an
+# unrecognized `qkv_bias` kwarg instead of raising. HISTORICAL as of 2026-08-17
+# (plan-2026-08-17T183311-79c63e38/D-011) — that factory is now strict and would
+# raise on `qkv_bias`. The test below still reads the LAYER, not the kwargs
+# dict, because the fix is that the model passes `use_bias`, and only the layer
+# can say whether the bias weights exist.
 
 
 def _small_dino(**kwargs):

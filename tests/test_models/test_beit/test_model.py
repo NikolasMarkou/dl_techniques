@@ -2,8 +2,11 @@
 
 The assertions here read the ACTUAL sub-layer objects and weights, never the kwargs
 dict that was passed in: a kwarg that never arrived and a kwarg that arrived and was
-honoured are indistinguishable from the caller's side, and
-``create_attention_layer`` drops undeclared kwargs SILENTLY.
+honoured are indistinguishable from the caller's side. ``create_attention_layer``
+used to drop undeclared kwargs SILENTLY; since 2026-08-17
+(plan-2026-08-17T183311-79c63e38/D-011) it raises on them, but the reason to read the
+objects stands — a kwarg the registry DECLARES and the constructor never wires is
+still invisible to the raise.
 
 Two costs are traded deliberately:
 

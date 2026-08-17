@@ -318,11 +318,16 @@ class TransformerDecoderLayer(keras.layers.Layer):
         if self.self_attention_type == 'fnet':
             # FNetFourierTransform is parameter-free -- no `dim`, no `num_heads`
             # -- exactly as `TransformerLayer._get_attention_params` already
-            # handles it. The attention factory currently DROPS the two keys
-            # silently rather than rejecting them (measured), so injecting them
-            # is not what makes 'fnet' fail; it is nonetheless a latent break,
-            # because the sibling FFN factory has already turned that same
-            # silent drop into a hard raise (D-023). Keep the two dispatchers
+            # handles it. HISTORICAL, and the prediction in it came true: the
+            # attention factory USED TO DROP the two keys silently rather than
+            # rejecting them (measured), so injecting them was not what made
+            # 'fnet' fail -- but it was called out here as a latent break,
+            # because the sibling FFN factory had already turned that same
+            # silent drop into a hard raise (D-023). As of 2026-08-17
+            # (plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer`
+            # raises too, which is exactly why this branch must keep returning
+            # `{'name': ..., **attention_args}` and must NOT inject
+            # `dim`/`num_heads` for 'fnet'. Keep the two dispatchers
             # in agreement -- `test_fnet_self_attention_params_match_TransformerLayer`
             # compares them.
             return {'name': name, **self.attention_args}

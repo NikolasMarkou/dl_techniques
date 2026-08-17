@@ -717,10 +717,15 @@ class TransformerLayer(keras.layers.Layer):
         elif self.attention_type == 'beit':
             # NOT a copy of the 'window' branch: `BeitAttention` declares no
             # `dropout_rate`, it declares `attn_dropout_rate` /
-            # `proj_dropout_rate`. `create_attention_layer` FILTERS kwargs to the
-            # registry's declared names and DROPS the rest SILENTLY, so passing
-            # 'dropout_rate' here would look correct, raise nothing, and leave
-            # the attention probabilities undropped at 0.0 forever. The block's
+            # `proj_dropout_rate`. HISTORICAL, and the reason for the rename
+            # SURVIVES the change: `create_attention_layer` used to FILTER kwargs
+            # to the registry's declared names and DROP the rest SILENTLY, so
+            # passing 'dropout_rate' here would have looked correct, raised
+            # nothing, and left the attention probabilities undropped at 0.0
+            # forever. Since 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011)
+            # that factory RAISES instead, so the same mistake would now be a
+            # loud construction failure rather than a silent one -- still a
+            # mistake, just a findable one. The block's
             # `attention_dropout_rate` is routed to the attention-probability
             # dropout, matching every other branch's intent; `proj_dropout_rate`
             # is deliberately left at the layer default so the block's own
