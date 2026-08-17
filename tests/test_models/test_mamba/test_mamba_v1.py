@@ -723,8 +723,29 @@ class TestMambaIntegration:
         grad_A_np = keras.ops.convert_to_numpy(grad_A)
         grad_D_np = keras.ops.convert_to_numpy(grad_D)
 
-        assert not np.allclose(grad_A_np, 0), "A_log gradient is all zeros"
-        assert not np.allclose(grad_D_np, 0), "D gradient is all zeros"
+        # `np.allclose(x, 0)` is the WRONG instrument here: its default
+        # atol=1e-8 is an ABSOLUTE floor, and A_log's gradient has no reason to
+        # live above it. In the discretization `A_bar = exp(dt * A)` the
+        # gradient w.r.t. A_log scales with dt, and the paper's initialization
+        # puts dt in [dt_min=0.001, dt_max=0.1] -- so a CORRECTLY initialized
+        # model produces a small A_log gradient by construction.
+        #
+        # This assertion used to read `not np.allclose(grad_A_np, 0)` and passed
+        # only because dt was stuck at softplus(0) = 0.693147, ~7x above dt_max,
+        # from the discarded-assign defect fixed in D-084. Measured at
+        # d_model=32: max|grad_A| was 1.06e-06 with the broken dt=0.693 and is
+        # 3.17e-08 with a correct dt -- both non-zero, but only the first clears
+        # an absolute 1e-8. Restoring the old form would re-pin the defect.
+        #
+        # What "gradients flow" actually means is: not identically zero, and not
+        # NaN. Test that, relative to each tensor's own scale.
+        for name, grad in (("A_log", grad_A_np), ("D", grad_D_np)):
+            assert np.isfinite(grad).all(), f"{name} gradient has non-finite entries"
+            assert np.abs(grad).max() > 0.0, f"{name} gradient is identically zero"
+            assert np.count_nonzero(grad) > grad.size // 2, (
+                f"{name} gradient is mostly zeros "
+                f"({np.count_nonzero(grad)}/{grad.size} non-zero)"
+            )
 
     def test_training_integration(self, small_model):
         """Test the model in a minimal training loop."""
