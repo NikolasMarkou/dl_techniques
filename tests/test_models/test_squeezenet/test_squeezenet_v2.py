@@ -28,7 +28,12 @@ class TestSqueezeNoduleNetV2:
     @pytest.fixture
     def input_shape_3d(self) -> Tuple[int, int, int, int]:
         """Create test input shape for 3D volumes."""
-        # MODIFIED: Increased size from 32 to 64 to prevent NaN from pooling.
+        # 64, not 32: at 32 the third pooling stage collapses every axis to
+        # length 0 and the model returns all-NaN with a correct-looking shape.
+        # A prior worker patched THIS FIXTURE and left the model unguarded; the
+        # model itself has refused sub-floor inputs since 2026-08-18 (the
+        # computed floor is 35 for all four V2 variants), so 64 now clears a
+        # real constructor check rather than merely dodging the NaN.
         return (64, 64, 64, 1)
 
     @pytest.fixture

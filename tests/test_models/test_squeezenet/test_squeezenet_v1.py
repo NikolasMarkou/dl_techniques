@@ -170,8 +170,12 @@ class TestSqueezeNetV1:
 
         for shape in test_shapes:
             # v1.1 pools later, so it keeps more spatial resolution on small
-            # inputs. (Measured 2026-08-15: "1.0" at (32, 32, 3) does build and
-            # forward -- the older "to avoid pooling errors" note was stale.)
+            # inputs. (The 2026-08-15 note that "'1.0' at (32, 32, 3) does build
+            # and forward" was true and MISLEADING: it forwarded an all-NaN
+            # tensor of the correct shape. "1.0" walks 32 -> 13 -> 6 -> 2 -> 0
+            # and its computed floor is 35; "1.1"'s is 31. Since 2026-08-18 the
+            # constructor raises below the floor, so this selection is load-
+            # bearing, not a resolution preference.)
             variant = "1.1" if shape[0] < 64 else "1.0"
 
             model = SqueezeNetV1.from_variant(

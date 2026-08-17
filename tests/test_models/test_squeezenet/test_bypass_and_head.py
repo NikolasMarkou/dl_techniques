@@ -33,6 +33,7 @@ from dl_techniques.models.squeezenet.squeezenet_v1 import (
     create_squeezenet_v1,
 )
 from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+from dl_techniques.models.squeezenet.spatial_guard import minimum_spatial_extent
 
 
 def _add_layers(model):
@@ -107,13 +108,81 @@ class TestV2HeadEmitsAClassDistribution:
 
 
 class TestDocstringExampleIsConstructible:
-    """The class docstring advertises `1.0_bypass` at (32, 32, 3)."""
+    """The class docstring's own example must forward FINITE values.
 
-    def test_thirty_two_pixel_example_builds_and_forwards(self):
+    Until 2026-08-18 this class pinned `1.0_bypass` at (32, 32, 3) -- the size
+    the docstring advertised -- and asserted only ``out.shape == (2, 10)``. That
+    assertion passes on an all-NaN tensor, which is exactly what the model
+    returned: at 32 px the "1.0" stem family walks 32 -> 13 -> 6 -> 2 -> 0, and
+    a zero-length spatial axis makes GlobalAveragePooling2D divide by zero
+    without Keras raising anywhere. Shape is not the property; finiteness is
+    (its sibling `test_bypass_model_still_forwards` at 224 px already knew).
+    """
+
+    def test_corrected_docstring_example_builds_and_forwards_finite(self):
         model = SqueezeNetV1.from_variant(
-            "1.0_bypass", num_classes=10, input_shape=(32, 32, 3)
+            "1.0_bypass", num_classes=10, input_shape=(64, 64, 3)
         )
         out = keras.ops.convert_to_numpy(
-            model(np.random.rand(2, 32, 32, 3).astype("float32"))
+            model(np.random.rand(2, 64, 64, 3).astype("float32"))
         )
         assert out.shape == (2, 10)
+        assert np.all(np.isfinite(out))
+
+    def test_sub_floor_input_is_refused_instead_of_returning_nan(self):
+        with pytest.raises(ValueError, match=r"collapses to length 0"):
+            SqueezeNetV1.from_variant(
+                "1.0_bypass", num_classes=10, input_shape=(32, 32, 3)
+            )
+
+    def test_the_floor_is_computed_per_variant_not_hard_coded(self):
+        """35 for the 7x7-stem family, 31 for "1.1" -- both derived from the
+        variant's own kernel/stride/pool schedule."""
+        assert minimum_spatial_extent(SqueezeNetV1.MODEL_VARIANTS["1.0"]) == 35
+        assert minimum_spatial_extent(SqueezeNetV1.MODEL_VARIANTS["1.0_bypass"]) == 35
+        assert minimum_spatial_extent(SqueezeNetV1.MODEL_VARIANTS["1.1"]) == 31
+        for variant in SqueezeNoduleNetV2.MODEL_VARIANTS.values():
+            assert minimum_spatial_extent(variant) == 35
+
+    def test_at_the_floor_the_output_is_finite_and_one_below_it_raises(self):
+        """Anti-vacuity: the computed floor is exact in both directions."""
+        floor = minimum_spatial_extent(SqueezeNetV1.MODEL_VARIANTS["1.1"])
+        model = SqueezeNetV1.from_variant(
+            "1.1", num_classes=10, input_shape=(floor, floor, 3)
+        )
+        out = keras.ops.convert_to_numpy(
+            model(np.random.rand(2, floor, floor, 3).astype("float32"))
+        )
+        assert np.all(np.isfinite(out))
+        with pytest.raises(ValueError, match=r"minimum legal spatial extent"):
+            SqueezeNetV1.from_variant(
+                "1.1", num_classes=10, input_shape=(floor - 1, floor - 1, 3)
+            )
+
+    def test_three_d_variant_guard_applies_to_every_axis(self):
+        with pytest.raises(ValueError, match=r"collapses to length 0"):
+            SqueezeNoduleNetV2.from_variant(
+                "v2_3d", num_classes=2, input_shape=(48, 48, 32, 1)
+            )
+
+
+class TestUseBypassOverrideIsHonoured:
+    """`use_bypass=False` must be able to turn a bypass variant's bypass OFF.
+
+    `use_bypass if use_bypass else variant_config.get("use_bypass")` treats an
+    explicit `False` as "unset", so the variant's own `"simple"` won.
+    """
+
+    def test_explicit_false_disables_the_variant_bypass(self):
+        model = SqueezeNetV1.from_variant(
+            "1.0_bypass", num_classes=10, input_shape=(64, 64, 3), use_bypass=False
+        )
+        assert model.use_bypass is False
+        assert len(_add_layers(model)) == 0
+
+    def test_omitting_the_argument_still_defers_to_the_variant(self):
+        model = SqueezeNetV1.from_variant(
+            "1.0_bypass", num_classes=10, input_shape=(64, 64, 3)
+        )
+        assert model.use_bypass == "simple"
+        assert len(_add_layers(model)) == 4

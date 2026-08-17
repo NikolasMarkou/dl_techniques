@@ -70,6 +70,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .spatial_guard import validate_spatial_extent
 
 # ---------------------------------------------------------------------
 
@@ -210,16 +211,25 @@ class SqueezeNoduleNetV2(keras.Model):
         **kwargs: Additional arguments for Model base class.
 
     Raises:
-        ValueError: If invalid configuration is provided.
+        ValueError: If invalid configuration is provided, or if the input's
+            spatial extent is below the variant's minimum (see
+            `spatial_guard.minimum_spatial_extent`): every downsampling stage
+            uses `padding='valid'`, and a stage that collapses an axis to length
+            zero yields an all-NaN output of the correct shape. All four
+            variants share one stem and pooling schedule, so the computed
+            minimum is 35 on every spatial axis, 2D and 3D alike.
 
     Example:
         >>> # Create SqueezeNodule-Net V2 for lung nodule classification
         >>> model = SqueezeNoduleNetV2.from_variant("v2", num_classes=2,
         >>>                                          input_shape=(50, 50, 1))
         >>>
-        >>> # Create 3D version for CT scans
+        >>> # Create 3D version for CT scans. Every variant of this model shares
+        >>> # the 7x7/stride-2 stem and pools after fire4 and fire8, so the
+        >>> # minimum extent on EVERY spatial axis is 35 -- a 32-voxel cube
+        >>> # collapses the last pooling stage to length 0.
         >>> model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2,
-        >>>                                          input_shape=(32, 32, 32, 1))
+        >>>                                          input_shape=(48, 48, 48, 1))
     """
 
     MODEL_VARIANTS = {
@@ -315,6 +325,14 @@ class SqueezeNoduleNetV2(keras.Model):
             raise ValueError("num_classes must be a positive integer")
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
+
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020
+        # Validate here, in __init__, NOT in build(): input_shape is a required
+        # constructor argument already resolved to concrete ints, and this class
+        # calls super().__init__(inputs=..., outputs=...) -- by the time a
+        # functional Model's build() would run, the all-NaN graph is already
+        # assembled. Applies to every spatial axis, so it covers the 3D variants.
+        validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
 
         self.num_classes = num_classes
         self.variant_config = variant_config
@@ -528,16 +546,18 @@ class SqueezeNoduleNetV2(keras.Model):
             SqueezeNoduleNetV2 model instance
 
         Raises:
-            ValueError: If variant is not recognized
+            ValueError: If variant is not recognized, or if `input_shape`'s
+                spatial extent is below the computed minimum of 35 (shared by
+                all four variants, which share one stem and pooling schedule).
 
         Example:
             >>> # SqueezeNodule-Net V2 for lung nodule classification
             >>> model = SqueezeNoduleNetV2.from_variant("v2", num_classes=2,
             >>>                                          input_shape=(50, 50, 1))
             >>>
-            >>> # 3D version for CT scans
+            >>> # 3D version for CT scans (48 voxels per axis: the minimum is 35)
             >>> model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2,
-            >>>                                          input_shape=(32, 32, 32, 1))
+            >>>                                          input_shape=(48, 48, 48, 1))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -647,6 +667,10 @@ def create_squeezenodule_net_v2(
     Returns:
         SqueezeNoduleNetV2 model instance
 
+    Raises:
+        NotImplementedError: If `weights` is not None.
+        ValueError: If `input_shape`'s spatial extent is below 35 on any axis.
+
     Example:
         >>> # Create SqueezeNodule-Net V2 for lung nodules
         >>> model = create_squeezenodule_net_v2("v2", num_classes=2,
@@ -656,9 +680,9 @@ def create_squeezenodule_net_v2(
         >>> model = create_squeezenodule_net_v2("v1", num_classes=2,
         >>>                                     input_shape=(50, 50, 1))
         >>>
-        >>> # Create 3D version for CT volumes
+        >>> # Create 3D version for CT volumes (48 voxels per axis; minimum is 35)
         >>> model = create_squeezenodule_net_v2("v2_3d", num_classes=2,
-        >>>                                     input_shape=(32, 32, 32, 1))
+        >>>                                     input_shape=(48, 48, 48, 1))
     """
     if weights is not None:
         # Raise rather than log-and-ignore: silently returning a randomly

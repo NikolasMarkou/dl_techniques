@@ -72,6 +72,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .spatial_guard import validate_spatial_extent
 
 # ---------------------------------------------------------------------
 
@@ -215,8 +216,10 @@ class SqueezeNetV1(keras.Model):
     Args:
         num_classes: Integer, number of output classes for classification.
         variant_config: Dictionary defining the Fire module configurations.
-        use_bypass: Boolean or string, whether to use bypass connections.
-            Can be False, 'simple', or 'complex'.
+        use_bypass: Boolean, string or None, whether to use bypass connections.
+            Can be False, 'simple', or 'complex'. ``None`` (the default) defers
+            to the variant's own setting; an explicit ``False`` overrides it and
+            disables the bypass even for a bypass variant.
         dropout_rate: Float, dropout rate after final Fire module.
         kernel_regularizer: Regularizer for all convolution kernels.
         kernel_initializer: Initializer for all convolution kernels.
@@ -225,15 +228,22 @@ class SqueezeNetV1(keras.Model):
         **kwargs: Additional arguments for Model base class.
 
     Raises:
-        ValueError: If invalid configuration is provided.
+        ValueError: If invalid configuration is provided, or if the input's
+            spatial extent is below the variant's minimum (see
+            `spatial_guard.minimum_spatial_extent`): every downsampling stage
+            uses `padding='valid'`, and a stage that collapses an axis to length
+            zero yields an all-NaN output of the correct shape. The minimum is
+            35 for the "1.0"/"1.0_bypass" stem family and 31 for "1.1"; both are
+            computed from the variant, never hard-coded.
 
     Example:
         >>> # Create standard SqueezeNet for ImageNet
         >>> model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
         >>>
-        >>> # Create SqueezeNet with simple bypass for CIFAR-10
+        >>> # Create SqueezeNet with simple bypass for CIFAR-sized inputs
+        >>> # (upsampled to 64 px: the "1.0" stem family cannot accept 32 px)
         >>> model = SqueezeNetV1.from_variant("1.0_bypass", num_classes=10,
-        >>>                                    input_shape=(32, 32, 3))
+        >>>                                    input_shape=(64, 64, 3))
     """
 
     MODEL_VARIANTS = {
@@ -298,7 +308,7 @@ class SqueezeNetV1(keras.Model):
             self,
             num_classes: int = 1000,
             variant_config: Optional[Dict[str, Any]] = None,
-            use_bypass: Union[bool, str] = False,
+            use_bypass: Optional[Union[bool, str]] = None,
             dropout_rate: float = 0.5,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -314,9 +324,24 @@ class SqueezeNetV1(keras.Model):
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
 
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020
+        # Validate here, in __init__, NOT in build(): input_shape is a required
+        # constructor argument already resolved to concrete ints before
+        # _build_model runs, and this class calls super().__init__(inputs=...,
+        # outputs=...) -- by the time a functional Model's build() would run the
+        # all-NaN graph has already been assembled. Do NOT move this to build().
+        validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
+
         self.num_classes = num_classes
         self.variant_config = variant_config
-        self.use_bypass = use_bypass if use_bypass else variant_config.get("use_bypass", False)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020
+        # `is None` sentinel, not truthiness: `use_bypass if use_bypass else ...`
+        # made an explicit `use_bypass=False` fall through to the variant's own
+        # value, so from_variant("1.0_bypass", use_bypass=False) built the
+        # bypass anyway. Do NOT "simplify" this back to a truthiness test.
+        self.use_bypass = (
+            variant_config.get("use_bypass", False) if use_bypass is None else use_bypass
+        )
         self.dropout_rate = dropout_rate
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
@@ -497,13 +522,16 @@ class SqueezeNetV1(keras.Model):
             SqueezeNetV1 model instance
 
         Raises:
-            ValueError: If variant is not recognized
+            ValueError: If variant is not recognized, or if `input_shape`'s
+                spatial extent is below the variant's computed minimum (35 for
+                "1.0"/"1.0_bypass", 31 for "1.1").
 
         Example:
             >>> # Standard SqueezeNet for ImageNet
             >>> model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
             >>>
-            >>> # SqueezeNet 1.1 for CIFAR-10
+            >>> # SqueezeNet 1.1 for CIFAR-10. 32 px clears the "1.1" floor of
+            >>> # 31; the "1.0" stem family would raise here (its floor is 35).
             >>> model = SqueezeNetV1.from_variant("1.1", num_classes=10,
             >>>                                   input_shape=(32, 32, 3))
         """
@@ -603,11 +631,17 @@ def create_squeezenet_v1(
     Returns:
         SqueezeNetV1 model instance
 
+    Raises:
+        NotImplementedError: If `weights` is not None.
+        ValueError: If `input_shape`'s spatial extent is below the variant's
+            computed minimum (35 for "1.0"/"1.0_bypass", 31 for "1.1").
+
     Example:
         >>> # Create SqueezeNet 1.0 for ImageNet
         >>> model = create_squeezenet_v1("1.0", num_classes=1000)
         >>>
-        >>> # Create SqueezeNet 1.1 for CIFAR-10
+        >>> # Create SqueezeNet 1.1 for CIFAR-10 (32 px clears the "1.1" floor
+        >>> # of 31; "1.0" and "1.0_bypass" require at least 35)
         >>> model = create_squeezenet_v1("1.1", num_classes=10,
         >>>                              input_shape=(32, 32, 3))
         >>>
