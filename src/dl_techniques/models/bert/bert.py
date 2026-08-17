@@ -154,12 +154,11 @@ class BERT(keras.Model):
     :type layer_norm_eps: float
     :param pad_token_id: ID of padding token. Defaults to 0.
     :type pad_token_id: int
-    :param position_embedding_type: Type of position embedding.
-        Defaults to "absolute".
+    :param position_embedding_type: ``'learned'`` (default) or
+        ``'sinusoidal'``; forwarded to :class:`BertEmbeddings`, which raises on
+        anything else. ``'absolute'`` is accepted as the legacy spelling of
+        ``'learned'`` and normalized to it.
     :type position_embedding_type: str
-    :param use_cache: Whether to use caching in attention layers.
-        Defaults to True.
-    :type use_cache: bool
     :param normalization_type: Type of normalization layer.
         Defaults to "layer_norm".
     :type normalization_type: str
@@ -262,8 +261,7 @@ class BERT(keras.Model):
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
-        position_embedding_type: str = "absolute",
-        use_cache: bool = True,
+        position_embedding_type: str = "learned",
         normalization_type: NormalizationType = "layer_norm",
         normalization_position: NormalizationPositionType = "post",
         attention_type: AttentionType = "multi_head",
@@ -300,10 +298,9 @@ class BERT(keras.Model):
         :type layer_norm_eps: float
         :param pad_token_id: ID of the padding token.
         :type pad_token_id: int
-        :param position_embedding_type: Type of position embedding.
+        :param position_embedding_type: ``'learned'`` or ``'sinusoidal'``;
+            ``'absolute'`` is the legacy spelling of ``'learned'``.
         :type position_embedding_type: str
-        :param use_cache: Whether to use caching in attention layers.
-        :type use_cache: bool
         :param normalization_type: Type of normalization layer.
         :type normalization_type: str
         :param normalization_position: Position of normalization ('pre'/'post').
@@ -340,8 +337,24 @@ class BERT(keras.Model):
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.pad_token_id = pad_token_id
+        # DECISION plan-2026-08-17T183311-79c63e38/D-015
+        # `'absolute'` was this model's default while the value was never
+        # forwarded to `BertEmbeddings` -- which has no such value at all
+        # (`VALID_POSITION_EMBEDDING_TYPES` is `('learned', 'sinusoidal')`), so
+        # wiring the shipped default up naively would have RAISED. The legacy
+        # spelling is normalized ONCE, here, so every stored config and every
+        # `get_config()` carries the single live spelling.
+        #
+        # WHAT NOT TO DO: do not drop `position_embedding_type` from the
+        # `BertEmbeddings(...)` call in `_build_architecture` "to keep the
+        # default stable" -- that is the defect this closes, and it is the same
+        # one FNet closed as D-071. Do not reinstate `use_cache`: BERT here is a
+        # bidirectional encoder with no incremental-decoding path and no KV
+        # cache in the stack, so it named a mechanism that does not exist.
+        # See decisions.md D-015.
+        if position_embedding_type == "absolute":
+            position_embedding_type = "learned"
         self.position_embedding_type = position_embedding_type
-        self.use_cache = use_cache
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.attention_type = attention_type
@@ -419,6 +432,7 @@ class BERT(keras.Model):
             layer_norm_eps=self.layer_norm_eps,
             dropout_rate=self.hidden_dropout_prob,
             normalization_type=self.normalization_type,
+            position_embedding_type=self.position_embedding_type,
             name="embeddings"
         )
 
@@ -755,7 +769,6 @@ class BERT(keras.Model):
             "layer_norm_eps": self.layer_norm_eps,
             "pad_token_id": self.pad_token_id,
             "position_embedding_type": self.position_embedding_type,
-            "use_cache": self.use_cache,
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "attention_type": self.attention_type,
@@ -774,6 +787,13 @@ class BERT(keras.Model):
         :return: A new BERT model instance.
         :rtype: BERT
         """
+        # `use_cache` was a serialized constructor argument that reached nothing
+        # (D-015). It is dropped rather than refused because `bert/` is the most
+        # reachable package in the tree and this method is `cls(**config)` --
+        # without the pop, every `.keras` file written before 2026-08-18 would
+        # fail to load with an unexpected-keyword `TypeError`.
+        config = dict(config)
+        config.pop("use_cache", None)
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
