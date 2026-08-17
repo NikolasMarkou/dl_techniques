@@ -75,6 +75,16 @@ The model exposes both a complete mode (`call(batch)`, run to halting) and a
 single-step mode (`call((carry, batch))`) so an external training loop can drive the
 recursion itself.
 
+Positional information enters through attention, not through the input stream. With
+`pos_encodings="rope"` (the default) the reasoning modules run grouped-query attention
+with `num_kv_heads == num_heads` — arithmetically plain multi-head attention, chosen
+because it is the only plain self-attention type in this repo's attention registry that
+also applies RoPE to Q and K. `pos_encodings="learned"` is the alternative and works the
+other way round: it adds a learned positional embedding to the token embedding and runs
+position-blind attention. The core does NOT own a rotary-embedding layer of its own; it
+once did, was never handed a Q or K tensor by any code path, and the model was measured
+exactly permutation-equivariant while advertising RoPE.
+
 Six preset variants scale layers, heads and cycle counts together, from 2+2 layers
 with 2+2 cycles to 16+16 layers with 4+4 cycles.
 
@@ -157,7 +167,11 @@ class HierarchicalReasoningModel(keras.Model):
             Must be positive and divide evenly into embed_dim.
         ffn_expansion_factor: Integer, expansion factor for feed-forward networks.
             Typically 4 for standard transformer architectures.
-        pos_encodings: String, type of positional encodings ("rope" or "learned").
+        pos_encodings: String, type of positional encodings ("rope" or
+            "learned"). "rope" (the default) runs the reasoning modules on
+            grouped-query attention, which rotates Q and K by their own
+            positions inside attention; "learned" adds a learned positional
+            embedding to the input stream instead.
         rope_theta: Float, theta parameter for RoPE positional encodings.
             Only used when pos_encodings="rope".
         halt_max_steps: Integer, maximum computation steps before forced halt.
@@ -935,7 +949,8 @@ def create_hierarchical_reasoning_model(
     - **base**: Paper configuration (27M params, 40.3% ARC-AGI)
     - **AdamW optimizer**: Scale-invariant optimization with bounded parameters
     - **Learning rate 1e-4**: Optimal for hierarchical convergence training
-    - **Post-Norm architecture**: With RMSNorm, RoPE, GLU (Llama-style)
+    - **Post-Norm architecture**: With RMSNorm, SwiGLU, and RoPE applied to Q/K
+      inside the reasoning modules' grouped-query attention (Llama-style)
 
     Args:
         vocab_size: Size of vocabulary for token embeddings.
