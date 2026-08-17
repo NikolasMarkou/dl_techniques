@@ -500,14 +500,29 @@ class TestConvNeXtV1:
         """RED proof for the value comparison in `test_model_save_load`, kept in the
         suite rather than performed once and thrown away.
 
-        MEASURED 2026-08-17 (CPU): the nested-container trap does NOT bite in
-        `ConvNeXtV1`'s code shape. All 65 weights round-trip bit-identically and the
-        output delta is exactly 0.0, despite `stages_list` being
-        `List[List[Dict[str, Layer]]]`. So the value assertion is currently a
-        REGRESSION guard, not a bug-catcher — which is precisely why it needs a proof
-        that it can fail at all. This test supplies one by transplanting fresh weights
-        into a loaded model and requiring the comparison to fire while the shape and
-        `count_params()` assertions still pass.
+        MEASURED 2026-08-17 (CPU): all 65 weights round-trip bit-identically and the
+        output delta is exactly 0.0. So the value assertion is currently a REGRESSION
+        guard, not a bug-catcher — which is precisely why it needs a proof that it can
+        fail at all.
+
+        **Why the trap does not bite here, corrected 2026-08-17 (step 41.1).** The
+        original wording credited this to `ConvNeXtV1`'s "code shape", i.e. implied
+        that `stages_list` being `List[List[Dict[str, Layer]]]` is safe. It is not.
+        The result is explained by `convnext_v1.py`'s explicit `build()`, which runs a
+        dummy forward pass over the whole tree and so materializes every nested
+        sublayer — the documented REMEDY for the trap, not evidence of immunity. This
+        probe also constructs with a concrete `input_shape`, so the lazy-build path is
+        never exercised at all. Read the negative result as "the remedy is in place",
+        and expect the trap to return the moment `ConvNeXtV1.build` is removed or
+        narrowed.
+
+        The sabotage below is scoped to the weights under `stages_list` for the same
+        reason: the failure it stands in for reinitializes the NESTED sublayers'
+        kernels, not every weight in the model. A guard proven only against a
+        whole-model scramble is not proven against the partial perturbation it exists
+        to catch. At this configuration that is 45 of the 65 weights; the 20 left
+        untouched are the stem conv/norm, the three downsample conv/norm pairs, the
+        head norm and the classifier — none of which live in a nested container.
         """
         keras.utils.set_random_seed(7)
         model = ConvNeXtV1(
@@ -525,11 +540,27 @@ class TestConvNeXtV1:
             model.save(model_path)
             loaded_model = keras.models.load_model(model_path)
 
-            # A second load, then every weight overwritten — the observable signature of
-            # "restored the graph, reinitialized the kernels".
+            # A second load, then only the weights UNDER `stages_list` overwritten —
+            # the observable signature of "restored the graph, reinitialized the
+            # nested sublayers' kernels". Scoped deliberately: the trap does not
+            # touch the stem, the head or the final norm, so scrambling those too
+            # would prove the assertion fires against a much larger perturbation
+            # than the one it stands in for.
             sabotaged = keras.models.load_model(model_path)
+            nested = [
+                v for v in sabotaged.weights
+                if "stage" in v.path or "block" in v.path
+            ]
+            assert nested, (
+                "no weights matched the stages_list scope; this sabotage would "
+                "be a no-op and the test would prove nothing"
+            )
+            assert len(nested) < len(sabotaged.weights), (
+                f"the scope matched every one of {len(sabotaged.weights)} weights, "
+                f"so it is not the PARTIAL perturbation this test claims to make"
+            )
             rng = np.random.default_rng(4242)
-            for v in sabotaged.weights:
+            for v in nested:
                 v.assign(keras.ops.convert_to_tensor(
                     rng.normal(scale=0.3, size=v.shape).astype("float32")
                 ))
