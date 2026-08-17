@@ -28,6 +28,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from tests.numerics import reassociation_atol
+
 # LESSONS [I:4]: TF32 on Ampere+ truncates matmul mantissas and makes an einsum
 # equivalence check fail spuriously at ~5e-4 against an fp32 reference. Without this, the
 # gradient oracle below is a coin-flip that WILL be misread as "the gradient is wrong".
@@ -493,22 +495,85 @@ class TestKerasMaskIsHonored:
         )
 
         max_abs_diff = float(np.abs(y_pad - y_short).max())
-        # KNOWN RED ON CPU, and NOT caused by the TF32 scoping (plan
-        # plan-2026-07-30T140922-8af1028f step 10): measured on the pre-change file
-        # at HEAD, `CUDA_VISIBLE_DEVICES=""` gives 1.907e-06 against this atol=1e-6,
-        # i.e. the bound sits below float32's own cross-shape reduction noise on this
-        # path -- the same unattainable-tolerance class that D-024 fixed for
-        # `test_energy_transformer.py` by DERIVING the bound in-test. On GPU it is
-        # green with TF32 off and RED at 3.815e-06 with TF32 on (D-029), which is why
-        # this module scopes TF32 off. Do NOT "fix" this by bumping the literal:
-        # derive it from the noise source, as `reassociation_atol` does.
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-079
+        # This assertion shipped with a literal `atol=1e-6` and was RED FOR ITS WHOLE
+        # LIFETIME on CPU at 1.907e-06 — the same unattainable-tolerance class D-024
+        # diagnosed for `test_energy_transformer.py`, and the previous comment here said
+        # so and then left the literal in place. The two sides are the SAME formula
+        # evaluated at two sequence SHAPES (6 padded vs 3 unpadded), which changes the
+        # backend's reduction blocking and nothing else, so the difference is pure
+        # float32 reassociation noise: measured 1.907e-06 against an output magnitude of
+        # ~27, i.e. 7.1e-08 relative, or 0.6 eps_f32. The bound is now DERIVED from that
+        # noise source with the shared `reassociation_atol` (one descent step; the
+        # contraction lengths are read off the layer, not guessed).
+        # Do NOT paste the measured number back: change `TOKENS`, `DIM` or `HEADS` and a
+        # literal silently becomes vacuous or unattainable again — which is exactly how
+        # this line got here. See decisions.md D-079.
+        head_dim = DIM // HEADS
+        num_tokens = padded.shape[1]
+        atol = reassociation_atol(
+            reduction_lengths=(
+                2 * DIM,                        # w_query / w_key projections
+                head_dim,                       # attention logits
+                num_tokens,                     # softmax over the key axis
+                2 * head_dim * HEADS * num_tokens,  # term_q + term_k read-outs
+            ),
+            num_steps=1,                        # EnergyAttention is applied once here
+            scale=float(np.abs(y_short).max()),
+        )
+        # Callers must pass rtol=0: assert_allclose's default rtol=1e-7 on an output of
+        # magnitude ~27 contributes 2.7e-06 of tolerance on its own, which would dominate
+        # the derived bound and make it decorative.
         np.testing.assert_allclose(
-            y_pad, y_short, atol=1e-6,
+            y_pad, y_short, atol=atol, rtol=0,
             err_msg=(
-                f"PAD tokens shifted the real tokens' outputs by {max_abs_diff:.3e}. "
+                f"PAD tokens shifted the real tokens' outputs by {max_abs_diff:.3e} "
+                f"against a derived reassociation bound of {atol:.3e}. "
                 "EnergyAttention advertises supports_masking=True but its call() must "
                 "declare `mask` for Keras to inject the propagated mask (F-02)."
             ),
+        )
+
+    def test_the_derived_bound_still_catches_a_dropped_mask(self):
+        """Anti-vacuity for the bound above, and the reason widening it is a REPAIR.
+
+        Feed the same padded row with the mask suppressed entirely — the F-02 defect
+        verbatim — and require the difference to sit orders of magnitude ABOVE the
+        derived bound. A bound that a dropped mask can slip under would be a vacuity
+        hole; this proves it is not.
+        """
+        model = _padded_mask_model()
+        padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")
+        short = np.array([[1, 2, 3]], dtype="int32")
+
+        y_short = keras.ops.convert_to_numpy(model(short))
+
+        # Reach the layer directly and pass NO mask: the pads now participate.
+        emb, attn = model.layers[1], model.layers[2]
+        tokens = emb(keras.ops.convert_to_tensor(padded))
+        unmasked = keras.ops.convert_to_numpy(
+            attn(keras.ops.convert_to_tensor(
+                keras.ops.convert_to_numpy(tokens)))
+        )[:, :3, :]
+
+        head_dim = DIM // HEADS
+        num_tokens = padded.shape[1]
+        atol = reassociation_atol(
+            reduction_lengths=(
+                2 * DIM,
+                head_dim,
+                num_tokens,
+                2 * head_dim * HEADS * num_tokens,
+            ),
+            num_steps=1,
+            scale=float(np.abs(y_short).max()),
+        )
+        defect_size = float(np.abs(unmasked - y_short).max())
+        assert defect_size > 100.0 * atol, (
+            f"a dropped mask moves the real tokens by only {defect_size:.3e}, which is "
+            f"not comfortably above the derived bound {atol:.3e} — the bound would be "
+            f"vacuous"
         )
 
 

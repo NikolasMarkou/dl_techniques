@@ -22,7 +22,7 @@ covers what, and what has no document of its own.
 | `qwen3_embeddings.py` | `Qwen3EmbeddingLayer`, `Qwen3RerankerLayer`, `Qwen3EmbeddingModel`, `Qwen3RerankerModel`. |
 | `QWEN3.md` | Full document for `Qwen3`: architecture diagram, variants, MoE configuration, training, serialization. |
 | `QWEN3_next.md` | Full document for `Qwen3Next`, including a `Qwen3` vs `Qwen3 Next` comparison section. |
-| `__init__.py` | **Empty.** There is no curated package API — import from the submodules directly. |
+| `__init__.py` | **A curated re-export module with `__all__`**, since the `1bfe89d08` package-init pass. Import `Qwen3`, `Qwen3Next`, their `create_*` factories and the embedding/reranker pair straight from `dl_techniques.models.qwen`; submodule imports keep working. This row read "**Empty.** There is no curated package API" until 2026-08-17 — the init was populated and neither this line nor `tests/test_readme_claims.py` moved with it. |
 
 Tests live in `tests/test_models/test_qwen/`: `test_qwen3.py`, `test_qwen3_next.py`,
 `test_components.py`, `test_qwen3_embeddings.py`.

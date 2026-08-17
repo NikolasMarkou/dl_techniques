@@ -179,19 +179,28 @@ def test_readme_variant_table_matches_code(module, cls, expected):
     )
 
 
-def test_qwen_package_init_is_empty():
-    """The qwen README states there is no curated package API.
+def test_qwen_package_init_exports_a_curated_api():
+    """The qwen README describes a curated package API — so import it and check.
 
-    Measured as a byte count, not by reading: a future `__init__.py` that
-    starts re-exporting names makes the README's "import from the submodules"
-    instruction wrong.
+    This test used to assert the init was zero BYTES, mirroring a README row that
+    said "**Empty.** There is no curated package API". The `1bfe89d08` curated-export
+    pass populated the init to 871 bytes and neither the README nor this test moved
+    with it, leaving a permanent RED that said nothing about qwen. It is now stated
+    the other way round and, more importantly, by IMPORTING rather than by measuring
+    a file size: a byte count cannot tell a curated API from a docstring.
     """
-    init = os.path.join(REPO_ROOT, "src/dl_techniques/models/qwen/__init__.py")
-    size = os.path.getsize(init)
-    assert size == 0, (
-        f"models/qwen/__init__.py is {size} bytes; its README states the "
-        "package init is empty and that imports must come from the submodules"
+    import importlib
+
+    module = importlib.import_module("dl_techniques.models.qwen")
+    assert hasattr(module, "__all__") and module.__all__, (
+        "models/qwen/__init__.py declares no non-empty __all__; its README "
+        "describes a curated package API"
     )
+    for name in ("Qwen3", "Qwen3Next", "create_qwen3"):
+        assert name in module.__all__, f"{name} missing from qwen's __all__"
+        assert getattr(module, name, None) is not None, (
+            f"qwen's __all__ advertises {name} but the name does not resolve"
+        )
 
 
 def test_superpoint_detector_channels_is_65():
