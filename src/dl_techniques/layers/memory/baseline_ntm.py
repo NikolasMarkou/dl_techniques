@@ -201,11 +201,16 @@ class NTMReadHead(BaseHead):
     """
     Standard NTM Read Head.
 
-    Projects controller output to addressing parameters (key, beta, gate,
-    shift, gamma) and computes attention weights for reading from memory
-    using the full NTM hybrid addressing mechanism.
+    Projects controller output to addressing parameters and computes attention
+    weights for reading from memory. **Which parameters exist depends on
+    ``addressing_mode``** — the chain below is the ``HYBRID`` one; under
+    ``CONTENT`` the gate / shift / gamma projections are not created at all and
+    the content weights ARE the addressing (D-073). This paragraph and the
+    diagram described the hybrid chain as unconditional until 2026-08-18, four
+    months after the branch landed; ``shift_range`` in particular is read only
+    on the ``HYBRID`` path, and a CONTENT head silently ignores it.
 
-    **Architecture Overview:**
+    **Architecture Overview (HYBRID):**
 
     .. code-block:: text
 
@@ -215,14 +220,16 @@ class NTMReadHead(BaseHead):
                    ▼
         ┌───────────────────────────┐
         │  Dense projections:       │
-        │  key, beta, gate,         │
-        │  shift, gamma             │
+        │  key, beta                │
+        │  (+ gate, shift, gamma    │
+        │   only under HYBRID)      │
         └──────────┬────────────────┘
                    ▼
         ┌───────────────────────────┐
-        │  Hybrid Addressing:       │
-        │  content ─► gate ─►       │
-        │  shift ─► sharpen         │
+        │  HYBRID:  content ─► gate │
+        │           ─► shift ─►     │
+        │           sharpen         │
+        │  CONTENT: content         │
         └──────────┬────────────────┘
                    ▼
         ┌───────────────────────────┐
@@ -239,7 +246,9 @@ class NTMReadHead(BaseHead):
         directly and does not create the gate / shift / gamma projections at all, so a
         CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing.
+    :param shift_range: Range of allowed shifts for location addressing. Read
+        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
+        shift projection, so this value is silently ignored there.
     :type shift_range: int
     :param kernel_initializer: Initializer for dense layers.
     :type kernel_initializer: str | keras.initializers.Initializer
@@ -501,7 +510,9 @@ class NTMWriteHead(BaseHead):
         directly and does not create the gate / shift / gamma projections at all, so a
         CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing.
+    :param shift_range: Range of allowed shifts for location addressing. Read
+        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
+        shift projection, so this value is silently ignored there.
     :type shift_range: int
     :param kernel_initializer: Initializer for dense layers.
     :type kernel_initializer: str | keras.initializers.Initializer

@@ -105,6 +105,12 @@ class Mamba2(keras.Model):
     :param pad_token_id: ID of the padding token.
     :param rmsnorm: If True, use RMSNorm instead of LayerNormalization.
     :param d_ssm: Dimensionality of the SSM. Defaults to `d_model * expand`.
+    :param norm_before_gate: Forwarded to every
+        :class:`~dl_techniques.models.mamba.components_v2.Mamba2Layer` in the
+        stack; see that class for the semantics. Exposed here because its
+        docstring names ``norm_before_gate=True`` as the remedy for a checkpoint
+        trained under the pre-2026-08-15 default, and nothing between this model
+        and that layer forwarded it.
     """
 
     MODEL_VARIANTS = {
@@ -128,6 +134,7 @@ class Mamba2(keras.Model):
             pad_token_id: int = 0,
             rmsnorm: bool = True,
             d_ssm: Optional[int] = None,
+            norm_before_gate: bool = False,
             **kwargs: Any,
     ) -> None:
         if vocab_size <= 0:
@@ -148,6 +155,7 @@ class Mamba2(keras.Model):
         self.norm_epsilon = norm_epsilon
         self.pad_token_id = pad_token_id
         self.rmsnorm = rmsnorm
+        self.norm_before_gate = norm_before_gate
 
         # If d_ssm is not provided, it should default to d_inner.
         d_inner = d_model * expand
@@ -169,6 +177,7 @@ class Mamba2(keras.Model):
                 d_ssm=self.d_ssm,
                 rmsnorm=self.rmsnorm,
                 norm_epsilon=self.norm_epsilon,
+                norm_before_gate=self.norm_before_gate,
                 name=f"mamba2_block_{i}",
             )
             self.encoder_layers.append(block)
@@ -224,6 +233,7 @@ class Mamba2(keras.Model):
             "pad_token_id": self.pad_token_id,
             "rmsnorm": self.rmsnorm,
             "d_ssm": self.d_ssm,
+            "norm_before_gate": self.norm_before_gate,
         })
         return config
 

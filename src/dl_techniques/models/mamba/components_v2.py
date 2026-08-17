@@ -361,7 +361,17 @@ class Mamba2Layer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class Mamba2ResidualBlock(keras.layers.Layer):
-    """Residual block wrapping a Mamba2Layer with pre-normalization."""
+    """Residual block wrapping a Mamba2Layer with pre-normalization.
+
+    :param norm_before_gate: Forwarded verbatim to the wrapped
+        :class:`Mamba2Layer`; see its docstring for the semantics. It is exposed
+        here because that docstring names ``norm_before_gate=True`` as the
+        remedy for a checkpoint trained under the pre-2026-08-15 default, and
+        this block did not accept, forward or serialize it — which made the
+        documented escape hatch unreachable from every real model, since
+        :class:`~dl_techniques.models.mamba.mamba_v2.Mamba2Model` builds its
+        whole stack out of these blocks.
+    """
 
     def __init__(
             self,
@@ -373,6 +383,7 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             d_ssm: int,
             norm_epsilon: float = 1e-5,
             rmsnorm: bool = True,
+            norm_before_gate: bool = False,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -384,6 +395,7 @@ class Mamba2ResidualBlock(keras.layers.Layer):
         self.d_ssm = d_ssm
         self.norm_epsilon = norm_epsilon
         self.rmsnorm = rmsnorm
+        self.norm_before_gate = norm_before_gate
 
         if rmsnorm:
             self.norm = keras.layers.LayerNormalization(
@@ -402,6 +414,7 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             d_ssm=self.d_ssm,
             rmsnorm=self.rmsnorm,
             norm_epsilon=self.norm_epsilon,
+            norm_before_gate=self.norm_before_gate,
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -445,6 +458,7 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             "d_ssm": self.d_ssm,
             "norm_epsilon": self.norm_epsilon,
             "rmsnorm": self.rmsnorm,
+            "norm_before_gate": self.norm_before_gate,
         })
         return config
 

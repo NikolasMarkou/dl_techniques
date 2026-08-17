@@ -245,12 +245,26 @@ class NAMCell(keras.layers.Layer):
             epsilon=config.epsilon,
             name="ntm_memory",
         )
+        # DECISION plan-2026-08-17T183311-79c63e38/D-014
+        # CONTENT addressing is NAM's design, not an oversight — both heads have
+        # been CONTENT since the package's first commit, and NAM's memory is a
+        # content-keyed scratchpad for an expression evaluator, with no notion of
+        # an adjacent slot for a circular shift to reach.
+        #
+        # WHAT NOT TO DO: do not restore `shift_range=config.shift_range` here.
+        # Under CONTENT, `NTMReadHead.__init__` does not create `shift_dense`
+        # (D-073), so the argument reached a branch NAM never takes and
+        # `NAMConfig.shift_range` configured nothing at all. It has been deleted
+        # from the config rather than reinstated. Switching these two sites to
+        # `AddressingMode.HYBRID` to "use" it would be the opposite change: it
+        # adds three trained projections and changes the memory semantics of a
+        # shipped model to give a copy-pasted knob something to do.
+        # See decisions.md D-014.
         self.read_heads = [
             NTMReadHead(
                 memory_size=config.memory_size,
                 memory_dim=h,
                 addressing_mode=AddressingMode.CONTENT,
-                shift_range=config.shift_range,
                 name=f"read_head_{i}",
             )
             for i in range(config.num_read_heads)
@@ -259,7 +273,6 @@ class NAMCell(keras.layers.Layer):
             memory_size=config.memory_size,
             memory_dim=h,
             addressing_mode=AddressingMode.CONTENT,
-            shift_range=config.shift_range,
             name="write_head",
         )
 

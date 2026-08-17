@@ -31,7 +31,14 @@ class NAMConfig:
     :param hidden_act: FFN activation function.
     :param layer_norm_eps: Epsilon for layer normalization.
     :param epsilon: Numerical stability constant for arithmetic.
-    :param shift_range: Circular shift range for NTM addressing.
+
+    .. note::
+       There is no ``shift_range``. NAM builds every NTM read and write head
+       with ``AddressingMode.CONTENT`` (see :mod:`.cell`), under which the
+       circular-shift projection is not created at all, so the field this
+       docstring used to advertise configured nothing. Removed 2026-08-18;
+       :meth:`from_dict` ignores it, so a config dict serialized before then
+       still loads. See decisions.md D-014.
     """
 
     hidden_size: int = 128
@@ -52,7 +59,6 @@ class NAMConfig:
     hidden_act: str = "gelu"
     layer_norm_eps: float = 1e-6
     epsilon: float = 1e-7
-    shift_range: int = 3
 
     def __post_init__(self) -> None:
         if self.hidden_size <= 0 or self.hidden_size % self.num_heads != 0:
