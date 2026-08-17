@@ -39,11 +39,13 @@ Deep supervision is available as an optional training aid. Intermediate stages a
 given their own pooling and classification heads, so gradient enters the network
 at several depths rather than only at the output. This shortens the effective
 backpropagation distance for early layers and pressures intermediate
-representations to be linearly discriminative on their own. Stage 0 is skipped as
-too shallow to supervise usefully, and the final stage is served by the main head.
-When enabled the model returns `[final_output, stage3, stage2, stage1]`, reversed
-so the deepest supervision head comes first; inference typically consumes index 0
-alone.
+representations to be linearly discriminative on their own. Every stage but the
+last gets a head: the final stage is already served by the main head, and stage 0
+— the shallowest — is exactly where the shortened path is worth having. For the
+four-stage default that is three supervision heads, on stages 1, 2 and 3 counting
+from one. When enabled the model returns `[final_output, stage3, stage2, stage1]`,
+reversed so the deepest supervision head comes first; inference typically consumes
+index 0 alone.
 
 Normalization and activation are supplied through factories rather than
 hard-coded, and an optional `normalization_kwargs` dict is forwarded to every
@@ -103,8 +105,9 @@ class ResNet(keras.Model):
     cannot be taken verbatim: at the first block of every stage after the first
     (stride-2 shape change), plus stage 0's first block under the bottleneck
     design (channel widening at stride 1). With ``enable_deep_supervision=True``
-    intermediate stages receive their own GAP + Dense heads, and the model
-    returns ``[final_output, stage3, stage2, stage1]``.
+    every stage but the last receives its own GAP + Dense head (the last stage is
+    the main head's own), and the model returns
+    ``[final_output, stage3, stage2, stage1]``.
 
     **Architecture Overview:**
 
@@ -195,8 +198,9 @@ class ResNet(keras.Model):
         the final stage's feature maps are returned. Defaults to True.
     :type include_top: bool
     :param enable_deep_supervision: Whether to attach auxiliary classification
-        heads to intermediate stages. Requires ``include_top=True``. Stage 0 is
-        skipped as too shallow to supervise. Defaults to False.
+        heads. Requires ``include_top=True``. One head per stage except the last,
+        whose features the main head already consumes; stage 0 is included.
+        Defaults to False.
     :type enable_deep_supervision: bool
     :param input_shape: Input shape ``(height, width, channels)`` excluding the
         batch dimension. Defaults to ``(224, 224, 3)``.
@@ -423,10 +427,24 @@ class ResNet(keras.Model):
     def _build_supervision_heads(self) -> None:
         """Build deep supervision classification heads.
 
-        One GAP + Dense head per intermediate stage. Stage 0 is skipped (too
-        shallow to supervise); the final stage is served by the main head.
+        One GAP + Dense head per stage EXCEPT the last. The final stage is
+        already served by the main head — ``call`` appends one entry to
+        ``stage_features`` per stage, so a head at ``stage_idx ==
+        len(blocks_per_stage) - 1`` would read the very tensor ``self.gap`` /
+        ``self.classifier`` consume and inject no gradient the main head does
+        not already carry. Stage 0 IS supervised: it is the only stage for which
+        deep supervision actually shortens the backpropagation path, which is
+        the entire point of the technique.
         """
-        for stage_idx in range(1, len(self.blocks_per_stage)):
+        # DECISION plan-2026-08-17T183311-79c63e38/D-019
+        # range(0, N-1), NOT range(1, N) and NOT range(1, N-1). The old bound
+        # supervised the FINAL stage (a duplicate of the main head) and skipped
+        # stage 0 (the only one that shortens backprop). Do NOT "restore" the
+        # `Stage 0 is skipped as too shallow` rule that the old prose asserted:
+        # skipping stage 0 while also excluding the final stage would leave a
+        # 4-stage ResNet with two supervision heads and no shallow supervision
+        # at all. See decisions.md D-019.
+        for stage_idx in range(0, len(self.blocks_per_stage) - 1):
             gap_layer = keras.layers.GlobalAveragePooling2D(
                 name=f"supervision_gap_stage{stage_idx+1}"
             )
