@@ -492,9 +492,60 @@ class TestConvNeXtV2:
             # Generate prediction with loaded model
             loaded_outputs = loaded_model(cifar_sample_data, training=False)
 
-            # Check outputs match (shapes should be identical)
+            # Shape and parameter count are the two quantities the nested-sublayer
+            # weight-loss trap is documented to PRESERVE while restoring fresh kernels
+            # (SYSTEM.md framework behaviour 1), and `ConvNeXtV2` has exactly that
+            # container shape: `self.stages_list` is `List[List[Dict[str, Layer]]]` and
+            # `self.downsample_layers_list` is `List[List[Layer]]`. So they cannot be the
+            # whole assertion — the VALUE comparison below is.
             assert original_outputs.shape == loaded_outputs.shape
             assert loaded_model.count_params() == model.count_params()
+
+            # `training=False` is load-bearing (SYSTEM.md framework behaviour 3): a bare
+            # `model(x)` runs the stochastic-depth path and fabricates round-trip deltas
+            # that are indistinguishable from reinitialized weights.
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_outputs),
+                keras.ops.convert_to_numpy(loaded_outputs),
+                atol=1e-5,
+                err_msg=(
+                    "ConvNeXtV2 output changed across a .keras round-trip: the restored "
+                    "model computes something different from the saved one."
+                ),
+            )
+
+    def test_output_values_depend_on_every_stage(
+        self, num_classes, cifar_input_shape
+    ):
+        """A non-local receptive-field probe (see the V1 twin for the rationale).
+
+        Perturbing one interior pixel must move a spatially distant output cell, which
+        no shape or finiteness assertion can establish.
+        """
+        keras.utils.set_random_seed(1234)
+        model = ConvNeXtV2(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+            include_top=False,
+        )
+
+        x = np.zeros((1, *cifar_input_shape), dtype="float32")
+        base = keras.ops.convert_to_numpy(model(x, training=False))
+
+        bumped = x.copy()
+        bumped[0, 2, 2, :] = 10.0
+        moved = keras.ops.convert_to_numpy(model(bumped, training=False))
+
+        delta = np.abs(moved - base)
+        assert delta.max() > 1e-4, "one interior pixel moved nothing at all"
+
+        far_corner = delta[0, -1, -1, :]
+        assert far_corner.max() > 1e-6, (
+            "a corner perturbation did not reach the opposite corner of the feature "
+            "map — the stage ladder is not propagating information"
+        )
 
     def test_training_integration(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test training integration with a small dataset."""

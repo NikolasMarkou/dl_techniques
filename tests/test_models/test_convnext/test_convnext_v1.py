@@ -468,9 +468,123 @@ class TestConvNeXtV1:
             # Generate prediction with loaded model
             loaded_outputs = loaded_model(cifar_sample_data, training=False)
 
-            # Check outputs match (shapes should be identical)
+            # Shape and parameter count are necessary but NOT sufficient: they are
+            # exactly the two quantities the nested-sublayer weight-loss trap preserves
+            # while restoring freshly initialized kernels (SYSTEM.md framework behaviour
+            # 1). `ConvNeXtV1` stores `self.stages_list` as `List[List[Dict[str, Layer]]]`
+            # and `self.downsample_layers_list` as `List[List[Layer]]`, so it has exactly
+            # the container shape that trap is documented for. The VALUE comparison below
+            # is the assertion that would fire.
             assert original_outputs.shape == loaded_outputs.shape
             assert loaded_model.count_params() == model.count_params()
+
+            # `training=False` is load-bearing and must NOT be relaxed to a bare
+            # `model(x)`: SYSTEM.md framework behaviour 3 records that `training=None` is
+            # not inference here — the shared `StochasticDepth` short-circuits on
+            # `training is False` only, so a plain call runs the stochastic path and
+            # produces round-trip deltas of 0.2-2.2 that look exactly like reinitialized
+            # weights.
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_outputs),
+                keras.ops.convert_to_numpy(loaded_outputs),
+                atol=1e-5,
+                err_msg=(
+                    "ConvNeXtV1 output changed across a .keras round-trip: the restored "
+                    "model computes something different from the saved one."
+                ),
+            )
+
+    def test_the_round_trip_assertion_would_catch_a_reinitialized_restore(
+        self, num_classes, cifar_input_shape, cifar_sample_data
+    ):
+        """RED proof for the value comparison in `test_model_save_load`, kept in the
+        suite rather than performed once and thrown away.
+
+        MEASURED 2026-08-17 (CPU): the nested-container trap does NOT bite in
+        `ConvNeXtV1`'s code shape. All 65 weights round-trip bit-identically and the
+        output delta is exactly 0.0, despite `stages_list` being
+        `List[List[Dict[str, Layer]]]`. So the value assertion is currently a
+        REGRESSION guard, not a bug-catcher — which is precisely why it needs a proof
+        that it can fail at all. This test supplies one by transplanting fresh weights
+        into a loaded model and requiring the comparison to fire while the shape and
+        `count_params()` assertions still pass.
+        """
+        keras.utils.set_random_seed(7)
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+        )
+        original_outputs = keras.ops.convert_to_numpy(
+            model(cifar_sample_data, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "convnext_red.keras")
+            model.save(model_path)
+            loaded_model = keras.models.load_model(model_path)
+
+            # A second load, then every weight overwritten — the observable signature of
+            # "restored the graph, reinitialized the kernels".
+            sabotaged = keras.models.load_model(model_path)
+            rng = np.random.default_rng(4242)
+            for v in sabotaged.weights:
+                v.assign(keras.ops.convert_to_tensor(
+                    rng.normal(scale=0.3, size=v.shape).astype("float32")
+                ))
+            sabotaged_outputs = keras.ops.convert_to_numpy(
+                sabotaged(cifar_sample_data, training=False)
+            )
+
+            # The two quantities the trap preserves survive the sabotage untouched ...
+            assert sabotaged_outputs.shape == original_outputs.shape
+            assert sabotaged.count_params() == loaded_model.count_params()
+            # ... and only the value assertion notices.
+            with pytest.raises(AssertionError):
+                np.testing.assert_allclose(
+                    original_outputs, sabotaged_outputs, atol=1e-5
+                )
+
+    def test_output_values_depend_on_every_stage(
+        self, num_classes, cifar_input_shape
+    ):
+        """A non-local receptive-field probe — the first assertion in this package that
+        looks at a number the model produced.
+
+        62 tests here carry 64 `.shape` assertions and 0 numeric comparisons; every
+        non-shape assertion is a constructor-attribute echo (`assert model.dims == ...`).
+        A shape or finiteness assertion cannot tell a working ConvNeXt from one whose
+        stages are all dead: perturbing ONE interior input pixel must move a spatially
+        DISTANT logit, which requires the whole downsample/stage ladder to be live and
+        connected.
+        """
+        keras.utils.set_random_seed(1234)
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+            include_top=False,
+        )
+
+        x = np.zeros((1, *cifar_input_shape), dtype="float32")
+        base = keras.ops.convert_to_numpy(model(x, training=False))
+
+        bumped = x.copy()
+        bumped[0, 2, 2, :] = 10.0          # a single pixel near the top-left corner
+        moved = keras.ops.convert_to_numpy(model(bumped, training=False))
+
+        delta = np.abs(moved - base)
+        assert delta.max() > 1e-4, "one interior pixel moved nothing at all"
+
+        # Non-local: the response must reach the spatially OPPOSITE corner of the final
+        # feature map, not just the cell the pixel sits in.
+        far_corner = delta[0, -1, -1, :]
+        assert far_corner.max() > 1e-6, (
+            "a corner perturbation did not reach the opposite corner of the feature "
+            "map — the stage ladder is not propagating information"
+        )
 
     def test_training_integration(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test training integration with a small dataset."""

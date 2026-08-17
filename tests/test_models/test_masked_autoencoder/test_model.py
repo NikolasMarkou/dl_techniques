@@ -67,17 +67,65 @@ class TestMAE:
     def test_keras_round_trip(self, tmp_path):
         model = _model()
         x = _images()
-        # `encoded` is the deterministic encoder output (mask path is random)
-        before = keras.ops.convert_to_numpy(model(x, training=False)["encoded"])
+        # The mask path is NOT random under `training=False`: `PatchMasking._create_mask`
+        # returns `ops.zeros(...)` whenever `training` is falsy, so `reconstruction` is
+        # deterministic here. Comparing ONLY `encoded` left the decoder's restored
+        # weights asserted by nothing at all — the encoder is a plain functional
+        # `keras.Model` and cannot exercise the container shapes the decoder uses.
+        before = model(x, training=False)
+        before_encoded = keras.ops.convert_to_numpy(before["encoded"])
+        before_recon = keras.ops.convert_to_numpy(before["reconstruction"])
+        # Anti-vacuity: an all-zero reconstruction would satisfy any allclose below.
+        assert np.abs(before_recon).max() > 0.0
 
         path = os.path.join(str(tmp_path), "mae.keras")
         model.save(path)
         loaded = keras.models.load_model(path)
-        after = keras.ops.convert_to_numpy(loaded(x, training=False)["encoded"])
+        after = loaded(x, training=False)
 
         # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
-        np.testing.assert_allclose(before, after, atol=1e-4,
-                                   err_msg="MAE encoded output differs after round-trip")
+        np.testing.assert_allclose(
+            before_encoded,
+            keras.ops.convert_to_numpy(after["encoded"]),
+            atol=1e-4,
+            err_msg="MAE encoded output differs after round-trip")
+        np.testing.assert_allclose(
+            before_recon,
+            keras.ops.convert_to_numpy(after["reconstruction"]),
+            atol=1e-4,
+            err_msg="MAE reconstruction differs after round-trip: the DECODER's "
+                    "weights were not restored")
+
+    def test_the_round_trip_assertion_would_catch_a_lost_decoder(self, tmp_path):
+        """RED proof, kept in the suite: transplant fresh decoder weights into the
+        loaded model and require the `reconstruction` comparison above to fire.
+
+        A shape-and-count assertion cannot do this — the transplanted model has an
+        identical output shape and an identical `count_params()`.
+        """
+        model = _model()
+        x = _images()
+        before = model(x, training=False)
+        before_recon = keras.ops.convert_to_numpy(before["reconstruction"])
+
+        path = os.path.join(str(tmp_path), "mae.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        fresh = keras.models.load_model(path)
+        rng = np.random.default_rng(99)
+        for v in fresh.weights:
+            v.assign(keras.ops.convert_to_tensor(
+                rng.normal(scale=0.5, size=v.shape).astype("float32")))
+        sabotaged = keras.ops.convert_to_numpy(
+            fresh(x, training=False)["reconstruction"])
+
+        # The two quantities the trap preserves are still equal ...
+        assert sabotaged.shape == before_recon.shape
+        assert fresh.count_params() == loaded.count_params()
+        # ... while the VALUE assertion fires.
+        with pytest.raises(AssertionError):
+            np.testing.assert_allclose(before_recon, sabotaged, atol=1e-4)
 
 
 if __name__ == "__main__":
