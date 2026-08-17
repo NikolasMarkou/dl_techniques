@@ -464,7 +464,11 @@ def train_score_vlm(
         model: ScoreBasedNanoVLM instance
         train_dataset: Training dataset
         epochs: Number of epochs
-        optimizer_config: Optimizer configuration
+        optimizer_config: Optimizer configuration, in the shape
+            :func:`dl_techniques.optimization.optimizer_builder` accepts, plus
+            an optional ``learning_rate`` (a float or a
+            ``LearningRateSchedule``) which is forwarded as that builder's
+            separate ``lr_schedule`` argument. Defaults to 1e-4.
         checkpoint_dir: Directory for checkpoints
         log_frequency: Log every N steps
         sample_every_n_epochs: Generate monitoring samples every N epochs.
@@ -481,7 +485,23 @@ def train_score_vlm(
         }
 
     from dl_techniques.optimization import optimizer_builder
-    optimizer = optimizer_builder(optimizer_config)
+
+    # DECISION plan-2026-08-17T183311-79c63e38/D-016
+    # `optimizer_builder(config, lr_schedule)` takes the learning rate as its
+    # OWN positional argument and never reads it out of `config`; `lr_schedule`
+    # has no default.
+    #
+    # WHAT NOT TO DO: do NOT go back to `optimizer_builder(optimizer_config)`.
+    # It raised `TypeError: missing 1 required positional argument` two
+    # statements before `ScoreVLMTrainer` was even constructed, so it hid every
+    # trainer-internal defect behind it -- and because this function has no
+    # callers in `src/`, nothing surfaced it. Do NOT leave `learning_rate`
+    # inside the dict either: it is not a key `optimizer_builder` consumes, so
+    # a caller-supplied rate would silently do nothing.
+    # See decisions.md D-016.
+    optimizer_config = dict(optimizer_config)
+    lr_schedule = optimizer_config.pop('learning_rate', 1e-4)
+    optimizer = optimizer_builder(optimizer_config, lr_schedule)
 
     # Setup loss and trainer
     loss_fn = VLMDenoisingLoss(
@@ -506,7 +526,23 @@ def train_score_vlm(
         trainer.reset_metrics()
 
         last_text_tokens = None
-        for step, (images, text_tokens) in enumerate(train_dataset):
+        # DECISION plan-2026-08-17T183311-79c63e38/D-016
+        # Index the dataset by `len()`. `keras.utils.Sequence` is
+        # `PyDataset` in Keras 3 and defines NO `__iter__` (MEASURED against
+        # keras 3.8) -- so `for ... in train_dataset` falls back to Python's
+        # legacy `__getitem__` protocol, which walks 0, 1, 2, ... until
+        # `IndexError` and IGNORES `__len__` entirely.
+        #
+        # WHAT NOT TO DO: do not restore
+        # `for step, (images, text_tokens) in enumerate(train_dataset)`. A
+        # correctly-written `PyDataset` -- including this module's own
+        # `example_training` `DummyDataset`, whose `__getitem__` generates a
+        # fresh random batch for any index and never raises -- makes that loop
+        # run FOREVER. Epoch 0 never ends, so no checkpoint is ever written and
+        # the run looks like a hang rather than a failure.
+        # See decisions.md D-016.
+        for step in range(len(train_dataset)):
+            images, text_tokens = train_dataset[step]
             last_text_tokens = text_tokens
             metrics = trainer.train_step(images, text_tokens)
 
