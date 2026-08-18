@@ -1,7 +1,11 @@
 """Permanent build+forward smoke test for the swin_transformer family.
 
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_b5cec9e4).
-REPORT-ONLY: a build/forward break is documented via xfail, never fixed.
+**No longer REPORT-ONLY.** `test_smoke_build_and_forward` used to wrap
+construction AND the forward pass in `except Exception: pytest.xfail(...)`, so a
+total build break reported as `xfail` -- the package's headline smoke test could
+not fail, which is not an instrument. It now fails, and asserts the logits'
+shape rather than only their finiteness.
 
 `create_swin_transformer(variant, num_classes, input_shape)` verified from
 source (model.py:627 -> SwinTransformer.from_variant). The tiny variant uses
@@ -21,33 +25,34 @@ See ``TestWarnedGeometriesAreCorrect`` for the executable form.
 import numpy as np
 import pytest
 
+from ..smoke_contract_oracle import assert_finite
 
-def _assert_finite(value):
-    arr = np.asarray(value)
-    assert arr is not None
-    assert not np.any(np.isnan(arr))
-    assert not np.any(np.isinf(arr))
+SMOKE_BATCH, SMOKE_NUM_CLASSES = 2, 10
+
+
+def _smoke_build():
+    from dl_techniques.models.swin_transformer.model import create_swin_transformer
+
+    # 32x32 is the DOCUMENTED example input (model.py:30), not a minimum --
+    # see the module docstring; smaller and non-divisible inputs also work.
+    return create_swin_transformer("tiny", SMOKE_NUM_CLASSES, input_shape=(32, 32, 3))
+
+
+def _smoke_inputs():
+    return np.random.rand(SMOKE_BATCH, 32, 32, 3).astype("float32")
+
+
+def _assert_smoke_contract(out):
+    """The smoke assertion. Shared with the meta-test so it is proven falsifiable."""
+    assert not isinstance(out, (dict, list, tuple)), (
+        f"swin should return a single logits tensor, got {type(out)}"
+    )
+    assert tuple(out.shape) == (SMOKE_BATCH, SMOKE_NUM_CLASSES), tuple(out.shape)
+    assert_finite(out)
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.swin_transformer.model import (
-            create_swin_transformer,
-        )
-
-        # 32x32 is the DOCUMENTED example input (model.py:30), not a minimum --
-        # see the module docstring; smaller and non-divisible inputs also work.
-        model = create_swin_transformer("tiny", 10, input_shape=(32, 32, 3))
-
-        images = np.random.rand(2, 32, 32, 3).astype("float32")
-        out = model(images, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"swin_transformer build/forward failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    _assert_finite(out)
+    _assert_smoke_contract(_smoke_build()(_smoke_inputs(), training=False))
 
 
 # ---------------------------------------------------------------------------
@@ -114,4 +119,4 @@ class TestWarnedGeometriesAreCorrect:
             f"SwinTransformer.__init__ asserts these geometries are CORRECT; "
             f"if that is no longer true the note is a false claim."
         )
-        _assert_finite(out)
+        assert_finite(out)

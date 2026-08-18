@@ -1,57 +1,67 @@
 """Permanent build+forward smoke test for the nano_vlm_world_model family.
 
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_b5cec9e4).
-REPORT-ONLY: a build/forward break is documented via xfail, never fixed.
+
+**No longer REPORT-ONLY.** The original version wrapped construction AND the
+forward pass in `except Exception: pytest.xfail(...)`, so a total build break
+reported as `xfail` -- the package's headline smoke test could not fail, which
+is not an instrument. It now fails, and asserts the full output key set and
+per-key shape rather than "some non-empty structure of finite values".
 
 `create_score_based_nanovlm(variant, mode, vocab_size, ...)` verified from
 source (model.py:559 -> ScoreBasedNanoVLM at model.py:33). GHOST family: was
-dead-on-forward (MEMORY.md), reportedly fixed at 1b61a381, but HIGH risk after
-the 2026-06-14/15 transformers refactor (nano_vlm already broke on
-MultiModalFusion in step 2). call() (model.py:202) consumes a dict
-``{'images': (B,224,224,3), 'text': (B,T), 'timesteps': (B,) optional}`` and
-returns a dict of denoised/target tensors. Smallest is ``variant='mini'``
-(embed_dim 384, depth 6); img_size 224, patch_size 16. xfail with the exact
-captured error if the forward breaks.
+dead-on-forward (MEMORY.md), fixed at 1b61a381. call() (model.py:202) consumes a
+dict ``{'images': (B,224,224,3), 'text': (B,T), 'timesteps': (B,) optional}``.
+
+Shapes MEASURED at ``variant='mini'`` (embed_dim 384, depth 6, img_size 224,
+patch_size 16): the vision sequence is 197 = (224/16)**2 + 1 CLS token.
 """
 
 import numpy as np
-import pytest
+
+from ..smoke_contract_oracle import assert_finite
+
+BATCH, TEXT_LEN, EMBED_DIM = 2, 16, 384
+VISION_LEN = (224 // 16) ** 2 + 1  # 197
+
+EXPECTED_SHAPES = {
+    "denoised_vision": (BATCH, VISION_LEN, EMBED_DIM),
+    "target_vision": (BATCH, VISION_LEN, EMBED_DIM),
+    "noise_vision": (BATCH, VISION_LEN, EMBED_DIM),
+    "denoised_text": (BATCH, TEXT_LEN, EMBED_DIM),
+    "target_text": (BATCH, TEXT_LEN, EMBED_DIM),
+    "noise_text": (BATCH, TEXT_LEN, EMBED_DIM),
+    "joint_denoised_vision": (BATCH, VISION_LEN, EMBED_DIM),
+    "joint_denoised_text": (BATCH, TEXT_LEN, EMBED_DIM),
+    "joint_target_vision": (BATCH, VISION_LEN, EMBED_DIM),
+    "joint_target_text": (BATCH, TEXT_LEN, EMBED_DIM),
+    "timesteps": (BATCH,),
+}
 
 
-def _assert_finite(value):
-    arr = np.asarray(value)
-    assert arr is not None
-    assert not np.any(np.isnan(arr))
-    assert not np.any(np.isinf(arr))
+def _build():
+    from dl_techniques.models.nano_vlm_world_model.model import (
+        create_score_based_nanovlm,
+    )
+
+    return create_score_based_nanovlm(variant="mini", vocab_size=256)
+
+
+def _inputs():
+    return {
+        "images": np.random.rand(BATCH, 224, 224, 3).astype("float32"),
+        "text": np.random.randint(0, 256, size=(BATCH, TEXT_LEN)).astype("int32"),
+    }
+
+
+def _assert_contract(out):
+    """The smoke assertion. Shared with the meta-test so it is proven falsifiable."""
+    assert isinstance(out, dict), f"expected a dict of tensors, got {type(out)}"
+    assert set(out) == set(EXPECTED_SHAPES), sorted(out)
+    for key, expected in EXPECTED_SHAPES.items():
+        assert tuple(out[key].shape) == expected, f"{key}: {tuple(out[key].shape)}"
+    assert_finite(out)
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.nano_vlm_world_model.model import (
-            create_score_based_nanovlm,
-        )
-
-        model = create_score_based_nanovlm(
-            variant="mini", vocab_size=256
-        )
-
-        inputs = {
-            "images": np.random.rand(2, 224, 224, 3).astype("float32"),
-            "text": np.random.randint(0, 256, size=(2, 16)).astype("int32"),
-        }
-        out = model(inputs, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"nano_vlm_world_model build/forward failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    if isinstance(out, dict):
-        vals = list(out.values())
-    elif isinstance(out, (list, tuple)):
-        vals = list(out)
-    else:
-        vals = [out]
-    assert len(vals) > 0
-    for v in vals:
-        _assert_finite(v)
+    _assert_contract(_build()(_inputs(), training=False))
