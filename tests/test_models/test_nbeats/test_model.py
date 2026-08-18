@@ -14,6 +14,10 @@ from dl_techniques.models.time_series.nbeats import (
     create_nbeatsx_model,
 )
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+)
+
 
 class TestNBeatsNet:
     """Comprehensive test suite for N-BEATS model following modern Keras 3 patterns."""
@@ -376,7 +380,14 @@ class TestNBeatsNet:
         )
 
     def test_different_stack_configurations(self, sample_univariate_input):
-        """Test different stack type configurations."""
+        """``stack_types``/``thetas_dim`` must build the requested stacks.
+
+        The forecast shape is ``(B, 12, 1)`` for every stack layout, and
+        ``len(model.blocks) == len(stack_types)`` is a STRUCTURAL ECHO of the
+        list's length -- it says nothing about the blocks being of the requested
+        TYPES or carrying the requested theta widths. Both are parameterisation
+        knobs, so the weight-shape signature is the discriminating fact.
+        """
         base_config = {
             'backcast_length': 24,
             'forecast_length': 12,
@@ -392,6 +403,27 @@ class TestNBeatsNet:
             (['trend', 'seasonality'], [4, 8]),
             (['generic', 'trend', 'seasonality'], [16, 4, 8])
         ]
+
+        def _build(stack_types, thetas_dim):
+            config = base_config.copy()
+            config.update({
+                'stack_types': stack_types,
+                'thetas_dim': thetas_dim
+            })
+            model = NBeatsNet(**config)
+            model(sample_univariate_input[:1])
+            return model
+
+        builders = {
+            tuple(st): (lambda st=st, td=td: _build(st, td))
+            for st, td in configs
+        }
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="stack_types/thetas_dim")
+        # Stronger than "different": more stacks means strictly more weights.
+        assert len(sigs[('generic',)]) < len(
+            sigs[('generic', 'trend', 'seasonality')]
+        ), "adding stacks did not add weight tensors"
 
         for stack_types, thetas_dim in configs:
             config = base_config.copy()

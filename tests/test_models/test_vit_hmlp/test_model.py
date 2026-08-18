@@ -20,6 +20,11 @@ from dl_techniques.models.vit_hmlp.model import (
     apply_mask_after_stem
 )
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestViTHMLPInitialization:
     """Test suite for ViTHMLP model initialization with modern patterns."""
@@ -984,16 +989,33 @@ class TestViTHMLPEdgeCases:
         assert not np.any(np.isnan(output.numpy()))
 
     def test_different_stem_normalization(self):
-        """Test different stem normalization configurations."""
+        """``stem_norm_layer`` must build the requested stem normalization."""
         norm_types = ["batch", "layer"]
 
-        for norm_type in norm_types:
+        def _build(norm_type):
             model = ViTHMLP(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=5,
                 stem_norm_layer=norm_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # `model.stem.norm_layer == norm_type` is a knob ECHO. BatchNorm carries
+        # non-trainable moving mean/variance that LayerNorm does not, so the
+        # weight-shape signature says which normalization was actually built.
+        sigs = assert_structural_knob_changes_weights(
+            {n: (lambda n=n: _build(n)) for n in norm_types},
+            knob="stem_norm_layer",
+        )
+        assert len(sigs["batch"]) > len(sigs["layer"]), (
+            "stem_norm_layer='batch' should add moving-statistic weights the "
+            f"layer-norm stem has not: {len(sigs['batch'])} vs {len(sigs['layer'])}"
+        )
+
+        for norm_type in norm_types:
+            model = _build(norm_type)
 
             input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
@@ -1003,13 +1025,54 @@ class TestViTHMLPEdgeCases:
             assert model.stem.norm_layer == norm_type
 
     def test_different_normalization_configurations(self):
-        """Test different transformer normalization configurations using factories."""
+        """Both normalization axes must reach the graph.
+
+        The logits shape is ``(2, 5)`` under all four combinations, so the old
+        assertion was true whether or not either kwarg was honoured -- and the
+        two axes fail differently, so they need different instruments.
+        """
         configs = [
             {"normalization_type": "layer_norm", "normalization_position": "post"},
             {"normalization_type": "layer_norm", "normalization_position": "pre"},
             {"normalization_type": "rms_norm", "normalization_position": "post"},
             {"normalization_type": "rms_norm", "normalization_position": "pre"}
         ]
+
+        input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
+
+        def _build(**kwargs):
+            model = ViTHMLP(
+                input_shape=(64, 64, 3),
+                scale="tiny",
+                num_classes=5,
+                **kwargs
+            )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # Axis 1 -- `normalization_type` is STRUCTURAL: RMSNorm has no centering
+        # shift, so it holds strictly fewer weights than LayerNorm. (Measured on
+        # the `tiny` scale: 127 tensors / 5,486,021 params vs 152 / 5,490,821.)
+        type_sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(normalization_type=t))
+             for t in ("layer_norm", "rms_norm")},
+            knob="normalization_type",
+        )
+        assert len(type_sigs["rms_norm"]) < len(type_sigs["layer_norm"])
+
+        # Axis 2 -- `normalization_position` is a VALUE knob: pre-norm and
+        # post-norm hold the SAME weights, so under one seed they are
+        # bit-identical and the whole output difference is the ordering. This is
+        # the axis a shape assertion is completely blind to.
+        for norm_type in ("layer_norm", "rms_norm"):
+            deltas = assert_value_knob_changes_output(
+                {pos: (lambda pos=pos: _build(
+                    normalization_type=norm_type, normalization_position=pos))
+                 for pos in ("post", "pre")},
+                input_tensor,
+                knob=f"normalization_position ({norm_type})",
+            )
+            assert min(deltas.values()) > 1e-5
 
         for config in configs:
             model = ViTHMLP(
@@ -1019,23 +1082,43 @@ class TestViTHMLPEdgeCases:
                 **config
             )
 
-            input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
 
             assert output.shape == (2, 5)
             assert not np.any(np.isnan(output.numpy()))
 
     def test_different_ffn_types(self):
-        """Test different FFN types using factory integration."""
+        """``ffn_type`` must build the requested FFN.
+
+        The logits shape is ``(1, 3)`` for every FFN, so the old assertion held
+        whether or not the factory ever saw the argument. The three FFNs have
+        genuinely different parameterisations -- SwiGLU fuses gate and up
+        projections, GEGLU adds a third matrix -- so the weight-shape signature
+        pins which one was built.
+        """
         ffn_types = ["mlp", "swiglu", "geglu"]  # Available types
 
-        for ffn_type in ffn_types:
+        def _build(ffn_type):
             model = ViTHMLP(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(t)) for t in ffn_types}, knob="ffn_type")
+        params = {
+            t: sum(int(np.prod(w)) for w in sigs[t]) for t in ffn_types
+        }
+        # All three parameter counts must be distinct -- two matching counts
+        # would mean two of the three names resolved to the same layer.
+        assert len(set(params.values())) == 3, f"ffn_type parameter counts: {params}"
+
+        for ffn_type in ffn_types:
+            model = _build(ffn_type)
 
             input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
             output = model(input_tensor)

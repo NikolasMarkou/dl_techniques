@@ -24,6 +24,11 @@ from typing import Dict, Any
 
 from dl_techniques.models.mamba import Mamba
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestMambaModelInitialization:
     """Test Mamba model initialization and parameter validation."""
@@ -877,13 +882,32 @@ class TestMambaAdvancedFeatures:
     """Test advanced Mamba features and SSM-specific functionality."""
 
     def test_different_expansion_factors(self):
-        """Test model with different expansion factors."""
+        """``expand`` must reach the SSM's inner width.
+
+        ``last_hidden_state`` is ``(2, 16, 128)`` at every expansion, and
+        ``first_mamba.d_inner == expand * 128`` is a knob ECHO -- it proves the
+        constructor stored the kwarg, not that the weights got wider. `expand`
+        is structural, so the weight-shape signature is the discriminating fact.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 128,
             "num_layers": 2,
             "d_state": 8
         }
+
+        def _build(**kw):
+            model = Mamba(**base_config, **kw)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {e: (lambda e=e: _build(expand=e)) for e in [2, 3, 4]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="expand")
+        # Stronger than "different": d_inner = expand * d_model, so the
+        # in-projection's output width must scale with `expand`.
+        assert max(w[-1] for w in sigs[2] if len(w) == 2) * 2 == max(
+            w[-1] for w in sigs[4] if len(w) == 2
+        ), "expand did not scale the widest projection"
 
         for expand in [2, 3, 4]:
             model = Mamba(**base_config, expand=expand)
@@ -898,13 +922,32 @@ class TestMambaAdvancedFeatures:
             assert first_mamba.d_inner == expected_d_inner
 
     def test_different_state_dimensions(self):
-        """Test model with different state space dimensions."""
+        """``d_state`` must reach the SSM state tensors.
+
+        The hidden-state shape is ``(2, 16, 256)`` at every setting and
+        ``first_mamba.d_state == d_state`` is a knob echo. `d_state` is
+        structural -- it is an axis of ``A_log`` -- so the weight-shape
+        signature carries the claim.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 256,
             "num_layers": 2,
             "expand": 2
         }
+
+        def _build(d_state):
+            model = Mamba(**base_config, d_state=d_state)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in [8, 16, 32, 64]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="d_state")
+        # A_log / D live at (d_inner, d_state); the state axis must be present.
+        for d in [8, 16, 32, 64]:
+            assert any(d in w for w in sigs[d]), (
+                f"d_state={d} produced no weight with a {d}-sized axis"
+            )
 
         for d_state in [8, 16, 32, 64]:
             model = Mamba(**base_config, d_state=d_state)
@@ -918,7 +961,12 @@ class TestMambaAdvancedFeatures:
             assert first_mamba.d_state == d_state
 
     def test_different_convolution_sizes(self):
-        """Test model with different convolution kernel sizes."""
+        """``d_conv`` must reach the depthwise convolution kernel.
+
+        The output shape is ``(2, 16, 128)`` at every kernel length and
+        ``first_mamba.d_conv == d_conv`` is a knob echo. The kernel length is a
+        weight axis, so the signature pins it.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 128,
@@ -926,6 +974,19 @@ class TestMambaAdvancedFeatures:
             "d_state": 8,
             "expand": 2
         }
+
+        def _build(d_conv):
+            model = Mamba(**base_config, d_conv=d_conv)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in [2, 4, 8, 16]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="d_conv")
+        # The depthwise conv kernel's length axis IS d_conv.
+        for d in [2, 4, 8, 16]:
+            assert any(w[0] == d for w in sigs[d] if len(w) == 3), (
+                f"d_conv={d} produced no rank-3 conv kernel of length {d}"
+            )
 
         for d_conv in [2, 4, 8, 16]:
             model = Mamba(**base_config, d_conv=d_conv)
@@ -1008,9 +1069,24 @@ class TestMambaAdvancedFeatures:
         assert len(layer_names) == len(set(layer_names)), "Layer names are not unique"
 
     def test_different_norm_epsilon(self):
-        """Test model with different normalization epsilon values."""
-        for epsilon in [1e-5, 1e-6, 1e-8]:
-            model = Mamba(
+        """``norm_epsilon`` must reach the normalization arithmetic.
+
+        ``model.norm_epsilon == epsilon`` is a knob echo: it reads back the
+        attribute the constructor stored. `norm_epsilon` is a VALUE knob -- the
+        parameterisation is identical at every setting -- so under one seed the
+        models hold bit-identical weights and the entire output difference is
+        the epsilon.
+
+        Measured on CPU with identical seeds: 1e-5 vs 1e-6 moves the hidden
+        state by 2.365e-02 and 1e-6 vs 1e-8 by 2.623e-03. The 1e-5 bar is set
+        from that defect signal with ~260x margin on the smaller of the two;
+        the inert value would be exactly 0.0 (same weights, same input).
+        """
+        epsilons = [1e-5, 1e-6, 1e-8]
+        input_ids = keras.random.randint((2, 16), minval=0, maxval=1000, dtype="int32")
+
+        def _build(epsilon):
+            return Mamba(
                 vocab_size=1000,
                 d_model=128,
                 num_layers=2,
@@ -1018,7 +1094,17 @@ class TestMambaAdvancedFeatures:
                 norm_epsilon=epsilon
             )
 
-            input_ids = keras.random.randint((2, 16), minval=0, maxval=1000, dtype="int32")
+        builders = {e: (lambda e=e: _build(e)) for e in epsilons}
+        deltas = assert_value_knob_changes_output(
+            builders,
+            {"input_ids": input_ids},
+            knob="norm_epsilon",
+            extract=lambda out: out['last_hidden_state'],
+        )
+        assert min(deltas.values()) > 1e-5
+
+        for epsilon in epsilons:
+            model = _build(epsilon)
             output = model({"input_ids": input_ids}, training=False)
 
             assert output['last_hidden_state'].shape == (2, 16, 128)

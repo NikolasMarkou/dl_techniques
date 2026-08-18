@@ -29,6 +29,8 @@ from dl_techniques.models.qwen.qwen3 import (
 )
 from dl_techniques.layers.transformers import TransformerLayer
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 class TestQwen3ModelBasic:
     """Test basic Qwen3 model functionality with standard transformer blocks."""
 
@@ -263,7 +265,14 @@ class TestQwen3ModelConfigurations:
             pytest.skip("30b-coder variant too large even with overrides")
 
     def test_different_head_configurations(self):
-        """Test different attention head configurations."""
+        """The head layout must reach the attention projections.
+
+        The logits shape is ``(1, 16, vocab_size)`` under every layout, and
+        ``model.head_dim == hidden_size // num_attention_heads`` is a knob ECHO
+        of a value the constructor computed and stored. The head layout is
+        structural -- ``num_key_value_heads`` sets the K/V projection width --
+        so the weight-shape signature is the discriminating fact.
+        """
         configs = [
             # Standard configuration
             {'num_attention_heads': 8, 'num_key_value_heads': 8, 'hidden_size': 128},
@@ -272,6 +281,35 @@ class TestQwen3ModelConfigurations:
             # Extreme GQA
             {'num_attention_heads': 6, 'num_key_value_heads': 1, 'hidden_size': 120},
         ]
+
+        def _build(config):
+            model_config = {
+                'vocab_size': 500,
+                'hidden_size': config['hidden_size'],
+                'num_layers': 2,
+                'num_attention_heads': config['num_attention_heads'],
+                'num_key_value_heads': config['num_key_value_heads'],
+                'max_seq_len': 256,
+                'moe_layers': [],  # No MoE for simplicity
+                
+                'num_experts': 1,
+                'num_experts_per_tok': 1,
+            }
+            model = Qwen3(**model_config)
+            model(keras.ops.zeros((1, 16), dtype='int32'))
+            return model
+
+        builders = {i: (lambda c=c: _build(c)) for i, c in enumerate(configs)}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="head configuration")
+        # Stronger than "different": GQA (config 1) shares K/V across query
+        # heads, so at the SAME hidden_size it must hold strictly FEWER
+        # parameters than full multi-head attention (config 0).
+        params = [sum(int(np.prod(w)) for w in sigs[i]) for i in (0, 1)]
+        assert params[1] < params[0], (
+            "num_key_value_heads=2 did not shrink the K/V projections relative "
+            f"to num_key_value_heads=8: {params[1]} vs {params[0]} parameters"
+        )
 
         for config in configs:
             model_config = {
@@ -300,7 +338,13 @@ class TestQwen3ModelConfigurations:
             assert model.head_dim == expected_head_dim
 
     def test_different_moe_configurations(self):
-        """Test different selective MoE configurations."""
+        """The MoE layout must reach the parameterisation.
+
+        ``model.num_experts == ...`` and its two siblings are knob ECHOES of
+        stored kwargs. The expert count is structural: each expert is its own
+        set of FFN weights, so the signature and the parameter count carry the
+        claim.
+        """
         base_config = {
             'vocab_size': 600,
             'hidden_size': 96,
@@ -318,6 +362,21 @@ class TestQwen3ModelConfigurations:
             # Dense MoE (every other layer)
             {'moe_layers': [1, 3, 5], 'num_experts': 8, 'num_experts_per_tok': 2, 'moe_intermediate_size': 96},
         ]
+
+        def _build(moe_config):
+            model = Qwen3(**{**base_config, **moe_config})
+            model(keras.ops.zeros((1, 16), dtype='int32'), training=False)
+            return model
+
+        builders = {i: (lambda m=m: _build(m)) for i, m in enumerate(moe_configs)}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="MoE configuration")
+        # Stronger than "different": more experts means strictly more
+        # parameters. A dropped MoE config would leave all three identical.
+        params = [sum(int(np.prod(w)) for w in sigs[i]) for i in range(len(moe_configs))]
+        assert params == sorted(params) and params[0] < params[-1], (
+            f"num_experts did not grow the parameter count: {params}"
+        )
 
         for moe_config in moe_configs:
             config = {**base_config, **moe_config}

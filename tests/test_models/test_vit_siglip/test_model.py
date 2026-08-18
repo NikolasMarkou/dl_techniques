@@ -18,6 +18,11 @@ from dl_techniques.models.vit_siglip.model import (
     create_siglip_vision_transformer
 )
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestSigLIPInitialization:
     """Test suite for SigLIP ViT model initialization with modern patterns."""
@@ -893,13 +898,60 @@ class TestSigLIPEdgeCases:
         assert not np.any(np.isnan(output.numpy()))
 
     def test_different_normalization_configurations(self):
-        """Test different normalization configurations using factories."""
+        """Both normalization axes must reach the graph.
+
+        The logits shape is ``(2, 5)`` under all four combinations, so the old
+        assertion was true whether or not either kwarg was honoured -- and the
+        two axes fail differently, so they need different instruments.
+        """
         configs = [
             {"normalization_type": "layer_norm", "normalization_position": "post"},
             {"normalization_type": "layer_norm", "normalization_position": "pre"},
             {"normalization_type": "rms_norm", "normalization_position": "post"},
             {"normalization_type": "rms_norm", "normalization_position": "pre"}
         ]
+
+        input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
+
+        def _build(**kwargs):
+            model = SigLIPVisionTransformer(
+                input_shape=(64, 64, 3),
+                scale="tiny",
+                num_classes=5,
+                **kwargs
+            )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # Axis 1 -- `normalization_type` is STRUCTURAL: RMSNorm has no centering
+        # shift, so it holds strictly fewer weights than LayerNorm. (Measured on
+        # the `tiny` scale: 127 tensors / 5,486,021 params vs 152 / 5,490,821.)
+        type_sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(normalization_type=t))
+             for t in ("layer_norm", "rms_norm")},
+            knob="normalization_type",
+        )
+        assert len(type_sigs["rms_norm"]) < len(type_sigs["layer_norm"])
+
+        # Axis 2 -- `normalization_position`. In `vit` and `vit_hmlp` this is a
+        # pure VALUE knob (same weights, different ordering), but SigLIP's
+        # pre-norm variant adds a final normalization after the last block, so
+        # here it is STRUCTURAL: measured 156 weights pre-norm vs 154 post-norm.
+        # The value instrument is deliberately NOT used -- with two extra
+        # tensors the two configurations draw different random numbers, so an
+        # output difference between them would prove nothing.
+        for norm_type in ("layer_norm", "rms_norm"):
+            pos_sigs = assert_structural_knob_changes_weights(
+                {pos: (lambda pos=pos: _build(
+                    normalization_type=norm_type, normalization_position=pos))
+                 for pos in ("post", "pre")},
+                knob=f"normalization_position ({norm_type})",
+            )
+            assert len(pos_sigs["pre"]) > len(pos_sigs["post"]), (
+                f"{norm_type}: pre-norm should add a final normalization the "
+                f"post-norm stack has not ({len(pos_sigs['pre'])} vs "
+                f"{len(pos_sigs['post'])} weight tensors)"
+            )
 
         for config in configs:
             model = SigLIPVisionTransformer(
@@ -909,23 +961,43 @@ class TestSigLIPEdgeCases:
                 **config
             )
 
-            input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
 
             assert output.shape == (2, 5)
             assert not np.any(np.isnan(output.numpy()))
 
     def test_different_ffn_types(self):
-        """Test different FFN types using factory integration."""
+        """``ffn_type`` must build the requested FFN.
+
+        The logits shape is ``(1, 3)`` for every FFN, so the old assertion held
+        whether or not the factory ever saw the argument. The three FFNs have
+        genuinely different parameterisations -- SwiGLU fuses gate and up
+        projections, GEGLU adds a third matrix -- so the weight-shape signature
+        pins which one was built.
+        """
         ffn_types = ["mlp", "swiglu", "geglu"]  # Available types
 
-        for ffn_type in ffn_types:
+        def _build(ffn_type):
             model = SigLIPVisionTransformer(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(t)) for t in ffn_types}, knob="ffn_type")
+        params = {
+            t: sum(int(np.prod(w)) for w in sigs[t]) for t in ffn_types
+        }
+        # All three parameter counts must be distinct -- two matching counts
+        # would mean two of the three names resolved to the same layer.
+        assert len(set(params.values())) == 3, f"ffn_type parameter counts: {params}"
+
+        for ffn_type in ffn_types:
+            model = _build(ffn_type)
 
             input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
             output = model(input_tensor)

@@ -29,6 +29,12 @@ import tensorflow as tf
 
 from dl_techniques.models.tiny_recursive_model import TRM, TRMInner, TRMReasoningModule
 
+from ..knob_sensitivity_oracle import (
+    as_array,
+    assert_structural_knob_changes_weights,
+    build_seeded,
+)
+
 
 class TestTRMModelBasic:
     """Test basic TRM model functionality and state management."""
@@ -153,7 +159,13 @@ class TestTRMModelConfigurations:
     """Test various model configurations."""
 
     def test_different_layer_configs(self):
-        """Test the model with different h_layers and l_layers."""
+        """``h_layers``/``l_layers`` must build the requested layer stacks.
+
+        The logits shape is ``(1, seq_len, vocab_size)`` at every layer count,
+        so the old assertion held whether or not either kwarg reached the
+        reasoning modules. Both are structural, so the weight-shape signature is
+        the discriminating fact.
+        """
         configs_to_test = [
             {"h_layers": 1, "l_layers": 1},
             {"h_layers": 3, "l_layers": 1},
@@ -165,6 +177,45 @@ class TestTRMModelConfigurations:
             "puzzle_emb_len": 2, "halt_max_steps": 3,
             "no_act_continue": True, "halt_exploration_prob": 0.1,
         }
+
+        def _build(layer_config):
+            config = {**base_config, **layer_config}
+            model = TRM(**config)
+            batch = {"inputs": keras.ops.zeros((1, config['seq_len']), dtype='int32')}
+            model(model.initial_carry(batch), batch)
+            return model
+
+        def _sig(cfg):
+            return assert_structural_knob_changes_weights(
+                {"base": (lambda: _build({"h_layers": 1, "l_layers": 1})),
+                 "swept": (lambda: _build(cfg))},
+                knob=f"h_layers={cfg['h_layers']}, l_layers={cfg['l_layers']}",
+            )
+
+        # Each module is swept against the (1, 1) baseline separately. Sweeping
+        # (3, 1) against (1, 3) would be the WRONG comparison: the two reasoning
+        # modules are identically shaped, so those two configurations hold the
+        # same 66 weight tensors and 55,906 parameters (measured) even though
+        # they are different models. A first-vs-last signature check would call
+        # that a no-op; it is not one, and the behavioural check below shows why.
+        sig_h = _sig({"h_layers": 3, "l_layers": 1})
+        sig_l = _sig({"h_layers": 1, "l_layers": 3})
+        assert len(sig_h["base"]) < len(sig_h["swept"])
+        assert len(sig_l["base"]) < len(sig_l["swept"])
+
+        # (3, 1) and (1, 3) are bit-identical in weights under one seed, so any
+        # output difference between them is the recursion layout alone.
+        outs = []
+        for cfg in ({"h_layers": 3, "l_layers": 1}, {"h_layers": 1, "l_layers": 3}):
+            model = build_seeded(lambda cfg=cfg: TRM(**{**base_config, **cfg}))
+            batch = {"inputs": keras.ops.zeros((1, base_config['seq_len']), dtype='int32')}
+            _, out = model(model.initial_carry(batch), batch)
+            outs.append(as_array(out["logits"]))
+        delta = float(np.max(np.abs(outs[0] - outs[1])))
+        assert delta > 1e-5, (
+            "h_layers and l_layers are interchangeable: (3, 1) and (1, 3) hold "
+            f"identical weights AND produce logits differing by only {delta:.3e}"
+        )
 
         for layer_config in configs_to_test:
             config = {**base_config, **layer_config}

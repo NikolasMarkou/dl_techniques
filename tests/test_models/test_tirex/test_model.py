@@ -9,6 +9,10 @@ from typing import Dict, Any, Tuple
 
 from dl_techniques.models.time_series.tirex.model import TiRexCore, create_tirex_model, create_tirex_by_variant
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+)
+
 
 class TestTiRexCore:
     """Comprehensive test suite for TiRex model following modern Keras 3 patterns."""
@@ -329,7 +333,14 @@ class TestTiRexCore:
             model(invalid_4d_input)
 
     def test_different_block_configurations(self, sample_univariate_input):
-        """Test different block type configurations."""
+        """``block_types`` must build blocks of the requested TYPES.
+
+        The output shape is ``(B, 12, 3)`` for every layout and
+        ``len(model.blocks) == len(block_types)`` echoes the list's length, not
+        its contents -- six configurations all of length two would pass that
+        assertion even if every block were the same type. `block_types` is
+        structural, so the weight-shape signature carries the claim.
+        """
         base_config = {
             'patch_size': 8,
             'embed_dim': 64,
@@ -348,6 +359,22 @@ class TestTiRexCore:
             ['transformer', 'mixed'],
             ['mixed', 'lstm']
         ]
+
+        def _build(block_types):
+            config = base_config.copy()
+            config['block_types'] = block_types
+            model = TiRexCore(**config)
+            model(sample_univariate_input[:1])
+            return model
+
+        builders = {tuple(b): (lambda b=b: _build(b)) for b in configs}
+        sigs = assert_structural_knob_changes_weights(builders, knob="block_types")
+        # Stronger than "different": an LSTM block and a transformer block are
+        # not just differently shaped, they hold different NUMBERS of tensors.
+        assert len(sigs[('lstm', 'lstm')]) != len(sigs[('transformer', 'transformer')]), (
+            "an all-LSTM stack and an all-transformer stack held the same "
+            "number of weight tensors"
+        )
 
         for block_types in configs:
             config = base_config.copy()
