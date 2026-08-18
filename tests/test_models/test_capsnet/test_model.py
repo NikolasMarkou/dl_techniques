@@ -689,6 +689,94 @@ class TestCapsNet:
                     err_msg=f"'{key}' differs after a save/load round trip",
                 )
 
+    def test_model_save_load_with_reconstruction(
+        self, num_classes, mnist_input_shape, sample_mnist_data
+    ):
+        """Round-trip the RECONSTRUCTION path, whose decoder was never probed.
+
+        The decoder is a `keras.Sequential`, and `Sequential` normally builds its
+        own sublayers by running them, so it was an open question whether it
+        rescued itself. It does NOT, and this test can fail: measured
+        2026-08-18 against a subclass that builds the whole tree EXCEPT the
+        decoder, `loaded.weights` holds 16 of 22 before the first call and the
+        six decoder tensors come back FRESH (decoder_hidden_1/kernel off by
+        0.521, decoder_hidden_2/kernel by 0.302, decoder_output/kernel by
+        0.219, the three biases by exactly the perturbation), which moves
+        `reconstructed` by 0.582 while `digit_caps` and `length` stay at exactly
+        0.0 -- so `test_model_save_load`, which runs `reconstruction=False`,
+        cannot see this at all. The decoder's explicit build in
+        `CapsNet._build_sublayer_tree` is therefore load-bearing, not
+        belt-and-braces.
+        """
+        capsnet = CapsNet(
+            num_classes=num_classes,
+            input_shape=mnist_input_shape,
+            reconstruction=True,
+            name="recon_capsnet",
+        )
+
+        # Build, then move every weight off its initializer. A restored tensor
+        # that still equals its initializer is indistinguishable from one that
+        # was never loaded, which is how the biases "matched" under the defect.
+        _ = capsnet(sample_mnist_data, training=False)
+        for weight in capsnet.weights:
+            weight.assign(weight + 0.02)
+
+        donor_weights = {w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights}
+        assert len(donor_weights) == 22, (
+            f"expected 22 donor weights with reconstruction on, got {len(donor_weights)}"
+        )
+
+        original_outputs = capsnet(sample_mnist_data, training=False)
+        assert "reconstructed" in original_outputs
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "capsnet_reconstruction.keras")
+            capsnet.save(model_path)
+
+            loaded_capsnet = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "CapsNet": CapsNet,
+                    "PrimaryCapsule": PrimaryCapsule,
+                    "RoutingCapsule": RoutingCapsule,
+                    "CapsuleAccuracy": CapsuleAccuracy,
+                    "capsule_margin_loss": capsule_margin_loss,
+                    "length": length,
+                },
+            )
+
+            # BEFORE the first call: the discriminating count. 16 (not 22) is
+            # the signature of an unbuilt decoder specifically.
+            assert len(loaded_capsnet.weights) == 22, (
+                f"loaded model has {len(loaded_capsnet.weights)} weights before "
+                "its first call, expected 22 -- 16 means the decoder Sequential "
+                "was not built, so its six tensors had nowhere to land"
+            )
+
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w) for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored from the checkpoint",
+                )
+
+            loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
+
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
+            for key in original_outputs.keys():
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
+
     def test_training_integration(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
         """Test training integration with fit() method."""
         capsnet = CapsNet(
