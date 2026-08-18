@@ -124,6 +124,32 @@ class CapsNet(keras.Model):
 
         self._layers_built = False
 
+        # Guide 1.1 Golden Rule: sub-layers are CREATED here, in `__init__`.
+        # Neither helper reads `input_shape` -- both are pure functions of the
+        # config stored above -- so neither has any reason to wait for
+        # `build()`. Only the `.build()` calls themselves are deferred, to
+        # `_build_sublayer_tree`.
+        self._build_feature_extraction()
+        self._build_capsule_layers()
+
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-007
+        # DELIBERATE, BOUNDED DEVIATION from the Golden Rule: the decoder is
+        # the ONE sub-layer that cannot always be created here. Its final
+        # `Dense` width is `prod(input_shape[1:])` and its `Reshape` target IS
+        # `input_shape[1:]` -- both are functions of the input shape, which is
+        # legitimately unknown until `build()` when the caller did not pass
+        # `input_shape=` to `__init__` (a supported, documented construction:
+        # `_validate_parameters` only WARNS in that case). So: create it
+        # eagerly HERE whenever `input_shape` was supplied, and only fall back
+        # to creating it in `build()` when it was not. Do NOT "simplify" this
+        # by moving decoder creation wholly back into `build()` -- that
+        # re-introduces create-in-build for the common, fully-specified case
+        # for no gain. Do NOT move it wholly into `__init__` either -- it would
+        # crash `CapsNet(reconstruction=True)` with no `input_shape`.
+        # See decisions.md D-007.
+        if self.reconstruction and self._input_shape is not None:
+            self._build_decoder()
+
     def _validate_parameters(
         self,
         num_classes: int,
@@ -171,7 +197,13 @@ class CapsNet(keras.Model):
         return keras.regularizers.get(regularizer)
 
     def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Build the model layers based on input shape."""
+        """Build the model layers based on input shape.
+
+        Per guide 1.1, sub-layer CREATION happens in `__init__`; this method
+        only (a) validates the input shape, (b) captures `_input_shape`, (c)
+        creates the decoder in the one case `__init__` could not (see D-007),
+        and (d) builds the sub-layer tree (see D-006).
+        """
         if self._layers_built:
             return
 
@@ -186,11 +218,13 @@ class CapsNet(keras.Model):
         if self.reconstruction and self._input_shape is None:
             self._input_shape = tuple(input_shape[1:])
 
-        self._build_feature_extraction()
-
-        self._build_capsule_layers()
-
-        if self.reconstruction and self._input_shape is not None:
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-007
+        # The residual half of the decoder deviation: reached ONLY when
+        # `input_shape` was not supplied to `__init__`, so the decoder's output
+        # width was genuinely unknowable there. The `self.decoder is None`
+        # guard is what keeps this from re-creating (and thereby discarding)
+        # the decoder `__init__` already made. See decisions.md D-007.
+        if self.reconstruction and self._input_shape is not None and self.decoder is None:
             self._build_decoder()
 
         self._build_sublayer_tree(input_shape)
