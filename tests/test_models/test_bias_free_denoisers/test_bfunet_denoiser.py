@@ -19,7 +19,14 @@ from dl_techniques.models.bias_free_denoisers.bfunet import (
     BFUNET_CONFIGS
 )
 
-from .conftest import HOMOGENEITY_RTOL, HOMOGENEITY_SCALES, fit_one_step
+from .conftest import (
+    HOMOGENEITY_RTOL,
+    HOMOGENEITY_SCALES,
+    fit_one_step,
+    homogeneity_error,
+    homogeneity_error_raw,
+    tf32_disabled,
+)
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     assert_value_knob_changes_output,
@@ -522,6 +529,65 @@ class TestBiasFreeUNet:
                 f"{HOMOGENEITY_RTOL:.0e}. A trained bias-free denoiser must satisfy "
                 "f(c*x) = c*f(x) to float32 round-off"
             )
+
+    def test_homogeneity_error_is_round_off_not_bias(self, test_image_grayscale):
+        """Pins the DIAGNOSIS behind `test_scaling_invariance_property`, not its symptom.
+
+        # DECISION plan-2026-08-18T123346-c3c4a681/D-003
+        The residual homogeneity error of a bias-free U-Net is arithmetic ROUND-OFF, so it must
+        shrink when the arithmetic gets more precise. An additive-bias leak -- the defect this
+        family of tests exists to catch -- would not: it is a property of the weights, not of
+        the mantissa. Measured 2026-08-18 on GPU 1 over c in (0.5, 2, 3, 10, 100, 1e4):
+        TF32 ~6.5e-04, true float32 ~1.2e-06, float64 ~1.4e-07 (the float64 floor is the
+        decoder's bilinear ``UpSampling2D``, which ``tf.image.resize`` executes in float32 at
+        any dtype policy -- see conftest for the full table and the per-layer walk, where the
+        encoder reads 4.01e-16).
+
+        Do NOT tighten this to an absolute bar on the TF32 reading: it is genuinely unstable
+        run to run (2.86e-04 / 5.06e-04 / 1.08e-03 observed), which is why the assertion is on
+        the RATIO, where the separation is ~100x-1000x and the bar is 10x. Do NOT delete the
+        skips: on CPU, and on any GPU that does not actually take the TF32 path, both readings
+        are the same number and the experiment has no discriminating power.
+        """
+        if not tf.config.list_physical_devices('GPU'):
+            pytest.skip("TF32 is a GPU (Ampere+) execution mode; the flag is inert on CPU")
+
+        model = create_bfunet_denoiser(
+            input_shape=(64, 64, 1),
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=1,
+            final_activation='linear',
+        )
+        fit_one_step(model)
+
+        previous = tf.config.experimental.tensor_float_32_execution_enabled()
+        tf.config.experimental.enable_tensor_float_32_execution(True)
+        try:
+            err_tf32 = homogeneity_error_raw(model, test_image_grayscale, 3.0)
+        finally:
+            tf.config.experimental.enable_tensor_float_32_execution(previous)
+            assert (
+                tf.config.experimental.tensor_float_32_execution_enabled() == previous
+            ), "TF32 setting leaked out of the diagnosis test"
+
+        err_true_f32 = homogeneity_error(model, test_image_grayscale, 3.0)
+
+        if err_tf32 < 1e-5:
+            pytest.skip(
+                f"this GPU did not take the TF32 path (error {err_tf32:.3e}); "
+                "the on/off comparison has nothing to discriminate"
+            )
+
+        assert err_true_f32 < HOMOGENEITY_RTOL, (
+            f"true-float32 homogeneity error {err_true_f32:.3e} exceeds "
+            f"{HOMOGENEITY_RTOL:.0e} -- this is NOT reduced precision and is a real defect"
+        )
+        assert err_true_f32 * 10 < err_tf32, (
+            f"homogeneity error did not track arithmetic precision: TF32 {err_tf32:.3e} vs "
+            f"true float32 {err_true_f32:.3e}. Round-off shrinks with the mantissa; an "
+            "additive-bias leak would stay put, so this looks like a real bias leak"
+        )
 
         moving_means = [w for w in model.weights if 'moving_mean' in w.path]
         assert not moving_means, (

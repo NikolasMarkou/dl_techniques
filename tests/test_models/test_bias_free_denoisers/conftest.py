@@ -42,6 +42,33 @@ everywhere):
 ``1e-5`` therefore sits ~9x above the float32 floor and ~680x below the defect. Keep the
 models these tests build SMALL and fixed: a deeper graph accumulates more round-off, and the
 headroom is what makes the tolerance meaningful rather than decorative.
+
+**Direct float64 evidence (measured 2026-08-18, GPU 1, depth-2 bfunet, one fit step; the
+float64 model is given the float32 model's WEIGHTS, so it is the same function).** The TF32
+ruling above was originally made with a *substitute* discriminator -- toggling TF32 on one
+model object -- because ``BiasFreeBatchNorm`` could not run at float64 until that layer's
+dtype bug was fixed. It can now, and the direct experiment agrees:
+
+===========  ==============  ===============  ==========
+``c``        GPU TF32 ON     GPU TF32 OFF     float64
+===========  ==============  ===============  ==========
+0.5          0.0             0.0              0.0
+2.0          0.0             0.0              0.0
+3.0          6.875e-04       1.164e-06        1.358e-07
+10           6.526e-04       1.218e-06        1.544e-07
+100          6.609e-04       9.790e-07        1.642e-07
+1e4          6.598e-04       1.298e-06        1.401e-07
+===========  ==============  ===============  ==========
+
+The error tracks the precision of the arithmetic (10-bit mantissa -> 24-bit -> 53-bit) instead
+of staying put, which is the signature of round-off and NOT of an additive bias. A per-layer
+walk under float64 nails it further: the first ``BiasFreeConv2D`` reads **4.01e-16** and the
+bottleneck **1.54e-15**, i.e. float64 machine eps -- the bias-free graph is homogeneous to
+exact arithmetic. The float64 model's residual 1.4e-07 is *one framework op*: the decoder's
+``UpSampling2D(interpolation='bilinear')``. ``tf.image.resize`` returns **float32 for a float64
+input**, so that op is a hard float32 bottleneck at any dtype policy; measured in isolation it
+gives exactly the 1.4396e-07 the model shows, while ``interpolation='nearest'`` gives 0.0.
+That is also why a model-level float64 test cannot assert a machine-eps bar.
 """
 
 import contextlib
@@ -151,8 +178,29 @@ def homogeneity_error(model: keras.Model, x: np.ndarray, c: float) -> float:
     :rtype: float
     """
     with tf32_disabled():
-        out = model(x, training=False)
-        out_scaled = model(c * x, training=False)
+        return homogeneity_error_raw(model, x, c)
+
+
+def homogeneity_error_raw(model: keras.Model, x: np.ndarray, c: float) -> float:
+    """:func:`homogeneity_error` WITHOUT the TF32 guard -- whatever regime the caller is in.
+
+    Interface contract: identical to :func:`homogeneity_error` (same arguments, same
+    ``max|f(c*x) - c*f(x)| / max|c*f(x)|`` return, same ``inf`` for a dead model). It exists so
+    the one test that deliberately measures the TF32-ON regime does not have to re-implement
+    the metric. Every ordinary homogeneity assertion must call :func:`homogeneity_error`
+    instead; this function reports the hardware, not the model.
+
+    :param model: A built denoiser, called with ``training=False``.
+    :type model: keras.Model
+    :param x: Input batch.
+    :type x: np.ndarray
+    :param c: Positive scale factor.
+    :type c: float
+    :return: Relative homogeneity violation, or ``inf`` if the output is identically zero.
+    :rtype: float
+    """
+    out = model(x, training=False)
+    out_scaled = model(c * x, training=False)
     if isinstance(out, list):  # deep supervision: index 0 is the full-resolution output
         out, out_scaled = out[0], out_scaled[0]
     f = np.asarray(out, dtype=np.float64)
