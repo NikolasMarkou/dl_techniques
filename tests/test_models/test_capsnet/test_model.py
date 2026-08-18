@@ -580,28 +580,35 @@ class TestCapsNet:
         assert recreated_capsnet.downweight == original_capsnet.downweight
         assert recreated_capsnet.reconstruction_weight == original_capsnet.reconstruction_weight
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "MEASURED 2026-08-18: CapsNet loses EVERY kernel on a `.keras` "
-            "round trip. Weight paths and shapes all match (16 weights, "
-            "identical paths), but comparing values: conv_1/kernel differs by "
-            "0.686, conv_2/kernel by 0.080, primary_caps/primary_conv/kernel "
-            "by 0.045, digit_caps/capsule_transformation_weights by 0.022 -- "
-            "i.e. the restored kernels are FRESH. Only the tensors whose "
-            "trained value still equals their initializer (all biases, BN "
-            "gamma/beta/moving stats) match. The forward is deterministic "
-            "(self-vs-self delta exactly 0.0), so the resulting 0.0015 output "
-            "difference on `digit_caps` -- 639 of 640 elements -- is entirely "
-            "the lost weights. This test asserted only SHAPE equality before, "
-            "which is exactly the instrument this repo has recorded as blind "
-            "to this failure mode "
-            "(reference_nested_sublayer_list_loses_weights.md). Model defect, "
-            "not a test defect: NOT fixed here, see decisions.md D-041."
-        ),
-    )
     def test_model_save_load(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
-        """Test saving and loading a CapsNet model."""
+        """Test saving and loading a CapsNet model.
+
+        HISTORY -- this test carried `xfail(strict=True)` from 2026-08-18 until
+        plan-2026-08-18T073231-52a93f8c/iter-1/step-8. The pinned defect: CapsNet
+        lost EVERY kernel on a `.keras` round trip. Weight paths and shapes all
+        matched (16 weights, identical paths) while the values did not --
+        conv_1/kernel differed by 0.686, conv_2/kernel by 0.080,
+        primary_caps/primary_conv/kernel by 0.045,
+        digit_caps/capsule_transformation_weights by 0.022, i.e. the restored
+        kernels were FRESH. Only the tensors whose trained value still equalled
+        their initializer (biases, BN gamma/beta/moving stats) "matched", and
+        only by coincidence. Cause: `CapsNet.build()` overrode `keras.Model.build`
+        without building its sub-layer tree, which disables Keras'
+        `is_default(self.build)` build-by-run fallback while `build_from_config`
+        swallows the incomplete build in a bare `try/except` -- so the loss was
+        silent. Fixed by `CapsNet._build_sublayer_tree` (see that method's
+        `# DECISION .../D-006` anchor and decisions.md D-006).
+
+        The pin was strict, so removing it is itself the red-proof. It is kept
+        removed rather than deleted-and-forgotten because the original
+        instrument -- SHAPE equality only -- was blind to this failure mode
+        (reference_nested_sublayer_list_loses_weights.md). This test therefore
+        now asserts the DISCRIMINATING quantity: the weight count BEFORE the
+        first `call()` on the loaded model. A post-`call()` count is 16 either
+        way, because lazy build re-creates fresh variables; only the pre-call
+        count separates fixed from broken (measured: 0 before the fix, 16
+        after). Per-weight VALUES are compared too, not just outputs.
+        """
         # Create and compile model
         capsnet = CapsNet(
             num_classes=num_classes,
@@ -616,6 +623,11 @@ class TestCapsNet:
 
         # Generate prediction before saving
         original_outputs = capsnet(sample_mnist_data, training=False)
+
+        donor_weights = {w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights}
+        assert len(donor_weights) == 16, (
+            f"expected 16 donor weights for this configuration, got {len(donor_weights)}"
+        )
 
         # Create temporary directory for model
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -637,16 +649,37 @@ class TestCapsNet:
                 }
             )
 
+            # THE DISCRIMINATING MEASUREMENT, and it must run BEFORE the first
+            # `call()` on the loaded model: a broken build lazily materializes
+            # fresh variables on first call, so a post-call count is 16 either
+            # way. Measured 0 before the step-8 fix, 16 after.
+            assert len(loaded_capsnet.weights) == 16, (
+                "loaded model has "
+                f"{len(loaded_capsnet.weights)} weights before its first call, "
+                "expected 16 -- the sub-layer tree was not built by "
+                "`build_from_config`, so the saved arrays had nowhere to land"
+            )
+
+            # Per-weight VALUE equality. Shape equality was the ONLY check here,
+            # and it is exactly the instrument that misses this repo's recorded
+            # `List[List[Layer]]` round-trip failure, where weight count, layer
+            # paths and parameter totals all matched while the restored kernels
+            # were FRESH (reference_nested_sublayer_list_loses_weights.md).
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w) for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored from the checkpoint",
+                )
+
             # Generate prediction with loaded model
             loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
 
-            # Shape equality was the ONLY check here, and it is exactly the
-            # instrument that misses this repo's recorded `List[List[Layer]]`
-            # round-trip failure, where weight count, layer paths and parameter
-            # totals all matched while the restored kernels were FRESH
-            # (reference_nested_sublayer_list_loses_weights.md). CapsNet holds
-            # its capsule layers in nested containers, so it is precisely the
-            # architecture that failure mode targets. Compare VALUES.
             assert set(original_outputs.keys()) == set(loaded_outputs.keys())
             for key in original_outputs.keys():
                 np.testing.assert_allclose(

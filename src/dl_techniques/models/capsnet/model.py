@@ -193,8 +193,64 @@ class CapsNet(keras.Model):
         if self.reconstruction and self._input_shape is not None:
             self._build_decoder()
 
+        self._build_sublayer_tree(input_shape)
+
         self._layers_built = True
         super().build(input_shape)
+
+    def _build_sublayer_tree(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
+        """Explicitly build every sub-layer, threading shapes in dependency order.
+
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-006
+        These `.build()` calls are LOAD-BEARING. Do NOT delete them as
+        "redundant because `call()` builds them anyway" -- that is exactly the
+        defect this replaced. Mechanism (measured 2026-08-18): Keras'
+        `Model.build_from_config` only falls back to build-by-run
+        (`_build_by_run_for_single_pos_arg`, an actual forward pass that builds
+        the whole sub-layer tree) when `keras.src.utils.python_utils.is_default(
+        self.build)` is True. `CapsNet` OVERRIDES `build`, so `is_default` is
+        False and that fallback is disabled; Keras instead calls `self.build(
+        input_shape)` inside a bare `try/except: pass`. The previous override
+        only CREATED the sub-layer objects and never built them, so after
+        `load_model` every sub-layer was still `built=False` with no variables
+        for the saved arrays to be written into -- and the swallowing
+        `try/except` meant nothing raised or warned. The loss was therefore
+        SILENT: layer paths, weight shapes and parameter totals all matched the
+        donor while every restored kernel was FRESH. The only instrument that
+        sees it is `len(model.weights)` BEFORE the first `call()` (it was 0;
+        after the first call, lazy build makes it 16 either way, so a post-call
+        count cannot distinguish fixed from broken). See decisions.md D-006.
+
+        Args:
+            input_shape: 4D input shape `(batch, height, width, channels)`.
+        """
+        shape = tuple(input_shape)
+
+        for i in range(len(self.conv_layers)):
+            conv_layer = self.conv_layers[i]
+            conv_layer.build(shape)
+            shape = conv_layer.compute_output_shape(shape)
+
+            bn_layer = self.batch_norm_layers[i]
+            if bn_layer is not None:
+                bn_layer.build(shape)
+                shape = bn_layer.compute_output_shape(shape)
+
+            activation_layer = self.activation_layers[i]
+            activation_layer.build(shape)
+            shape = activation_layer.compute_output_shape(shape)
+
+        self.primary_caps.build(shape)
+        shape = self.primary_caps.compute_output_shape(shape)
+
+        self.digit_caps.build(shape)
+
+        if self.decoder is not None:
+            # `_reconstruct` flattens the masked digit capsules before the
+            # decoder, so the decoder never sees `digit_caps`' own output shape.
+            self.decoder.build(
+                (input_shape[0], self.num_classes * self.digit_capsule_dim)
+            )
 
     def _build_feature_extraction(self) -> None:
         """Build convolutional feature extraction layers."""
