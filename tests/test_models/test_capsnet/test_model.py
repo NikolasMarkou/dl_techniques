@@ -777,6 +777,100 @@ class TestCapsNet:
                     err_msg=f"'{key}' differs after a save/load round trip",
                 )
 
+    def test_save_load_reconstruction_without_input_shape(
+        self, num_classes, sample_mnist_data
+    ):
+        """The D-007 deviation branch: decoder created in ``build()``.
+
+        Every other ``reconstruction=True`` call site in this suite passes
+        ``input_shape=`` to ``__init__``, so the decoder is created eagerly
+        there and the ANCHORED deviation -- the one branch where creation
+        genuinely cannot happen in ``__init__``, because the decoder's output
+        width is ``prod(input_shape[1:])`` and nothing knows it yet -- had no
+        coverage at all.
+
+        What this pins, in order: the decoder really is ``None`` after
+        ``__init__`` (otherwise the branch is not being exercised);
+        ``get_config()`` reports the shape captured during ``build()`` rather
+        than ``None`` (otherwise the reload constructs a different model); the
+        loaded model carries all 22 weights BEFORE its first ``call()`` (16
+        would mean the decoder Sequential was never built); and all three
+        outputs match exactly.
+        """
+        capsnet = CapsNet(
+            num_classes=num_classes,
+            reconstruction=True,
+            name="recon_no_shape_capsnet",
+        )
+        assert capsnet.decoder is None, (
+            "the decoder must NOT exist after __init__ when input_shape was "
+            "not supplied -- otherwise this test is not exercising the D-007 "
+            "deviation branch at all"
+        )
+
+        _ = capsnet(sample_mnist_data, training=False)
+        assert capsnet.decoder is not None, "build() must have created it"
+
+        config = capsnet.get_config()
+        assert tuple(config["input_shape"]) == tuple(sample_mnist_data.shape[1:]), (
+            f"get_config must report the shape captured in build(), got "
+            f"{config['input_shape']!r}"
+        )
+
+        for weight in capsnet.weights:
+            weight.assign(weight + 0.02)
+
+        donor_weights = {
+            w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights
+        }
+        assert len(donor_weights) == 22
+
+        original_outputs = capsnet(sample_mnist_data, training=False)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "capsnet_recon_no_shape.keras")
+            capsnet.save(model_path)
+
+            loaded_capsnet = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "CapsNet": CapsNet,
+                    "PrimaryCapsule": PrimaryCapsule,
+                    "RoutingCapsule": RoutingCapsule,
+                    "CapsuleAccuracy": CapsuleAccuracy,
+                    "capsule_margin_loss": capsule_margin_loss,
+                    "length": length,
+                },
+            )
+
+            assert len(loaded_capsnet.weights) == 22, (
+                f"loaded model has {len(loaded_capsnet.weights)} weights before "
+                "its first call, expected 22"
+            )
+
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w)
+                for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored",
+                )
+
+            loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
+            for key in original_outputs.keys():
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
+
     def test_training_integration(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
         """Test training integration with fit() method."""
         capsnet = CapsNet(
