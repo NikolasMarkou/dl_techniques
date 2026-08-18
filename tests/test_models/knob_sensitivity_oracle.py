@@ -125,7 +125,10 @@ def weight_signature(model: Any) -> Tuple[Tuple[int, ...], ...]:
     bit-identical weights; two models whose signatures differ do not, and their
     outputs cannot be compared for knob sensitivity.
 
-    Returns an empty tuple for an unbuilt model -- callers must build first.
+    Returns an empty tuple for an unbuilt model -- callers must build first. A
+    SUBCLASSED ``keras.Model`` is unbuilt until its first ``call()``, so a
+    signature taken straight after the constructor is ``()`` and compares equal
+    to every other unbuilt model's. See the D-003 anchor below.
     """
     return tuple(tuple(int(d) for d in w.shape) for w in model.weights)
 
@@ -253,16 +256,41 @@ def assert_value_knob_changes_output(
     signatures: Dict[Hashable, Tuple[Tuple[int, ...], ...]] = {}
     for k in keys:
         model = build_seeded(builders[k], seed)
-        signatures[k] = weight_signature(model)
+        # DECISION plan-2026-08-18T111512-29569f8b/D-003
+        # The signature is captured AFTER the forward pass, and the order is
+        # load-bearing -- do NOT "tidy" it back next to the build. A SUBCLASSED
+        # keras.Model has len(model.weights) == 0 until its first call(), which
+        # is what every real consumer of this helper in tests/test_models/
+        # builds. With the capture before _forward, both arms' signatures were
+        # the EMPTY TUPLE, () == () compared equal for free, and clause 1 -- the
+        # clause whose entire job is to make clause 2's delta attributable to
+        # the KNOB rather than to a different random draw -- could not fail.
+        # Proven RED by
+        # test_knob_sensitivity_oracle.py::TestSubclassedModelSignatureOrdering
+        # ::test_a_structural_knob_on_subclassed_models_is_rejected, which two
+        # subclassed arms of genuinely different weight shapes made pass at
+        # HEAD. See D-003 in
+        # plans/plan-2026-08-18T111512-29569f8b/decisions.md.
         outs[k] = _forward(model, x, extract)
+        signatures[k] = weight_signature(model)
+        if not signatures[k]:
+            raise AssertionError(
+                f"{knob}={k!r} produced a model with no weights even after a "
+                "forward pass; the signature comparison below would be vacuous"
+            )
 
     first = keys[0]
     for k in keys[1:]:
         if signatures[k] != signatures[first]:
             raise AssertionError(
                 f"{knob}={k!r} does not share a weight-shape signature with "
-                f"{knob}={first!r} ({len(signatures[k])} vs "
-                f"{len(signatures[first])} weights). This is a STRUCTURAL knob: "
+                f"{knob}={first!r} "
+                f"({len(signatures[k])} tensors / "
+                f"{sum(int(np.prod(w)) for w in signatures[k])} parameters vs "
+                f"{len(signatures[first])} tensors / "
+                f"{sum(int(np.prod(w)) for w in signatures[first])} parameters; "
+                "the counts may match while the shapes do not). "
+                "This is a STRUCTURAL knob: "
                 "its configurations draw different random numbers, so an output "
                 "difference between them proves nothing. Use "
                 "assert_structural_knob_changes_weights."

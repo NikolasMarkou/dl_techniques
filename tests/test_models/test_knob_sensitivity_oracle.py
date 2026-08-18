@@ -95,3 +95,51 @@ class TestSeedingContract:
             assert_structural_knob_changes_weights(
                 {4: (lambda: _mlp(4, "relu"))}, knob="units"
             )
+
+
+class _SubclassedMLP(keras.Model):
+    """A SUBCLASSED model: ``len(self.weights) == 0`` until the first call.
+
+    Every real consumer of :func:`assert_value_knob_changes_output` in this
+    suite builds a subclassed ``keras.Model``, which is why the ordering of the
+    signature capture is not a stylistic detail.
+    """
+
+    def __init__(self, units: int, activation: str = "relu", **kwargs):
+        super().__init__(**kwargs)
+        self.hidden = keras.layers.Dense(units, activation=activation)
+        self.head = keras.layers.Dense(3)
+
+    def call(self, inputs, training=None):
+        return self.head(self.hidden(inputs))
+
+
+class TestSubclassedModelSignatureOrdering:
+    """The clause-1 guard must survive a model that is unbuilt at return time."""
+
+    def test_an_unbuilt_subclassed_model_has_an_empty_signature(self):
+        # The premise of the defect, pinned so the RED proof below cannot be
+        # explained away: this is why a pre-forward capture compares equal.
+        assert weight_signature(_SubclassedMLP(8)) == ()
+        model = _SubclassedMLP(8)
+        model(X, training=False)
+        assert weight_signature(model) != ()
+
+    def test_a_structural_knob_on_subclassed_models_is_rejected(self):
+        # RED at HEAD: both arms' PRE-forward signatures are the empty tuple, so
+        # clause 1 compares () == () and passes for free; clause 2 then reports a
+        # difference that is entirely the different random draw. The oracle must
+        # convict this as STRUCTURAL.
+        builders = {u: (lambda u=u: _SubclassedMLP(u)) for u in (4, 8)}
+        with pytest.raises(AssertionError, match="STRUCTURAL knob"):
+            assert_value_knob_changes_output(builders, X, knob="units")
+
+    def test_an_honoured_value_knob_on_subclassed_models_still_passes(self):
+        builders = {a: (lambda a=a: _SubclassedMLP(8, a)) for a in ("relu", "tanh")}
+        deltas = assert_value_knob_changes_output(builders, X, knob="activation")
+        assert all(d > 1e-5 for d in deltas.values())
+
+    def test_a_dropped_value_knob_on_subclassed_models_is_convicted(self):
+        builders = {a: (lambda a=a: _SubclassedMLP(8, "relu")) for a in ("relu", "tanh")}
+        with pytest.raises(AssertionError, match="activation is a no-op"):
+            assert_value_knob_changes_output(builders, X, knob="activation")
