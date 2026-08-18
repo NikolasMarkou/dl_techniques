@@ -407,7 +407,26 @@ class NAMCell(keras.layers.Layer):
         token_mask_float = ops.cast(token_mask, self.compute_dtype)
 
         scores = ops.squeeze(self.reduction_scorer(hidden), axis=-1)  # (B, L)
-        scores = scores + (1.0 - token_mask_float) * (-1e9)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-024
+        # dtype-aware mask sentinel. `-1e9` is below float16's finite floor
+        # (~-6.55e4), so under `mixed_float16` it converts to `-inf` and this
+        # line produced NaN TWICE OVER: a fully-masked row softmaxes
+        # `[-inf, ...]` to NaN, and — the one a "check the masked positions"
+        # guard misses — an UNMASKED position computes `0.0 * -inf`, which is
+        # also NaN. The corruption therefore lands on the positions the mask is
+        # meant to KEEP, in a row with a perfectly ordinary right-padding mask.
+        #
+        # The idiom is the LOCAL one from `tree_transformer/components.py:283`
+        # (`GroupAttention`, D-001) and `:481`, not
+        # `layers/attention/common.apply_attention_mask`. That helper has zero
+        # call sites anywhere inside `models/`, and this is a reduction SCORER
+        # rather than attention — importing it would open a models/ -> attention
+        # internals dependency edge for a two-token change. `sequence_pooling`
+        # made the same call for the same reason (SYSTEM.md). This cell already
+        # composes the tree_transformer components that use this exact idiom, so
+        # the two now agree instead of differing inside one call graph.
+        neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
+        scores = scores + (1.0 - token_mask_float) * neg_inf
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
         # --- 5. Deterministic number assembly from tokens ---
@@ -555,8 +574,26 @@ class NAMCell(keras.layers.Layer):
             "memory_usage": ops.stop_gradient(memory_state.usage),
             "read_weights": [ops.stop_gradient(w) for w in new_read_weights],
             "write_weights": ops.stop_gradient(write_weights_new),
-            "accumulated_result": carry["accumulated_result"] + result,
-            "accumulated_valid": carry["accumulated_valid"] * valid,
+            # DECISION plan-2026-08-17T183311-79c63e38/D-024 (second fp16
+            # blocker, found by the mask fix's own RED proof and sitting AFTER
+            # it in this same function). The deterministic number assembly above
+            # pins itself to "float32" ON PURPOSE — exact digit arithmetic must
+            # not run in fp16 — while Keras autocasts the incoming `carry` to
+            # `compute_dtype`. Under `mixed_float16` the two met here and raised
+            # `InvalidArgumentError: cannot compute AddV2 as input #1 was
+            # expected to be a half tensor but is a float tensor`. Cast BOTH
+            # sides to `compute_dtype` rather than casting only one: the carry is
+            # float32 when this layer is called without autocast, so a one-sided
+            # cast just moves the mismatch. `outputs["result"]` below keeps the
+            # exact float32 value — only the accumulator is normalised.
+            "accumulated_result": (
+                ops.cast(carry["accumulated_result"], self.compute_dtype)
+                + ops.cast(result, self.compute_dtype)
+            ),
+            "accumulated_valid": (
+                ops.cast(carry["accumulated_valid"], self.compute_dtype)
+                * ops.cast(valid, self.compute_dtype)
+            ),
             "steps": carry["steps"] + 1,
         }
 
