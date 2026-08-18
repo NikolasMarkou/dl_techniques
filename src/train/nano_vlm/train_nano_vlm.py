@@ -3,6 +3,7 @@
 import os
 import argparse
 import keras
+import tensorflow as tf
 from keras import ops
 from datetime import datetime
 from typing import Dict, List, Tuple, Any
@@ -130,7 +131,7 @@ class NanoVLMTrainer:
     def train_step(self, batch_data: Tuple[Any, Any]) -> Dict[str, keras.Variable]:
         inputs, labels = batch_data
 
-        with keras.GradientTape() as tape:
+        with tf.GradientTape() as tape:
             predictions = self.model(inputs, training=True)
             loss = self.loss_fn(labels, predictions)
 
@@ -154,8 +155,8 @@ class NanoVLMTrainer:
         return {'loss': self.train_loss.result(), 'accuracy': self.train_accuracy.result()}
 
     def reset_metrics(self) -> None:
-        self.train_loss.reset_states()
-        self.train_accuracy.reset_states()
+        self.train_loss.reset_state()
+        self.train_accuracy.reset_state()
 
 
 # ---------------------------------------------------------------------
@@ -204,7 +205,20 @@ def train_nanovlm(
         for epoch in range(epochs):
             trainer.reset_metrics()
 
-            for step, batch in enumerate(train_dataset):
+            # DECISION plan-2026-08-18T140459-7991552f/D-009
+            # Index by `range(steps_per_epoch)`. Do NOT write
+            # `for step, batch in enumerate(train_dataset)`. `create_vqa_dataset`
+            # returns a `VQADataSequence(keras.utils.Sequence)`, and in Keras 3
+            # `keras.utils.Sequence` IS `PyDataset`, which defines
+            # `__getitem__`/`__len__` and no `__iter__`. `enumerate` therefore
+            # fell back to Python's legacy `__getitem__` protocol, which walks
+            # 0, 1, 2, ... until `IndexError` and IGNORES `__len__` entirely.
+            # `VQADataSequence.__getitem__` serves any index and never raises
+            # `IndexError`, so epoch 0 never ended: a hang with no failure text.
+            # Same mechanism, same repair as the D-034 anchor in
+            # `src/train/hrm/train_hrm.py`'s `train_epoch`.
+            for step in range(steps_per_epoch):
+                batch = train_dataset[step]
                 try:
                     metrics = trainer.train_step(batch)
                     if step % log_frequency == 0:
@@ -212,7 +226,16 @@ def train_nanovlm(
                             f"Epoch {epoch + 1}/{epochs}, Step {step}/{steps_per_epoch}: "
                             f"Loss={float(metrics['loss']):.4f}, Acc={float(metrics['accuracy']):.4f}"
                         )
-                except Exception as e:
+                # DECISION plan-2026-08-18T140459-7991552f/D-010
+                # Do NOT widen this back to `except Exception`. This handler
+                # exists to survive one bad SAMPLE, not a broken training
+                # mechanism. As `except Exception: continue` it swallowed an
+                # `AttributeError` on EVERY step of EVERY epoch (there was no
+                # `keras.GradientTape`), so the run "completed" all ten epochs
+                # and saved an untrained model, reporting only a per-step
+                # `logger.error` line. An `AttributeError`/`TypeError` is a
+                # programming defect and must propagate.
+                except (tf.errors.InvalidArgumentError, ValueError) as e:
                     logger.error(f"Error in step {step}: {e}")
                     continue
 
