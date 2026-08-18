@@ -18,8 +18,14 @@ from dl_techniques.layers.time_series.prism_blocks import (
     FrequencyBandStatistics,
 )
 
-# seq_len must be long enough for the multi-level wavelet decomposition not to
-# degenerate (very short bands collapse the band-length normalization).
+# seq_len must be long enough that the multi-level wavelet decomposition does
+# not drive the deepest band to length 1 or 0. There is no "band-length
+# normalization" to collapse: the real mechanism is that a length-1 band has an
+# EMPTY first-difference tensor (mean/var over an empty axis) and a length-0
+# band has nothing to reduce at all. Both are handled by the guard in
+# ``FrequencyBandStatistics.call``, exercised deliberately in
+# ``TestFrequencyBandStatisticsDegenerateLengths`` below; the default here stays
+# non-degenerate so the ordinary tests exercise the ordinary path.
 B, SEQ, CH = 4, 32, 4
 
 

@@ -50,8 +50,13 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         │  Output: [approx, details_K, ..., details_1]│
         └─────────────────────────────────────────────┘
 
-    :param num_levels: Number of decomposition levels. Each level halves
-        the spatial resolution along each dimension. Defaults to 3.
+    :param num_levels: Number of decomposition levels. Each level FLOOR-halves
+        the resolution along each dimension (an odd length is truncated to
+        ``(L // 2) * 2`` first), so after ``K`` levels the approximation is
+        ``L // 2 ** K`` long. Defaults to 3. This layer does NOT refuse a
+        ``num_levels`` that drives a dimension to 0: the reductions downstream
+        are what break, so callers must bound it against their own input
+        length (``PRISMModel.__init__`` is one such caller).
     :type num_levels: int
     :param kwargs: Additional arguments for the Layer base class.
     """

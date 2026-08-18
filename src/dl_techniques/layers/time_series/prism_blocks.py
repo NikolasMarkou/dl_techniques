@@ -416,8 +416,13 @@ class PRISMNode(keras.layers.Layer):
                        ▼
         Output: processed [batch, seq_len, channels]
 
-    :param num_wavelet_levels: Number of Haar DWT decomposition levels.
-        Defaults to 3.
+    :param num_wavelet_levels: Number of Haar DWT decomposition levels,
+        producing ``num_wavelet_levels + 1`` bands (one detail band per level
+        plus the final approximation band). Defaults to 3. Each level
+        floor-halves the length, so the deepest band is
+        ``seq_len // 2 ** num_wavelet_levels`` long; at 1 it is statistically
+        degenerate and at 0 the configuration is unrepresentable (see
+        :class:`FrequencyBandStatistics` and ``PRISMModel.__init__``).
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for the router MLP.
         Defaults to 64.
@@ -623,10 +628,18 @@ class PRISMTimeTree(keras.layers.Layer):
     """
     Hierarchical time decomposition with PRISM nodes at each level.
 
-    Builds a binary tree over the time domain by recursively splitting the
-    signal into overlapping segments. Each node processes its segment through
-    wavelet decomposition and adaptive weighting. Segments are stitched back
-    together using linear cross-fade blending in the overlap regions.
+    Builds a binary tree over the time domain by splitting the signal into
+    overlapping segments. Each node processes its segment through wavelet
+    decomposition and adaptive weighting. Segments are stitched back together
+    using linear cross-fade blending in the overlap regions.
+
+    The traversal is a LOOP over levels, not a recursion over children: level
+    ``i`` re-splits the FULL, re-stitched sequence into ``2 ** i`` segments
+    rather than bisecting level ``i - 1``'s outputs. The deepest leaf's length
+    therefore comes from ONE application of :meth:`_segment_len` at
+    ``num_segments = 2 ** tree_depth`` -- not from ``tree_depth`` successive
+    halvings. Anything reasoning about the deepest segment (band lengths,
+    configuration validation) must use the one-shot form.
 
     **Architecture Overview:**
 
@@ -659,13 +672,20 @@ class PRISMTimeTree(keras.layers.Layer):
         Output: [batch, T, channels]
 
     :param tree_depth: Depth of the binary time tree. Depth 0 means single
-        node (no splitting). Defaults to 2.
+        node (no splitting). Defaults to 2. This knob has no valid range of its
+        own: with ``overlap_ratio`` and the input length it fixes the deepest
+        segment length, which ``num_wavelet_levels`` then floor-halves down to
+        the deepest band. ``PRISMModel.__init__`` refuses combinations whose
+        deepest band would have length 0; this layer does not validate.
     :type tree_depth: int
     :param overlap_ratio: Ratio of overlap between adjacent segments.
         Value in [0, 0.5). Defaults to 0.25.
     :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels per node.
-        Defaults to 3.
+    :param num_wavelet_levels: Number of Haar DWT levels per node, producing
+        ``num_wavelet_levels + 1`` bands. Defaults to 3. Each level floor-halves
+        the band length, so the deepest band of the deepest node is
+        ``segment_len // 2 ** num_wavelet_levels`` -- this trades directly
+        against ``tree_depth`` and the input length.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for router MLPs.
         Defaults to 64.

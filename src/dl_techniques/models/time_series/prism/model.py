@@ -9,14 +9,27 @@ downsampling rate — resolves one of those and blurs the rest. Widening the rec
 field trades away the short structure; narrowing it trades away the long. The
 resolution is a choice, and PRISM's answer is to stop making it globally.
 
-The signal is recursively bisected along the time axis into overlapping segments, so
-level `i` of the tree holds `2^i` views of increasingly local extent, with the root
-seeing the whole context. At every node the segment is passed through a Haar DWT,
-producing a set of frequency bands within that node's temporal span. The two
-hierarchies are therefore independent knobs: `tree_depth` sets how finely time is
-partitioned and `num_wavelet_levels` sets how finely frequency is split inside each
-partition, and a node deep in the tree can still attend to a low band while a shallow
-one attends to a high one. That decoupling is the architectural claim.
+The signal is partitioned along the time axis into overlapping segments, so level `i`
+of the tree holds `2^i` views of increasingly local extent, with the root seeing the
+whole context. Mechanically this is a LOOP, not a recursion: each level re-splits the
+full, re-stitched sequence into `2^i` segments rather than bisecting the previous
+level's children, so the deepest leaf's length follows from ONE application of the
+split formula at `num_segments = 2^tree_depth`. At every node the segment is passed
+through a Haar DWT, producing a set of frequency bands within that node's temporal
+span. `tree_depth` sets how finely time is partitioned and `num_wavelet_levels` sets
+how finely frequency is split inside each partition, and a node deep in the tree can
+still attend to a low band while a shallow one attends to a high one. That decoupling
+is the architectural claim, and it holds for WHICH band a node selects.
+
+It does NOT hold for how far the two knobs can be turned. They multiply into a single
+budget: the deepest band has length
+`min_band_len = deepest_leaf_segment_len // 2 ** num_wavelet_levels`, and once that
+reaches 0 the configuration is unrepresentable. `__init__` refuses those configurations
+with a `ValueError`. Measured (36-cell grid, plan-2026-08-18T073231-52a93f8c): no
+`tree_depth` range separates the working configurations from the broken ones —
+`context_len=96, tree_depth=2, num_wavelet_levels=4` used to be all-NaN while
+`context_len=256, tree_depth=4, num_wavelet_levels=3` was always fine. Read the
+constraint off `min_band_len`, never off `tree_depth` alone.
 
 Which bands matter is decided per node by data, not by hyperparameter. A small shared
 MLP router reads six summary statistics of each band — mean, standard deviation, min,
@@ -156,8 +169,21 @@ class PRISMModel(keras.Model, ForecastMixin):
         hidden_dim: Hidden dimension for processing. If None, uses num_features.
         num_layers: Number of stacked PRISM layers. Defaults to 2.
         tree_depth: Depth of time tree in each PRISM layer. Defaults to 2.
+            NOT independently bounded: there is no valid range for this knob on
+            its own. Together with ``context_len``, ``overlap_ratio`` and
+            ``num_wavelet_levels`` it determines
+            ``min_band_len = deepest_leaf_segment_len // 2 ** num_wavelet_levels``,
+            and ``__init__`` raises ``ValueError`` when that reaches 0. Depth 2 at
+            ``num_wavelet_levels=4`` and ``context_len=96`` is refused; depth 4 at
+            ``context_len=256, num_wavelet_levels=3`` is fine. Node count grows as
+            ``2 ** tree_depth`` per layer, so cost is exponential in this knob.
         overlap_ratio: Overlap ratio for segment splitting. Defaults to 0.25.
-        num_wavelet_levels: Number of Haar DWT levels. Defaults to 3.
+            Feeds the segment-length formula, so it shifts ``min_band_len`` too --
+            it is not a purely cosmetic smoothing knob.
+        num_wavelet_levels: Number of Haar DWT levels. Defaults to 3. Each level
+            floor-halves the band length, so this trades directly against
+            ``tree_depth`` and ``context_len`` through ``min_band_len``; raising it
+            on a short context is what drives the deepest band to length 0.
         router_hidden_dim: Hidden dimension for routers. Defaults to 64.
         router_temperature: Temperature for router softmax. Defaults to 1.0.
         dropout_rate: Dropout rate. Defaults to 0.1.

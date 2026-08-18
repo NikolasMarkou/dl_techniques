@@ -26,11 +26,17 @@ Two claims, each with its dead component run in the same test:
    successive pairs cross and the minimum difference is -7.2855. That contrast
    is the RED proof.
 
-Scope: `tree_depth` is held at 1-2 throughout. D-039 in this plan's decisions.md
-records `PRISMModel(tree_depth=3)` as an ALL-NaN forward at initialization
-(`nan_frac == 1.0` on two seeds) and `tree_depth=4` as not building at all;
-those are pinned separately in `test_model.py` and are deliberately not
-re-tested here.
+Scope: `tree_depth` is held at 1-2 throughout, now only because these tests are
+about the ROUTER and the quantile head, not about the tree. The depth-3 defect
+D-039 recorded (`PRISMModel(tree_depth=3)` all-NaN at initialization) was FIXED
+by plan-2026-08-18T073231-52a93f8c: the cause was a length-1 deepest band, whose
+empty first-difference tensor returned NaN silently and which the router's
+single joint softmax then spread across every band. Depth 3 is finite and swept
+in `test_model.py`; depth 4 at `context_len=96` is now refused by `__init__`
+with a `ValueError`. The governing quantity is
+`min_band_len = deepest_leaf_seg // 2 ** num_wavelet_levels`, NOT a `tree_depth`
+range -- a depth-2 config (96/2/4) was equally broken and a depth-4 one
+(256/4/3) was always fine.
 """
 
 import keras
