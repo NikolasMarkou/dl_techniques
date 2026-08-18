@@ -14,6 +14,7 @@ import numpy as np
 from typing import Dict, Any, Tuple
 
 from dl_techniques.models.time_series.prism.model import PRISMModel, create_prism_model
+from dl_techniques.layers.time_series.prism_blocks import PRISMTimeTree
 
 from ..knob_sensitivity_oracle import (
     as_array,
@@ -236,12 +237,35 @@ class TestPRISMModelInstantiation:
         assert output.shape == (4, 24, 7)
         assert np.all(np.isfinite(output))
 
-    @pytest.mark.parametrize("variant", ["tiny", "small", "base", "large"])
-    def test_shipped_variants_survive_band_validation(self, variant: str) -> None:
-        """Every shipped preset must remain constructible (invariant I-2).
+    @pytest.mark.parametrize(
+        "variant,expected_min_band_len",
+        [("tiny", 13), ("small", 3), ("base", 3), ("large", 1)],
+    )
+    def test_shipped_variants_survive_band_validation(
+        self, variant: str, expected_min_band_len: int
+    ) -> None:
+        """Every shipped preset constructs AND forwards finitely at ctx 96.
 
-        If one of these starts raising, the validation rule is wrong -- do not
-        loosen the rule to accommodate it without re-measuring.
+        The old version of this test asserted only ``model.context_len == 96``,
+        which is a property of the argument it just passed -- it could not have
+        caught the defect this plan fixed. It now pins the quantity that
+        actually governs the preset.
+
+        MEASURED at ``context_len=96, overlap_ratio=0.25``
+        (``deepest_leaf_seg // 2 ** num_wavelet_levels``)::
+
+            tiny  (depth 1, nwl 2): seg 54 -> min_band_len 13
+            small (depth 2, nwl 3): seg 25 -> min_band_len  3
+            base  (depth 2, nwl 3): seg 25 -> min_band_len  3
+            large (depth 2, nwl 4): seg 25 -> min_band_len  1   <- boundary
+
+        ``large`` sits EXACTLY on the degenerate boundary, and the plan's
+        assumption A-8 / invariant I-2 ("no shipped variant affected",
+        "observationally inert for every shipped variant") is FALSE for it:
+        measured old-vs-new, ``large`` @ ctx 96 was 85.4% NaN before this
+        plan's ``FrequencyBandStatistics`` guard and is 0% NaN after. See
+        decisions.md D-010. If a shipped preset starts raising, the validation
+        rule is wrong -- do not loosen the rule without re-measuring.
         """
         model = PRISMModel.from_variant(
             variant,
@@ -250,6 +274,51 @@ class TestPRISMModelInstantiation:
             num_features=7,
         )
         assert model.context_len == 96
+
+        num_leaves = 2 ** model.tree_depth
+        if num_leaves == 1:
+            deepest_leaf_seg = model.context_len
+        else:
+            _, _, deepest_leaf_seg = PRISMTimeTree._segment_len(
+                model.context_len, model.overlap_ratio, num_leaves
+            )
+        min_band_len = deepest_leaf_seg // (2 ** model.num_wavelet_levels)
+        assert min_band_len == expected_min_band_len, (
+            f"{variant}: min_band_len is {min_band_len}, expected "
+            f"{expected_min_band_len} (deepest_leaf_seg={deepest_leaf_seg}, "
+            f"num_wavelet_levels={model.num_wavelet_levels})"
+        )
+
+        inputs = np.random.randn(2, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert output.shape == (2, 24, 7)
+        assert np.all(np.isfinite(output)), (
+            f"{variant} @ context_len=96 is non-finite "
+            f"(nan_frac={float(np.mean(np.isnan(output)))}); this preset was "
+            f"85.4% NaN before plan-2026-08-18T073231-52a93f8c"
+        )
+
+    def test_large_variant_is_refused_below_its_supportable_context_len(
+        self,
+    ) -> None:
+        """MEASURED boundary for the one preset that has a tight one.
+
+        Searching ``context_len`` upward by construction: ``large`` (depth 2,
+        nwl 4) first becomes supportable at ``context_len=61``
+        (``deepest_leaf_seg=16``, ``16 >> 4 == 1``). Below that
+        ``min_band_len == 0`` and ``__init__`` refuses it -- a behaviour change
+        this plan introduced for that preset, recorded in decisions.md D-010.
+        The other three presets bottom out at 8 (``tiny``) and 31 (``small``,
+        ``base``).
+        """
+        with pytest.raises(ValueError, match="min_band_len=0"):
+            PRISMModel.from_variant(
+                "large", context_len=60, forecast_len=4, num_features=1
+            )
+        model = PRISMModel.from_variant(
+            "large", context_len=61, forecast_len=4, num_features=1
+        )
+        assert model.context_len == 61
 
 
 class TestPRISMDegenerateBandWarning:

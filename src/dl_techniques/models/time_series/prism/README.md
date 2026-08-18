@@ -288,6 +288,30 @@ PRISMModel.MODEL_VARIANTS = {
 - **`base`** — wider for multivariate (e.g. ETT, Weather). 3 layers, depth 2.
 - **`large`** — long context / large-scale pre-training. 4 layers, depth 2, deeper wavelets.
 
+### Band budget per preset (MEASURED, not hand-computed)
+
+Every preset multiplies `tree_depth` and `num_wavelet_levels` into one number,
+`min_band_len = deepest_leaf_seg // 2 ** num_wavelet_levels` (see L-5). It depends on
+`context_len`, which is a caller argument, so a preset alone does not determine it. At
+`context_len=96, overlap_ratio=0.25` (produced by running each preset and its forward pass, not by
+arithmetic on paper):
+
+| variant | `tree_depth` | `num_wavelet_levels` | `deepest_leaf_seg` | `min_band_len` @ `context_len=96` | forward finite | smallest supportable `context_len` |
+|---|---|---|---|---|---|---|
+| `tiny`  | 1 | 2 | 54 | 13 | yes | 8 |
+| `small` | 2 | 3 | 25 | 3  | yes | 31 |
+| `base`  | 2 | 3 | 25 | 3  | yes | 31 |
+| `large` | 2 | 4 | 25 | **1** | yes | 61 |
+
+`large` sits **exactly on the degenerate boundary** at `context_len=96`: its deepest bands carry a
+single timestep, so `mean == min == max` and both first-difference features are exactly `0.0` by
+definition. `__init__` emits a `logger.warning` saying so. This is supported, not an error — but it
+is the reason `large` is documented as the *long context* preset. Below `context_len=61` the same
+preset is REFUSED with a `ValueError` (`min_band_len == 0`).
+
+Historical note: before plan `plan-2026-08-18T073231-52a93f8c`, `large` @ `context_len=96` was
+**85.4% NaN** on a forward pass. It is 0% NaN now. See L-5.
+
 `from_variant` accepts any variant key plus the three required positional fields (`context_len`, `forecast_len`, `num_features`) plus any override kwargs (e.g. `use_quantile_head=True`, `num_quantiles=9`). Preset fields are merged with user kwargs (user kwargs win).
 
 ---
@@ -455,7 +479,13 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 
   `min_band_len` must be `>= 1`. `PRISMModel.__init__` raises `ValueError` when it is 0, naming all four knobs, the computed `deepest_leaf_seg` and `min_band_len`, and a `context_len` that does work. Measured over a 36-cell grid: **depth alone does not separate the working configurations from the broken ones** — `context_len=96, tree_depth=2, num_wavelet_levels=4` is refused, while `context_len=256, tree_depth=4, num_wavelet_levels=3` is fine. Do not read a "`tree_depth > 3` is bad" rule out of this; compute `min_band_len`.
 
-  At `min_band_len == 1` the configuration is SUPPORTED but statistically degenerate: that band is a single timestep, so the router sees `mean == min == max`, and its two first-difference statistics are defined to be exactly `0.0` (there is no first difference of one sample). Prefer `min_band_len >= 2` if the deepest band is meant to carry information.
+  At `min_band_len == 1` the configuration is SUPPORTED but statistically degenerate: that band is a single timestep, so the router sees `mean == min == max`, and its two first-difference statistics are defined to be exactly `0.0` (there is no first difference of one sample). Prefer `min_band_len >= 2` if the deepest band is meant to carry information. `__init__` emits a `logger.warning` when `min_band_len == 1`, because README prose is not reachable from a `from_variant(...)` call site.
+
+  **The shipped `large` preset sits exactly on that boundary** at `context_len=96` (`min_band_len == 1`) — see the per-preset table in §8. It was **85.4% NaN** on a forward pass before the band guard landed and is 0% NaN now, and below `context_len=61` it is now REFUSED where it previously constructed. That is a real behaviour change to a shipped preset, not an inert repair.
+
+  **Loading a legacy checkpoint saved from a refused configuration.** `from_config` routes through `__init__`, so a `.keras` file saved before this validation whose config has `min_band_len == 0` now raises `ValueError` at `load_model` instead of loading. This is DELIBERATE: such a model was producing `inf`/NaN band statistics on every forward pass, so its weights were trained against (or produce) garbage. Re-train at a supported configuration; there is no migration path that makes those weights meaningful.
+
+  **Known limitation — a dynamic time axis defeats all of this.** The degenerate-band guard branches on the STATIC band length and deliberately falls through when it is unknown. MEASURED: the fixed `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None,None,7])])` returns `nan_frac == 1.0`, where the same model returns `0.0` eager. `PRISMModel.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but it cannot close this: Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature or `padded_batch` pipeline (the shipped ONNX exporter already does).
 
   Cost is separately exponential in depth: each layer instantiates `2^tree_depth` leaf segments plus the shallower levels, which inflates parameter count and graph build time.
 - **L-6. `PRISMNode.call()` uses `keras.ops.cond` for the interpolation branch.** Under the TF backend, `ops.cond` traces both branches, so the conditional is purely a control-flow nicety, not a perf optimization. Acceptable for forward pass, but a latent inefficiency if you are benchmarking on very large trees. Surfaced from issue I-12.
