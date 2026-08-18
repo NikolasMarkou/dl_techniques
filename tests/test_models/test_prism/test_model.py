@@ -1213,14 +1213,21 @@ class TestPRISMModelDifferentConfigurations:
     # signature, this one's is finiteness of the actual output. Note the
     # governing quantity is min_band_len, NOT tree_depth: a depth-2 config
     # (96/2/4) was equally broken and a depth-4 one (256/4/3) was always fine.
-    def test_tree_depth_3_forward_is_finite(self) -> None:
-        """The depth-3 forward must be finite. Measured nan_frac 0.0 on seeds 1234 and 7."""
+    @pytest.mark.parametrize("seed", [1234, 7])
+    def test_tree_depth_3_forward_is_finite(self, seed: int) -> None:
+        """The depth-3 forward must be finite, on two seeds.
+
+        The plan's success criterion 1 says "on at least two seeds"; until this
+        parametrization the claim lived only in this docstring while the test
+        built ONE model at the default seed. Measured ``nan_frac == 0.0`` at
+        both 1234 and 7.
+        """
         model = build_seeded(lambda: PRISMModel(
             context_len=96,
             forecast_len=24,
             num_features=7,
             tree_depth=3,
-        ))
+        ), seed=seed)
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
         output = as_array(model(inputs, training=False))
         assert np.all(np.isfinite(output)), (
