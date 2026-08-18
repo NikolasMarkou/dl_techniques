@@ -255,6 +255,23 @@ class CapsNet(keras.Model):
         after the first call, lazy build makes it 16 either way, so a post-call
         count cannot distinguish fixed from broken). See decisions.md D-006.
 
+        QUALIFICATION -- this mechanism is NECESSARY BUT NOT SUFFICIENT, and it
+        is NOT a general law that "overriding `build` loses your weights".
+        Counterexample in this same repo: `models/pft_sr/model.py::PFTSR` also
+        overrides `keras.Model.build`, also creates every sub-layer inside
+        `build()`, and never calls `.build()` on any of them -- yet it
+        round-trips with 22 weights BEFORE the first `call()` and an output
+        delta of exactly 0.0. MEASURED here why: `PFTSR.build` ends with a
+        CONCRETE DUMMY FORWARD (`self.call(keras.ops.zeros((1,) +
+        input_shape[1:]))`, `pft_sr/model.py:318-320`), which materializes the
+        whole sub-layer tree. Disabling only that dummy forward drops it to 0
+        weights. So the discriminating property is whether `build()`
+        MATERIALIZES the sub-layer tree at all -- by explicit `.build()` calls
+        as here, or by a forward pass as there -- not whether `build` is
+        overridden. Do not cite D-006 as evidence that some other model with an
+        overridden `build` is broken; measure `len(model.weights)` before the
+        first `call()` on that model.
+
         Args:
             input_shape: 4D input shape `(batch, height, width, channels)`.
         """
