@@ -147,11 +147,13 @@ class MobileNetV4(keras.Model):
         ValueError: If invalid attention stage indices are provided.
 
     Example:
-        >>> # Create MobileNetV4-ConvMedium for ImageNet
-        >>> model = MobileNetV4.from_variant("conv_medium", num_classes=1000)
+        >>> # Create MobileNetV4-Medium for ImageNet. The variant keys are
+        >>> # "small", "medium", "large", "hybrid_medium", "hybrid_large" --
+        >>> # there is no "conv_medium"/"conv_small"; see the module docstring.
+        >>> model = MobileNetV4.from_variant("medium", num_classes=1000)
         >>>
-        >>> # Create MobileNetV4-ConvSmall for CIFAR-10
-        >>> model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        >>> # Create MobileNetV4-Small for CIFAR-10
+        >>> model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         >>>
         >>> # Create MobileNetV4-Hybrid with custom configuration
         >>> model = MobileNetV4(
@@ -591,7 +593,10 @@ def create_mobilenetv4(
             f"(requested variant '{variant}'). Build the architecture with "
             f"pretrained=False and warm-start from a local checkpoint instead: "
             f"model = create_mobilenetv4('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras')."
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
         )
 
     model = MobileNetV4.from_variant(

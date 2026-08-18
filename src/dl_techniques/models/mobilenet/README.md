@@ -173,7 +173,7 @@ from dl_techniques.models.mobilenet.mobilenet_v4 import create_mobilenetv4
 
 # 1. Create a small MobileNetV4 model for CIFAR-10 (32x32 images, 10 classes)
 model = create_mobilenetv4(
-    variant="conv_small",  # A very small and fast V4 variant
+    variant="small",  # A very small and fast V4 variant
     num_classes=10,
     input_shape=(32, 32, 3)
 )
@@ -234,8 +234,14 @@ Each MobileNet version comes with several pre-configured variants.
 `"large"`, `"small"` (both can be scaled with `width_multiplier`)
 
 ### MobileNetV4 Variants
--   **Conv-Only**: `"conv_small"`, `"conv_medium"`, `"conv_large"`
+-   **Conv-Only**: `"small"`, `"medium"`, `"large"`
 -   **Hybrid (with Attention)**: `"hybrid_medium"`, `"hybrid_large"`
+
+These five strings are the complete key set of `MobileNetV4.MODEL_VARIANTS`. There
+is no `"conv_small"`, `"conv_medium"` or `"conv_large"` -- `from_variant` raises
+`ValueError` on them. (The names are deliberately not the paper's MNv4-Conv-S/M/L:
+these ladders are hand-written depth/width tables, not the NAS-found specifications
+-- see `mobilenet_v4.py`'s module docstring.)
 
 ---
 
@@ -316,8 +322,9 @@ exactly 0.
 While this implementation does not ship with pre-trained weights, it is designed to load them easily. If you have a `.keras` file with ImageNet weights, you can load them and fine-tune on a new task.
 
 ```python
-# Assume you have downloaded pre-trained weights for MobileNetV4-ConvMedium
-# and saved them to "mobilenet_v4_conv_medium_imagenet.keras"
+# Assume you TRAINED a MobileNetV4-Medium yourself and saved it to
+# "mobilenet_v4_medium.keras". Nothing is downloadable: `pretrained=True`
+# raises `NotImplementedError` and no checkpoint ships with dl_techniques.
 
 # 1. Create a new model for a custom task (e.g., 20 classes)
 # The `from_config` logic in the custom model classes handles this.
@@ -348,7 +355,7 @@ All MobileNet models are well-suited for mixed precision training, which uses 16
 keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Create model (will automatically use mixed precision)
-model = create_mobilenetv4("conv_medium", num_classes=1000)
+model = create_mobilenetv4("medium", num_classes=1000)
 model.compile(...)
 
 # When training, use a LossScaleOptimizer to prevent numeric underflow
@@ -427,7 +434,7 @@ def test_creation_all_variants():
 
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""
-    model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(96, 96, 3))
+    model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(96, 96, 3))
     dummy_input = np.random.rand(4, 96, 96, 3).astype("float32")
     output = model.predict(dummy_input)
     assert output.shape == (4, 10)
@@ -454,7 +461,7 @@ if __name__ == '__main__':
 **Q: Which MobileNet version should I use?**
 
 A:
--   **For the best accuracy/latency trade-off on modern hardware**: Start with **MobileNetV4**. The `conv_small` or `conv_medium` variants are excellent general-purpose backbones.
+-   **For the best accuracy/latency trade-off on modern hardware**: Start with **MobileNetV4**. The `small` or `medium` variants are excellent general-purpose backbones.
 -   **For a robust, well-understood baseline**: **MobileNetV2** is a fantastic choice and is widely supported in production environments.
 -   **If you need a CPU-optimized model with good performance**: **MobileNetV3** is still highly competitive.
 -   **For legacy systems or maximum simplicity**: **MobileNetV1** is the original, but V2 generally offers better performance for a similar cost.

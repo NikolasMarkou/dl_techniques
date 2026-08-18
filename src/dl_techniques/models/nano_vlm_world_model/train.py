@@ -603,7 +603,7 @@ def example_training():
 
         def __getitem__(self, idx):
             images = keras.random.normal((8, 224, 224, 3))
-            text = keras.random.uniform((8, 77), minval=0, maxval=32000, dtype='int32')
+            text = keras.random.randint((8, 77), minval=0, maxval=32000, dtype='int32')
             return images, text
 
     dataset = DummyDataset()

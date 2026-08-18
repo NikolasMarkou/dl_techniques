@@ -261,7 +261,7 @@ class CliffordCLIP(keras.Model):
                 "nano", vocab_size=100352, image_size=96, context_length=64
             )
             images = keras.random.normal((4, 96, 96, 3))
-            tokens = keras.random.uniform((4, 64), 0, 100277, dtype="int32")
+            tokens = keras.random.randint((4, 64), 0, 100277, dtype="int32")
             out = model({"image": images, "text": tokens})
             # out has keys: image_features, text_features,
             # logits_per_image, logits_per_text, logit_scale

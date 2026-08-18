@@ -294,20 +294,33 @@ inference_model = create_inference_model_from_training_model(training_model)
 result = inference_model.predict(some_image)
 ```
 
-### Example 3: Loading Pretrained BF-UNet
-BF-UNet supports automatic weight downloading for standard configurations.
+### Example 3: Loading BF-UNet Weights From a Local File
+
+**No weights are downloadable.** `pretrained=True` raises `NotImplementedError` --
+there is no host, no checkpoint and no fallback to random initialization. The
+`weights_dataset` argument only names a checkpoint that would be fetched, so it is
+inert. The supported route is a local `.keras` file you produced yourself, passed as
+`pretrained="<path>"`:
 
 ```python
 from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
 
-model = create_bfunet_variant(
-    'base',
-    input_shape=(256, 256, 3),
-    pretrained=True,
-    weights_dataset='imagenet_denoising'
+# A model you trained and saved earlier.
+model = create_bfunet_variant('tiny', input_shape=(64, 64, 3))
+model.save('/tmp/bfunet_tiny.keras')
+
+# Reload its weights into a freshly configured model of the same shape.
+restored = create_bfunet_variant(
+    'tiny',
+    input_shape=(64, 64, 3),
+    pretrained='/tmp/bfunet_tiny.keras',
 )
-print("✅ Pretrained weights loaded.")
 ```
+
+`keras.models.load_model('/tmp/bfunet_tiny.keras')` is the simpler route when you want
+the saved model back as-is; `pretrained="<path>"` exists to transplant weights into a
+configuration you built yourself (e.g. a different `input_shape`, with
+`weights_input_shape=` set to the shape the file was trained at).
 
 ---
 

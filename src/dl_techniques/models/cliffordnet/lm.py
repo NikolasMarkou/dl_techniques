@@ -133,7 +133,7 @@ class CliffordNetLM(keras.Model):
         .. code-block:: python
 
             model = CliffordNetLM.from_variant("nano", vocab_size=50261)
-            input_ids = keras.random.uniform((2, 64), 0, 50261, dtype="int32")
+            input_ids = keras.random.randint((2, 64), 0, 50261, dtype="int32")
             outputs = model(input_ids)
             print(outputs["logits"].shape)  # (2, 64, 50261)
     """

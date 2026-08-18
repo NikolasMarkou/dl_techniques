@@ -239,7 +239,7 @@ class ModernBERT(keras.Model):
 
             # Use the model
             inputs = {
-                "input_ids": keras.random.uniform((2, 256), 0, 50368, dtype="int32"),
+                "input_ids": keras.random.randint((2, 256), 0, 50368, dtype="int32"),
                 "attention_mask": keras.ops.ones((2, 256), dtype="int32")
             }
             outputs = model(inputs)
@@ -574,8 +574,16 @@ class ModernBERT(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
         try:
             if not self.built:
+                # DECISION plan-2026-08-17T183311-79c63e38/D-044
+                # `keras.random.randint`, NOT `keras.random.uniform(..., dtype=
+                # "int32")`. Keras 3 rejects an integer dtype on `uniform`
+                # ("requires a floating point dtype"), so this build raised on
+                # EVERY unbuilt model and the whole `pretrained="<path>"` route
+                # was unreachable -- the README documented it as the supported
+                # alternative to the (raising) `pretrained=True`. Same defect
+                # and same fix as `distilbert/model.py` (D-024 there).
                 dummy_input = {
-                    "input_ids": keras.random.uniform(
+                    "input_ids": keras.random.randint(
                         (1, 128), 0, self.vocab_size, dtype="int32"
                     )
                 }

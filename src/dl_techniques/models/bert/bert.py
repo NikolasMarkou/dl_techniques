@@ -196,7 +196,7 @@ class BERT(keras.Model):
 
             # Use the model
             inputs = {
-                "input_ids": keras.random.uniform((2, 128), 0, 30522, dtype="int32"),
+                "input_ids": keras.random.randint((2, 128), 0, 30522, dtype="int32"),
                 "attention_mask": keras.ops.ones((2, 128), dtype="int32")
             }
             outputs = model(inputs)

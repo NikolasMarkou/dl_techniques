@@ -16,6 +16,7 @@ method below used to be named `test_forward_logits_shape` and this line used to 
 import os
 import keras
 import pytest
+import pathlib
 import numpy as np
 
 from dl_techniques.models.coshnet.model import CoShNet, create_coshnet
@@ -136,3 +137,25 @@ class TestDocumentedParameterCounts:
         doc = inspect.getdoc(create_coshnet) or ""
         assert "~50k" not in doc
         assert "~800k" not in doc
+
+    def test_the_readme_no_longer_restates_a_count(self):
+        """The SECOND copy this guard used to miss.
+
+        DECISION plan-2026-08-17T183311-79c63e38/D-044
+        Until 2026-08-18 this class checked the FACTORY DOCSTRING only, which is the
+        one place the surviving duplicate was NOT: `README.md` § 4 carried a
+        `Params (Est)` column that was wrong on every row (`nano` ~15k against a
+        measured 55,282 -- 3.7x) and omitted `cifar10` entirely. The column was
+        deleted, not corrected. Do NOT re-add a parameter figure here; put it in
+        `model.py`'s module docstring, which `test_the_documented_count_is_the_measured_count`
+        re-derives by construction. See decisions.md D-044.
+        """
+        readme = (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "src" / "dl_techniques" / "models" / "coshnet" / "README.md"
+        )
+        assert readme.is_file(), readme
+        text = readme.read_text(encoding="utf-8")
+        # The exact drifted estimates, plus the column header that hosted them.
+        for stale in ("~15k", "~50k", "~800k", "~2.5M", "~3M", "Params (Est)"):
+            assert stale not in text, f"{stale!r} is back in coshnet/README.md"

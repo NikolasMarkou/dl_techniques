@@ -146,7 +146,7 @@ class GPT2(keras.Model):
             model = GPT2.from_variant("small")
 
             # Forward pass
-            input_ids = keras.random.uniform((2, 128), 0, 100277, dtype="int32")
+            input_ids = keras.random.randint((2, 128), 0, 100277, dtype="int32")
             outputs = model(input_ids)
             print(outputs["logits"].shape)  # (2, 128, 100277)
 

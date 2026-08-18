@@ -244,8 +244,13 @@ import numpy as np
 # Local imports from your project structure
 from dl_techniques.models.modern_bert.model import ModernBERT
 
-# 1. Create a ModernBERT-base model
-model = ModernBERT.from_variant("base")
+# 1. Create a model. Every example below that runs a FORWARD pass uses `"tiny"`.
+#    This is not a stylistic choice: because the local layers pad to a single
+#    `window_size**2` window (§ 4.3), `"base"`/`"large"` materialize a
+#    16384 x 16384 score matrix PER HEAD -- ~12.9 GB in float32 at `hidden_size=768`,
+#    which OOMs a 12 GB GPU at any sequence length. Measured 2026-08-18, peak host
+#    RSS for CONSTRUCTION alone: tiny 1.05 GB, base 20.1 GB, large 24.2 GB.
+model = ModernBERT.from_variant("tiny")
 
 # 2. Compile the model (optional for inference)
 model.compile(optimizer="adam")
@@ -257,7 +262,7 @@ dummy_inputs = {
     "input_ids": np.random.randint(0, 50368, (2, 256)),
     "attention_mask": np.ones((2, 256), dtype="int32"),
     "token_type_ids": np.zeros((2, 256), dtype="int32"),
-}
+}  # last_hidden_state is (2, 256, 256) for "tiny" (hidden_size=256)
 
 # 4. Run inference
 outputs = model(dummy_inputs)
@@ -309,19 +314,22 @@ Use the factory function to attach a classification head to a ModernBERT encoder
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.modern_bert.model import (
+    ModernBERT,
+    create_modern_bert_with_head,
+)
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the classification task
 classification_task = NLPTaskConfig(
     name="sentiment_classification",
-    task_type=NLPTaskType.SEQUENCE_CLASSIFICATION,
+    task_type=NLPTaskType.TEXT_CLASSIFICATION,
     num_classes=3
 )
 
 # 2. Create the complete model
 classifier_model = create_modern_bert_with_head(
-    bert_variant="base",
+    bert_variant="tiny",
     task_config=classification_task
 )
 classifier_model.summary()
@@ -340,12 +348,19 @@ print(f"\nPredictions shape: {predictions.shape}") # (4, 3)
 
 ModernBERT's native 8192 sequence length makes it ideal for long-document tasks.
 
+**8192 is now a hard ceiling, not a soft one.** Since the global layers were moved
+onto RoPE (2026-08-17), `RotaryPositionEmbedding.call` **raises** above
+`max_seq_len`. Before that, a longer input ran -- position-blind, but it ran. Two
+`(8192, head_dim/2)` non-trainable tables are also materialized per global layer and
+written into every checkpoint.
+
 ```python
 import numpy as np
 from dl_techniques.models.modern_bert.model import ModernBERT
 
-# 1. Create a foundation model
-long_context_bert = ModernBERT.from_variant("base")
+# 1. Create a foundation model ("tiny": the only variant that can forward on a
+#    consumer GPU -- see § 4.3 and Example 1's note)
+long_context_bert = ModernBERT.from_variant("tiny")
 
 # 2. Process a long sequence (e.g., 4096 tokens)
 long_inputs = {
@@ -362,31 +377,69 @@ print(f"Feature map shape: {features['last_hidden_state'].shape}") # (1, 4096, 7
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning from Pre-trained Weights
+### Pattern 1: Fine-tuning From a Local Checkpoint
 
-This implementation is designed to load pre-trained weights from local files or official URLs.
+**Nothing is downloaded.** `pretrained=True` raises `NotImplementedError`: no
+ModernBERT checkpoint is distributed with `dl_techniques`, and there is no URL for
+`from_variant` to fetch. `weights_dataset` names a checkpoint that would be fetched, so
+it is inert. The supported route is a local `.keras` encoder file you produced yourself,
+passed as `pretrained="<path>"`.
+
+Two things the mechanism requires, both verified by running this example on 2026-08-18:
+
+1.  **Call the encoder once before you save it.** `pretrained=` transfers weights
+    *layer by layer* out of the saved model. `ModernBERT` is a subclassed model whose
+    sublayers are built lazily, so saving an un-called encoder writes a file whose
+    layers hold **zero** weights; the transfer then finds no overlap and raises
+    *"No overlapping layers between target and source checkpoint"*.
+2.  **Save the bare encoder, not a model that already carries a head** — the transfer
+    matches on layer name against the `ModernBERT` you are restoring into.
 
 ```python
-# Create a model and load official pre-trained weights by setting pretrained=True
-# The from_variant method will handle downloading.
 import keras
-from dl_techniques.models.modern_bert.model import create_modern_bert_with_head
+from dl_techniques.models.modern_bert.model import (
+    ModernBERT,
+    create_modern_bert_with_head,
+)
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
-ner_model_pretrained = create_modern_bert_with_head(
-    bert_variant="base",
-    task_config=some_ner_config,
-    pretrained=True
+# 0. An encoder you pre-trained and saved earlier.
+encoder = ModernBERT.from_variant("tiny")
+encoder(
+    {"input_ids": keras.random.randint((1, 128), 0, encoder.vocab_size, dtype="int32")},
+    training=False,
+)  # REQUIRED before save -- see note 1 above
+encoder.save("/tmp/modern_bert_tiny.keras")
+
+ner_task = NLPTaskConfig(
+    name="ner",
+    task_type=NLPTaskType.TOKEN_CLASSIFICATION,
+    num_classes=9,
 )
 
-# 2. Now you can fine-tune this model on your specific NER dataset
-# Use a low learning rate for fine-tuning
-ner_model_pretrained.compile(
+# 1. Attach a fresh task head on top of the restored encoder.
+ner_model = create_modern_bert_with_head(
+    bert_variant="tiny",
+    task_config=ner_task,
+    pretrained="/tmp/modern_bert_tiny.keras",
+)
+
+# 2. Fine-tune on your own NER dataset, at a low learning rate.
+ner_model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=2e-5),
-    loss="...",
-    metrics=["accuracy"]
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
 )
-print("✅ Model ready for fine-tuning!")
 ```
+
+Measured for the snippet above: the restored encoder reproduces the saved encoder's
+`last_hidden_state` to **exactly 0.0**, against **5.50** for a freshly initialized
+control -- so the transfer is real, not a silent no-op.
+
+The example uses `"tiny"` deliberately -- see the note in § 8 Example 1. `"base"` and
+`"large"` cost 20.1 GB and 24.2 GB of host RSS to *construct* (measured 2026-08-18) and
+OOM a 12 GB GPU on a forward pass at any sequence length. That is the known windowing
+degeneracy of § 4.3, not a property of this example.
 
 ---
 
@@ -460,7 +513,11 @@ import numpy as np
 from dl_techniques.models.modern_bert.model import ModernBERT, create_modern_bert_with_head
 
 def test_creation_all_variants():
-    """Test model creation for all variants."""
+    """Test model creation for all variants.
+
+    Needs ~45 GB of host RAM if the three models are alive at once
+    (tiny 1.05 GB, base 20.1 GB, large 24.2 GB peak RSS -- § 8 Example 1).
+    """
     for variant in ModernBERT.MODEL_VARIANTS.keys():
         model = ModernBERT.from_variant(variant)
         assert model is not None
@@ -468,10 +525,19 @@ def test_creation_all_variants():
 
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""
-    model = ModernBERT.from_variant("base") # Using "base" as "tiny" is not a standard variant
-    dummy_input = {"input_ids": np.random.randint(0, 50368, size=(4, 64))}
+    # "tiny" IS a standard variant (MODEL_VARIANTS is tiny/base/large), and it is
+    # the one to forward with -- see Example 1's note on "base"'s memory cost.
+    model = ModernBERT.from_variant("tiny")
+    # `attention_mask` is REQUIRED under `predict()`. `call` echoes the mask back in
+    # its output dict, so omitting it makes that entry `None` and Keras' batch
+    # concatenation raises "Structures don't have the same nested structure".
+    # `model(inputs)` directly does accept `input_ids` alone.
+    dummy_input = {
+        "input_ids": np.random.randint(0, 50368, size=(4, 64)),
+        "attention_mask": np.ones((4, 64), dtype="int32"),
+    }
     output = model.predict(dummy_input)
-    assert output["last_hidden_state"].shape == (4, 64, 768) # Shape for "base" model
+    assert output["last_hidden_state"].shape == (4, 64, 256) # hidden_size=256 for "tiny"
     print("✓ Forward pass has correct shape")
 
 # Run tests

@@ -480,7 +480,7 @@ A: DistilBERT removed them to simplify the architecture. It does not distinguish
 A: Not directly. While the architectures are similar, the layer count is different (6 vs 12), and the weight matrices are not 1:1 mappable without the specific distillation selection process.
 
 **Q: Where do I get trained weights, then?**
-A: You train them, or you convert them yourself. This package ships no checkpoint and contains no HuggingFace converter. `pretrained=True` reaches placeholder URLs and falls back to random init; `pretrained="<path>"` raises. Save with `model.save(path)` and reload with `keras.models.load_model(path)` (§8).
+A: You train them, or you convert them yourself. This package ships no checkpoint and contains no HuggingFace converter. `pretrained=True` raises `NotImplementedError` (it does not fetch anything and does not fall back to random init); `pretrained="<path>.keras"` on a file you saved yourself **does** work. Save with `model.save(path)` and reload with `keras.models.load_model(path)` (§8).
 
 **Q: Why is there no Pooler output?**
 A: The original DistilBERT removed the pre-training "Next Sentence Prediction" task, and thus removed the dense pooler layer associated with the `[CLS]` token. You should simply take the 0-th index of `last_hidden_state` for classification tasks.
