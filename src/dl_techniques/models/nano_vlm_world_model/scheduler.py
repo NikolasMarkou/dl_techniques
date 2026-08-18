@@ -40,7 +40,15 @@ class DiffusionScheduler:
             Defaults to 'linear'.
         beta_start: Starting value of β at t=0. Defaults to 0.0001.
         beta_end: Ending value of β at t=T. Defaults to 0.02.
-        clip_sample: Whether to clip samples to [-1, 1]. Defaults to True.
+        clip_sample: Whether to clip predicted x_0 to [-1, 1]. Defaults to **False**,
+            which is a deliberate departure from the DDPM convention this class
+            otherwise follows. `[-1, 1]` is DDPM's *pixel*-space range, and nothing in
+            this package diffuses pixels: `ScoreBasedNanoVLM.call` noises the output of
+            `VisionEncoder`/`TextEncoder`, both of which end in a LayerNormalization,
+            so a unit-variance coordinate falls outside `[-1, 1]` roughly a third of
+            the time. Clipping also applied only on the reverse path — `add_noise`
+            never clipped — so the train and inference domains disagreed. Pass True
+            explicitly when the samples really are pixels in `[-1, 1]`.
         prediction_type: What the model predicts ('epsilon', 'sample', 'v_prediction').
             Defaults to 'sample', which is a deliberate departure from the DDPM
             convention this class otherwise follows. Every denoiser in this package is
@@ -73,7 +81,16 @@ class DiffusionScheduler:
             beta_schedule: Literal['linear', 'cosine', 'quadratic'] = 'linear',
             beta_start: float = 0.0001,
             beta_end: float = 0.02,
-            clip_sample: bool = True,
+            # DECISION plan-2026-08-17T183311-79c63e38/D-029: clip_sample defaults
+            # False, NOT the DDPM-conventional True. Do NOT "restore" True on the
+            # grounds that it matches DDPM/diffusers: this scheduler only ever runs
+            # over LayerNorm'd ENCODER FEATURES, not pixels, so [-1, 1] projects away
+            # ~a third of every coordinate axis while add_noise (training) clips
+            # nothing. The knob is deliberately KEPT rather than deleted — a
+            # pixel-space caller may legitimately want it, and the three shipped
+            # create_score_based_nanovlm presets pass no clip_sample at all, so this
+            # default is their only route. See decisions.md D-029.
+            clip_sample: bool = False,
             prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'sample',
     ) -> None:
         if num_timesteps <= 0:
@@ -252,10 +269,13 @@ class DiffusionScheduler:
 
         `ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)`
 
-        This is a standalone utility for callers that hold an x_0 estimate and
+        This is the conversion callers need when they hold an x_0 estimate and
         need the ε consistent with it — e.g. converting an x_0-predicting denoiser
         into an ε-predicting one, or recovering the noise that `add_noise` used.
-        It currently has NO in-repo caller.
+        `ScoreBasedNanoVLM.compute_score_field` is its in-repo caller: it composes
+        this with :meth:`get_score_from_noise` to turn a denoiser's x_0 output into
+        a score, which is the only correct route because `get_score_from_noise`
+        consumes ε and nothing else.
 
         It is deliberately not used by `ScoreBasedNanoVLM.generate_from_text`: an
         earlier version of that method converted x_0 to ε here before calling

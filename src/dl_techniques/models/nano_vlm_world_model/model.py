@@ -375,7 +375,16 @@ class ScoreBasedNanoVLM(keras.Model):
                 noisy_vision, text_features, timesteps, training=training
             )
             outputs['denoised_vision'] = denoised_vision
-            outputs['target_vision'] = vision_features
+            # DECISION plan-2026-08-17T183311-79c63e38/D-029: the DSM regression
+            # target is DETACHED. It is the vision encoder's own trainable output,
+            # and ||D(x_t) - x_0||^2 with a trainable x_0 is globally minimised by a
+            # CONSTANT encoder — which the zero-initialised output_proj already
+            # predicts exactly. Do NOT remove stop_gradient to "let the encoder learn
+            # from the diffusion loss": that is the representation-collapse setup, and
+            # the encoder still receives gradient through the denoiser INPUT path
+            # (add_noise is differentiable in vision_features). Precedent:
+            # video_jepa/model.py:439. See decisions.md D-029.
+            outputs['target_vision'] = ops.stop_gradient(vision_features)
             outputs['noise_vision'] = noise_vision
 
         if self.generation_mode in ['image_to_text', 'joint']:
@@ -387,7 +396,8 @@ class ScoreBasedNanoVLM(keras.Model):
                 noisy_text, vision_features, timesteps, training=training
             )
             outputs['denoised_text'] = denoised_text
-            outputs['target_text'] = text_features
+            # Detached for the same reason as target_vision above (D-029).
+            outputs['target_text'] = ops.stop_gradient(text_features)
             outputs['noise_text'] = noise_text
 
         if self.generation_mode == 'joint':
@@ -402,8 +412,9 @@ class ScoreBasedNanoVLM(keras.Model):
             )
             outputs['joint_denoised_vision'] = denoised_v
             outputs['joint_denoised_text'] = denoised_t
-            outputs['joint_target_vision'] = vision_features
-            outputs['joint_target_text'] = text_features
+            # Detached for the same reason as target_vision above (D-029).
+            outputs['joint_target_vision'] = ops.stop_gradient(vision_features)
+            outputs['joint_target_text'] = ops.stop_gradient(text_features)
 
         outputs['timesteps'] = timesteps
         return outputs
@@ -595,12 +606,26 @@ class ScoreBasedNanoVLM(keras.Model):
             vision_features, text_features, t, training=False
         )
 
-        # By Miyasawa: score = (denoised - noisy) / variance
+        # DECISION plan-2026-08-17T183311-79c63e38/D-029: the denoisers are x_0
+        # predictors, so their output must be converted to an epsilon estimate
+        # BEFORE get_score_from_noise, which consumes epsilon and nothing else.
+        # This used to pass `denoised - noisy` straight in, which is not an epsilon
+        # by any parameterisation; the result was `-(D - x_t)/sqrt(1-a_t)`, exactly
+        # OPPOSITE the true score at low noise (measured cosine -1.0 at t=2) and
+        # wrong in scale everywhere, so navigate_semantic_space did gradient
+        # DESCENT on log p. Do NOT "simplify" this back by negating in place: in
+        # this VP schedule Tweedie is `(sqrt(a_t)*D - x_t)/(1 - a_t)`, which carries
+        # a sqrt(a_t) on D and a (1-a_t) denominator; the familiar `(D - x)/sigma^2`
+        # form is the variance-exploding special case a_t = 1 and is wrong for every
+        # t > 0 here. predict_noise_from_start is that conversion and is reused
+        # rather than re-derived. See decisions.md D-029.
         vision_score = self.scheduler.get_score_from_noise(
-            denoised_v - vision_features, t, vision_features
+            self.scheduler.predict_noise_from_start(vision_features, t, denoised_v),
+            t, vision_features
         )
         text_score = self.scheduler.get_score_from_noise(
-            denoised_t - text_features, t, text_features
+            self.scheduler.predict_noise_from_start(text_features, t, denoised_t),
+            t, text_features
         )
 
         return vision_score, text_score
