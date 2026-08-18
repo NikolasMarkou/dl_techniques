@@ -827,7 +827,30 @@ class DepthAnything(keras.Model):
         x: keras.KerasTensor,
         y: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Labeled-only path: augment image+target together, forward, backprop."""
+        """Labeled-only path: augment image+target together, forward, backprop.
+
+        Both step methods differentiate ``scaled_loss`` and report ``loss``.
+        See the D-034 anchor below for why the two must not be collapsed.
+        """
+        # DECISION plan-2026-08-17T183311-79c63e38/D-034
+        # `self.optimizer.scale_loss(loss)` MUST be called inside the tape, and
+        # the SCALED value is what `tape.gradient` differentiates while the
+        # UNSCALED value is what gets reported. Keras' own default TF
+        # `train_step` does exactly this (`backend/tensorflow/trainer.py:72`),
+        # and overriding `train_step` silently opts out of it.
+        # Under `mixed_float16` Keras wraps the optimizer in a
+        # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+        # `dynamic_scale` (2**15 initially) unconditionally
+        # (`optimizers/loss_scale_optimizer.py:172-177`). Skipping `scale_loss`
+        # therefore does not merely lose fp16 precision -- it divides the whole
+        # update by the loss scale. MEASURED on this exact step shape: total
+        # |dW| over 10 steps was 8.74e-05 without the call vs 2.44e+00 with it,
+        # a ratio of 2.79e+04 (~32768), against a float32 control of 2.74e+00.
+        # Nothing warns; training simply does not move.
+        # In float32 this is a provable no-op: the base
+        # `Optimizer.scale_loss` returns `loss` unchanged unless
+        # `loss_scale_factor` is set (`optimizers/base_optimizer.py:605-614`).
+        # Do not "simplify" this back to `tape.gradient(loss, ...)`.
         x, (y,) = self._augment_with_targets(x, [y])
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
@@ -836,9 +859,10 @@ class DepthAnything(keras.Model):
             # See dl_techniques/models/masked_language_model/mlm.py:309-343.
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         return self._finalize_train_step(y, y_pred, loss)
@@ -910,8 +934,10 @@ class DepthAnything(keras.Model):
                 consistency = ops.mean(ops.abs(y_pred_unlab - pseudo))
                 loss = loss + self.loss_weights.get('unlabeled', 0.5) * consistency
 
+            scaled_loss = self.optimizer.scale_loss(loss)
+
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         return self._finalize_train_step(y, y_pred, loss)

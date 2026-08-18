@@ -666,6 +666,25 @@ class WaveFieldMemoryLLM(keras.Model):
             y_pred = self(x, training=True)
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
 
+        # DECISION plan-2026-08-17T183311-79c63e38/D-034
+        # NO `optimizer.scale_loss(loss)` call here, DELIBERATELY -- unlike
+        # every other custom `train_step` in this repo, where omitting it is a
+        # ~32768x silent under-update under `mixed_float16`. This model is the
+        # measured exception, for two independent reasons:
+        #   1. Gradients are applied through `self.backbone_optimizer` and
+        #      `self.memory_optimizer` -- the RAW optimizer objects. Keras'
+        #      `auto_scale_loss` only wraps `self.optimizer`, so neither of
+        #      these is ever a `LossScaleOptimizer`, neither unscales, and
+        #      calling `scale_loss` on them is an unconditional no-op. Adding
+        #      the call would look like a fix and change nothing.
+        #   2. The model cannot execute under `mixed_float16` at all today:
+        #      `MemoryReadController.call()` raises `InvalidArgumentError` on a
+        #      dtype mismatch before a single step completes (measured).
+        # Making fp16 correct here means wrapping BOTH optimizers by hand and
+        # reconciling their two independent dynamic scales -- a design change,
+        # not a one-line fix, and unverifiable until (2) is resolved. Flagged
+        # as a scoped follow-up in decisions.md D-034; do not "just add
+        # scale_loss".
         trainable_vars = self.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
 

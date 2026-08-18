@@ -201,7 +201,18 @@ class HRMTrainer:
         self.metrics.reset_state()
         epoch_metrics = {}
 
-        for batch_idx, batch in enumerate(self.train_dataset):
+        # DECISION plan-2026-08-17T183311-79c63e38/D-034
+        # Index by `range(len(...))`. Do NOT write `for batch in
+        # self.train_dataset`. MEASURED against Keras 3.8: `keras.utils.Sequence
+        # is keras.utils.PyDataset` and `hasattr(PyDataset, "__iter__")` is
+        # False, so `for x in <a PyDataset>` falls back to Python's legacy
+        # `__getitem__` protocol -- which walks 0, 1, 2, ... until `IndexError`
+        # and IGNORES `__len__` entirely. `SampleDataset.__getitem__` below
+        # generates fresh random data for any index and never raises, so this
+        # loop ran FOREVER: epoch 0 never ended, nothing raised, and it
+        # presented as a hang with no failure text.
+        for batch_idx in range(len(self.train_dataset)):
+            batch = self.train_dataset[batch_idx]
             step_metrics = self.train_step(batch)
 
             for key, value in step_metrics.items():
@@ -229,7 +240,9 @@ class HRMTrainer:
         self.metrics.reset_state()
         eval_metrics = {}
 
-        for batch in self.val_dataset:
+        # Same PyDataset trap as `train_epoch` -- see the D-034 anchor there.
+        for batch_idx in range(len(self.val_dataset)):
+            batch = self.val_dataset[batch_idx]
             step_metrics = self.evaluate_step(batch)
             for key, value in step_metrics.items():
                 if key not in eval_metrics:
