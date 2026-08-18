@@ -883,12 +883,23 @@ class TestPRISMModelDifferentConfigurations:
     def test_different_tree_depths(self) -> None:
         """``tree_depth`` must build the requested frequency tree.
 
-        Swept over 1 and 2 only. ``tree_depth=3`` is EXCLUDED here on purpose --
-        it is measured broken, and pinned by
-        :meth:`test_tree_depth_3_forward_is_finite` below -- so that this test
-        keeps testing the knob rather than the bug.
+        Swept over 1, 2 and 3. Depth 3 was previously EXCLUDED because the
+        depth-3 forward was all-NaN; that defect is fixed (see
+        :meth:`test_tree_depth_3_forward_is_finite`), so the sweep is whole
+        again. Depth 4 is NOT swept here, and not because it is broken:
+        at ``context_len=96`` it drives ``min_band_len`` to 0 and is REFUSED by
+        ``__init__`` with a ``ValueError`` at the default
+        ``num_wavelet_levels=3`` -- that path is covered by
+        :meth:`TestPRISMModelInstantiation.test_unsupportable_band_config_raises_value_error`.
+
+        Weight counts below are MEASURED (seed 42, this sweep's own builder),
+        not extrapolated: 48 weights / 5,989 params at depth 1, 96 / 10,189 at
+        depth 2, 192 / 18,589 at depth 3. The tensor count doubles per level
+        (one extra band tree level doubles the node count); the PARAMETER count
+        does not -- its increments do (4,200 then 8,400), because the shared
+        head is paid once.
         """
-        depths = [1, 2]
+        depths = [1, 2, 3]
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
         def _build(tree_depth):
@@ -903,12 +914,13 @@ class TestPRISMModelDifferentConfigurations:
 
         builders = {d: (lambda d=d: _build(d)) for d in depths}
         sigs = assert_structural_knob_changes_weights(builders, knob="tree_depth")
-        # Each extra level doubles the number of bands, hence the tensor count:
-        # measured 48 weights / 5,989 params at depth 1 and 96 / 10,189 at 2.
-        assert len(sigs[2]) == 2 * len(sigs[1]), (
-            f"tree_depth=2 held {len(sigs[2])} weight tensors, not twice "
-            f"depth 1's {len(sigs[1])}"
-        )
+        # Each extra level doubles the number of tree nodes, hence the tensor
+        # count: measured 48 / 96 / 192 weight tensors at depths 1 / 2 / 3.
+        for shallow, deep in zip(depths, depths[1:]):
+            assert len(sigs[deep]) == 2 * len(sigs[shallow]), (
+                f"tree_depth={deep} held {len(sigs[deep])} weight tensors, not "
+                f"twice depth {shallow}'s {len(sigs[shallow])}"
+            )
 
         for tree_depth in depths:
             model = _build(tree_depth)
@@ -917,27 +929,28 @@ class TestPRISMModelDifferentConfigurations:
             assert np.all(np.isfinite(as_array(output)))
 
     # DECISION plan-2026-08-17T183311-79c63e38/D-037
-    # Do NOT "fix" this by dropping tree_depth=3 from the sweep and deleting this
-    # test, and do NOT relax it to a shape or a nan-tolerant check. The strict
-    # xfail is the escalation: it will turn RED (xpass) the moment the model is
-    # repaired, which is the signal the user's ruling needs. Nor is this a
-    # tolerance problem -- the output is 100% non-finite on two seeds, not
-    # marginally off.
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "MEASURED: PRISMModel(tree_depth=3) returns an ALL-NaN forward at "
-            "initialisation -- nan_frac 1.0 on seeds 1234 and 7, while depths 1 "
-            "and 2 are finite. tree_depth=4 does not even build "
-            "(InvalidArgumentError from FrequencyBandStatistics: 'Cannot compute "
-            "the min of an empty tensor'), so the band split degenerates as the "
-            "tree deepens. The old parametrized test swept depth 3 and asserted "
-            "only the output SHAPE, so this has been green throughout. Model "
-            "defect, not a test defect -- see D-037."
-        ),
-    )
+    # HISTORY (do not delete): D-037 added this test under a strict xfail. The
+    # defect it pinned was real and MEASURED: PRISMModel(tree_depth=3) at
+    # context_len=96 returned nan_frac 1.0 on seeds 1234 and 7, because at
+    # num_wavelet_levels=3 the deepest leaf segment (12) decimates to a band of
+    # length 1, whose first-difference tensor is EMPTY -- ops.mean/ops.var over
+    # an empty axis return NaN silently, and the router's joint softmax then
+    # spread that NaN across every band. The old parametrized sweep asserted
+    # only the output SHAPE, so it stayed green throughout.
+    # FIXED by plan-2026-08-18T073231-52a93f8c: D-004 (static-length guard in
+    # FrequencyBandStatistics.call emitting exact-zero diff features at length
+    # 1 and all-zero statistics at length 0) and D-005 (PRISMModel.__init__
+    # refuses min_band_len == 0 with a ValueError). The strict xfail did its
+    # job -- it turned XPASS the moment D-004 landed -- and was removed in the
+    # same commit that restored depth 3 to the sweep above.
+    # WHAT THIS TEST GUARDS NOW: that the depth-3 forward stays FINITE. Do NOT
+    # relax it to a shape check or a nan-tolerant check, and do not delete it
+    # as redundant with the sweep above -- the sweep's oracle is the weight
+    # signature, this one's is finiteness of the actual output. Note the
+    # governing quantity is min_band_len, NOT tree_depth: a depth-2 config
+    # (96/2/4) was equally broken and a depth-4 one (256/4/3) was always fine.
     def test_tree_depth_3_forward_is_finite(self) -> None:
-        """The depth-3 forward must not be NaN. It is. Escalated, not softened."""
+        """The depth-3 forward must be finite. Measured nan_frac 0.0 on seeds 1234 and 7."""
         model = build_seeded(lambda: PRISMModel(
             context_len=96,
             forecast_len=24,
