@@ -251,6 +251,72 @@ class TestPRISMModelInstantiation:
         assert model.context_len == 96
 
 
+class TestPRISMModelTimeAxisContract:
+    """The time axis is pinned statically, and what that pin does NOT cover."""
+
+    def test_wrong_static_context_len_is_refused(self) -> None:
+        """A static time axis other than ``context_len`` raises at ``__call__``.
+
+        ``context_len`` is a required constructor argument and the whole tree
+        geometry is derived from it, so any other static length is a caller
+        error rather than a supported mode.
+        """
+        model = PRISMModel(
+            context_len=96, forecast_len=24, num_features=7, num_layers=1
+        )
+        x = np.random.randn(2, 128, 7).astype("float32")
+        with pytest.raises(ValueError, match="axis 1"):
+            model(x, training=False)
+
+    def test_dynamic_time_axis_is_an_UNCLOSED_hole(self) -> None:
+        """MEASURED limitation, pinned so it cannot rot silently.
+
+        The degenerate-band guard in ``FrequencyBandStatistics.call``
+        (decisions.md D-004) branches on the STATIC band length and
+        deliberately falls through when it is ``None``. Under a dynamic time
+        axis the guard is therefore vacuous and the original all-NaN defect is
+        fully present: ``nan_frac == 1.0`` where the same model gives ``0.0``
+        eager.
+
+        ``PRISMModel.input_spec`` does NOT close this. Keras'
+        ``assert_input_compatibility`` tests ``shape[axis] not in {value,
+        None}`` (``keras/src/layers/input_spec.py:223-226``), so an unknown
+        dimension is explicitly accepted by an ``axes`` constraint. Measured
+        both before and after adding the pin: ``nan_frac == 1.0`` either way.
+
+        This test asserts the CURRENT, BROKEN behaviour on purpose. If a future
+        change closes the hole this test goes RED -- that is the intended
+        notification, and the fix is to replace the assertion with
+        ``nan_frac == 0.0`` (or a raise) rather than to delete the test.
+        """
+        import tensorflow as tf
+
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            tree_depth=3,
+            num_layers=1,
+        )
+        x = np.random.randn(2, 96, 7).astype("float32")
+
+        eager = np.asarray(model(x, training=False))
+        assert float(np.mean(np.isnan(eager))) == 0.0, (
+            "control: the static-shape path must be finite"
+        )
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, 7], tf.float32)])
+        def traced(t):
+            return model(t, training=False)
+
+        dynamic = np.asarray(traced(tf.constant(x)))
+        assert float(np.mean(np.isnan(dynamic))) == 1.0, (
+            "the dynamic-time-axis hole is documented as OPEN; if this is now "
+            "finite the limitation has been closed -- update D-004/D-012 and "
+            "this assertion, do not delete the test"
+        )
+
+
 class TestPRISMModelForwardPass:
     """Test forward pass and output shapes."""
 

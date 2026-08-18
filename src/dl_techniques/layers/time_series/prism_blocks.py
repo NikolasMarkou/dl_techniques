@@ -112,7 +112,18 @@ class FrequencyBandStatistics(keras.layers.Layer):
         # Do NOT "simplify" it by clamping or padding the slice to fake a
         # length: that fabricates a first difference from a sample that does not
         # exist, which is a silently wrong number rather than a defined one.
-        # See decisions.md D-004 (and D-002 for the threshold ruling).
+        # KNOWN LIMITATION of the fall-through, MEASURED, not hypothesised:
+        # under a DYNAMIC time axis this guard does nothing and the original
+        # all-NaN defect is fully present -- the fixed ``tree_depth=3``
+        # ``PRISMModel`` traced as
+        # ``tf.function(input_signature=[TensorSpec([None,None,7])])`` returns
+        # ``nan_frac == 1.0`` where the same model returns ``0.0`` eager.
+        # ``PRISMModel.input_spec`` cannot close it: Keras' own
+        # ``assert_input_compatibility`` accepts an unknown dimension against an
+        # ``axes`` constraint (``shape[axis] not in {value, None}``). Pin the
+        # time axis statically at the caller (the shipped ONNX exporter already
+        # does, ``src/train/common/ts_export.py``).
+        # See decisions.md D-004, D-012 (and D-002 for the threshold ruling).
         static_len = inputs.shape[1]
 
         if static_len is not None and static_len == 0:

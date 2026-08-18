@@ -444,6 +444,30 @@ class PRISMModel(keras.Model, ForecastMixin):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-012
+        # This pins the TIME axis so a WRONG static length is refused at
+        # ``__call__`` instead of reaching the tree with the wrong geometry --
+        # ``context_len`` is a required constructor argument, so any other
+        # static length is a caller error.
+        # It does NOT close the dynamic-time-axis hole, and must not be cited
+        # as if it did. MEASURED both before and after adding it: the fixed
+        # ``tree_depth=3`` model traced as
+        # ``tf.function(input_signature=[TensorSpec([None,None,7])])`` returns
+        # ``nan_frac == 1.0``, while the same model returns ``0.0`` eager.
+        # The reason is in Keras itself: ``assert_input_compatibility`` tests
+        # ``shape[axis] not in {value, None}``
+        # (``keras/src/layers/input_spec.py:223-226``), so an UNKNOWN dimension
+        # is explicitly accepted by an ``axes`` constraint. An unknown time
+        # axis therefore still reaches ``FrequencyBandStatistics.call``, whose
+        # degenerate-band guard branches on the static length and deliberately
+        # falls through when it is ``None`` (D-004) -- so under that regime the
+        # original all-NaN defect is fully present.
+        # Do NOT relax this to ``InputSpec(ndim=3)``; do NOT claim it closes
+        # the dynamic case. See decisions.md D-012 and D-004.
+        self.input_spec = keras.layers.InputSpec(
+            ndim=3, axes={1: context_len}
+        )
+
         # ---------------------------------------------------------------------
         # 3. Create Layers (Unconditionally)
         # ---------------------------------------------------------------------
