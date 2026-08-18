@@ -27,42 +27,56 @@ class DenoisingScoreMatchingLoss(keras.losses.Loss):
     This simple MSE loss implicitly trains the model to estimate
     ∇ log p(x_t | c), enabling score-based generation.
 
+    This loss is **objective-agnostic and timestep-agnostic**: it is the plain
+    mean squared error between what the denoiser emitted and whatever target
+    the caller handed it. It does not know which parameterisation produced
+    ``y_pred`` and it does not weight timesteps.
+
+    .. note::
+       It used to advertise ``prediction_type`` ('epsilon'/'sample'/
+       'v_prediction'), ``loss_weight_type`` ('uniform'/'snr'/'truncated_snr',
+       citing Hang et al. 2023) and ``min_snr_gamma``. All three were stored,
+       serialized and never read -- ``call()`` has always been an
+       unconditional MSE -- so ``prediction_type='epsilon'`` on a package whose
+       denoisers are all x_0 predictors was harmless only because the field was
+       dead. Removed 2026-08-19 rather than implemented, because the weighting
+       needs per-sample timesteps this signature cannot receive and the
+       parameterisation is chosen by
+       :class:`~dl_techniques.models.nano_vlm_world_model.scheduler.DiffusionScheduler`,
+       which has a live ``prediction_type`` of its own. :meth:`from_config`
+       still accepts and drops the three legacy keys. See decisions.md
+       plan-2026-08-18T140459-7991552f/D-034.
+
     Args:
-        prediction_type: What the denoiser predicts
-            - 'epsilon': Predicts the noise ε
-            - 'sample': Predicts the clean sample x_0
-            - 'v_prediction': Predicts velocity v
-        loss_weight_type: How to weight loss across timesteps
-            - 'uniform': Equal weight
-            - 'snr': Signal-to-noise ratio weighting
-            - 'truncated_snr': Truncated SNR (Min-SNR)
         reduction: Keras reduction type. Defaults to 'sum_over_batch_size'.
+        name: Loss name. Defaults to 'dsm_loss'.
         **kwargs: Additional loss arguments.
 
     References:
         - Ho et al. (2020): Simple L2 loss works best
-        - Hang et al. (2023): Min-SNR weighting for stability
     """
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-034
+    # Deliberately NO `prediction_type` / `loss_weight_type` / `min_snr_gamma`
+    # arguments. Do NOT re-add them as stored-and-serialized fields: that is
+    # exactly the state this class shipped in, where a caller could set
+    # `loss_weight_type='snr'`, see it in the reloaded config, and train under
+    # uniform weighting. `call(y_true, y_pred)` receives no timesteps and no
+    # alphas, so SNR weighting is not implementable at this signature; the
+    # parameterisation lives on `DiffusionScheduler.prediction_type`, which is
+    # read. If min-SNR weighting is wanted, pass per-sample `sample_weight`
+    # from the trainer, which does have the timesteps. See decisions.md.
+    _LEGACY_DEAD_KEYS = ('prediction_type', 'loss_weight_type', 'min_snr_gamma')
 
     def __init__(
             self,
-            prediction_type: str = 'epsilon',
-            loss_weight_type: str = 'uniform',
-            min_snr_gamma: float = 5.0,
             reduction: str = 'sum_over_batch_size',
             name: str = 'dsm_loss',
             **kwargs
     ) -> None:
         super().__init__(reduction=reduction, name=name, **kwargs)
 
-        self.prediction_type = prediction_type
-        self.loss_weight_type = loss_weight_type
-        self.min_snr_gamma = min_snr_gamma
-
-        logger.info(
-            f"Initialized DSM loss: prediction={prediction_type}, "
-            f"weighting={loss_weight_type}"
-        )
+        logger.info("Initialized DSM loss: unweighted MSE over all timesteps")
 
     def call(
             self,
@@ -73,28 +87,41 @@ class DenoisingScoreMatchingLoss(keras.losses.Loss):
         Compute DSM loss.
 
         Args:
-            y_true: True clean data or noise (depending on prediction_type)
+            y_true: The target the denoiser is fit against -- whichever
+                parameterisation the caller trained (x_0 for every denoiser in
+                this package). This loss does not branch on it.
             y_pred: Predicted data from denoiser
 
         Returns:
             Scalar loss value
         """
-        # Simple MSE - the magic is in what we're predicting
+        # Simple MSE - the magic is in what we're predicting.
+        # There is no timestep-dependent weighting here and no branch on a
+        # parameterisation; see the class-level D-032 anchor.
         loss = ops.mean(ops.square(y_pred - y_true), axis=list(range(1, len(y_pred.shape))))
-
-        # Optionally apply timestep-dependent weighting
-        # This would require passing timesteps, which we handle in the trainer
 
         return ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            'prediction_type': self.prediction_type,
-            'loss_weight_type': self.loss_weight_type,
-            'min_snr_gamma': self.min_snr_gamma,
-        })
-        return config
+        return super().get_config()
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "DenoisingScoreMatchingLoss":
+        """Rebuild from a ``get_config()`` dict, tolerating pre-2026-08-19 ones.
+
+        Configs saved before the three dead knobs were removed carry them. They
+        are dropped rather than rejected: the values never reached ``call()``,
+        so a restored loss computes exactly what the saved one computed.
+        """
+        dropped = [k for k in cls._LEGACY_DEAD_KEYS if k in config]
+        if dropped:
+            config = {k: v for k, v in config.items()
+                      if k not in cls._LEGACY_DEAD_KEYS}
+            logger.warning(
+                f"DenoisingScoreMatchingLoss: ignoring legacy config key(s) "
+                f"{dropped}; they never affected the loss (unweighted MSE)."
+            )
+        return cls(**config)
 
 
 @keras.saving.register_keras_serializable()
@@ -128,7 +155,9 @@ class VLMDenoisingLoss(keras.losses.Loss):
         self.joint_weight = joint_weight
 
         # Component losses
-        self.dsm_loss = DenoisingScoreMatchingLoss(prediction_type='sample')
+        # The `prediction_type='sample'` this used to pass was a no-op on a
+        # class that never read it (D-032); the sub-loss is a plain MSE.
+        self.dsm_loss = DenoisingScoreMatchingLoss()
 
     def call(
             self,

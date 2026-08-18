@@ -32,7 +32,6 @@ def model():
             intermediate_size=64,
             memory_size=8,
             num_read_heads=2,
-            num_write_heads=1,
             max_expression_len=L,
             halt_max_steps=ACT_STEPS,
             hidden_dropout_rate=0.0,

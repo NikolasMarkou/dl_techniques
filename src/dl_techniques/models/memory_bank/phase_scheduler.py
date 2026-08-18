@@ -20,8 +20,13 @@ writes the new phase to ``model.current_phase``. Both are non-trainable
 ``add_weight`` float32 counters managed by :class:`WaveFieldMemoryLLM`,
 so their values survive ``model.save`` / ``load_model`` round-trips.
 
-**This callback flips no Python attribute, by design.** Assigning
-``current_phase`` *is* the whole state change: the model derives memory
+**This callback flips exactly one Python attribute, and pays for it.**
+``read_controller.top_k`` is a Python int consumed at trace time by
+``ops.top_k``, which cannot take a ``Variable`` for ``k``, so the optional
+``top_k_schedule`` assigns the attribute and then forces a retrace
+(``PhaseScheduler._force_retrace``); without that second half the schedule was
+a log line only, which is F-21. Everything else here is a ``Variable``.
+Assigning ``current_phase`` *is* the whole state change: the model derives memory
 injection, aux-loss scaling and the backbone gradient mask from that one
 ``Variable`` inside its traced ``call``/``train_step``. The scheduler
 previously set ``layer.trainable = False`` and
@@ -212,9 +217,11 @@ class PhaseScheduler(keras.callbacks.Callback):
 
     def _apply_top_k_schedule(self, step: int) -> None:
         """O7: if `model.top_k_schedule` is set, evaluate it at the
-        current step and assign the result to
-        `model.read_controller.top_k`. Done only on phase transitions
-        (cheap; phase-1 -> phase-2 is the only frequent case)."""
+        current step, assign the result to `model.read_controller.top_k`
+        AND force the step functions to be re-traced, because that
+        attribute is a Python int the traced graph reads once. Done only
+        on phase transitions (cheap; phase-1 -> phase-2 is the only
+        frequent case)."""
         m = self.model
         sched = getattr(m, "top_k_schedule", None)
         if sched is None:
@@ -241,6 +248,45 @@ class PhaseScheduler(keras.callbacks.Callback):
                 f"PhaseScheduler: top_k {rc.top_k} -> {new_top_k} (step={step})"
             )
             rc.top_k = new_top_k
+            self._force_retrace()
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-032
+    # `_apply_top_k_schedule` is the ONE place in this callback that flips a
+    # Python attribute, and it is legal ONLY because of the call below. Do not
+    # delete `_force_retrace`, and do not add a second attribute flip that does
+    # not pair with it: `read_controller.top_k` is consumed as a Python int at
+    # TRACE time (`ops.top_k(sim_clipped, k=self.top_k)` needs a static k, so a
+    # Variable is not expressible there), and `fit()` traces `train_function`
+    # once before the epoch loop and rebuilds it only from `compile()`. Until
+    # 2026-08-19 the assignment stood alone, so the log printed `top_k 32 -> 8`
+    # while the traced graph retrieved 32 keys for the rest of the run -- the
+    # very defect D-016 removed from every other line of this file. Proven RED
+    # by `test_top_k_schedule_reaches_the_traced_graph.py`, which the
+    # pre-existing mock-driven `TestTopKSchedule` could not see.
+    def _force_retrace(self) -> None:
+        """Rebuild the traced step functions so the new ``top_k`` takes effect.
+
+        ``fit()`` re-reads ``self.train_function`` every step, so replacing it
+        here lands before the next batch; the retrace itself is deferred to
+        that batch's first call. ``test_function`` / ``predict_function`` are
+        merely cleared, because ``evaluate()`` / ``predict()`` re-make theirs on
+        entry when they are ``None``.
+
+        This is the "(cheap retrace boundary)" the caller's comment always
+        claimed: it runs only on a phase transition that actually changes k, at
+        most three times in a full curriculum.
+
+        A model without ``make_train_function`` (a stand-in in tests, or a
+        caller reusing this callback outside a Keras trainer) is left alone.
+        """
+        model = self.model
+        make_train_function = getattr(model, "make_train_function", None)
+        if make_train_function is None:
+            return
+        make_train_function(force=True)
+        for attr in ("test_function", "predict_function"):
+            if getattr(model, attr, None) is not None:
+                setattr(model, attr, None)
 
     # ------------------------------------------------------------------
     # Config (for callback save/restore via training logs)

@@ -269,6 +269,17 @@ class NAMCell(keras.layers.Layer):
             )
             for i in range(config.num_read_heads)
         ]
+        # DECISION plan-2026-08-18T140459-7991552f/D-035
+        # ONE write head, deliberately, and there is no `config.num_write_heads`
+        # to loop over any more. Do NOT re-add that field and wrap this in a
+        # comprehension mirroring `read_heads` above: the field existed for
+        # months as a default, three identical variant entries and a serialized
+        # key while this line stayed a bare attribute, so every model that ever
+        # advertised it wrote through exactly one head. Honouring it now would
+        # silently change the memory semantics and the weight tree of every
+        # shipped checkpoint to give a copy-pasted knob something to do — the
+        # same trade D-014 refused for `shift_range`. `num_read_heads` above IS
+        # live and stays. See decisions.md.
         self.write_head = NTMWriteHead(
             memory_size=config.memory_size,
             memory_dim=h,

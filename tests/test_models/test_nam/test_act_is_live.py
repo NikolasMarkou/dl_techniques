@@ -37,7 +37,6 @@ def config():
         intermediate_size=64,
         memory_size=8,
         num_read_heads=2,
-        num_write_heads=1,
         max_expression_len=16,
         halt_max_steps=HALT_MAX_STEPS,
         hidden_dropout_rate=0.0,

@@ -62,6 +62,7 @@ from dl_techniques.models.memory_bank.write_controller import (
 )
 from dl_techniques.models.memory_bank.read_controller import (
     MemoryReadController,
+    _DEAD_INFONCE_TEMPERATURE_KEY,
 )
 from dl_techniques.models.memory_bank.phase_scheduler import (
     PHASE_WARMUP,
@@ -264,7 +265,6 @@ class WaveFieldMemoryLLM(keras.Model):
         lambda_v_diversity: float = 1e-3,
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
-        infonce_temperature: float = 0.1,
         # O6 — opt-in V_lt diversity aux loss. Default False so existing
         # variants and tests are unaffected.
         enable_v_diversity: bool = False,
@@ -329,7 +329,6 @@ class WaveFieldMemoryLLM(keras.Model):
         self.lambda_v_diversity = lambda_v_diversity
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
-        self.infonce_temperature = infonce_temperature
         self.enable_v_diversity = enable_v_diversity
         self.enable_aux_losses = enable_aux_losses
         self.top_k_schedule = top_k_schedule
@@ -463,7 +462,6 @@ class WaveFieldMemoryLLM(keras.Model):
             lambda_v_diversity=self.lambda_v_diversity,
             diversity_subsample=self.diversity_subsample,
             infonce_negatives=self.infonce_negatives,
-            infonce_temperature=self.infonce_temperature,
             enable_v_diversity=self.enable_v_diversity,
             # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the aux
             # losses are enabled STATICALLY here, at construction, because
@@ -950,7 +948,6 @@ class WaveFieldMemoryLLM(keras.Model):
             "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
-            "infonce_temperature": self.infonce_temperature,
             "enable_v_diversity": self.enable_v_diversity,
             "enable_aux_losses": self.enable_aux_losses,
             "multi_head_keys": self.multi_head_keys,
@@ -988,7 +985,19 @@ class WaveFieldMemoryLLM(keras.Model):
         a round-trip: ``top_k_schedule`` is a Python callable, is therefore
         absent from ``get_config``, and a reloaded model runs with the fixed
         ``top_k``. Re-attach it after loading if you were using one.
+
+        It also drops ``infonce_temperature`` from configs saved before
+        2026-08-19, when that dead argument was removed (see
+        :data:`~dl_techniques.models.memory_bank.read_controller._DEAD_INFONCE_TEMPERATURE_KEY`).
         """
+        if _DEAD_INFONCE_TEMPERATURE_KEY in config:
+            config = {k: v for k, v in config.items()
+                      if k != _DEAD_INFONCE_TEMPERATURE_KEY}
+            logger.warning(
+                f"WaveFieldMemoryLLM: ignoring legacy config key "
+                f"'{_DEAD_INFONCE_TEMPERATURE_KEY}'; the InfoNCE temperature "
+                f"is the learned `log_temp_nce` weight and always was."
+            )
         return cls(**config)
 
 

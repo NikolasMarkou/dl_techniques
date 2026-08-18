@@ -19,7 +19,6 @@ class NAMConfig:
     :param intermediate_size: FFN intermediate dimension.
     :param memory_size: Number of NTM memory slots.
     :param num_read_heads: Number of NTM read heads (typically 2: left/right operand).
-    :param num_write_heads: Number of NTM write heads.
     :param max_expression_len: Maximum token sequence length.
     :param halt_max_steps: Maximum recursive reduction steps (ACT).
     :param halt_exploration_prob: Probability of forcing exploration during training.
@@ -39,6 +38,17 @@ class NAMConfig:
        docstring used to advertise configured nothing. Removed 2026-08-18;
        :meth:`from_dict` ignores it, so a config dict serialized before then
        still loads. See decisions.md D-014.
+
+    .. note::
+       There is no ``num_write_heads`` either, for the same reason and by the
+       same audit one pass later. :mod:`.cell` constructs exactly one
+       :class:`NTMWriteHead` — a single attribute, not a list comprehension
+       over a count, unlike ``num_read_heads`` immediately above it — so the
+       field was a default, three identical variant entries and a serialized
+       key that no code read. Removed 2026-08-19; :meth:`from_dict` ignores it,
+       so a config dict serialized before then still loads. Note that
+       ``num_read_heads`` IS live. See decisions.md
+       plan-2026-08-18T140459-7991552f/D-035.
     """
 
     hidden_size: int = 128
@@ -47,7 +57,6 @@ class NAMConfig:
     intermediate_size: int = 256
     memory_size: int = 32
     num_read_heads: int = 2
-    num_write_heads: int = 1
     max_expression_len: int = 64
     halt_max_steps: int = 16
     halt_exploration_prob: float = 0.1
@@ -89,7 +98,6 @@ NAM_VARIANTS: Dict[str, Dict[str, Any]] = {
         intermediate_size=128,
         memory_size=16,
         num_read_heads=2,
-        num_write_heads=1,
         max_expression_len=32,
         halt_max_steps=8,
     ),
@@ -100,7 +108,6 @@ NAM_VARIANTS: Dict[str, Dict[str, Any]] = {
         intermediate_size=256,
         memory_size=32,
         num_read_heads=2,
-        num_write_heads=1,
         max_expression_len=64,
         halt_max_steps=16,
     ),
@@ -111,7 +118,6 @@ NAM_VARIANTS: Dict[str, Dict[str, Any]] = {
         intermediate_size=512,
         memory_size=64,
         num_read_heads=2,
-        num_write_heads=1,
         max_expression_len=128,
         halt_max_steps=32,
     ),

@@ -69,14 +69,17 @@ tok.decode(_)             # '1 + 2 * 3'
 `NAM_VARIANTS` (module-level, the package's original spelling) and
 `NAM.MODEL_VARIANTS` (class-level alias, added for the house shape) are the **same
 dict**: `tiny`, `small`, `base`. They scale `hidden_size`, `num_heads`,
-`num_tree_layers`, `intermediate_size`, `memory_size`, `num_read_heads`,
-`num_write_heads`, `max_expression_len` and `halt_max_steps` together.
+`num_tree_layers`, `intermediate_size`, `memory_size`, `max_expression_len` and
+`halt_max_steps` together. They do **not** scale the head counts: all three
+variants pin `num_read_heads=2` (left/right operand), which the previous
+wording claimed otherwise, and `num_write_heads` no longer exists at all (see
+below).
 
 `create_nam(variant="base", **overrides)` applies individual `NAMConfig` field
 overrides on top of a variant and raises `ValueError` for an unknown variant or a
 config that fails `NAMConfig` validation.
 
-## A knob that used to do nothing, and is now gone
+## Two knobs that used to do nothing, and are now gone
 
 `NAMConfig.shift_range` was documented, validated and serialized while configuring
 nothing: `cell.py` builds every NTM read and write head with
@@ -85,3 +88,12 @@ creates no circular-shift projection at all. The field was **removed on 2026-08-
 `NAMConfig.from_dict` ignores it, so a config dict serialized before then still
 loads. Do not restore it — `cell.py:254` says so at the site. See `config.py`'s
 class docstring.
+
+`NAMConfig.num_write_heads` was the same defect one field away, and the audit that
+removed `shift_range` missed it. `cell.py` constructs exactly one `NTMWriteHead` as
+a single attribute — not a comprehension over a count, unlike `num_read_heads`
+directly above it — so the field was a default, three identical variant entries
+(all `1`) and a `to_dict()` key that no code read. Removed on **2026-08-19**;
+`NAMConfig.from_dict` ignores it, so a config dict serialized before then still
+loads with byte-identical behaviour, because the value never reached anything.
+`num_read_heads` is live and unaffected.

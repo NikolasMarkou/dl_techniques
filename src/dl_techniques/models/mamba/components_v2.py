@@ -371,6 +371,24 @@ class Mamba2ResidualBlock(keras.layers.Layer):
         documented escape hatch unreachable from every real model, since
         :class:`~dl_techniques.models.mamba.mamba_v2.Mamba2Model` builds its
         whole stack out of these blocks.
+    :param ngroups: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+    :param dt_min: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+    :param dt_max: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+    :param dt_init_floor: Forwarded verbatim to the wrapped
+        :class:`Mamba2Layer`.
+    :param bias: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+    :param conv_bias: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+
+    .. note::
+       Those six joined ``norm_before_gate`` on 2026-08-19 for exactly the
+       reason its own ``:param:`` gives. :class:`Mamba2Layer` declares, stores
+       and USES all seven, but this block declared only the last one, so from
+       any assembled Mamba-2 model ``ngroups`` was pinned at 1 (which is what
+       made multi-group state unreachable), ``conv_bias`` could not be turned
+       off, and the Δ initialisation range could not be widened. Every default
+       here equals the corresponding :class:`Mamba2Layer` default, so the
+       default construction path is unchanged. See decisions.md
+       plan-2026-08-18T140459-7991552f/D-036.
     """
 
     def __init__(
@@ -384,6 +402,23 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             norm_epsilon: float = 1e-5,
             rmsnorm: bool = True,
             norm_before_gate: bool = False,
+            # DECISION plan-2026-08-18T140459-7991552f/D-036
+            # These six are pure pass-throughs and their defaults MUST stay
+            # equal to `Mamba2Layer`'s, which is where the semantics live. Do
+            # NOT drop them again: until 2026-08-19 this block declared none of
+            # them, and since `Mamba2Model` builds its entire stack out of these
+            # blocks, six documented `Mamba2Layer` knobs were unreachable from
+            # every assembled model -- `ngroups` in particular, which is why the
+            # multi-group state path had no caller. Do not give them
+            # block-local defaults either: a divergence here silently rebuilds
+            # a different `in_proj`/`conv1d` width than the docstring one level
+            # down promises. See decisions.md.
+            ngroups: int = 1,
+            dt_min: float = 0.001,
+            dt_max: float = 0.1,
+            dt_init_floor: float = 1e-4,
+            bias: bool = False,
+            conv_bias: bool = True,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -396,6 +431,12 @@ class Mamba2ResidualBlock(keras.layers.Layer):
         self.norm_epsilon = norm_epsilon
         self.rmsnorm = rmsnorm
         self.norm_before_gate = norm_before_gate
+        self.ngroups = ngroups
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
+        self.bias = bias
+        self.conv_bias = conv_bias
 
         if rmsnorm:
             self.norm = keras.layers.LayerNormalization(
@@ -415,6 +456,12 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             rmsnorm=self.rmsnorm,
             norm_epsilon=self.norm_epsilon,
             norm_before_gate=self.norm_before_gate,
+            ngroups=self.ngroups,
+            dt_min=self.dt_min,
+            dt_max=self.dt_max,
+            dt_init_floor=self.dt_init_floor,
+            bias=self.bias,
+            conv_bias=self.conv_bias,
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -459,6 +506,12 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             "norm_epsilon": self.norm_epsilon,
             "rmsnorm": self.rmsnorm,
             "norm_before_gate": self.norm_before_gate,
+            "ngroups": self.ngroups,
+            "dt_min": self.dt_min,
+            "dt_max": self.dt_max,
+            "dt_init_floor": self.dt_init_floor,
+            "bias": self.bias,
+            "conv_bias": self.conv_bias,
         })
         return config
 

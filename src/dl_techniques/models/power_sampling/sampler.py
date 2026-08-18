@@ -410,6 +410,47 @@ class PowerSampler:
     # MCMC Power Sampling
     # -----------------------------------------------------------------
 
+    # DECISION plan-2026-08-18T140459-7991552f/D-037
+    # Both MCMC entry points size their blocks HERE, and neither may go back to
+    # the bare `jump_size = max_tok // blocks` they used until 2026-08-19. That
+    # expression dropped the remainder, so the shipped `block_num=16` turned a
+    # requested `max_tokens=50` into 48 generated tokens with no warning, and
+    # when `max_tokens < block_num` it produced `jump_size == 0`: every block
+    # appended nothing, `t == c`, and `random.randint(c, t - 1)` raised a bare
+    # `ValueError: empty range` from inside stdlib `random`, which is what a
+    # short smoke run got. Spreading the remainder over the leading blocks
+    # makes the returned length exactly `max_tokens`; clamping the block count
+    # keeps every block non-empty, which is the precondition the cut-point draw
+    # below actually needs. Do NOT "simplify" this back to a single division.
+    # See decisions.md.
+    @staticmethod
+    def _block_sizes(max_tokens: int, block_num: int) -> List[int]:
+        """Split ``max_tokens`` into per-block generation counts.
+
+        :param max_tokens: Total number of tokens to generate. Must be
+            positive.
+        :param block_num: Requested number of MCMC blocks. Must be positive;
+            clamped down to ``max_tokens`` (with a warning) so that no block is
+            empty.
+        :return: A list of per-block token counts, each ``>= 1``, summing
+            exactly to ``max_tokens``.
+        :raises ValueError: If either argument is not positive.
+        """
+        if max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+        if block_num <= 0:
+            raise ValueError(f"block_num must be positive, got {block_num}")
+
+        n_blocks = min(block_num, max_tokens)
+        if n_blocks != block_num:
+            logger.warning(
+                f"block_num={block_num} exceeds max_tokens={max_tokens}; "
+                f"using {n_blocks} block(s) of 1 token so that no MCMC block "
+                f"is empty."
+            )
+        base, remainder = divmod(max_tokens, n_blocks)
+        return [base + 1 if i < remainder else base for i in range(n_blocks)]
+
     def mcmc_power_sample(
         self,
         prompt: str,
@@ -464,8 +505,9 @@ class PowerSampler:
             strip = 0
         c = len(prompt_ids)  # context boundary
 
-        # Adjust block size to divide evenly
-        jump_size = max_tok // blocks
+        # Per-block token counts: they sum to exactly `max_tok` and none is
+        # zero (see the D-032 anchor on `_block_sizes`).
+        block_sizes = self._block_sizes(max_tok, blocks)
 
         gen = list(prompt_ids)
         log_probs_norm: List[float] = []
@@ -475,7 +517,7 @@ class PowerSampler:
 
         t0 = time.time()
 
-        for block_idx in range(blocks):
+        for block_idx, jump_size in enumerate(block_sizes):
             # Generate one block of tokens with naive temperature sampling
             gen, lp_norm, lp_unnorm = self.naive_temp_generate(
                 gen, temp, num_tokens=jump_size,
@@ -583,7 +625,7 @@ class PowerSampler:
             strip = 0
         c = len(prompt_ids)
 
-        jump_size = max_tok // blocks
+        block_sizes = self._block_sizes(max_tok, blocks)
 
         gen = list(prompt_ids)
         log_probs_norm: List[float] = []
@@ -593,7 +635,7 @@ class PowerSampler:
 
         t0 = time.time()
 
-        for block_idx in range(blocks):
+        for block_idx, jump_size in enumerate(block_sizes):
             gen, lp_norm, lp_unnorm = self.naive_temp_generate(
                 gen, temp, num_tokens=jump_size,
             )

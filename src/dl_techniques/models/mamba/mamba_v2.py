@@ -122,6 +122,21 @@ class Mamba2(keras.Model):
         docstring names ``norm_before_gate=True`` as the remedy for a checkpoint
         trained under the pre-2026-08-15 default, and nothing between this model
         and that layer forwarded it.
+    :param ngroups: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param dt_min: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param dt_max: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param dt_init_floor: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param bias: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param conv_bias: Forwarded to every ``Mamba2Layer`` in the stack.
+
+    .. note::
+       Those six joined ``norm_before_gate`` on 2026-08-19. They are declared,
+       stored and used by ``Mamba2Layer`` but were declared by neither this
+       class nor ``Mamba2ResidualBlock``, so no assembled Mamba-2 model could
+       reach them: ``ngroups`` was pinned at 1, ``conv_bias`` could not be
+       disabled, and the Δ init range could not be widened. Every default
+       matches ``Mamba2Layer``'s, so the default construction path is
+       unchanged. See decisions.md plan-2026-08-18T140459-7991552f/D-036.
     """
 
     # DECISION plan-2026-08-18T140459-7991552f/D-024: this table is derived from the
@@ -188,6 +203,12 @@ class Mamba2(keras.Model):
             rmsnorm: bool = True,
             d_ssm: Optional[int] = None,
             norm_before_gate: bool = False,
+            ngroups: int = 1,
+            dt_min: float = 0.001,
+            dt_max: float = 0.1,
+            dt_init_floor: float = 1e-4,
+            bias: bool = False,
+            conv_bias: bool = True,
             **kwargs: Any,
     ) -> None:
         if vocab_size <= 0:
@@ -209,6 +230,15 @@ class Mamba2(keras.Model):
         self.pad_token_id = pad_token_id
         self.rmsnorm = rmsnorm
         self.norm_before_gate = norm_before_gate
+        # DECISION plan-2026-08-18T140459-7991552f/D-036
+        # Pure pass-throughs to `Mamba2Layer` via `Mamba2ResidualBlock`; the
+        # defaults MUST equal `Mamba2Layer`'s. See the class docstring note.
+        self.ngroups = ngroups
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
+        self.bias = bias
+        self.conv_bias = conv_bias
 
         # If d_ssm is not provided, it should default to d_inner.
         d_inner = d_model * expand
@@ -231,6 +261,12 @@ class Mamba2(keras.Model):
                 rmsnorm=self.rmsnorm,
                 norm_epsilon=self.norm_epsilon,
                 norm_before_gate=self.norm_before_gate,
+                ngroups=self.ngroups,
+                dt_min=self.dt_min,
+                dt_max=self.dt_max,
+                dt_init_floor=self.dt_init_floor,
+                bias=self.bias,
+                conv_bias=self.conv_bias,
                 name=f"mamba2_block_{i}",
             )
             self.encoder_layers.append(block)
@@ -287,6 +323,12 @@ class Mamba2(keras.Model):
             "rmsnorm": self.rmsnorm,
             "d_ssm": self.d_ssm,
             "norm_before_gate": self.norm_before_gate,
+            "ngroups": self.ngroups,
+            "dt_min": self.dt_min,
+            "dt_max": self.dt_max,
+            "dt_init_floor": self.dt_init_floor,
+            "bias": self.bias,
+            "conv_bias": self.conv_bias,
         })
         return config
 

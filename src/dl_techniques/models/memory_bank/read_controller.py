@@ -30,8 +30,19 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 from keras import ops
 
+from dl_techniques.utils.logger import logger
+
 
 _NEG_INF = -1.0e9
+
+#: Config key removed on 2026-08-19: an
+#: ``infonce_temperature`` constructor argument that was stored, forwarded from
+#: :class:`~dl_techniques.models.memory_bank.wave_field_memory_llm.WaveFieldMemoryLLM`
+#: and serialized by both ``get_config()`` methods while no code read it. Both
+#: ``from_config`` implementations drop it so pre-removal artifacts still load;
+#: the name lives here, once, because both of them need it. See decisions.md
+#: plan-2026-08-18T140459-7991552f/D-033.
+_DEAD_INFONCE_TEMPERATURE_KEY = "infonce_temperature"
 
 
 # ---------------------------------------------------------------------
@@ -140,7 +151,6 @@ class MemoryReadController(keras.layers.Layer):
         # Sub-sample sizes for cheap aux losses on large S_lt.
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
-        infonce_temperature: float = 0.1,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -195,7 +205,6 @@ class MemoryReadController(keras.layers.Layer):
 
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
-        self.infonce_temperature = infonce_temperature
 
         # M_static is the static last-axis cardinality of the routing
         # tensor — required by ops.one_hot under XLA.
@@ -255,6 +264,16 @@ class MemoryReadController(keras.layers.Layer):
             initializer=self._log_temp_initializer,
             trainable=True,
         )
+        # DECISION plan-2026-08-18T140459-7991552f/D-033
+        # This weight is the ONLY InfoNCE temperature. Do NOT re-add an
+        # `infonce_temperature` constructor argument: one existed until
+        # 2026-08-19, was forwarded model -> controller and emitted by both
+        # `get_config()`s, and was read by nothing, so a caller asking for
+        # `infonce_temperature=0.05` trained at softplus(0.0)+1e-3 == 0.694 and
+        # then saw 0.05 echoed back in the reloaded config. Seeding this
+        # initializer from such an argument is NOT a free fix either -- it
+        # would move the shipped default init from 0.694 to 0.1 and change
+        # every future training run. See decisions.md.
         # B2: learnable InfoNCE temperature. tau = softplus(log_temp_nce)
         # + 1e-3 to keep tau strictly positive.
         # DECISION plan_2026-05-09_0f39a086/D-001 — added a separate
@@ -696,6 +715,23 @@ class MemoryReadController(keras.layers.Layer):
             "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
-            "infonce_temperature": self.infonce_temperature,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MemoryReadController":
+        """Rebuild from a ``get_config()`` dict, tolerating pre-2026-08-19 ones.
+
+        Configs saved before ``infonce_temperature`` was removed carry it. The
+        key is dropped rather than rejected: it never reached the InfoNCE term,
+        so a restored controller computes exactly what the saved one computed.
+        """
+        if _DEAD_INFONCE_TEMPERATURE_KEY in config:
+            config = {k: v for k, v in config.items()
+                      if k != _DEAD_INFONCE_TEMPERATURE_KEY}
+            logger.warning(
+                f"MemoryReadController: ignoring legacy config key "
+                f"'{_DEAD_INFONCE_TEMPERATURE_KEY}'; the InfoNCE temperature "
+                f"is the learned `log_temp_nce` weight and always was."
+            )
+        return cls(**config)
