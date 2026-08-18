@@ -817,6 +817,13 @@ class PRISMTimeTree(keras.layers.Layer):
     # tensor's compute dtype and truncates toward zero on the cast to int32, and
     # reproducing that truncation exactly is what keeps the two in step.
     # See decisions.md D-001.
+    #
+    # SUPERSEDED IN PART 2026-08-18 (plan-2026-08-18T140459-7991552f/D-014):
+    # this helper is still the single source of the geometry and its arithmetic
+    # is UNCHANGED, but the span it describes now applies to segments
+    # ``0 .. num_segments - 2`` only. The LAST segment is extended to end at
+    # ``seq_len`` so the remainder the floor division discards is covered; see
+    # the D-014 anchor in ``_split_with_overlap``.
     @staticmethod
     def _segment_len(
             seq_len: int,
@@ -845,7 +852,8 @@ class PRISMTimeTree(keras.layers.Layer):
         :return: Tuple of ``(non_overlap_len, overlap_size, segment_len)``,
             where ``segment_len == non_overlap_len + overlap_size`` and
             segment ``i`` spans ``[i * non_overlap_len, i * non_overlap_len +
-            segment_len)``.
+            segment_len)`` for every ``i`` except the last, which is extended to
+            ``[i * non_overlap_len, seq_len)`` (see ``_split_with_overlap``).
         :rtype: Tuple[int, int, int]
         """
         float_type = np.dtype(keras.backend.standardize_dtype(dtype)).type
@@ -883,19 +891,35 @@ class PRISMTimeTree(keras.layers.Layer):
                     # Compute segment length with overlap. Same helper the
                     # forward pass uses, so a node is built for exactly the
                     # length it will be handed (see _segment_len's anchor).
-                    _, _, segment_len = self._segment_len(
+                    non_overlap_len, _, segment_len = self._segment_len(
                         seq_len, self.overlap_ratio, num_nodes,
                         dtype=self.compute_dtype
                     )
                     segment_shape = (batch_size, segment_len, channels)
+                    # The LAST node of the level is handed the remainder the
+                    # floor division in ``non_overlap_len`` discards, so it is
+                    # built LONGER than its siblings. See the D-014 anchor in
+                    # _split_with_overlap.
+                    last_segment_shape = (
+                        batch_size,
+                        seq_len - (num_nodes - 1) * non_overlap_len,
+                        channels
+                    )
                 else:
                     segment_shape = (batch_size, seq_len, channels)
+                    last_segment_shape = segment_shape
             else:
                 segment_shape = (batch_size, None, channels)
+                last_segment_shape = segment_shape
 
             # Build all nodes in this level
-            for _ in range(num_nodes):
-                self.all_nodes[node_idx_counter].build(segment_shape)
+            for node_in_level in range(num_nodes):
+                node_shape = (
+                    last_segment_shape
+                    if node_in_level == num_nodes - 1
+                    else segment_shape
+                )
+                self.all_nodes[node_idx_counter].build(node_shape)
                 node_idx_counter += 1
 
         super().build(input_shape)
@@ -912,7 +936,11 @@ class PRISMTimeTree(keras.layers.Layer):
         :type x: keras.KerasTensor
         :param num_segments: Number of segments to create.
         :type num_segments: int
-        :return: List of segment tensors.
+        :return: List of ``num_segments`` segment tensors. The first
+            ``num_segments - 1`` are ``segment_len`` long; the last runs to the
+            end of the sequence and is therefore ``>= segment_len``, absorbing
+            the remainder discarded by the floor division in
+            ``non_overlap_len``.
         :rtype: List[keras.KerasTensor]
         """
         if num_segments == 1:
@@ -937,11 +965,40 @@ class PRISMTimeTree(keras.layers.Layer):
             ) // num_segments
             segment_len = non_overlap_len + overlap_size
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-014
+        # The LAST segment runs to the END of the sequence, not to
+        # ``start_idx + segment_len``. ``non_overlap_len`` in ``_segment_len``
+        # is a FLOOR division and the remainder it discards was reclaimed by
+        # nothing: the last segment stopped at
+        # ``num_segments * non_overlap_len + overlap_size`` and
+        # ``_stitch_with_crossfade`` zero-pads out to ``target_len``, so every
+        # trailing position came out EXACTLY 0.0 -- not attenuated, ZERO.
+        # MEASURED at HEAD (``seq_len=96``, ``overlap_ratio=0.25``, all-ones
+        # input, identity segments): ``num_segments=2`` covered exactly (the
+        # control), ``num_segments=4`` left positions 82..95 at 0.0 and
+        # ``num_segments=8`` left positions 75..95 at 0.0.
+        # This is NOT an off-by-one to be "cleaned up" back to a uniform
+        # ``end_idx = start_idx + segment_len``. The last segment is
+        # deliberately LONGER than its siblings (39 vs 25 at ``num_segments=4``,
+        # ``seq_len=96``) and ``build()`` sizes the last node of every level to
+        # match. ``PRISMNode`` carries no weight with a time dimension, so the
+        # longer node is weight-identical to its siblings.
+        # ``_stitch_with_crossfade`` needs no change: it already reads
+        # ``seg_len = ops.shape(segment)[1]`` per segment, the extension is
+        # trailing (past the last fade band, which is anchored at the NEXT
+        # segment's start and is therefore unmoved), and the last segment never
+        # fades out -- so the newly covered tail lands at weight exactly 1.0
+        # with no partner to blend against, and the weights still sum to 1
+        # everywhere. Both the static and the dynamic branch above feed this one
+        # loop, so neither path can drift from the other.
+        # See decisions.md D-014.
         segments = []
         for i in range(num_segments):
             start_idx = i * non_overlap_len
-            end_idx = start_idx + segment_len
-            segment = x[:, start_idx:end_idx, :]
+            if i == num_segments - 1:
+                segment = x[:, start_idx:, :]
+            else:
+                segment = x[:, start_idx:start_idx + segment_len, :]
             segments.append(segment)
 
         return segments

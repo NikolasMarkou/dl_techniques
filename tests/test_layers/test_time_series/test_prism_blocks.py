@@ -372,3 +372,195 @@ class TestPRISMModelDynamicTimeAxis:
 
         nan_frac = float(np.mean(~np.isfinite(y)))
         assert nan_frac == 0.0, f"traced dynamic-axis PRISM produced nan_frac={nan_frac}"
+
+
+class TestPRISMTimeTreeTailCoverage:
+    """Every input position must receive exactly unit weight from the tree.
+
+    ``PRISMTimeTree`` splits into overlapping segments whose geometry comes from
+    ``_segment_len``, where ``non_overlap_len`` is a FLOOR division.  The
+    discarded remainder was never reclaimed by any segment, so the last segment
+    ended at ``num_segments * non_overlap_len + overlap_size``, strictly short of
+    ``seq_len`` whenever the division was inexact.  ``_stitch_with_crossfade``
+    zero-pads to ``target_len``, so those trailing positions came out EXACTLY
+    0.0 rather than merely attenuated.
+
+    Measured at HEAD (``seq_len=96``, ``overlap_ratio=0.25``): ``n=2`` covered
+    exactly (0 uncovered -- the built-in control that this probe is not
+    trivially red), ``n=4`` left positions 82..95 at 0.0 (14 positions) and
+    ``n=8`` left positions 75..95 at 0.0 (21 positions).
+
+    The load-bearing assertion is ``stitched == 1.0`` everywhere, not
+    ``stitched > 0`` everywhere: a "fix" that made the last segment overlap
+    wrongly would cover every position while double-counting the seam, and only
+    the unit-weight form rejects that.
+    """
+
+    OVERLAP_RATIO = 0.25
+    SEQ_LEN = 96
+
+    @staticmethod
+    def _tree(overlap_ratio=0.25):
+        return PRISMTimeTree(
+            tree_depth=3, num_wavelet_levels=1, router_hidden_dim=8,
+            dropout_rate=0.0, overlap_ratio=overlap_ratio,
+        )
+
+    @classmethod
+    def _identity_stitch(cls, tree, x, num_segments, target_len):
+        """Split then stitch back with the segments processed by the IDENTITY.
+
+        This isolates the split/stitch geometry from ``PRISMNode`` entirely: any
+        deviation from all-ones is the segment arithmetic, not the node.
+        """
+        segments = tree._split_with_overlap(x, num_segments)
+        return tree._stitch_with_crossfade(segments, target_len)
+
+    @pytest.mark.parametrize("num_segments", [2, 4, 8])
+    def test_static_path_gives_every_position_unit_weight(self, num_segments):
+        tree = self._tree(self.OVERLAP_RATIO)
+        x = np.ones((2, self.SEQ_LEN, 3), dtype="float32")
+
+        out = keras.ops.convert_to_numpy(
+            self._identity_stitch(tree, x, num_segments, self.SEQ_LEN)
+        )
+
+        uncovered = np.flatnonzero(np.isclose(out[0, :, 0], 0.0, atol=1e-6))
+        assert uncovered.size == 0, (
+            f"num_segments={num_segments}: positions {uncovered.tolist()} "
+            f"received NO contribution from any segment"
+        )
+        np.testing.assert_allclose(
+            out, np.ones_like(out), rtol=0.0, atol=1e-6,
+            err_msg=(
+                f"num_segments={num_segments}: crossfade weights do not sum to "
+                f"exactly 1 at every position"
+            ),
+        )
+
+    @pytest.mark.parametrize("num_segments", [2, 4, 8])
+    def test_dynamic_path_gives_every_position_unit_weight(self, num_segments):
+        """The traced unknown-time-axis branch must match the static one.
+
+        ``_split_with_overlap`` and ``_stitch_with_crossfade`` each carry a
+        separate dynamic branch.  A fix applied to only one of the two paths is
+        the exact defect class this module already carries anchors about, so the
+        dynamic branch is pinned independently rather than assumed to follow.
+        """
+        import tensorflow as tf
+
+        tree = self._tree(self.OVERLAP_RATIO)
+        x = np.ones((2, self.SEQ_LEN, 3), dtype="float32")
+
+        traced = tf.function(
+            lambda t: self._identity_stitch(
+                tree, t, num_segments, keras.ops.shape(t)[1]
+            ),
+            input_signature=[tf.TensorSpec([None, None, 3], tf.float32)],
+        )
+        out = keras.ops.convert_to_numpy(traced(tf.convert_to_tensor(x)))
+
+        uncovered = np.flatnonzero(np.isclose(out[0, :, 0], 0.0, atol=1e-6))
+        assert uncovered.size == 0, (
+            f"dynamic path, num_segments={num_segments}: positions "
+            f"{uncovered.tolist()} received NO contribution from any segment"
+        )
+        np.testing.assert_allclose(
+            out, np.ones_like(out), rtol=0.0, atol=1e-6,
+            err_msg=(
+                f"dynamic path, num_segments={num_segments}: crossfade weights "
+                f"do not sum to exactly 1 at every position"
+            ),
+        )
+
+    @pytest.mark.parametrize("context_len", [96, 256])
+    def test_last_node_is_built_for_the_length_it_actually_receives(
+            self, context_len, monkeypatch
+    ):
+        """``build()`` must size the LAST node of each level for the remainder.
+
+        ``TestPRISMTimeTreeSegmentArithmetic`` pins only the FIRST segment, so
+        it is green both before and after this fix and cannot see the tail.
+        """
+        channels = 7
+        depth = 4
+
+        recorded = []
+        original_build = PRISMNode.build
+
+        def recording_build(self, input_shape):
+            recorded.append(input_shape[1])
+            return original_build(self, input_shape)
+
+        monkeypatch.setattr(PRISMNode, "build", recording_build)
+
+        tree = PRISMTimeTree(
+            tree_depth=depth, num_wavelet_levels=1, router_hidden_dim=8,
+            dropout_rate=0.0, overlap_ratio=self.OVERLAP_RATIO,
+        )
+        tree.build((None, context_len, channels))
+
+        x = np.zeros((2, context_len, channels), dtype="float32")
+
+        offset = 1  # skip level 0 (num_segments == 1, no split)
+        mismatches = []
+        for level in range(1, depth + 1):
+            num_segments = 2 ** level
+            level_shapes = recorded[offset:offset + num_segments]
+            offset += num_segments
+
+            runtime = tree._split_with_overlap(x, num_segments)
+            for node_idx, (build_len, segment) in enumerate(
+                    zip(level_shapes, runtime)
+            ):
+                runtime_len = int(segment.shape[1])
+                if build_len != runtime_len:
+                    mismatches.append(
+                        f"ctx={context_len} level={level} node={node_idx} "
+                        f"({num_segments} segments): build={build_len} "
+                        f"runtime={runtime_len}"
+                    )
+
+            total = sum(int(s.shape[1]) for s in runtime)
+            covered_end = (num_segments - 1) * (
+                tree._segment_len(
+                    context_len, self.OVERLAP_RATIO, num_segments
+                )[0]
+            ) + int(runtime[-1].shape[1])
+            assert covered_end == context_len, (
+                f"ctx={context_len} level={level}: segments stop at "
+                f"{covered_end}, short of {context_len} (total sampled "
+                f"length {total})"
+            )
+
+        assert not mismatches, (
+            "build-time and runtime segment lengths disagree per node:\n  "
+            + "\n  ".join(mismatches)
+        )
+
+    def test_the_extended_last_node_creates_no_extra_weights(self):
+        """A5: ``PRISMNode`` is length-agnostic, so the longer last node must
+        carry exactly the same weight shapes as its siblings.
+
+        Falsification signal for the assumption the fix rests on -- if a weight
+        anywhere under ``PRISMNode`` ever grows a time dimension, the last node
+        of every level silently diverges from the rest.
+        """
+        tree = PRISMTimeTree(
+            tree_depth=3, num_wavelet_levels=1, router_hidden_dim=8,
+            dropout_rate=0.0, overlap_ratio=self.OVERLAP_RATIO,
+        )
+        tree.build((None, self.SEQ_LEN, 5))
+
+        offset = 0
+        for level in range(4):
+            num_nodes = 2 ** level
+            sigs = [
+                [tuple(w.shape) for w in tree.all_nodes[i].weights]
+                for i in range(offset, offset + num_nodes)
+            ]
+            offset += num_nodes
+            assert all(s == sigs[0] for s in sigs), (
+                f"level {level}: node weight shapes differ across the level "
+                f"{sigs}"
+            )
