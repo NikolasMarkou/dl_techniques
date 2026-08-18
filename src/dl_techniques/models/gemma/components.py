@@ -187,6 +187,8 @@ class Gemma3TransformerBlock(keras.layers.Layer):
             num_kv_heads=self.num_key_value_heads,
             max_seq_len=self.max_seq_len,
             dropout_rate=self.dropout_rate,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
             name="attention",
         )
 

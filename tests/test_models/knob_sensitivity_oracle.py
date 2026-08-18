@@ -48,6 +48,16 @@ VALUE knob -- same parameterisation, different arithmetic
     identical (otherwise the comparison is contaminated by different draws) AND
     outputs differ by more than a stated tolerance.
 
+SCOPED value knob -- honoured in some of the tree, dropped in the rest
+    ``kernel_initializer`` on a model that forwards it to its transformer
+    blocks but not to its patch embedding; ``initializer_range`` that reaches
+    the word embeddings but not the decoder blocks. The whole-model output
+    already differs between two configurations at HEAD -- via the parts that DO
+    honour the knob -- so :func:`assert_value_knob_changes_output` passes on the
+    broken tree and proves nothing about the part under test.
+    :func:`assert_scoped_value_knob_changes_weights` compares the WEIGHT VALUES
+    of a named subtree instead, with the full signature still pinned identical.
+
 Seeding
 -------
 Every builder is invoked immediately after ``keras.utils.set_random_seed(seed)``
@@ -107,6 +117,8 @@ __all__ = [
     "knob_output_deltas",
     "assert_structural_knob_changes_weights",
     "assert_value_knob_changes_output",
+    "assert_scoped_value_knob_changes_weights",
+    "weights_in_scope",
     "as_array",
 ]
 
@@ -310,5 +322,132 @@ def assert_value_knob_changes_output(
                 f"outputs differ by max|delta| = {delta:.6e} <= atol={atol:.1e}. "
                 "The kwarg is not reaching the forward pass. Do NOT widen atol "
                 "to make this pass -- record the measurement and xfail(strict)."
+            )
+    return deltas
+
+
+def _weight_path(w: Any) -> str:
+    """Best-effort stable identifier for a weight, for scope matching."""
+    return str(getattr(w, "path", None) or getattr(w, "name", ""))
+
+
+def weights_in_scope(model: Any, scope: str) -> Sequence[Any]:
+    """Every weight of ``model`` whose path contains the substring ``scope``.
+
+    Interface contract (used by
+    :func:`assert_scoped_value_knob_changes_weights` and by call sites that want
+    to make a stronger claim on the same subtree):
+
+    * ``model`` must already be BUILT -- a subclassed ``keras.Model`` has no
+      weights until its first ``call()``, so an unbuilt model yields ``[]``
+      here and every downstream comparison is vacuous.
+    * Matching is on ``Variable.path`` (falling back to ``.name``), which for a
+      sublayer created with ``name="patch_embed"`` contains ``"patch_embed"``.
+    * Returns the weights in ``model.weights`` order, which is stable across
+      two builds of the same parameterisation.
+    """
+    return [w for w in model.weights if scope in _weight_path(w)]
+
+
+# DECISION plan-2026-08-18T140459-7991552f/D-021
+# A THIRD instrument, deliberately. Do NOT redirect these call sites to
+# assert_value_knob_changes_output because "it is a value knob and the
+# signature matches" -- for a knob the model forwards to MOST of its tree and
+# drops on ONE sublayer (ViT/Swin `kernel_initializer` reaching every
+# transformer block but not the patch embedding; TextDecoder `initializer_range`
+# reaching the word embeddings but not the decoder blocks), two arms already
+# produce different whole-model outputs AT HEAD, through the parts that do
+# honour the knob. The output instrument therefore passes on the broken tree:
+# it is unfalsifiable for exactly the defect it would be aimed at. The
+# discriminating fact is the VALUES of the dropped subtree's own weights, which
+# are bit-identical across arms while the kwarg is dropped and differ once it is
+# forwarded. See D-021 in
+# plans/plan-2026-08-18T140459-7991552f/decisions.md.
+def assert_scoped_value_knob_changes_weights(
+    builders: Builders,
+    x: Any,
+    *,
+    knob: str,
+    scope: str,
+    seed: int = DEFAULT_SEED,
+    extract: Optional[Callable[[Any], Any]] = None,
+) -> Dict[Tuple[Hashable, Hashable], float]:
+    """Assert a value knob reaches the weights of ONE named subtree.
+
+    Three claims, in order:
+
+    1. Every configuration has the same whole-model weight-shape signature, so
+       under a fixed seed the arms consume identical RNG draws and step 3's
+       difference cannot be an artefact of a different draw.
+    2. ``scope`` selects at least one weight, with identical shapes in every
+       arm. A scope that matches nothing would make step 3 vacuously true in
+       the quietest possible way.
+    3. Each adjacent pair's scoped weights differ: ``max|delta| > 0``. The bound
+       is exact zero rather than a tolerance because the arms hold BIT-identical
+       weights while the kwarg is dropped -- there is no floating-point noise to
+       absorb, and a tolerance here would only hide a partially-honoured knob.
+
+    :param builders: ``{knob value: zero-argument builder}``; at least two.
+    :param x: Input for the one forward pass that materialises the weights of a
+        subclassed model. Its VALUE is irrelevant to the assertion.
+    :param knob: Knob name, for the failure message.
+    :param scope: Substring matched against each weight's path.
+    :param seed: Global seed set immediately before each build.
+    :param extract: Optional selector applied to the forward output; supplied
+        only so models returning a dict/tuple can be warmed without error.
+    :return: The measured per-adjacent-pair maxima.
+    """
+    keys = _ordered(builders)
+    signatures: Dict[Hashable, Tuple[Tuple[int, ...], ...]] = {}
+    scoped: Dict[Hashable, Sequence[np.ndarray]] = {}
+    for k in keys:
+        model = build_seeded(builders[k], seed)
+        _forward(model, x, extract)
+        signatures[k] = weight_signature(model)
+        if not signatures[k]:
+            raise AssertionError(
+                f"{knob}={k!r} produced a model with no weights even after a "
+                "forward pass; every comparison below would be vacuous"
+            )
+        selected = weights_in_scope(model, scope)
+        if not selected:
+            raise AssertionError(
+                f"{knob}={k!r}: scope {scope!r} matched none of the model's "
+                f"{len(signatures[k])} weights. Paths available: "
+                f"{sorted({_weight_path(w) for w in model.weights})}"
+            )
+        scoped[k] = [as_array(w) for w in selected]
+
+    first = keys[0]
+    for k in keys[1:]:
+        if signatures[k] != signatures[first]:
+            raise AssertionError(
+                f"{knob}={k!r} does not share a weight-shape signature with "
+                f"{knob}={first!r} ({len(signatures[k])} vs "
+                f"{len(signatures[first])} tensors). This is a STRUCTURAL knob: "
+                "its configurations draw different random numbers. Use "
+                "assert_structural_knob_changes_weights."
+            )
+        if [a.shape for a in scoped[k]] != [a.shape for a in scoped[first]]:
+            raise AssertionError(
+                f"{knob}={k!r}: scope {scope!r} selected a different set of "
+                "weight shapes than "
+                f"{knob}={first!r}; the scope is not naming the same subtree."
+            )
+
+    deltas: Dict[Tuple[Hashable, Hashable], float] = {}
+    for a, b in zip(keys, keys[1:]):
+        delta = max(
+            float(np.max(np.abs(wa - wb))) for wa, wb in zip(scoped[a], scoped[b])
+        )
+        deltas[(a, b)] = delta
+        if not (delta > 0.0):
+            raise AssertionError(
+                f"{knob} does not reach {scope!r}: {knob}={a!r} and "
+                f"{knob}={b!r} leave the {len(scoped[a])} weight tensors under "
+                f"{scope!r} BIT-IDENTICAL (max|delta| = {delta:.6e}) while the "
+                "rest of the model's parameterisation is unchanged. The kwarg "
+                "is being dropped at that construction site. Do NOT relax this "
+                "to a tolerance -- record the measurement and xfail(strict)."
             )
     return deltas

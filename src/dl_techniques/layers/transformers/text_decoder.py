@@ -307,7 +307,10 @@ class TextDecoder(keras.layers.Layer):
                 attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
-                name=f'decoder_layer_{i}'
+                kernel_initializer=initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                name=f"decoder_layer_{i}"
             )
             self.decoder_layers.append(layer)
 

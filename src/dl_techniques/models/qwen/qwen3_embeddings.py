@@ -220,14 +220,22 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-020
+        # `dropout_rate` is forwarded here AND there is deliberately no second
+        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
+        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
+        # to the very same tensor on the next line, so forwarding it without
+        # removing that layer stacks two dropouts and gives an effective rate of
+        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
+        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
+        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
             dim=hidden_size,
+            dropout_rate=dropout_rate,
             name='positional_embeddings'
         )
-
-        self.embedding_dropout = layers.Dropout(dropout_rate, name='embedding_dropout')
 
         # Create transformer layers
         self.transformer_layers = []
@@ -263,9 +271,6 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # Build positional embeddings - expects (batch_size, seq_len, hidden_size)
         self.positional_embeddings.build((batch_size, seq_len, self.hidden_size))
 
-        # Build dropout layer
-        self.embedding_dropout.build((batch_size, seq_len, self.hidden_size))
-
         # Build transformer layers
         transformer_input_shape = (batch_size, seq_len, self.hidden_size)
         for transformer_layer in self.transformer_layers:
@@ -288,11 +293,9 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # Token embeddings
         hidden_states = self.token_embeddings(input_ids)
 
-        # Add positional embeddings
-        hidden_states = self.positional_embeddings(hidden_states)
-
-        # Apply dropout
-        hidden_states = self.embedding_dropout(hidden_states, training=training)
+        # Add positional embeddings. The embedding dropout lives INSIDE this
+        # layer, so `training` has to be forwarded explicitly here.
+        hidden_states = self.positional_embeddings(hidden_states, training=training)
 
         # Process through transformer layers
         for transformer_layer in self.transformer_layers:
@@ -477,14 +480,22 @@ class Qwen3RerankerLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-020
+        # `dropout_rate` is forwarded here AND there is deliberately no second
+        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
+        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
+        # to the very same tensor on the next line, so forwarding it without
+        # removing that layer stacks two dropouts and gives an effective rate of
+        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
+        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
+        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
             dim=hidden_size,
+            dropout_rate=dropout_rate,
             name='positional_embeddings'
         )
-
-        self.embedding_dropout = layers.Dropout(dropout_rate, name='embedding_dropout')
 
         # Create transformer layers
         self.transformer_layers = []
@@ -526,9 +537,6 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Build positional embeddings
         self.positional_embeddings.build((batch_size, seq_len, self.hidden_size))
 
-        # Build dropout layer
-        self.embedding_dropout.build((batch_size, seq_len, self.hidden_size))
-
         # Build transformer layers
         transformer_input_shape = (batch_size, seq_len, self.hidden_size)
         for transformer_layer in self.transformer_layers:
@@ -554,11 +562,9 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Token embeddings
         hidden_states = self.token_embeddings(input_ids)
 
-        # Add positional embeddings
-        hidden_states = self.positional_embeddings(hidden_states)
-
-        # Apply dropout
-        hidden_states = self.embedding_dropout(hidden_states, training=training)
+        # Add positional embeddings. The embedding dropout lives INSIDE this
+        # layer, so `training` has to be forwarded explicitly here.
+        hidden_states = self.positional_embeddings(hidden_states, training=training)
 
         # The reranker reads its own LM head at the last real position, so it is
         # a next-token prediction and MUST be causal: without the mask that

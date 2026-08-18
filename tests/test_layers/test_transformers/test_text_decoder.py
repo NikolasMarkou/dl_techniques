@@ -945,3 +945,85 @@ class TestF12StaticSeqLenGuard:
         assert "LIMITATION" in source
         assert "None" in source and "max_seq_len" in source
         assert "device" in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# F-70 -- `initializer_range` reached the embeddings and nothing else.
+# ---------------------------------------------------------------------------
+
+
+class TestInitializerRangeReachesTheDecoderBlocks:
+    """``initializer_range`` must initialise the blocks, not only the embeddings.
+
+    ``TextDecoder`` documents ``initializer_range`` as "Std-dev for
+    TruncatedNormal" with no scope qualifier, stores it, and serialises it. It
+    was applied only in ``_create_word_embeddings`` / the positional table: the
+    ``TransformerLayer`` construction passed no ``kernel_initializer`` at all, so
+    every one of ``depth`` blocks' attention and FFN kernels came out at
+    ``TransformerLayer``'s own ``glorot_uniform`` default. For the shipped
+    GPT-2 config (``initializer_range=0.02``, ``embed_dim=768``) glorot's
+    ``sqrt(2/(768+768)) ~= 0.036`` stddev is ~1.8x the requested 0.02, and for
+    the wider intermediate projections more still -- the model trains from a
+    different initialisation than the one its config records.
+
+    The instrument is the SCOPED weight probe, not an output diff: the word
+    embeddings DO honour the knob at HEAD, so two arms already produce different
+    outputs and an output-level assertion passes on the broken tree.
+    """
+
+    CONFIG = dict(
+        vocab_size=128,
+        embed_dim=32,
+        depth=2,
+        num_heads=4,
+        max_seq_len=16,
+        dropout_rate=0.0,
+        attention_dropout_rate=0.0,
+    )
+
+    IDS = np.array([[3, 5, 7, 9, 11, 13, 2, 1]], dtype="int32")
+
+    def test_initializer_range_reaches_the_decoder_block_kernels(self):
+        from ...test_models.knob_sensitivity_oracle import (
+            assert_scoped_value_knob_changes_weights,
+        )
+
+        builders = {
+            r: (lambda r=r: TextDecoder(initializer_range=r, **self.CONFIG))
+            for r in (0.02, 0.5)
+        }
+        assert_scoped_value_knob_changes_weights(
+            builders, self.IDS, knob="initializer_range", scope="/decoder_layer_"
+        )
+
+    def test_decoder_block_kernel_scale_tracks_initializer_range(self):
+        """The stronger claim: the blocks' kernel spread must SCALE with the knob.
+
+        The probe above would also be satisfied by forwarding some other,
+        constant-but-different initializer. This pins the actual contract --
+        a 25x larger ``initializer_range`` must give a ~25x larger kernel
+        standard deviation -- and it is what distinguishes "the knob is wired"
+        from "the knob perturbs something".
+        """
+        from ...test_models.knob_sensitivity_oracle import as_array, build_seeded
+
+        spreads = {}
+        for r in (0.02, 0.5):
+            decoder = build_seeded(
+                lambda r=r: TextDecoder(initializer_range=r, **self.CONFIG)
+            )
+            decoder(self.IDS, training=False)
+            kernels = [
+                as_array(w)
+                for w in decoder.weights
+                if "/decoder_layer_" in w.path and w.path.endswith("/kernel")
+            ]
+            assert kernels, "no decoder-block kernels found"
+            spreads[r] = float(np.std(np.concatenate([k.ravel() for k in kernels])))
+
+        ratio = spreads[0.5] / spreads[0.02]
+        assert 20.0 < ratio < 30.0, (
+            f"decoder-block kernel std scaled by {ratio:.2f}x for a 25x change in "
+            f"initializer_range (measured stds {spreads}); the blocks are not "
+            "being initialised from initializer_range."
+        )

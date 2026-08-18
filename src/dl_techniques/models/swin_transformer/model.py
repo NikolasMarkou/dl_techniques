@@ -463,6 +463,10 @@ class SwinTransformer(keras.Model):
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
             use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="patch_embed"
         )
         x = self.patch_embed(x)

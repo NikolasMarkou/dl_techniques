@@ -407,10 +407,24 @@ class ViT(keras.Model):
         # Using factories for consistent component creation
 
         # Patch embedding using factory
+        # DECISION plan-2026-08-18T140459-7991552f/D-022
+        # The four initializer/regularizer knobs are forwarded; `activation` is
+        # deliberately NOT, although 'patch_2d' declares one and `self.activation`
+        # exists. ViT's `activation` is the FFN activation (see this class's
+        # docstring and the TransformerLayer construction below); forwarding its
+        # default 'gelu' into the patch projection would make the stem
+        # nonlinear, which no ViT is. It is a name collision, not a dropped
+        # knob, and is recorded as one in
+        # tests/test_models/test_package_api_contract.py::_NAME_COLLISIONS.
+        # See D-022 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
         self.patch_embed = create_embedding_layer(
             'patch_2d',
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="patch_embed"
         )
 

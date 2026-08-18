@@ -430,6 +430,7 @@ class FNet(keras.Model):
         if self.normalization_position == 'pre':
             self.final_norm = create_normalization_layer(
                 normalization_type=self.normalization_type,
+                epsilon=self.layer_norm_eps,
                 name="final_norm",
             )
 

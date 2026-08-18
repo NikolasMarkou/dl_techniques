@@ -566,12 +566,25 @@ class TestGPT2AttentionMask:
     (``CUDA_VISIBLE_DEVICES=""``), i.e. in both the TF32 and non-TF32 regimes:
 
     - max |delta| at UNMASKED positions: **exactly 0.0** in both regimes.
-    - max |delta| at MASKED positions:   0.8897 (the perturbation is real).
-    - same perturbation with NO mask:    0.1973 at the unmasked positions
+    - max |delta| at MASKED positions:   1.0547 (the perturbation is real).
+    - same perturbation with NO mask:    3.944e-03 at the unmasked positions
       (i.e. the isolation is due to the mask, not to causality).
 
-    Logits are O(0.75), so the ``< 1e-6`` bar is a two-sided margin, not a
+    Logits are O(0.96), so the ``< 1e-6`` bar is a two-sided margin, not a
     bit-identity claim.
+
+    **Re-measured 2026-08-18** (plan-2026-08-18T140459-7991552f, step 8, F-70).
+    The previous numbers were 0.8897 / 0.1973 against logits of O(0.75). They
+    moved because ``TextDecoder`` now initialises its transformer blocks from
+    ``initializer_range`` (0.02 truncated normal) instead of falling through to
+    ``TransformerLayer``'s ``glorot_uniform`` (~0.036 for these widths) -- the
+    blocks' weights are ~1.8x smaller, so the *cross-position* signal that has to
+    traverse two attention blocks fell ~50x while the *same-position* signal,
+    dominated by the untouched embedding path, rose. The no-mask control's bar
+    moved 1e-2 -> 1e-3 for that reason and only that reason: it is still 3.9x
+    above the new measurement and 3900x above the ``1e-6`` isolation bar it
+    exists to make non-vacuous, and the isolation measurement itself is still
+    exactly 0.0.
     """
 
     P = 5  # number of left-padded positions
@@ -615,7 +628,7 @@ class TestGPT2AttentionMask:
     def test_the_perturbation_is_real(self, tiny_config):
         """Non-vacuity guard for the test above: the perturbed tokens DO change
         the model's output somewhere — at the masked positions themselves.
-        Measured 0.8897 against logits of magnitude ~0.75. Bar: > 1e-2."""
+        Measured 1.0547 against logits of magnitude ~0.96. Bar: > 1e-2."""
         keras.utils.set_random_seed(1234)
         model = GPT2(**tiny_config)
         ids, perturbed, mask = self._probe_inputs(tiny_config["vocab_size"])
@@ -639,7 +652,8 @@ class TestGPT2AttentionMask:
     def test_without_the_mask_the_same_tokens_do_leak(self, tiny_config):
         """The isolation is attributable to the MASK, not to causality: drop
         the mask and the identical perturbation reaches the same positions.
-        Measured 0.1973. Bar: > 1e-2."""
+        Measured 3.944e-03 (GPU and CPU). Bar: > 1e-3 -- see the class docstring
+        for why this bar moved from 1e-2 on 2026-08-18."""
         keras.utils.set_random_seed(1234)
         model = GPT2(**tiny_config)
         ids, perturbed, _mask = self._probe_inputs(tiny_config["vocab_size"])
@@ -652,7 +666,7 @@ class TestGPT2AttentionMask:
         )
 
         leak = np.abs(base[:, self.P:] - moved[:, self.P:]).max()
-        assert leak > 1e-2, (
+        assert leak > 1e-3, (
             f"unmasked run shows no influence from the prefix tokens "
             f"(max |delta| = {leak:.4e}); the masked run's 0.0 would then be "
             f"explained by causality alone and prove nothing about masking"

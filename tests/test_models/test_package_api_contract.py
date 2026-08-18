@@ -423,51 +423,46 @@ _KERAS_BASE_ATTRS = frozenset(
 
 #: Sites that are SCHEDULED WORK, not accepted exceptions.
 #:
-#: **This list must reach empty.** Each entry is a measured instance of the
-#: defect this guard exists to catch; it is waived only so the suite is green at
-#: every commit while the fixes land one at a time. Deleting an entry is part of
-#: the commit that fixes it. When the last one goes, this constant stays -- empty
-#: -- and the guard becomes unconditional.
+#: **EMPTY as of 2026-08-18.** All 13 entries were fixed at their call sites; the
+#: constant stays so the guard's shape is unchanged and so the next measured
+#: instance has somewhere to be waived while its fix lands. It must never be used
+#: to park an omission that is actually deliberate -- that is what
+#: ``_NAME_COLLISIONS`` below is for, and it carries the read that clears it.
+#:
+#: Twelve of the thirteen were forwarded verbatim. The thirteenth pair -- both
+#: Qwen3 wrappers' ``positional_learned`` ``dropout_rate`` -- was a REFUTATION:
+#: the classes already applied that rate through a second standalone ``Dropout``
+#: on the same tensor, so forwarding alone would have stacked two dropouts
+#: (effective ``1-(1-p)^2``). They are cleared by forwarding the kwarg AND
+#: deleting the redundant layer; see
+#: ``tests/test_models/test_qwen/test_embedding_dropout_applied_once.py``.
 #:
 #: Key is ``(path relative to src/dl_techniques, class, factory type, param)``.
 #: Deliberately NOT keyed by line number: the fixes themselves move lines, and a
 #: waiver that silently stops matching is a waiver that hides a live defect.
-_SCHEDULED_FIXES = {
-    # 2026-08-18, F-83 -- Gemma3TransformerBlock stores both and forwards neither;
-    # get_config() serializes them, so a round trip advertises a knob that never
-    # reached a weight. use_bias is a weight-SET change.
-    ("models/gemma/components.py", "Gemma3TransformerBlock", "group_query", "kernel_initializer"),
-    ("models/gemma/components.py", "Gemma3TransformerBlock", "group_query", "use_bias"),
-    # 2026-08-18, F-75 -- Swin's patch embedding drops the whole initializer/
-    # regularizer set; the stem trains at glorot regardless of what was asked for.
-    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "kernel_initializer"),
-    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "bias_initializer"),
-    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "kernel_regularizer"),
-    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "bias_regularizer"),
-    # 2026-08-18, N-04 -- same defect as F-75, found by this guard's own
-    # calibration run rather than by hand; ViT additionally drops `activation`.
-    ("models/vit/model.py", "ViT", "patch_2d", "kernel_initializer"),
-    ("models/vit/model.py", "ViT", "patch_2d", "bias_initializer"),
-    ("models/vit/model.py", "ViT", "patch_2d", "kernel_regularizer"),
-    ("models/vit/model.py", "ViT", "patch_2d", "bias_regularizer"),
-    ("models/vit/model.py", "ViT", "patch_2d", "activation"),
-    # 2026-08-18, N-04 -- both Qwen3 embedding wrappers accept `dropout_rate`,
-    # store it, serialize it, and build the positional embedding without it.
-    ("models/qwen/qwen3_embeddings.py", "Qwen3EmbeddingLayer", "positional_learned", "dropout_rate"),
-    ("models/qwen/qwen3_embeddings.py", "Qwen3RerankerLayer", "positional_learned", "dropout_rate"),
-}
+_SCHEDULED_FIXES: set = set()
 
 #: Name collisions this static predicate cannot resolve, cleared by manual read.
 #:
 #: Unlike ``_SCHEDULED_FIXES`` these are permanent: the enclosing class stores an
-#: attribute that merely *shares a name* with a declared factory parameter. Every
-#: one of these five is the ViT-family ``scale``, which is the variant-size string
+#: attribute that merely *shares a name* with a declared factory parameter.
+#:
+#: Five of the six are the ViT-family ``scale``, which is the variant-size string
 #: (``"base"``, ``"large"``, ...; e.g. ``vit/model.py`` ``self.scale = str(scale)``)
 #: and has nothing to do with ``positional_learned``'s embedding-scale parameter.
 #: No AST predicate can tell the two apart -- both are ``self.scale`` assigned
 #: from a same-named ``__init__`` argument -- so the discrimination is recorded
 #: here, with its evidence, rather than pretended at.
+#:
+#: The sixth is ``ViT.activation``, added 2026-08-18 when the four REAL drops at
+#: the same call site were fixed. ``patch_2d`` declares an ``activation``
+#: (default ``'linear'``) and ``ViT`` stores ``self.activation``, but ViT's is the
+#: FFN activation -- documented as such in ``vit/model.py`` and passed to every
+#: ``TransformerLayer`` -- and forwarding its ``'gelu'`` default into the patch
+#: projection would make the stem nonlinear, which no ViT is. See the
+#: ``D-022`` anchor at that call site.
 _NAME_COLLISIONS = {
+    ("models/vit/model.py", "ViT", "patch_2d", "activation"),
     ("models/vit/model.py", "ViT", "positional_learned", "scale"),
     ("models/vit_hmlp/model.py", "ViTHMLP", "positional_learned", "scale"),
     ("models/vit_siglip/model.py", "SigLIPVisionTransformer", "positional_learned", "scale"),
