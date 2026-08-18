@@ -820,12 +820,18 @@ class HierarchicalReasoningModel(keras.Model):
         logger.info(f"Creating Hierarchical Reasoning Model-{variant.upper()}")
         logger.info(f"Architecture: {config}")
 
+        # DECISION plan-2026-08-17T183311-79c63e38/D-025: MERGE, do not splat.
+        # `**config, **kwargs` raises `TypeError: got multiple values for
+        # keyword argument` for ANY override of a variant key, and every key in
+        # MODEL_VARIANTS is one. `create_hierarchical_reasoning_model`'s own
+        # Sudoku example (`variant="base", halt_max_steps=16`) is exactly this
+        # call and could not run. Copied from `models/gpt2/gpt2.py:464`.
+        config.update(kwargs)
         return cls(
             vocab_size=vocab_size,
             seq_len=seq_len,
             num_puzzle_identifiers=num_puzzle_identifiers,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:

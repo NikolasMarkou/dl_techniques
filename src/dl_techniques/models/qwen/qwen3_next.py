@@ -518,7 +518,10 @@ class Qwen3Next(keras.Model):
         logger.info(f"Creating Qwen3Next-{variant.upper()} model")
         logger.info(f"Configuration: {cls.MODEL_VARIANTS[variant]['description']}")
 
-        return cls(**config, **kwargs)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-025: MERGE, do not splat.
+        # See the identical note in `qwen3.py::Qwen3.from_variant`.
+        config.update(kwargs)
+        return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""

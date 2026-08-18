@@ -543,7 +543,13 @@ class Qwen3(keras.Model):
         logger.info(f"Creating Qwen3-{variant.upper()} model")
         logger.info(f"Configuration: {cls.MODEL_VARIANTS[variant]['description']}")
 
-        return cls(**config, **kwargs)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-025: MERGE, do not splat.
+        # `cls(**config, **kwargs)` raises `TypeError: got multiple values for
+        # keyword argument` for ANY override of a variant key -- and every
+        # overridable key is already in the variant dict, so that was every
+        # documented use of `**kwargs` here. Copied from `models/gpt2/gpt2.py:464`.
+        config.update(kwargs)
+        return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
