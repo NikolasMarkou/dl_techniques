@@ -233,7 +233,7 @@ print(forecast.shape)  # (1, 24, 1)
 | `hidden_dim` | `Optional[int]` | `None` | Hidden dim for projection and PRISM layers. If `None`, falls back to `num_features`. |
 | `num_layers` | `int` | `2` | Number of stacked PRISM layers (each = TimeTree + residual + LN + dropout). |
 | `tree_depth` | `int` | `2` | Depth of the time binary tree inside each layer. `2^tree_depth` segments per layer. `0` disables splitting. **No standalone valid range** — it is constrained jointly with `context_len`, `overlap_ratio` and `num_wavelet_levels` via `min_band_len` (see L-5); `__init__` raises `ValueError` when `min_band_len` reaches 0. |
-| `overlap_ratio` | `float` | `0.25` | Overlap fraction between adjacent time segments. Range `[0.0, 0.5]`. Larger values smooth segment boundaries — and lengthen each segment, so this knob also shifts `min_band_len` (see L-5). |
+| `overlap_ratio` | `float` | `0.25` | Overlap fraction between adjacent time segments. Range `[0, 0.5)` — half-open, and validated in `__init__`: a value outside it raises `ValueError`. Larger values smooth segment boundaries — and lengthen each segment, so this knob also shifts `min_band_len` (see L-5). |
 | `num_wavelet_levels` | `int` | `3` | Number of Haar DWT levels per node. Produces `num_wavelet_levels + 1` frequency bands. Each level floor-halves the band length, so raising it on a short context is what drives the deepest band to length 0 (see L-5). |
 | `router_hidden_dim` | `int` | `64` | Hidden dim of the per-node importance-router MLP. |
 | `router_temperature` | `float` | `1.0` | Temperature for the router softmax. Lower (`< 1.0`) sharpens band selection; higher (`> 1.0`) smooths it. |
@@ -258,7 +258,7 @@ print(forecast.shape)  # (1, 24, 1)
 | Parameter | Description |
 |-----------|-------------|
 | `tree_depth` | Depth of the per-layer time tree. `2^tree_depth` overlapping segments. |
-| `overlap_ratio` | Overlap fraction between segments. `[0.0, 0.5]`. |
+| `overlap_ratio` | Overlap fraction between segments. `[0, 0.5)` (half-open; validated in `__init__`). |
 | `num_wavelet_levels` | Number of Haar DWT levels per node. |
 | `router_hidden_dim` | Router MLP hidden dim. |
 | `router_temperature` | Softmax temperature for the router. |

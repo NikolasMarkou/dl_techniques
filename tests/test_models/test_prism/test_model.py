@@ -99,6 +99,76 @@ class TestPRISMModelInstantiation:
                 num_features=-5,
             )
 
+    def test_out_of_range_overlap_ratio_raises_rather_than_hangs(self) -> None:
+        """A negative ``overlap_ratio`` must RAISE -- it used to HANG.
+
+        RED-proof (measured before the fix, plan-2026-08-18T073231-52a93f8c
+        completion fix A): this exact call did not return within 60s and was
+        killed by ``timeout`` (exit 124). The remedy search inside the
+        ``min_band_len`` refusal was an unbounded ``while True`` over
+        ``context_len``, and a negative ``overlap_ratio`` makes the segment
+        length negative at EVERY ``context_len`` (-18 at 96, -18750 at
+        100000), so the loop could never break. The contract ``[0, 0.5)`` is
+        ``PRISMTimeTree.__init__``'s, which is constructed only AFTER this
+        arithmetic runs -- hence the duplicate guard.
+        """
+        with pytest.raises(ValueError, match=r"overlap_ratio must be in \[0, 0.5\)"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                overlap_ratio=-20.0,
+            )
+
+    @pytest.mark.parametrize("bad_overlap", [-0.1, 0.5, 0.9, 1.0])
+    def test_overlap_ratio_outside_half_open_interval_raises(
+        self, bad_overlap: float
+    ) -> None:
+        """The interval is half-open: 0.5 itself is refused, 0.0 is not."""
+        with pytest.raises(ValueError, match="overlap_ratio"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                overlap_ratio=bad_overlap,
+            )
+
+    def test_zero_overlap_ratio_is_accepted(self) -> None:
+        """The closed end of ``[0, 0.5)`` must still construct."""
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            overlap_ratio=0.0,
+        )
+        assert model.overlap_ratio == 0.0
+
+    def test_negative_tree_depth_raises(self) -> None:
+        """Negative ``tree_depth`` must RAISE, not silently skip validation.
+
+        The band-validation block used to sit behind
+        ``if tree_depth >= 0 and num_wavelet_levels >= 0:``, so a negative
+        value bypassed the whole ``min_band_len`` check instead of being
+        rejected.
+        """
+        with pytest.raises(ValueError, match="tree_depth must be >= 0"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=-1,
+            )
+
+    def test_negative_num_wavelet_levels_raises(self) -> None:
+        """Negative ``num_wavelet_levels`` must RAISE (same skipped-gate bug)."""
+        with pytest.raises(ValueError, match="num_wavelet_levels must be >= 0"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                num_wavelet_levels=-3,
+            )
+
     def test_unsupportable_band_config_raises_value_error(self) -> None:
         """A configuration whose deepest frequency band has length 0 is REFUSED.
 
