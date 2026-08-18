@@ -380,7 +380,7 @@ class TestPRISMDegenerateBandWarning:
 
 
 class TestPRISMModelTimeAxisContract:
-    """The time axis is pinned statically, and what that pin does NOT cover."""
+    """The time axis is pinned statically, and the dynamic axis is finite anyway."""
 
     def test_wrong_static_context_len_is_refused(self) -> None:
         """A static time axis other than ``context_len`` raises at ``__call__``.
@@ -396,26 +396,24 @@ class TestPRISMModelTimeAxisContract:
         with pytest.raises(ValueError, match="axis 1"):
             model(x, training=False)
 
-    def test_dynamic_time_axis_is_an_UNCLOSED_hole(self) -> None:
-        """MEASURED limitation, pinned so it cannot rot silently.
+    def test_dynamic_time_axis_is_finite(self) -> None:
+        """The dynamic-time-axis hole is CLOSED; this pins it shut.
 
-        The degenerate-band guard in ``FrequencyBandStatistics.call``
-        (decisions.md D-004) branches on the STATIC band length and
-        deliberately falls through when it is ``None``. Under a dynamic time
-        axis the guard is therefore vacuous and the original all-NaN defect is
-        fully present: ``nan_frac == 1.0`` where the same model gives ``0.0``
-        eager.
+        This test previously asserted the BROKEN behaviour on purpose
+        (``nan_frac == 1.0`` under a trace with an unknown time axis, where the
+        same model gives ``0.0`` eager), with instructions to flip the assertion
+        rather than delete the test once the hole was closed. That is what
+        happened: the degenerate-band guard in ``FrequencyBandStatistics.call``
+        now carries a dynamic fallback that replaces non-finite statistics with
+        ``0.0`` when the static band length is ``None``
+        (decisions.md D-001 of plan-2026-08-18T111512-29569f8b, which closes
+        D-012 of plan-2026-08-18T073231-52a93f8c).
 
-        ``PRISMModel.input_spec`` does NOT close this. Keras'
+        ``PRISMModel.input_spec`` is NOT what closes it and never could: Keras'
         ``assert_input_compatibility`` tests ``shape[axis] not in {value,
         None}`` (``keras/src/layers/input_spec.py:223-226``), so an unknown
         dimension is explicitly accepted by an ``axes`` constraint. Measured
         both before and after adding the pin: ``nan_frac == 1.0`` either way.
-
-        This test asserts the CURRENT, BROKEN behaviour on purpose. If a future
-        change closes the hole this test goes RED -- that is the intended
-        notification, and the fix is to replace the assertion with
-        ``nan_frac == 0.0`` (or a raise) rather than to delete the test.
         """
         import tensorflow as tf
 
@@ -438,10 +436,12 @@ class TestPRISMModelTimeAxisContract:
             return model(t, training=False)
 
         dynamic = np.asarray(traced(tf.constant(x)))
-        assert float(np.mean(np.isnan(dynamic))) == 1.0, (
-            "the dynamic-time-axis hole is documented as OPEN; if this is now "
-            "finite the limitation has been closed -- update D-004/D-012 and "
-            "this assertion, do not delete the test"
+        nan_frac = float(np.mean(~np.isfinite(dynamic)))
+        assert nan_frac == 0.0, (
+            f"the dynamic-time-axis hole has REOPENED: nan_frac={nan_frac}. The "
+            "fallback in FrequencyBandStatistics.call (D-001) is what keeps this "
+            "finite -- do not remove it, and do not try to close it with "
+            "input_spec, which is measured not to work"
         )
 
 

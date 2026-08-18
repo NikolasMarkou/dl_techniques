@@ -90,7 +90,11 @@ class FrequencyBandStatistics(keras.layers.Layer):
             Degenerate bands are handled explicitly: a band of length 1 gets
             ``diff_mean``/``diff_std`` of exactly ``0.0`` (the first difference
             of a single sample is undefined), and a band of length 0 gets all
-            six statistics as ``0.0``.
+            six statistics as ``0.0``. When the time axis is not known
+            statically (a traced graph over ``[batch, None, channels]``) the
+            same semantics are reproduced by replacing non-finite statistics
+            with ``0.0``; on a statically shaped input a genuine NaN in the data
+            still propagates.
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-18T073231-52a93f8c/D-004
@@ -112,17 +116,12 @@ class FrequencyBandStatistics(keras.layers.Layer):
         # Do NOT "simplify" it by clamping or padding the slice to fake a
         # length: that fabricates a first difference from a sample that does not
         # exist, which is a silently wrong number rather than a defined one.
-        # KNOWN LIMITATION of the fall-through, MEASURED, not hypothesised:
-        # under a DYNAMIC time axis this guard does nothing and the original
-        # all-NaN defect is fully present -- the fixed ``tree_depth=3``
-        # ``PRISMModel`` traced as
-        # ``tf.function(input_signature=[TensorSpec([None,None,7])])`` returns
-        # ``nan_frac == 1.0`` where the same model returns ``0.0`` eager.
-        # ``PRISMModel.input_spec`` cannot close it: Keras' own
-        # ``assert_input_compatibility`` accepts an unknown dimension against an
-        # ``axes`` constraint (``shape[axis] not in {value, None}``). Pin the
-        # time axis statically at the caller (the shipped ONNX exporter already
-        # does, ``src/train/common/ts_export.py``).
+        # The DYNAMIC time axis (``static_len is None``) falls through this
+        # branch by design and is closed separately, at the bottom of ``call``,
+        # by a value-level non-finite repair -- see the
+        # ``plan-2026-08-18T111512-29569f8b/D-001`` anchor there for why
+        # ``input_spec`` cannot close it and why the repair is confined to that
+        # path.
         # See decisions.md D-004, D-012 (and D-002 for the threshold ruling).
         static_len = inputs.shape[1]
 
@@ -163,6 +162,45 @@ class FrequencyBandStatistics(keras.layers.Layer):
             [mean, std, min_val, max_val, diff_mean, diff_std],
             axis=-1
         )
+
+        # DECISION plan-2026-08-18T111512-29569f8b/D-001
+        # Dynamic-time-axis fallback.  The branch above is on the STATIC length,
+        # so under a trace with an unknown time axis -- ``TensorSpec([None, None,
+        # C])``, what an ONNX/SavedModel export or a ragged ``tf.data`` pipeline
+        # produces -- neither degenerate case is caught and the band arithmetic
+        # runs raw.  MEASURED before this fallback existed: a built
+        # ``tree_depth=3`` ``PRISMModel`` traced at ``[None, None, 7]`` returned
+        # ``nan_frac == 1.0`` while the SAME model returned ``0.0`` eager.
+        # ``input_spec`` CANNOT close this: Keras'
+        # ``assert_input_compatibility`` tests ``shape[axis] not in {value,
+        # None}``, so an unknown dimension is explicitly ACCEPTED by an ``axes``
+        # constraint (measured, not inferred).  ``ops.cond`` on
+        # ``ops.shape(inputs)[1]`` is also out -- this repo has measured that
+        # rewrite break under ``@tf.function`` with
+        # ``OperatorNotAllowedInGraphError`` (``clifford_block``).
+        # What IS graph-safe is a value-level repair, because in graph mode the
+        # degenerate cases fail *numerically* rather than raising: a length-0
+        # band gives ``ops.min``/``ops.max`` of ``+inf``/``-inf`` (in EAGER the
+        # very same call raises ``InvalidArgumentError``, which is why the static
+        # length-0 branch above must stay -- it cannot be repaired after the
+        # fact) and ``ops.mean``/``ops.var`` of NaN; a length-1 band gives NaN
+        # diff features.  Replacing every non-finite statistic with 0.0 therefore
+        # reproduces EXACTLY the semantics the static branches define, with no
+        # Python branch on a symbolic value.
+        # The ``is None`` test below is a TRACE-TIME branch on a Python object,
+        # not on a tensor value -- it is safe.
+        # Do NOT hoist this sanitization out of the ``is None`` guard to "cover
+        # both paths": on the static path a genuine NaN in user data must keep
+        # propagating, because it is a data defect the caller has to see, not
+        # something a statistics layer may silently rewrite to 0.0.  Laundering
+        # it here would make a corrupt window indistinguishable from a constant
+        # one.  Pinned by
+        # ``test_static_path_still_propagates_genuine_nan_inputs``.
+        # See decisions.md D-001 (and D-004/D-012 of
+        # plan-2026-08-18T073231-52a93f8c for the static branch this completes).
+        if static_len is None:
+            stats = ops.where(ops.isfinite(stats), stats, ops.zeros_like(stats))
+
         return stats
 
     def compute_output_shape(

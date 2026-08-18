@@ -247,3 +247,128 @@ class TestFrequencyBandStatisticsDegenerateLengths:
         diff = x[:, 1:, :] - x[:, :-1, :]
         np.testing.assert_allclose(out[:, :, 4], diff.mean(axis=1), rtol=1e-6, atol=1e-6)
         assert np.isfinite(out).all()
+
+
+class TestFrequencyBandStatisticsDynamicTimeAxis:
+    """The degenerate-band guard must also hold when the time axis is UNKNOWN.
+
+    ``FrequencyBandStatistics`` branches on the STATIC time length, so a trace
+    with ``TensorSpec([None, None, C])`` -- the shape an ONNX/SavedModel export
+    or a ragged-length ``tf.data`` pipeline produces -- used to fall through the
+    guard entirely.  Under a graph the failure is silent rather than loud:
+    ``ops.min``/``ops.max`` over a zero-length axis return ``+/-inf`` instead of
+    raising, and ``ops.mean``/``ops.var`` return NaN, which the router's single
+    joint softmax then spreads across every band.
+    """
+
+    CHANNELS = 7
+    BATCH = 4
+
+    @staticmethod
+    def _call_dynamic(layer, x):
+        """Trace ``layer`` with the time axis left unknown."""
+        import tensorflow as tf
+
+        fn = tf.function(
+            lambda t: layer(t),
+            input_signature=[tf.TensorSpec([None, None, x.shape[-1]], tf.float32)],
+        )
+        return fn(tf.convert_to_tensor(x))
+
+    @pytest.mark.parametrize("length", [0, 1, 2, 8])
+    def test_dynamic_time_axis_statistics_are_finite(self, length):
+        layer = FrequencyBandStatistics()
+        x = np.random.default_rng(length).standard_normal(
+            (self.BATCH, length, self.CHANNELS)
+        ).astype("float32")
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+
+        assert out.shape == (self.BATCH, self.CHANNELS, 6)
+        assert np.isfinite(out).all(), (
+            f"non-finite statistics on a dynamic-axis band of length {length}; "
+            f"non_finite_frac={float(np.mean(~np.isfinite(out)))}"
+        )
+
+    def test_dynamic_length_zero_matches_the_static_guard(self):
+        """A length-0 band is all zeros -- exactly what the static branch returns."""
+        layer = FrequencyBandStatistics()
+        x = np.zeros((self.BATCH, 0, self.CHANNELS), dtype="float32")
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        np.testing.assert_array_equal(
+            out, np.zeros((self.BATCH, self.CHANNELS, 6), dtype="float32")
+        )
+
+    def test_dynamic_length_one_matches_the_static_guard(self):
+        """A length-1 band gets diff features of exactly 0.0 and real mean/min/max."""
+        layer = FrequencyBandStatistics()
+        x = np.random.default_rng(11).standard_normal(
+            (self.BATCH, 1, self.CHANNELS)
+        ).astype("float32")
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        static = keras.ops.convert_to_numpy(layer(x))
+
+        np.testing.assert_array_equal(out, static)
+        np.testing.assert_array_equal(out[:, :, 4], np.zeros((self.BATCH, self.CHANNELS), "float32"))
+        np.testing.assert_array_equal(out[:, :, 5], np.zeros((self.BATCH, self.CHANNELS), "float32"))
+
+    @pytest.mark.parametrize("length", [2, 8])
+    def test_dynamic_non_degenerate_band_equals_the_static_result(self, length):
+        """The dynamic path must not perturb an ordinary band: bit-identical."""
+        layer = FrequencyBandStatistics()
+        x = np.random.default_rng(100 + length).standard_normal(
+            (self.BATCH, length, self.CHANNELS)
+        ).astype("float32")
+
+        dynamic = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        static = keras.ops.convert_to_numpy(layer(x))
+        np.testing.assert_array_equal(dynamic, static)
+
+    def test_static_path_still_propagates_genuine_nan_inputs(self):
+        """Sanitization is confined to the dynamic path -- it must not launder data.
+
+        A real NaN in user data is a data defect the caller must see, not
+        something the statistics layer silently rewrites to 0.0.
+        """
+        layer = FrequencyBandStatistics()
+        x = np.random.default_rng(3).standard_normal(
+            (self.BATCH, 8, self.CHANNELS)
+        ).astype("float32")
+        x[0, 0, 0] = np.nan
+
+        out = keras.ops.convert_to_numpy(layer(x))
+        assert np.isnan(out[0, 0, :]).any(), (
+            "a genuine NaN input was laundered away on the STATIC path"
+        )
+
+
+class TestPRISMModelDynamicTimeAxis:
+    """Model-level closure: a traced PRISM with an unknown time axis is finite."""
+
+    def test_depth_three_model_traced_with_unknown_time_axis_is_finite(self):
+        import tensorflow as tf
+        from dl_techniques.models.time_series.prism.model import PRISMModel
+
+        keras.utils.set_random_seed(1234)
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            tree_depth=3,
+            hidden_dim=32,
+            num_layers=1,
+            router_hidden_dim=16,
+        )
+        x = np.random.default_rng(0).standard_normal((2, 96, 7)).astype("float32")
+        model(x)  # build
+
+        traced = tf.function(
+            lambda t: model(t, training=False),
+            input_signature=[tf.TensorSpec([None, None, 7], tf.float32)],
+        )
+        y = keras.ops.convert_to_numpy(traced(tf.convert_to_tensor(x)))
+
+        nan_frac = float(np.mean(~np.isfinite(y)))
+        assert nan_frac == 0.0, f"traced dynamic-axis PRISM produced nan_frac={nan_frac}"
