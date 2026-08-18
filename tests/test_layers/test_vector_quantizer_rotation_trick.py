@@ -520,5 +520,107 @@ class TestSerialization:
             )
 
 
+# ============================================================================
+# call() vs the indices round trip, per distance_mode
+# ============================================================================
+
+class TestForwardMatchesTheIndicesPathPerDistanceMode:
+    """``call()`` must equal ``get_codebook_indices -> quantize_from_indices``.
+
+    That invariant is the module's own, stated in a comment inside
+    ``_apply_gradient_transform``, and it is what the ``reflection`` sign fix
+    restored. It was still broken in the cosine branch: ``_lookup`` rescaled the
+    codebook row by ``x_mag / q_mag`` while ``quantize_from_indices`` returns the raw
+    row, so the two paths disagreed by that factor for every input whose norm differed
+    from its codebook vector's — i.e. always.
+
+    Why nothing caught it: the mode-discriminating value assertion in
+    ``tests/test_models/test_vq_vae_rotation/`` is parametrized over
+    ``gradient_mode``, and everything here under ``TestDistanceModes`` asserts index
+    validity and shape only. Both are invariant under a per-vector rescale.
+
+    ``euclidean`` is the control arm and passed both before and after the fix.
+    """
+
+    @pytest.mark.parametrize("distance_mode", ["euclidean", "cosine"])
+    def test_call_equals_quantize_from_indices(self, base_config, distance_mode):
+        base_config["distance_mode"] = distance_mode
+        base_config["gradient_mode"] = "ste"  # exact forward: x + sg(q - x) == q
+        layer = VectorQuantizerRotationTrick(**base_config)
+        layer.build((None, 32))
+
+        # Scaled well away from unit norm so ``x_mag / q_mag`` cannot be ~1 by luck.
+        x = ops.cast(
+            keras.random.normal((64, 32), seed=keras.random.SeedGenerator(3)) * 4.0,
+            "float32",
+        )
+
+        out = ops.convert_to_numpy(layer(x, training=False))
+        idx = layer.get_codebook_indices(x)
+        ref = ops.convert_to_numpy(layer.quantize_from_indices(idx))
+
+        np.testing.assert_allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    def test_the_probe_is_not_vacuous_input_and_codebook_norms_differ(
+            self, base_config
+    ):
+        """If ``||x|| == ||e_k||`` the rescale factor is 1 and the test above would
+        pass under either implementation. This pins that the fixture's inputs are
+        genuinely far from their codebook rows in magnitude."""
+        base_config["distance_mode"] = "cosine"
+        layer = VectorQuantizerRotationTrick(**base_config)
+        layer.build((None, 32))
+        x = ops.cast(
+            keras.random.normal((64, 32), seed=keras.random.SeedGenerator(3)) * 4.0,
+            "float32",
+        )
+        idx = layer.get_codebook_indices(x)
+        ref = ops.convert_to_numpy(layer.quantize_from_indices(idx))
+        x_np = ops.convert_to_numpy(x)
+
+        ratio = np.linalg.norm(x_np, axis=-1) / np.linalg.norm(ref, axis=-1)
+        assert float(np.min(np.abs(ratio - 1.0))) > 0.1, (
+            f"probe is vacuous: some ||x||/||e_k|| is ~1 (min deviation "
+            f"{float(np.min(np.abs(ratio - 1.0)))})"
+        )
+
+    def test_cosine_forward_output_is_a_codebook_row(self, base_config):
+        """The stronger statement the round trip implies: a *discrete* bottleneck's
+        forward output must be one of the ``num_embeddings`` stored vectors, not a
+        continuously rescaled one. Before the fix the per-token magnitude leaked
+        through as a continuous side channel, so no index prior could reproduce the
+        decoder's training-time input.
+
+        Tolerance is 1e-3, which is loose on purpose and MEASURED, not guessed. Unlike
+        the round-trip test above — where both sides run the same ``one_hot @ codebook``
+        einsum and cancel to 1.2e-7 — this arm compares the forward output against a
+        directly-indexed numpy row, so the einsum's own error shows up. On GPU that
+        error is dominated by TF32: max distance to the nearest row is **4.07e-05 with
+        TF32 enabled and 7.68e-07 with it disabled** (RTX 4070, float32, measured
+        2026-08-18), a 53x swing, and whether TF32 is on depends on which other test
+        modules ran first in the session (``test_linear_attention.py`` disables it
+        process-globally at import). 1e-3 clears both regimes with three orders to
+        spare, and the pre-fix signal was **30.78** — this cannot be a tolerance that
+        hides the defect."""
+        base_config["distance_mode"] = "cosine"
+        base_config["gradient_mode"] = "ste"
+        layer = VectorQuantizerRotationTrick(**base_config)
+        layer.build((None, 32))
+        x = ops.cast(
+            keras.random.normal((64, 32), seed=keras.random.SeedGenerator(9)) * 4.0,
+            "float32",
+        )
+        out = ops.convert_to_numpy(layer(x, training=False))
+        codebook = ops.convert_to_numpy(layer.embeddings)[0]  # (K, D), num_heads == 1
+
+        nearest = np.min(
+            np.linalg.norm(out[:, None, :] - codebook[None, :, :], axis=-1), axis=-1
+        )
+        assert float(np.max(nearest)) < 1e-3, (
+            f"forward output is not a stored codebook row; max distance to the "
+            f"nearest one is {float(np.max(nearest))}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

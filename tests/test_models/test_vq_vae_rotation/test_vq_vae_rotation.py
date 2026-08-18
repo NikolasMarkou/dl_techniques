@@ -27,6 +27,35 @@ def sample_images():
     return ops.cast(keras.random.uniform((4, 32, 32, 3), 0.0, 1.0), "float32")
 
 
+class TestIndicesRoundTripMatchesCall:
+    """``decode_from_indices(encode_to_indices(x))`` must equal ``model(x)``.
+
+    Also the reachability statement: ``distance_mode`` is a public constructor
+    argument on ``VQVAERotationTrick`` (and on ``create_vq_vae_rotation``), defaulting
+    to ``'euclidean'``, so ``'cosine'`` is opt-in but reachable from the model — not
+    layer-only. That is what makes the asymmetry a model defect and not just a layer
+    one: a trained index prior could not reproduce the decoder's training-time input.
+
+    RED before the fix (plan step 19): the cosine arm's two paths disagreed by the
+    ``||x|| / ||e_k||`` factor ``_lookup`` applied and ``quantize_from_indices``
+    omitted. The euclidean arm is the control and passed both ways.
+    """
+
+    @pytest.mark.parametrize("distance_mode", ["euclidean", "cosine"])
+    def test_decode_from_indices_matches_call(self, sample_images, distance_mode):
+        m = VQVAERotationTrick(
+            num_embeddings=32, embedding_dim=16,
+            input_shape=(32, 32, 3), hidden_channels=32,
+            downsample_factor=4, num_res_blocks=1, norm_type="layer_norm",
+            gradient_mode="ste", distance_mode=distance_mode,
+        )
+        direct = ops.convert_to_numpy(m(sample_images, training=False))
+        via_indices = ops.convert_to_numpy(
+            m.decode_from_indices(m.encode_to_indices(sample_images))
+        )
+        np.testing.assert_allclose(direct, via_indices, atol=1e-5, rtol=1e-5)
+
+
 class TestForward:
     def test_forward_shape(self, sample_images):
         m = VQVAERotationTrick(

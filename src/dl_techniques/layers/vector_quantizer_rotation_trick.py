@@ -47,8 +47,10 @@ Architecturally, a forward pass proceeds through five stages:
     effective vocabulary to `K^H` at linear cost in memory.
 2.  A per-head nearest neighbour search selects one code per group, using
     either squared Euclidean distance or cosine similarity. In cosine mode the
-    lookup is purely angular and the input magnitude is restored afterwards,
-    which decouples direction matching from scale.
+    lookup is purely angular, so the input's magnitude affects neither which code
+    is selected nor what is emitted: the quantized vector is the stored codebook
+    row itself, as in euclidean mode. Codebook magnitudes are therefore trained by
+    the codebook loss in both modes.
 3.  The selected codes are combined with the encoder output by the chosen
     gradient transform: `'rotation'` for the full form above, `'reflection'`
     for the Householder reflection alone, `'no_grad_scale'` to let the scale
@@ -492,15 +494,22 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # quantized = sum_k encodings * codebook[h,k] -> (N,H,D)
         quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, codebook)
 
-        if self.distance_mode == "cosine":
-            # Restore magnitude
-            x_mag = keras.ops.sqrt(
-                keras.ops.sum(keras.ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
-            )
-            q_mag = keras.ops.sqrt(
-                keras.ops.sum(keras.ops.square(quantized), axis=-1, keepdims=True) + self.epsilon
-            )
-            quantized = quantized * (x_mag / q_mag)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-030: cosine mode returns the RAW
+        # codebook row, exactly like euclidean mode. This branch used to "restore
+        # magnitude" by scaling the row by `x_mag / q_mag`, and it must NOT be put
+        # back. `quantize_from_indices` — the only other producer of a quantized
+        # vector, and the one `models/vq_vae_rotation`'s
+        # `encode_to_indices -> quantize_from_indices -> decode` pair uses — returns
+        # the raw row in every mode and CANNOT reproduce the rescale: an index has
+        # already discarded x_mag by design in cosine mode (that is what cosine
+        # similarity means), so carrying it would require changing
+        # `encode_to_indices`' public return signature. So the rescale, not the raw
+        # row, was the outlier. It also made the "discrete" bottleneck leak a
+        # continuous per-token magnitude channel, leaving codebook MAGNITUDES
+        # untrained (`||sg[x] - (||x||/||e||)e||^2` is direction-only). This is the
+        # same defect class as the reflection-sign bug fixed in
+        # `_apply_gradient_transform` below, for magnitude instead of sign, and the
+        # invariant documented there is the one it violated. See decisions.md D-030.
 
         return indices, quantized
 
