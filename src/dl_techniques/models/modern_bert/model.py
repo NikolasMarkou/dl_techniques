@@ -41,20 +41,38 @@ slots. Two consequences, both mechanical:
   above `DEFAULT_MAX_POSITION_EMBEDDINGS = 8192`, so **no admissible sequence
   length is ever windowed for those two variants**. `tiny` (`window_size=64`,
   threshold 4096) is the only variant where windowing engages at all, and only
-  for `4096 < L <= 8192`.
+  for `4097 <= L <= 8192`, where the padded grid really does partition into
+  four windows (a 2x2 grid, no cross-window information flow).
 * The score matrix in a local layer is `window_size**2 x window_size**2`
   *independent of `L`* -- roughly `2.7e8` entries per head per sample at
   `window_size=128`. That is ~16,384x the cost of dense attention at `L=128`
   and still ~4x dense attention at `L=8192`. The local layers are the
   expensive ones here, not the cheap ones.
 
-So the hybrid schedule as built buys no affordability; it collapses to an
-all-global stack in which 2 of every 3 layers additionally carry no RoPE (only
-`is_global` layers receive `rope_theta`) and get their order signal from a
-relative position bias over the synthetic grid instead. This is documented
-rather than fixed because no 1-D sliding-window attention layer exists in
-`layers/attention/`; writing one is the real fix, and it is an open decision.
-Pinned by `tests/test_models/test_modern_bert/test_shipped_window_size.py`.
+So the hybrid schedule as built buys no affordability -- but the failure is
+per-variant, not uniform, and both convenient summaries of it are wrong.
+Measured 2026-08-18 by sweeping `L` over the admissible range against the real
+grid-formation/padding/partition code:
+
+* `base` and `large` (`window_size=128`) partition into exactly **one** window
+  at every admissible `L`. Their local layers are dense attention over a
+  padded 16384-slot window: padding cost and no RoPE, for exactly zero
+  locality benefit.
+* `tiny` (`window_size=64`) partitions into **one** window for `L <= 4096` and
+  into **four** for `4097 <= L <= 8192`. In that band the windowing is real.
+
+Do not write "windowing always degenerates" (false for `tiny` above 4096) and
+do not write "windowing delivers linear cost" (false for `base` and `large` at
+every admissible length). Where a local layer is dense it additionally carries
+no RoPE (only `is_global` layers receive `rope_theta`) and gets its order
+signal from a relative position bias over the synthetic grid instead. That bias
+is weak at its initialization scale but genuinely wired: injecting `N(0, 1)`
+into the table moves the output by `4.82e-03` (one window) and `3.68e-01`
+(multi-window) against a zeroed table, measured 2026-08-18 in float64. This is
+documented rather than fixed because no 1-D sliding-window attention layer
+exists in `layers/attention/`; writing one is the real fix, and it is an open
+decision. Pinned by
+`tests/test_models/test_modern_bert/test_shipped_window_size.py`.
 
 Positional information lives entirely in the attention layers, as in the
 paper: the embedding stage sums word and token-type embeddings and adds no
@@ -144,7 +162,10 @@ class ModernBERT(keras.Model):
     layer's neighbourhood is a set of strided runs of tokens rather than a
     contiguous 1-D window, and for every ``L <= local_attention_window_size**2``
     (16384 at the default) it degenerates to attention over the whole padded
-    grid. That is a real deviation from the paper's 1-D sliding window; it is
+    grid. Per variant, measured: ``base`` and ``large`` (window 128) never
+    partition at any admissible length, while ``tiny`` (window 64) partitions
+    into four windows for ``4097 <= L <= 8192`` and only there.
+    That is a real deviation from the paper's 1-D sliding window; it is
     documented rather than fixed because no 1-D sliding-window attention layer
     exists in ``layers/attention/``.
 
@@ -429,6 +450,15 @@ class ModernBERT(keras.Model):
             # `global_attention_interval=1`: `max|P f(x) - f(P x)| = 1.19e-07`
             # (float32 noise) before, `4.06e-01` after. See decisions.md D-007.
             #
+            # SUPERSEDE-NOTE 2026-08-18
+            # (plan-2026-08-18T140459-7991552f/D-019): a proposal to widen this
+            # ruling to EVERY layer -- delete the local branch so the whole
+            # stack is 'group_query' and RoPE reaches all of it ("Option B") --
+            # was evaluated, MEASURED and CANCELLED. The ruling above is
+            # unchanged and still applies to the global layers only; the
+            # measurement that killed the widening is in the D-019 anchor
+            # below.
+            #
             # Local layers stay 'window', which is a SPATIAL layer: it reshapes
             # a `(B, L, D)` text sequence into a synthetic `ceil(sqrt(L))^2` grid
             # and attends inside `window_size`-square blocks of it, so its
@@ -462,6 +492,52 @@ class ModernBERT(keras.Model):
             #     the expensive ones in this implementation.
             # Implement-or-delete is an OPEN decision: see decisions.md D-027.
             # Pinned by tests/test_models/test_modern_bert/test_shipped_window_size.py.
+            #
+            # SUPERSEDE-NOTE 2026-08-18
+            # (plan-2026-08-18T140459-7991552f/D-019): the "delete" half of the
+            # open decision above was taken up, measured, and CLOSED as
+            # CANCELLED. Everything above still stands as written -- including
+            # "base and large can never window an admissible length at all",
+            # which the sweep confirmed -- except that it must NOT be read as
+            # "windowing degenerates everywhere". See the D-019 anchor
+            # immediately below for the per-variant numbers.
+            #
+            # DECISION plan-2026-08-18T140459-7991552f/D-019
+            # Emitting 'window' for `base`/`large` is a MEASURED no-op. Swept
+            # 2026-08-18 over the real grid/pad/partition code, L in 8..8192
+            # against DEFAULT_MAX_POSITION_EMBEDDINGS = 8192:
+            #     window_size=128 (base, large) -> 1 window at EVERY admissible L
+            #     window_size=64  (tiny)        -> 1 window for L <= 4096,
+            #                                      4 windows for 4097..8192
+            # So base and large pay the 16384-slot padding on two thirds of
+            # their layers, and forgo RoPE there, for exactly zero locality
+            # benefit -- while tiny above 4096 tokens really does partition
+            # into a 2x2 grid with no cross-window information flow.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT delete `local_attention_window_size` or
+            #     `global_attention_interval`. That was "Option B" and it was
+            #     CANCELLED on 2026-08-18 BECAUSE OF the numbers above: its
+            #     premise was "the window path degenerates at every shipped
+            #     variant size", and that is false for `tiny` above 4096. At
+            #     `tiny` the knob buys a real 4x attention saving, so deleting
+            #     it removes a capability rather than cleaning up a no-op.
+            #   * Do NOT quietly stop emitting 'window' for base/large here
+            #     either. It is the right fix, but it is a PER-VARIANT
+            #     CONFIGURATION change with a weight-tree consequence -- a
+            #     local layer is a 5-tensor fused-QKV subtree (qkv, proj,
+            #     relative_position_bias_table) while a global one is 4
+            #     projections plus 2 RoPE caches, so EVERY parameter name under
+            #     a swapped layer changes, not just the bias table. It is
+            #     deferred to a follow-up plan with the measurement attached.
+            #   * Do NOT re-derive any of this by reading. Two readings failed
+            #     here already: "the local layers have no positional term at
+            #     all" is FALSE (injecting `N(0,1)` into the relative-position
+            #     bias table moves the output 4.82e-03 one-window / 3.68e-01
+            #     multi-window against a zeroed table, float64), and the
+            #     "degenerate everywhere" premise was equally a reading.
+            # Pinned by tests/test_models/test_modern_bert/test_shipped_window_size.py
+            # (TestShippedWindowSizeIsDenseAttention). See decisions.md D-019.
             attention_type = "group_query" if is_global else "window"
             attention_args = (
                 {

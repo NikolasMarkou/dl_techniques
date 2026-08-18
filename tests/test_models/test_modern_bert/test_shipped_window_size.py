@@ -98,7 +98,9 @@ def _partition_of(window_size: int, seq_len: int):
 class TestShippedWindowSizeIsDenseAttention:
     """The shipped ``window_size=128`` never windows an admissible sequence."""
 
-    @pytest.mark.parametrize("seq_len", [128, 512, 8192])
+    @pytest.mark.parametrize(
+        "seq_len", [8, 128, 512, 4096, 4097, 6000, 8191, 8192]
+    )
     def test_one_padded_window_at_every_admissible_length(self, seq_len):
         """One window of 16384 slots, whatever the sequence length is.
 
@@ -147,17 +149,35 @@ class TestShippedWindowSizeIsDenseAttention:
         assert windowed_entries // (8192 ** 2) == 4, "≈4x dense at L=8192"
 
     def test_windowing_does_engage_for_tiny_above_its_threshold(self):
-        """CONTROL: the same instrument sees a genuine multi-window partition.
+        """CONTROL, and the pin on ``tiny``'s exact engagement band.
 
-        ``tiny`` ships ``window_size=64`` (``M = 4096``), so ``L = 8192 > M``
-        is above its threshold and the grid really is partitioned. Without this
-        arm, every "1 window" assertion above could be an artefact of the
-        recorder rather than a property of the configuration.
+        ``tiny`` ships ``window_size=64`` (``M = 4096``), so ``L > M`` is above
+        its threshold and the grid really is partitioned. Without this arm,
+        every "1 window" assertion above could be an artefact of the recorder
+        rather than a property of the configuration.
+
+        This also pins the BOUNDARY, which is the fact that killed a proposal
+        to delete ``local_attention_window_size`` outright (see the
+        ``plan-2026-08-18T140459-7991552f/D-019`` anchor in
+        ``models/modern_bert/model.py``): windowing here is not degenerate
+        everywhere, it is degenerate up to 4096 and real from 4097 to 8192, so
+        deleting the knob would remove a capability rather than a no-op.
         """
-        num_windows, slots = _partition_of(window_size=64, seq_len=8192)
+        for seq_len in (8, 64, 1024, 4096):
+            num_windows, slots = _partition_of(window_size=64, seq_len=seq_len)
+            assert num_windows == 1, (
+                f"tiny at L={seq_len} (<= 4096) must be one padded window, "
+                f"got {num_windows}"
+            )
+            assert slots == 64 ** 2
 
-        assert num_windows == 4, f"expected a 2x2 partition, got {num_windows}"
-        assert slots == 64 ** 2
+        for seq_len in (4097, 6000, 8191, 8192):
+            num_windows, slots = _partition_of(window_size=64, seq_len=seq_len)
+            assert num_windows == 4, (
+                f"tiny at L={seq_len} (> 4096) must be a 2x2 partition, "
+                f"got {num_windows}"
+            )
+            assert slots == 64 ** 2
 
 
 class TestVariantTableAgainstTheThreshold:

@@ -40,7 +40,7 @@ An advanced, production-ready Keras 3 implementation of **ModernBERT**, a succes
 1.  **Rotary Positional Embeddings (RoPE)**: Replaces traditional absolute positional embeddings with RoPE, which is proven to excel in both short- and long-context scenarios and allows for easier context extension.
 2.  **Pre-Layer Normalization (Pre-LN)**: Applies layer normalization *before* attention and feed-forward blocks, significantly improving training stability and convergence.
 3.  **GeGLU Activation Function**: Uses a Gated GELU (GeGLU) in the feed-forward network, which provides a more sophisticated gating mechanism for improved performance.
-4.  **Alternating Local & Global Attention**: Employs a hybrid attention strategy. Most layers use **windowed (local) attention**, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. In the paper this is what makes the 8192 native sequence length affordable. **In this implementation it is not** — the reused `window` layer pads every window to `window_size**2` slots, so at the shipped `window_size=128` no admissible length is ever windowed and the local layers are *more* expensive than global ones, not less. See § 4.3; this is a known deviation, and an open decision.
+4.  **Alternating Local & Global Attention**: Employs a hybrid attention strategy. Most layers use **windowed (local) attention**, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. In the paper this is what makes the 8192 native sequence length affordable. **In this implementation it is not** — the reused `window` layer pads every window to `window_size**2` slots, so for `base` and `large` (`window_size=128`, threshold 16384 > the 8192 max position) no admissible length is ever windowed and their local layers are *more* expensive than global ones, not less. `tiny` (`window_size=64`, threshold 4096) is the one exception: for `4097 <= L <= 8192` it really does partition into four windows. See § 4.3; this is a known deviation, and an open decision.
 5.  **Bias-Free Layers**: Removes bias parameters from most linear and normalization layers to optimize the parameter budget and improve stability.
 6.  **Modern Training Recipe**: Trained on 2 trillion tokens with a modern BPE tokenizer, a modified trapezoidal learning rate schedule, and advanced optimizers like StableAdamW.
 
@@ -72,10 +72,12 @@ ModernBERT Approach:
   NOT REPRODUCED HERE: step 1's cost benefit. The `window` layer this package
   reuses pads every window to `window_size**2` slots, so its cost is
   O(max(L, M) * M) with M = window_size**2 -- a CONSTANT O(M^2) floor for
-  L <= M rather than a linear-in-L saving. At the shipped window_size=128
-  (M = 16384 > the 8192 max position) every local layer is dense attention
-  over a padded 16384-slot window at every admissible L. Modelling quality is
-  unaffected in kind; the efficiency claim is inverted. See § 4.3.
+  L <= M rather than a linear-in-L saving. For base/large (window_size=128,
+  M = 16384 > the 8192 max position) every local layer is dense attention
+  over a padded 16384-slot window at every admissible L. For tiny
+  (window_size=64, M = 4096) it is dense for L <= 4096 and a genuine 4-window
+  partition for 4097 <= L <= 8192. Modelling quality is unaffected in kind;
+  the efficiency claim is inverted for base/large. See § 4.3.
 ```
 
 ### Real-World Impact
@@ -566,7 +568,7 @@ A: The five key upgrades are: **1) Rotary Positional Embeddings (RoPE)** for lon
 
 A: In the paper, alternating attention is a simple and effective strategy: computationally cheap (dominated by the fast local attention) while still allowing full sequence-level information flow through the periodic global layers.
 
-**This implementation does not deliver that efficiency, and it is worth being blunt about the direction.** The local layers are built from the `window` attention layer, which folds the sequence into a synthetic `ceil(sqrt(L))`-square grid and pads every window to `window_size**2` token slots. Cost is therefore `O(max(L, M) * M)` with `M = window_size**2`, which has a constant `O(M^2)` floor rather than a linear-in-`L` saving. At the shipped `window_size=128`, `M = 16384` exceeds the 8192 max position, so a local layer computes a `16384 x 16384` score matrix *whatever `L` is* — about 16,384x dense attention at `L=128`, and still ~4x dense attention at `L=8192`. The schedule collapses to an all-global stack that is slower than a plain all-global stack would be. Modelling behaviour is what § 4.3 describes; only the speed claim is wrong. `tests/test_models/test_modern_bert/test_shipped_window_size.py` pins this at the shipped size. Fixing it means writing a genuine 1-D sliding-window attention layer — none exists in `layers/attention/` — which is an open decision, not a pending patch.
+**This implementation does not deliver that efficiency, and it is worth being blunt about the direction.** The local layers are built from the `window` attention layer, which folds the sequence into a synthetic `ceil(sqrt(L))`-square grid and pads every window to `window_size**2` token slots. Cost is therefore `O(max(L, M) * M)` with `M = window_size**2`, which has a constant `O(M^2)` floor rather than a linear-in-`L` saving. At the `window_size=128` that `base` and `large` ship, `M = 16384` exceeds the 8192 max position, so a local layer computes a `16384 x 16384` score matrix *whatever `L` is* — about 16,384x dense attention at `L=128`, and still ~4x dense attention at `L=8192`. For those two variants the schedule collapses to an all-global stack that is slower than a plain all-global stack would be. `tiny` (`window_size=64`, `M = 4096`) is the only variant where the schedule does not collapse, and only above 4096 tokens, where it partitions into four windows — so "windowing always degenerates here" is as wrong as the paper's linear-cost claim. Modelling behaviour is what § 4.3 describes; only the speed claim is wrong. `tests/test_models/test_modern_bert/test_shipped_window_size.py` pins this at the shipped size. Fixing it means writing a genuine 1-D sliding-window attention layer — none exists in `layers/attention/` — which is an open decision, not a pending patch.
 
 **Q: Is ModernBERT a drop-in replacement for `bert-base-uncased`?**
 
