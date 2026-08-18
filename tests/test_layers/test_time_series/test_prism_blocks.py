@@ -13,6 +13,8 @@ import pytest
 
 from dl_techniques.layers.time_series.prism_blocks import (
     PRISMLayer,
+    PRISMNode,
+    PRISMTimeTree,
     FrequencyBandStatistics,
 )
 
@@ -84,3 +86,61 @@ class TestPRISMLayer:
     def test_get_config_round_trip(self):
         rebuilt = PRISMLayer.from_config(self._make(use_residual=False).get_config())
         assert rebuilt.use_residual is False
+
+
+class TestPRISMTimeTreeSegmentArithmetic:
+    """The build-time and runtime segment-length formulas must agree.
+
+    ``PRISMTimeTree.build`` sizes every node from one formula while
+    ``PRISMTimeTree._split_with_overlap`` feeds it segments sized by another;
+    the two drifted apart (they differ in the SIGN of the overlap term).  This
+    pins them together: whatever ``build`` promises a node, the forward pass
+    must actually hand it.
+    """
+
+    @pytest.mark.parametrize("context_len", [96, 256])
+    def test_build_and_runtime_segment_lengths_agree(self, context_len, monkeypatch):
+        channels = 7
+        depth = 4
+
+        recorded = []
+        original_build = PRISMNode.build
+
+        def recording_build(self, input_shape):
+            recorded.append(input_shape[1])
+            return original_build(self, input_shape)
+
+        monkeypatch.setattr(PRISMNode, "build", recording_build)
+
+        tree = PRISMTimeTree(
+            tree_depth=depth, num_wavelet_levels=1, router_hidden_dim=8,
+            dropout_rate=0.0, overlap_ratio=0.25,
+        )
+        tree.build((None, context_len, channels))
+
+        # One entry per node, in level order: 1 + 2 + 4 + 8 + 16 nodes.
+        assert len(recorded) == sum(2 ** level for level in range(depth + 1))
+
+        x = np.zeros((2, context_len, channels), dtype="float32")
+
+        offset = 1  # skip level 0 (num_segments == 1, no split)
+        mismatches = []
+        for level in range(1, depth + 1):
+            num_segments = 2 ** level
+            build_len = recorded[offset]
+            offset += num_segments
+
+            runtime_len = int(
+                tree._split_with_overlap(x, num_segments)[0].shape[1]
+            )
+            if build_len != runtime_len:
+                mismatches.append(
+                    f"ctx={context_len} level={level} "
+                    f"({num_segments} segments): build={build_len} "
+                    f"runtime={runtime_len}"
+                )
+
+        assert not mismatches, (
+            "build-time and runtime segment lengths disagree:\n  "
+            + "\n  ".join(mismatches)
+        )

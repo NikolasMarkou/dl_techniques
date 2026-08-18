@@ -10,6 +10,7 @@ recursively to capture both global trends and local fine-grained structures.
 """
 
 import keras
+import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -693,6 +694,64 @@ class PRISMTimeTree(keras.layers.Layer):
                 )
                 self.all_nodes.append(node)
 
+    # DECISION plan-2026-08-18T073231-52a93f8c/D-001
+    # Three copies of this arithmetic had drifted apart. ``build()`` sized every
+    # node with ``(seq_len + overlap_size * (n - 1)) // n`` (note the PLUS)
+    # while both runtime sites used ``(seq_len - overlap_size * (n - 1)) // n``.
+    # They disagree on ordinary configurations -- measured at
+    # ``overlap_ratio=0.25``: ``context_len=96`` gives build 28 vs runtime 25 at
+    # level 2 and build 14 vs runtime 12 at level 3; ``context_len=256`` gives
+    # 76/68, 39/33 and 19/16 at levels 2/3/4.
+    # The RUNTIME form is NORMATIVE -- it sizes the tensors the nodes actually
+    # receive -- so this helper reproduces it and ``build()`` now follows it.
+    # Do NOT "restore" the build-time PLUS form, and do NOT "simplify away" the
+    # float round-trip in ``overlap_size``: the runtime path multiplies in the
+    # tensor's compute dtype and truncates toward zero on the cast to int32, and
+    # reproducing that truncation exactly is what keeps the two in step.
+    # See decisions.md D-001.
+    @staticmethod
+    def _segment_len(
+            seq_len: int,
+            overlap_ratio: float,
+            num_segments: int,
+            dtype: str = "float32"
+    ) -> Tuple[int, int, int]:
+        """
+        Compute the overlapping-segment geometry for one split.
+
+        Single source of truth for the segment arithmetic shared by
+        :meth:`build`, :meth:`_split_with_overlap` and
+        :meth:`_stitch_with_crossfade`. Pure Python over ints; it mirrors the
+        runtime expression exactly, including the truncating cast of
+        ``overlap_size`` to int32.
+
+        :param seq_len: Length of the sequence being split.
+        :type seq_len: int
+        :param overlap_ratio: Ratio of overlap between adjacent segments.
+        :type overlap_ratio: float
+        :param num_segments: Number of segments the sequence is split into.
+        :type num_segments: int
+        :param dtype: Float dtype the overlap is computed in, matching the
+            compute dtype of the runtime tensor. Defaults to ``"float32"``.
+        :type dtype: str
+        :return: Tuple of ``(non_overlap_len, overlap_size, segment_len)``,
+            where ``segment_len == non_overlap_len + overlap_size`` and
+            segment ``i`` spans ``[i * non_overlap_len, i * non_overlap_len +
+            segment_len)``.
+        :rtype: Tuple[int, int, int]
+        """
+        float_type = np.dtype(keras.backend.standardize_dtype(dtype)).type
+        overlap_size = int(
+            float_type(seq_len)
+            * float_type(overlap_ratio)
+            / float_type(num_segments)
+        )
+        non_overlap_len = (
+            seq_len - overlap_size * (num_segments - 1)
+        ) // num_segments
+        segment_len = non_overlap_len + overlap_size
+        return non_overlap_len, overlap_size, segment_len
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build all PRISM nodes with appropriate segment shapes.
@@ -713,9 +772,13 @@ class PRISMTimeTree(keras.layers.Layer):
             # Determine segment shape for this level
             if seq_len is not None:
                 if num_nodes > 1:
-                    # Compute segment length with overlap
-                    overlap_size = int(seq_len * self.overlap_ratio / num_nodes)
-                    segment_len = (seq_len + overlap_size * (num_nodes - 1)) // num_nodes
+                    # Compute segment length with overlap. Same helper the
+                    # forward pass uses, so a node is built for exactly the
+                    # length it will be handed (see _segment_len's anchor).
+                    _, _, segment_len = self._segment_len(
+                        seq_len, self.overlap_ratio, num_nodes,
+                        dtype=self.compute_dtype
+                    )
                     segment_shape = (batch_size, segment_len, channels)
                 else:
                     segment_shape = (batch_size, seq_len, channels)
@@ -747,18 +810,24 @@ class PRISMTimeTree(keras.layers.Layer):
         if num_segments == 1:
             return [x]
 
-        seq_len = ops.shape(x)[1]
-        seq_len_float = ops.cast(seq_len, x.dtype)
-
-        # Calculate segment parameters
-        overlap_size = ops.cast(
-            seq_len_float * self.overlap_ratio / ops.cast(num_segments, x.dtype),
-            "int32"
-        )
-
-        # Non-overlapping part per segment
-        non_overlap_len = (seq_len - overlap_size * (num_segments - 1)) // num_segments
-        segment_len = non_overlap_len + overlap_size
+        static_seq_len = x.shape[1]
+        if static_seq_len is not None:
+            non_overlap_len, overlap_size, segment_len = self._segment_len(
+                int(static_seq_len), self.overlap_ratio, num_segments,
+                dtype=x.dtype
+            )
+        else:
+            # Dynamic time axis: the same expression over traced tensors.
+            seq_len = ops.shape(x)[1]
+            seq_len_float = ops.cast(seq_len, x.dtype)
+            overlap_size = ops.cast(
+                seq_len_float * self.overlap_ratio / ops.cast(num_segments, x.dtype),
+                "int32"
+            )
+            non_overlap_len = (
+                seq_len - overlap_size * (num_segments - 1)
+            ) // num_segments
+            segment_len = non_overlap_len + overlap_size
 
         segments = []
         for i in range(num_segments):
@@ -788,15 +857,26 @@ class PRISMTimeTree(keras.layers.Layer):
             return segments[0][:, :target_len, :]
 
         num_segments = len(segments)
-        seq_len_float = ops.cast(target_len, segments[0].dtype)
 
-        # Calculate overlap parameters
-        # Use cast to ensure we have integer overlap_size for shape logic
-        overlap_size = ops.cast(
-            seq_len_float * self.overlap_ratio / ops.cast(num_segments, segments[0].dtype),
-            "int32"
-        )
-        non_overlap_len = (target_len - overlap_size * (num_segments - 1)) // num_segments
+        # Calculate overlap parameters. Mirrors _split_with_overlap exactly --
+        # the same helper, so the stitch offsets cannot drift from the split
+        # offsets (see _segment_len's anchor).
+        if isinstance(target_len, int):
+            non_overlap_len, overlap_size, _ = self._segment_len(
+                target_len, self.overlap_ratio, num_segments,
+                dtype=segments[0].dtype
+            )
+        else:
+            # Dynamic time axis: the same expression over traced tensors.
+            seq_len_float = ops.cast(target_len, segments[0].dtype)
+            overlap_size = ops.cast(
+                seq_len_float * self.overlap_ratio
+                / ops.cast(num_segments, segments[0].dtype),
+                "int32"
+            )
+            non_overlap_len = (
+                target_len - overlap_size * (num_segments - 1)
+            ) // num_segments
 
         # Create output tensor
         batch_size = ops.shape(segments[0])[0]
