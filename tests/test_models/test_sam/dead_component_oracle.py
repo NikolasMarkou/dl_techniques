@@ -284,6 +284,60 @@ def zeroed_variables(variables: Iterable[Any]) -> Iterator[None]:
             variable.assign(value)
 
 
+@contextlib.contextmanager
+def layer_returns_its_input(layer: Any, *, name: Optional[str] = None) -> Iterator[None]:
+    """
+    Replace ``layer.call`` with the identity for the block -- the layer is DEAD.
+
+    This is the killer the "central claim" guards need: an attention block, a
+    routing loop, a spline basis or a Fourier mixer that is replaced by
+    ``lambda x: x`` keeps every shape, every weight and every serialized config
+    intact, so a test suite that only checks those reports green on a model with
+    the mechanism removed. Measured examples in this tree: ``CBAM.call ->
+    return inputs`` passed all 16 of its tests; substituting
+    ``keras.layers.Dense`` for the KAN spline layer passed everything.
+
+    ``mock.patch.object`` is used rather than attribute assignment so the
+    instance attribute is REMOVED on exit, restoring the class-level ``call``
+    (same reason as :func:`outputs_stop_gradient`).
+
+    Args:
+        layer: The layer to kill. Only its ``call`` is replaced; weights,
+            ``build`` state and config are untouched.
+        name: Optional label used in the "never invoked" error.
+
+    Yields:
+        ``None``.
+
+    Raises:
+        AssertionError: on exit, if the identity was never actually invoked --
+            i.e. the block ran without the layer being on the path at all, so
+            "nothing changed" would have been an artefact of the injection
+            rather than a property of the model.
+    """
+    # DECISION plan-2026-08-17T183311-79c63e38/D-042: the invocation counter and
+    # its exit assertion are NOT ceremony -- do not drop them to "simplify" this
+    # to a bare mock.patch. A killer applied to a layer that is not on the
+    # executed path produces "nothing changed", which reads as EXACTLY the same
+    # verdict as a model that ignores the component. Nor should this be replaced
+    # by a per-package local injection: it is shared precisely so all ten
+    # central-claim guards use one killer with one control. See decisions.md
+    # D-042.
+    calls = {"n": 0}
+
+    def _identity(inputs: Any, *args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return inputs
+
+    with mock.patch.object(layer, "call", _identity):
+        yield
+    assert calls["n"] > 0, (
+        f"the identity injection on {name or getattr(layer, 'name', layer)!r} "
+        "was NEVER invoked: the layer is not on the executed path, so any "
+        "'nothing changed' verdict measured under it is meaningless"
+    )
+
+
 def destroy_negatives(prediction: np.ndarray, ground_truth: np.ndarray, wrong: float = 0.99) -> np.ndarray:
     """
     Return ``prediction`` with every NEGATIVE pixel's value set maximally wrong.
