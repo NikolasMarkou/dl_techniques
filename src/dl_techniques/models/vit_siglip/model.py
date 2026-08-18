@@ -1,14 +1,38 @@
 """
-SigLIP Vision Transformer Model Implementation
+Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-This module provides a complete SigLIP Vision Transformer model implementation following
-modern Keras 3 best practices. The model leverages the dl_techniques framework's
-factory system for consistent component creation and configuration management.
+**The name is a misattribution, and it is corrected here rather than in a footnote.**
+SigLIP's contribution is a LOSS: the pairwise **sigmoid** objective that replaces
+CLIP's softmax over the in-batch similarity matrix, removing the need for a global
+normalization across all pairs and therefore for very large batches. It is not a
+patch-embedding scheme. SigLIP's own vision tower is a plain ViT with a single
+`Conv2D(k=s=patch)` stem, **no CLS token**, and a MAP (multi-head attention pooling)
+head. This module shares none of those three: it has a two-stage stem, it offers a
+`pooling='cls'` mode, and it has no MAP head. It also contains no text tower and no
+loss, so nothing here can be sigmoid-contrastive.
 
-SigLIP (Sigmoid-Loss for Language-Image Pre-training) introduces a two-stage patch
-embedding approach that provides better feature extraction compared to standard ViT.
-The implementation supports different scales and configurations with enhanced flexibility
-through factory-based component creation.
+What it actually is: a standard pre-norm ViT encoder whose patch embedding is split
+into two strided convolutions -- `Conv2D(embed_dim//2, k=s=patch//2)` -> LayerNorm ->
+GELU -> `Conv2D(embed_dim, k=s=2)` -- for a total stride of `2 * (patch // 2)`. That
+identity forces `patch_size` to be EVEN in both dimensions (an odd value gives a
+stride smaller than the declared patch size and a token count that does not match
+`num_patches`); the constructor raises rather than letting the mismatch surface as an
+opaque reshape failure at the first forward. Everything else -- attention,
+normalization, FFN -- is built through the `dl_techniques` factories, so the
+component types are configurable per instance.
+
+The class and the `SCALE_CONFIGS` keys keep the `SigLIP` name for source
+compatibility. Do NOT read a published SigLIP number as applying to a model built
+here, and do NOT "restore" the claim that two-stage patch embedding comes from
+SigLIP.
+
+References:
+    - Zhai et al., 2023. Sigmoid Loss for Language Image Pre-Training (SigLIP).
+      (https://arxiv.org/abs/2303.15343) -- the loss this package does not implement.
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words (ViT).
+      (https://arxiv.org/abs/2010.11929) -- the architecture this package does build.
+    - Lee et al., 2019. Set Transformer. (https://arxiv.org/abs/1810.00825) -- the
+      MAP/attention-pooling head SigLIP's tower uses and this one does not.
 """
 
 import keras
@@ -41,12 +65,14 @@ FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', '
 @keras.saving.register_keras_serializable()
 class SigLIPVisionTransformer(keras.Model):
     """
-    SigLIP Vision Transformer model with factory-based component creation and modern Keras 3 patterns.
+    Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-    This model implements the complete SigLIP Vision Transformer architecture using the dl_techniques
-    framework's factory system for consistent component creation. It features a two-stage patch
-    embedding approach that provides better feature extraction compared to standard ViT, along with
-    support for different scales and configurations for various vision_heads tasks.
+    The `SigLIP` in the name is historical and inaccurate -- SigLIP is a sigmoid
+    contrastive LOSS, not a patch-embedding scheme, and its own tower uses a
+    single-conv stem, no CLS token and a MAP head, none of which this class shares.
+    See the module docstring. What this class builds is a standard pre-norm ViT
+    encoder whose patch embedding is split into two strided convolutions, with every
+    sub-component created through the dl_techniques factories.
 
     **Intent**: Provide a production-ready SigLIP Vision Transformer implementation that leverages
     the dl_techniques framework's modular components while following modern Keras 3 best
@@ -216,8 +242,8 @@ class SigLIPVisionTransformer(keras.Model):
     Note:
         This implementation follows modern Keras 3 patterns with proper serialization
         support. All sub-components are created using dl_techniques factories for
-        consistency and configurability. The two-stage patch embedding is a key
-        differentiator from standard ViT implementations.
+        consistency and configurability. The two-stage patch embedding is what
+        differentiates this from a standard ViT -- it is not inherited from SigLIP.
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]

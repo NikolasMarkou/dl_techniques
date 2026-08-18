@@ -434,7 +434,16 @@ for call in (
 ```
 
 A string path is loaded with `skip_mismatch=True`; a nonexistent one raises
-`FileNotFoundError`.
+`FileNotFoundError`. The load goes through
+`utils.weight_transfer.load_weights_or_raise`, which adds a third hard error: it
+counts variables whose value actually changed and raises when that count is
+**zero**, so a checkpoint whose names or shapes do not match cannot restore nothing
+and return normally.
+
+Its limit: the guard fires only on a *completely* empty load. A **partial** restore
+(say 9 of 30 variables) logs a warning and returns normally, and `skip_mismatch=True`
+— hardcoded at both call sites here — is precisely the configuration in which a
+partial restore is possible. Check the logged restored-variable count.
 
 ---
 

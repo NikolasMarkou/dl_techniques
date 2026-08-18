@@ -442,6 +442,14 @@ def create_nlp_callbacks(
 
     Wraps common create_callbacks() with NLP defaults: TensorBoard enabled,
     LR schedule managed externally (no ReduceLROnPlateau).
+
+    .. note::
+       There is **no ``monitor_mode=`` passthrough**, so none of this helper's
+       callers can pass an explicit direction; the mode is always inferred from
+       ``monitor`` by ``callbacks.resolve_monitor_mode``. That inference is
+       correct for every monitor string in use today, and for an unrecognized
+       name it falls back to ``'min'`` with a WARNING. If you need an explicit
+       mode, call :func:`create_callbacks` directly rather than this wrapper.
     """
     callbacks, results_dir = create_common_callbacks(
         model_name=model_name,

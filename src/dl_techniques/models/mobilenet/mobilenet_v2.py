@@ -423,7 +423,10 @@ def create_mobilenetv2(
             f"(requested variant '{variant}'). Build the architecture with "
             f"pretrained=False and warm-start from a local checkpoint instead: "
             f"model = create_mobilenetv2('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras')."
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
         )
 
     model = MobileNetV2.from_variant(

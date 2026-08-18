@@ -161,7 +161,15 @@ class DINOv2Block(keras.layers.Layer):
         ffn_type: Type of FFN ('mlp', 'swiglu', etc.).
         normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
         qkv_bias: Whether to use bias in QKV projection.
-        proj_bias: Whether to use bias in attention projection.
+        proj_bias: **DEAD KNOB.** Stored, serialized and forwarded, but read by
+            nothing: `build` maps `qkv_bias` onto the attention layer's
+            `use_bias` and never consults `proj_bias`, and no attention type in
+            `ATTENTION_REGISTRY` separates the output projection's bias from the
+            QKV one. The projection's bias therefore follows `qkv_bias`
+            regardless of what is passed here. Kept for config compatibility;
+            do not read it as a control. (The module docstring names the other
+            two dead DINOv2 knobs, `interpolate_antialias` and
+            `interpolate_offset`, and was silent about this one.)
         ffn_bias: Whether to use bias in FFN layers.
         stochastic_depth_rate: Stochastic depth drop probability.
         init_values: LearnableMultiplier initialization value (None disables scaling).
@@ -447,7 +455,9 @@ class DINOv2VisionTransformer(keras.Model):
         num_heads: Number of attention heads. Must be positive.
         mlp_ratio: Ratio of MLP hidden dim to embedding dim. Must be positive.
         qkv_bias: Enable bias for QKV projections.
-        proj_bias: Enable bias for attention projection.
+        proj_bias: **DEAD KNOB** -- forwarded to every `DINOv2Block` and read by
+            none of them; see `DINOv2Block`'s Args. The output projection's bias
+            follows `qkv_bias`.
         ffn_bias: Enable bias for FFN layers.
         stochastic_depth_rate: Maximum stochastic depth rate.
         drop_path_uniform: Use uniform drop rate across blocks.
@@ -1326,7 +1336,10 @@ def create_dino_v2(
             f"(requested variant '{variant}'). Build the architecture with "
             f"pretrained=False and warm-start from a local checkpoint instead: "
             f"model = create_dino_v2('{variant}', ...); "
-            f"model.load_weights('/path/to/weights.keras')."
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
         )
 
     if patch_size is None:

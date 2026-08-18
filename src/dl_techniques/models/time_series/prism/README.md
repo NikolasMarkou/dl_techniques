@@ -241,7 +241,7 @@ print(forecast.shape)  # (1, 24, 1)
 | `ffn_expansion` | `int` | `4` | Expansion factor for the point-mode MLP forecast head (`hidden_dim * ffn_expansion`). Ignored when `use_quantile_head=True`. |
 | `use_quantile_head` | `bool` | `False` | If `True`, swap the point MLP head for a `QuantileHead`. Output rank becomes 4. |
 | `num_quantiles` | `int` | `3` | Number of quantiles emitted when `use_quantile_head=True`. Ignored in point mode (still stored / serialized — see L-7). |
-| `quantile_levels` | `Optional[List[float]]` | `None` | Optional explicit quantile levels (e.g. `[0.1, 0.5, 0.9]`). Length must equal `num_quantiles`. If `None` and `use_quantile_head=True`, auto-generates a linear space. |
+| `quantile_levels` | `Optional[List[float]]` | `None` | Optional explicit quantile levels (e.g. `[0.1, 0.5, 0.9]`). Length must equal `num_quantiles`. If `None` and `use_quantile_head=True`: at `num_quantiles == 3` (the default) it is `PRISMModel.DEFAULT_QUANTILES = [0.1, 0.5, 0.9]`; at any OTHER length it falls back to evenly spaced interior levels, `np.linspace(0, 1, num_quantiles + 2)[1:-1]`. |
 | `enforce_monotonicity` | `bool` | `True` | When `use_quantile_head=True`, forces `Q_i <= Q_{i+1}` via a cumulative softplus reparameterization. Eliminates quantile crossing. |
 | `kernel_initializer` | `Union[str, Initializer]` | `"glorot_uniform"` | Kernel initializer for all `Dense` layers. Round-tripped via `get_config`. |
 | `kernel_regularizer` | `Optional[Regularizer]` | `None` | Kernel regularizer for all `Dense` layers. Round-tripped via `get_config`. |

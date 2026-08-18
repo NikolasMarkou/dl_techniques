@@ -171,7 +171,16 @@ class DeepAR(keras.Model, ForecastMixin):
         target_dim: Dimensionality of target variable (typically 1 for
             univariate forecasting). Defaults to 1.
         num_samples: Number of Monte Carlo samples to draw during prediction.
-            Defaults to 100.
+            Defaults to 100. **The default is expensive and the cost is not
+            obvious**: the sampling loop Python-unrolls `num_samples *
+            prediction_len` stacked-LSTM passes into ONE traced graph, so at the
+            defaults (`num_samples=100`, `num_layers=3`, `H=24`) that is 7,200
+            `LSTM.__call__` sites in a single graph -- a long trace/compile and a
+            large graph, before any arithmetic runs. `predict()` is the only
+            supported inference path, so this cost cannot be routed around; lower
+            `num_samples` (quantile precision degrades as `1/sqrt(num_samples)`)
+            or shorten the horizon. See the module docstring for why the prefix is
+            replayed rather than resumed.
         scale_epsilon: Small constant added to scale computation. Defaults to 1.0.
         conditioning_length: Number of leading steps used to compute the
             per-series scale nu during training. Set this to the context length.

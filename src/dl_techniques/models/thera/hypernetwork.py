@@ -140,8 +140,11 @@ class TheraHypernetwork(keras.layers.Layer):
         out_dim: Output channel count (e.g. 3 for an RGB residual). Defaults to 3.
         w0: SIREN frequency multiplier forwarded to the :class:`HeatField`.
             Defaults to 1.0.
-        c: SIREN variance constant forwarded to the :class:`HeatField` (stored for
-            config fidelity). Defaults to 6.0.
+        c: **DEAD KNOB** -- forwarded to :class:`HeatField`, which also only
+            stores it. The reference's ``w_std = sqrt(c / dim_hidden) / w0``
+            SIREN init has no counterpart here: ``out_conv``, the 1x1 conv that
+            produces ``phi_kernel``, uses Keras' default ``glorot_uniform``.
+            Defaults to 6.0.
         k_init: Initial value of the heat-field scalar ``k``. Defaults to the
             THERA reference ``sqrt(log 4) / (2*pi^2)`` (same default as
             :class:`HeatField`).

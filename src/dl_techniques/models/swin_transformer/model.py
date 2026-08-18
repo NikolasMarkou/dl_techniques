@@ -769,7 +769,10 @@ def create_swin_transformer(
             f"dl_techniques (requested variant '{variant}'). Build the "
             f"architecture with pretrained=False and warm-start from a local "
             f"checkpoint instead: model = create_swin_transformer('{variant}', "
-            f"...); model.load_weights('/path/to/weights.keras')."
+            f"...); model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
         )
 
     return SwinTransformer.from_variant(

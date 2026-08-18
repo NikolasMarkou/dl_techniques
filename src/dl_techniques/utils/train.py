@@ -102,6 +102,16 @@ def train_model(
                 filepath=config.output_dir / f'{config.model_name}.keras',
                 save_best_only=True,
                 monitor=config.monitor_metric,
+                # DECISION plan-2026-08-17T183311-79c63e38/D-044
+                # This substring heuristic is a RIVAL of
+                # `src/train/common/callbacks.py::resolve_monitor_mode`, and its
+                # fallback is the INVERSE one: an unrecognized metric resolves to
+                # 'max' here and to 'min' there. Both are correct for every
+                # monitor string in use today, which is why this survived the
+                # 57-file sweep that introduced the shared resolver -- that sweep
+                # closed the CALL, not the concept. Prefer `resolve_monitor_mode`
+                # for new code; adding a metric token there does NOT reach here.
+                # See decisions.md D-044.
                 mode='min' if 'loss' in config.monitor_metric else 'max',
                 verbose=1
             ),

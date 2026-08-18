@@ -300,6 +300,19 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         # a tensor built here and closed over would belong to the symbolic
         # build pass's scratch `FuncGraph` and raise "cannot be accessed from
         # here ... out of scope" on the eager pass. See decisions.md D-021.
+        #
+        # DECISION plan-2026-08-17T183311-79c63e38/D-044
+        # THE FIX DOES NOT PROTECT A PRE-FIX CHECKPOINT, and the failure is
+        # SILENT. These tables are still `add_weight(..., trainable=False)`, and
+        # Keras serializes non-trainable weights. A `.keras` file saved before
+        # 2026-08-15 therefore carries the ALL-ZERO tables, and loading it
+        # OVERWRITES this initializer's correct output in a load that succeeds
+        # completely, logs nothing and raises nothing — reinstating exactly the
+        # defect above (the whole rotated head zeroed at `rope_percentage=1.0`).
+        # Nothing in the tree detects it. "Invalidated" understates it: such a
+        # checkpoint loads FINE and is wrong. Re-train, or verify after loading
+        # that `cos_cached[0]` is 1 rather than 0. Do NOT add a `.assign()`-based
+        # repair on load — see WHAT NOT TO DO above. See decisions.md D-044.
         def _table_initializer(trig):
             def initializer(shape, dtype=None):
                 table_dtype = dtype or cache_dtype

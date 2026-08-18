@@ -587,13 +587,17 @@ class PowerMLP(keras.Model):
                 of your input data (e.g., 784 for flattened MNIST, 3072 for flattened CIFAR-10).
             **kwargs: Additional arguments passed to the constructor to override
                 variant defaults. Can include dropout_rate, batch_normalization,
-                output_activation, etc.
+                output_activation, k, etc. **`hidden_units` is refused by name**
+                (`ValueError`): this method builds the variant's own architecture,
+                so a caller-supplied list was silently discarded before 2026-08-15.
+                Use `PowerMLP(hidden_units=..., k=...)` directly for that.
 
         Returns:
             PowerMLP model instance configured according to the specified variant.
 
         Raises:
-            ValueError: If variant is not recognized.
+            ValueError: If variant is not recognized, or if `hidden_units` is
+                passed in **kwargs.
 
         Example:
             >>> # CIFAR-10 model (flattened 32x32x3 = 3072)

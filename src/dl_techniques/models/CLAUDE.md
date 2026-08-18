@@ -13,9 +13,10 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `fastvit/` — FastViT MCi image backbone (the assembled tower over `layers/fastvit/`; the image branch of MobileCLIP2, also usable standalone — architecture only, no pretrained weights)
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)
 - `squeezenet/` — SqueezeNet
+- `fastvlm/` — despite the `VLM` in its name and its former listing under Vision-Language, this is a **vision-only** hybrid backbone (MobileOne stem + RepMixer + attention stages). No text tower, no tokenizer, no language input — its own `README.md:1` says so: "A Fast Hybrid Vision Model"
 - `vit/` — Vision Transformer
 - `vit_hmlp/` — ViT with hierarchical MLP
-- `vit_siglip/` — ViT with SigLIP
+- `vit_siglip/` — ViT with a two-stage conv patch-embedding stem. **The name misattributes**: SigLIP is a sigmoid contrastive LOSS, and its own tower has a single-conv stem, no CLS token and a MAP head — none of which this package shares. There is no text tower and no loss here. See `vit_siglip/model.py`'s module docstring
 - `beit/` — BEiT (masked image modeling over discrete visual tokens + classifier; trainers in `src/train/beit/`)
 - `swin_transformer/` — Swin Transformer
 - `dino/` — DINO self-supervised
@@ -60,7 +61,6 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
   a nested `MODEL_VARIANTS` CLASS attribute (`embed_dim` + `image_config` + `text_config`)
   and a constructor over those two sub-dicts. Neither deprecates the other — see the
   package README §17
-- `fastvlm/` — FastVLM
 - `nano_vlm/` — NanoVLM
 - `nano_vlm_world_model/` — NanoVLM world model
 
@@ -242,8 +242,8 @@ or `MCI_VARIANTS` for that same role; where one of those is the package's *only*
 table, add `MODEL_VARIANTS` as a class-level alias to the same dict.
 
 **`SCALE_CONFIGS` is NOT a stale spelling of `MODEL_VARIANTS`, and the two must not be
-merged where both appear.** They answer different questions, measured in
-`beit/model.py:150` and `:182`:
+merged where both appear.** They answer different questions, both defined at module
+scope in `beit/model.py` (`SCALE_CONFIGS` and `MODEL_VARIANTS`):
 
 - `SCALE_CONFIGS` is the **architecture table** — `'tiny' -> {hidden_size: 192,
   num_layers: 12, num_heads: 3, ...}`.
@@ -321,7 +321,7 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   them would break existing checkpoints, and the `bias_free_denoisers` ones are actively
   used by `src/train/bfunet/` and `src/applications/`. Axes 1, 4 and 5 still apply.
   (`detr/` was listed here in the first draft of this section and does **not** belong:
-  `detr/model.py:315` is `class DETR(models.Model)`. Verify with
+  `detr/model.py` defines `class DETR(models.Model)`. Verify with
   `grep -n "^class .*(.*Model)" <pkg>/*.py` before classifying a package — the census
   that produced the original list was grep-based and wrong about several packages.)
 - **Multi-model families and nested packages** (`SAM/`, `time_series/`, `dino/`,

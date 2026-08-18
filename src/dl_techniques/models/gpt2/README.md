@@ -404,7 +404,17 @@ except FileNotFoundError as e:
 ```
 
 An existing path is loaded with `skip_mismatch=True` after a dummy forward
-pass builds the model.
+pass builds the model, and the load goes through
+`utils.weight_transfer.load_weights_or_raise`, which adds a **third** hard error:
+it counts variables whose value actually changed and raises when that count is
+**zero** — a checkpoint whose names or shapes do not match this model would
+otherwise restore nothing and return normally under `skip_mismatch=True`.
+
+Its limit, stated so it is not mistaken for a total guarantee: the guard fires only
+on a *completely* empty load. A **partial** restore (say 9 of 30 variables) logs a
+warning and returns normally, and `skip_mismatch=True` — hardcoded here — is
+precisely the configuration in which a partial restore is possible. Check the
+logged restored-variable count against what you expect.
 
 ---
 

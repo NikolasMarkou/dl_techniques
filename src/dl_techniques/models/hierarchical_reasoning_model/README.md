@@ -44,7 +44,7 @@ It employs a **Dual-System Architecture**:
 ### Key Innovations of this Implementation
 
 1.  **Adaptive Computation Time (ACT)**: A Q-Learning head learns the optimal stopping point ($Q_{halt}$ vs $Q_{continue}$), allowing the model to "think" longer on hard puzzles and shorter on easy ones.
-2.  **Hierarchical Core**: A unified core that updates high and low-level states iteratively using cross-attention mechanisms.
+2.  **Hierarchical Core**: A unified core that updates high and low-level states iteratively. The coupling is **additive input injection, not cross-attention**: `HierarchicalReasoningModule` computes `x = hidden_states + input_injection` and then runs ordinary **self**-attention over `x` (`layers/reasoning/hrm_reasoning_module.py::HierarchicalReasoningModule.call`). No attention layer anywhere in this package attends from one state to the other.
 3.  **Efficient Gradient Flow**: Implements a "Truncated Backprop through Thinking" strategy, where intermediate reasoning cycles use `stop_gradient` to save memory, while the final step provides the learning signal.
 4.  **Keras 3 Native**: Fully serializable, compatible with JAX, TensorFlow, and PyTorch.
 
