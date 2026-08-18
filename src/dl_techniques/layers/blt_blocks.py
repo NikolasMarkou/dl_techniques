@@ -899,7 +899,8 @@ class PatchPooling(keras.layers.Layer):
     ```
 
     **Pooling Methods**:
-    1. **Max Pooling**: max(h_bytes) per patch
+    1. **Max Pooling**: max(h_bytes) per patch; an EMPTY patch pools to a zero
+       vector, NOT to the internal `-1e9` masking sentinel (D-039).
     2. **Mean Pooling**: mean(h_bytes) per patch
     3. **Attention Pooling**: Learnable queries attend to patch bytes
 
@@ -1017,6 +1018,23 @@ class PatchPooling(keras.layers.Layer):
             # Apply mask and get max (set masked positions to large negative value)
             masked_hiddens = ops.where(mask_expanded, byte_hiddens, -1e9)
             patch_max = ops.max(masked_hiddens, axis=1)  # (batch_size, hidden_dim)
+
+            # DECISION plan-2026-08-18T140459-7991552f/D-039: EMPTY patches are
+            # the NORM here, not an edge case -- `DynamicPatcher` always emits
+            # `max_patches` slots and fills only as many as there were entropy
+            # crossings (~120 of 128 empty for a 16-byte sequence at `micro`).
+            # For an empty patch `mask` is all-False, so the `-1e9` sentinel
+            # above SURVIVES the max and the slot becomes `[-1e9] * hidden_dim`,
+            # which the output `Dense` turns into O(1e9) activations and the
+            # downstream `GlobalTransformer`'s LayerNorm then normalizes almost
+            # entirely against, annihilating the real patches. Do NOT drop this
+            # `where` and do NOT "fix" it by making the sentinel smaller (a
+            # finite sentinel is still an arbitrary non-zero constant in every
+            # empty slot). The neutral value is 0.0, matching `_mean_pooling`
+            # (which divides a zero sum by `max(count, 1)`) and
+            # `_attention_pooling` (zeroed keys/values).
+            has_any = ops.any(mask, axis=1, keepdims=True)  # (batch_size, 1)
+            patch_max = ops.where(has_any, patch_max, ops.zeros_like(patch_max))
 
             patch_reps.append(patch_max)
 

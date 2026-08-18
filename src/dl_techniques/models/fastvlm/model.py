@@ -86,9 +86,17 @@ class FastVLM(keras.Model):
             Defaults to False.
         attention_type: String, type of attention mechanism for attention blocks.
             Options: 'multi_head', 'window', 'group_query'.
-            Defaults to 'multi_head'.
+            Defaults to 'group_query' (with `num_kv_heads == num_heads`, i.e.
+            plain MHA arithmetic) because that is the only wired type that
+            carries positional information into stage 3 -- see D-044. THIS IS
+            A WEIGHT-PATH CHANGE relative to models built before 2026-08-19.
         use_layer_scale: Boolean, whether to use layer scaling in attention blocks.
             Defaults to True.
+        attention_max_seq_len: Integer, RoPE table length for the stage-3
+            attention blocks. Only consumed when `attention_type` is
+            'group_query'. The stage-3 grid is `(H/16) * (W/16)` tokens, so the
+            2048 default covers inputs up to ~720px; a larger encoder input
+            needs a larger value or RoPE will raise. Defaults to 2048.
         activation: String or callable, activation function used throughout.
             Defaults to 'gelu'.
         kernel_initializer: String or initializer, initializer for conv kernels.
@@ -213,8 +221,9 @@ class FastVLM(keras.Model):
             dropout_rate: float = 0.0,
             drop_path_rate: float = 0.1,
             use_se: bool = False,
-            attention_type: AttentionType = 'multi_head',
+            attention_type: AttentionType = 'group_query',
             use_layer_scale: bool = True,
+            attention_max_seq_len: int = 2048,
             activation: Union[str, callable] = 'gelu',
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             include_top: bool = True,
@@ -269,7 +278,29 @@ class FastVLM(keras.Model):
         self.dropout_rate = dropout_rate
         self.drop_path_rate = drop_path_rate
         self.use_se = use_se
+        # DECISION plan-2026-08-18T140459-7991552f/D-044: the DEFAULT is
+        # `'group_query'`, not `'multi_head'`. `TransformerLayer`'s
+        # `'multi_head'` branch builds `MultiHeadAttention` with no RoPE and no
+        # relative bias, and neither `AttentionBlockVLM` nor this model adds a
+        # positional embedding anywhere, so with `'multi_head'` EVERY stage-3
+        # block was exactly permutation-equivariant over the (H/16, W/16) grid:
+        # stage 3 could not represent WHERE anything was. MEASURED on CPU at a
+        # 14x14 grid, `max|f(Px) - Pf(x)|` over a random spatial permutation:
+        # `'multi_head'` 5.36e-07 (the float32 floor, i.e. EXACTLY equivariant)
+        # vs `'group_query'` 5.48e-01 on |y|max 4.03.
+        # Two traps this measurement had to dodge, both of which make the fix
+        # look like a no-op:
+        #   (1) the shipped head is `GlobalAveragePooling2D`, itself
+        #       permutation-INVARIANT, so the probe must read
+        #       `include_top=False` output (or the block directly);
+        #   (2) at the shipped `layer_scale_init=1e-4` the block is ~identity at
+        #       init, which attenuates the SAME delta to 4.88e-05 -- present,
+        #       but small enough to be mistaken for noise. Probe with
+        #       `use_layer_scale=False`.
+        # `num_kv_heads` is left at `None`, which `TransformerLayer` resolves to
+        # `num_heads` -- so this is MHA arithmetic plus RoPE, not a capacity cut.
         self.attention_type = attention_type
+        self.attention_max_seq_len = attention_max_seq_len
         self.use_layer_scale = use_layer_scale
         self.activation = activation
         self.kernel_initializer = kernel_initializer
@@ -389,6 +420,7 @@ class FastVLM(keras.Model):
                     use_stochastic_depth=True,
                     stochastic_depth_rate=block_drop_rate,
                     use_layer_scale=self.use_layer_scale,
+                    max_seq_len=self.attention_max_seq_len,
                     name=f'stage3_attention_{i}'
                 )
             )
@@ -554,6 +586,7 @@ class FastVLM(keras.Model):
             'drop_path_rate': self.drop_path_rate,
             'use_se': self.use_se,
             'attention_type': self.attention_type,
+            'attention_max_seq_len': self.attention_max_seq_len,
             'use_layer_scale': self.use_layer_scale,
             'activation': keras.activations.serialize(
                 keras.activations.get(self.activation)

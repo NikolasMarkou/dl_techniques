@@ -56,7 +56,16 @@ class AttentionBlockVLM(keras.layers.Layer):
         attention_type: String, type of attention mechanism to use, forwarded to
             TransformerLayer. Options: 'multi_head', 'window', 'group_query'
             (see dl_techniques.layers.attention.factory.AttentionType).
-            Defaults to 'multi_head'.
+            Defaults to 'multi_head' -- WHICH CARRIES NO POSITIONAL
+            INFORMATION. This block flattens the spatial grid and adds no
+            positional embedding, and TransformerLayer's 'multi_head' branch
+            builds MultiHeadAttention with no RoPE and no relative bias, so a
+            'multi_head' block is EXACTLY permutation-equivariant over the grid
+            (MEASURED: max|f(Px) - Pf(x)| = 5.36e-07 on |y|max 4.45, the float32
+            floor). `FastVLM` therefore defaults to 'group_query' instead
+            (D-044); this constructor default is left alone only so that
+            existing direct callers keep their weight paths. Prefer
+            'group_query'.
         normalization_position: String, position of normalization layers.
             Options: 'pre', 'post'. Defaults to 'pre'.
         dropout_rate: Float, ordinary elementwise dropout rate applied by the
@@ -69,6 +78,11 @@ class AttentionBlockVLM(keras.layers.Layer):
         stochastic_depth_rate: Float, drop-path rate used when
             `use_stochastic_depth` is True. Must be < 1.0 (StochasticDepth
             raises otherwise). Defaults to 0.1 (matching TransformerLayer).
+        max_seq_len: Integer, RoPE table length. ONLY consumed when
+            `attention_type` is 'group_query' (other types do not declare the
+            key and the attention factory raises on undeclared kwargs). Must be
+            at least the flattened grid size H*W or RoPE raises at call time.
+            Defaults to 2048 (a 45x45 grid).
         use_layer_scale: Boolean, whether to apply learnable layer scaling.
             Defaults to True.
         layer_scale_init: Float, initial value for layer scale parameters.
@@ -136,6 +150,7 @@ class AttentionBlockVLM(keras.layers.Layer):
             stochastic_depth_rate: float = 0.1,
             use_layer_scale: bool = True,
             layer_scale_init: float = 1e-4,
+            max_seq_len: int = 2048,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -153,6 +168,8 @@ class AttentionBlockVLM(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if layer_scale_init <= 0:
             raise ValueError(f"layer_scale_init must be positive, got {layer_scale_init}")
+        if max_seq_len <= 0:
+            raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
 
         # Store configuration
         self.dim = dim
@@ -165,6 +182,7 @@ class AttentionBlockVLM(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.use_layer_scale = use_layer_scale
         self.layer_scale_init = layer_scale_init
+        self.max_seq_len = max_seq_len
 
         # Will be set in build
         self.height = None
@@ -184,11 +202,31 @@ class AttentionBlockVLM(keras.layers.Layer):
         # output was attenuated by 1e-4 PER BLOCK: ~1e-24 over the 6 blocks of
         # the `base` variant, so the classifier saw zeros. Shape, finiteness and
         # gradient-existence checks all still passed at that magnitude.
+        # DECISION plan-2026-08-18T140459-7991552f/D-043: `max_seq_len` is
+        # forwarded through `attention_args` (which `TransformerLayer` merges
+        # OVER its own defaults) because the default `attention_type` is now
+        # `'group_query'`, whose RoPE tables are precomputed to `max_seq_len`
+        # and which RAISES on a longer sequence. The stage-3 grid is
+        # `(H/16) * (W/16)`, so the 2048 default covers inputs up to ~720px
+        # (a 45x45 grid). Raise it for higher-resolution encoders. It is
+        # deliberately NOT derived from the model's `input_shape`: that would
+        # make a NON-TRAINABLE weight's SHAPE resolution-dependent and break
+        # weight transfer between resolutions, which is a capability a
+        # convolutional VLM encoder is supposed to have.
+        # The key is passed ONLY for `'group_query'`: since 2026-08-17 the
+        # attention factory RAISES on any kwarg the target type does not
+        # declare, so handing `max_seq_len` to `'multi_head'` would be a hard
+        # construction failure rather than a harmless extra.
+        attention_args = (
+            {'max_seq_len': self.max_seq_len}
+            if attention_type == 'group_query' else None
+        )
         self.transformer = TransformerLayer(
             hidden_size=dim,
             num_heads=num_heads,
             intermediate_size=int(dim * mlp_ratio),
             attention_type=attention_type,
+            attention_args=attention_args,
             normalization_position=normalization_position,
             dropout_rate=dropout_rate,
             attention_dropout_rate=dropout_rate,
@@ -273,6 +311,7 @@ class AttentionBlockVLM(keras.layers.Layer):
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'use_layer_scale': self.use_layer_scale,
             'layer_scale_init': self.layer_scale_init,
+            'max_seq_len': self.max_seq_len,
         })
         return config
 

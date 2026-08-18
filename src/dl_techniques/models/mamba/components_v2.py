@@ -53,7 +53,12 @@ class Mamba2Layer(keras.layers.Layer):
     :param d_conv: Kernel size for causal 1D convolution.
     :param expand: Expansion factor for internal dimension.
     :param headdim: Dimensionality of each SSM head.
-    :param ngroups: Number of groups for B and C projections.
+    :param ngroups: Number of groups for the ``B``/``C`` projections. Each
+        group is BROADCAST to the ``nheads // ngroups`` consecutive heads it
+        serves (GQA semantics), so ``nheads`` must be divisible by ``ngroups``.
+        Until 2026-08-19 the scan summed over the group axis instead, which
+        made any ``ngroups > 1`` mathematically identical to ``ngroups = 1``
+        with a rescaled ``B``/``C`` (D-042).
     :param d_ssm: If not None, applies SSM on this many dims, with the
         rest using a gated MLP. Defaults to the full inner dimension.
     :param rmsnorm: Whether to apply RMS normalization to the SSM output.
@@ -117,6 +122,15 @@ class Mamba2Layer(keras.layers.Layer):
         if self.d_ssm % self.headdim != 0:
             raise ValueError(f"d_ssm ({self.d_ssm}) must be divisible by headdim ({self.headdim})")
         self.nheads = self.d_ssm // self.headdim
+        if self.ngroups <= 0:
+            raise ValueError(f"ngroups must be positive, got {self.ngroups}")
+        # Required by the head->group routing in `_ssm_scan` (D-042): each group
+        # serves exactly `nheads // ngroups` consecutive heads.
+        if self.nheads % self.ngroups != 0:
+            raise ValueError(
+                f"nheads ({self.nheads} = d_ssm {self.d_ssm} // headdim "
+                f"{self.headdim}) must be divisible by ngroups ({self.ngroups})"
+            )
 
         # Input projection for z, x, B, C, dt
         d_in_proj = (
@@ -227,6 +241,27 @@ class Mamba2Layer(keras.layers.Layer):
         """Performs the selective scan recurrence."""
         batch_size, seq_len, nheads, headdim = keras.ops.shape(x)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-042: BROADCAST B/C from
+        # their group to the heads that group serves -- do NOT sum over `g`.
+        # This body used to do `einsum("bh,bgn->bhgn")` then
+        # `einsum("bhgn,bhp->bhpn")`, and `einsum('bhpn,bgn->bhpg')` then
+        # `sum(axis=3)`, i.e. it CONTRACTED the group axis, so every head
+        # received `sum_g B_g` and `sum_g C_g`. MEASURED on CPU at
+        # `nheads=4, ngroups=4`: the scan was bit-invariant to PERMUTING the
+        # group axis (max|delta| 9.5e-07 on |y|max 10.2) and reproduced a
+        # `ngroups=1` layer fed the summed `B`/`C` to 1.3e-06 -- i.e. `ngroups`
+        # allocated `2*ngroups*d_state` projection channels and then collapsed
+        # them additively, exactly `ngroups=1` with a rescaled B/C. GQA (which
+        # `mamba_v2.py`'s module docstring invokes) BROADCASTS WITHIN a group;
+        # it does not sum across groups.
+        # Head->group order matches the reference's
+        # `repeat(B, "b l g n -> b l (g h) n")`: heads are contiguous blocks,
+        # head `i` reads group `i // (nheads // ngroups)`.
+        heads_per_group = self.nheads // self.ngroups
+        if self.ngroups != self.nheads:
+            B = keras.ops.repeat(B, heads_per_group, axis=2)  # (B, L, H, N)
+            C = keras.ops.repeat(C, heads_per_group, axis=2)  # (B, L, H, N)
+
         # Discretize A: A_bar = exp(Δ * A)
         delta = keras.ops.softplus(dt + self.dt_bias)  # (B, L, H)
         deltaA = keras.ops.exp(keras.ops.einsum("blh,h->blh", delta, A))  # (B, L, H)
@@ -247,19 +282,18 @@ class Mamba2Layer(keras.layers.Layer):
             # deltaA[:, t] has shape (B, H). h has shape (B, H, P, N).
             h_A_part = keras.ops.einsum("bh,bhpn->bhpn", deltaA[:, t], h)
 
-            # B part: (delta_t * B_t) * x_t, summing over groups
+            # B part: (delta_t * B_t) * x_t, PER HEAD (no contraction).
             # delta[:, t] is (B, H)
-            # B[:, t] is (B, G, N)
+            # B[:, t] is (B, H, N)  -- already broadcast from (B, G, N)
             # x[:, t] is (B, H, P)
-            B_bar_t = keras.ops.einsum("bh,bgn->bhgn", delta[:, t], B[:, t])
-            h_B_part = keras.ops.einsum("bhgn,bhp->bhpn", B_bar_t, x[:, t])
+            B_bar_t = keras.ops.einsum("bh,bhn->bhn", delta[:, t], B[:, t])
+            h_B_part = keras.ops.einsum("bhn,bhp->bhpn", B_bar_t, x[:, t])
 
             h = h_A_part + h_B_part
 
-            # Output computation: y_t = C_t * h_t (sum over state and group)
-            # h is (B, H, P, N). C[:, t] is (B, G, N).
-            y_t_grouped = keras.ops.einsum('bhpn,bgn->bhpg', h, C[:, t])
-            y_t = keras.ops.sum(y_t_grouped, axis=3)  # sum over g. Shape (B, H, P)
+            # Output: y_t = <C_t, h_t> contracted over the STATE axis only.
+            # h is (B, H, P, N). C[:, t] is (B, H, N).
+            y_t = keras.ops.einsum('bhpn,bhn->bhp', h, C[:, t])
 
             # Store output
             updates = keras.ops.expand_dims(y_t, axis=0)

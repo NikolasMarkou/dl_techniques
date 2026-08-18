@@ -441,7 +441,12 @@ class TestFastVLM:
         assert model.dropout_rate == 0.0
         assert model.drop_path_rate == 0.1
         assert model.use_se is False
-        assert model.attention_type == 'multi_head'
+        # D-044: flipped from 'multi_head' on 2026-08-19. 'multi_head' has no
+        # RoPE and no relative bias, and nothing else in the model adds a
+        # positional embedding, so stage 3 was exactly permutation-equivariant
+        # over the spatial grid. This is a WEIGHT-PATH change.
+        assert model.attention_type == 'group_query'
+        assert model.attention_max_seq_len == 2048
         assert model.use_layer_scale is True
         assert model.activation == 'gelu'
         assert model.include_top is True

@@ -22,7 +22,10 @@ capacity actually lives.
 
 The layer's parameterization follows from that duality. `B` and `C` are shared
 across `ngroups` head groups rather than being per-head, exactly as keys and values
-are shared in grouped-query attention and for the same reason. `dt` is emitted
+are shared in grouped-query attention and for the same reason: each group is
+*broadcast* to the `nheads // ngroups` heads it serves. The word "broadcast" is
+load-bearing — the scan summed `B` and `C` over the group axis until 2026-08-19,
+which is not GQA and made `ngroups > 1` a rescaled `ngroups = 1` (D-042). `dt` is emitted
 directly by the input projection as one scalar per head, with no low-rank `dt_rank`
 bottleneck — v1 needed that bottleneck because it produced a `Δ` per inner channel.
 Critically, `z`, `x`, `B`, `C` and `dt` all come out of a *single* `in_proj` at the

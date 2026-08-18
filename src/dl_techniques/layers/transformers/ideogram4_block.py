@@ -29,8 +29,12 @@ Block conditioning (the structurally-novel bits, ported exactly):
 Final layer:
 
 - ``LayerNormalization(center=False, scale=False, epsilon=1e-6)`` (no affine),
-  then ``* (1 + adaln_modulation(silu(c)))`` (silu applied to ``c`` BEFORE the
-  Dense), then ``Dense(out_channels, use_bias=True)``.
+  then ``* (1 + adaln_modulation(c))``, then ``Dense(out_channels,
+  use_bias=True)``.
+- ``c`` is the SAME already-SiLU'd ``adaln_input`` the blocks consume; the
+  final layer does NOT apply its own SiLU (D-040). The reference applies SiLU
+  once per modulation Dense and this port hoists that single SiLU into
+  ``Ideogram4Transformer.call``.
 """
 
 import keras
@@ -301,8 +305,12 @@ class Ideogram4FinalLayer(keras.layers.Layer):
     """Ideogram4 DiT final layer: no-affine LayerNorm, scale-AdaLN, linear head.
 
     Applies ``LayerNormalization(center=False, scale=False, epsilon=1e-6)`` to
-    ``x``, modulates by ``1 + adaln_modulation(silu(c))`` (silu applied BEFORE
-    the Dense), then projects to ``out_channels`` with a biased Dense.
+    ``x``, modulates by ``1 + adaln_modulation(c)``, then projects to
+    ``out_channels`` with a biased Dense.
+
+    ``c`` must ALREADY carry its activation: this layer applies no SiLU of its
+    own (D-040), matching ``Ideogram4TransformerBlock``, which also consumes
+    ``adaln_input`` raw.
 
     :param hidden_size: Input feature dimensionality.
     :type hidden_size: int
@@ -414,8 +422,18 @@ class Ideogram4FinalLayer(keras.layers.Layer):
         :return: ``(B, L, out_channels)``.
         :rtype: keras.KerasTensor
         """
-        # silu applied to c BEFORE the Dense; scale is 1 + modulation.
-        scale = 1.0 + self.adaln_modulation(keras.ops.silu(c))
+        # DECISION plan-2026-08-18T140459-7991552f/D-040: `c` arrives ALREADY
+        # SiLU'd. Do NOT re-apply `keras.ops.silu` here. In the PyTorch
+        # reference each modulation Dense sees `silu(c)` exactly once; this port
+        # hoists that single SiLU up to the caller
+        # (`Ideogram4Transformer.call`: `adaln_input = silu(adaln_proj(t_cond))`,
+        # which its module docstring calls what "every block and the output head
+        # consume"), and `Ideogram4TransformerBlock.call` consumes it raw. This
+        # site used to apply a SECOND SiLU, so the velocity head alone was
+        # conditioned on `silu(silu(c))` -- a strictly flatter function of `t`
+        # for every negative component (-2 -> -0.238 -> -0.105) than the trunk
+        # it sits on top of.
+        scale = 1.0 + self.adaln_modulation(c)
         normed = self.norm_final(x, training=training)
         return self.linear(normed * scale)
 

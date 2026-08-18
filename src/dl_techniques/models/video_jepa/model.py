@@ -494,13 +494,43 @@ class VideoJEPA(keras.Model):
         # DECISION plan_2026-05-23_0b664700/D-001: per-horizon Dense heads on
         # the shared predictor + same lambda per horizon + combined metric =
         # mean of per-horizon losses (decouples reported magnitude from N).
-        if cfg.num_frames >= 2:
+        # DECISION plan-2026-08-18T140459-7991552f/D-041: every frame count in
+        # the loss arithmetic below comes from THIS BATCH's ``T``, never from
+        # ``cfg.num_frames``. ``cfg.num_frames`` is only the *default training
+        # window*; ``encode_frames``/``predictor``/``stream_step`` are all
+        # T-generic and ``config.__post_init__`` constrains
+        # ``max(predict_horizons) < num_frames`` but nothing constrains the
+        # runtime ``T``. Two things went wrong when they disagreed:
+        #   (1) ``T <= h`` made ``pred[:, :-h]`` EMPTY. With masking off that is
+        #       ``ops.mean`` of an empty tensor -> a **NaN** loss straight
+        #       through ``add_loss`` into ``train_step`` (MEASURED: nan at
+        #       ``num_frames=8, predict_horizons=(1, 4), T=2``). With masking on
+        #       it is quieter and no better: ``sum(empty)/denom == 0.0``, so the
+        #       horizon silently contributes nothing.
+        #   (2) ``denom`` counted ``cfg.num_frames - h`` positions while the
+        #       tensor held ``T - h``, rescaling the loss by
+        #       ``(cfg.num_frames - h) / (T - h)`` (2.33x at
+        #       ``num_frames=8, T=4, h=1``).
+        # Do NOT "fix" this by re-validating ``T == cfg.num_frames`` at the
+        # entry point: variable-length clips are a supported input, not an error.
+        t_shape = getattr(pixels, "shape", None)
+        t_static = t_shape[1] if t_shape is not None and len(t_shape) > 1 else None
+        # A fully dynamic time axis cannot be branched on at trace time; the
+        # configured window is the only available answer there.
+        num_frames_batch = int(t_static) if t_static is not None else int(cfg.num_frames)
+
+        if num_frames_batch >= 2:
             unmasked_per_row = (
                 cfg.num_patches - self.mask_gen.num_masked
                 if masking_on else cfg.num_patches
             )
             per_horizon_losses = []
             for h_idx, h in enumerate(cfg.predict_horizons):
+                if h >= num_frames_batch:
+                    # No causal pair exists at this horizon for this clip. Skip
+                    # rather than emit a NaN (masking off) or a silent 0.0
+                    # (masking on); the horizon's tracker keeps its last value.
+                    continue
                 pred_ctx = pred[:, :-h]                  # (B, T-h, H_p, W_p, D)
                 pred_ctx = self.pred_heads[h_idx](pred_ctx)
                 # Target from EMA encoder (plan_2026-05-23_15151c75/D-001):
@@ -511,7 +541,12 @@ class VideoJEPA(keras.Model):
                 if masking_on:
                     w = (1.0 - M)  # broadcasts (B,1,H_p,W_p,1) -> (B,T-h,...)
                     denom = float(
-                        max(1, unmasked_per_row * (cfg.num_frames - h) * cfg.embed_dim)
+                        max(
+                            1,
+                            unmasked_per_row
+                            * (num_frames_batch - h)
+                            * cfg.embed_dim,
+                        )
                     )
                     h_loss = ops.sum(sq * w) / (
                         float(ops.shape(pred_ctx)[0]) * denom
@@ -524,11 +559,14 @@ class VideoJEPA(keras.Model):
                 per_horizon_losses.append(h_loss)
             # Combined tracker = mean of per-horizon losses; decouples reported
             # magnitude from N so dashboards stay comparable across runs.
-            combined = per_horizon_losses[0]
-            for hl in per_horizon_losses[1:]:
-                combined = combined + hl
-            combined = combined / float(len(per_horizon_losses))
-            self.next_frame_loss_tracker.update_state(combined)
+            # ``per_horizon_losses`` can now be EMPTY (every horizon skipped for
+            # a very short clip), in which case there is no L1 to report.
+            if per_horizon_losses:
+                combined = per_horizon_losses[0]
+                for hl in per_horizon_losses[1:]:
+                    combined = combined + hl
+                combined = combined / float(len(per_horizon_losses))
+                self.next_frame_loss_tracker.update_state(combined)
 
         # --- L2: mask-prediction loss (iter-2, D-008..D-012) ---
         # MSE between predictor output and *same-encoder* target at masked
@@ -539,8 +577,13 @@ class VideoJEPA(keras.Model):
             # was ``z`` (live target) — switched so masked-position
             # prediction has a moving but non-co-adapting target.
             sq_full = ops.square(pred - z_target)  # (B, T, H_p, W_p, D)
+            # D-041 again, one loss down: this normalizer counts the masked
+            # slots in ``sq_full``, whose time axis is the BATCH's ``T``. It
+            # used to read ``cfg.num_frames``. The finding (F-52) named only the
+            # horizon loss; this is the identical defect in its neighbour and is
+            # fixed with it rather than left as a known-wrong line.
             num_masked_per_clip = (
-                self.mask_gen.num_masked * cfg.num_frames * cfg.embed_dim
+                self.mask_gen.num_masked * num_frames_batch * cfg.embed_dim
             )
             denom = float(max(1, num_masked_per_clip))
             mask_loss = ops.sum(sq_full * M) / (
