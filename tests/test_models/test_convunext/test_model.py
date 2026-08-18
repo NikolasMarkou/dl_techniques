@@ -57,6 +57,8 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.match_channels import MatchChannels
+
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
@@ -265,17 +267,42 @@ class TestConvUNextStem:
 
         assert output.shape[-1] == 32
 
-    @pytest.mark.parametrize("kernel_size", [3, 5, 7])
     def test_different_kernel_sizes(
         self,
-        kernel_size: int,
         sample_input_small: np.ndarray
     ) -> None:
-        """Test stem works with various kernel sizes."""
-        stem = ConvUNextStem(filters=32, kernel_size=kernel_size)
-        output = stem(sample_input_small)
+        """``kernel_size`` must reach the stem's convolution kernel.
 
-        assert output.shape == (2, 64, 64, 32)
+        Restructured out of ``@parametrize``: one stem per invocation left
+        nowhere to compare, so the test asserted ``(2, 64, 64, 32)`` -- which is
+        the SAME output shape at 3, 5 and 7 because the stem pads to 'same', so
+        the assertion held whether or not the kwarg reached the Conv2D. The
+        kernel's spatial extent is a weight axis; measured, the stem holds
+        exactly one rank-4 kernel of shape ``(k, k, 3, 32)``.
+        """
+        kernel_sizes = [3, 5, 7]
+
+        def _build(kernel_size):
+            stem = ConvUNextStem(filters=32, kernel_size=kernel_size)
+            stem(sample_input_small)
+            return stem
+
+        sigs = assert_structural_knob_changes_weights(
+            {k: (lambda k=k: _build(k)) for k in kernel_sizes}, knob="kernel_size")
+        for k in kernel_sizes:
+            # The stem also holds two (1, 1, 1, 32) GRN parameters, which are
+            # rank-4 but are not the convolution; the conv is the one kernel
+            # whose in-channels axis matches the 3-channel input.
+            kernels = [w for w in sigs[k] if len(w) == 4 and w[2] == 3]
+            assert kernels == [(k, k, 3, 32)], (
+                f"kernel_size={k} produced conv kernels {kernels}"
+            )
+
+        for kernel_size in kernel_sizes:
+            stem = ConvUNextStem(filters=32, kernel_size=kernel_size)
+            output = stem(sample_input_small)
+
+            assert output.shape == (2, 64, 64, 32)
 
 
 class TestMergedConvUNextStemKnobs:

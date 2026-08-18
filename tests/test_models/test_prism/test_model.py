@@ -14,6 +14,12 @@ from typing import Dict, Any, Tuple
 
 from dl_techniques.models.time_series.prism.model import PRISMModel, create_prism_model
 
+from ..knob_sensitivity_oracle import (
+    as_array,
+    assert_structural_knob_changes_weights,
+    build_seeded,
+)
+
 
 class TestPRISMModelInstantiation:
     """Test model instantiation and configuration validation."""
@@ -759,52 +765,146 @@ class TestPRISMModelDifferentConfigurations:
 
         assert output.shape == (4, 24, num_features)
 
-    @pytest.mark.parametrize("num_layers", [1, 2, 3, 4])
-    def test_different_num_layers(self, num_layers: int) -> None:
-        """Test model with different numbers of PRISM layers."""
-        model = PRISMModel(
+    def test_different_num_layers(self) -> None:
+        """``num_layers`` must build the requested stack.
+
+        Restructured out of ``@parametrize``: one model per invocation gave the
+        sweep nowhere to compare, so it asserted ``(4, 24, 7)`` -- true at every
+        depth -- plus ``len(model.prism_layers) == num_layers``, a STRUCTURAL
+        ECHO of the list Python just built. `num_layers` is a parameterisation
+        knob, so the weight-shape signature is the discriminating fact.
+        """
+        layer_counts = [1, 2, 3, 4]
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+
+        def _build(num_layers):
+            model = PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                num_layers=num_layers,
+            )
+            model(inputs[:1])
+            return model
+
+        builders = {n: (lambda n=n: _build(n)) for n in layer_counts}
+        sigs = assert_structural_knob_changes_weights(builders, knob="num_layers")
+        n_weights = [len(sigs[n]) for n in layer_counts]
+        assert n_weights == sorted(n_weights) and n_weights[0] < n_weights[-1], (
+            f"num_layers did not add weight tensors: {dict(zip(layer_counts, n_weights))}"
+        )
+
+        for num_layers in layer_counts:
+            model = _build(num_layers)
+            assert len(model.prism_layers) == num_layers
+            assert model(inputs).shape == (4, 24, 7)
+
+    def test_different_tree_depths(self) -> None:
+        """``tree_depth`` must build the requested frequency tree.
+
+        Swept over 1 and 2 only. ``tree_depth=3`` is EXCLUDED here on purpose --
+        it is measured broken, and pinned by
+        :meth:`test_tree_depth_3_forward_is_finite` below -- so that this test
+        keeps testing the knob rather than the bug.
+        """
+        depths = [1, 2]
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+
+        def _build(tree_depth):
+            model = PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=tree_depth,
+            )
+            model(inputs[:1])
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in depths}
+        sigs = assert_structural_knob_changes_weights(builders, knob="tree_depth")
+        # Each extra level doubles the number of bands, hence the tensor count:
+        # measured 48 weights / 5,989 params at depth 1 and 96 / 10,189 at 2.
+        assert len(sigs[2]) == 2 * len(sigs[1]), (
+            f"tree_depth=2 held {len(sigs[2])} weight tensors, not twice "
+            f"depth 1's {len(sigs[1])}"
+        )
+
+        for tree_depth in depths:
+            model = _build(tree_depth)
+            output = model(inputs)
+            assert output.shape == (4, 24, 7)
+            assert np.all(np.isfinite(as_array(output)))
+
+    # DECISION plan-2026-08-17T183311-79c63e38/D-037
+    # Do NOT "fix" this by dropping tree_depth=3 from the sweep and deleting this
+    # test, and do NOT relax it to a shape or a nan-tolerant check. The strict
+    # xfail is the escalation: it will turn RED (xpass) the moment the model is
+    # repaired, which is the signal the user's ruling needs. Nor is this a
+    # tolerance problem -- the output is 100% non-finite on two seeds, not
+    # marginally off.
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "MEASURED: PRISMModel(tree_depth=3) returns an ALL-NaN forward at "
+            "initialisation -- nan_frac 1.0 on seeds 1234 and 7, while depths 1 "
+            "and 2 are finite. tree_depth=4 does not even build "
+            "(InvalidArgumentError from FrequencyBandStatistics: 'Cannot compute "
+            "the min of an empty tensor'), so the band split degenerates as the "
+            "tree deepens. The old parametrized test swept depth 3 and asserted "
+            "only the output SHAPE, so this has been green throughout. Model "
+            "defect, not a test defect -- see D-037."
+        ),
+    )
+    def test_tree_depth_3_forward_is_finite(self) -> None:
+        """The depth-3 forward must not be NaN. It is. Escalated, not softened."""
+        model = build_seeded(lambda: PRISMModel(
             context_len=96,
             forecast_len=24,
             num_features=7,
-            num_layers=num_layers,
+            tree_depth=3,
+        ))
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert np.all(np.isfinite(output)), (
+            f"{float(np.mean(~np.isfinite(output))) * 100:.0f}% of the depth-3 "
+            "forward output is non-finite"
         )
 
-        assert len(model.prism_layers) == num_layers
+    def test_different_dropout_rates(self) -> None:
+        """``dropout_rate`` must reach the training-mode forward.
 
+        An output-difference sweep is the WRONG instrument here: dropout is
+        inactive at inference, so two rates give identical inference outputs
+        whether or not the kwarg was honoured. The discriminating form is
+        training-mode NON-DETERMINISM -- two training-mode calls on one model
+        must be bit-identical at rate 0.0 and must differ at rate > 0.
+
+        Measured with identical seeds: rate 0.0 gives exactly 0.0 between two
+        training calls, rate 0.3 gives 1.924. The bar is set from that signal.
+        """
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
 
-        assert output.shape == (4, 24, 7)
+        def _train_mode_spread(dropout_rate):
+            model = build_seeded(lambda: PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                dropout_rate=dropout_rate,
+            ))
+            first = as_array(model(inputs, training=True))
+            second = as_array(model(inputs, training=True))
+            assert first.shape == (4, 24, 7)
+            return float(np.max(np.abs(first - second)))
 
-    @pytest.mark.parametrize("tree_depth", [1, 2, 3])
-    def test_different_tree_depths(self, tree_depth: int) -> None:
-        """Test model with different tree depths."""
-        model = PRISMModel(
-            context_len=96,
-            forecast_len=24,
-            num_features=7,
-            tree_depth=tree_depth,
+        assert _train_mode_spread(0.0) == 0.0, (
+            "dropout_rate=0.0 must make the training-mode forward deterministic"
         )
-
-        inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
-
-        assert output.shape == (4, 24, 7)
-
-    @pytest.mark.parametrize("dropout_rate", [0.0, 0.1, 0.3, 0.5])
-    def test_different_dropout_rates(self, dropout_rate: float) -> None:
-        """Test model with different dropout rates."""
-        model = PRISMModel(
-            context_len=96,
-            forecast_len=24,
-            num_features=7,
-            dropout_rate=dropout_rate,
-        )
-
-        inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
-
-        assert output.shape == (4, 24, 7)
+        for dropout_rate in (0.1, 0.3, 0.5):
+            spread = _train_mode_spread(dropout_rate)
+            assert spread > 1e-5, (
+                f"dropout_rate={dropout_rate} is a no-op: two training-mode "
+                f"forwards agreed to {spread:.3e}"
+            )
 
 # ---------------------------------------------------------------------
 # Run tests

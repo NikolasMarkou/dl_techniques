@@ -11,6 +11,13 @@ from keras import layers, models, ops
 from dl_techniques.models.qwen.components import Qwen3NextBlock
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
+from ..knob_sensitivity_oracle import (
+    as_array,
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+    build_seeded,
+)
+
 
 # --- Test Class ---
 class TestQwen3NextBlock:
@@ -385,34 +392,120 @@ class TestQwen3NextBlock:
             err_msg="Inference outputs should be identical",
         )
 
-    @pytest.mark.parametrize("num_heads", [1, 2, 4, 8, 16])
-    def test_different_num_heads(self, num_heads, sample_input):
-        """Tests forward pass with different numbers of heads."""
-        # Adjust dim to be divisible by num_heads
-        dim = num_heads * 16
-        block = Qwen3NextBlock(dim=dim, num_heads=num_heads, max_seq_len=256)
+    def test_different_num_heads(self, sample_input):
+        """``num_heads`` must reach the attention projections.
 
-        # Adjust input to match dim
-        adjusted_input = tf.random.normal((sample_input.shape[0], sample_input.shape[1], dim))
-        output = block(adjusted_input, training=False)
+        Restructured out of ``@parametrize``: with one block per invocation the
+        sweep had nowhere to compare and asserted only
+        ``output.shape == adjusted_input.shape`` -- which is the residual
+        stream's shape and is preserved at every head count, including a block
+        that ignores the argument. `num_heads` is structural.
+        """
+        head_counts = [1, 2, 4, 8, 16]
 
-        assert output.shape == adjusted_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        def _build(num_heads):
+            dim = num_heads * 16
+            block = Qwen3NextBlock(dim=dim, num_heads=num_heads, max_seq_len=256)
+            block(tf.zeros((1, int(sample_input.shape[1]), dim)), training=False)
+            return block
 
-    @pytest.mark.parametrize("normalization_type",
-                             ["zero_centered_rms_norm", "layer_norm", "rms_norm", "band_rms"])
-    def test_different_normalization_types(self, normalization_type, sample_input):
-        """Tests forward pass with different normalization types."""
-        block = Qwen3NextBlock(
-            dim=128,
-            num_heads=8,
-            max_seq_len=512,
-            normalization_type=normalization_type
+        sigs = assert_structural_knob_changes_weights(
+            {n: (lambda n=n: _build(n)) for n in head_counts}, knob="num_heads")
+        params = [sum(int(np.prod(w)) for w in sigs[n]) for n in head_counts]
+        assert params == sorted(params) and params[0] < params[-1], (
+            f"num_heads did not grow the block: {dict(zip(head_counts, params))}"
         )
-        output = block(sample_input, training=False)
 
-        assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        for num_heads in head_counts:
+            dim = num_heads * 16
+            block = Qwen3NextBlock(dim=dim, num_heads=num_heads, max_seq_len=256)
+            adjusted_input = tf.random.normal(
+                (sample_input.shape[0], sample_input.shape[1], dim))
+            output = block(adjusted_input, training=False)
+
+            assert output.shape == adjusted_input.shape
+            assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+
+    def test_different_normalization_types(self, sample_input):
+        """``normalization_type`` must reach the block's normalization layers.
+
+        Two claims, because the four names do not all differ the same way.
+        Measured at ``dim=128, num_heads=8`` with one seed (LayerNorm/RMSNorm
+        weight initializers are constant, so all four configurations draw the
+        SAME random numbers for the projections and the comparisons are clean):
+
+        ============================  ==============  ================
+        pair                          weight tensors  max output delta
+        ============================  ==============  ================
+        layer_norm                    66 / 397,024    --
+        zero_centered_rms_norm        62 / 396,512    --
+        rms_norm                      62 / 396,512    --
+        band_rms                      62 / 396,004    --
+        zero_centered vs layer_norm   --              1.013e-06
+        layer_norm vs rms_norm        --              4.421e-01
+        rms_norm vs band_rms          --              1.093e-04
+        ============================  ==============  ================
+
+        ``zero_centered_rms_norm`` agreeing with ``layer_norm`` to 1e-06 is NOT
+        a defect and is deliberately not asserted against: mean-subtracted RMS
+        normalization IS layer normalization up to the beta shift, which is zero
+        at initialisation. That is exactly why an undiscriminating
+        "all four must differ pairwise" sweep would have been wrong here.
+        """
+        norm_types = ["zero_centered_rms_norm", "layer_norm", "rms_norm", "band_rms"]
+
+        def _build(normalization_type):
+            block = Qwen3NextBlock(
+                dim=128,
+                num_heads=8,
+                max_seq_len=512,
+                normalization_type=normalization_type
+            )
+            block(tf.zeros_like(sample_input[:1]), training=False)
+            return block
+
+        # Claim 1 (structural): LayerNorm carries a beta the RMS family has not.
+        layer_sigs = assert_structural_knob_changes_weights(
+            {n: (lambda n=n: _build(n)) for n in ("rms_norm", "layer_norm")},
+            knob="normalization_type",
+        )
+        assert len(layer_sigs["rms_norm"]) < len(layer_sigs["layer_norm"])
+
+        # Claim 2 (value): `zero_centered_rms_norm` and `rms_norm` are the only
+        # pair with an IDENTICAL signature, so under one seed they hold
+        # bit-identical weights and their difference is the normalization
+        # arithmetic alone. An inert kwarg would measure exactly 0.0 here.
+        deltas = assert_value_knob_changes_output(
+            {n: (lambda n=n: _build(n))
+             for n in ("zero_centered_rms_norm", "rms_norm")},
+            sample_input,
+            knob="normalization_type (RMS family)",
+        )
+        assert min(deltas.values()) > 1e-5
+
+        # Claim 3 (structural): `band_rms` also holds 62 tensors, but they are
+        # not the same 62 -- it carries 396,004 parameters against rms_norm's
+        # 396,512 -- so the value instrument correctly refuses that pair and the
+        # signature is what separates them.
+        band_sigs = assert_structural_knob_changes_weights(
+            {n: (lambda n=n: _build(n)) for n in ("rms_norm", "band_rms")},
+            knob="normalization_type (band_rms)",
+        )
+        assert sum(int(np.prod(w)) for w in band_sigs["band_rms"]) != sum(
+            int(np.prod(w)) for w in band_sigs["rms_norm"]
+        )
+
+        for normalization_type in norm_types:
+            block = Qwen3NextBlock(
+                dim=128,
+                num_heads=8,
+                max_seq_len=512,
+                normalization_type=normalization_type
+            )
+            output = block(sample_input, training=False)
+
+            assert output.shape == sample_input.shape
+            assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     # ===============================================
     # 4. Serialization Tests (The Gold Standard)

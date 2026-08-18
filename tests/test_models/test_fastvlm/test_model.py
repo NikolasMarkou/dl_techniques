@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 
 from dl_techniques.models.fastvlm.model import FastVLM
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 class TestFastVLM:
     """Comprehensive test suite for FastVLM model."""
 
@@ -518,27 +520,48 @@ class TestFastVLM:
         except Exception as e:
             pytest.fail(f"Model summary failed: {e}")
 
-    @pytest.mark.parametrize("attention_type", [
-        'multi_head',
-        'group_query'
-        # Note: window_attention requires specific spatial dimensions that are complex to set up
-    ])
     def test_different_attention_types(
         self,
         base_config: Dict[str, Any],
         sample_input: keras.KerasTensor,
-        attention_type: str
     ) -> None:
-        """Test model with different attention mechanisms."""
-        config = base_config.copy()
-        config['attention_type'] = attention_type
+        """``attention_type`` must build the requested attention.
 
-        model = FastVLM(**config)
-        output = model(sample_input)
+        Restructured out of ``@parametrize``: one model per invocation gave the
+        sweep nowhere to compare, so it asserted the logits shape (identical at
+        every attention type) plus ``model.attention_type == attention_type``,
+        a knob ECHO of the stored kwarg. The two attentions have different
+        parameterisations -- measured 139 tensors / 418,058 params for
+        `multi_head` and 151 / 549,130 for `group_query` -- so the weight-shape
+        signature says which one was actually built.
+        """
+        # Note: window_attention requires specific spatial dimensions that are
+        # complex to set up.
+        attention_types = ['multi_head', 'group_query']
 
-        assert output.shape == (sample_input.shape[0], config['num_classes'])
-        assert keras.ops.all(keras.ops.isfinite(output))
-        assert model.attention_type == attention_type
+        def _build(attention_type):
+            config = base_config.copy()
+            config['attention_type'] = attention_type
+            model = FastVLM(**config)
+            model(keras.ops.zeros_like(sample_input[:1]))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {a: (lambda a=a: _build(a)) for a in attention_types},
+            knob="attention_type",
+        )
+        assert len(sigs['multi_head']) != len(sigs['group_query'])
+
+        for attention_type in attention_types:
+            config = base_config.copy()
+            config['attention_type'] = attention_type
+
+            model = FastVLM(**config)
+            output = model(sample_input)
+
+            assert output.shape == (sample_input.shape[0], config['num_classes'])
+            assert keras.ops.all(keras.ops.isfinite(output))
+            assert model.attention_type == attention_type
 
 
 # Additional integration tests

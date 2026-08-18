@@ -44,6 +44,8 @@ from dl_techniques.models.power_mlp.model import (
 )
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 
+from ..knob_sensitivity_oracle import as_array, build_seeded
+
 # ---------------------------------------------------------------------
 
 
@@ -530,19 +532,53 @@ class TestPowerMLPTrainingModes:
         """Create sample input."""
         return keras.random.normal(shape=(8, 10))
 
-    @pytest.mark.parametrize("training", [True, False, None])
     def test_different_training_modes(
         self,
-        model: PowerMLP,
         sample_input: keras.KerasTensor,
-        training: bool
     ) -> None:
-        """Test model behavior in different training modes."""
-        output = model(sample_input, training=training)
+        """The `training` flag must change what the model computes.
 
-        assert output.shape == (8, 5)
-        assert not ops.any(ops.isnan(output))
-        assert not ops.any(ops.isinf(output))
+        Restructured out of ``@parametrize``: one call per invocation could only
+        assert ``(8, 5)`` plus finiteness, which is true in every mode -- and
+        train-vs-eval is the whole point of the fixture, whose model carries
+        ``dropout_rate=0.5`` AND ``batch_normalization=True``. Both of those
+        behave differently in the two modes and nothing checked it.
+
+        Measured on one seeded model, batch (8, 10):
+
+        * ``training=True`` vs ``training=False``: 12.226
+        * two ``training=True`` calls: 5.169 (dropout is stochastic)
+        * ``training=None`` vs ``training=False``: exactly 0.0 -- ``None`` means
+          "use the enclosing context", and a direct call has none, so it must be
+          bit-identical to inference. That exactness is the assertion; a
+          tolerance here would hide the mode leaking the other way.
+        """
+        model = build_seeded(lambda: PowerMLP(
+            hidden_units=[10, 16, 5],
+            dropout_rate=0.5,
+            batch_normalization=True,
+        ))
+
+        train_out = as_array(model(sample_input, training=True))
+        eval_out = as_array(model(sample_input, training=False))
+        none_out = as_array(model(sample_input, training=None))
+        train_again = as_array(model(sample_input, training=True))
+
+        for output in (train_out, eval_out, none_out):
+            assert output.shape == (8, 5)
+            assert np.all(np.isfinite(output))
+
+        assert np.max(np.abs(train_out - eval_out)) > 1e-5, (
+            "training=True and training=False produced the same output; "
+            "dropout and batch normalization are not mode-aware"
+        )
+        assert np.max(np.abs(train_out - train_again)) > 1e-5, (
+            "two training-mode calls were identical; dropout is not sampling"
+        )
+        np.testing.assert_array_equal(
+            none_out, eval_out,
+            err_msg="training=None must fall back to inference on a direct call",
+        )
 
     def test_dropout_affects_training(self) -> None:
         """Test that dropout behaves differently in training vs inference."""
