@@ -438,8 +438,19 @@ class VQVAERotationTrick(keras.Model):
             x_recon = self(x, training=True)
             recon_loss = ops.mean(ops.square(x - x_recon))
             recon_loss = self.reconstruction_loss_weight * recon_loss
-            vq_losses = self.quantizer.losses
-            vq_loss = ops.sum(ops.stack(vq_losses)) if vq_losses else 0.0
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
+            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
+            # `self.losses` already CONTAINS the quantizer's codebook/commitment/
+            # diversity terms and additionally carries every regularizer on the
+            # caller-supplied encoder and decoder. With the narrow form a BYO encoder
+            # built with `kernel_regularizer=l2(...)` contributed EXACTLY NOTHING to
+            # the gradient (measured on the sibling `models/vq_vae`: identical
+            # reported loss with and without the regularizer). The module's own
+            # architecture diagram at the top of this file already said
+            # `total_loss = recon(x, x_rec) + sum(layer.losses)`; only the code
+            # disagreed. See decisions.md D-026.
+            aux_losses = self.losses
+            vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
             total = recon_loss + vq_loss
         grads = tape.gradient(total, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -457,8 +468,12 @@ class VQVAERotationTrick(keras.Model):
         x_recon = self(x, training=False)
         recon_loss = ops.mean(ops.square(x - x_recon))
         recon_loss = self.reconstruction_loss_weight * recon_loss
-        vq_losses = self.quantizer.losses
-        vq_loss = ops.sum(ops.stack(vq_losses)) if vq_losses else 0.0
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
+        # `self.quantizer.losses` -- same reason as the anchor in `train_step`
+        # above. `test_step` must report the SAME objective `train_step`
+        # optimizes. See decisions.md D-026.
+        aux_losses = self.losses
+        vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
         total = recon_loss + vq_loss
         self.total_loss_tracker.update_state(total)
         self.reconstruction_loss_tracker.update_state(recon_loss)

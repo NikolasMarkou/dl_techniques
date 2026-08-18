@@ -861,6 +861,91 @@ class TestVQVAEPerformance:
         assert True
 
 
+class TestVQVAEAuxiliaryLossesReachTheObjective:
+    """F-66: `train_step`/`test_step` must sum `self.losses`, not just the quantizer's.
+
+    Before 2026-08-18 both steps summed `self.quantizer.losses`, so every
+    `add_loss` on the caller-supplied encoder or decoder -- the kernel
+    regularizers a BYO encoder is normally built with -- was absent from the
+    optimized objective AND from the reported `loss`, while the module's own
+    architecture diagram said `total_loss = recon + sum(layer.losses)`.
+
+    MEASURED at HEAD, encoder built with `kernel_regularizer=l2(1e-1)`:
+    `train_step` reported the identical 0.326447 with and without the
+    regularizer; `sum(self.losses)` was 0.912722 against
+    `sum(self.quantizer.losses)` 0.236841; the encoder-kernel gradient differed
+    by max 5.30e-02 between the two objectives.
+    """
+
+    @staticmethod
+    def _build(regularizer):
+        keras.utils.set_random_seed(0)
+        encoder = keras.Sequential([
+            keras.layers.Conv2D(8, 3, strides=2, padding='same',
+                                activation='relu',
+                                kernel_regularizer=regularizer),
+            keras.layers.Conv2D(4, 1, padding='same',
+                                kernel_regularizer=regularizer),
+        ])
+        decoder = keras.Sequential([
+            keras.layers.Conv2DTranspose(8, 3, strides=2, padding='same',
+                                         activation='relu'),
+            keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid'),
+        ])
+        model = VQVAEModel(encoder=encoder, decoder=decoder,
+                           num_embeddings=8, embedding_dim=4)
+        model.compile(optimizer=keras.optimizers.SGD(0.0))
+        return model
+
+    @pytest.fixture
+    def images(self):
+        return np.random.default_rng(0).uniform(
+            size=(4, 8, 8, 1)).astype('float32')
+
+    def test_an_encoder_regularizer_changes_the_reported_loss(self, images):
+        """RED at HEAD: both arms reported exactly 0.326447."""
+        plain = self._build(None)
+        regularized = self._build(keras.regularizers.l2(1e-1))
+        loss_plain = float(ops.convert_to_numpy(
+            plain.train_step(ops.convert_to_tensor(images))['loss']))
+        loss_reg = float(ops.convert_to_numpy(
+            regularized.train_step(ops.convert_to_tensor(images))['loss']))
+        assert loss_reg > loss_plain + 1e-4, (
+            f"an l2(1e-1) encoder regularizer moved the objective by "
+            f"{loss_reg - loss_plain:.3e} -- it is not in the objective"
+        )
+
+    def test_test_step_reports_the_same_objective_as_train_step(self, images):
+        """`val_loss` and `loss` must be the same quantity."""
+        model = self._build(keras.regularizers.l2(1e-1))
+        train_loss = float(ops.convert_to_numpy(
+            model.train_step(ops.convert_to_tensor(images))['loss']))
+        model.total_loss_tracker.reset_state()
+        model.reconstruction_loss_tracker.reset_state()
+        model.vq_loss_tracker.reset_state()
+        test_loss = float(ops.convert_to_numpy(
+            model.test_step(ops.convert_to_tensor(images))['loss']))
+        # SGD(0.0) leaves the weights untouched, so the only difference between
+        # the two is the training flag, which this model does not branch on.
+        assert abs(train_loss - test_loss) < 1e-4, (
+            f"train_step reported {train_loss:.6f} but test_step "
+            f"{test_loss:.6f} on identical weights and data"
+        )
+
+    def test_the_quantizer_losses_are_still_included(self, images):
+        """Control: widening to `self.losses` must not LOSE the VQ terms."""
+        model = self._build(None)
+        _ = model(images, training=True)
+        assert len(model.quantizer.losses) > 0
+        quantizer_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.quantizer.losses))))
+        model_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.losses))))
+        assert model_sum == pytest.approx(quantizer_sum, abs=1e-6), (
+            "with no encoder/decoder regularizer the two sums must coincide"
+        )
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     pytest.main([__file__, "-v", "--tb=short"])

@@ -1143,5 +1143,82 @@ class TestKLWarmupCallback:
             KLWarmupCallback(target=0.01, warmup_epochs=0)
 
 
+class TestVAEEffectiveBeta:
+    """F-53: `kl_loss_weight` is `beta / prod(input_shape)`, and that is PINNED.
+
+    The reconstruction term is a MEAN over pixels while the gaussian KL is a SUM
+    over latents, so the `beta` of the standard sum-over-pixels ELBO is
+    `kl_loss_weight * prod(input_shape)`. This was undocumented, which made a
+    nominal `kl_loss_weight` mean different things at different resolutions:
+    MEASURED over the shipped `MODEL_VARIANTS`, `micro`/`small` optimize
+    beta 7.84 at (28, 28, 1) and 30.72 at (32, 32, 3) -- a 3.92x swing in
+    regularization strength from the input resolution alone.
+
+    The arithmetic is deliberately UNCHANGED (see the D-028 anchor in
+    `_compute_reconstruction_loss`); what these tests pin is that the convention
+    is what the docs now say it is, so a later "cleanup" of either reduction is
+    caught here rather than silently re-scaling every shipped preset.
+    """
+
+    def test_reconstruction_is_a_mean_over_pixels_not_a_sum(self):
+        vae = VAE(latent_dim=4, input_shape=(8, 8, 1), kl_loss_weight=0.01)
+        rng = np.random.default_rng(0)
+        y_true = rng.uniform(size=(4, 8, 8, 1)).astype("float32")
+        y_pred = np.clip(y_true + 0.1, 1e-3, 1 - 1e-3).astype("float32")
+
+        got = float(keras.ops.convert_to_numpy(
+            vae._compute_reconstruction_loss(y_true, y_pred)))
+        per_pixel_mean = float(np.mean(keras.ops.convert_to_numpy(
+            keras.losses.binary_crossentropy(
+                y_true.reshape(4, -1),
+                np.clip(y_pred.reshape(4, -1), 1e-7, 1 - 1e-7)))))
+
+        assert got == pytest.approx(per_pixel_mean, rel=1e-5)
+        # And it is emphatically NOT the sum over the 64 pixels, which is the
+        # reduction the standard ELBO uses and the one `effective_kl_beta`
+        # converts to. `rel=0.5` is deliberately loose: this arm only has to
+        # separate a mean from a 64x-larger sum, not measure either.
+        assert got != pytest.approx(64.0 * per_pixel_mean, rel=0.5)
+
+    def test_kl_is_a_sum_over_the_latent_axis_for_gaussian(self):
+        vae = VAE(latent_dim=6, input_shape=(8, 8, 1), sampling_type="gaussian")
+        z_mean = np.zeros((4, 6), dtype="float32")
+        z_log_var = np.zeros((4, 6), dtype="float32")
+        z_mean[:, :] = 1.0
+        got = float(keras.ops.convert_to_numpy(
+            vae._compute_kl_loss(z_mean, z_log_var)))
+        # -0.5 * sum_j (1 + 0 - 1 - 1) = 0.5 * latent_dim
+        assert got == pytest.approx(0.5 * 6, rel=1e-5)
+
+    @pytest.mark.parametrize("shape", [(28, 28, 1), (32, 32, 3)])
+    def test_effective_beta_is_the_weight_times_the_pixel_count(self, shape):
+        vae = VAE(latent_dim=8, input_shape=shape, kl_loss_weight=0.01)
+        assert vae.effective_kl_beta == pytest.approx(
+            0.01 * int(np.prod(shape)))
+
+    def test_the_same_nominal_weight_is_a_different_beta_per_resolution(self):
+        """The finding itself, as an assertion."""
+        mnist = VAE(latent_dim=8, input_shape=(28, 28, 1), kl_loss_weight=0.01)
+        cifar = VAE(latent_dim=8, input_shape=(32, 32, 3), kl_loss_weight=0.01)
+        assert mnist.kl_loss_weight == cifar.kl_loss_weight
+        assert cifar.effective_kl_beta / mnist.effective_kl_beta == (
+            pytest.approx(3072.0 / 784.0))
+
+    def test_shipped_variant_effective_betas_are_the_measured_ones(self):
+        """Any re-tune of `MODEL_VARIANTS` must update these numbers on purpose."""
+        expected_at_mnist = {
+            "micro": 7.84, "small": 7.84,
+            "medium": 3.92, "large": 3.92,
+            "xlarge": 0.784,
+        }
+        assert set(expected_at_mnist) == set(VAE.MODEL_VARIANTS)
+        for variant, beta in expected_at_mnist.items():
+            weight = VAE.MODEL_VARIANTS[variant]["kl_loss_weight"]
+            assert weight * 784 == pytest.approx(beta, rel=1e-6), (
+                f"variant {variant!r} now optimizes an effective beta of "
+                f"{weight * 784:.4g} at (28, 28, 1), not {beta}"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

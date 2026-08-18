@@ -557,20 +557,48 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         q32 = keras.ops.cast(q, "float32")
 
         eps = self.epsilon
+        eps_sq = eps * eps
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-025: the three norms below are
+        # FLOORED (`sqrt(max(sum(x^2), eps^2))` == `max(||x||, eps)`), NOT
+        # eps-regularised. Do NOT put `sqrt(sum(x^2) + eps)` back. That form is not a
+        # floor: it inflates every norm, and since `scale_eff = q_norm / x_norm`
+        # multiplies the output, the inflation does not cancel -- `call()` emits
+        # `(1 + O(eps/||x||^2)) * q` instead of `q`, so the "discrete" bottleneck
+        # leaks a CONTINUOUS per-token magnitude channel and disagrees with
+        # `encode_to_indices -> quantize_from_indices -> decode`, which returns the
+        # raw codebook row. The leak grows as the encoder's scale shrinks, which is
+        # exactly the regime a fresh `Conv2D(embedding_dim, 1)` head produces.
+        # MEASURED at HEAD (num_embeddings=16, embedding_dim=8, seeded N(0,1) input
+        # scaled by s), max|call() - quantize_from_indices()|, all three rotation
+        # modes vs the exact `ste` path:
+        #     s=1.00  (||x||^2~8.2e+00): 5.35e-05  (rel 1.1e-03)   ste 2.98e-08
+        #     s=0.10  (||x||^2~8.2e-02): 6.88e-05  (rel 1.4e-03)   ste 7.45e-09
+        #     s=0.01  (||x||^2~8.2e-04): 1.92e-03  (rel 4.0e-02)   ste 1.86e-09
+        # i.e. a 4% magnitude leak at the small-norm end. With the floor, the same
+        # three measurements are 2.61e-08 / 2.61e-08 / 1.86e-08 -- the float32
+        # arithmetic floor, indistinguishable from the exact `ste` path and no longer
+        # scale dependent. The floor is written on the SQUARED side deliberately: below the
+        # floor the sqrt argument is a constant, so the `no_grad_scale` mode (the one
+        # branch where gradient flows through these norms) cannot see `d/dx sqrt(x)`
+        # blow up at an exactly-zero row. See decisions.md D-025.
+        #
         # Per the paper: the geometric anchors (unit_x, unit_q, w, and scale unless
         # 'no_grad_scale') are computed with stop_gradient so that the rotation
         # matrix R becomes a *constant* w.r.t. backprop. The gradient w.r.t. x
         # then flows through R @ x as a constant linear transform — preserving
         # the curvature/direction information that pure STE discards.
-        x_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(x32), axis=-1, keepdims=True) + eps)
-        q_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(q32), axis=-1, keepdims=True) + eps)
+        x_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(x32), axis=-1, keepdims=True), eps_sq))
+        q_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(q32), axis=-1, keepdims=True), eps_sq))
 
         # Detached unit vectors and w direction.
         unit_x_sg = keras.ops.stop_gradient(x32 / x_norm)
         unit_q_sg = keras.ops.stop_gradient(q32 / q_norm)
         w_unnorm = unit_x_sg + unit_q_sg
-        w_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True) + eps)
+        w_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True), eps_sq))
         w_sg = keras.ops.stop_gradient(w_unnorm / w_norm)
 
 

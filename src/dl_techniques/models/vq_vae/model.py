@@ -322,10 +322,22 @@ class VQVAEModel(keras.Model):
                     self.reconstruction_loss_weight * reconstruction_loss
             )
 
-            # Get VQ losses from quantizer
-            vq_losses = self.quantizer.losses
-            # Sum vq_losses if multiple (e.g. codebook + commitment)
-            vq_loss = ops.sum(ops.stack(vq_losses))
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
+            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
+            # `self.losses` is the whole model's `add_loss` collection -- it already
+            # CONTAINS the quantizer's codebook + commitment terms, and it
+            # additionally carries every regularizer on the caller-supplied encoder
+            # and decoder. With the narrow form, a BYO encoder built with
+            # `kernel_regularizer=l2(1e-1)` contributed EXACTLY NOTHING: MEASURED at
+            # HEAD, `train_step` reported the identical 0.326447 with and without the
+            # regularizer, while `sum(self.losses)` was 0.912722 against
+            # `sum(self.quantizer.losses)` 0.236841, and the encoder-kernel gradient
+            # differed by max 5.30e-02 between the two objectives. The module's own
+            # architecture diagram already said `total_loss = recon + sum(layer.losses)`;
+            # only the code disagreed. See decisions.md D-026.
+            aux_losses = self.losses
+            # Sum aux_losses if multiple (e.g. codebook + commitment + regularizers)
+            vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
 
             total_loss = reconstruction_loss + vq_loss
 
@@ -366,9 +378,13 @@ class VQVAEModel(keras.Model):
         reconstruction_loss = ops.mean((x - x_recon) ** 2)
         reconstruction_loss = self.reconstruction_loss_weight * reconstruction_loss
 
-        # Get VQ losses from quantizer
-        vq_losses = self.quantizer.losses
-        vq_loss = ops.sum(ops.stack(vq_losses))
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
+        # `self.quantizer.losses` -- same reason and same measurement as the
+        # anchor in `train_step` above. `test_step` must report the SAME
+        # objective `train_step` optimizes, or val_loss and loss are not
+        # comparable. See decisions.md D-026.
+        aux_losses = self.losses
+        vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
 
         total_loss = reconstruction_loss + vq_loss
 

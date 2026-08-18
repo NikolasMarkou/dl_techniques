@@ -30,7 +30,11 @@ Under `"gaussian"` the second head emits a full `[B, latent_dim]` diagonal
 log-variance and the KL is the closed-form Gaussian-to-`N(0, I)` divergence, summed
 over the latent axis and averaged over the batch (summing over latents and
 averaging over samples is what keeps the KL comparable across latent widths for a
-fixed `beta`). Under `"hypersphere"` the head collapses to a single `[B, 1]` radius
+fixed `beta`). That comparability is across latent WIDTHS only, and it is worth
+being precise about what it does not cover: the reconstruction term on the other
+side of the trade-off is a **mean** over pixels, not a sum, so `kl_loss_weight` is
+`beta / prod(input_shape)` rather than `beta` -- see the `effective_kl_beta`
+property and the note under `Reconstruction` below. Under `"hypersphere"` the head collapses to a single `[B, 1]` radius
 log-variance: the sampler places `z` on a shell of fixed radius and the only
 learned uncertainty is radial, so the KL is the one-dimensional
 `0.5 * (exp(rlv) - rlv - 1)` on that radius alone. There is deliberately no
@@ -70,7 +74,21 @@ Five presets scale depth, width and latent dimension together and lower
 a weaker prior pull.
 
 Reconstruction is binary crossentropy on flattened inputs with predictions clipped
-to `[1e-7, 1 - 1e-7]`, which assumes data in `[0, 1]`. The training step is custom
+to `[1e-7, 1 - 1e-7]`, which assumes data in `[0, 1]`, reduced by a **mean over
+pixels**. That reduction is the reason `kl_loss_weight` is not `beta`: against the
+standard sum-over-pixels ELBO the model optimizes
+`beta = kl_loss_weight * prod(input_shape)`, which for the shipped presets is
+`micro`/`small` 7.84, `medium`/`large` 3.92 and `xlarge` 0.784 at `(28, 28, 1)`,
+and 30.72 / 15.36 / 3.072 at `(32, 32, 3)` -- a 3.92x swing in regularization
+strength from the input resolution alone, at an unchanged nominal weight. This is a
+known, MEASURED property of the shipped defaults rather than an accident of
+reading: `effective_kl_beta` exposes it, `summary()` logs it, and
+`tests/test_models/test_vae/test_model.py::TestVAEEffectiveBeta` pins it. It is
+deliberately NOT repaired by changing the reduction, because every available repair
+moves the trained behaviour of every existing preset and no re-tuned target could
+be justified without training runs; see decisions.md D-028 of
+plan-2026-08-18T140459-7991552f for the full ruling and the numbers a future
+re-tune needs. The training step is custom
 because the loss depends on intermediate encoder outputs rather than on
 `(y_true, y_pred)` alone; it clips gradients elementwise to `[-1, 1]`, a blunt but
 effective guard against the loss spikes the KL term can produce early in training.
@@ -139,7 +157,11 @@ class VAE(keras.Model):
         depths: Integer, number of depth levels in the encoder/decoder.
         steps_per_depth: Integer, number of residual blocks per depth level.
         filters: List of integers, filter counts for each depth level.
-        kl_loss_weight: Float, weight for KL divergence loss term.
+        kl_loss_weight: Float, weight for KL divergence loss term. This is NOT
+            the `beta` of the standard ELBO: the reconstruction term is a mean
+            over pixels, so the effective `beta` is
+            `kl_loss_weight * prod(input_shape)` (see `effective_kl_beta`) and
+            the same value means different things at different resolutions.
         sampling_type: String, the latent sampling mode. One of:
             ``"gaussian"`` (baseline diagonal-Gaussian reparameterization), or
             ``"hypersphere"`` (a dedicated ``Dense(1)`` radius log-variance head
@@ -808,6 +830,28 @@ class VAE(keras.Model):
         )
 
     @property
+    def effective_kl_beta(self) -> float:
+        """The beta this model actually optimizes, in sum-over-pixels ELBO units.
+
+        `kl_loss_weight` is NOT the `beta` of the standard ELBO. This model's
+        reconstruction term is a **mean** over the `prod(input_shape)` pixels while
+        its Gaussian KL is a **sum** over the latent axis, so dividing the standard
+        `sum_pixels(BCE) + beta * sum_latents(KL)` through by the pixel count shows
+        that `kl_loss_weight == beta / prod(input_shape)`. The `beta` a reader of
+        the literature means is therefore this property, not the constructor
+        argument -- and because the pixel count is in it, the SAME nominal
+        `kl_loss_weight` is a different regularization strength at a different
+        input resolution.
+
+        Returns:
+            `kl_loss_weight * prod(input_shape)`.
+        """
+        pixels = 1
+        for dim in self._input_shape:
+            pixels *= int(dim)
+        return float(self.kl_loss_weight) * pixels
+
+    @property
     def metrics(self) -> List[keras.metrics.Metric]:
         """Return metrics tracked by the model."""
         return [
@@ -1026,6 +1070,24 @@ class VAE(keras.Model):
         # Clip predictions to avoid log(0)
         y_pred_clipped = ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-028: this reduction is a MEAN
+        # over pixels while `_compute_kl_loss`'s gaussian branch SUMS over latents,
+        # so `kl_loss_weight` is `beta / prod(input_shape)`, not `beta`. That is
+        # KNOWN and MEASURED (micro/small 7.84, medium/large 3.92, xlarge 0.784 at
+        # 28x28x1; 30.72 / 15.36 / 3.072 at 32x32x3 -- 3.92x from resolution alone),
+        # and it is deliberately LEFT AS IS rather than switched to a sum. Do not
+        # "fix" it in passing. Switching to a sum multiplies the whole objective by
+        # `prod(input_shape)` (784-3072x) and changes what every shipped
+        # `MODEL_VARIANTS` weight and every saved config MEANS; keeping the mean but
+        # dividing the KL by the pixel count needs new per-variant defaults, and no
+        # resolution-independent default can reproduce today's behaviour at more
+        # than one resolution -- the two goals are mutually exclusive. Choosing a
+        # re-tuned target requires training runs this repair could not do. What IS
+        # fixed is the confusion: `effective_kl_beta` computes the real beta,
+        # `summary()` logs it, the module docstring states the convention, and
+        # `TestVAEEffectiveBeta` pins the arithmetic so a silent change is caught.
+        # See decisions.md D-028.
+        #
         # Binary crossentropy for better numerical stability
         reconstruction_loss = ops.mean(
             keras.losses.binary_crossentropy(y_true_flat, y_pred_clipped)
@@ -1148,6 +1210,10 @@ class VAE(keras.Model):
         logger.info(f"  - Steps per depth: {self.steps_per_depth}")
         logger.info(f"  - Filters: {self.filters}")
         logger.info(f"  - KL loss weight: {self.kl_loss_weight}")
+        logger.info(
+            f"  - Effective beta (sum-over-pixels ELBO): "
+            f"{self.effective_kl_beta:.4g}"
+        )
         logger.info(f"  - Total parameters: {self.count_params():,}")
 
 

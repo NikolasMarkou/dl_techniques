@@ -327,3 +327,160 @@ class TestEMACodebookStability:
                         f"the fix an unassigned code normalized to "
                         f"0.99 * init / 1e-5 ~= 99000 * init"
                     )
+
+
+class TestRotationNormFloorDoesNotLeakMagnitude:
+    """F-67: the rotation-trick norms must be FLOORED, not eps-regularised.
+
+    ``sqrt(sum(x^2) + eps)`` inflates every norm, and because
+    ``scale_eff = q_norm / x_norm`` multiplies the output, the inflation does not
+    cancel: ``call()`` emitted ``(1 + O(eps/||x||^2)) * q`` while
+    ``encode_to_indices -> quantize_from_indices -> decode`` returns the raw
+    codebook row ``q``. The gap grows as the encoder's scale shrinks.
+
+    MEASURED at HEAD (num_embeddings=16, embedding_dim=8, seeded N(0, 1) input
+    scaled by s), ``max|call() - quantize_from_indices()|``:
+
+        s      ||x||^2    rotation   reflection   no_grad_scale   ste
+        1.00   8.2e+00    5.35e-05   5.34e-05     5.35e-05        2.98e-08
+        0.10   8.2e-02    6.88e-05   5.18e-05     6.88e-05        7.45e-09
+        0.01   8.2e-04    1.92e-03   6.69e-04     1.92e-03        1.86e-09
+
+    i.e. a 4% relative magnitude leak at the small-norm end -- exactly the regime
+    a fresh ``Conv2D(embedding_dim, 1)`` head produces -- against an exact ``ste``
+    path three to six orders below it. With the floor every rotation mode drops to
+    ~2e-08, the float32 arithmetic floor, and stops depending on the input scale.
+
+    The bar below is set at 1e-6: comfortably above the measured post-fix 2.6e-08,
+    and 700x below the 1.9e-03 the defect produced. The ``ste`` row is the
+    built-in control -- it never used these norms and must pass both before and
+    after.
+    """
+
+    @pytest.mark.parametrize(
+        "mode", ["ste", "rotation", "reflection", "no_grad_scale"])
+    @pytest.mark.parametrize("input_scale", [1.0, 0.1, 0.01])
+    def test_call_emits_the_codebook_vector_at_every_input_scale(
+            self, mode, input_scale):
+        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+            VectorQuantizerRotationTrick,
+        )
+
+        keras.utils.set_random_seed(0)
+        vq = VectorQuantizerRotationTrick(
+            num_embeddings=16, embedding_dim=8, gradient_mode=mode)
+        vq.build((None, 8))
+
+        z = (np.random.default_rng(0).normal(size=(32, 8))
+             * input_scale).astype("float32")
+
+        out = np.asarray(ops.convert_to_numpy(vq(z, training=False)))
+        idx = vq.get_codebook_indices(z)
+        ref = np.asarray(ops.convert_to_numpy(vq.quantize_from_indices(idx)))
+
+        gap = float(np.abs(out - ref).max())
+        assert gap < 1e-6, (
+            f"gradient_mode={mode!r}, input scaled by {input_scale}: call() and "
+            f"the index path disagree by {gap:.3e}. An eps-inflated norm leaks a "
+            f"continuous magnitude channel through the discrete bottleneck; the "
+            f"norms must be floored with max(||x||, eps)."
+        )
+
+    def test_the_leak_is_scale_independent_after_the_floor(self):
+        """The defect's signature was scale DEPENDENCE, so pin its absence."""
+        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+            VectorQuantizerRotationTrick,
+        )
+
+        gaps = []
+        for input_scale in (1.0, 0.01):
+            keras.utils.set_random_seed(0)
+            vq = VectorQuantizerRotationTrick(
+                num_embeddings=16, embedding_dim=8, gradient_mode="rotation")
+            vq.build((None, 8))
+            z = (np.random.default_rng(0).normal(size=(32, 8))
+                 * input_scale).astype("float32")
+            out = np.asarray(ops.convert_to_numpy(vq(z, training=False)))
+            ref = np.asarray(ops.convert_to_numpy(
+                vq.quantize_from_indices(vq.get_codebook_indices(z))))
+            # Relative to the codebook magnitude, which the scaling does not move.
+            gaps.append(float(np.abs(out - ref).max())
+                        / float(np.abs(ref).max()))
+
+        assert gaps[1] < 10.0 * gaps[0] + 1e-9, (
+            f"relative disagreement grew from {gaps[0]:.3e} at unit scale to "
+            f"{gaps[1]:.3e} at 1/100 scale -- the error still scales like "
+            f"eps/||x||^2, so a norm is still eps-inflated somewhere"
+        )
+
+
+class TestRotationAuxiliaryLossesReachTheObjective:
+    """F-66, rotation-trick half: `train_step`/`test_step` sum `self.losses`.
+
+    Same defect and same fix as
+    `tests/test_models/test_vq_vae/test_model.py::TestVQVAEAuxiliaryLossesReachTheObjective`;
+    this model has its own copy of both steps. The module's architecture diagram
+    already said `total_loss = recon(x, x_rec) + sum(layer.losses)`.
+    """
+
+    @staticmethod
+    def _build(regularizer):
+        keras.utils.set_random_seed(0)
+        encoder = keras.Sequential([
+            keras.layers.Conv2D(8, 3, strides=2, padding="same",
+                                activation="relu",
+                                kernel_regularizer=regularizer),
+            keras.layers.Conv2D(4, 1, padding="same",
+                                kernel_regularizer=regularizer),
+        ])
+        decoder = keras.Sequential([
+            keras.layers.Conv2DTranspose(8, 3, strides=2, padding="same",
+                                         activation="relu"),
+            keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid"),
+        ])
+        model = VQVAERotationTrick(
+            num_embeddings=8, embedding_dim=4,
+            encoder=encoder, decoder=decoder)
+        model.compile(optimizer=keras.optimizers.SGD(0.0))
+        return model
+
+    @pytest.fixture
+    def images(self):
+        return np.random.default_rng(0).uniform(
+            size=(4, 8, 8, 1)).astype("float32")
+
+    def test_an_encoder_regularizer_changes_the_reported_loss(self, images):
+        plain = self._build(None)
+        regularized = self._build(keras.regularizers.l2(1e-1))
+        loss_plain = float(ops.convert_to_numpy(
+            plain.train_step(ops.convert_to_tensor(images))["loss"]))
+        loss_reg = float(ops.convert_to_numpy(
+            regularized.train_step(ops.convert_to_tensor(images))["loss"]))
+        assert loss_reg > loss_plain + 1e-4, (
+            f"an l2(1e-1) encoder regularizer moved the objective by "
+            f"{loss_reg - loss_plain:.3e} -- it is not in the objective"
+        )
+
+    def test_test_step_reports_the_same_objective_as_train_step(self, images):
+        model = self._build(keras.regularizers.l2(1e-1))
+        train_loss = float(ops.convert_to_numpy(
+            model.train_step(ops.convert_to_tensor(images))["loss"]))
+        for tracker in model.metrics:
+            tracker.reset_state()
+        test_loss = float(ops.convert_to_numpy(
+            model.test_step(ops.convert_to_tensor(images))["loss"]))
+        assert abs(train_loss - test_loss) < 1e-4, (
+            f"train_step reported {train_loss:.6f} but test_step "
+            f"{test_loss:.6f} on identical weights and data"
+        )
+
+    def test_the_quantizer_losses_are_still_included(self, images):
+        """Control: widening to `self.losses` must not LOSE the VQ terms."""
+        model = self._build(None)
+        _ = model(images, training=True)
+        assert len(model.quantizer.losses) > 0
+        quantizer_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.quantizer.losses))))
+        model_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.losses))))
+        assert model_sum == pytest.approx(quantizer_sum, abs=1e-6)
