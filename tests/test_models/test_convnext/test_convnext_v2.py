@@ -17,6 +17,11 @@ from typing import Tuple, List
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestConvNeXtV2:
     """Test suite for ConvNeXt V2 model implementation."""
@@ -198,7 +203,14 @@ class TestConvNeXtV2:
             assert outputs.shape == (2, num_classes)
 
     def test_different_depths_configurations(self, num_classes, cifar_input_shape):
-        """Test with different depth configurations."""
+        """``depths`` must build the requested number of blocks.
+
+        The logits shape is ``(2, num_classes)`` for every depth list, so the
+        old assertion held whether or not `depths` reached the graph. `depths`
+        is structural: the weight-shape signature carries the claim, and an
+        output-difference check would not (different depths draw different
+        random numbers).
+        """
         depth_configs = [
             [1, 1, 2, 1],     # Very small
             [2, 2, 4, 2],     # Small
@@ -207,8 +219,27 @@ class TestConvNeXtV2:
             [3, 3, 9, 3],     # Tiny (default)
         ]
 
+        dims = [32, 64, 128, 256]  # Keep dims small for testing
+
+        def _build(depths):
+            model = ConvNeXtV2(
+                num_classes=num_classes,
+                depths=depths,
+                dims=dims,
+                input_shape=cifar_input_shape  # Specify correct input shape
+            )
+            model(tf.zeros([1] + list(cifar_input_shape)))
+            return model
+
+        builders = {tuple(d): (lambda d=d: _build(d)) for d in depth_configs}
+        sigs = assert_structural_knob_changes_weights(builders, knob="depths")
+        # Stronger than "different": more blocks in total means more weights.
+        by_total = sorted(depth_configs, key=sum)
+        assert len(sigs[tuple(by_total[0])]) < len(sigs[tuple(by_total[-1])]), (
+            "depths did not change the number of weight tensors"
+        )
+
         for depths in depth_configs:
-            dims = [32, 64, 128, 256]  # Keep dims small for testing
             model = ConvNeXtV2(
                 num_classes=num_classes,
                 depths=depths,
@@ -221,10 +252,15 @@ class TestConvNeXtV2:
             assert outputs.shape == (2, num_classes)
 
     def test_different_activations(self, num_classes, cifar_input_shape, cifar_sample_data):
-        """Test with different activation functions."""
+        """The activation must reach the forward pass.
+
+        A value knob: the parameterisation is identical for every activation, so
+        under one seed the models hold bit-identical weights and the entire
+        output difference is attributable to the activation.
+        """
         activations = ["relu", "gelu", "leaky_relu", "elu", "swish"]
 
-        for activation in activations:
+        def _build(activation):
             model = ConvNeXtV2(
                 num_classes=num_classes,
                 depths=[1, 1, 2, 1],  # Small for faster testing
@@ -232,7 +268,17 @@ class TestConvNeXtV2:
                 activation=activation,
                 input_shape=cifar_input_shape  # Specify correct input shape
             )
+            model(tf.zeros_like(cifar_sample_data[:1]))
+            return model
 
+        builders = {a: (lambda a=a: _build(a)) for a in activations}
+        deltas = assert_value_knob_changes_output(
+            builders, cifar_sample_data, knob="activation",
+        )
+        assert min(deltas.values()) > 1e-5
+
+        for activation in activations:
+            model = _build(activation)
             outputs = model(cifar_sample_data)
             assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
 

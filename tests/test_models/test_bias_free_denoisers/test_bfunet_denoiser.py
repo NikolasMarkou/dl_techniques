@@ -20,6 +20,10 @@ from dl_techniques.models.bias_free_denoisers.bfunet import (
 )
 
 from .conftest import HOMOGENEITY_RTOL, HOMOGENEITY_SCALES, fit_one_step
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
 
 
 def _first_norm(layer):
@@ -116,9 +120,26 @@ class TestBiasFreeUNet:
         assert large_output.shape == (1, 128, 128, 1)
 
     def test_different_depths(self, grayscale_input_shape):
-        """Test U-Net with different depth configurations."""
-        depths = [3, 4, 5]  # Updated minimum depth to 3
+        """``depth`` must add levels, not just be accepted.
 
+        The output shape is the input's shape at every depth, so it is not
+        evidence. `depth` is structural: each extra level adds encoder, decoder
+        and skip weights, so the weight-shape signature carries the claim and
+        the parameter count must grow strictly.
+        """
+        depths = [3, 4, 5]  # Updated minimum depth to 3
+        builders = {
+            d: (lambda d=d: create_bfunet_denoiser(
+                input_shape=grayscale_input_shape, depth=d, initial_filters=8))
+            for d in depths
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="depth")
+        counts = [sum(int(np.prod(w)) for w in sigs[d]) for d in depths]
+        assert counts[0] < counts[1] < counts[2], (
+            f"depth did not grow the parameter count: {dict(zip(depths, counts))}"
+        )
+
+        # Forward pass still works at every depth, and preserves the shape.
         for depth in depths:
             model = create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
@@ -126,7 +147,6 @@ class TestBiasFreeUNet:
                 initial_filters=8
             )
 
-            # Test forward pass
             test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
             output = model(test_input)
 
@@ -778,7 +798,12 @@ class TestBiasFreeUNetParameterized:
         ((96, 96, 3), 3, 32),  # Non-power-of-2 dimensions
     ])
     def test_various_configurations(self, input_shape, depth, initial_filters):
-        """Test model creation with various valid configurations."""
+        """Each configuration builds and forwards without NaN.
+
+        A build smoke only. The shape assertion below is true at every depth and
+        width by construction; `test_different_depths` and
+        `test_different_initial_filters` carry the knob claims.
+        """
         model = create_bfunet_denoiser(
             input_shape=input_shape,
             depth=depth,
@@ -793,71 +818,91 @@ class TestBiasFreeUNetParameterized:
         assert output.shape == (batch_size,) + input_shape
         assert not np.any(np.isnan(output.numpy()))
 
-    @pytest.mark.parametrize("activation", [
-        'relu', 'leaky_relu', 'elu', 'swish', 'gelu'
-    ])
-    def test_different_activations(self, activation):
-        """Test model with different activation functions."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            activation=activation
+    def test_different_activations(self):
+        """The activation must reach the forward pass.
+
+        A value knob: the parameterisation is identical across activations, so
+        under one seed the models hold bit-identical weights and the whole
+        output difference is the activation.
+        """
+        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
+        builders = {
+            a: (lambda a=a: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                activation=a))
+            for a in ('relu', 'leaky_relu', 'elu', 'swish', 'gelu')
+        }
+        deltas = assert_value_knob_changes_output(
+            builders, test_input, knob="activation",
+        )
+        assert min(deltas.values()) > 1e-5
+
+    def test_different_kernel_sizes(self):
+        """``kernel_size`` must reach the convolution kernels.
+
+        bfunet.py fixes the stem at ``initial_kernel_size=5`` (line 362) and the
+        output projection at 1x1, so those extents are present at every setting;
+        `kernel_size` governs every other conv.
+        """
+        builders = {
+            k: (lambda k=k: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                kernel_size=k))
+            for k in (1, 3, 5, 7)
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="kernel_size")
+        for k, sig in sigs.items():
+            spatial = {w[:2] for w in sig if len(w) == 4}
+            assert (k, k) in spatial, (
+                f"kernel_size={k} produced no {k}x{k} kernel; extents were "
+                f"{sorted(spatial)}"
+            )
+            assert spatial <= {(5, 5), (k, k), (1, 1)}, (
+                f"kernel_size={k} produced unexpected extents {sorted(spatial)}"
+            )
+
+    def test_different_filter_multipliers(self):
+        """``filter_multiplier`` must widen each successive level.
+
+        Structural. bfunet.py:339 computes
+        ``initial_filters * multiplier ** level``; at multiplier 1 the levels
+        are flat, so the parameter count must grow strictly with the multiplier.
+        """
+        multipliers = (1, 2, 3, 4)
+        builders = {
+            m: (lambda m=m: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                filter_multiplier=m))
+            for m in multipliers
+        }
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="filter_multiplier")
+        counts = [sum(int(np.prod(w)) for w in sigs[m]) for m in multipliers]
+        assert counts == sorted(counts) and counts[0] < counts[-1], (
+            f"filter_multiplier did not widen the model: "
+            f"{dict(zip(multipliers, counts))}"
         )
 
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
+    def test_different_blocks_per_level(self):
+        """``blocks_per_level`` must add blocks, not just be accepted.
 
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("kernel_size", [1, 3, 5, 7])
-    def test_different_kernel_sizes(self, kernel_size):
-        """Test model with different kernel sizes."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            kernel_size=kernel_size
+        Structural: more blocks per level means strictly more weight tensors,
+        which a differing-shapes check alone would not pin down.
+        """
+        counts_swept = (1, 2, 3, 4)
+        builders = {
+            b: (lambda b=b: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                blocks_per_level=b))
+            for b in counts_swept
+        }
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="blocks_per_level")
+        n_weights = [len(sigs[b]) for b in counts_swept]
+        assert n_weights == sorted(n_weights) and n_weights[0] < n_weights[-1], (
+            f"blocks_per_level did not add weight tensors: "
+            f"{dict(zip(counts_swept, n_weights))}"
         )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("filter_multiplier", [1, 2, 3, 4])
-    def test_different_filter_multipliers(self, filter_multiplier):
-        """Test model with different filter multipliers."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            filter_multiplier=filter_multiplier
-        )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("blocks_per_level", [1, 2, 3, 4])
-    def test_different_blocks_per_level(self, blocks_per_level):
-        """Test model with different numbers of blocks per level."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            blocks_per_level=blocks_per_level
-        )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
 
     @pytest.mark.parametrize("variant", ['tiny', 'small', 'base', 'large', 'xlarge'])
     def test_all_variants_parameterized(self, variant):

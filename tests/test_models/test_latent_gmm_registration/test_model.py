@@ -114,8 +114,13 @@ class TestTrainStep:
         (source, target), (r_gt, t_gt) = self._fit_data()
 
         logs = model.train_step(((source, target), (r_gt, t_gt)))
-        assert "t_mse" in logs
-        assert np.isfinite(float(keras.ops.convert_to_numpy(logs["t_mse"])))
+        # Keras prefixes a per-output metric with the OUTPUT name, so a metric
+        # named "t_mse" attached to the "estimated_t" output is logged as
+        # "estimated_t_t_mse". The model is right; the old assertion named a key
+        # Keras never emits and had been red since 3833e8310.
+        key = "estimated_t_t_mse"
+        assert key in logs, f"expected {key!r} in {sorted(logs)}"
+        assert np.isfinite(float(keras.ops.convert_to_numpy(logs[key])))
 
     def test_test_step_runs(self):
         model = create_latent_gmm_registration(num_gaussians=4, k_neighbors=8)

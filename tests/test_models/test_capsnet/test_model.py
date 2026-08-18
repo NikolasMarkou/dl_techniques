@@ -19,6 +19,12 @@ from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.utils.tensors import length
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    build_seeded,
+    as_array,
+)
+
 
 class TestCapsuleAccuracy:
     """Test suite for CapsuleAccuracy metric."""
@@ -348,11 +354,28 @@ class TestCapsNet:
             assert outputs["length"].shape == (2, num_classes)
 
     def test_different_capsule_configurations(self, mnist_input_shape):
-        """Test with different capsule configurations."""
+        """The capsule counts and dims must reach the parameterisation.
+
+        These are structural knobs, so an output-difference check between the
+        two configs would be satisfied by the different random draw alone. The
+        weight-shape signature is the discriminating fact; the per-config shape
+        assertions below are kept because they pin the *contract* (which the
+        signature does not).
+        """
         configs = [
             {"num_classes": 5, "primary_capsules": 16, "primary_capsule_dim": 4, "digit_capsule_dim": 8},
             {"num_classes": 20, "primary_capsules": 64, "primary_capsule_dim": 16, "digit_capsule_dim": 32},
         ]
+
+        def _build(cfg):
+            model = CapsNet(input_shape=mnist_input_shape, reconstruction=False, **cfg)
+            model(tf.zeros([1] + list(mnist_input_shape)))
+            return model
+
+        builders = {
+            i: (lambda cfg=cfg: _build(cfg)) for i, cfg in enumerate(configs)
+        }
+        assert_structural_knob_changes_weights(builders, knob="capsule configuration")
 
         for config in configs:
             capsnet = CapsNet(
@@ -368,12 +391,40 @@ class TestCapsNet:
             assert outputs["length"].shape == (2, config["num_classes"])
 
     def test_different_conv_filters(self, num_classes, mnist_input_shape):
-        """Test with different convolutional filter configurations."""
+        """``conv_filters`` must build the requested conv stack.
+
+        `length` has shape ``(2, num_classes)`` for every filter list, so the
+        old shape assertion was true whether or not the list reached the graph.
+        The stack depth is structural: one more entry means strictly more conv
+        weight tensors.
+        """
         filter_configs = [
             [128],
             [256, 128],
             [64, 128, 256],
         ]
+
+        def _build(filters):
+            model = CapsNet(
+                num_classes=num_classes,
+                input_shape=mnist_input_shape,
+                conv_filters=filters,
+                reconstruction=False,
+            )
+            model(tf.zeros([1] + list(mnist_input_shape)))
+            return model
+
+        builders = {
+            tuple(f): (lambda f=f: _build(f)) for f in filter_configs
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="conv_filters")
+        for f in filter_configs:
+            widths = [w[-1] for w in sigs[tuple(f)] if len(w) == 4]
+            for requested in f:
+                assert requested in widths, (
+                    f"conv_filters={f} produced no conv with {requested} output "
+                    f"channels; conv widths were {widths}"
+                )
 
         for filters in filter_configs:
             capsnet = CapsNet(
@@ -458,19 +509,38 @@ class TestCapsNet:
         assert metrics["reconstruction_loss"].numpy() == 0.0
 
     def test_different_margin_parameters(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
-        """Test with different margin loss parameters."""
-        capsnet = CapsNet(
-            num_classes=num_classes,
-            input_shape=mnist_input_shape,
-            positive_margin=0.95,
-            negative_margin=0.05,
-            downweight=0.3,
-            reconstruction=False
-        )
-        capsnet.compile(optimizer="adam")
+        """The margin parameters must change the margin loss they parameterise.
 
-        metrics = capsnet.train_step((sample_mnist_data, sample_labels))
-        assert "margin_loss" in metrics
+        ``"margin_loss" in metrics`` is true for every margin setting, including
+        one that never reaches the loss. These are value knobs -- they do not
+        touch the parameterisation -- so two identically seeded models differ
+        only in the margins, and the loss they report must differ.
+        """
+        margins = {
+            "default": dict(positive_margin=0.9, negative_margin=0.1, downweight=0.5),
+            "tight": dict(positive_margin=0.95, negative_margin=0.05, downweight=0.3),
+        }
+
+        def _loss(cfg):
+            model = build_seeded(lambda: CapsNet(
+                num_classes=num_classes,
+                input_shape=mnist_input_shape,
+                reconstruction=False,
+                **cfg,
+            ))
+            model.compile(optimizer="adam")
+            metrics = model.train_step((sample_mnist_data, sample_labels))
+            assert "margin_loss" in metrics
+            return float(as_array(metrics["margin_loss"]))
+
+        losses = {k: _loss(cfg) for k, cfg in margins.items()}
+        delta = abs(losses["default"] - losses["tight"])
+        # Same seed, same parameterisation, same batch: the only difference is
+        # the margins, so this delta is entirely attributable to them.
+        assert delta > 1e-5, (
+            f"margin parameters are a no-op: margin_loss was {losses} "
+            f"(delta {delta:.3e})"
+        )
 
     def test_serialization(self, num_classes, mnist_input_shape):
         """Test serialization and deserialization."""

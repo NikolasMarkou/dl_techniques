@@ -23,6 +23,8 @@ from typing import Dict, Any
 from dl_techniques.models.bert.bert import BERT, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 
 class TestBERTModelInitialization:
     """Test BERT model initialization and parameter validation."""
@@ -391,7 +393,30 @@ class TestBERTAdvancedFeatures:
     """Test advanced BERT features from dl-techniques framework."""
 
     def test_different_normalization_types(self):
+        """``normalization_type`` must reach the normalization layers.
+
+        ``last_hidden_state`` is ``(2, 16, 128)`` under both settings, so the
+        old assertion held whether or not the kwarg was honoured. RMSNorm has no
+        centering shift, so it holds strictly FEWER weights than LayerNorm --
+        a structural difference the weight-shape signature pins directly. (An
+        output-difference check would not: different signatures consume
+        different RNG draws, so the outputs differ either way.)
+        """
         base_config = {"vocab_size": 1000, "hidden_size": 128, "num_layers": 2, "num_heads": 8}
+
+        def _build(norm_type):
+            model = BERT(**base_config, normalization_type=norm_type)
+            model(keras.ops.zeros((1, 16), dtype='int32'), training=False)
+            return model
+
+        builders = {n: (lambda n=n: _build(n)) for n in ["layer_norm", "rms_norm"]}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="normalization_type")
+        assert len(sigs["rms_norm"]) < len(sigs["layer_norm"]), (
+            "rms_norm should drop one weight per norm layer (no beta), but held "
+            f"{len(sigs['rms_norm'])} vs layer_norm's {len(sigs['layer_norm'])}"
+        )
+
         for norm_type in ["layer_norm", "rms_norm"]:
             model = BERT(**base_config, normalization_type=norm_type)
             input_ids = keras.ops.cast(keras.random.uniform((2, 16), maxval=1000), 'int32')

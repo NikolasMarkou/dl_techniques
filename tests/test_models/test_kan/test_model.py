@@ -23,6 +23,8 @@ from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.models.kan.model import KAN, create_kan_model
 from dl_techniques.utils.logger import logger
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 
 class TestKAN:
     """Test suite for modern KAN model implementation."""
@@ -333,6 +335,25 @@ class TestKAN:
                 "input_features": 8
             }
         ]
+
+        # `layer_configs` is structural: depth, width and per-layer grid_size
+        # all land in the parameterisation. The per-architecture shape check
+        # below is a contract check, not evidence that the config was honoured
+        # (the output width is read straight back out of the same config).
+        def _build(cfg):
+            model = KAN(**cfg)
+            model(keras.ops.zeros((1, cfg["input_features"])))
+            return model
+
+        builders = {
+            i: (lambda cfg=cfg: _build(cfg)) for i, cfg in enumerate(architectures)
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="layer_configs")
+        # Deeper config => strictly more weight tensors than the single-layer one.
+        assert len(sigs[0]) < len(sigs[1]), (
+            f"a 1-layer KAN held {len(sigs[0])} weights and a 5-layer KAN "
+            f"{len(sigs[1])}; layer_configs is not building the requested depth"
+        )
 
         for arch_config in architectures:
             model = KAN(**arch_config)

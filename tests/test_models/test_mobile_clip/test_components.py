@@ -13,6 +13,8 @@ from dl_techniques.models.mobile_clip.components import (
     MobileClipTextEncoder
 )
 
+from ..knob_sensitivity_oracle import assert_value_knob_changes_output
+
 class TestImageProjectionHead:
     """Comprehensive test suite for ImageProjectionHead layer."""
 
@@ -131,8 +133,25 @@ class TestImageProjectionHead:
             ImageProjectionHead(projection_dim=512, dropout_rate=1.5)  # Invalid dropout
 
     def test_different_activations(self, sample_input):
-        """Test different activation functions."""
+        """The activation must reach the projection head's forward pass.
+
+        A value knob: the head holds the same weights for every activation, so
+        under one seed the layers are bit-identical and the whole output
+        difference is the activation. ``None`` (linear) is included, which is
+        the setting a dropped kwarg would silently collapse the others onto.
+        """
         activations_to_test = [None, 'relu', 'gelu', 'tanh']
+
+        def _build(activation):
+            layer = ImageProjectionHead(projection_dim=256, activation=activation)
+            layer(keras.ops.zeros_like(sample_input[:1]))
+            return layer
+
+        builders = {a: (lambda a=a: _build(a)) for a in activations_to_test}
+        deltas = assert_value_knob_changes_output(
+            builders, sample_input, knob="activation",
+        )
+        assert min(deltas.values()) > 1e-5
 
         for activation in activations_to_test:
             layer = ImageProjectionHead(projection_dim=256, activation=activation)
