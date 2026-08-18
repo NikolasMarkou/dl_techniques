@@ -356,7 +356,21 @@ class TestBERTIntegration:
             outputs = classification_model(inputs, training=True)
             logits = outputs['logits']
             targets = keras.ops.one_hot(keras.ops.array([0, 2]), 3)
-            loss = keras.ops.mean(keras.losses.categorical_crossentropy(targets, logits))
+            # `from_logits=True` is REQUIRED here and was missing. With the
+            # default `False`, Keras treats these logits as probabilities:
+            # it renormalizes by their sum and CLIPS to [eps, 1-eps], and for
+            # some input draws every element lands in the clipped region, where
+            # the loss is constant and EVERY gradient is exactly 0.0. MEASURED
+            # 2026-08-18: 61 of 61 trainable weights had identically-zero
+            # gradients on one such draw, which is why this test was
+            # order-dependent -- importing a sibling test module shifts the RNG
+            # stream and changes the ids. The old `all(norm >= 0.0)` assertion
+            # reported green either way.
+            loss = keras.ops.mean(
+                keras.losses.categorical_crossentropy(
+                    targets, logits, from_logits=True
+                )
+            )
 
         gradients = tape.gradient(loss, classification_model.trainable_weights)
         non_none_grads = [g for g in gradients if g is not None]
@@ -390,13 +404,17 @@ class TestBERTIntegration:
         deleted rather than fixed.
 
         The bar is derived from the trivial baseline, not chosen: after 100 Adam
-        steps at 1e-3 on ONE fixed batch, the model must be at least as good as
-        the constant predictor that outputs the uniform distribution, whose loss
-        is ``ln(3) = 1.0986``. Measured over 4 independent runs of exactly this
-        body: initial 4.06 / 10.11 / 3.94 / 4.89, final 0.8240 / 1.0986 /
-        1.0986 / 0.2747. The finals are quantised at ``k/4 * ln(3)`` -- k of the
-        4 examples memorised, the rest left at uniform -- so ``<= ln(3)`` is the
-        real ceiling and the 2% margin below is slack, not a fitted bound.
+        steps at 1e-3 on ONE fixed batch of 4 examples, the model must be far
+        better than the constant predictor that outputs the uniform
+        distribution, whose loss is ``ln(3) = 1.0986``. MEASURED over 4
+        independent runs of exactly this body: initial 1.1041 / 1.0639 /
+        1.0646 / 1.0858 (i.e. the uniform value, as random logits should give)
+        and final 0.0334 / 0.0363 / 0.0371 / 0.0272 -- the batch is memorised,
+        a ~30x drop. The bar below is a QUARTER of the uniform baseline
+        (0.2747), roughly 7x above the worst measurement.
+
+        NOTE the ``from_logits=True`` above: without it this loop's gradients
+        can be identically zero. See the comment at ``test_gradient_flow_integration``.
         """
         optimizer = keras.optimizers.Adam(learning_rate=1e-3)
         batch_size, seq_length = 4, 16
@@ -413,7 +431,9 @@ class TestBERTIntegration:
             with tf.GradientTape() as tape:
                 outputs = classification_model(inputs, training=True)
                 loss = keras.ops.mean(
-                    keras.losses.sparse_categorical_crossentropy(labels, outputs['logits'])
+                    keras.losses.sparse_categorical_crossentropy(
+                        labels, outputs['logits'], from_logits=True
+                    )
                 )
             loss_value = float(loss)
             assert np.isfinite(loss_value), f"loss became {loss_value} at step {step}"
@@ -427,10 +447,11 @@ class TestBERTIntegration:
             f"100 Adam steps at 1e-3 on a single fixed batch did not reduce the "
             f"loss at all: {initial_loss:.4f} -> {loss_value:.4f}."
         )
-        assert loss_value <= uniform_baseline * 1.02, (
-            f"after 100 steps the loss is {loss_value:.4f}, worse than the "
-            f"constant uniform predictor's {uniform_baseline:.4f}; the model is "
-            f"not learning (initial was {initial_loss:.4f})."
+        assert loss_value < 0.25 * uniform_baseline, (
+            f"after 100 steps the loss is {loss_value:.4f}; the constant "
+            f"uniform predictor scores {uniform_baseline:.4f} and a model that "
+            f"memorises this 4-example batch measures ~0.03. Initial was "
+            f"{initial_loss:.4f}."
         )
 
 

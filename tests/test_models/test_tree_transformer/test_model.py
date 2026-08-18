@@ -464,7 +464,12 @@ class TestTreeTransformerIntegration:
                 9,
             )
             loss = keras.ops.mean(
-                keras.losses.categorical_crossentropy(targets, logits)
+                # from_logits=True: the head emits logits, and the default
+                # renormalize-and-clip path can zero every gradient (measured
+                # on BERT's identical test; see test_bert.py:359).
+                keras.losses.categorical_crossentropy(
+                    targets, logits, from_logits=True
+                )
             )
 
         gradients = tape.gradient(
@@ -522,7 +527,7 @@ class TestTreeTransformerIntegration:
                 outputs = token_classification_model(inputs, training=True)
                 loss = keras.ops.mean(
                     keras.losses.sparse_categorical_crossentropy(
-                        labels, outputs["logits"]
+                        labels, outputs["logits"], from_logits=True
                     )
                 )
             if initial_loss is None:
