@@ -81,11 +81,30 @@ Two behavioural choices are worth stating as choices. `use_feature_alignment`
 defaults to `True` while `enable_semi_supervised` defaults to `False`, so the
 default configuration *builds* the teacher — roughly doubling parameter count and
 memory — while the custom `train_step` never routes through the semi-supervised
-branch that would use it. Enable the second, or disable the first, rather than
-paying for a teacher that does nothing. And the clone is wrapped in a
-`try/except` that degrades to `use_feature_alignment = False` with a warning
-instead of raising, so an encoder that cannot be cloned yields a working but
-silently unregularized model.
+branch that would use it. Enable the second rather than paying for a teacher that
+does nothing; `__init__` warns about exactly this combination. Note that
+*disabling the first* is no longer a way to avoid the teacher when semi-supervision
+is on: the pseudo-label consistency term needs a teacher regardless of whether the
+feature-alignment term is wanted, so the teacher is built whenever either flag is
+set and `use_feature_alignment` now governs only the FAL term. And the clone is
+wrapped in a `try/except` that degrades to `use_feature_alignment = False` with a
+warning instead of raising, so an encoder that cannot be cloned yields a working
+but silently unregularized model — and, when semi-supervision was requested, one
+whose consistency term is inactive too, which the same warning says.
+
+This model overrides `train_step`, against this repository's standing rule that
+models use stock `fit()` and feed extra signals through `tf.data`. The exception
+is deliberate and was measured before it was granted: the semi-supervised path
+consumes two batches per step with *different* augmentation applied to each
+(teacher on the clean unlabeled batch, student on the perturbed one — the
+asymmetry above is the entire recipe), and it reads a teacher network that is not
+part of the loss graph. `compute_loss(x, y, y_pred, sample_weight, training)`
+receives neither the second batch nor the teacher, so the rule's prescribed shape
+cannot express this step. The price of the exception is that everything Keras'
+default `train_step` does for free must be done by hand here — in particular
+feeding `self._loss_tracker`, which the default `compute_loss` does *not* do; see
+`_finalize_train_step`. Do not treat this file as precedent for an ordinary
+single-batch model.
 
 Serialization overrides `save_own_variables` / `load_own_variables` to write the
 entire ordered `self.weights` list into flat numeric slots at the top level.
@@ -188,8 +207,13 @@ class DepthAnything(keras.Model):
             range. Pass None for standardized or `[-1, +1]` inputs — see
             `create_depth_anything` for the full contract.
             Defaults to (0.0, 1.0).
-        use_feature_alignment: Boolean, whether to use feature alignment loss.
-            Defaults to True.
+        use_feature_alignment: Boolean, whether to add the feature-alignment
+            loss term during semi-supervised training. This governs the FAL
+            *term* only; it no longer governs whether the teacher encoder is
+            built, because `enable_semi_supervised`'s pseudo-label consistency
+            term needs a teacher of its own. Setting it True with
+            `enable_semi_supervised` False builds a teacher nothing reads, and
+            warns. Defaults to True.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -279,6 +303,16 @@ class DepthAnything(keras.Model):
         self.encoder_kind = encoder_kind
         self.enable_semi_supervised = bool(enable_semi_supervised)
 
+        if self.use_feature_alignment and not self.enable_semi_supervised:
+            logger.warning(
+                "DepthAnything: use_feature_alignment=True with "
+                "enable_semi_supervised=False builds the teacher encoder — "
+                "roughly doubling parameter count and memory — while train_step "
+                "never routes through the branch that reads it. Set "
+                "enable_semi_supervised=True to use it, or "
+                "use_feature_alignment=False to stop paying for it."
+            )
+
         # Encoder geometry: stride from patch_size for real ViT, 32 for placeholder
         # (initial stride-2 conv + 3 maxpools across 4 stages — last stage no pool).
         if self.encoder_kind == 'real':
@@ -358,7 +392,22 @@ class DepthAnything(keras.Model):
         #   3) copy weights student → teacher and freeze.
         # Wrapped in try/except — if cloning fails on an exotic subclass we
         # disable feature alignment for the run rather than crash the model.
-        if self.use_feature_alignment:
+        #
+        # DECISION plan-2026-08-17T183311-79c63e38/D-033
+        # The teacher is built whenever EITHER flag is set, not just under
+        # `use_feature_alignment`. `enable_semi_supervised` needs a teacher for
+        # the pseudo-label consistency term, which is not a feature-space term
+        # and has nothing to do with feature alignment. When this condition was
+        # `if self.use_feature_alignment:` alone, the documented combination
+        # `enable_semi_supervised=True, use_feature_alignment=False` — exposed
+        # as two INDEPENDENT CLI flags by `src/train/depth_anything/` — built no
+        # teacher, so `_train_step_semi_supervised` unpacked `x_unlab`, used it
+        # for nothing, and silently degraded to labeled-only training at half
+        # the throughput, with `update_teacher_ema` a no-op as well. Do not
+        # narrow this back to the FAL knob; `use_feature_alignment` governs the
+        # FAL *term* (see `_train_step_semi_supervised`), not the teacher's
+        # existence.
+        if self.use_feature_alignment or self.enable_semi_supervised:
             try:
                 dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
                 _ = self.encoder(dummy, training=False)
@@ -369,7 +418,13 @@ class DepthAnything(keras.Model):
             except Exception as exc:  # pragma: no cover — diagnostic path
                 logger.warning(
                     f"DepthAnything: clone_model(encoder) failed ({exc!r}); "
-                    "disabling feature alignment for this run."
+                    "disabling feature alignment for this run"
+                    + (
+                        ", and the pseudo-label consistency term with it — "
+                        "semi-supervised training will run labeled-only."
+                        if self.enable_semi_supervised
+                        else "."
+                    )
                 )
                 self.frozen_encoder = None
                 self.use_feature_alignment = False
@@ -388,12 +443,18 @@ class DepthAnything(keras.Model):
         """Update the frozen teacher encoder via EMA over the student weights.
 
         Intended to be called from a Keras callback per training step. No-op when
-        feature alignment is disabled or the frozen encoder was not built.
+        the frozen encoder was not built.
+
+        The condition is the teacher's existence alone. It used to also require
+        ``use_feature_alignment``, which pinned the teacher at its initial
+        weights for the whole run under ``enable_semi_supervised=True,
+        use_feature_alignment=False`` — the pseudo-label consistency term needs
+        a *moving* teacher just as much as the alignment term does.
 
         Args:
             decay: EMA decay factor in ``[0,1]``. Higher values → slower update.
         """
-        if self.frozen_encoder is None or not self.use_feature_alignment:
+        if self.frozen_encoder is None:
             return
         student_w = self.encoder.get_weights()
         teacher_w = self.frozen_encoder.get_weights()
@@ -444,7 +505,7 @@ class DepthAnything(keras.Model):
             f"unused_in_source={len(report.unused_in_source)}"
         )
         # Re-sync the frozen teacher so it starts from the pretrained snapshot.
-        if self.frozen_encoder is not None and self.use_feature_alignment:
+        if self.frozen_encoder is not None:
             try:
                 self.frozen_encoder.set_weights(self.encoder.get_weights())
                 logger.info("from_pretrained_encoder: teacher re-synced from student.")
@@ -695,6 +756,72 @@ class DepthAnything(keras.Model):
         x_aug, mix = self.augmentation.augment_with_mix(x, training=True)
         return x_aug, [self.augmentation.apply_mix_to_target(t, mix) for t in targets]
 
+    # DECISION plan-2026-08-17T183311-79c63e38/D-033
+    # Both custom step methods MUST end here. Two things Keras' default
+    # `train_step` does for free are not free once `train_step` is overridden,
+    # and both were missing:
+    #   1. `self._loss_tracker` is fed by the DEFAULT `train_step`, NOT by
+    #      `compute_loss`. Both methods previously ran
+    #      `for m in self.metrics: if m.name != "loss": m.update_state(y, y_pred)`
+    #      and never fed the tracker anywhere, so `history.history["loss"]` was
+    #      the `Mean` metric's reset default `0.0` on every step of every run —
+    #      MEASURED `[0.0, 0.0]` across two epochs — and every
+    #      `ModelCheckpoint`/`EarlyStopping`/`ReduceLROnPlateau` monitoring
+    #      `"loss"` was dead. `test_step` is not overridden, which is why
+    #      `val_loss` was real and the shipped trainer never surfaced this.
+    #   2. `self.metrics` yields the `CompileMetrics` CONTAINER, whose
+    #      `.result()` is a dict. Do NOT skip the tracker by name: the tracker
+    #      is identified by identity here, as in `capsnet/model.py`, because
+    #      `Mean.update_state(y, y_pred)` accepts `(y, y_pred)` as
+    #      `(values, sample_weight)` without raising and would silently
+    #      accumulate garbage.
+    def _finalize_train_step(
+        self,
+        y: keras.KerasTensor,
+        y_pred: keras.KerasTensor,
+        loss: keras.KerasTensor,
+    ) -> Dict[str, keras.KerasTensor]:
+        """Update every metric and return a FLAT logs dict.
+
+        Interface contract (called from both training paths, and only from
+        inside a step method after the gradients have been applied):
+
+        * Updates each compiled metric with ``(y, y_pred)`` and feeds
+          ``self._loss_tracker`` the scalar ``loss`` that was actually
+          optimized — including every auxiliary term, not just the labeled one.
+        * Returns ``{metric_name: scalar}``. `CompileMetrics.result()` returns a
+          nested dict and is spliced in flat, so no ``"compile_metrics"`` key
+          survives. Keras' own `pythonify_logs` would flatten it for callbacks
+          anyway, but a direct `model.train_step(batch)` caller sees the raw
+          dict, and that one was nested.
+        * Never raises for a missing tracker: `_loss_tracker` only exists after
+          `compile()`.
+
+        Args:
+            y: Ground-truth targets for the compiled metrics.
+            y_pred: Model predictions for the compiled metrics.
+            loss: The scalar total loss that was backpropagated.
+
+        Returns:
+            Flat mapping of metric name to scalar result.
+        """
+        loss_tracker = getattr(self, "_loss_tracker", None)
+        for metric in self.metrics:
+            if metric is loss_tracker:
+                continue
+            metric.update_state(y, y_pred)
+        if loss_tracker is not None:
+            loss_tracker.update_state(loss)
+
+        results: Dict[str, keras.KerasTensor] = {}
+        for metric in self.metrics:
+            value = metric.result()
+            if isinstance(value, dict):
+                results.update(value)
+            else:
+                results[metric.name] = value
+        return results
+
     def _train_step_labeled(
         self,
         x: keras.KerasTensor,
@@ -714,10 +841,7 @@ class DepthAnything(keras.Model):
         gradients = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        for m in self.metrics:
-            if m.name != "loss":
-                m.update_state(y, y_pred)
-        return {m.name: m.result() for m in self.metrics}
+        return self._finalize_train_step(y, y_pred, loss)
 
     def _train_step_semi_supervised(
         self,
@@ -725,7 +849,7 @@ class DepthAnything(keras.Model):
         x_unlab: keras.KerasTensor,
         y: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Semi-supervised path: labeled compute_loss + FAL + consistency.
+        """Semi-supervised path: labeled compute_loss + consistency + optional FAL.
 
         Both branches take the teacher's view from the *clean* batch and the
         student's from the *augmented* one — that asymmetry is the whole recipe.
@@ -740,8 +864,19 @@ class DepthAnything(keras.Model):
             loss = self.compute_loss(x=x_lab, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)
 
-            # ---- semi-sup branch: FAL + consistency ----
-            if self.use_feature_alignment and self.frozen_encoder is not None:
+            # ---- semi-sup branch: consistency (always) + FAL (opt-in) ----
+            # DECISION plan-2026-08-17T183311-79c63e38/D-033
+            # The gate is the TEACHER's existence, not `use_feature_alignment`.
+            # Both terms used to sit under `self.use_feature_alignment`, while
+            # `train_step` routes here on `self.enable_semi_supervised` alone —
+            # so the documented `enable_semi_supervised=True,
+            # use_feature_alignment=False` configuration executed this method,
+            # skipped the whole block, and was labeled-only training that paid
+            # to unpack and discard `x_unlab`. Pseudo-label consistency is an
+            # L1 between depth maps; it is not a feature-space term and must
+            # not be coupled to the feature-alignment knob. Only the FAL term
+            # below reads that knob.
+            if self.frozen_encoder is not None:
                 # The teacher's pseudo-depth is read off the clean batch, then
                 # mixed by the same box the student's input received.
                 pseudo = self._pseudo_label_depth(x_unlab)
@@ -749,22 +884,24 @@ class DepthAnything(keras.Model):
                     x_unlab, [pseudo]
                 )
 
-                # Feature-Alignment-Loss on unlabeled features. The student sees
-                # the augmented batch here too — reading `self.encoder(x_unlab)`
-                # directly would bypass `self.augmentation` and reduce the term
-                # to a train/eval-mode difference between two initially
-                # identical encoders.
-                feat_student = self.encoder(x_unlab_aug, training=True)
-                feat_teacher = self.frozen_encoder(x_unlab, training=False)
-                # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
-                if len(feat_student.shape) == 4:
-                    feat_student = ops.mean(feat_student, axis=[1, 2])
-                    feat_teacher = ops.mean(feat_teacher, axis=[1, 2])
-                elif len(feat_student.shape) == 3:
-                    feat_student = ops.mean(feat_student[:, 1:, :], axis=1)
-                    feat_teacher = ops.mean(feat_teacher[:, 1:, :], axis=1)
-                fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
-                loss = loss + self.loss_weights.get('feature', 0.1) * fal
+                if self.use_feature_alignment:
+                    # Feature-Alignment-Loss on unlabeled features. The student
+                    # sees the augmented batch here too — reading
+                    # `self.encoder(x_unlab)` directly would bypass
+                    # `self.augmentation` and reduce the term to a
+                    # train/eval-mode difference between two initially
+                    # identical encoders.
+                    feat_student = self.encoder(x_unlab_aug, training=True)
+                    feat_teacher = self.frozen_encoder(x_unlab, training=False)
+                    # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
+                    if len(feat_student.shape) == 4:
+                        feat_student = ops.mean(feat_student, axis=[1, 2])
+                        feat_teacher = ops.mean(feat_teacher, axis=[1, 2])
+                    elif len(feat_student.shape) == 3:
+                        feat_student = ops.mean(feat_student[:, 1:, :], axis=1)
+                        feat_teacher = ops.mean(feat_teacher[:, 1:, :], axis=1)
+                    fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
+                    loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
                 # Pseudo-label consistency: L1 between student depth on the
                 # augmented batch and the teacher's identically mixed,
@@ -777,10 +914,7 @@ class DepthAnything(keras.Model):
         gradients = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        for m in self.metrics:
-            if m.name != "loss":
-                m.update_state(y, y_pred)
-        return {m.name: m.result() for m in self.metrics}
+        return self._finalize_train_step(y, y_pred, loss)
 
     def train_step(self, data: Any) -> Dict[str, keras.KerasTensor]:
         """Execute one training step.
@@ -791,9 +925,9 @@ class DepthAnything(keras.Model):
           :meth:`_train_step_labeled`.
         * ``((x_lab, x_unlab), y_lab)`` — semi-supervised path. Active only
           when ``self.enable_semi_supervised`` is True. Routed to
-          :meth:`_train_step_semi_supervised`. The semi-sup branch adds a
-          Feature-Alignment-Loss term and a stop-gradient pseudo-label
-          L1-consistency term over ``x_unlab``.
+          :meth:`_train_step_semi_supervised`, which adds a stop-gradient
+          pseudo-label L1-consistency term over ``x_unlab`` and, when
+          ``use_feature_alignment`` is also set, a Feature-Alignment-Loss term.
 
         Args:
             data: Training data batch.

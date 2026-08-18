@@ -82,10 +82,10 @@ on this machine.
 | `--max-val-files`             | `1000`                                    | Cap on validation pairs. |
 | `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. |
 | `--encoder-kind`              | `real`                                    | `real` (in-tree `ViT`) or `placeholder` (Conv-BN-ReLU compat). |
-| `--enable-semi-supervised`    | off                                       | Activates FAL + pseudo-label consistency train_step path on `((x_lab,x_unlab),y_lab)`. Combine with `--unlabeled-image-glob`. |
+| `--enable-semi-supervised`    | off                                       | Activates the pseudo-label consistency train_step path on `((x_lab,x_unlab),y_lab)`, plus the FAL term when `--use-feature-alignment` is also on. Combine with `--unlabeled-image-glob`. |
 | `--unlabeled-image-glob`      | `None`                                    | Glob to unlabeled RGB images (e.g. `'/data/unlab/**/*.jpg'`); paired with `MegaDepthDataset` via `pair_labeled_unlabeled`. |
 | `--pretrained-encoder-weights`| `None`                                    | Path to a saved encoder `.keras` file. Loaded via `DepthAnything.from_pretrained_encoder`; re-syncs the EMA teacher. |
-| `--ema-schedule`              | `none`                                    | `{cosine,linear,none}`. Drives `TeacherEMACallback` when `--use-feature-alignment` is on. |
+| `--ema-schedule`              | `none`                                    | `{cosine,linear,none}`. Drives `TeacherEMACallback` when `--use-feature-alignment` **or** `--enable-semi-supervised` is on (both read the teacher). |
 | `--ema-decay-start`           | `0.5`                                     | EMA decay at step 0. |
 | `--ema-decay-end`             | `0.999`                                   | EMA decay asymptote at the end of the run. |
 | `--ema-warmup-steps`          | `0`                                       | Number of training steps before EMA updates begin. |

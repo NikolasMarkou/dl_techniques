@@ -46,7 +46,7 @@ It is composed of three sub-networks:
 |--------------------|-------------------------------|-------------------|-----------|
 | `encoder`          | `keras.Model` (`ViT` or Conv) | `__init__`/`build()` | yes |
 | `decoder`          | `DPTDecoder`                  | `build()`         | yes |
-| `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` | no |
+| `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
 | `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
 Forward path (`call`):
@@ -67,10 +67,19 @@ un-augmented forward pass.
 `train_step` accepts two input shapes:
 
 * `(x, y)` — labeled-only path (default).
-* `((x_lab, x_unlab), y_lab)` — semi-supervised path. Active only when
-  `enable_semi_supervised=True` AND `use_feature_alignment=True`. Adds a
-  Feature-Alignment Loss term on unlabeled features against the
-  weight-shared frozen teacher.
+* `((x_lab, x_unlab), y_lab)` — semi-supervised path. Active when
+  `enable_semi_supervised=True`. Adds a stop-gradient pseudo-label
+  L1-consistency term over `x_unlab` against the weight-shared frozen
+  teacher, plus a Feature-Alignment Loss term on unlabeled features when
+  `use_feature_alignment=True` as well.
+
+  This used to read "active only when `enable_semi_supervised=True` **AND**
+  `use_feature_alignment=True`", and that was an accurate description of a
+  bug rather than of a design: both terms sat under the FAL flag while
+  `train_step` routed on `enable_semi_supervised` alone, so
+  `enable_semi_supervised=True, use_feature_alignment=False` unpacked the
+  unlabeled batch and used it for nothing. Fixed in
+  `plan-2026-08-17T183311-79c63e38` (D-033).
 
 ---
 
@@ -287,7 +296,7 @@ Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
 | `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`. |
 | `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`. |
 | `input_value_range`      | `Tuple[float,float]` \| `None` | `(0.0, 1.0)`                       | Declared input range for the colour-jitter clip. `None` for standardized / `[-1,+1]` inputs. |
-| `use_feature_alignment`  | `bool`                     | `True`                                 | Builds `frozen_encoder` (weight-shared at build). |
+| `use_feature_alignment`  | `bool`                     | `True`                                 | Adds the FAL term in the semi-supervised step. Also builds `frozen_encoder` — but so does `enable_semi_supervised`, which needs a teacher for its consistency term. Setting this True with `enable_semi_supervised=False` builds a teacher nothing reads, and warns. |
 | `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
 `DPTDecoder` (used internally):
@@ -373,11 +382,46 @@ folded into the work below. Item numbers are kept stable for traceability.
   (`TestMultiEpochFALStability`): 3 epochs * 2 steps semi-sup synthetic;
   asserts losses finite, last <= 1.5 * first, and teacher weights moved.
 
+**FIXED in `plan-2026-08-17T183311-79c63e38`** (D-033):
+
+* **The consistency term was gated on the wrong flag.** Both the FAL term
+  and the pseudo-label consistency term sat under `use_feature_alignment`,
+  while `train_step` routes to `_train_step_semi_supervised` on
+  `enable_semi_supervised` alone. `enable_semi_supervised=True,
+  use_feature_alignment=False` — two independent CLI flags in
+  `src/train/depth_anything/` — therefore unpacked `x_unlab`, used it for
+  nothing, and silently trained labeled-only at half the throughput, with
+  `update_teacher_ema` a no-op too. The teacher is now built under either
+  flag, consistency is gated on the teacher's existence, and
+  `use_feature_alignment` governs only the FAL term. The trainer's EMA
+  callback condition was widened to match.
+* **`self._loss_tracker` was never fed.** Keras 3 updates it inside the
+  DEFAULT `train_step`, not inside `compute_loss`, and both step methods
+  explicitly skipped `"loss"` in their metrics loop. MEASURED:
+  `history.history["loss"] == [0.0, 0.0]` across two epochs, so every
+  `ModelCheckpoint`/`EarlyStopping`/`ReduceLROnPlateau` monitoring `"loss"`
+  was dead. `test_step` is not overridden, which is why `val_loss` was real
+  and the shipped trainer (which monitors `val_loss`) never exposed it.
+  Both paths now route through `_finalize_train_step`.
+* **The returned logs dict nested under `"compile_metrics"`.** Now flat.
+  Scope correction: this was *never* visible in `history.history`, because
+  Keras' `pythonify_logs` recursively splices nested dicts into the parent
+  and discards the outer key. It was visible only to a direct
+  `model.train_step(batch)` caller.
+
+Guards: `tests/test_models/test_depth_anything/test_train_step.py`
+(8 tests, 6 RED-proven at `b0914e836`).
+
 **STILL OPEN**:
 
 * **#5 (base note)** — Custom `train_step` uses `tf.GradientTape` rather
-  than default Keras `train_step`. Acceptable for now (semi-sup path needs
-  the custom tape). *(LOW.)*
+  than default Keras `train_step`. This is now a *sanctioned* exception
+  rather than an open issue: the semi-supervised path is dual-batch with
+  asymmetric augmentation and reads a teacher outside the loss graph, none
+  of which `compute_loss(x, y, y_pred, sample_weight, training)` can carry.
+  The rationale is written into `model.py`'s module docstring so it ships
+  with the code. Do not cite this file as precedent for an ordinary
+  single-batch model. *(LOW.)*
 
 **REMOVED** (issue no longer applicable):
 
