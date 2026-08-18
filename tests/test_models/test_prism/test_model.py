@@ -7,6 +7,7 @@ shape inference, and integration with training pipeline.
 
 import os
 import keras
+import logging
 import pytest
 import tempfile
 import numpy as np
@@ -249,6 +250,64 @@ class TestPRISMModelInstantiation:
             num_features=7,
         )
         assert model.context_len == 96
+
+
+class TestPRISMDegenerateBandWarning:
+    """``min_band_len == 1`` is supported, but it must not be silent."""
+
+    def test_warning_fires_at_min_band_len_one(self, caplog) -> None:
+        """``context_len=96, tree_depth=3, num_wavelet_levels=3`` -> band 1.
+
+        Measured (36-cell grid, D-002): deepest_leaf_seg 12, ``12 >> 3 == 1``.
+        Threshold = 1 ALLOWS this, so nothing raises -- but the deepest bands
+        carry a single timestep, where ``mean == min == max`` and both
+        first-difference features are a fabricated exact ``0.0``. The only
+        record of that used to be README prose a ``from_variant`` caller never
+        sees.
+        """
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=3,
+                num_wavelet_levels=3,
+                num_layers=1,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        degenerate = [m for m in messages if "min_band_len=1" in m]
+        assert degenerate, f"no degenerate-boundary warning in: {messages}"
+        message = degenerate[0]
+        for knob in (
+            "context_len",
+            "tree_depth",
+            "num_wavelet_levels",
+            "overlap_ratio",
+        ):
+            assert knob in message, f"{knob!r} missing from: {message}"
+        assert "SINGLE timestep" in message
+
+    def test_warning_does_not_fire_at_min_band_len_two_or_more(
+        self, caplog
+    ) -> None:
+        """The default config (``min_band_len == 3``) must stay quiet.
+
+        ``context_len=96, tree_depth=2, num_wavelet_levels=3``: deepest_leaf_seg
+        25, ``25 >> 3 == 3``.
+        """
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=2,
+                num_wavelet_levels=3,
+                num_layers=1,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if "min_band_len=1" in m], (
+            f"warning fired at min_band_len=3: {messages}"
+        )
 
 
 class TestPRISMModelTimeAxisContract:

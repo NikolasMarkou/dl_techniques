@@ -393,6 +393,36 @@ class PRISMModel(keras.Model, ForecastMixin):
                 f"statistics are undefined. Every band must have length "
                 f">= 1. Remedies: " + ", or ".join(remedies) + "."
             )
+        elif min_band_len == 1:
+            # DECISION plan-2026-08-18T073231-52a93f8c/D-013
+            # `min_band_len == 1` is ALLOWED (threshold = 1, D-002) but it is
+            # the degenerate boundary, not a normal operating point: a
+            # single-timestep band has `mean == min == max == the one sample`,
+            # `std == sqrt(epsilon)`, and BOTH diff features are the exact
+            # `0.0` D-004 defines for a first difference that does not exist.
+            # A shipped preset sits exactly there (`MODEL_VARIANTS["large"]`
+            # at `context_len=96`: deepest_leaf_seg 25, 25 >> 4 == 1) and a
+            # `from_variant("large", context_len=96)` caller never reads the
+            # README paragraph that documents it -- so the limitation is
+            # surfaced at runtime, once, at construction.
+            # Do NOT move this into `call()`: the house rule forbids logging
+            # from the forward path, it fires on every trace.
+            # Do NOT promote it to a raise: that is threshold = 2, which D-002
+            # rejected by measurement. See decisions.md D-013 and D-010.
+            logger.warning(
+                f"PRISM configuration is at the degenerate boundary: "
+                f"context_len={context_len}, tree_depth={tree_depth}, "
+                f"num_wavelet_levels={num_wavelet_levels}, overlap_ratio="
+                f"{overlap_ratio} give deepest_leaf_seg={deepest_leaf_seg} "
+                f"and min_band_len=1, so the deepest frequency bands carry a "
+                f"SINGLE timestep. Their statistics are degenerate (mean == "
+                f"min == max == that one sample, and both first-difference "
+                f"features are exactly 0.0 by definition rather than by "
+                f"measurement), so those bands carry almost no information "
+                f"into the router. This is supported, not an error. To avoid "
+                f"it, raise context_len or lower tree_depth / "
+                f"num_wavelet_levels."
+            )
 
         # Validate or generate quantile levels
         if quantile_levels is not None:
