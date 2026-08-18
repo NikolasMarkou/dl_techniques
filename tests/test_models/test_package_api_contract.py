@@ -23,6 +23,7 @@ import ast
 import importlib
 import inspect
 import re
+import warnings
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -386,3 +387,302 @@ class TestNoKeras2Residues:
             "use keras.config.floatx()/epsilon() and tf.GradientTape; "
             f"keras.backend.* found at: {offenders}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Silent-kwarg-drop guard (the inverse of the factories' strict-drop raise).
+# ---------------------------------------------------------------------------
+
+LAYERS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "layers"
+
+#: The three factories whose registries declare a per-type parameter set. Maps
+#: the factory's function name to (its type-selecting parameter, its registry).
+#: ``norms``/``activations``/``sampling`` are deliberately absent: they have no
+#: ``required_params``/``optional_params`` registry, so there is no declared-param
+#: ground truth to diff a call site against.
+_REGISTRY_FACTORIES = {
+    "create_attention_layer": "attention_type",
+    "create_ffn_layer": "ffn_type",
+    "create_embedding_layer": "embedding_type",
+}
+
+#: Attributes every Keras layer/model carries. A call site is never "demonstrably
+#: had the value" because ``keras.layers.Layer`` set one of these.
+_KERAS_BASE_ATTRS = frozenset(
+    {
+        "built",
+        "name",
+        "trainable",
+        "dtype",
+        "dtype_policy",
+        "supports_masking",
+        "activity_regularizer",
+        "input_spec",
+    }
+)
+
+#: Sites that are SCHEDULED WORK, not accepted exceptions.
+#:
+#: **This list must reach empty.** Each entry is a measured instance of the
+#: defect this guard exists to catch; it is waived only so the suite is green at
+#: every commit while the fixes land one at a time. Deleting an entry is part of
+#: the commit that fixes it. When the last one goes, this constant stays -- empty
+#: -- and the guard becomes unconditional.
+#:
+#: Key is ``(path relative to src/dl_techniques, class, factory type, param)``.
+#: Deliberately NOT keyed by line number: the fixes themselves move lines, and a
+#: waiver that silently stops matching is a waiver that hides a live defect.
+_SCHEDULED_FIXES = {
+    # 2026-08-18, F-83 -- Gemma3TransformerBlock stores both and forwards neither;
+    # get_config() serializes them, so a round trip advertises a knob that never
+    # reached a weight. use_bias is a weight-SET change.
+    ("models/gemma/components.py", "Gemma3TransformerBlock", "group_query", "kernel_initializer"),
+    ("models/gemma/components.py", "Gemma3TransformerBlock", "group_query", "use_bias"),
+    # 2026-08-18, F-75 -- Swin's patch embedding drops the whole initializer/
+    # regularizer set; the stem trains at glorot regardless of what was asked for.
+    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "kernel_initializer"),
+    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "bias_initializer"),
+    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "kernel_regularizer"),
+    ("models/swin_transformer/model.py", "SwinTransformer", "patch_2d", "bias_regularizer"),
+    # 2026-08-18, N-04 -- same defect as F-75, found by this guard's own
+    # calibration run rather than by hand; ViT additionally drops `activation`.
+    ("models/vit/model.py", "ViT", "patch_2d", "kernel_initializer"),
+    ("models/vit/model.py", "ViT", "patch_2d", "bias_initializer"),
+    ("models/vit/model.py", "ViT", "patch_2d", "kernel_regularizer"),
+    ("models/vit/model.py", "ViT", "patch_2d", "bias_regularizer"),
+    ("models/vit/model.py", "ViT", "patch_2d", "activation"),
+    # 2026-08-18, N-04 -- both Qwen3 embedding wrappers accept `dropout_rate`,
+    # store it, serialize it, and build the positional embedding without it.
+    ("models/qwen/qwen3_embeddings.py", "Qwen3EmbeddingLayer", "positional_learned", "dropout_rate"),
+    ("models/qwen/qwen3_embeddings.py", "Qwen3RerankerLayer", "positional_learned", "dropout_rate"),
+}
+
+#: Name collisions this static predicate cannot resolve, cleared by manual read.
+#:
+#: Unlike ``_SCHEDULED_FIXES`` these are permanent: the enclosing class stores an
+#: attribute that merely *shares a name* with a declared factory parameter. Every
+#: one of these five is the ViT-family ``scale``, which is the variant-size string
+#: (``"base"``, ``"large"``, ...; e.g. ``vit/model.py`` ``self.scale = str(scale)``)
+#: and has nothing to do with ``positional_learned``'s embedding-scale parameter.
+#: No AST predicate can tell the two apart -- both are ``self.scale`` assigned
+#: from a same-named ``__init__`` argument -- so the discrimination is recorded
+#: here, with its evidence, rather than pretended at.
+_NAME_COLLISIONS = {
+    ("models/vit/model.py", "ViT", "positional_learned", "scale"),
+    ("models/vit_hmlp/model.py", "ViTHMLP", "positional_learned", "scale"),
+    ("models/vit_siglip/model.py", "SigLIPVisionTransformer", "positional_learned", "scale"),
+    ("models/beit/model.py", "BeitModel", "positional_learned", "scale"),
+    ("models/energy_transformer/model.py", "EnergyTransformerBackbone", "positional_learned", "scale"),
+}
+
+
+def _declared_params(registry: dict, type_name: str):
+    """Every parameter a registry entry declares, or None if the type is unknown."""
+    entry = registry.get(type_name)
+    if entry is None:
+        return None
+    return set(entry.get("required_params") or []) | set(entry.get("optional_params") or {})
+
+
+def _init_stored_attrs(cls: ast.ClassDef) -> set:
+    """``self.<name>`` targets assigned anywhere in the class's ``__init__``."""
+    init = next(
+        (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"),
+        None,
+    )
+    if init is None:
+        return set()
+    stored = set()
+    for node in ast.walk(init):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                stored.add(target.attr)
+    return stored - _KERAS_BASE_ATTRS
+
+
+def _sweep_factory_call_sites() -> Tuple[List[tuple], List[str]]:
+    """Return ``(dropped, dynamic)`` for every registry-backed factory call site.
+
+    ``dropped`` holds ``(relpath, lineno, class, type, param)`` for each call that
+    omits a parameter the registry declares *and* the enclosing class stores --
+    the demonstrable "the caller had the value and did not forward it" signature.
+    ``dynamic`` holds ``"path:line"`` for call sites whose type is a variable,
+    which cannot be resolved statically.
+    """
+    from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
+    from dl_techniques.layers.embedding.factory import EMBEDDING_REGISTRY
+    from dl_techniques.layers.ffn.factory import FFN_REGISTRY
+
+    registries = {
+        "create_attention_layer": (_REGISTRY_FACTORIES["create_attention_layer"], ATTENTION_REGISTRY),
+        "create_ffn_layer": (_REGISTRY_FACTORIES["create_ffn_layer"], FFN_REGISTRY),
+        "create_embedding_layer": (_REGISTRY_FACTORIES["create_embedding_layer"], EMBEDDING_REGISTRY),
+    }
+    src_root = MODELS_DIR.parent
+    dropped: List[tuple] = []
+    dynamic: List[str] = []
+
+    for root in (MODELS_DIR, LAYERS_DIR / "transformers"):
+        for path in sorted(root.rglob("*.py")):
+            rel = path.relative_to(src_root).as_posix()
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:  # covered by the import tests
+                continue
+            for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+                stored = _init_stored_attrs(cls)
+                for node in ast.walk(cls):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    fname = (
+                        func.id
+                        if isinstance(func, ast.Name)
+                        else func.attr
+                        if isinstance(func, ast.Attribute)
+                        else None
+                    )
+                    if fname not in registries:
+                        continue
+                    type_kw, registry = registries[fname]
+                    type_node = node.args[0] if node.args else None
+                    for kw in node.keywords:
+                        if kw.arg == type_kw:
+                            type_node = kw.value
+                    if not (
+                        isinstance(type_node, ast.Constant)
+                        and isinstance(type_node.value, str)
+                    ):
+                        dynamic.append(f"{rel}:{node.lineno}")
+                        continue
+                    declared = _declared_params(registry, type_node.value)
+                    if declared is None:
+                        dynamic.append(f"{rel}:{node.lineno} (unknown type {type_node.value!r})")
+                        continue
+                    # A `**config` unpack can carry anything; only literal kwargs
+                    # are provably present, so an unpack clears the whole call.
+                    if any(kw.arg is None for kw in node.keywords):
+                        continue
+                    passed = {kw.arg for kw in node.keywords}
+                    for param in sorted((declared - passed) & stored):
+                        dropped.append(
+                            (rel, node.lineno, cls.name, type_node.value, param)
+                        )
+    return dropped, dynamic
+
+
+class TestFactoryKnobsAreForwarded:
+    """A parameter the caller stores and the factory declares must be passed.
+
+    ``attention``/``ffn``/``embedding`` factories are STRICT about the *undeclared*
+    direction -- passing a key the type does not accept raises
+    ``STRICT_DROPPED_KEY_MARKER``. This is the inverse and until now unguarded
+    direction: the call site hand-writes its kwarg list, the enclosing class holds
+    the value in ``self.<name>``, ``get_config()`` faithfully serializes it, and
+    the factory never sees it. Nothing raises, nothing warns, and every existing
+    test passes because the built layer is *valid* -- just not the one that was
+    asked for. Thirteen live instances across five call sites were found the day
+    this guard was written, including a Swin/ViT patch embedding that trains at
+    glorot no matter which initializer the caller supplies.
+
+    The predicate is deliberately narrow, and each narrowing is a place it can
+    miss a real defect:
+
+    * only **literal** ``type=`` strings (a variable type has no static declared-
+      param set; those sites are reported non-fatally by
+      ``test_dynamic_call_sites_are_reported``);
+    * only calls with **no** ``**unpack`` (an unpack may well carry the param);
+    * only the three registry-backed factories -- ``create_normalization_layer``
+      has no ``required_params``/``optional_params`` registry, so the norm-epsilon
+      family of this same defect is out of reach here. This is also why the two
+      by-design omissions catalogued in the sweep that motivated this guard
+      (``adaln_zero.py`` and ``text_encoder.py``'s ``**norm_config`` unpack) need
+      no waiver: both are ``create_normalization_layer`` calls and the predicate
+      never reaches them. Waiving them anyway would have been a waiver guarding
+      nothing;
+    * only params the enclosing class stores in ``__init__``, which is what makes
+      a hit *demonstrable* rather than merely suspicious.
+    """
+
+    def test_no_declared_and_stored_param_is_dropped(self):
+        # DECISION plan-2026-08-18T140459-7991552f/D-015
+        # Guards the SILENT-DROP direction of the factory contract. The opposite
+        # direction -- a caller passing a key the type does not declare -- is
+        # already guarded at runtime by the strict raise added in D-011/D-023
+        # (`STRICT_DROPPED_KEY_MARKER`). That raise cannot see this direction at
+        # all: an omitted kwarg is indistinguishable from a caller who wanted the
+        # default. Do NOT "simplify" this into a runtime check inside the
+        # factories -- the information needed (does the CALLER hold this value?)
+        # exists only at the call site, statically. Do NOT widen it by dropping
+        # the "enclosing class stores it" clause either: without that clause every
+        # deliberate use of a factory default becomes a failure. See
+        # plans/.../findings/dead-knob-systematic-sweep.md Part D, which rejected
+        # a per-call-site test (a) and a `strict_forward` helper (b) in favour of
+        # this AST guard (c).
+        dropped, _ = _sweep_factory_call_sites()
+        waived = _SCHEDULED_FIXES | _NAME_COLLISIONS
+        offenders = [
+            f"{rel}:{line} {cls}: create_*_layer({typ!r}) drops {param!r} "
+            f"(self.{param} is stored in __init__)"
+            for rel, line, cls, typ, param in dropped
+            if (rel, cls, typ, param) not in waived
+        ]
+        assert not offenders, (
+            "a factory call site drops a parameter its enclosing class stores. "
+            "Forward it, or -- if the omission is deliberate -- add it to "
+            "_NAME_COLLISIONS with the read that clears it. Found:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_waivers_still_match_a_real_site(self):
+        """A waiver that no longer matches anything is a waiver hiding nothing.
+
+        Both lists are keyed by (path, class, type, param) precisely so they keep
+        matching as the fixes move lines. A stale entry means either the fix
+        landed (delete the entry) or the code moved (re-key it) -- and a stale
+        entry left in place would silently start waiving nothing while looking
+        like it still guards something.
+        """
+        dropped, _ = _sweep_factory_call_sites()
+        live = {(rel, cls, typ, param) for rel, _, cls, typ, param in dropped}
+        stale = sorted((_SCHEDULED_FIXES | _NAME_COLLISIONS) - live)
+        assert not stale, (
+            "waiver entries no longer match any call site; delete them if the "
+            f"fix landed, re-key them if the code moved: {stale}"
+        )
+
+    def test_the_sweep_found_call_sites(self):
+        """The parameterization must not silently collapse to nothing."""
+        dropped, dynamic = _sweep_factory_call_sites()
+        assert len(dropped) + len(dynamic) >= 20, (
+            "expected the factory call-site sweep to reach dozens of sites; it "
+            f"found {len(dropped)} dropped-param hits and {len(dynamic)} dynamic "
+            "sites, which means the AST walk stopped seeing the tree"
+        )
+
+    def test_dynamic_call_sites_are_reported(self):
+        """Non-fatal: list the call sites this guard structurally cannot check.
+
+        A variable ``type=`` has no static declared-param set. These are not
+        unguarded in practice -- the factories' strict raise fires the moment such
+        a path is actually built -- but they are invisible to the check above, and
+        an inventory that shrinks silently is how a guard's coverage rots.
+        """
+        _, dynamic = _sweep_factory_call_sites()
+        if dynamic:
+            warnings.warn(
+                "factory call sites with a non-literal type (not statically "
+                f"checkable, {len(dynamic)}): {dynamic}",
+                UserWarning,
+                stacklevel=2,
+            )
