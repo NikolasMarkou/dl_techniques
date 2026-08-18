@@ -58,6 +58,17 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 
+#: Variance epsilon for every ``LayerNormalization`` authored in this module.
+#:
+#: Matches the ``CliffordNetBlock`` / ``CausalCliffordNetBlock`` this predictor
+#: is assembled from, which build ``LayerNormalization(epsilon=1e-6)`` directly
+#: (``layers/geometric/clifford_block.py:1443``) to agree with
+#: ``layers/norms/factory.py``'s ``setdefault('epsilon', 1e-6)``. Keras'
+#: own default is 1e-3, i.e. 1000x this, which is what these two norms silently
+#: used before. Import this name at any new construction site here rather than
+#: writing the literal a third time.
+_NORM_EPSILON: float = 1e-6
+
 
 @keras.saving.register_keras_serializable()
 class CausalSelfAttnMLPBlock(keras.layers.Layer):
@@ -107,14 +118,32 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.layer_scale_init = layer_scale_init
 
         # Sub-layers.
-        self.ln1 = keras.layers.LayerNormalization(name="ln_attn")
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028
+        # `epsilon` is EXPLICIT on both LayerNorms of this block. Left at Keras'
+        # default they were 1e-3, while every OTHER normalization in the same
+        # forward pass runs at 1e-6: the spatial and causal `CliffordNetBlock`s
+        # this predictor is built from construct
+        # `LayerNormalization(epsilon=1e-6)` directly
+        # (`layers/geometric/clifford_block.py:1443`, chosen there to match
+        # `layers/norms/factory.py`'s `setdefault('epsilon', 1e-6)`). A 1000x
+        # spread inside one stack is not a design choice, it is an omission.
+        # WHAT NOT TO DO: do not drop the argument again — an epsilon is
+        # invisible to every shape, dtype and finiteness assertion in the
+        # suite, so nothing here would go red. Existing `.keras` checkpoints are
+        # unaffected: `epsilon` round-trips in the layer config, so a reloaded
+        # model keeps the value it was saved with. See decisions.md D-028.
+        self.ln1 = keras.layers.LayerNormalization(
+            epsilon=_NORM_EPSILON, name="ln_attn"
+        )
         self.attn = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=dim_head,
             dropout=dropout,
             name="mha",
         )
-        self.ln2 = keras.layers.LayerNormalization(name="ln_mlp")
+        self.ln2 = keras.layers.LayerNormalization(
+            epsilon=_NORM_EPSILON, name="ln_mlp"
+        )
         self.mlp_hidden = keras.layers.Dense(mlp_dim, activation="gelu",
                                              name="mlp_hidden")
         # DECISION plan_2026-05-24_ca745a6c/D-005: mirror encoder.py:112-116 pattern.

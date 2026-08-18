@@ -133,7 +133,7 @@ from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 from dl_techniques.models.vit.model import ViT
 
-from .components import DPTDecoder
+from .components import DPTDecoder, REFERENCE_BN_EPSILON
 
 # Map depth_anything encoder_type slugs to ViT scale names.
 _VIT_SCALE_MAP: Dict[str, str] = {
@@ -492,7 +492,17 @@ class DepthAnything(keras.Model):
             use_bias=False,
             name='initial_conv'
         )(inputs)
-        x = keras.layers.BatchNormalization(name='initial_bn')(x)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028
+        # `epsilon` is EXPLICIT on all three BatchNorms of this placeholder
+        # encoder, and the justification here is CONSISTENCY, not fidelity:
+        # this Conv-BN-ReLU stack is an in-repo stand-in for DINOv2 with no
+        # reference implementation, so it has nothing to be faithful to. What it
+        # does have is a downstream DPT head normalizing at 1e-5; running the
+        # encoder at Keras' 1e-3 put a 100x spread inside one forward pass for
+        # no stated reason. Do NOT restate the literal here.
+        x = keras.layers.BatchNormalization(
+            epsilon=REFERENCE_BN_EPSILON, name='initial_bn'
+        )(x)
         x = keras.layers.ReLU(name='initial_relu')(x)
         # Note: removed legacy stride-2 'initial_pool' to keep placeholder
         # encoder stride at 16 (matches 4-stage DPT decoder upsample).
@@ -510,7 +520,9 @@ class DepthAnything(keras.Model):
                 use_bias=False,
                 name=f'conv_block_{i}_1'
             )(x)
-            x = keras.layers.BatchNormalization(name=f'bn_block_{i}_1')(x)
+            x = keras.layers.BatchNormalization(
+                epsilon=REFERENCE_BN_EPSILON, name=f'bn_block_{i}_1'
+            )(x)
             x = keras.layers.ReLU(name=f'relu_block_{i}_1')(x)
 
             # Second conv block
@@ -523,7 +535,9 @@ class DepthAnything(keras.Model):
                 use_bias=False,
                 name=f'conv_block_{i}_2'
             )(x)
-            x = keras.layers.BatchNormalization(name=f'bn_block_{i}_2')(x)
+            x = keras.layers.BatchNormalization(
+                epsilon=REFERENCE_BN_EPSILON, name=f'bn_block_{i}_2'
+            )(x)
             x = keras.layers.ReLU(name=f'relu_block_{i}_2')(x)
 
             # Downsample (except for last block to maintain spatial resolution)

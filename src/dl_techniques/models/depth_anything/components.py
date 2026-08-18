@@ -55,6 +55,25 @@ from typing import Dict, Tuple, Optional, Any, List, Union
 
 # ---------------------------------------------------------------------
 
+#: Variance epsilon for every ``BatchNormalization`` in this package.
+#:
+#: The DPT dense-prediction head below follows the Depth Anything V1 recipe (see
+#: ``model.py``'s module docstring, which enumerates the three places this
+#: package deliberately departs from the paper — normalization is not one of
+#: them). That reference is PyTorch, whose ``nn.BatchNorm2d`` defaults to 1e-5;
+#: Keras' ``BatchNormalization`` defaults to 1e-3, 100x larger. The same fact is
+#: stated for the other torch port in this repo at
+#: ``layers/fastvit/reference.py``, where getting it wrong once silently
+#: mis-normalized 86 of 114 layers with every test green.
+#:
+#: ``model.py``'s placeholder encoder imports this constant too. Its
+#: justification is different and weaker: that encoder is an in-repo stand-in
+#: for DINOv2 with no reference implementation at all, so the value there is
+#: chosen for consistency with the head it feeds, not for fidelity.
+REFERENCE_BN_EPSILON: float = 1e-5
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class DPTDecoder(keras.layers.Layer):
     """DPT (Dense Prediction Transformer) decoder.
@@ -171,7 +190,13 @@ class DPTDecoder(keras.layers.Layer):
             self.conv_layers.append(conv)
 
             # Batch normalization layer
-            bn = keras.layers.BatchNormalization(name=f'bn_{i}')
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028
+            # `epsilon` is EXPLICIT: Keras' 1e-3 default is 100x the torch
+            # reference this head follows. Do NOT drop the argument, and do NOT
+            # restate the literal — the constant has one definition above.
+            bn = keras.layers.BatchNormalization(
+                epsilon=REFERENCE_BN_EPSILON, name=f'bn_{i}'
+            )
             self.batch_norm_layers.append(bn)
 
             # Activation layer

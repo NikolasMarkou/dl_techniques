@@ -460,7 +460,20 @@ class SigLIPVisionTransformer(keras.Model):
                 bias_regularizer=self.bias_regularizer,
                 name='patch_embed_conv1'
             ),
-            layers.LayerNormalization(name='patch_embed_norm1'),
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028
+            # Routed through the factory rather than constructed directly, so
+            # this norm's `epsilon` comes from the SAME source as the model's
+            # final norm (`create_normalization_layer`, which `setdefault`s
+            # 1e-6). Built directly it inherited Keras' `LayerNormalization`
+            # default of 1e-3 — a 100x divergence from the other normalization
+            # in this very file, invisible to every shape and dtype assertion.
+            # WHAT NOT TO DO: do not "simplify" this back to
+            # `layers.LayerNormalization(...)`, and do not restate 1e-6 as a
+            # literal here; the factory is the one place that value lives.
+            # The type is pinned to 'layer_norm' (not `self.normalization_type`)
+            # because that is what this stem shipped with — this decision is
+            # about epsilon only. See decisions.md D-028.
+            create_normalization_layer('layer_norm', name='patch_embed_norm1'),
             layers.Activation('gelu', name='patch_embed_activation1'),
 
             # Stage 2: Refinement to final embedding dimension

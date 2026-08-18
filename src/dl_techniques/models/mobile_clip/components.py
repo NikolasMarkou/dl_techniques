@@ -10,6 +10,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
 
 
 # ---------------------------------------------------------------------
@@ -459,7 +460,21 @@ class MobileClipTextEncoder(keras.layers.Layer):
                 name=f'transformer_layer_{i}'
             ) for i in range(self.num_layers)
         ]
-        self.layer_norm = layers.LayerNormalization(name='final_layer_norm')
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028
+        # `epsilon` is EXPLICIT and is imported, not written as a literal.
+        # This is the `ln_final` of the OpenCLIP-shaped text tower that
+        # `mobile_clip_v2.py:229` calls "the faithful MobileCLIP port"'s text
+        # transformer, so it is a normalization layer IN the port and
+        # `layers/fastvit/reference.py`'s interface contract applies to it:
+        # PyTorch's `nn.LayerNorm` defaults to 1e-5, Keras' to 1e-3.
+        # WHAT NOT TO DO: do not drop the argument back (Keras' 1e-3 default is
+        # 100x the reference and is invisible to every shape assertion — it
+        # shipped wrong once already in 86 of 114 layers of the FastViT tower),
+        # and do not re-declare the value as a local `1e-5` literal; the
+        # constant has ONE definition on purpose. See decisions.md D-028.
+        self.layer_norm = layers.LayerNormalization(
+            epsilon=REFERENCE_NORM_EPSILON, name='final_layer_norm'
+        )
 
         # Initialize weight attributes - created in build()
         self.projection_weights = None
