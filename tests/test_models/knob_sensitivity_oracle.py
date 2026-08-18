@@ -259,9 +259,12 @@ def assert_value_knob_changes_output(
         # DECISION plan-2026-08-18T111512-29569f8b/D-003
         # The signature is captured AFTER the forward pass, and the order is
         # load-bearing -- do NOT "tidy" it back next to the build. A SUBCLASSED
-        # keras.Model has len(model.weights) == 0 until its first call(), which
-        # is what every real consumer of this helper in tests/test_models/
-        # builds. With the capture before _forward, both arms' signatures were
+        # keras.Model has len(model.weights) == 0 until its first call(). Most
+        # call sites hand-warm the model inside their local _build helper and
+        # so were unaffected, but one did not (test_mamba_v1.py's norm_epsilon
+        # sweep, measured 0 weight tensors pre-forward and 25 post-forward), and
+        # nothing stopped the next one from doing the same. With the capture
+        # before _forward, such a pair's signatures were
         # the EMPTY TUPLE, () == () compared equal for free, and clause 1 -- the
         # clause whose entire job is to make clause 2's delta attributable to
         # the KNOB rather than to a different random draw -- could not fail.
