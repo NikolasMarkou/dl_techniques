@@ -113,7 +113,13 @@ class TestQuantileHeadDoesNotCross:
             num_features=3,
             hidden_dim=32,
             num_layers=1,
-            tree_depth=2,  # D-039: depth 3 is all-NaN; not used here
+            # Depth 2 because these tests are about the ROUTER and the
+            # quantile head, not the tree. D-039's "depth 3 is all-NaN" is no
+            # longer true -- it was fixed by
+            # plan-2026-08-18T073231-52a93f8c. At this config depth 3 would
+            # still be legal but degenerate: measured, deepest_leaf_seg 6 and
+            # min_band_len 6 >> 2 == 1 (depth 2 gives seg 12, min_band_len 3).
+            tree_depth=2,
             overlap_ratio=0.25,
             num_wavelet_levels=2,
             router_hidden_dim=16,
