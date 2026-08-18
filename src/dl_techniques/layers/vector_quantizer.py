@@ -182,6 +182,7 @@ class VectorQuantizer(keras.layers.Layer):
         self.embeddings = None
         self.ema_cluster_size = None
         self.ema_embeddings = None
+        self.ema_step = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -215,11 +216,53 @@ class VectorQuantizer(keras.layers.Layer):
                 trainable=False,
             )
 
-            # Track sum of assigned encoder outputs for each embedding
+            # Track sum of assigned encoder outputs for each embedding.
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # This accumulator MUST start at ZERO, not at `self.initializer`.
+            # It is the numerator of an EMA that `_update_ema` debiases by
+            # `1 - decay**t`; a non-zero start is a bias the debias step
+            # AMPLIFIES by `decay**t / (1 - decay**t)` = 99x at t=1. MEASURED:
+            # with `initializer=self.initializer` here and the debias below,
+            # `max|codebook|` after 5 epochs was 47283 (vs 4521 with neither
+            # correction, and 0.264 with both). See decisions.md D-012.
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_embeddings, self.embedding_dim),
-                initializer=self.initializer,
+                initializer="zeros",
+                trainable=False,
+            )
+
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # This counter exists ONLY to debias the two EMA accumulators in
+            # `_update_ema`. Do NOT delete it as an unused scalar: without it the
+            # accumulators are read at their un-debiased values, and on step 1 a
+            # code that received zero assignments evaluates to
+            # `0.99 * init[k] / 1e-5` ~= 99000 * init[k] -- a codebook blown up
+            # by ~1e5 that collapses every input onto a single code. MEASURED at
+            # HEAD before this fix, 5 epochs on the tiny sinusoid fixture:
+            # `len(np.unique(encode_to_indices(images)))` == 1 and
+            # `max|codebook|` == 4521; after this fix 18 and 0.264. It costs one
+            # float scalar and changes the `use_ema=True` weight set from 3 to 4.
+            # It is deliberately NOT `dtype="int32"`: TF places an int32
+            # variable on the CPU, and the resulting CPU/GPU split raises
+            # `Trying to access resource .../ema_step ... from device GPU:0`
+            # inside the jit-compiled train function (MEASURED -- fit() died).
+            #
+            # COMPATIBILITY, MEASURED not assumed. This BREAKS every
+            # pre-2026-08-18 `use_ema=True` artifact, and it breaks LOUDLY in
+            # both directions: a by-name `load_weights` AND a full
+            # `keras.models.load_model()` of an old `.keras` file both raise
+            # `ValueError: A total of 1 objects could not be loaded`. The
+            # earlier belief that a full `load_model` would silently
+            # re-initialize the counter is WRONG -- it was tested by saving
+            # under the pre-fix source and loading under this one. No such
+            # artifact exists under `results/` (checked), and any that did
+            # would hold a codebook blown up by ~1e5 and be worthless.
+            # See decisions.md D-012.
+            self.ema_step = self.add_weight(
+                name="ema_step",
+                shape=(),
+                initializer="zeros",
                 trainable=False,
             )
 
@@ -333,11 +376,49 @@ class VectorQuantizer(keras.layers.Layer):
         )
         self.ema_embeddings.assign(new_ema_embeddings)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-012
+        # Do NOT "simplify" the block below back to
+        #     self.ema_embeddings / (self.ema_cluster_size + self.epsilon)
+        # It looks equivalent and is not. Two separate corrections are needed:
+        #
+        # (1) BIAS CORRECTION. `ema_cluster_size` starts at zeros while
+        #     `ema_embeddings` starts at `self.initializer` (NOT zeros -- see
+        #     build()). For a code that receives no assignments on step 1 the
+        #     naive ratio is `0.99 * init[k] / 1e-5` ~= 99000 * init[k]. This is
+        #     a step-1 blow-up, not a slow drift, so no amount of extra training
+        #     fixes it. Dividing BOTH accumulators by `1 - decay^t` puts them on
+        #     a common, unbiased scale from the first step.
+        # (2) LAPLACE SMOOTHING. Bare `+ epsilon` in the denominator is not a
+        #     stabiliser, it is an unbounded gain: as the count -> 0 the ratio
+        #     -> numerator / 1e-5. Smoothing the counts toward a uniform prior
+        #     while preserving their total N keeps every denominator O(N/K).
+        #
+        # Both corrections are load-bearing and neither works alone. MEASURED,
+        # 5 epochs on the tiny sinusoid fixture (unique codes, max|codebook|):
+        #   neither correction (HEAD)                    -> 1,  4521
+        #   this block, `ema_embeddings` init unchanged  -> 1,  47283  (WORSE)
+        #   this block + zero-init `ema_embeddings`      -> 18, 0.264
+        # See decisions.md D-012.
+        self.ema_step.assign_add(1.0)
+        bias_correction = 1.0 - keras.ops.power(
+            keras.ops.cast(self.ema_decay, self.ema_step.dtype), self.ema_step
+        )
+
+        debiased_cluster_size = self.ema_cluster_size / bias_correction
+        debiased_embeddings = self.ema_embeddings / bias_correction
+
+        # Laplace smoothing of the counts, total mass N preserved.
+        total_count = keras.ops.sum(debiased_cluster_size)
+        smoothed_cluster_size = (
+                (debiased_cluster_size + self.epsilon)
+                / (total_count + self.num_embeddings * self.epsilon)
+                * total_count
+        )
+
         # Update embeddings: e^(t) = m^(t) / N^(t)
-        # Add epsilon for numerical stability
         normalized_embeddings = (
-                self.ema_embeddings
-                / keras.ops.reshape(self.ema_cluster_size + self.epsilon, (-1, 1))
+                debiased_embeddings
+                / keras.ops.reshape(smoothed_cluster_size, (-1, 1))
         )
         self.embeddings.assign(normalized_embeddings)
 

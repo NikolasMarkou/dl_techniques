@@ -289,6 +289,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         self.embeddings = None
         self.ema_cluster_size = None
         self.ema_embeddings = None
+        self.ema_step = None
         self.dead_code_unused = None
         self.kmeans_init_done = None
 
@@ -328,10 +329,34 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
                 initializer="zeros",
                 trainable=False,
             )
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # This accumulator MUST start at ZERO, not at `self.initializer`.
+            # It is the numerator of an EMA that `_update_ema` debiases by
+            # `1 - decay**t`; a non-zero start is a bias the debias step
+            # AMPLIFIES by `decay**t / (1 - decay**t)` = 99x at t=1. MEASURED
+            # on the sibling `vector_quantizer.py` (same defect, same fixture):
+            # `max|codebook|` after 5 epochs was 47283 with this initializer
+            # kept and the debias added, versus 4521 with neither correction
+            # and 0.264 with both. See decisions.md D-012.
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_heads, self.num_embeddings, self.head_dim),
-                initializer=self.initializer,
+                initializer="zeros",
+                trainable=False,
+            )
+
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # EMA step counter, read ONLY by `_update_ema`'s bias correction.
+            # Do NOT delete it as an unused scalar and do NOT give it
+            # `dtype="int32"`: TF places an int32 variable on the CPU and the
+            # resulting CPU/GPU split raises `Trying to access resource
+            # .../ema_step ... from device GPU:0` inside the jit-compiled train
+            # function (MEASURED on the sibling layer -- `fit()` died).
+            # It changes the `use_ema=True` weight set from 3 to 4.
+            self.ema_step = self.add_weight(
+                name="ema_step",
+                shape=(),
+                initializer="zeros",
                 trainable=False,
             )
 
@@ -619,8 +644,60 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         )
         self.ema_embeddings.assign(new_embed)
 
-        normalised = self.ema_embeddings / keras.ops.expand_dims(
-            self.ema_cluster_size + self.epsilon, axis=-1
+        # DECISION plan-2026-08-18T140459-7991552f/D-012
+        # Do NOT "simplify" the block below back to
+        #     self.ema_embeddings / (self.ema_cluster_size + self.epsilon)
+        # It looks equivalent and is not. Two corrections, both load-bearing:
+        #
+        # (1) BIAS CORRECTION. Both accumulators start at zero, so at step t
+        #     they carry a factor `1 - decay**t` (0.01 at t=1). The counts and
+        #     the sums are on a common scale only after dividing BOTH by it;
+        #     without it a code that received no assignments evaluates to
+        #     `numerator / 1e-5`, a step-1 blow-up of ~1e5 that collapses every
+        #     input onto a single code. No amount of extra training undoes it.
+        # (2) LAPLACE SMOOTHING. Bare `+ epsilon` is not a stabiliser but an
+        #     unbounded gain: as the count -> 0 the ratio -> numerator / 1e-5.
+        #     Smoothing the counts toward a uniform prior while preserving
+        #     their total keeps every denominator O(N/K).
+        #
+        # AXIS: this quantizer is PER-HEAD, so `debiased_cluster_size` is
+        # `(H, K)` and the Laplace total is summed over the CODEBOOK axis K
+        # with `keepdims=True` -- shape `(H, 1)`, one total per head. The
+        # sibling `vector_quantizer.py` has a 1-D `(K,)` count and a scalar
+        # total; this is the one place the two copies of this fix differ.
+        #
+        # Honest note on how much that choice matters, MEASURED rather than
+        # asserted: `cluster_size = sum(one_hot(indices), axis=0)` sums over N,
+        # so `sum_k cluster_size[h, k] == N` for EVERY head, identically, at
+        # every step. The per-head totals are therefore always equal and
+        # pooling over H would scale numerator and denominator by the same H;
+        # the two answers differ by ~9e-6 (the eps floor alone) at H=3, K=8,
+        # N=64. K is kept because it is the axis that stays correct if the
+        # counts ever become per-head unequal, NOT because H is observably
+        # wrong today. Do not write a test claiming to discriminate them.
+        #
+        # MEASURED (sibling layer, same fixture, 5 epochs): unique codes 1 and
+        # max|codebook| 4521 before, 18 and 0.264 after. See decisions.md D-012.
+        self.ema_step.assign_add(1.0)
+        bias_correction = 1.0 - keras.ops.power(
+            keras.ops.cast(self.ema_decay, self.ema_step.dtype), self.ema_step
+        )
+
+        debiased_cluster_size = self.ema_cluster_size / bias_correction
+        debiased_embeddings = self.ema_embeddings / bias_correction
+
+        # Laplace smoothing of the counts; per-head total mass preserved.
+        total_count = keras.ops.sum(
+            debiased_cluster_size, axis=-1, keepdims=True
+        )  # (H, 1)
+        smoothed_cluster_size = (
+                (debiased_cluster_size + self.epsilon)
+                / (total_count + self.num_embeddings * self.epsilon)
+                * total_count
+        )
+
+        normalised = debiased_embeddings / keras.ops.expand_dims(
+            smoothed_cluster_size, axis=-1
         )
         self.embeddings.assign(normalised)
 

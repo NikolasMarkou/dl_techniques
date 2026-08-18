@@ -208,3 +208,122 @@ class TestRotationTrickForwardIdentity:
             out, ref, atol=1e-4,
             err_msg=(f"gradient_mode={mode!r}: call() does not emit the "
                      f"codebook vector, so it disagrees with the index path"))
+
+
+def _structured_images(n: int = 8, size: int = 32, seed: int = 0) -> np.ndarray:
+    """Learnable images: smooth sinusoidal texture in [0, 1], seeded."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.meshgrid(
+        np.linspace(0, 1, size), np.linspace(0, 1, size), indexing="ij"
+    )
+    images = []
+    for _ in range(n):
+        freq = rng.integers(1, 3)
+        phase = rng.random()
+        base = 0.5 + 0.5 * np.sin(2 * np.pi * freq * (xx + phase)) * np.cos(
+            2 * np.pi * freq * (yy + phase)
+        )
+        images.append(np.stack([base, np.roll(base, 4, axis=0), 1.0 - base], -1))
+    return np.clip(np.asarray(images, dtype="float32"), 0.0, 1.0)
+
+
+class TestEMACodebookStability:
+    """F-65 in the per-head quantizer.
+
+    Same defect as `layers/vector_quantizer.py`: `ema_cluster_size` starts at
+    zeros, `ema_embeddings` started at the codebook initializer, and the
+    normalize divided by `count + 1e-5`. On step 1 an unassigned code became
+    `0.99 * init / 1e-5` ~= 99000 * init.
+
+    MEASURED on this configuration (num_heads=2, use_ema=True, 5 epochs,
+    seed 1234): max|codebook| 4509.37 before the fix and 2.257 after. Note the
+    unique-code count is a WEAK indicator here -- it read 8 before the fix and
+    14 after, because two heads' index sets are pooled -- so the magnitude
+    assertion, not the usage assertion, is what carries this proof.
+    """
+
+    def test_ema_codebook_does_not_blow_up(self):
+        keras.utils.set_random_seed(1234)
+        m = VQVAERotationTrick(
+            num_embeddings=32, embedding_dim=16,
+            input_shape=(32, 32, 3), hidden_channels=32,
+            downsample_factor=4, num_res_blocks=1, norm_type="layer_norm",
+            use_ema=True, num_heads=2,
+        )
+        m.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        images = _structured_images(seed=0)
+        m.fit(images, epochs=5, batch_size=4, verbose=0)
+
+        codebook = np.asarray(ops.convert_to_numpy(m.quantizer.embeddings))
+        max_abs = float(np.abs(codebook).max())
+        assert np.isfinite(max_abs)
+        assert max_abs < 50.0, (
+            f"per-head EMA codebook blew up: max|codebook| = {max_abs:.4g} "
+            f"after 5 epochs. MEASURED 4509 before the bias correction + "
+            f"Laplace smoothing and 2.257 after; the bar is 50.0."
+        )
+
+        indices = np.asarray(ops.convert_to_numpy(m.encode_to_indices(images)))
+        assert len(np.unique(indices)) > 1
+
+    def test_one_ema_update_matches_a_transcribed_oracle(self):
+        """One `_update_ema` must reproduce a hand-computed per-head oracle.
+
+        AXIS NOTE, measured not assumed. The Laplace total is summed over the
+        CODEBOOK axis K with `keepdims=True`, giving one total per head. That
+        is the principled choice -- heads own independent codebooks -- but it
+        is NOT observable at runtime here, and this test does not pretend
+        otherwise: `cluster_size = sum(one_hot(indices), axis=0)` sums over N,
+        so `sum_k cluster_size[h, k] == N` for EVERY head, identically. The
+        per-head totals are therefore always equal, and pooling over H would
+        scale numerator and denominator by the same H, cancelling. The K-axis
+        sum is kept because it is the one that stays correct if counts ever
+        become per-head unequal; the claim being tested below is the FORMULA
+        (debias + smoothing), which is observable.
+
+        Oracle: after a single update from the zero state, a code that received
+        assignments must equal the mean of the vectors assigned to it (the
+        debias cancels `1 - decay` exactly), and an unassigned code must be
+        ~0 (its numerator is exactly 0).
+        """
+        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+            VectorQuantizerRotationTrick,
+        )
+
+        num_heads, k, head_dim = 2, 4, 3
+        vq = VectorQuantizerRotationTrick(
+            num_embeddings=k, embedding_dim=num_heads * head_dim,
+            num_heads=num_heads, use_ema=True, gradient_mode="ste",
+        )
+        vq.build((None, num_heads * head_dim))
+
+        rng = np.random.default_rng(0)
+        n = 10
+        flat_heads = rng.normal(size=(n, num_heads, head_dim)).astype("float32")
+        # Head 0 uses codes {0, 1}; head 1 uses code {2} only.
+        idx = np.zeros((n, num_heads), dtype="int32")
+        idx[:, 0] = np.array([0, 0, 0, 1, 1, 1, 1, 0, 0, 1], dtype="int32")
+        idx[:, 1] = 2
+
+        vq._update_ema(
+            keras.ops.convert_to_tensor(flat_heads),
+            keras.ops.convert_to_tensor(idx),
+        )
+        got = np.asarray(ops.convert_to_numpy(vq.embeddings))
+        assert got.shape == (num_heads, k, head_dim)
+
+        for h in range(num_heads):
+            for code in range(k):
+                members = flat_heads[idx[:, h] == code, h, :]
+                if len(members):
+                    np.testing.assert_allclose(
+                        got[h, code], members.mean(axis=0), atol=1e-4,
+                        err_msg=f"head {h} code {code} is not the cluster mean",
+                    )
+                else:
+                    assert np.abs(got[h, code]).max() < 1e-3, (
+                        f"head {h} code {code} received nothing yet has "
+                        f"magnitude {np.abs(got[h, code]).max():.4g}; before "
+                        f"the fix an unassigned code normalized to "
+                        f"0.99 * init / 1e-5 ~= 99000 * init"
+                    )

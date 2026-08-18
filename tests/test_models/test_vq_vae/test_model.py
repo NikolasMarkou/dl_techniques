@@ -625,6 +625,136 @@ class TestVQVAEIntegration:
         if usage_ratio < 0.1:
             print(f"Warning: Low codebook usage ({usage_ratio:.2%})")
 
+    def test_ema_codebook_does_not_blow_up(self, simple_encoder, simple_decoder):
+        """The EMA codebook must stay bounded and use more than one code.
+
+        RED PROOF (F-65). Before the `ema_step` bias correction and the Laplace
+        smoothing in `VectorQuantizer._update_ema`, `ema_cluster_size` started at
+        zeros while `ema_embeddings` started at the codebook initializer, so a
+        code that received no assignments on step 1 normalized to
+        `0.99 * init[k] / 1e-5` ~= 99000 * init[k]. That is a step-1 blow-up,
+        not a slow drift -- extra epochs never recover.
+
+        MEASURED on this exact configuration, 5 epochs, seed 1234:
+
+        =========================================  =============  ==============
+        variant                                    unique codes   max|codebook|
+        =========================================  =============  ==============
+        HEAD (no correction)                       1              4521
+        bias correction only, init kept            1              47283
+        bias correction + zero-init accumulator    18             0.264
+        =========================================  =============  ==============
+
+        The middle row is why this test asserts BOTH quantities: adding the
+        debias alone made the magnitude an order of magnitude WORSE while the
+        collapse indicator stayed at 1.
+
+        The bars are 4 orders of magnitude away from both the failing and the
+        passing measurement, so this guard is insensitive to TF32 (no
+        `tf32_disabled` fixture is reachable from `tests/test_models/` and I5
+        forbids adding a process-global toggle).
+        """
+        keras.utils.set_random_seed(1234)
+        model = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=128,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        images = _structured_images(seed=0)
+        model.fit(images, epochs=5, batch_size=4, verbose=0)
+
+        codebook = np.asarray(
+            ops.convert_to_numpy(model.quantizer.embeddings)
+        )
+        max_abs = float(np.abs(codebook).max())
+        assert np.isfinite(max_abs)
+        assert max_abs < 50.0, (
+            f"EMA codebook blew up: max|codebook| = {max_abs:.4g} after 5 "
+            f"epochs. MEASURED 4519 (this test) / 4521 (standalone probe) "
+            f"before the bias correction + Laplace smoothing, and 0.264 "
+            f"after; the bar is 50.0."
+        )
+
+        indices = np.asarray(
+            ops.convert_to_numpy(model.encode_to_indices(images))
+        )
+        unique_codes = len(np.unique(indices))
+        assert unique_codes > 1, (
+            f"EMA codebook collapsed to {unique_codes} code(s) after 5 epochs. "
+            f"MEASURED 1 before the fix and 18 after."
+        )
+
+    def test_ema_weight_set_is_four_and_only_under_ema(
+            self, simple_encoder, simple_decoder, sample_images
+    ):
+        """`ema_step` exists at `use_ema=True` and NOWHERE else.
+
+        The counter is a weight-SET change (3 -> 4 at `use_ema=True`). It must
+        not appear on the gradient path, where it would change every existing
+        `use_ema=False` checkpoint's weight list for nothing.
+        """
+        model_ema = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model_ema(sample_images, training=False)
+        ema_names = [w.name for w in model_ema.quantizer.weights]
+        assert ema_names == [
+            "embeddings", "ema_cluster_size", "ema_embeddings", "ema_step"
+        ], ema_names
+
+        model_grad = VQVAEModel(
+            encoder=keras.models.clone_model(simple_encoder),
+            decoder=keras.models.clone_model(simple_decoder),
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=False,
+        )
+        model_grad(sample_images, training=False)
+        grad_names = [w.name for w in model_grad.quantizer.weights]
+        assert grad_names == ["embeddings"], grad_names
+
+    def test_ema_model_round_trips_by_value(
+            self, simple_encoder, simple_decoder, tmp_path
+    ):
+        """A trained `use_ema=True` model reloads with the SAME codebook VALUES.
+
+        Weight COUNTS and PATHS match under the failure mode this repo has
+        measured repeatedly (a nested sublayer list restores fresh kernels with
+        an identical weight tree), so this asserts values, never structure.
+        """
+        keras.utils.set_random_seed(7)
+        model = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        images = _structured_images(seed=3)
+        model.fit(images, epochs=2, batch_size=4, verbose=0)
+
+        before = np.asarray(ops.convert_to_numpy(model.quantizer.embeddings))
+        step_before = float(
+            ops.convert_to_numpy(model.quantizer.ema_step)
+        )
+        assert step_before > 0, "ema_step never advanced during fit()"
+
+        path = str(tmp_path / "vqvae_ema.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+
+        after = np.asarray(ops.convert_to_numpy(reloaded.quantizer.embeddings))
+        np.testing.assert_allclose(before, after, atol=1e-6, rtol=1e-6)
+        assert float(ops.convert_to_numpy(reloaded.quantizer.ema_step)) == step_before
+
     def test_ema_vs_gradient_consistency(self, simple_encoder, simple_decoder, sample_images):
         """Test that EMA and gradient-based training produce similar results."""
         # Create two models: one with EMA, one without
@@ -654,11 +784,20 @@ class TestVQVAEIntegration:
 
         # `error < 1.0` on uniform(0, 1) images was nearly unfalsifiable: the
         # constant-mean predictor scores 0.083. Both codebook update rules must
-        # instead BEAT that constant predictor by the derived margin. MEASURED:
-        # the EMA path needs materially longer than the gradient path -- at 30
+        # instead BEAT that constant predictor by the derived margin, so this
+        # test trains for RECON_TRAIN_EPOCHS rather than 3.
+        #
+        # SUPERSEDED 2026-08-18 (F-65). The epoch budget used to be justified by
+        # "the EMA path needs materially longer than the gradient path -- at 30
         # epochs it was still collapsed to a single code (MSE/variance = 1.000),
-        # and it escapes to 5 codes and 0.17-0.31 by 60. That is why this test
-        # trains for RECON_TRAIN_EPOCHS rather than 3.
+        # escaping to 5 codes and 0.17-0.31 by 60". That collapse was not a
+        # convergence rate, it was the missing EMA bias correction: the codebook
+        # was blown up by ~1e5 on step 1 and never recovered. With the fix in
+        # `VectorQuantizer._update_ema` the EMA path reaches 18 codes and
+        # max|codebook| 0.264 in FIVE epochs -- see
+        # `test_ema_codebook_does_not_blow_up` above. RECON_TRAIN_EPOCHS is kept
+        # because the gradient arm and the measured 0.6 bar were both calibrated
+        # at 60 epochs, not because EMA needs them.
         images = _structured_images(seed=2)
         model_grad.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
         model_ema.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
