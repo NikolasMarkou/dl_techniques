@@ -87,8 +87,41 @@ class FrequencyBandStatistics(keras.layers.Layer):
             numerical stability fixes for padded zeros).
         :type mask: Optional[keras.KerasTensor]
         :return: Statistics tensor of shape [batch, channels, num_stats].
+            Degenerate bands are handled explicitly: a band of length 1 gets
+            ``diff_mean``/``diff_std`` of exactly ``0.0`` (the first difference
+            of a single sample is undefined), and a band of length 0 gets all
+            six statistics as ``0.0``.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-004
+        # Degenerate band lengths are branched on the STATIC shape, with an
+        # ``is not None`` short-circuit so an unknown time axis falls through to
+        # the unguarded arithmetic below.  Bands shrink as
+        # ``segment_len // 2 ** num_wavelet_levels`` and reach 1, then 0, at
+        # configurations the model accepts; a length-1 band makes the
+        # first-difference tensor EMPTY, and ``ops.mean``/``ops.var`` over an
+        # empty axis return NaN *silently*, which the router's single joint
+        # softmax then spreads across every band.  A length-0 band additionally
+        # makes ``ops.min``/``ops.max`` raise ``InvalidArgumentError`` in eager
+        # and return +/-inf under ``tf.function`` (both measured).
+        # Do NOT rewrite this as a traced-tensor ``ops.cond`` on
+        # ``ops.shape(inputs)[1]``: this repo has measured exactly that rewrite
+        # break under ``@tf.function`` with ``OperatorNotAllowedInGraphError``
+        # (``clifford_block``'s singleton-axis check), and the static-shape form
+        # with an ``is not None`` short-circuit is the form that works.
+        # Do NOT "simplify" it by clamping or padding the slice to fake a
+        # length: that fabricates a first difference from a sample that does not
+        # exist, which is a silently wrong number rather than a defined one.
+        # See decisions.md D-004 (and D-002 for the threshold ruling).
+        static_len = inputs.shape[1]
+
+        if static_len is not None and static_len == 0:
+            # Nothing is defined over an empty time axis. ``ops.sum`` over a
+            # zero-length axis is exactly 0.0 and, unlike ``ops.min``/``ops.max``,
+            # does not raise -- it also carries the dynamic batch dimension.
+            zeros = ops.sum(inputs, axis=1)  # [batch, channels], exact zeros
+            return ops.stack([zeros] * self._num_stats, axis=-1)
+
         # Basic statistics along time axis
         mean = ops.mean(inputs, axis=1)  # [batch, channels]
 
@@ -100,13 +133,19 @@ class FrequencyBandStatistics(keras.layers.Layer):
         min_val = ops.min(inputs, axis=1)
         max_val = ops.max(inputs, axis=1)
 
-        # Temporal derivatives (first difference)
-        diff = inputs[:, 1:, :] - inputs[:, :-1, :]
-        diff_mean = ops.mean(diff, axis=1)
+        if static_len is not None and static_len == 1:
+            # mean/std/min/max are well defined on a single sample; only the
+            # first difference is not, and 0.0 is its defined stand-in.
+            diff_mean = ops.zeros_like(mean)
+            diff_std = ops.zeros_like(mean)
+        else:
+            # Temporal derivatives (first difference)
+            diff = inputs[:, 1:, :] - inputs[:, :-1, :]
+            diff_mean = ops.mean(diff, axis=1)
 
-        # FIX: Apply same stability fix to diff_std
-        diff_variance = ops.var(diff, axis=1)
-        diff_std = ops.sqrt(diff_variance + self.epsilon)
+            # FIX: Apply same stability fix to diff_std
+            diff_variance = ops.var(diff, axis=1)
+            diff_std = ops.sqrt(diff_variance + self.epsilon)
 
         # Stack statistics: [batch, channels, num_stats]
         stats = ops.stack(
