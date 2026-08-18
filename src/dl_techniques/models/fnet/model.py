@@ -459,8 +459,12 @@ class FNet(keras.Model):
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
-                 - ``attention_mask``: The original attention mask, passed
-                   through for convenience in downstream models.
+                 - ``attention_mask``: The attention mask, passed through for
+                   convenience in downstream models. When the caller omitted
+                   it, an all-ones mask of the same shape as ``input_ids`` is
+                   returned rather than ``None``, so the output structure is
+                   independent of the input and ``predict()`` works on a
+                   single-key input dict.
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
@@ -490,9 +494,35 @@ class FNet(keras.Model):
         if self.final_norm is not None:
             hidden_states = self.final_norm(hidden_states, training=training)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-031
+        # The echoed mask is RESOLVED here so the output structure is the same
+        # two fixed-rank tensors whether or not the caller supplied a mask.
+        # Echoing a bare `None` made `predict()` unusable on the ordinary
+        # single-key dict: MEASURED at HEAD ae2e2aa0a,
+        # `FNet.predict({"input_ids": ids})` -> `ValueError: Structures don't
+        # have the same nested structure` (Keras concatenates per-batch outputs
+        # and a `None` slot has no structure). `model(inputs)` always worked,
+        # which is why no test caught it.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT drop the "attention_mask" key when it is None. That makes
+        #     the OUTPUT structure depend on the INPUT, which is precisely why
+        #     this repair was declined in the 2026-08-17 round.
+        #   * Do NOT resolve the mask BEFORE the encoder loop. It is an exact
+        #     no-op here (measured max|delta| = 0.000000e+00 over the whole
+        #     FNet output, since the mask is multiplicative post-mix) but the
+        #     SAME edit in `modern_bert/model.py` is NOT a no-op -- measured
+        #     6.415714e-01 on a max|out| of 2.67 -- because `WindowAttention`
+        #     zero-pads a rank-2 mask up to its square grid and thereby masks
+        #     out the grid padding that an absent mask leaves attendable. Both
+        #     files therefore resolve at the RETURN only, so the numerics of
+        #     every shipped checkpoint are untouched. See decisions.md D-031.
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": attention_mask,
+            "attention_mask": (
+                attention_mask if attention_mask is not None
+                else keras.ops.ones_like(input_ids)
+            ),
         }
 
     def load_pretrained_weights(

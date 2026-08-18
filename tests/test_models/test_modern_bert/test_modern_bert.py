@@ -166,7 +166,15 @@ class TestModernBERTModelBuilding:
             batch_size, seq_length, basic_config['hidden_size']
         )
         assert "attention_mask" in outputs
-        assert outputs["attention_mask"] is None  # Since it wasn't provided
+        # DECISION plan-2026-08-18T140459-7991552f/D-031: an OMITTED mask is
+        # echoed back as all-ones, not as `None`. This line asserted `is None`
+        # until 2026-08-19 and was therefore pinning the defect that made
+        # `predict({"input_ids": ...})` raise "Structures don't have the same
+        # nested structure". The mask still does not reach the encoder --
+        # see the D-031 anchor in `modern_bert/model.py`.
+        echoed = keras.ops.convert_to_numpy(outputs["attention_mask"])
+        assert echoed.shape == (batch_size, seq_length)
+        assert (echoed == 1).all()
 
     def test_transformer_layers_configuration(self, basic_config):
         model = ModernBERT(**basic_config)

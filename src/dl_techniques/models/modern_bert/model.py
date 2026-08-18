@@ -597,8 +597,12 @@ class ModernBERT(keras.Model):
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
-                 - ``attention_mask``: The original attention mask, passed
-                   through for convenience in downstream models.
+                 - ``attention_mask``: The attention mask, passed through for
+                   convenience in downstream models. When the caller omitted
+                   it, an all-ones mask of the same shape as ``input_ids`` is
+                   returned rather than ``None``, so the output structure is
+                   independent of the input and ``predict()`` works on a
+                   single-key input dict.
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
@@ -627,9 +631,41 @@ class ModernBERT(keras.Model):
 
         sequence_output = self.final_norm(hidden_states, training=training)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-031
+        # The echoed mask is RESOLVED here so the output structure is the same
+        # two fixed-rank tensors whether or not the caller supplied a mask.
+        # Echoing a bare `None` made `predict()` unusable on the ordinary
+        # single-key dict: MEASURED at HEAD ae2e2aa0a,
+        # `ModernBERT.predict({"input_ids": ids})` -> `ValueError: Structures
+        # don't have the same nested structure`. `model(inputs)` always worked,
+        # which is why no test caught it; `README.md` documented it as a
+        # limitation instead.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT drop the "attention_mask" key when it is None -- that
+        #     makes the OUTPUT structure depend on the INPUT.
+        #   * Do NOT move this resolution ABOVE the encoder loop. It reads like
+        #     the cleaner spelling and it is NOT a no-op here: an all-ones
+        #     rank-2 mask reaching the LOCAL layers changes the output, because
+        #     `WindowAttention._call_grid` zero-pads a rank-2 mask up to its
+        #     square grid, so the ones-mask MASKS OUT the grid padding that an
+        #     absent mask leaves attendable. MEASURED on a 2-layer model,
+        #     seq_len 12, `local_attention_window_size=4`:
+        #       mixed local/global (interval=3): max|delta| = 6.415714e-01
+        #                                        on a max|out| of 2.67
+        #       all-global       (interval=1): max|delta| = 0.000000e+00
+        #     identical for an int32, float32 or bool ones-mask. So the global
+        #     path really is mask-invariant and only the window path is not --
+        #     that difference is what makes the pre-loop placement a silent
+        #     numerics change for every shipped ModernBERT variant, which is
+        #     why it is refused. `fnet/model.py` carries the twin anchor.
+        # See decisions.md D-031.
         return {
             "last_hidden_state": sequence_output,
-            "attention_mask": attention_mask,
+            "attention_mask": (
+                attention_mask if attention_mask is not None
+                else ops.ones_like(input_ids)
+            ),
         }
 
     def load_pretrained_weights(

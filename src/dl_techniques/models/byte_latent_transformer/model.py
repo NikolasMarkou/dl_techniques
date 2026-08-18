@@ -791,7 +791,24 @@ class ByteLatentTransformer(keras.Model):
             'cross_attention_queries': self.cross_attention_queries,
             'dropout_rate': self.dropout_rate,
             'patch_pooling_method': self.patch_pooling_method,
-            'entropy_model': None if not self._custom_entropy_model else self.entropy_model,
+            # DECISION plan-2026-08-18T140459-7991552f/D-030
+            # A CUSTOM entropy model is serialized here, and re-materialized by
+            # `from_config` below. WHAT NOT TO DO: do NOT store the live
+            # `self.entropy_model` layer object. It LOOKS like it works --
+            # `model.save()` succeeds, because Keras' config encoder walks the
+            # dict and serializes the layer on the way out -- but on reload the
+            # value arrives as a plain config DICT, `__init__` takes its
+            # `else` branch and assigns that dict to `self.entropy_model`, and
+            # the first `build()` dies. MEASURED at HEAD ae2e2aa0a with a
+            # 1-layer custom `EntropyModel`: save OK, then
+            # `AttributeError: 'TrackedDict' object has no attribute 'built'`.
+            # The default path (`entropy_model=None`) is unaffected, which is
+            # why the shipped round-trip test never saw it -- no test built a
+            # custom entropy model. See decisions.md D-030.
+            'entropy_model': (
+                keras.saving.serialize_keras_object(self.entropy_model)
+                if self._custom_entropy_model else None
+            ),
         })
         return config
 
@@ -826,6 +843,15 @@ class ByteLatentTransformer(keras.Model):
         Returns:
             ByteLatentTransformer model instance.
         """
+        config = dict(config)
+        # DECISION plan-2026-08-18T140459-7991552f/D-030: the mirror of the
+        # `serialize_keras_object` in `get_config`. Without this the value
+        # arriving from a `.keras` file stays a plain dict and the first
+        # `build()` raises `'TrackedDict' object has no attribute 'built'`.
+        if config.get('entropy_model') is not None:
+            config['entropy_model'] = keras.saving.deserialize_keras_object(
+                config['entropy_model']
+            )
         return cls(**config)
 
     def summary(self, **kwargs: Any) -> None:

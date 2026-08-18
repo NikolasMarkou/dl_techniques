@@ -530,10 +530,14 @@ def test_forward_pass_shape():
     # "tiny" IS a standard variant (MODEL_VARIANTS is tiny/base/large), and it is
     # the one to forward with -- see Example 1's note on "base"'s memory cost.
     model = ModernBERT.from_variant("tiny")
-    # `attention_mask` is REQUIRED under `predict()`. `call` echoes the mask back in
-    # its output dict, so omitting it makes that entry `None` and Keras' batch
-    # concatenation raises "Structures don't have the same nested structure".
-    # `model(inputs)` directly does accept `input_ids` alone.
+    # `attention_mask` is OPTIONAL everywhere as of 2026-08-19. It used to be
+    # required under `predict()`: `call` echoed the mask back in its output dict,
+    # so omitting it made that entry `None` and Keras' batch concatenation raised
+    # "Structures don't have the same nested structure". `call` now echoes an
+    # all-ones mask when the caller omits one, so the output structure no longer
+    # depends on the input. The mask still does NOT reach the encoder in that
+    # case -- resolving it before the encoder loop would change the numerics of
+    # the local (window) layers; see the D-031 anchor in `model.py`.
     dummy_input = {
         "input_ids": np.random.randint(0, 50368, size=(4, 64)),
         "attention_mask": np.ones((4, 64), dtype="int32"),

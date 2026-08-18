@@ -32,6 +32,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.attention.factory import assemble_attention_config
 from dl_techniques.layers.transformers import (
     TransformerLayer,
     FFNType,
@@ -225,6 +226,46 @@ class TRMReasoningModule(keras.layers.Layer):
 
         intermediate_size = int(hidden_size * expansion)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-029
+        # These three keys are THIS MODULE'S OWN generic conveniences derived
+        # from its own hyperparameters, not an end user's expressed intent, so
+        # they are pre-filtered against the target type's registry allowlist
+        # instead of being forwarded unconditionally.
+        #
+        # WHAT NOT TO DO, and why: do NOT go back to a literal
+        # `attention_args={'num_kv_heads': ..., 'max_seq_len': ...,
+        # 'rope_theta': ...}`. Since 2026-08-17
+        # (plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer`
+        # RAISES on any key the target type does not declare, and
+        # `MultiHeadAttention` declares none of these three. MEASURED at
+        # HEAD ae2e2aa0a, both arms:
+        #   * `create_trm(attention_type='multi_head')` ->
+        #     `ValueError: create_attention_layer('multi_head'): 3 unsupported
+        #     parameter(s) ['max_seq_len','num_kv_heads','rope_theta']`, and
+        #     the same for every non-'group_query' type, so the documented
+        #     `attention_type` knob had exactly ONE legal value.
+        #   * A TRM `.keras` saved from commit 1c10e4203 (the last commit
+        #     before the D-007 default flip, whose `TRM.__init__` defaults to
+        #     'multi_head') FAILED to load at HEAD with that same ValueError,
+        #     because `get_config()` serializes `attention_type`. Verified by
+        #     building the artifact in a detached worktree, not by reading.
+        # The registry intersection is what makes both work again: for
+        # 'group_query' all three keys are accepted, so the shipped default
+        # path is byte-identical; for 'multi_head' all three are dropped, which
+        # is correct -- a legacy checkpoint's weights ARE MultiHeadAttention
+        # weights and must be rebuilt as such. No `from_config` string
+        # remapping: rewriting 'multi_head' to 'group_query' on load would
+        # rebuild a DIFFERENT weight tree than the file contains.
+        # See decisions.md D-029.
+        attention_args = assemble_attention_config(
+            attention_type,
+            {
+                'num_kv_heads': num_heads,
+                'max_seq_len': seq_len + puzzle_emb_len,
+                'rope_theta': rope_theta,
+            },
+        )
+
         # CREATE sub-layers in __init__ as per the Golden Rule.
         self.layers_list = [
             TransformerLayer(
@@ -232,11 +273,7 @@ class TRMReasoningModule(keras.layers.Layer):
                 num_heads=num_heads,
                 intermediate_size=intermediate_size,
                 attention_type=attention_type,
-                attention_args={
-                    'num_kv_heads': num_heads,
-                    'max_seq_len': seq_len + puzzle_emb_len,
-                    'rope_theta': rope_theta
-                },
+                attention_args=dict(attention_args),
                 normalization_type=normalization_type,
                 normalization_position=normalization_position,
                 ffn_type=ffn_type,
