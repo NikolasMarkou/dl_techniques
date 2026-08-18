@@ -166,8 +166,11 @@ class DINOv2Block(keras.layers.Layer):
             `use_bias` and never consults `proj_bias`, and no attention type in
             `ATTENTION_REGISTRY` separates the output projection's bias from the
             QKV one. The projection's bias therefore follows `qkv_bias`
-            regardless of what is passed here. Kept for config compatibility;
-            do not read it as a control. (The module docstring names the other
+            regardless of what is passed here. MEASURED 2026-08-18, two
+            `DINOv2Block(dim=32, num_heads=4)` built under the same seed: both
+            have 12 weights and 12,704 parameters, and their outputs on the same
+            input differ by exactly **0.0**. Kept for config compatibility; do
+            not read it as a control. (The module docstring names the other
             two dead DINOv2 knobs, `interpolate_antialias` and
             `interpolate_offset`, and was silent about this one.)
         ffn_bias: Whether to use bias in FFN layers.

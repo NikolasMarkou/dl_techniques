@@ -161,10 +161,14 @@ class CoShNet(keras.Model):
         epsilon: **DEAD KNOB.** Validated, stored, serialized and forwarded to
             every complex layer -- and never used in a computation. `grep -n
             "epsilon" layers/complex_layers.py` returns 6 hits, all of them
-            docstring / signature / validation / `get_config` (measured
-            2026-08-18); no complex layer performs a division at all, so there is
-            no numerical-stability term for it to be. Changing it changes
-            nothing. Kept for config compatibility.
+            docstring / signature / validation / `get_config`; no complex layer
+            performs a division at all, so there is no numerical-stability term
+            for it to be. MEASURED 2026-08-18 on ONE built `nano` (so the weights
+            are held fixed -- rebuilding under `set_random_seed` does NOT
+            reproduce them here, and that invalid instrument reported a spurious
+            0.023): forward is deterministic self-vs-self at exactly 0.0, and
+            after mutating all 4 live `epsilon` attributes from 1e-7 to 1e-1 the
+            output changes by exactly **0.0**. Kept for config compatibility.
 
         **kwargs: Additional arguments for Model base class.
 

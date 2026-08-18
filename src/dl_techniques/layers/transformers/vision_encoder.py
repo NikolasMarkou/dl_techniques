@@ -495,7 +495,9 @@ class VisionEncoder(keras.layers.Layer):
             )
 
         elif self.patch_embed_type == 'siglip':
-            # SigLIP-style two-stage patch embedding
+            # Two-stage patch embedding. NOT a SigLIP feature -- SigLIP is a sigmoid
+            # contrastive LOSS and its tower uses a single-conv stem; see
+            # models/vit_siglip/model.py's module docstring.
             return keras.Sequential([
                 # Stage 1: Coarse-grained patching
                 layers.Conv2D(

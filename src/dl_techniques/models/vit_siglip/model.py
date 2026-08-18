@@ -195,7 +195,9 @@ class SigLIPVisionTransformer(keras.Model):
         num_layers: Integer, number of transformer layers determined by scale.
         num_patches: Integer, total number of image patches.
         max_seq_len: Integer, maximum sequence length (num_patches + 1 for CLS).
-        siglip_patch_embed: SigLIP two-stage patch embedding layers.
+        siglip_patch_embed: the two-stage patch-embedding layers. The attribute
+            name keeps the `siglip_` prefix for source compatibility; the scheme is
+            NOT SigLIP's (see the module docstring).
         pos_embed: PositionalEmbedding layer for sequence position encoding.
         transformer_layers: List of TransformerLayer instances.
         norm: Final normalization layer.
@@ -383,7 +385,7 @@ class SigLIPVisionTransformer(keras.Model):
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Using factories for consistent component creation
 
-        # SigLIP two-stage patch embedding - custom implementation
+        # Two-stage patch embedding -- this module's own, not SigLIP's (module docstring)
         self.siglip_patch_embed = self._create_siglip_patch_embedding()
 
         # Positional embedding using factory
@@ -461,7 +463,7 @@ class SigLIPVisionTransformer(keras.Model):
 
     def _create_siglip_patch_embedding(self) -> keras.Sequential:
         """
-        Create SigLIP-style two-stage patch embedding.
+        Create the two-stage patch embedding (not SigLIP's -- see module docstring).
 
         The SigLIP approach uses a two-stage convolution:
         1. First stage: Coarse-grained patching with intermediate dimension
@@ -586,7 +588,7 @@ class SigLIPVisionTransformer(keras.Model):
         """
         batch_size = ops.shape(inputs)[0]
 
-        # SigLIP two-stage patch embedding
+        # Two-stage patch embedding (module docstring: not SigLIP's scheme)
         x = self.siglip_patch_embed(inputs, training=training)  # (batch_size, patch_h, patch_w, embed_dim)
 
         # Reshape to sequence format
