@@ -18,10 +18,7 @@ from dl_techniques.models.vit_siglip.model import (
     create_siglip_vision_transformer
 )
 
-from ..knob_sensitivity_oracle import (
-    assert_structural_knob_changes_weights,
-    assert_value_knob_changes_output,
-)
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 
 
 class TestSigLIPInitialization:
