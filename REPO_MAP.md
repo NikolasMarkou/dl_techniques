@@ -57,8 +57,8 @@ legitimately writes a trainer path as `train/vit/` rather than `src/train/vit/`.
 
 ## src/dl_techniques/ — the 13 subpackages
 
-Weighting matters more than completeness here: layers and models together are 562 of the
-library's Python files, i.e. 55% of everything under `src/`. The other eleven subpackages
+Weighting matters more than completeness here: layers and models together are 563 of the
+library's Python files, i.e. 56% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
 > **`layers`/`models` re-derived 2026-08-14 (second pass), after `models/mobile_clip_v2/`
@@ -550,12 +550,12 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1004 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 826 | `find tests -name '*.py' \| wc -l` |
+| Python files under `src/` | 1005 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 864 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/models/` | 266 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/models/` | 267 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 42 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 39 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/datasets/` | 37 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
@@ -567,8 +567,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 562 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
-| layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
+| `.py` in layers + models | 563 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| layers+models share of `src/` (%) | 56 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 75 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model packages under `src/dl_techniques/models/` | 73 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
@@ -616,7 +616,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 256 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
 | Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 336 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 246 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 247 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 16 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 81 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
