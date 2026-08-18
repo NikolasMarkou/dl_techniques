@@ -89,7 +89,7 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.time_series.prism_blocks import PRISMLayer
+from dl_techniques.layers.time_series.prism_blocks import PRISMLayer, PRISMTimeTree
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 
 # ---------------------------------------------------------------------
@@ -252,6 +252,74 @@ class PRISMModel(keras.Model, ForecastMixin):
             raise ValueError(f"num_features must be > 0, got {num_features}")
         if num_quantiles <= 0:
             raise ValueError(f"num_quantiles must be > 0, got {num_quantiles}")
+
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-005
+        # The governing quantity is `min_band_len`, NOT a `tree_depth` range. Do
+        # NOT "simplify" this into a bound on `tree_depth`: MEASURED over a
+        # 36-cell grid, `context_len=96, tree_depth=2, num_wavelet_levels=4` is
+        # broken while `context_len=256, tree_depth=4, num_wavelet_levels=3` is
+        # perfectly finite. Depth alone cannot separate the two; only the
+        # deepest band's length can, and it depends on all four knobs named in
+        # the message.
+        # This must be refused HERE, at construction, and not left to the
+        # forward pass. Below the threshold the failure is SILENT under
+        # `@tf.function` -- a length-0 band returns inf/NaN from `ops.min`/
+        # `ops.max` without raising (it raises only in eager), and since the
+        # degenerate-band guard landed in `FrequencyBandStatistics` it does not
+        # even do that: it returns finite ALL-ZERO statistics. There is no
+        # runtime signal left. See decisions.md D-004 and D-005.
+        if tree_depth >= 0 and num_wavelet_levels >= 0:
+            num_leaves = 2 ** tree_depth
+            if num_leaves == 1:
+                # `PRISMTimeTree._split_with_overlap` returns the sequence whole
+                # at a single segment; the geometry formula does not apply.
+                deepest_leaf_seg = context_len
+            else:
+                # `PRISMTimeTree.call` is NOT recursive -- every level re-splits
+                # the full re-stitched sequence -- so the deepest leaf is ONE
+                # application of the shared geometry at `2 ** tree_depth`.
+                _, _, deepest_leaf_seg = PRISMTimeTree._segment_len(
+                    context_len, overlap_ratio, num_leaves,
+                    dtype=self.compute_dtype
+                )
+            # Each Haar level floor-halves the band length.
+            min_band_len = deepest_leaf_seg // (2 ** num_wavelet_levels)
+            if min_band_len < 1:
+                # Smallest context_len that lifts this exact (tree_depth,
+                # num_wavelet_levels, overlap_ratio) triple to min_band_len >= 1,
+                # solved by search rather than by an approximation of the
+                # segment geometry -- the remedy printed must be one that works.
+                min_supported_context_len = context_len
+                while True:
+                    min_supported_context_len += 1
+                    if num_leaves == 1:
+                        probe_seg = min_supported_context_len
+                    else:
+                        _, _, probe_seg = PRISMTimeTree._segment_len(
+                            min_supported_context_len, overlap_ratio,
+                            num_leaves, dtype=self.compute_dtype
+                        )
+                    if probe_seg // (2 ** num_wavelet_levels) >= 1:
+                        break
+                # Only offer remedies that are real: at tree_depth 0 or
+                # num_wavelet_levels 0 there is nothing left to lower.
+                remedies = [f"raise context_len (to >= {min_supported_context_len})"]
+                if tree_depth > 0:
+                    remedies.append(f"lower tree_depth (to <= {tree_depth - 1})")
+                if num_wavelet_levels > 0:
+                    remedies.append(
+                        f"lower num_wavelet_levels (to <= {num_wavelet_levels - 1})"
+                    )
+                raise ValueError(
+                    f"unsupportable PRISM configuration: context_len="
+                    f"{context_len}, tree_depth={tree_depth}, "
+                    f"num_wavelet_levels={num_wavelet_levels}, overlap_ratio="
+                    f"{overlap_ratio} give deepest_leaf_seg={deepest_leaf_seg} "
+                    f"and min_band_len={min_band_len}, i.e. the deepest "
+                    f"frequency band carries no timesteps at all and its "
+                    f"statistics are undefined. Every band must have length "
+                    f">= 1. Remedies: " + ", or ".join(remedies) + "."
+                )
 
         # Validate or generate quantile levels
         if quantile_levels is not None:

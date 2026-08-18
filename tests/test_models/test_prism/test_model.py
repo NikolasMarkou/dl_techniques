@@ -99,6 +99,87 @@ class TestPRISMModelInstantiation:
                 num_features=-5,
             )
 
+    def test_unsupportable_band_config_raises_value_error(self) -> None:
+        """A configuration whose deepest frequency band has length 0 is REFUSED.
+
+        The governing quantity is ``min_band_len``, not ``tree_depth``::
+
+            deepest_leaf_seg = PRISMTimeTree._segment_len(
+                context_len, overlap_ratio, 2 ** tree_depth)[2]
+            min_band_len     = deepest_leaf_seg // 2 ** num_wavelet_levels
+
+        Measured (plan-2026-08-18T073231-52a93f8c step 1, 36-cell grid): at
+        ``context_len=96`` the deepest-leaf segment is 54 / 25 / 12 / 6 for
+        ``tree_depth`` 1-4, so ``96/4/3`` gives ``6 >> 3 == 0``. Without this
+        raise the model builds happily and, since the degenerate-band guard
+        landed, returns finite ALL-ZERO band statistics -- silent garbage.
+        """
+        with pytest.raises(ValueError, match="min_band_len"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=4,
+                num_wavelet_levels=3,
+            )
+
+    def test_unsupportable_band_message_names_all_four_knobs(self) -> None:
+        """The refusal must name every knob the caller can turn to fix it."""
+        with pytest.raises(ValueError) as excinfo:
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=3,
+                num_wavelet_levels=4,
+            )
+        message = str(excinfo.value)
+        for knob in (
+            "context_len",
+            "tree_depth",
+            "num_wavelet_levels",
+            "overlap_ratio",
+        ):
+            assert knob in message, f"{knob!r} missing from: {message}"
+        assert "min_band_len=0" in message
+        assert "deepest_leaf_seg=12" in message
+
+    def test_min_band_len_one_config_is_still_supported(self) -> None:
+        """The neighbour of the refused config must NOT be refused.
+
+        ``context_len=96, tree_depth=3, num_wavelet_levels=3`` gives
+        ``12 >> 3 == 1``. Threshold = 1 was CONFIRMED by measurement (all six
+        ``min_band_len == 1`` grid cells forward finite once the degenerate-band
+        guard landed), so this must construct AND forward finite. This is the
+        discriminating half of the pair: over-broad validation fails here.
+        """
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            tree_depth=3,
+            num_wavelet_levels=3,
+        )
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert output.shape == (4, 24, 7)
+        assert np.all(np.isfinite(output))
+
+    @pytest.mark.parametrize("variant", ["tiny", "small", "base", "large"])
+    def test_shipped_variants_survive_band_validation(self, variant: str) -> None:
+        """Every shipped preset must remain constructible (invariant I-2).
+
+        If one of these starts raising, the validation rule is wrong -- do not
+        loosen the rule to accommodate it without re-measuring.
+        """
+        model = PRISMModel.from_variant(
+            variant,
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+        )
+        assert model.context_len == 96
+
 
 class TestPRISMModelForwardPass:
     """Test forward pass and output shapes."""
