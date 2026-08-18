@@ -963,9 +963,14 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': create_grid_window_attention,
         'description': (
             'Windowed multi-head self-attention from Swin Transformer, partitioning inputs '
-            'into non-overlapping grids for local attention computation. Achieves linear '
-            'complexity while maintaining spatial awareness through an optional learnable '
-            'relative position bias.'
+            'into non-overlapping grids for local attention computation, with spatial '
+            'awareness from an optional learnable relative position bias. '
+            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY: a 1-D input of '
+            'length N is folded into a ceil(sqrt(N))-square grid and every window is PADDED '
+            'up to window_size**2 slots, so cost is O(max(N, M) * M) with M = window_size**2. '
+            'It beats global attention only for N > M. For N <= M the grid pads to a SINGLE '
+            'window and this layer computes dense attention over M padded positions — '
+            '(M/N)**2 times MORE work than plain global attention over the N real tokens.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
@@ -992,7 +997,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'Core component of Swin-style architectures for image classification, object '
             'detection, and semantic segmentation where input resolution scalability is crucial.'
         ),
-        'complexity': 'O(W²) per window vs O(n²) global attention',
+        'complexity': (
+            'O(max(N, M) * M) with M = W**2 slots per window (W = window_size); '
+            'linear in N only for N > M, and a constant O(M**2) = O(W**4) floor for '
+            'N <= M, where it degenerates to dense attention over one padded window'
+        ),
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
     },
     # NOTE: also a FUNCTION, pinning partition_mode='zigzag' (and defaulting
@@ -1029,7 +1038,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'are important. Advanced normalization options are suitable for models requiring '
             'better calibration or exploring alternatives to softmax.'
         ),
-        'complexity': 'O(W²) per window, same as standard window attention',
+        'complexity': (
+            'O(max(N, M) * M) with M = W**2, same as standard window attention above — '
+            'including the O(M**2) floor: the zigzag path pads the reordered sequence up '
+            'to a multiple of M as well, so N <= M is one dense padded window here too'
+        ),
         'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
     },
 

@@ -19,19 +19,42 @@ many normalization layers it has passed through. That is what removes the
 learning-rate warmup sensitivity that makes deep post-normalization stacks
 awkward to train.
 
-Hybrid local/global attention is the cost change, and it is where the design
-does something non-obvious. Rather than making every layer cheap, the stack
-alternates: most layers use windowed local attention over
+Hybrid local/global attention is the paper's cost change, and it is where the
+design does something non-obvious. Rather than making every layer cheap, the
+stack alternates: most layers use windowed local attention over
 `local_attention_window_size` tokens, and every `global_attention_interval`-th
-layer uses full global attention. Local layers do the bulk of the work at
-linear cost, while the periodic global layers stitch the windows together so
-information still crosses the whole sequence -- a token pair `L` apart is
-connected after one global layer, not after `L / window` local ones. This is
-what makes an 8192-token context affordable when dense attention at that length
-would not be. The local layers here are a documented approximation of that
-idea rather than a transcription of it: the windowed attention layer this
-package reuses is a spatial one, so a text sequence is folded into a synthetic
-square grid before windowing (see the class docstring).
+layer uses full global attention. In the paper the local layers do the bulk of
+the work at linear cost, while the periodic global layers stitch the windows
+together so information still crosses the whole sequence -- a token pair `L`
+apart is connected after one global layer, not after `L / window` local ones.
+
+**That cost argument does not hold for this implementation, and the direction
+of the error is the opposite of an approximation.** The windowed attention
+layer this package reuses is a spatial one: it folds the sequence into a
+synthetic `ceil(sqrt(L))`-square grid and then pads that grid up to a multiple
+of `window_size`, so every window is padded to exactly `window_size**2` token
+slots. Two consequences, both mechanical:
+
+* Whenever `L <= window_size**2` the padded grid is a single window and the
+  local layer is **dense attention**, not windowed attention. At the
+  `window_size=128` that `base` and `large` ship, the threshold is 16384 --
+  above `DEFAULT_MAX_POSITION_EMBEDDINGS = 8192`, so **no admissible sequence
+  length is ever windowed for those two variants**. `tiny` (`window_size=64`,
+  threshold 4096) is the only variant where windowing engages at all, and only
+  for `4096 < L <= 8192`.
+* The score matrix in a local layer is `window_size**2 x window_size**2`
+  *independent of `L`* -- roughly `2.7e8` entries per head per sample at
+  `window_size=128`. That is ~16,384x the cost of dense attention at `L=128`
+  and still ~4x dense attention at `L=8192`. The local layers are the
+  expensive ones here, not the cheap ones.
+
+So the hybrid schedule as built buys no affordability; it collapses to an
+all-global stack in which 2 of every 3 layers additionally carry no RoPE (only
+`is_global` layers receive `rope_theta`) and get their order signal from a
+relative position bias over the synthetic grid instead. This is documented
+rather than fixed because no 1-D sliding-window attention layer exists in
+`layers/attention/`; writing one is the real fix, and it is an open decision.
+Pinned by `tests/test_models/test_modern_bert/test_shipped_window_size.py`.
 
 Positional information lives entirely in the attention layers, as in the
 paper: the embedding stage sums word and token-type embeddings and adds no
@@ -414,6 +437,31 @@ class ModernBERT(keras.Model):
             # information is the Swin-convention relative position bias over
             # that synthetic grid. This is documented, not fixed: no 1-D
             # sliding-window attention exists in `layers/attention/`.
+            #
+            # DECISION plan-2026-08-17T183311-79c63e38/D-027
+            # The local branch is kept as 'window' even though its COST claim is
+            # not merely approximate but INVERTED. Windows are padded to
+            # `window_size**2` slots, so a local layer's score matrix is
+            # `window_size**2 x window_size**2` INDEPENDENT of L: ~2.7e8 entries
+            # per head per sample at the shipped `window_size=128`, i.e. ~16,384x
+            # dense attention at L=128 and ~4x at L=8192. With
+            # DEFAULT_MAX_POSITION_EMBEDDINGS = 8192 < 128**2, base and large can
+            # never window an admissible length at all.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT "fix" this by lowering `local_attention_window_size`
+            #     until windowing engages. Below `L = window_size**2` the layer is
+            #     dense over a padded grid; above it, the neighbourhood is a set
+            #     of STRIDED token runs over a synthetic square grid, not the
+            #     paper's contiguous 1-D window. A smaller window buys a
+            #     different wrong adjacency, not the paper's.
+            #   * Do NOT write a 1-D sliding-window path inline here. It is new
+            #     architecture and belongs in `layers/attention/`, behind the
+            #     factory, with its own tests — not in a model's builder.
+            #   * Do NOT re-describe the local layers as the cheap ones. They are
+            #     the expensive ones in this implementation.
+            # Implement-or-delete is an OPEN decision: see decisions.md D-027.
+            # Pinned by tests/test_models/test_modern_bert/test_shipped_window_size.py.
             attention_type = "group_query" if is_global else "window"
             attention_args = (
                 {

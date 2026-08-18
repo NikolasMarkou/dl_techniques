@@ -40,7 +40,7 @@ An advanced, production-ready Keras 3 implementation of **ModernBERT**, a succes
 1.  **Rotary Positional Embeddings (RoPE)**: Replaces traditional absolute positional embeddings with RoPE, which is proven to excel in both short- and long-context scenarios and allows for easier context extension.
 2.  **Pre-Layer Normalization (Pre-LN)**: Applies layer normalization *before* attention and feed-forward blocks, significantly improving training stability and convergence.
 3.  **GeGLU Activation Function**: Uses a Gated GELU (GeGLU) in the feed-forward network, which provides a more sophisticated gating mechanism for improved performance.
-4.  **Alternating Local & Global Attention**: Employs an efficient hybrid attention strategy. Most layers use computationally cheaper **windowed (local) attention**, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. This is crucial for its 8192 native sequence length.
+4.  **Alternating Local & Global Attention**: Employs a hybrid attention strategy. Most layers use **windowed (local) attention**, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. In the paper this is what makes the 8192 native sequence length affordable. **In this implementation it is not** — the reused `window` layer pads every window to `window_size**2` slots, so at the shipped `window_size=128` no admissible length is ever windowed and the local layers are *more* expensive than global ones, not less. See § 4.3; this is a known deviation, and an open decision.
 5.  **Bias-Free Layers**: Removes bias parameters from most linear and normalization layers to optimize the parameter budget and improve stability.
 6.  **Modern Training Recipe**: Trained on 2 trillion tokens with a modern BPE tokenizer, a modified trapezoidal learning rate schedule, and advanced optimizers like StableAdamW.
 
@@ -62,12 +62,20 @@ Classic BERT Approach:
 **ModernBERT's Solution**:
 ```
 ModernBERT Approach:
-  1. Replace most global attention with efficient windowed attention.
+  1. Replace most global attention with windowed attention.
   2. Insert global attention layers periodically to aggregate information.
   3. Use RoPE for robust positional information up to 8192 tokens.
   4. Train on a massive, modern dataset including code.
-  5. Benefit: Achieves state-of-the-art performance with near-linear complexity,
-     making it a versatile and highly efficient backbone for modern NLP tasks.
+  5. Benefit (AS PUBLISHED): near-linear attention complexity, making it a
+     versatile and efficient backbone for modern NLP tasks.
+
+  NOT REPRODUCED HERE: step 1's cost benefit. The `window` layer this package
+  reuses pads every window to `window_size**2` slots, so its cost is
+  O(max(L, M) * M) with M = window_size**2 -- a CONSTANT O(M^2) floor for
+  L <= M rather than a linear-in-L saving. At the shipped window_size=128
+  (M = 16384 > the 8192 max position) every local layer is dense attention
+  over a padded 16384-slot window at every admissible L. Modelling quality is
+  unaffected in kind; the efficiency claim is inverted. See § 4.3.
 ```
 
 ### Real-World Impact
@@ -210,7 +218,8 @@ Input (from previous layer)
 -   **Global Attention**: Every 3rd layer uses standard global attention with **RoPE** on its queries and keys. This allows information to be exchanged across the entire 8192-token sequence, ensuring that long-range dependencies are captured. It is built as the factory's `group_query` type with `num_kv_heads == num_heads`, which is arithmetically plain multi-head attention — that is the only registry entry that reaches plain self-attention *and* carries RoPE. `multi_head` declares no RoPE parameter. Until 2026-08-17 `create_attention_layer` silently dropped keys it does not declare, so `attention_args={"use_rope": True}` on a `multi_head` layer built cleanly and did nothing; that factory is now strict and raises a `ValueError` naming the key, so the same mistake fails at construction.
 -   **Windowed (Local) Attention**: Most layers (2 out of every 3) use windowed attention. **This implementation deviates from the paper**, and the deviation is deliberate and documented rather than hidden: the reused `window` attention layer is a *spatial* one. It reshapes the `(B, L, D)` token sequence into a synthetic `ceil(sqrt(L))`-square grid and attends inside `window_size`-square blocks of that grid. Consequences, both measurable:
     -   A local layer's neighbourhood is **not** a contiguous 1-D window. With `L=16` and `window_size=2` the grid is 4x4 and token 0's window is `{0, 1, 4, 5}` — tokens 2 and 3 are invisible to it while token 4 is not. Pinned by `tests/test_models/test_modern_bert/test_positional_signal.py::TestLocalWindowAdjacencyIsSynthetic`.
-    -   Whenever `L <= window_size**2` (16384 at the default `window_size=128`) a single window covers the whole padded grid, so the layer is full attention, not `O(N * W)`.
+    -   Whenever `L <= window_size**2` (16384 at the default `window_size=128`) a single window covers the whole padded grid, so the layer is full attention, not `O(N * W)`. `DEFAULT_MAX_POSITION_EMBEDDINGS` is 8192, so for `base` and `large` (`window_size=128`) **no admissible sequence length is ever windowed**. `tiny` (`window_size=64`, threshold 4096) is the only variant where windowing engages, and only for `4096 < L <= 8192`.
+    -   The cost is not merely un-improved, it is *worse than global attention*. Windows are padded to `window_size**2` slots, so a local layer's score matrix is `window_size**2 x window_size**2` **independent of `L`**: `16384 x 16384 ~ 2.7e8` entries per head per sample at the default. That is ~16,384x dense attention at `L=128` and ~4x dense attention at `L=8192`. General form: `O(max(L, M) * M)` with `M = window_size**2`, i.e. an `O(M^2)` floor below `L = M` rather than a linear saving. Pinned by `tests/test_models/test_modern_bert/test_shipped_window_size.py` (the rest of the suite runs at `TEST_WINDOW_SIZE = 16`, where the same degeneracy holds but is invisible).
     Within-window order comes from the layer's learnable Swin-convention relative position bias over that synthetic grid, not from RoPE and not from 1-D token distance. No 1-D sliding-window attention layer exists in `layers/attention/`; adding one is the real fix.
 
 ---
@@ -485,11 +494,13 @@ if __name__ == '__main__':
 
 **Q: What is the main difference between ModernBERT and classic BERT?**
 
-A: The five key upgrades are: **1) Rotary Positional Embeddings (RoPE)** for long context; **2) Pre-Layer Normalization** for stability; **3) GeGLU activation** for better performance; **4) Alternating windowed/global attention** for efficiency; and **5) Bias-free layers**.
+A: The five key upgrades are: **1) Rotary Positional Embeddings (RoPE)** for long context; **2) Pre-Layer Normalization** for stability; **3) GeGLU activation** for better performance; **4) Alternating windowed/global attention** (for efficiency in the paper — see the next question for what this implementation actually does); and **5) Bias-free layers**.
 
 **Q: Why use alternating attention instead of another efficient attention mechanism?**
 
-A: Alternating attention is a simple and effective strategy. It is computationally cheap (dominated by the fast local attention) but still allows for full sequence-level information flow through the periodic global layers. This provides a strong balance of speed and modeling power.
+A: In the paper, alternating attention is a simple and effective strategy: computationally cheap (dominated by the fast local attention) while still allowing full sequence-level information flow through the periodic global layers.
+
+**This implementation does not deliver that efficiency, and it is worth being blunt about the direction.** The local layers are built from the `window` attention layer, which folds the sequence into a synthetic `ceil(sqrt(L))`-square grid and pads every window to `window_size**2` token slots. Cost is therefore `O(max(L, M) * M)` with `M = window_size**2`, which has a constant `O(M^2)` floor rather than a linear-in-`L` saving. At the shipped `window_size=128`, `M = 16384` exceeds the 8192 max position, so a local layer computes a `16384 x 16384` score matrix *whatever `L` is* — about 16,384x dense attention at `L=128`, and still ~4x dense attention at `L=8192`. The schedule collapses to an all-global stack that is slower than a plain all-global stack would be. Modelling behaviour is what § 4.3 describes; only the speed claim is wrong. `tests/test_models/test_modern_bert/test_shipped_window_size.py` pins this at the shipped size. Fixing it means writing a genuine 1-D sliding-window attention layer — none exists in `layers/attention/` — which is an open decision, not a pending patch.
 
 **Q: Is ModernBERT a drop-in replacement for `bert-base-uncased`?**
 
