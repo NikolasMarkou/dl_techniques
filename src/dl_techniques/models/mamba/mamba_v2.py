@@ -57,6 +57,17 @@ in-block SSM-output norm only). And the `'130m'` entry of `MODEL_VARIANTS` carri
 so `from_variant('130m')` yields a model literally named `base`; the key was
 evidently intended as an alias marker and is not one.
 
+`MODEL_VARIANTS` was corrected on 2026-08-18 against the released Mamba-2
+checkpoints' own configs: `370m` carried 24 layers instead of 48 and `780m` carried
+36 instead of 48, so those two rows built roughly half the model their names
+advertise, silently. The row names were corrected at the same time - the Mamba-2
+series ships `130m/370m/780m/1.3b/2.7b`, where Mamba-1 ships
+`130m/370m/790m/1.4b/2.8b`, so this table's former `1.4b`/`2.8b` keys named models
+that do not exist in this series. They still resolve, as aliases onto `1.3b`/`2.7b`,
+whose shapes are identical. Note that `780m` here versus `790m` in
+:mod:`~dl_techniques.models.mamba.mamba_v1` is correct in both files, not a typo in
+either.
+
 Residual handling matches v1: blocks return `(output, running_residual)` and the
 final addition is deferred to the model tail, so a caller stacking blocks manually
 must thread the residual through or end up with no skip connections at all.
@@ -113,12 +124,54 @@ class Mamba2(keras.Model):
         and that layer forwarded it.
     """
 
+    # DECISION plan-2026-08-18T140459-7991552f/D-024: this table is derived from the
+    # Mamba-2 release's own `config.json` files, NOT from `mamba_v1.MODEL_VARIANTS`
+    # and NOT from the Mamba-1 paper. The distinction is load-bearing three times over.
+    #
+    # (1) Mamba-2 is Dao and Gu 2024 (arXiv 2405.21060), not Gu and Dao 2023
+    #     (arXiv 2312.00752, which is Mamba-1). A reviewer citing "Gu and Dao 2023,
+    #     Table 9" for these numbers is citing the wrong paper.
+    # (2) The Mamba-2 series does NOT ship a `1.4b` or a `2.8b`. Its five released
+    #     checkpoints are `state-spaces/mamba2-{130m,370m,780m,1.3b,2.7b}`; the
+    #     Mamba-1 series is `state-spaces/mamba-{130m,370m,790m,1.4b,2.8b}`. The
+    #     `780m` spelling here is CORRECT for v2 and `790m` is correct for v1 - the
+    #     two files disagreeing on that name is not a bug in either. Fetched
+    #     2026-08-18 from https://huggingface.co/state-spaces/mamba2-<size>/raw/main/config.json
+    #     (`1.4b`/`2.8b`/`790m` under the `mamba2-` prefix return HTTP 401: no such repo).
+    # (3) Before this fix the table read 370m -> 24 layers and 780m -> 36 layers, so
+    #     `Mamba2.from_variant("370m")` built HALF the advertised model with no error.
+    #     Do NOT "fix" that by assuming v1's block-count doubling rationale ("one Mamba
+    #     block replaces an attention+MLP pair") transfers - the SSD block has a
+    #     different per-block parameter count, so the rationale does not transfer even
+    #     though the depths happen to coincide. The depths below are what the released
+    #     configs say (`n_layer`), measured, not reasoned from v1.
+    #
+    #   variant  d_model  n_layer   released as
+    #   130m       768      24      state-spaces/mamba2-130m
+    #   370m      1024      48      state-spaces/mamba2-370m
+    #   780m      1536      48      state-spaces/mamba2-780m
+    #   1.3b      2048      48      state-spaces/mamba2-1.3b
+    #   2.7b      2560      64      state-spaces/mamba2-2.7b
+    #
+    # `vocab_size` is deliberately NOT carried here: the checkpoints use 50277 padded
+    # to a multiple of 16, and `from_variant` requires the caller to state it.
     MODEL_VARIANTS = {
-        "2.8b": {"d_model": 2560, "num_layers": 64},
-        "1.4b": {"d_model": 2048, "num_layers": 48},
-        "780m": {"d_model": 1536, "num_layers": 36},
-        "370m": {"d_model": 1024, "num_layers": 24},
+        "2.7b": {"d_model": 2560, "num_layers": 64},
+        "1.3b": {"d_model": 2048, "num_layers": 48},
+        "780m": {"d_model": 1536, "num_layers": 48},
+        "370m": {"d_model": 1024, "num_layers": 48},
         "130m": {"d_model": 768, "num_layers": 24, "name": "base"},
+    }
+
+    # Accepted spellings that are not Mamba-2 size names. `base` is the pre-existing
+    # alias for `130m`; `1.4b`/`2.8b` are the Mamba-1 series names, kept accepting
+    # because they were this table's keys before 2026-08-18 and they resolve to the
+    # v2 rows with identical `d_model`/`num_layers`, so no caller silently changes
+    # model. They are aliases, not sizes: they do not appear in `MODEL_VARIANTS`.
+    VARIANT_ALIASES = {
+        "base": "130m",
+        "1.4b": "1.3b",
+        "2.8b": "2.7b",
     }
 
     def __init__(
@@ -213,10 +266,10 @@ class Mamba2(keras.Model):
 
     @classmethod
     def from_variant(cls, variant: str, vocab_size: int, **kwargs: Any) -> "Mamba2":
-        if variant == "base":
-            variant = "130m"
+        variant = cls.VARIANT_ALIASES.get(variant, variant)
         if variant not in cls.MODEL_VARIANTS:
-            raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}")
+            available = list(cls.MODEL_VARIANTS.keys()) + list(cls.VARIANT_ALIASES.keys())
+            raise ValueError(f"Unknown variant '{variant}'. Available: {available}")
 
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)

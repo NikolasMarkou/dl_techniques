@@ -259,27 +259,43 @@ model.summary()
 
 ## 7. Configuration & Model Variants
 
-This implementation provides standard configurations matching the original papers.
+Both tables below are the shapes of the authors' **released checkpoints**, read from
+each repo's own `config.json` (`d_model`, `n_layer`) on 2026-08-18 — not from a paper
+table and not from each other.
+
+**V1 and V2 are different size series, and their names differ on purpose.** Mamba-1
+ships `130m / 370m / 790m / 1.4b / 2.8b`; Mamba-2 ships `130m / 370m / 780m / 1.3b /
+2.7b`. `780m` (V2) versus `790m` (V1) is correct in both places. `Mamba2.from_variant`
+still accepts `1.4b` and `2.8b` as aliases for `1.3b` and `2.7b` — they were its keys
+before 2026-08-18 and the shapes are identical — but they are not Mamba-2 size names.
 
 ### Mamba V1 Variants
+
+Source: `https://huggingface.co/state-spaces/mamba-<variant>/raw/main/config.json`.
+This table was stale until 2026-08-18 on three cells (`370m` layers, `790m` and `1.4b`
+`d_model`); the code in `mamba_v1.py` was already correct, having been fixed 2026-08-14.
 
 | Variant | d_model | Layers | Parameters (Approx.) |
 |:---:|:---:|:---:|:---:|
 | **`130m`** (`base`) | 768 | 24 | ~130M |
-| **`370m`** | 1024 | 24 | ~370M |
-| **`790m`** | 1024 | 48 | ~790M |
-| **`1.4b`** | 1536 | 48 | ~1.4B |
+| **`370m`** | 1024 | 48 | ~370M |
+| **`790m`** | 1536 | 48 | ~790M |
+| **`1.4b`** | 2048 | 48 | ~1.4B |
 | **`2.8b`** | 2560 | 64 | ~2.8B |
 
 ### Mamba V2 Variants
 
+Source: `https://huggingface.co/state-spaces/mamba2-<variant>/raw/main/config.json`.
+Corrected 2026-08-18: `370m` was listed (and built) with 24 layers and `780m` with 36,
+roughly half the advertised model in each case.
+
 | Variant | d_model | Layers | Parameters (Approx.) |
 |:---:|:---:|:---:|:---:|
 | **`130m`** (`base`) | 768 | 24 | ~130M |
-| **`370m`** | 1024 | 24 | ~370M |
-| **`780m`** | 1536 | 36 | ~780M |
-| **`1.4b`** | 2048 | 48 | ~1.4B |
-| **`2.8b`** | 2560 | 64 | ~2.8B |
+| **`370m`** | 1024 | 48 | ~370M |
+| **`780m`** | 1536 | 48 | ~780M |
+| **`1.3b`** (alias `1.4b`) | 2048 | 48 | ~1.3B |
+| **`2.7b`** (alias `2.8b`) | 2560 | 64 | ~2.7B |
 
 ---
 

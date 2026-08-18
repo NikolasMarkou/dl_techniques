@@ -85,13 +85,19 @@ class TestMamba2ModelInitialization:
 class TestMamba2ModelVariants:
     """Test Mamba v2 model variants and factory methods."""
 
+    # These pin the released Mamba-2 checkpoint shapes
+    # (https://huggingface.co/state-spaces/mamba2-<size>/raw/main/config.json,
+    # fetched 2026-08-18). Until then this table asserted ("370m", 1024, 24) and
+    # ("780m", 1536, 36) -- i.e. it pinned the defect, so `from_variant("370m")`
+    # building half the advertised model was a GREEN test. Do not "simplify" these
+    # back toward `mamba_v1`'s table: v1 is a different size series (790m/1.4b/2.8b
+    # against v2's 780m/1.3b/2.7b). See the D-024 anchor in `mamba_v2.py`.
     @pytest.mark.parametrize("variant, d_model, num_layers", [
         ("130m", 768, 24),
-        ("base", 768, 24),
-        ("370m", 1024, 24),
-        ("780m", 1536, 36),
-        ("1.4b", 2048, 48),
-        ("2.8b", 2560, 64),
+        ("370m", 1024, 48),
+        ("780m", 1536, 48),
+        ("1.3b", 2048, 48),
+        ("2.7b", 2560, 64),
     ])
     def test_variants(self, variant, d_model, num_layers):
         """Test all standard parameter variants."""
@@ -99,6 +105,38 @@ class TestMamba2ModelVariants:
         assert model.d_model == d_model
         assert model.num_layers == num_layers
         assert model.vocab_size == 50257
+
+    @pytest.mark.parametrize("alias, canonical", [
+        ("base", "130m"),
+        ("1.4b", "1.3b"),
+        ("2.8b", "2.7b"),
+    ])
+    def test_variant_aliases_resolve_to_canonical_row(self, alias, canonical):
+        """Non-size spellings still build, and build the row they alias.
+
+        `1.4b`/`2.8b` are Mamba-*1* size names that were this table's keys before
+        2026-08-18. They are kept accepting so no existing caller breaks, but they
+        must not drift away from the v2 row they resolve to.
+        """
+        assert alias not in Mamba2.MODEL_VARIANTS
+        expected = Mamba2.MODEL_VARIANTS[canonical]
+        model = Mamba2.from_variant(alias, vocab_size=50257)
+        assert model.d_model == expected["d_model"]
+        assert model.num_layers == expected["num_layers"]
+
+    def test_mamba1_only_size_names_are_not_v2_sizes(self):
+        """The v2 table must not re-grow rows the Mamba-2 series never shipped.
+
+        `state-spaces/mamba2-1.4b`, `-2.8b` and `-790m` do not exist (HTTP 401 /
+        no such repo); `state-spaces/mamba-*` does ship those names. Listing them
+        as v2 *sizes* is what let v1's table get copied over v2's in the first
+        place.
+        """
+        for v1_only in ("790m", "1.4b", "2.8b"):
+            assert v1_only not in Mamba2.MODEL_VARIANTS, (
+                f"'{v1_only}' is a Mamba-1 size name; it may be an alias, not a row"
+            )
+        assert set(Mamba2.MODEL_VARIANTS) == {"130m", "370m", "780m", "1.3b", "2.7b"}
 
     def test_invalid_variant(self):
         """Test error handling for invalid variant names."""
