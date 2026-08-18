@@ -374,6 +374,14 @@ class DINOHead(keras.layers.Layer):
         # holds for a never-trained head too (see D-011 above). On a .keras
         # reload this runs BEFORE the saved weights are restored, and those
         # weights already satisfy the constraint, so it does not perturb them.
+        # The claim is path-qualified (finding C-1,
+        # plan-2026-08-17T183311-79c63e38/D-024): it is measured on the path
+        # `DINOv1(include_projection_head=True)` takes, which builds this head
+        # DIRECTLY -- column norms [0.999999, 1.000000]; a head built from
+        # inside a parent LAYER's `call()` runs in a StatelessScope that records
+        # and DISCARDS `.assign()`, giving 0.119-0.245, and nothing in this tree
+        # does that today (pinned by
+        # `tests/test_models/test_dino/test_head_unit_norm_invariant.py`).
         if self.norm_last_layer:
             self.last_layer.kernel.assign(
                 self.last_layer.kernel_constraint(self.last_layer.kernel)
