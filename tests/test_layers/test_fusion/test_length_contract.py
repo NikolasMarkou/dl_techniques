@@ -75,8 +75,28 @@ class TestUnequalLengthsAreRefusedByName:
     def test_length_agnostic_strategies_still_accept_unequal_lengths(self, strategy):
         """Anti-vacuity control: the guard must not fire for these two."""
         layer = _layer(strategy)
-        output = layer(_pair())
-        assert output is not None
+        inputs = _pair()
+        output = layer(inputs)
+        # `is not None` is true of every return value a Keras layer can
+        # produce, including a wrong-shaped or all-NaN one. The claim is that
+        # the layer really ran on the unequal-length pair.
+        # `cross_attention` returns a TUPLE of two tensors (one per modality,
+        # each keeping its own length) while `attention_pooling` returns a
+        # single pooled tensor -- measured 2026-08-18: (2, 5, 8) + (2, 3, 8)
+        # versus (2, 8). Both are normalised to a list here.
+        tensors = list(output) if isinstance(output, (list, tuple)) else [output]
+        claimed = layer.compute_output_shape([tuple(t.shape) for t in inputs])
+        claimed = claimed if isinstance(claimed, list) else [claimed]
+        assert len(tensors) == len(claimed)
+        for tensor, expected in zip(tensors, claimed):
+            array = np.asarray(keras.ops.convert_to_numpy(tensor))
+            assert np.all(np.isfinite(array)), (
+                f"{strategy} produced non-finite output"
+            )
+            assert tuple(array.shape) == tuple(expected), (
+                f"{strategy}: forward gave {array.shape}, "
+                f"compute_output_shape claimed {expected}"
+            )
 
     @pytest.mark.parametrize("strategy", LENGTH_SENSITIVE)
     def test_equal_lengths_still_run(self, strategy):
@@ -92,7 +112,15 @@ class TestUnequalLengthsAreRefusedByName:
             keras.Input(shape=(None, DIM)),
             keras.Input(shape=(None, DIM)),
         ]
-        assert layer(inputs) is not None
+        # `is not None` cannot fail. The claim is that the symbolic call
+        # succeeds AND leaves the unknown length unknown rather than guessing a
+        # concrete one.
+        output = layer(inputs)
+        assert isinstance(output, keras.KerasTensor)
+        assert output.shape[1] is None, (
+            f"the unknown sequence axis was guessed at: {output.shape}"
+        )
+        assert output.shape[-1] == DIM
 
 
 class TestComputeOutputShapeMatchesTheForwardPass:

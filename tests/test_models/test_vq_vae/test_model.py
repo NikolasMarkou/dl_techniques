@@ -124,6 +124,67 @@ def sample_images() -> keras.KerasTensor:
         dtype='float32'
     )
 
+
+# ---------------------------------------------------------------------------
+# Reconstruction bars, derived from the trivial baseline
+# ---------------------------------------------------------------------------
+# The reconstruction assertions in this file used to read `error < 0.5`,
+# `error < 1.0` and `final <= initial * 1.1`. On `sample_images`
+# (uniform(0, 1)) the CONSTANT predictor 0.5 has MSE = Var(U(0,1)) = 1/12 =
+# 0.0833, so `< 0.5` is ~6x looser than predicting a constant, and a test named
+# "reconstruction_quality_improves" passed a model that got 10% WORSE.
+#
+# MEASURED 2026-08-18, this exact config on `sample_images`: initial 0.08339,
+# final after 10 epochs 0.08329 -- the model sits EXACTLY on the variance floor,
+# because i.i.d. uniform noise is incompressible and nothing better than the
+# mean can be learned from it. A derived bar is therefore untestable on that
+# fixture: the data, not the assertion, is what made the claim unfalsifiable.
+#
+# `_structured_images` supplies learnable data (smooth sinusoidal texture,
+# variance 0.0625) on which the claim is real. MEASURED at 60 epochs, 3 runs
+# each: MSE/variance = 0.102 / 0.124 / 0.103 (gradient codebook) and
+# 0.306 / 0.172 / 0.241 (EMA codebook). The bar below is 0.6, ~2x above the
+# worst measurement; a model that only predicts the mean scores exactly 1.0 and
+# fails.
+RECON_TRAIN_EPOCHS = 60
+RECON_MSE_OVER_VARIANCE = 0.6
+
+
+def _structured_images(n: int = 8, size: int = 32, seed: int = 0) -> np.ndarray:
+    """Learnable images: smooth sinusoidal texture in [0, 1], seeded."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.meshgrid(
+        np.linspace(0, 1, size), np.linspace(0, 1, size), indexing="ij"
+    )
+    images = []
+    for _ in range(n):
+        freq = rng.integers(1, 3)
+        phase = rng.random()
+        base = 0.5 + 0.5 * np.sin(2 * np.pi * freq * (xx + phase)) * np.cos(
+            2 * np.pi * freq * (yy + phase)
+        )
+        images.append(np.stack([base, np.roll(base, 4, axis=0), 1.0 - base], -1))
+    return np.clip(np.asarray(images, dtype="float32"), 0.0, 1.0)
+
+
+def _assert_beats_the_constant_predictor(images, reconstruction, *, what: str) -> float:
+    """MSE must be a fraction of the data variance (= the constant predictor's MSE)."""
+    images = np.asarray(ops.convert_to_numpy(images))
+    error = float(
+        ops.convert_to_numpy(ops.mean(ops.square(images - reconstruction)))
+    )
+    baseline = float(images.var())
+    assert np.isfinite(error)
+    assert error < RECON_MSE_OVER_VARIANCE * baseline, (
+        f"{what}: reconstruction MSE {error:.5f} is {error / baseline:.2f}x the "
+        f"data variance {baseline:.5f}. A model that outputs the constant mean "
+        f"scores exactly 1.00x; the bar is {RECON_MSE_OVER_VARIANCE:.2f}x "
+        f"(measured 0.10-0.31x for a working model at "
+        f"{RECON_TRAIN_EPOCHS} epochs)."
+    )
+    return error
+
+
 # ============================================================================
 # VQVAEModel Tests
 # ============================================================================
@@ -461,27 +522,33 @@ class TestVQVAEModel:
         # Output shape should be correct regardless of training mode
         assert output.shape == sample_images.shape
 
-    def test_reconstruction_quality_improves(self, vqvae_config, sample_images):
-        """Test that reconstruction quality improves with training."""
+    def test_reconstruction_quality_improves(self, vqvae_config):
+        """Reconstruction must beat the constant predictor after training.
+
+        The old bar, `final <= initial * 1.1`, passed a model that got 10%
+        WORSE -- on a test named "improves" -- and was evaluated on
+        incompressible uniform noise where no model can improve at all. See the
+        measurements above `_structured_images`.
+        """
+        images = _structured_images()
         model = VQVAEModel(**vqvae_config)
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
 
-        # Initial reconstruction loss
-        initial_recon = model(sample_images, training=False)
-        initial_loss = ops.mean(ops.square(sample_images - initial_recon))
-        initial_loss_value = ops.convert_to_numpy(initial_loss)
+        initial_loss_value = float(
+            ops.convert_to_numpy(
+                ops.mean(ops.square(images - model(images, training=False)))
+            )
+        )
 
-        # Train for several epochs
-        model.fit(sample_images, epochs=10, batch_size=4, verbose=0)
+        model.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
 
-        # Final reconstruction loss
-        final_recon = model(sample_images, training=False)
-        final_loss = ops.mean(ops.square(sample_images - final_recon))
-        final_loss_value = ops.convert_to_numpy(final_loss)
-
-        # Loss should decrease (or at least not increase significantly)
-        assert final_loss_value <= initial_loss_value * 1.1, \
-            "Reconstruction loss did not improve with training"
+        final_loss_value = _assert_beats_the_constant_predictor(
+            images, model(images, training=False), what="after training"
+        )
+        assert final_loss_value < initial_loss_value, (
+            f"training did not reduce the reconstruction loss at all: "
+            f"{initial_loss_value:.5f} -> {final_loss_value:.5f}"
+        )
 
 
 # ============================================================================
@@ -519,11 +586,20 @@ class TestVQVAEIntegration:
         generated = model.decode_from_indices(indices)
         assert generated.shape == sample_images.shape
 
-        # 7. Verify reconstruction is reasonable
-        reconstruction_error = ops.mean(ops.square(sample_images - reconstructed))
-        reconstruction_error_value = ops.convert_to_numpy(reconstruction_error)
-        assert reconstruction_error_value < 0.5, \
-            "Reconstruction error is too high"
+        # 7. Verify reconstruction is reasonable. `< 0.5` on uniform(0, 1)
+        # inputs was ~6x LOOSER than predicting the constant 0.5, so it could
+        # not distinguish this pipeline from a model that ignores its input.
+        # The bar is now derived from that constant predictor, on data where
+        # beating it is possible at all.
+        images = _structured_images(seed=1)
+        trained = VQVAEModel(**vqvae_config)
+        trained.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        trained.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
+        _assert_beats_the_constant_predictor(
+            images,
+            trained.decode_from_indices(trained.encode_to_indices(images)),
+            what="end-to-end encode -> indices -> decode",
+        )
 
     def test_codebook_usage(self, vqvae_config, sample_images):
         """Test that codebook is being used (not all codes map to same embedding)."""
@@ -576,27 +652,23 @@ class TestVQVAEIntegration:
         model_grad.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
         model_ema.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
 
-        # Train both (small number of epochs)
-        model_grad.fit(sample_images, epochs=3, batch_size=4, verbose=0)
-        model_ema.fit(sample_images, epochs=3, batch_size=4, verbose=0)
+        # `error < 1.0` on uniform(0, 1) images was nearly unfalsifiable: the
+        # constant-mean predictor scores 0.083. Both codebook update rules must
+        # instead BEAT that constant predictor by the derived margin. MEASURED:
+        # the EMA path needs materially longer than the gradient path -- at 30
+        # epochs it was still collapsed to a single code (MSE/variance = 1.000),
+        # and it escapes to 5 codes and 0.17-0.31 by 60. That is why this test
+        # trains for RECON_TRAIN_EPOCHS rather than 3.
+        images = _structured_images(seed=2)
+        model_grad.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
+        model_ema.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
 
-        # Get reconstructions
-        recon_grad = model_grad(sample_images, training=False)
-        recon_ema = model_ema(sample_images, training=False)
-
-        # Both should produce reasonable reconstructions
-        # (They won't be identical but should have similar quality)
-        error_grad = ops.mean(ops.square(sample_images - recon_grad))
-        error_ema = ops.mean(ops.square(sample_images - recon_ema))
-
-        error_grad_value = ops.convert_to_numpy(error_grad)
-        error_ema_value = ops.convert_to_numpy(error_ema)
-
-        # Both should be finite and reasonable
-        assert np.isfinite(error_grad_value)
-        assert np.isfinite(error_ema_value)
-        assert error_grad_value < 1.0
-        assert error_ema_value < 1.0
+        _assert_beats_the_constant_predictor(
+            images, model_grad(images, training=False), what="gradient codebook"
+        )
+        _assert_beats_the_constant_predictor(
+            images, model_ema(images, training=False), what="EMA codebook"
+        )
 
 
 # ============================================================================

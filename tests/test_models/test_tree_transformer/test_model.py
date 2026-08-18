@@ -479,11 +479,28 @@ class TestTreeTransformerIntegration:
 
         assert len(non_none_grads) > 0
         assert len(non_none_grads) == (num_expected_trainable_weights - num_lm_head_weights)
-        grad_norms = [
-            keras.ops.sqrt(keras.ops.sum(keras.ops.square(g)))
-            for g in non_none_grads
-        ]
-        assert all(norm >= 0.0 for norm in grad_norms)
+        # A Euclidean norm is never negative: the previous
+        # `all(norm >= 0.0)` was true of an all-zero gradient, i.e. of a model
+        # in which nothing trains. Per-weight positive floor instead, so one
+        # dead tensor cannot hide behind the live ones
+        # (`test_beit/test_model.py::test_gradients_reach_every_trainable_weight`).
+        # An ABSOLUTE floor is the wrong instrument, exactly as
+        # `test_mamba/test_mamba_v1.py:726-733` records: MEASURED here,
+        # `block_0/group_attention/key_projection/bias` has gradient norm
+        # 1.357e-09 -- genuinely non-zero, but below a 1e-8 floor. The claim is
+        # "not identically zero and finite", per weight, which is the form
+        # `test_beit/test_model.py::test_gradients_reach_every_trainable_weight`
+        # uses.
+        for weight, grad in zip(
+            token_classification_model.trainable_weights, gradients
+        ):
+            if grad is None:  # the unused lm_head, asserted for above
+                continue
+            g = keras.ops.convert_to_numpy(grad)
+            assert np.isfinite(g).all(), f"non-finite gradient at {weight.path}"
+            assert float(np.max(np.abs(g))) > 0.0, (
+                f"gradient at {weight.path} is identically zero"
+            )
 
     def test_training_integration(self, token_classification_model):
         """Test the integrated model in a minimal training loop."""

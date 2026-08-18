@@ -26,6 +26,74 @@ from ..knob_sensitivity_oracle import (
 )
 
 
+# ---------------------------------------------------------------------------
+# The hMLP stem's ACTUAL claim: patch independence (commutation with masking)
+# ---------------------------------------------------------------------------
+# `apply_mask_after_stem` computes `stem(images)` and THEN multiplies by
+# `(1 - mask)` (model.py, docstring at :1050). So every assertion of the form
+# "masked positions are zero" is a re-verification of elementwise multiplication
+# by a 0/1 mask -- true for ANY stem, including one with total cross-patch
+# leakage. Three tests in this file asserted exactly that, and a fourth compared
+# `stem(x)` at unmasked positions against `stem(x) * (1 - mask)` at the same
+# positions: a value against itself.
+#
+# What the hMLP stem exists to claim (Touvron et al., "Three things everyone
+# should know about Vision Transformers", sec. 2) is that the stem is
+# PATCH-INDEPENDENT, which is what makes masking-after-stem equivalent to
+# masking-before-stem in MAE-style SSL. That claim is a commutation:
+#
+#     stem(images * pixel_mask)[unmasked] == stem(images)[unmasked]
+#
+# MEASURED 2026-08-18 at inference, patch_size=16, 64x64 input: max delta at
+# unmasked positions is EXACTLY 0.0 for both `stem_norm_layer="batch"` and
+# `"layer"`. The property holds. The companion assertion (masked positions DO
+# move: measured 0.106 for batch, 3.15 for layer) is the non-vacuity control --
+# without it, a stem that ignored its input entirely would satisfy the
+# commutation trivially.
+def _zero_masked_patches_in_pixels(
+    images: np.ndarray, mask: np.ndarray, patch: int
+) -> np.ndarray:
+    """Zero, IN PIXEL SPACE, the image region of every masked patch."""
+    images = np.asarray(keras.ops.convert_to_numpy(images))
+    b, h, w, c = images.shape
+    gh, gw = h // patch, w // patch
+    keep = (1.0 - np.asarray(mask, dtype="float32")).reshape(b, gh, gw, 1, 1, 1)
+    tiles = images.reshape(b, gh, patch, gw, patch, c).transpose(0, 1, 3, 2, 4, 5)
+    tiles = tiles * keep
+    return tiles.transpose(0, 1, 3, 2, 4, 5).reshape(b, h, w, c)
+
+
+def _assert_stem_is_patch_independent(stem, images, mask, patch: int) -> float:
+    """The stem must commute with masking; returns the measured masked-side delta."""
+    images = np.asarray(keras.ops.convert_to_numpy(images))
+    mask = np.asarray(keras.ops.convert_to_numpy(mask))
+    masked_images = _zero_masked_patches_in_pixels(images, mask, patch)
+    perturbed = np.asarray(
+        keras.ops.convert_to_numpy(stem(masked_images, training=False))
+    )
+    clean = np.asarray(keras.ops.convert_to_numpy(stem(images, training=False)))
+    assert perturbed.shape == clean.shape
+
+    kept, hidden = mask == 0, mask == 1
+    assert kept.any() and hidden.any(), "the mask must have both kinds of patch"
+
+    delta_kept = float(np.max(np.abs(perturbed[kept] - clean[kept])))
+    assert delta_kept <= 1e-5, (
+        "the hMLP stem LEAKS across patches: destroying the pixels of masked "
+        f"patches moved unmasked patch embeddings by max|delta| = "
+        f"{delta_kept:.3e} (measured 0.0 on a patch-independent stem). "
+        "Masking after the stem is then NOT equivalent to masking before it."
+    )
+    # Non-vacuity control: the perturbation must actually have reached the stem.
+    delta_hidden = float(np.max(np.abs(perturbed[hidden] - clean[hidden])))
+    assert delta_hidden > 1e-5, (
+        f"destroying the masked patches' pixels changed their own embeddings by "
+        f"only {delta_hidden:.3e}: the probe never reached the stem, so the "
+        "commutation above proves nothing."
+    )
+    return delta_hidden
+
+
 class TestViTHMLPInitialization:
     """Test suite for ViTHMLP model initialization with modern patterns."""
 
@@ -906,32 +974,27 @@ class TestViTHMLPMaskedLearning:
 
         model.build((None, 32, 32, 3))
 
-        # Create test scenario
         images = np.random.rand(2, 32, 32, 3).astype('float32')
-
-        # Test 1: Process with stem before masking
-        patches_before_mask = model.stem(images)
-
-        # Test 2: Create mask and apply after stem
         num_patches = (32 // 8) ** 2  # 16 patches
         mask = np.zeros((2, num_patches), dtype='float32')
         mask[:, :8] = 1.0  # Mask first half
 
+        # THE claim (see `_assert_stem_is_patch_independent` above): the stem
+        # commutes with masking. The old body asserted that
+        # `apply_mask_after_stem` zeroes the masked entries and leaves the rest
+        # equal to `stem(images)` -- but that function IS
+        # `stem(images) * (1 - mask)`, so both halves were true by definition
+        # for any stem whatsoever, leakage included.
+        _assert_stem_is_patch_independent(model.stem, images, mask, patch=8)
+
+        # The convenience wrapper's own contract, kept: it must agree with
+        # masking the stem's output directly.
         masked_patches, _ = apply_mask_after_stem(model.stem, images, mask)
-
-        # Test 3: The key property - masked patches should be cleanly zeroed
-        for b in range(2):
-            for p in range(8):  # First 8 patches are masked
-                assert np.allclose(masked_patches[b, p].numpy(), 0.0)
-
-            # Unmasked patches should match original
-            for p in range(8, num_patches):
-                np.testing.assert_allclose(
-                    patches_before_mask[b, p].numpy(),
-                    masked_patches[b, p].numpy(),
-                    rtol=1e-6, atol=1e-6,
-                    err_msg="Unmasked patches should be unchanged"
-                )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(masked_patches),
+            keras.ops.convert_to_numpy(model.stem(images)) * (1.0 - mask)[..., None],
+            rtol=1e-6, atol=1e-6,
+        )
 
 
 class TestViTHMLPEdgeCases:
@@ -1302,17 +1365,14 @@ class TestViTHMLPArchitectureValidation:
         assert not np.any(np.isnan(patches.numpy()))
         assert not np.any(np.isinf(patches.numpy()))
 
-        # Test that stem processes patches independently (no info leakage)
-        # This is the key advantage for SSL - we'll test masking compatibility
+        # Test that stem processes patches independently (no info leakage).
+        # This is the difference from a standard ViT stem, and it is a
+        # COMMUTATION, not a "the mask multiplies to zero" check -- the latter
+        # holds for any stem, see `_assert_stem_is_patch_independent`.
         mask = np.zeros((2, expected_patches), dtype='float32')
         mask[:, :8] = 1.0  # Mask half the patches
 
-        masked_patches, _ = apply_mask_after_stem(model.stem, test_input, mask)
-
-        # Masked patches should be clean zeros
-        for b in range(2):
-            for p in range(8):  # Masked patches
-                assert np.allclose(masked_patches[b, p].numpy(), 0.0)
+        _assert_stem_is_patch_independent(model.stem, test_input, mask, patch=16)
 
     def test_end_to_end_functionality(self):
         """Test complete end-to-end functionality."""
@@ -1391,14 +1451,15 @@ class TestViTHMLPArchitectureValidation:
 
         # 3. Verify masking worked correctly
         num_masked = int(0.75 * 16)  # 75% of 16 patches
+        mask_np = np.asarray(keras.ops.convert_to_numpy(mask_used))
         for b in range(batch_size):
-            masked_count = np.sum(mask_used[b].numpy())
-            assert masked_count == num_masked
+            assert np.sum(mask_np[b]) == num_masked
 
-            # Check that masked positions are actually zeroed
-            for p in range(16):
-                if mask_used[b, p] == 1:  # Masked
-                    assert np.allclose(masked_patches[b, p].numpy(), 0.0)
+        # 4. The property that makes step 2 legitimate at all: masking AFTER
+        # the stem equals masking BEFORE it, i.e. the stem does not mix
+        # patches. Asserting only "masked positions are zero" (what this test
+        # used to do) is true of `stem(x) * (1 - mask)` for every stem.
+        _assert_stem_is_patch_independent(model.stem, images, mask_np, patch=16)
 
 
 class TestViTHMLPPositionalDropoutReachesTheLayer:

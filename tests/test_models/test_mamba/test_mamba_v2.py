@@ -286,12 +286,28 @@ class TestMamba2Integration:
             loss = keras.ops.mean(outputs['last_hidden_state']**2)
 
         mamba_layer = small_model.encoder_layers[0].mamba2
+        names = ["A_log", "D", "dt_bias"]
         ssm_params = [mamba_layer.A_log, mamba_layer.D, mamba_layer.dt_bias]
         grads = tape.gradient(loss, ssm_params)
 
-        for grad in grads:
-            assert grad is not None
-            assert not np.allclose(keras.ops.convert_to_numpy(grad), 1e-1)
+        # The old assertion was `not np.allclose(grad, 1e-1)` -- a comparison
+        # against the constant 0.1, which is TRUE of the all-zero gradient and
+        # therefore green for an SSM whose defining parameters receive nothing.
+        # Almost certainly a typo for 0.0, but `allclose(x, 0)` is the wrong
+        # instrument too: its atol=1e-8 is an absolute floor and A_log's
+        # gradient scales with dt in [1e-3, 1e-1] by construction (see the
+        # sibling `test_mamba_v1.py::test_gradient_flow_through_ssm_params`,
+        # which measured 3.17e-08 for a CORRECT model). Same scale-free form
+        # here: finite, not identically zero, and not mostly zeros.
+        for name, grad in zip(names, grads):
+            assert grad is not None, f"{name} gradient is None"
+            g = keras.ops.convert_to_numpy(grad)
+            assert np.isfinite(g).all(), f"{name} gradient has non-finite entries"
+            assert np.abs(g).max() > 0.0, f"{name} gradient is identically zero"
+            assert np.count_nonzero(g) > g.size // 2, (
+                f"{name} gradient is mostly zeros "
+                f"({np.count_nonzero(g)}/{g.size} non-zero)"
+            )
 
     def test_training_integration(self, small_model):
         """Test the model in a minimal training loop."""

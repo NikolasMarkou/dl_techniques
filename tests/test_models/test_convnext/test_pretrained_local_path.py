@@ -23,14 +23,35 @@ from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnex
 
 TINY_KW = dict(depths=[1, 1], dims=[8, 16], num_classes=4)
 
+#: The probe every load is judged on. Fixed, not random, so donor and loaded
+#: model are compared on IDENTICAL bits.
+PROBE = np.linspace(-1.0, 1.0, 1 * 32 * 32 * 3, dtype="float32").reshape(1, 32, 32, 3)
+
 
 def _write_checkpoint(tmp_path, cls, name):
-    """A real .keras file with the same architecture, saved from a built model."""
+    """A real .keras file plus the donor's OUTPUT on :data:`PROBE`.
+
+    Four tests in this file used to assert only ``model.built`` after loading.
+    That is true regardless of whether any weight was transferred, because
+    ``load_pretrained_weights`` runs a dummy forward -- which builds the model --
+    BEFORE it loads anything. The donor was constructed, built and saved, and
+    then never compared to anything. Returning its logits here makes the
+    comparison possible; the shape is copied from
+    ``test_gpt2/test_gpt2.py::TestPretrainedLocalPathIsVerified::test_matching_checkpoint_still_loads``.
+    """
     donor = cls(input_shape=(32, 32, 3), **TINY_KW)
-    donor(np.zeros((1, 32, 32, 3), dtype="float32"))
+    donor(PROBE, training=False)
     path = str(tmp_path / f"{name}.keras")
     donor.save(path)
-    return path
+    expected = keras.ops.convert_to_numpy(donor(PROBE, training=False))
+    return path, expected
+
+
+def _assert_reproduces_donor(model, expected):
+    """The loaded model must reproduce the donor's logits, not merely be built."""
+    actual = keras.ops.convert_to_numpy(model(PROBE, training=False))
+    assert np.all(np.isfinite(actual))
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -43,20 +64,20 @@ def _write_checkpoint(tmp_path, cls, name):
 class TestLocalPathLoadAtTheDefaultShape:
     def test_load_at_the_default_none_spatial_input_shape(self, cls, factory, name, tmp_path):
         """The failing call: default input_shape, local weights path."""
-        ckpt = _write_checkpoint(tmp_path, cls, name)
+        ckpt, expected = _write_checkpoint(tmp_path, cls, name)
         model = cls(**TINY_KW)  # default input_shape == (None, None, 3)
         assert model.input_shape == (None, None, 3)
         model.load_pretrained_weights(ckpt, skip_mismatch=True)
         assert model.built
-        out = model(np.zeros((1, 32, 32, 3), dtype="float32"))
-        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+        _assert_reproduces_donor(model, expected)
 
     def test_explicit_input_shape_still_works(self, cls, factory, name, tmp_path):
         """Anti-vacuity: the path that already worked must keep working."""
-        ckpt = _write_checkpoint(tmp_path, cls, name)
+        ckpt, expected = _write_checkpoint(tmp_path, cls, name)
         model = cls(input_shape=(32, 32, 3), **TINY_KW)
         model.load_pretrained_weights(ckpt, skip_mismatch=True)
         assert model.built
+        _assert_reproduces_donor(model, expected)
 
     def test_a_genuine_failure_names_its_cause(self, cls, factory, name, tmp_path):
         """A corrupt file must not be reported as an unrelated shape problem:
@@ -77,19 +98,21 @@ class TestLocalPathLoadAtTheDefaultShape:
 def test_factory_docstring_call_v1(tmp_path):
     """`create_convnext_v1("tiny", pretrained="path/to/weights.keras")` verbatim."""
     donor = create_convnext_v1("tiny", num_classes=4, input_shape=(32, 32, 3))
-    donor(np.zeros((1, 32, 32, 3), dtype="float32"))
+    expected = keras.ops.convert_to_numpy(donor(PROBE, training=False))
     path = str(tmp_path / "convnext_tiny.keras")
     donor.save(path)
 
     model = create_convnext_v1("tiny", num_classes=4, pretrained=path)
     assert model.built
+    _assert_reproduces_donor(model, expected)
 
 
 def test_factory_docstring_call_v2(tmp_path):
     donor = create_convnext_v2("atto", num_classes=4, input_shape=(32, 32, 3))
-    donor(np.zeros((1, 32, 32, 3), dtype="float32"))
+    expected = keras.ops.convert_to_numpy(donor(PROBE, training=False))
     path = str(tmp_path / "convnext_v2_atto.keras")
     donor.save(path)
 
     model = create_convnext_v2("atto", num_classes=4, pretrained=path)
     assert model.built
+    _assert_reproduces_donor(model, expected)

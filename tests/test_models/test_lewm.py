@@ -192,6 +192,25 @@ class TestLeWM:
 
         metric_names = {m.name for m in model.metrics}
         assert {"pred_loss", "sigreg_loss"} <= metric_names
-        for tracker in (model.pred_loss_tracker, model.sigreg_loss_tracker):
+        # `val >= 0.0` was vacuous: both losses are non-negative by
+        # construction, and 0.0 is exactly what an UNUPDATED `Mean` tracker
+        # reports -- the failure this test exists to catch. A strict positive
+        # floor is the instrument.
+        values = {}
+        for name, tracker in (
+            ("pred_loss", model.pred_loss_tracker),
+            ("sigreg_loss", model.sigreg_loss_tracker),
+        ):
             val = float(ops.convert_to_numpy(tracker.result()))
-            assert np.isfinite(val) and val >= 0.0
+            assert np.isfinite(val), f"{name} tracker holds {val}"
+            assert val > 0.0, (
+                f"{name} tracker reads exactly {val}; an un-updated Mean "
+                f"tracker reads 0.0, so the forward pass never fed it"
+            )
+            values[name] = val
+        # ...and the two must be separately tracked, not the same number
+        # written twice (OPP-7's actual claim).
+        assert values["pred_loss"] != values["sigreg_loss"], (
+            f"both trackers hold {values['pred_loss']}: the two losses are not "
+            "being tracked separately"
+        )

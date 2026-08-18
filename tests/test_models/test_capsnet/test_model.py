@@ -580,6 +580,26 @@ class TestCapsNet:
         assert recreated_capsnet.downweight == original_capsnet.downweight
         assert recreated_capsnet.reconstruction_weight == original_capsnet.reconstruction_weight
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "MEASURED 2026-08-18: CapsNet loses EVERY kernel on a `.keras` "
+            "round trip. Weight paths and shapes all match (16 weights, "
+            "identical paths), but comparing values: conv_1/kernel differs by "
+            "0.686, conv_2/kernel by 0.080, primary_caps/primary_conv/kernel "
+            "by 0.045, digit_caps/capsule_transformation_weights by 0.022 -- "
+            "i.e. the restored kernels are FRESH. Only the tensors whose "
+            "trained value still equals their initializer (all biases, BN "
+            "gamma/beta/moving stats) match. The forward is deterministic "
+            "(self-vs-self delta exactly 0.0), so the resulting 0.0015 output "
+            "difference on `digit_caps` -- 639 of 640 elements -- is entirely "
+            "the lost weights. This test asserted only SHAPE equality before, "
+            "which is exactly the instrument this repo has recorded as blind "
+            "to this failure mode "
+            "(reference_nested_sublayer_list_loses_weights.md). Model defect, "
+            "not a test defect: NOT fixed here, see decisions.md D-041."
+        ),
+    )
     def test_model_save_load(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
         """Test saving and loading a CapsNet model."""
         # Create and compile model
@@ -620,9 +640,21 @@ class TestCapsNet:
             # Generate prediction with loaded model
             loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
 
-            # Check output shapes match
+            # Shape equality was the ONLY check here, and it is exactly the
+            # instrument that misses this repo's recorded `List[List[Layer]]`
+            # round-trip failure, where weight count, layer paths and parameter
+            # totals all matched while the restored kernels were FRESH
+            # (reference_nested_sublayer_list_loses_weights.md). CapsNet holds
+            # its capsule layers in nested containers, so it is precisely the
+            # architecture that failure mode targets. Compare VALUES.
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
             for key in original_outputs.keys():
-                assert original_outputs[key].shape == loaded_outputs[key].shape
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
 
     def test_training_integration(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
         """Test training integration with fit() method."""

@@ -668,8 +668,16 @@ class TestModelSaveLoad:
 
             loaded_output = loaded_model(x_test)
 
-            # Check outputs and architecture
-            assert loaded_output.shape == original_output.shape
+            # Shape + config echo cannot see a load that restored FRESH spline
+            # weights (reference_nested_sublayer_list_loses_weights.md: count,
+            # paths and parameter totals all matched while the values were
+            # random). The in-file exemplar is `test_model_save_load_with_kan`
+            # above -- same instrument here.
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_output),
+                ops.convert_to_numpy(loaded_output),
+                rtol=1e-5, atol=1e-6,
+            )
             assert loaded_model.input_features == original_model.input_features
             assert loaded_model.layer_configs == original_model.layer_configs
 
@@ -695,7 +703,12 @@ class TestModelSaveLoad:
             )
 
             loaded_output = loaded_model(x_test)
-            assert loaded_output.shape == original_output.shape
+            # Values, not shapes -- see `test_kan_model_save_load_direct`.
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_output),
+                ops.convert_to_numpy(loaded_output),
+                rtol=1e-5, atol=1e-6,
+            )
             assert loaded_model.input_features == original_model.input_features
 
 

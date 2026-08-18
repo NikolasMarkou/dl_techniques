@@ -406,16 +406,37 @@ class TestGraphAnomalyTargetIndexIsExactlyIgnored:
         )
 
     def test_the_readout_really_is_node_zero(self):
-        """Anti-vacuity: perturbing node 0 must move the logit, and the model must be
-        sensitive to the node dimension at all."""
+        """The readout must be node 0 SPECIFICALLY, not merely node-sensitive.
+
+        "Perturbing node 0 moves the logit" -- the previous assertion -- is
+        satisfied by ANY pooled readout (mean, sum, max), since node 0 is part
+        of every pool. The discriminating claim is that node 0 moves the output
+        far more than any other node does.
+
+        MEASURED 2026-08-18, +5.0 on each node's features in turn:
+        node 0 -> 0.5036, nodes 1..5 -> 1.2e-4, 1.6e-4, 5.3e-5, 3.4e-4, 4.4e-4.
+        The adjacency here is all-ones, so the other nodes DO reach node 0
+        through message passing; they just do so ~1000x more weakly. The bar
+        below is 50x, ~23x inside the measurement.
+        """
         model, inputs = self._model_and_inputs()
         base = keras.ops.convert_to_numpy(model(inputs, training=False))
-
         nf = np.array(keras.ops.convert_to_numpy(inputs["node_features"]))
-        bumped = nf.copy()
-        bumped[:, 0, :] += 5.0
-        moved = dict(inputs)
-        moved["node_features"] = keras.ops.convert_to_tensor(bumped)
-        assert not np.allclose(
-            base, keras.ops.convert_to_numpy(model(moved, training=False)), atol=1e-5
+
+        def _delta(node):
+            bumped = nf.copy()
+            bumped[:, node, :] += 5.0
+            moved = dict(inputs)
+            moved["node_features"] = keras.ops.convert_to_tensor(bumped)
+            out = keras.ops.convert_to_numpy(model(moved, training=False))
+            return float(np.max(np.abs(np.asarray(out) - np.asarray(base))))
+
+        deltas = {node: _delta(node) for node in range(nf.shape[1])}
+        assert deltas[0] > 1e-5, "perturbing the readout node did nothing"
+        others = max(deltas[node] for node in deltas if node != 0)
+        assert deltas[0] > 50.0 * others, (
+            f"the readout is not node 0: bumping node 0 moved the logit by "
+            f"{deltas[0]:.3e} while the strongest other node moved it by "
+            f"{others:.3e} (ratio {deltas[0] / max(others, 1e-12):.1f}x). "
+            "A pooled readout would score near 1x."
         )

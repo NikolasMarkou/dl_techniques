@@ -183,12 +183,27 @@ class TestMDNModel:
 
         total = keras.ops.convert_to_numpy(result["total_variance"])
         aleatoric = keras.ops.convert_to_numpy(result["aleatoric_variance"])
-        # Law of total variance: total = aleatoric + epistemic, epistemic >= 0.
-        assert np.all(total >= aleatoric - 1e-6)
-        assert np.all(total >= -1e-6)
+        epistemic = keras.ops.convert_to_numpy(result["epistemic_variance"])
+        # Law of total variance: total = aleatoric + epistemic. The previous
+        # form asserted only `total >= aleatoric - 1e-6` and `total >= -1e-6`,
+        # both of which hold when epistemic is IDENTICALLY ZERO -- i.e. under
+        # exactly the mixture collapse the decomposition exists to expose, and
+        # the second is additionally true of any non-negative quantity. Assert
+        # the identity itself, and that the decomposition is non-degenerate.
+        np.testing.assert_allclose(total, aleatoric + epistemic, rtol=1e-5, atol=1e-6)
+        assert np.all(aleatoric > 0.0), "aleatoric variance is not positive"
+        assert np.all(epistemic >= 0.0), "epistemic variance is negative"
+        assert np.max(epistemic) > 0.0, (
+            "epistemic variance is identically zero: every mixture component "
+            "shares one mean, so the decomposition carries no information"
+        )
         upper = keras.ops.convert_to_numpy(result["upper_bound"])
         lower = keras.ops.convert_to_numpy(result["lower_bound"])
-        assert np.all(upper >= lower)
+        point = keras.ops.convert_to_numpy(result["point_estimates"])
+        assert np.all(upper > lower), "the interval has zero or negative width"
+        assert np.all((lower <= point) & (point <= upper)), (
+            "the point estimate falls outside its own confidence interval"
+        )
         logger.info("MDNModel predict_with_uncertainty test passed.")
 
     # -- 7 -----------------------------------------------------------------

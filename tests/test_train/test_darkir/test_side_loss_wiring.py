@@ -98,8 +98,24 @@ class TestSideLossTrainability:
             optimizer="adam",
             loss=[_charbonnier_only(), _charbonnier_only()],
         )
-        with pytest.raises(Exception):
+        # `pytest.raises(Exception)` as the whole discriminator would pass on
+        # ANY failure -- a typo in the fixture, an OOM, a missing import --
+        # and this test's entire point is WHICH failure occurs. MEASURED
+        # 2026-08-18: `ValueError: Dimensions must be equal, but are 32 and 8
+        # for ... charbonnier_loss/sub ... with input shapes: [2,32,32,3],
+        # [2,8,8,3]` -- i.e. the full-resolution target meeting the 4x
+        # downsampled side head, which is exactly the resolution mismatch this
+        # test exists to pin.
+        with pytest.raises(ValueError) as excinfo:
             model.fit(x, (y, y), epochs=1, batch_size=2, verbose=0)
+        message = str(excinfo.value)
+        assert "side_out" in message, (
+            f"the failure must come from the SIDE head, got: {message}"
+        )
+        assert "32" in message and "8" in message, (
+            "the failure must name the two resolutions (32 target vs 8 side "
+            f"output), got: {message}"
+        )
 
     def test_downsampled_side_target_trains(self):
         x, y = _pairs()

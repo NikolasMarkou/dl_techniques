@@ -362,12 +362,43 @@ class TestBERTIntegration:
         non_none_grads = [g for g in gradients if g is not None]
         assert len(non_none_grads) > 0
         assert len(non_none_grads) == len(classification_model.trainable_weights)
-        grad_norms = [keras.ops.sqrt(keras.ops.sum(keras.ops.square(g))) for g in non_none_grads]
-        assert all(norm >= 0.0 for norm in grad_norms)
+        # A Euclidean norm is never negative, so the previous
+        # `all(norm >= 0.0)` was true of an ALL-ZERO gradient -- i.e. of a model
+        # in which nothing trains. The instrument is a positive floor, applied
+        # per weight (an aggregate hides a single dead tensor among 40 live
+        # ones); shape copied from
+        # `test_beit/test_model.py::test_gradients_reach_every_trainable_weight`.
+        # NOT an absolute floor: `test_mamba_v1.py:726-733` records why (a
+        # correctly-initialized tensor can carry a legitimate ~1e-9 gradient),
+        # and the sibling tree_transformer guard measured 1.357e-09 on a live
+        # bias. "Identically zero" is the falsifiable claim.
+        for weight, grad in zip(classification_model.trainable_weights, gradients):
+            g = keras.ops.convert_to_numpy(grad)
+            assert np.isfinite(g).all(), f"non-finite gradient at {weight.path}"
+            assert float(np.max(np.abs(g))) > 0.0, (
+                f"gradient at {weight.path} is identically zero"
+            )
 
     def test_training_integration(self, classification_model):
-        """Test the integrated model in a minimal training loop."""
-        optimizer = keras.optimizers.Adam(learning_rate=1e-6)
+        """A 100-step loop on a fixed batch must drive the loss down.
+
+        The original body ran the same 100 steps, assigned ``initial_loss`` and
+        then asserted NOTHING -- it could not fail for any model, including one
+        whose gradients were all zero. It also used ``learning_rate=1e-6``,
+        which over 100 steps on a tiny model cannot move the loss measurably;
+        that reads as a decrease assertion that was written, found flaky, and
+        deleted rather than fixed.
+
+        The bar is derived from the trivial baseline, not chosen: after 100 Adam
+        steps at 1e-3 on ONE fixed batch, the model must be at least as good as
+        the constant predictor that outputs the uniform distribution, whose loss
+        is ``ln(3) = 1.0986``. Measured over 4 independent runs of exactly this
+        body: initial 4.06 / 10.11 / 3.94 / 4.89, final 0.8240 / 1.0986 /
+        1.0986 / 0.2747. The finals are quantised at ``k/4 * ln(3)`` -- k of the
+        4 examples memorised, the rest left at uniform -- so ``<= ln(3)`` is the
+        real ceiling and the 2% margin below is slack, not a fitted bound.
+        """
+        optimizer = keras.optimizers.Adam(learning_rate=1e-3)
         batch_size, seq_length = 4, 16
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((batch_size, seq_length), maxval=1000), 'int32'),
@@ -377,16 +408,30 @@ class TestBERTIntegration:
         labels = keras.ops.cast(keras.random.uniform((batch_size,), maxval=3), 'int32')
 
         initial_loss = None
+        loss_value = None
         for step in range(100):
             with tf.GradientTape() as tape:
                 outputs = classification_model(inputs, training=True)
                 loss = keras.ops.mean(
                     keras.losses.sparse_categorical_crossentropy(labels, outputs['logits'])
                 )
+            loss_value = float(loss)
+            assert np.isfinite(loss_value), f"loss became {loss_value} at step {step}"
             if initial_loss is None:
-                initial_loss = loss
+                initial_loss = loss_value
             gradients = tape.gradient(loss, classification_model.trainable_weights)
             optimizer.apply_gradients(zip(gradients, classification_model.trainable_weights))
+
+        uniform_baseline = float(np.log(3.0))
+        assert loss_value < initial_loss, (
+            f"100 Adam steps at 1e-3 on a single fixed batch did not reduce the "
+            f"loss at all: {initial_loss:.4f} -> {loss_value:.4f}."
+        )
+        assert loss_value <= uniform_baseline * 1.02, (
+            f"after 100 steps the loss is {loss_value:.4f}, worse than the "
+            f"constant uniform predictor's {uniform_baseline:.4f}; the model is "
+            f"not learning (initial was {initial_loss:.4f})."
+        )
 
 
 class TestBERTAdvancedFeatures:

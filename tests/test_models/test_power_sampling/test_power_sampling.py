@@ -215,6 +215,32 @@ class TestForward:
 # ---------------------------------------------------------------------------
 # Sampler
 # ---------------------------------------------------------------------------
+
+def _assert_mcmc_actually_ran(info, *, what: str) -> None:
+    """`0 <= acceptance_ratio <= 1` is true by construction and cannot fail.
+
+    ``sampler.py`` computes ``acceptances / max(attempts, 1)`` from two
+    counters, so the bound holds for every possible execution -- including one
+    where the MCMC loop never proposed anything at all (``attempts == 0`` gives
+    ``0.0``, which is inside [0, 1]). What the tests meant to claim is that the
+    chain RAN and that the reported ratio is the two counters' quotient.
+
+    MEASURED 2026-08-18 on the seeded fixtures in this file: ``mcmc_power_sample``
+    reports 2/6 = 0.333 and ``max_swap`` 4/6 = 0.667 with ``mcmc_steps=3``,
+    ``block_num=2``.
+    """
+    attempts = info["total_steps"]
+    acceptances = info["acceptances"]
+    assert attempts > 0, f"{what}: the chain made ZERO proposals"
+    assert 0 <= acceptances <= attempts, (
+        f"{what}: {acceptances} acceptances out of {attempts} attempts"
+    )
+    assert info["acceptance_ratio"] == pytest.approx(acceptances / attempts), (
+        f"{what}: acceptance_ratio {info['acceptance_ratio']} is not "
+        f"{acceptances}/{attempts}"
+    )
+
+
 def _std_config(**overrides):
     base = dict(pad_token_id=0, ctx_len=16, max_tokens=8)
     base.update(overrides)
@@ -240,7 +266,10 @@ class TestSampler:
         )
         s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
         ids, info = s.mcmc_power_sample("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
+        assert info["acceptance_ratio"] == pytest.approx(2 / 6), (
+            "seeded reference value measured 2026-08-18"
+        )
         assert "alpha" in info
         assert len(ids) >= 3
 
@@ -253,7 +282,10 @@ class TestSampler:
         )
         s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
         ids, info = s.max_swap("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="max_swap")
+        assert info["acceptance_ratio"] == pytest.approx(4 / 6), (
+            "seeded reference value measured 2026-08-18"
+        )
 
     def test_generate_text_dispatch(self):
         """SC4: generate_text dispatch + ValueError on a bad method."""
@@ -394,7 +426,7 @@ class TestSampler:
 
         # exercise the single-fn batched fallback in _batched_generate via mcmc
         ids2, info2 = s.mcmc_power_sample("a")
-        assert 0.0 <= info2["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info2, what="single-fn batched fallback")
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +725,7 @@ class TestPadTokenIsRequiredEagerly:
         random.seed(0)
         np.random.seed(0)
         _, info = s.mcmc_power_sample("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
 
     def test_pad_token_id_supplied_still_runs(self):
         """Anti-vacuity: supplying the field makes the same config run."""
@@ -705,4 +737,4 @@ class TestPadTokenIsRequiredEagerly:
         random.seed(0)
         np.random.seed(0)
         _, info = s.mcmc_power_sample("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")

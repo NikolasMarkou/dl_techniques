@@ -153,9 +153,50 @@ class TestRegisterTokensLayerContract:
         with pytest.raises(ValueError, match="num_tokens"):
             RegisterTokens(num_tokens=0, embed_dim=8)
 
-    def test_round_trip(self):
+    def test_round_trip(self, tmp_path):
+        """A round trip must preserve the BANK, not just the two integers.
+
+        The old body compared ``clone.num_tokens``/``clone.embed_dim`` against
+        the values it had just passed in -- two integers read back out of the
+        very config it wrote, on an UNBUILT clone that holds no bank at all.
+        That is green for a layer whose R independent vectors collapse to one
+        shared vector on reload, which is precisely the defect (C-3b) this file
+        exists to guard.
+        """
         layer = RegisterTokens(num_tokens=3, embed_dim=8, name="regs")
         cfg = layer.get_config()
         clone = RegisterTokens.from_config(cfg)
         assert clone.num_tokens == 3
         assert clone.embed_dim == 8
+
+        # Values: save a built layer inside a model and reload it.
+        inputs = keras.Input(shape=(7, 8))
+        model = keras.Model(inputs, layer(inputs))
+        bank = _register_weights(model)
+        # Break the zero-init so a fresh bank is distinguishable from this one,
+        # and so the R rows are provably DIFFERENT from each other.
+        bank.assign(
+            keras.ops.reshape(
+                keras.ops.arange(3 * 8, dtype="float32") + 1.0, (1, 3, 8)
+            )
+        )
+
+        probe = keras.ops.zeros((2, 7, 8))
+        expected = keras.ops.convert_to_numpy(model(probe))
+        path = str(tmp_path / "regs.keras")
+        model.save(path)
+        loaded = keras.models.load_model(
+            path, custom_objects={"RegisterTokens": RegisterTokens}
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(loaded(probe)), expected,
+            rtol=1e-6, atol=1e-6,
+        )
+        # ...and the R rows must still be independent after the reload.
+        reloaded_bank = keras.ops.convert_to_numpy(_register_weights(loaded))
+        rows = reloaded_bank.reshape(3, 8)
+        for i in range(3):
+            for j in range(i + 1, 3):
+                assert not np.allclose(rows[i], rows[j]), (
+                    f"register rows {i} and {j} are identical after reload"
+                )

@@ -612,17 +612,16 @@ class TestAccUNetErrorHandling:
         """Test behavior with very small input sizes."""
         model = AccUNet(input_channels=3, num_classes=1)
 
-        # Test with size that might cause issues with pooling
+        # The real assertion used to sit inside `try: ... except Exception:
+        # pass`. `AssertionError` IS an `Exception`, so the test could not fail
+        # for ANY reason -- a broken forward and a wrong output shape both
+        # reported green. MEASURED (2026-08-18, CPU): AccUNet's forward at
+        # 16x16 succeeds and returns (1, 16, 16, 1). 16 is the smallest legal
+        # size (4 pooling levels => the input must be divisible by 16), so this
+        # is the architecture's minimum, not a "might work".
         small_input = keras.random.normal((1, 16, 16, 3))
-
-        # This might work or might fail depending on architecture
-        # If it works, output should have correct shape
-        try:
-            output = model(small_input)
-            assert output.shape == (1, 16, 16, 1)
-        except Exception:
-            # Small inputs may not work with the architecture
-            pass
+        output = model(small_input)
+        assert output.shape == (1, 16, 16, 1)
 
     def test_batch_size_variations(self):
         """Test with different batch sizes including edge cases."""
@@ -642,16 +641,16 @@ class TestAccUNetErrorHandling:
         """Test that model can handle reasonably sized inputs without memory issues."""
         model = AccUNet(input_channels=3, num_classes=1, base_filters=16)  # Smaller model
 
-        # Test with moderately large input
+        # The `except Exception as e: if "memory" not in str(e).lower() ...`
+        # guard re-raised only when the message lacked "memory"/"resource" --
+        # so any OTHER failure whose message merely mentioned either word,
+        # including the AssertionError on the shape itself, passed silently.
+        # MEASURED (2026-08-18): this forward completes on CPU in ~8s at
+        # base_filters=16 and returns (1, 512, 512, 1). There is no memory
+        # failure to tolerate, so nothing is tolerated.
         large_input = keras.random.normal((1, 512, 512, 3))
-
-        try:
-            output = model(large_input)
-            assert output.shape == (1, 512, 512, 1)
-        except Exception as e:
-            # If it fails due to memory, that's acceptable
-            if "memory" not in str(e).lower() and "resource" not in str(e).lower():
-                raise  # Re-raise if it's not a memory issue
+        output = model(large_input)
+        assert output.shape == (1, 512, 512, 1)
 
 class TestAccUNetPublicSurface:
     """Lock the public package surface and the input-divisibility contract."""
