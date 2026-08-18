@@ -181,6 +181,14 @@ FACTORIES = {
     "ffn": ("dl_techniques.layers.ffn.factory", "FFN_REGISTRY"),
     "logic": ("dl_techniques.layers.logic.factory", "LOGIC_REGISTRY"),
     "mixtures": ("dl_techniques.layers.mixtures.factory", "MIXTURE_REGISTRY"),
+    # Added by plan-2026-08-18T140459-7991552f/D-017. `sampling.py` hosts its
+    # factory INLINE rather than in a `factory.py`, which is why it was missing
+    # here -- and that omission is exactly how F-55 survived: `hypersphere`'s
+    # registry lacked `shell_thickness` while `HypersphereSampling.__init__`
+    # declared, validated and stored it, so `create_sampling_layer` silently
+    # dropped every caller's value. This entry is the guard, not the fix; the
+    # registry entry itself is in `layers/sampling.py`.
+    "sampling": ("dl_techniques.layers.sampling", "SAMPLING_REGISTRY"),
     "sequence_pooling": (
         "dl_techniques.layers.sequence_pooling.factory",
         "SEQUENCE_POOLING_REGISTRY",

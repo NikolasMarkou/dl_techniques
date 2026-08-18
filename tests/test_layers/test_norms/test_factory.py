@@ -298,3 +298,98 @@ class TestValidatorAgreesWithBuilder:
             probe = 'focal' if param == 'model_type' else _PROBE_VALUES[param]
             with pytest.raises(ValueError, match="Invalid parameters"):
                 validate_normalization_config(norm_type, **{param: probe})
+
+
+class TestBuilderCallsItsOwnValidator:
+    """Pins N-02 of plan-2026-08-18T140459-7991552f.
+
+    `validate_normalization_config` lived in this module for two plans and the
+    builder never called it. The observable consequence is NOT "an undeclared
+    kwarg is silently dropped" -- Keras 3's `Layer.__init__` already rejects an
+    unrecognized key, so a typo raised before this change too, just with a
+    message naming neither the factory nor the accepted set. The consequence
+    that was real, and is the RED below, is the class of keys the target class
+    ACCEPTS and this factory then throws away: `_FACTORY_OWNED_PARAMS` and
+    `_FACTORY_DROPPED_PARAMS`. `_accepted_params` already subtracted them; only
+    the validator knew, and nothing asked it.
+    """
+
+    def test_factory_owned_param_is_rejected_not_silently_clobbered(self):
+        """THE RED. Measured at HEAD, before the fix:
+
+            create_normalization_layer('dml_plus_focal', model_type='center')
+
+        returned a `DMLPlus` with `layer.model_type == 'focal'`. No raise, no
+        warning -- the caller's value was overwritten by the factory's hard
+        assignment and they were never told.
+        """
+        with pytest.raises(ValueError, match="Invalid parameters"):
+            create_normalization_layer('dml_plus_focal', model_type='center')
+
+    def test_the_clobber_is_the_thing_being_prevented(self):
+        """Guards against a vacuous reading of the test above.
+
+        If someone "fixes" the raise by letting `model_type` through, this fails
+        instead: the factory still hard-assigns, so the caller's value would be
+        silently ignored again. Pinned as the property, not the exception.
+        """
+        with pytest.raises(ValueError):
+            layer = create_normalization_layer('dml_plus_focal',
+                                               model_type='center')
+            assert layer.model_type == 'center', (
+                "model_type reached the layer -- if the factory no longer "
+                "clobbers it, delete the rejection instead of loosening it"
+            )
+
+    @pytest.mark.parametrize(
+        "norm_type", sorted(set(_FACTORY_OWNED_PARAMS) | set(_FACTORY_DROPPED_PARAMS))
+    )
+    def test_builder_now_agrees_with_validator_on_ignored_params(self, norm_type):
+        """The builder must reject exactly what the validator rejects.
+
+        The sibling `test_factory_ignored_params_are_rejected` asserts this of
+        the VALIDATOR. Before this change the BUILDER disagreed with it for
+        every one of these params. `epsilon` is unreachable through kwargs (it
+        is a named parameter of the builder), so only the OWNED set is
+        exercisable here -- asserted, not assumed, so the parametrization
+        cannot quietly become empty.
+        """
+        owned = _FACTORY_OWNED_PARAMS.get(norm_type, frozenset())
+        dropped = _FACTORY_DROPPED_PARAMS.get(norm_type, frozenset())
+        assert owned or dropped, f"no ignored params for '{norm_type}'"
+        for param in owned:
+            probe = 'focal' if param == 'model_type' else _PROBE_VALUES[param]
+            with pytest.raises(ValueError, match="Invalid parameters"):
+                create_normalization_layer(norm_type, **{param: probe})
+
+    def test_builder_rejects_a_typo_with_a_named_message(self):
+        with pytest.raises(ValueError, match="Invalid parameters"):
+            create_normalization_layer("rms_norm", epsilonn=1e-5)
+
+    def test_unknown_type_still_gets_the_richer_message(self):
+        """The validator is deliberately NOT consulted for an unknown type.
+
+        Its own unknown-type message does not list the supported types; the
+        builder's `else` arm does, and `test_unknown_type_raises` plus callers
+        depend on reaching it. The strict call is gated on `_TYPE_TO_CLASS`
+        membership precisely so this still happens.
+        """
+        with pytest.raises(ValueError, match="Supported types"):
+            create_normalization_layer("does_not_exist")
+
+    @pytest.mark.parametrize("norm_type", ALL_TYPES)
+    def test_no_type_became_unconstructible(self, norm_type):
+        """Over-rejection control.
+
+        A validator wired into the builder is one bad whitelist away from
+        making a whole type unbuildable, which is the widest-blast-radius way
+        this change could fail. Note that `epsilon` and `name` bind to the
+        builder's own named parameters and never enter `kwargs`, so this pins
+        constructibility; the strict path itself is exercised by the rejection
+        tests above and by `TestValidatorAgreesWithBuilder`, which drives every
+        real ctor param of every type through the builder.
+        """
+        layer = create_normalization_layer(
+            norm_type, epsilon=1e-5, name=f"ok_{norm_type}"
+        )
+        assert isinstance(layer, keras.layers.Layer)

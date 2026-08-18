@@ -23,6 +23,7 @@ from dl_techniques.layers.sampling import (
     validate_sampling_config,
     get_sampling_info,
     SAMPLING_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
     vmf_kl_divergence,
 )
 
@@ -1178,3 +1179,97 @@ class TestVMFNumerics:
         assert max_abserr < 1e-3, (
             f"vMF KL abserr {max_abserr:.3e} exceeds 1e-3 gate; worst={worst}"
         )
+
+class TestStrictDroppedKeys:
+    """Pins N-03 and F-55 of plan-2026-08-18T140459-7991552f.
+
+    `create_sampling_layer` filtered its merged parameter dict down to the
+    registry's declared names and dropped everything else WITHOUT a word --
+    the exact inverse of the strict-drop guard `attention`, `ffn` and
+    `embedding` grew in an earlier plan. That inversion is how F-55 stayed
+    invisible: `hypersphere`'s registry omitted `shell_thickness`, so a caller
+    asking for a 0.5-thick shell got the 0.1 default and no diagnostic.
+
+    The registry-vs-constructor drift that ALLOWED F-55 is guarded in
+    `tests/test_layers/test_factory_registry_drift.py`, which now includes
+    `sampling` in its `FACTORIES` map -- it was absent because this factory is
+    inline in `sampling.py` rather than in a `factory.py`. That guard is not
+    duplicated here.
+    """
+
+    def test_shell_thickness_reaches_the_layer(self):
+        """THE RED for F-55. Measured at HEAD, before the fix:
+
+            create_sampling_layer('hypersphere',
+                                  shell_thickness=0.5).shell_thickness
+              -> 0.1
+
+        No raise, no warning. `HypersphereSampling.__init__` declares,
+        validates and stores the parameter; only the registry did not know.
+        """
+        layer = create_sampling_layer("hypersphere", shell_thickness=0.5)
+
+        assert isinstance(layer, HypersphereSampling)
+        assert layer.shell_thickness == 0.5
+
+    def test_shell_thickness_survives_a_config_round_trip(self):
+        """A knob that reaches the layer but not its config is still dead."""
+        layer = create_sampling_layer("hypersphere", shell_thickness=0.42)
+        restored = HypersphereSampling.from_config(layer.get_config())
+
+        assert restored.shell_thickness == 0.42
+
+    @pytest.mark.parametrize("sampling_type", sorted(SAMPLING_REGISTRY))
+    def test_undeclared_kwarg_raises_with_marker(self, sampling_type):
+        """THE RED for N-03. Measured at HEAD, before the fix:
+
+            create_sampling_layer('gaussian', bogus_param=1)
+
+        built a `Sampling` layer successfully -- the factory's own filter
+        removed the key before `keras.layers.Layer.__init__` could object to
+        it, so not even the framework's usual rejection fired.
+        """
+        # `match=` is NOT used: the marker literal contains `(s)`, which the
+        # regex engine reads as a capture group, so `match=` would silently
+        # test for "parameters" and fail against the real message. The sibling
+        # factories' suites assert containment for the same reason.
+        with pytest.raises(ValueError) as exc:
+            create_sampling_layer(
+                sampling_type, definitely_not_a_sampler_argument=1
+            )
+        assert STRICT_DROPPED_KEY_MARKER in str(exc.value), str(exc.value)
+
+    def test_message_names_the_type_the_key_and_the_accepted_set(self):
+        with pytest.raises(ValueError) as exc:
+            create_sampling_layer("gaussian", bogus_param=1)
+        message = str(exc.value)
+
+        assert "create_sampling_layer('gaussian')" in message
+        assert "bogus_param" in message
+        assert "Sampling" in message
+        assert "accepts only" in message
+
+    def test_unknown_type_keeps_its_own_error(self):
+        """The strict block falls through when the type is not registered.
+
+        `SAMPLING_REGISTRY.get()` returns None there, so the existing
+        available-types message is what a caller sees. Pinned because the
+        strict check runs first and could have swallowed it.
+        """
+        with pytest.raises(ValueError, match="Unknown type"):
+            create_sampling_layer("not_a_real_sampler")
+
+    @pytest.mark.parametrize("sampling_type", sorted(SAMPLING_REGISTRY))
+    def test_every_declared_param_still_builds(self, sampling_type):
+        """Over-rejection control.
+
+        Without this the suite would be satisfied by a factory that rejects
+        everything, which is the vacuous-guard shape this repo has shipped
+        before.
+        """
+        info = SAMPLING_REGISTRY[sampling_type]
+        layer = create_sampling_layer(
+            sampling_type, **dict(info["optional_params"])
+        )
+
+        assert isinstance(layer, keras.layers.Layer)

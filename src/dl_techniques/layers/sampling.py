@@ -1001,7 +1001,14 @@ SAMPLING_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         "required_params": [],
         "optional_params": {
+            # F-55: `shell_thickness` is declared, validated and stored by
+            # `HypersphereSampling.__init__` and was missing here. Because
+            # `create_sampling_layer` filtered on this dict, a caller's
+            # `shell_thickness=0.5` was SILENTLY DROPPED and the layer was built
+            # at the 0.1 default. See the DECISION anchor on
+            # `create_sampling_layer`.
             "radius": 1.0,
+            "shell_thickness": 0.1,
             "seed": None,
         },
         "use_case": (
@@ -1036,6 +1043,21 @@ Each entry contains:
     - optional_params: Dict of optional parameters with default values.
     - use_case: Scenarios and applications where this sampler excels.
 """
+
+# Substring every strict-drop rejection message carries, so a test can pin the
+# BEHAVIOUR without pinning the whole sentence.
+#
+# DUPLICATION, deliberate and gated: the identical literal is defined in
+# `layers/attention/factory.py`, `layers/ffn/factory.py`,
+# `layers/embedding/factory.py` and `layers/activations/factory.py`. It is not
+# centralised because every candidate home is either a peer package (importing
+# one factory from another drags that package's whole layer tree into this
+# module's import graph) or a new shared module (this plan's abstraction budget
+# is 0). The lockstep is NOT hand-maintained:
+# `tests/test_layers/test_activations/test_activation_factory.py::
+# TestStrictDroppedKeys::test_marker_is_identical_across_all_five_factories`
+# fails if any copy drifts.
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
 
 
 # ---------------------------------------------------------------------
@@ -1132,10 +1154,54 @@ def create_sampling_layer(
 
     Raises:
         ValueError: If sampling_type is invalid, required parameters are
-            missing, parameter values are out of range, or layer construction
-            fails.
+            missing, parameter values are out of range, an undeclared parameter
+            is passed (the message then carries
+            :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
         TypeError: If parameter types are incompatible with the target class.
     """
+    # DECISION plan-2026-08-18T140459-7991552f/D-017
+    # Undeclared kwargs used to be SILENTLY DROPPED here, which is the inverse of
+    # what the sibling factories do. `attention`/`ffn`/`embedding` were hardened
+    # against undeclared kwargs by an earlier plan's D-011/D-023
+    # (STRICT_DROPPED_KEY_MARKER); this factory's filter was written the other way
+    # round -- it kept only declared keys and dropped the rest without a word.
+    #
+    # That is exactly how F-55 stayed invisible: `hypersphere`'s registry omitted
+    # `shell_thickness`, so every caller passing it got the 0.1 default and no
+    # diagnostic. MEASURED at HEAD, before this change:
+    #   create_sampling_layer('hypersphere', shell_thickness=0.5).shell_thickness
+    #     -> 0.1      (no raise, no warning)
+    #   create_sampling_layer('gaussian', bogus_param=1)
+    #     -> builds fine (no raise)
+    #
+    # DO NOT restore the silent filter, and DO NOT "fix" a caller that now raises
+    # by adding its key to `optional_params` unless the target class's `__init__`
+    # really declares it -- a registry entry with no matching ctor parameter
+    # recreates the same blindness one level down.
+    #
+    # Pre-flight cost, measured before this edit (decisions.md D-016): 11 call
+    # sites repo-wide, all literal-typed, ZERO of which pass an undeclared kwarg;
+    # and zero undeclared-kwarg calls observed at runtime across the 11,031 tests
+    # of tests/test_layers/. This raise breaks nothing that worked.
+    #
+    # The check runs BEFORE the try so the `except (TypeError, ValueError)`
+    # re-wrapper below cannot bury the marker inside a nested message.
+    _info = SAMPLING_REGISTRY.get(sampling_type)
+    if _info is not None:
+        _valid_param_names = set(_info["required_params"]) | set(
+            _info["optional_params"].keys()
+        )
+        dropped = sorted(set(kwargs) - _valid_param_names)
+        if dropped:
+            raise ValueError(
+                f"create_sampling_layer('{sampling_type}'): "
+                f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
+                f"'{sampling_type}' ({_info['class'].__name__}) accepts only "
+                f"{sorted(_valid_param_names)}. Either you mistyped one of "
+                f"those names, or you chose the wrong sampling_type for the "
+                f"parameters you are passing."
+            )
+
     try:
         # Validate configuration before proceeding
         validate_sampling_config(sampling_type, **kwargs)
