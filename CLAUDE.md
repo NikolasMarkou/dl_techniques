@@ -77,7 +77,18 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
 - Config-driven construction via factory functions
 - Full round-trip serialization via `get_config()`
 - Python 3.11+ with type hints
-- **Docstring style is not uniform, and "Google-style docstrings" is a preference for new code, not a description of the tree.** `layers/` is predominantly Sphinx/reST; `models/` is measurably mixed (no package-wide rule in either direction), and `models/bert/bert.py` — which is entirely Sphinx/reST — is the normative exemplar for a NEW model package. Match the file you are editing; never convert a file wholesale. The measured per-package counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style (the single home for these numbers).
+- **Docstring style is not uniform.** "Google-style docstrings" is a preference for new code, not a
+  description of the tree:
+
+  | | |
+  |---|---|
+  | `layers/` | predominantly Sphinx/reST |
+  | `models/` | measurably mixed — no package-wide rule in either direction |
+  | New `models/` package | follow `models/bert/bert.py`, which is entirely Sphinx/reST |
+
+  **Match the file you are editing; never convert a file wholesale.** The measured per-package
+  counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md`
+  § Core Conventions → Code Style — the single home for those numbers.
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 
 When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions_v2.md`.

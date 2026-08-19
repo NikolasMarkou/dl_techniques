@@ -13,10 +13,10 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `fastvit/` — FastViT MCi image backbone (the assembled tower over `layers/fastvit/`; the image branch of MobileCLIP2, also usable standalone — architecture only, no pretrained weights)
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)
 - `squeezenet/` — SqueezeNet
-- `fastvlm/` — despite the `VLM` in its name and its former listing under Vision-Language, this is a **vision-only** hybrid backbone (MobileOne stem + RepMixer + attention stages). No text tower, no tokenizer, no language input — its own `README.md:1` says so: "A Fast Hybrid Vision Model"
+- `fastvlm/` — vision-only hybrid backbone (MobileOne stem + RepMixer + attention stages). **Name misattributes** — see below
 - `vit/` — Vision Transformer
 - `vit_hmlp/` — ViT with hierarchical MLP
-- `vit_siglip/` — ViT with a two-stage conv patch-embedding stem. **The name misattributes**: SigLIP is a sigmoid contrastive LOSS, and its own tower has a single-conv stem, no CLS token and a MAP head — none of which this package shares. There is no text tower and no loss here. See `vit_siglip/model.py`'s module docstring
+- `vit_siglip/` — ViT with a two-stage conv patch-embedding stem. **Name misattributes** — see below
 - `beit/` — BEiT (masked image modeling over discrete visual tokens + classifier; trainers in `src/train/beit/`)
 - `swin_transformer/` — Swin Transformer
 - `dino/` — DINO self-supervised
@@ -94,14 +94,12 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `vq_vae/` — VQ-VAE
 - `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
 - `lewm/` — Latent-energy world model
-- `nam/` — Neural Arithmetic **Module**: a tree-transformer parse + NTM memory + TRM
-  halting stack that evaluates arithmetic expressions. **Not** a Neural Additive Model —
-  there is no per-feature additive model anywhere in the package. This entry said
-  "Neural additive model" until 2026-08-15; `nam/model.py`'s own module docstring has
-  always said Module.
+- `nam/` — Neural Arithmetic **Module**: tree-transformer parse + NTM memory + TRM halting stack
+  that evaluates arithmetic expressions. **Name misattributes** — see below
 - `fnet/` — FNet (Fourier)
 - `fftnet/` — FFTNet
-- `pw_fnet/` — **PW-FNet, "Pyramid Wavelet-Fourier Network" for image restoration** (the package's own name: `pw_fnet/model.py:2`). It was listed here as "Patchwise FNet" until 2026-08-19 and is **not** patchwise and **not** FNet: it is a 2-level U-Net with FFT token mixing and multi-scale supervision, not FNet's token+feature-axis Fourier mixing. There is no wavelet transform either — the only spectral ops are `FFTLayer` / `IFFTLayer` (`grep -rn -i wavelet pw_fnet/` returns only the name itself), so two of the three words in the expanded name are unearned by the code
+- `pw_fnet/` — a 2-level U-Net with FFT token mixing and multi-scale supervision, for image
+  restoration. **Name misattributes** — see below
 - `power_mlp/` — Power MLP
 - `mothnet/` — MothNet (bio-inspired)
 - `coshnet/` — CoshNet
@@ -110,6 +108,22 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `hierarchical_reasoning_model/` — HRM
 - `tiny_recursive_model/` — Tiny recursive model
 - `tree_transformer/` — Tree Transformer
+
+### Names that misattribute
+
+Five packages are named for something they are not. Each was corrected in place after measurement;
+the entry is kept so the correction is not silently re-reverted.
+
+| Package | The name claims | What the code is | Evidence |
+|---|---|---|---|
+| `fastvlm/` | a vision-**language** model, and it was formerly listed under Vision-Language | **vision-only**: no text tower, no tokenizer, no language input | its own `README.md:1` — "A Fast Hybrid Vision Model" |
+| `vit_siglip/` | SigLIP | a ViT with a two-stage conv patch-embedding stem. SigLIP is a sigmoid contrastive **loss**, and its own tower has a single-conv stem, no CLS token and a MAP head — none of which this package shares. There is no text tower and no loss here | `vit_siglip/model.py` module docstring |
+| `nam/` | (read as) Neural **Additive** Model | Neural Arithmetic **Module** — there is no per-feature additive model anywhere in the package | `nam/model.py`'s module docstring has always said Module; this catalogue said "Neural additive model" until 2026-08-15 |
+| `pw_fnet/` | "Pyramid **Wavelet**-Fourier Network" (the package's own name, `pw_fnet/model.py:2`), and it was listed here as "Patchwise FNet" until 2026-08-19 | neither patchwise nor FNet: a 2-level U-Net with FFT token mixing and multi-scale supervision, not FNet's token+feature-axis Fourier mixing. **No wavelet transform** — the only spectral ops are `FFTLayer` / `IFFTLayer` | `grep -rn -i wavelet pw_fnet/` returns only the name itself. Two of the three words in the expanded name are unearned |
+| `mobile_clip/` | one generation | **both**, in one package — see the Vision-Language entry | package `README` §17 |
+
+> A class or package sharing a name with a published architecture is not necessarily that
+> architecture. Check the composition rule, not the name.
 
 ## Conventions
 
