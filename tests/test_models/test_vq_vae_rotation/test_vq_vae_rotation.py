@@ -565,3 +565,262 @@ class TestVQVAERotationGradientFlow:
             "the codebook IS reachable from the reconstruction output now; the "
             "loss_fn= in the test above is no longer load-bearing"
         )
+
+
+# ---------------------------------------------------------------------
+# The BACKWARD pass across `gradient_mode` (plan-2026-08-19-a616f581 step 13)
+# ---------------------------------------------------------------------
+#
+# DECISION plan-2026-08-19-a616f581/D-019: these four tests assert the
+# PROPERTIES the rotation trick claims -- direction transport and magnitude
+# transport -- and NOT a frozen numeric delta. Do NOT replace them with a
+# hand-derived closed-form gradient oracle, and do NOT reduce them to a single
+# "the four gradients differ by more than X" number.
+#
+# Why the shape. MEASURED at HEAD, CPU: replacing the whole body of
+# `VectorQuantizerRotationTrick._apply_gradient_transform` with the `ste`
+# branch -- i.e. deleting the package's entire reason to exist -- left
+# `tests/test_models/test_vq_vae_rotation/` at 43 passed / 43 collected and
+# `tests/test_layers/test_vector_quantizer_rotation_trick.py` at 60 passed / 60
+# collected. 103 green tests, zero of them touching the backward pass. The
+# forward pass CANNOT close this gap: every mode emits the codebook vector `q`
+# by construction (that is what `TestRotationTrickForwardIdentity` pins), so the
+# modes are distinguishable ONLY through their Jacobians.
+#
+# Why a property and not a delta. A hand-derived closed-form gradient would have
+# to be transcribed from `_apply_gradient_transform` itself -- the
+# self-referential-oracle trap this repo has hit repeatedly -- and a frozen
+# numeric delta would pin one seed's arithmetic rather than the algorithm. The
+# rotation trick's claim is geometric and exactly checkable:
+#
+#     out = scale * R @ x,  R orthogonal with R @ unit(x) = unit(q),
+#     scale = ||q|| / ||x||   (detached, except in 'no_grad_scale')
+#
+# so for an upstream gradient aligned with `unit(q)`, the gradient w.r.t. the
+# encoder output is `R^T unit(q) * scale = scale * unit(x)`: it comes back
+# pointing along the ENCODER's own direction, rescaled by the codebook/encoder
+# magnitude ratio. Straight-through returns the upstream vector untouched --
+# along `unit(q)`, ratio exactly 1. Both are exact identities, verified below to
+# 1e-5 relative, and both are read off the paper's definition rather than off
+# the implementation.
+#
+# Deliberate scope note: the `unit(q)` probe does NOT separate 'rotation' from
+# 'reflection' -- the negated Householder form maps `unit(q) -> unit(x)` too
+# (measured: cos = 1.0 for both). That separation is the job of
+# `test_the_four_modes_disagree_on_the_backward_pass_alone`, which uses the
+# model's real objective and a general upstream gradient. See decisions.md
+# D-019.
+
+import tensorflow as tf
+
+from dl_techniques.layers.vector_quantizer_rotation_trick import (
+    VectorQuantizerRotationTrick,
+)
+
+
+def _unit(a: np.ndarray) -> np.ndarray:
+    return a / np.linalg.norm(a, axis=-1, keepdims=True)
+
+
+class TestGradientModesDisagreeOnTheBackwardPass:
+    """`gradient_mode` is a backward-pass knob; something must observe it."""
+
+    # The modes are ENUMERATED from the layer, never hard-coded here: a fifth
+    # mode must not be able to ship untested.
+    MODES = VectorQuantizerRotationTrick._GRAD_MODES
+
+    @staticmethod
+    def _model() -> VQVAERotationTrick:
+        keras.utils.set_random_seed(7)
+        return VQVAERotationTrick(
+            num_embeddings=32, embedding_dim=16, input_shape=(16, 16, 3),
+            hidden_channels=16, downsample_factor=4, num_res_blocks=1,
+            norm_type="layer_norm", gradient_mode="rotation",
+        )
+
+    @staticmethod
+    def _images() -> np.ndarray:
+        # numpy, not `keras.random.*`: a `keras.random` draw after
+        # `set_random_seed` is NOT reproducible across constructions in one
+        # process (it advances a global counter), which silently gave each mode
+        # a DIFFERENT input while this test was being written.
+        return np.random.default_rng(0).uniform(
+            0.0, 1.0, (4, 16, 16, 3)).astype("float32")
+
+    def test_the_four_modes_disagree_on_the_backward_pass_alone(self):
+        """One instance, one input, four modes: same loss, four gradients.
+
+        The objective is `train_step`'s own (`recon + sum(self.losses)`), not a
+        generic one -- this model's codebook lives entirely in `add_loss`.
+        `gradient_mode` is flipped on a SINGLE built instance so that
+        "different weights" cannot explain any difference.
+        """
+        model = self._model()
+        images = self._images()
+        model(images, training=False)
+        z = tf.constant(np.asarray(model.encode(images)))
+
+        grads, losses, outputs = {}, {}, {}
+        for mode in self.MODES:
+            model.quantizer.gradient_mode = mode
+            with tf.GradientTape() as tape:
+                tape.watch(z)
+                quantized = model.quantizer(z, training=True)
+                recon = model.decoder(quantized)
+                loss = model.reconstruction_loss_weight * ops.mean(
+                    ops.square(images - recon))
+                aux = model.losses
+                loss = loss + (ops.sum(ops.stack(aux)) if aux else 0.0)
+            grads[mode] = np.asarray(tape.gradient(loss, z))
+            losses[mode] = float(loss)
+            outputs[mode] = np.asarray(quantized)
+
+        # Control: the FORWARD pass is mode-invariant, so any difference below
+        # is purely a backward-pass difference. Both are asserted because the
+        # loss alone could coincide by luck; the tensors cannot.
+        first = self.MODES[0]
+        for mode in self.MODES[1:]:
+            np.testing.assert_allclose(
+                outputs[mode], outputs[first], atol=1e-5,
+                err_msg=f"forward pass is NOT mode-invariant: {mode} vs {first}")
+            assert abs(losses[mode] - losses[first]) < 1e-5, (
+                f"objective moved with gradient_mode ({mode}); the control that "
+                "isolates this test to the backward pass is broken")
+
+        # Every pair must disagree. Relative separation, never an absolute
+        # bound: the gradient scale here is ~1e-2 and is device-dependent.
+        # MEASURED on CPU: the closest pair (rotation vs no_grad_scale, which
+        # differ only in whether `scale`'s gradient flows) is 4.7e-2; the
+        # widest is 1.02. The float32 floor for two identical paths is ~1e-7,
+        # so 1e-3 sits between the two by orders of magnitude.
+        seen = []
+        for i, a in enumerate(self.MODES):
+            for b in self.MODES[i + 1:]:
+                denom = max(np.linalg.norm(grads[a]), np.linalg.norm(grads[b]))
+                assert denom > 0.0, f"{a}/{b}: both gradients are exactly zero"
+                rel = np.linalg.norm(grads[a] - grads[b]) / denom
+                seen.append((a, b, rel))
+                assert rel > 1e-3, (
+                    f"gradient_mode={a!r} and {b!r} produce the SAME gradient "
+                    f"w.r.t. the encoder output (rel={rel:.3e}). The modes are "
+                    "a backward-pass-only knob, so this means one of them has "
+                    "collapsed onto the other.")
+        assert len(seen) == len(self.MODES) * (len(self.MODES) - 1) // 2
+
+    def test_rotation_is_not_the_straight_through_copy(self):
+        """The `ste`-collapse signature, asserted by name.
+
+        Straight-through hands the upstream gradient back untouched. The
+        rotation trick multiplies it by `scale * R^T`. Both are checked on the
+        same instance and the same input.
+        """
+        model = self._model()
+        images = self._images()
+        model(images, training=False)
+        z = tf.constant(np.asarray(model.encode(images)))
+
+        def grad_for(mode):
+            model.quantizer.gradient_mode = mode
+            with tf.GradientTape() as tape:
+                tape.watch(z)
+                quantized = model.quantizer(z, training=True)
+                recon = model.decoder(quantized)
+                loss = model.reconstruction_loss_weight * ops.mean(
+                    ops.square(images - recon))
+                aux = model.losses
+                loss = loss + (ops.sum(ops.stack(aux)) if aux else 0.0)
+            return np.asarray(tape.gradient(loss, z))
+
+        g_rot, g_ste = grad_for("rotation"), grad_for("ste")
+        denom = max(np.linalg.norm(g_rot), np.linalg.norm(g_ste))
+        assert denom > 0.0
+        rel = np.linalg.norm(g_rot - g_ste) / denom
+        assert rel > 1e-3, (
+            f"gradient_mode='rotation' returned the straight-through gradient "
+            f"(rel={rel:.3e}); `_apply_gradient_transform` has collapsed onto "
+            "its `ste` branch and the package's entire premise is gone.")
+
+    @pytest.mark.parametrize("mode", ["rotation", "reflection", "ste"])
+    def test_the_gradient_is_transported_the_way_the_mode_claims(self, mode):
+        """Direction AND magnitude transport, as exact identities.
+
+        Upstream gradient := `unit(q)`, the codebook direction.
+          rotation/reflection: comes back along `unit(x)`, scaled by
+                               ||q||/||x||  (R is orthogonal).
+          ste:                 comes back unchanged -- along `unit(q)`, ratio 1.
+        """
+        model = self._model()
+        model.quantizer.gradient_mode = mode
+        rows = np.random.default_rng(1).normal(
+            size=(6, model.embedding_dim)).astype("float32")
+        x = tf.constant(rows)
+
+        q = np.asarray(model.quantizer(x, training=False))
+        unit_x, unit_q = _unit(rows), _unit(q)
+        upstream = tf.constant(unit_q)
+
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            out = model.quantizer(x, training=False)
+            projected = ops.sum(out * upstream)
+        g = np.asarray(tape.gradient(projected, x))
+
+        # Anti-vacuity: the two directions must actually differ, and the
+        # magnitude ratio must be far from 1 -- otherwise "along unit(x),
+        # scaled by ||q||/||x||" and "unchanged" would be the same claim.
+        cos_xq = np.sum(unit_x * unit_q, axis=-1)
+        scale = (np.linalg.norm(q, axis=-1) / np.linalg.norm(rows, axis=-1))
+        assert cos_xq.max() < 0.99, (
+            f"vacuous probe: unit(x) and unit(q) are nearly parallel "
+            f"(max cos={cos_xq.max():.4f})")
+        assert scale.max() < 0.5, (
+            f"vacuous probe: ||q||/||x|| is close to 1 (max={scale.max():.4f})")
+
+        ratio = np.linalg.norm(g, axis=-1) / np.linalg.norm(unit_q, axis=-1)
+        cos_g_x = np.sum(_unit(g) * unit_x, axis=-1)
+        cos_g_q = np.sum(_unit(g) * unit_q, axis=-1)
+
+        if mode == "ste":
+            np.testing.assert_allclose(cos_g_q, 1.0, atol=1e-5, err_msg=(
+                "straight-through must return the upstream gradient untouched"))
+            np.testing.assert_allclose(ratio, 1.0, rtol=1e-5, err_msg=(
+                "straight-through must not rescale the upstream gradient"))
+        else:
+            np.testing.assert_allclose(cos_g_x, 1.0, atol=1e-5, err_msg=(
+                f"gradient_mode={mode!r}: the gradient is NOT transported back "
+                "onto the encoder's own direction; R^T unit(q) != unit(x), so "
+                "the transform is not the claimed rotation about (u+v)"))
+            np.testing.assert_allclose(ratio, scale, rtol=1e-5, err_msg=(
+                f"gradient_mode={mode!r}: |grad| != (||q||/||x||)*|upstream|, "
+                "so the transform is not orthogonal-times-scale -- the "
+                "magnitude transport the trick exists to provide is broken"))
+
+    def test_no_grad_scale_lets_the_scale_gradient_cancel_the_transport(self):
+        """`no_grad_scale` is not a cosmetic alias of `rotation`.
+
+        With `scale = ||q||/||x||` left differentiable, the scale term's
+        gradient exactly opposes the rotated term's along `unit(q)`:
+        `d/dx [scale * (R x . unit(q))] = d/dx [ ||q|| ] = 0`. So the SAME
+        probe that gives `rotation` a ratio of `||q||/||x||` gives
+        `no_grad_scale` exactly 0. Under an `ste` collapse it is 1.0.
+        """
+        model = self._model()
+        model.quantizer.gradient_mode = "no_grad_scale"
+        rows = np.random.default_rng(1).normal(
+            size=(6, model.embedding_dim)).astype("float32")
+        x = tf.constant(rows)
+        q = np.asarray(model.quantizer(x, training=False))
+        upstream = tf.constant(_unit(q))
+
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            out = model.quantizer(x, training=False)
+            projected = ops.sum(out * upstream)
+        g = np.asarray(tape.gradient(projected, x))
+
+        ratio = np.linalg.norm(g, axis=-1)
+        assert ratio.max() < 1e-5, (
+            "gradient_mode='no_grad_scale' no longer lets the scale gradient "
+            f"flow (max |grad| = {ratio.max():.3e}, expected ~0); it has "
+            "collapsed onto 'rotation' (ratio ||q||/||x||) or onto 'ste' "
+            "(ratio 1.0).")
