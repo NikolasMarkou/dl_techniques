@@ -246,7 +246,7 @@ class DepthAnything(keras.Model):
         (2, 384, 384, 1)
     """
 
-    # DECISION plan-2026-08-19-a616f581/D-009
+    # DECISION plan-2026-08-19T070627-a616f581/D-009
     # This table is DERIVED from `_VIT_SCALE_MAP`, not written out, and
     # `supported_encoders` is read off it. WHAT NOT TO DO: do not re-inline the
     # `['vit_s', 'vit_b', 'vit_l']` literal into __init__ (that is what was here

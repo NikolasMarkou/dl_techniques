@@ -237,7 +237,7 @@ class GroupAttention(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.layer_norm_eps = layer_norm_eps
 
-        # DECISION plan-2026-08-19-a616f581/D-007
+        # DECISION plan-2026-08-19T070627-a616f581/D-007
         # `layer_norm_eps` is a NEW constructor parameter. Before it existed this
         # call was a bare `create_normalization_layer(normalization_type)`, so
         # `self.norm` silently took the factory's `epsilon=1e-6` default while
@@ -646,7 +646,7 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.layer_norm_eps = layer_norm_eps
 
         # Create all sub-layers in __init__
-        # DECISION plan-2026-08-19-a616f581/D-007
+        # DECISION plan-2026-08-19T070627-a616f581/D-007
         # `layer_norm_eps` reached `norm1`/`norm2` below but had no channel into
         # `GroupAttention`, whose own norm therefore ran at the factory's 1e-6
         # default. `GroupAttention` gained the parameter for exactly this wiring;

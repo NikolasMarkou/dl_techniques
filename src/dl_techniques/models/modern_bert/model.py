@@ -555,7 +555,7 @@ class ModernBERT(keras.Model):
                 else {"window_size": self.local_attention_window_size}
             )
 
-            # DECISION plan-2026-08-19-a616f581/D-007
+            # DECISION plan-2026-08-19T070627-a616f581/D-007
             # `layer_norm_eps` used to reach ONLY the embeddings and
             # `final_norm` below. This loop passed neither `attention_norm_args`
             # nor `ffn_norm_args`, so `TransformerLayer` fell through to

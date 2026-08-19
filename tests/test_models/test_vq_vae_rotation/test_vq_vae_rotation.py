@@ -571,7 +571,7 @@ class TestVQVAERotationGradientFlow:
 # The BACKWARD pass across `gradient_mode` (plan-2026-08-19-a616f581 step 13)
 # ---------------------------------------------------------------------
 #
-# DECISION plan-2026-08-19-a616f581/D-019: these four tests assert the
+# DECISION plan-2026-08-19T070627-a616f581/D-019: these four tests assert the
 # PROPERTIES the rotation trick claims -- direction transport and magnitude
 # transport -- and NOT a frozen numeric delta. Do NOT replace them with a
 # hand-derived closed-form gradient oracle, and do NOT reduce them to a single

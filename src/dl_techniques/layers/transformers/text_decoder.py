@@ -317,7 +317,7 @@ class TextDecoder(keras.layers.Layer):
         for i in range(self.depth):
             # Linearly increase drop rate per layer
             layer_drop_rate = self.stochastic_depth_rate * i / max(1, self.depth - 1)
-            # DECISION plan-2026-08-19-a616f581/D-007
+            # DECISION plan-2026-08-19T070627-a616f581/D-007
             # `layer_norm_eps` used to reach ONLY `embed_norm` and `final_norm`.
             # This loop
             # passed neither `attention_norm_args` nor `ffn_norm_args`, so all

@@ -1355,7 +1355,7 @@ class TestPRISMGradientFlow:
         the backward graph while every shape, finiteness and round-trip test in
         this file still passed.
         """
-        # DECISION plan-2026-08-19-a616f581/D-014
+        # DECISION plan-2026-08-19T070627-a616f581/D-014
         # The 14 inert biases are EXCLUDED from the per-weight floor rather than
         # waived with `expect_zero` or pinned with `xfail(strict=True)`. Both of
         # those express "this weight is zero", and the measurement says it is

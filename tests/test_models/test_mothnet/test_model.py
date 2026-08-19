@@ -162,7 +162,7 @@ class TestHebbianUpdateAndWinnerTakeAllAreLoadBearing:
     a component that owns none.
     """
 
-    # DECISION plan-2026-08-19-a616f581/D-018
+    # DECISION plan-2026-08-19T070627-a616f581/D-018
     # The "a mushroom-body unit that never fired keeps its row" assertion below
     # is NOT ceremony: without it, `W += const` -- which is not Hebbian learning
     # at all -- satisfies the max|delta| > 0 claim. Measured: the blanket mutant

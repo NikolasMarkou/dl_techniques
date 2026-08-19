@@ -946,7 +946,7 @@ class TestGroupProbIsAppliedOnTheKeyAxis:
     One test, RED under both mutations.
     """
 
-    # DECISION plan-2026-08-19-a616f581/D-017
+    # DECISION plan-2026-08-19T070627-a616f581/D-017
     # The oracle is a COLUMN SELECTOR compared across two key positions, and the
     # assertion is on the MINIMUM row delta. Do NOT "simplify" this to "the
     # output differs when group_prob is replaced by ones": that claim is already

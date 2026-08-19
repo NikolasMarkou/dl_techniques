@@ -163,6 +163,15 @@ def test_text_lm_wrapper_applies_drop_path(monkeypatch):
     to the drop. Measured 5 failures / 74 fresh-process runs (~6.8%) on the
     scalar-max form, against a ~5e-10 collapse probability for this one.
     """
+    # DECISION plan-2026-08-19T070627-a616f581/D-004
+    # Do NOT weaken this oracle back to any batch-reduced scalar statistic of
+    # the logits, and do NOT pool the keep/drop masks across all drop-paths:
+    # the schedule gives `text_drop_path_0` rate 0.0, so a pooled mask lets the
+    # live layer's variation hide a dead one. Pool PER LAYER, over live rates
+    # only, and read keep/drop off the layer's OUTPUT (all-zero => dropped)
+    # rather than re-deriving the Bernoulli draw -- restating the
+    # implementation would make this a self-referential oracle. See
+    # plans/plan-2026-08-19T070627-a616f581/decisions.md D-004.
     from keras import ops
 
     m = _tiny_clip(text_stochastic_depth_rate=0.5)

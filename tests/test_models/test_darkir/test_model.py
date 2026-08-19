@@ -130,7 +130,7 @@ class TestDarkIRGradientFlow:
     """Every trainable weight is on the backward graph once training starts."""
 
     def test_gradients_reach_every_trainable_weight_after_one_step(self):
-        # DECISION plan-2026-08-19-a616f581/D-012
+        # DECISION plan-2026-08-19T070627-a616f581/D-012
         # The warm-up is NOT a way to dodge a finding. It is the opposite: with a
         # 330-entry `expect_zero` this suite would assert essentially nothing
         # about darkir forever, and every future dead weight would land inside
@@ -250,7 +250,7 @@ class TestDarkIRBlockTowerIsLoadBearing:
     def test_at_init_the_whole_block_tower_is_an_exact_no_op(self):
         """The F-62 ruling, as a positive claim rather than a defect report.
 
-        # DECISION plan-2026-08-19-a616f581/D-016
+        # DECISION plan-2026-08-19T070627-a616f581/D-016
         `F-62` recorded "darkir is an exact identity at initialization" as a
         REAL LIVE DEFECT. It is not a defect; it is the design, and this test
         asserts it. `models/darkir/model.py`'s own module docstring says so in

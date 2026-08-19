@@ -215,7 +215,7 @@ def build_transformer_ffn_config(
     if ffn_type == 'swiglu':
         del config['hidden_dim']
         del config['activation']
-        # DECISION plan-2026-08-19-a616f581/D-006: `swiglu` is the ONE registry
+        # DECISION plan-2026-08-19T070627-a616f581/D-006: `swiglu` is the ONE registry
         # type whose own `use_bias` default is False (measured: every other
         # bias-declaring type defaults True), because a bias-free gated FFN is
         # SwiGLUFFN's defining LLaMA-style design. The block's `use_bias`
@@ -730,7 +730,7 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif self.attention_type == 'window':
-            # DECISION plan-2026-08-19-a616f581/D-005: the block's `use_bias`
+            # DECISION plan-2026-08-19T070627-a616f581/D-005: the block's `use_bias`
             # MUST be forwarded here, and it is spelled `qkv_bias`/`proj_bias`
             # -- NOT `use_bias`. The 'window' registry entry
             # (attention/factory.py, key 'window') declares exactly those two

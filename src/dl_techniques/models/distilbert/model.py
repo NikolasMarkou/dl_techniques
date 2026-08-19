@@ -494,7 +494,7 @@ class DistilBERT(keras.Model):
             normalization_type=self.normalization_type,
         )
 
-        # DECISION plan-2026-08-19-a616f581/D-007
+        # DECISION plan-2026-08-19T070627-a616f581/D-007
         # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above); the
         # `TransformerLayer` loop passed neither `attention_norm_args` nor
         # `ffn_norm_args`, so every one of the `2 * num_layers` block norms ran

@@ -280,7 +280,7 @@ class TestLeWMGradientFlow:
     """Every trainable weight is on the backward graph once training starts."""
 
     def test_gradients_reach_every_trainable_weight_after_one_step(self, cfg):
-        # DECISION plan-2026-08-19-a616f581/D-012
+        # DECISION plan-2026-08-19T070627-a616f581/D-012
         # One real fit step, then the oracle with NO waivers. Do NOT replace
         # this with a 30-entry `expect_zero`: waiving the entire predictor would
         # leave this suite asserting nothing about the component LeWM exists to

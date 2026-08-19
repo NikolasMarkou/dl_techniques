@@ -426,7 +426,7 @@ class Qwen3(keras.Model):
                 'use_bias': False
             })
 
-            # DECISION plan-2026-08-19-a616f581/D-007
+            # DECISION plan-2026-08-19T070627-a616f581/D-007
             # `norm_eps` used to reach ONLY `final_norm` below (F-10). This
             # construction passed neither `attention_norm_args` nor
             # `ffn_norm_args`, so all `2 * num_layers` block norms inherited

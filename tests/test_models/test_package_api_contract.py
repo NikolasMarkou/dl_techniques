@@ -966,7 +966,7 @@ class TestTransformerLayerNormArgsAreForwarded:
     """
 
     def test_no_eps_storing_class_omits_both_norm_arg_dicts(self):
-        # DECISION plan-2026-08-19-a616f581/D-008
+        # DECISION plan-2026-08-19T070627-a616f581/D-008
         # This guard is written against the TransformerLayer INDIRECTION, not
         # against `create_normalization_layer(...)` call sites, because the
         # direct-call form guards ZERO: measured over models/ + layers/, the
@@ -1407,7 +1407,7 @@ class TestModelVariantsArePresent:
     """
 
     def test_every_from_variant_class_resolves_a_model_variants_table(self):
-        # DECISION plan-2026-08-19-a616f581/D-009
+        # DECISION plan-2026-08-19T070627-a616f581/D-009
         # The trigger for this guard is EVIDENCE OF NAMED VARIANTS (a
         # `from_variant`, a legacy table, or a hidden local table) -- NOT "is a
         # keras.Model". WHAT NOT TO DO: do not "strengthen" this into "every

@@ -164,7 +164,7 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
 #: The ONE weight in NanoVLM that legitimately receives no gradient.
 #:
-# DECISION plan-2026-08-19-a616f581/D-011
+# DECISION plan-2026-08-19T070627-a616f581/D-011
 # `shared_output_projection/kernel` is waived here BY DESIGN, not to make this
 # test pass. When `use_shared_embedding=True` (the default for
 # `text_component_type='decoder'`) the logits come from a CALL-TIME weight tie --

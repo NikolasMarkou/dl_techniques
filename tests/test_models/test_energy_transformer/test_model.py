@@ -246,7 +246,7 @@ class TestSerialization:
         assert len(loaded.weights) == len(model.weights)
         np.testing.assert_allclose(before, after, atol=1e-4)
 
-    # DECISION plan-2026-08-19-a616f581/D-015: perturb ONE ELEMENT of
+    # DECISION plan-2026-08-19T070627-a616f581/D-015: perturb ONE ELEMENT of
     # `decoder_proj/kernel`, keep the `> 1e-2` bound, and assert the un-perturbed
     # round trip FIRST. The bound was never the problem -- the perturbation was
     # annihilated by `decoder_norm` and the old bite was TF32 rounding noise.
@@ -810,7 +810,7 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
 #: The ONE weight the classifier legitimately never trains.
 #:
-# DECISION plan-2026-08-19-a616f581/D-013
+# DECISION plan-2026-08-19T070627-a616f581/D-013
 # `mask_token/mask_token` is waived HERE (classifier only) BY DESIGN, and the
 # product code says so in as many words. `EnergyTransformerBackbone.build`
 # (`models/energy_transformer/model.py`) carries the literal comment

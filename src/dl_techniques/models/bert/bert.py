@@ -443,7 +443,7 @@ class BERT(keras.Model):
             name="embeddings"
         )
 
-        # DECISION plan-2026-08-19-a616f581/D-007
+        # DECISION plan-2026-08-19T070627-a616f581/D-007
         # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above). The
         # `TransformerLayer` loop below passed neither `attention_norm_args` nor
         # `ffn_norm_args`, so `TransformerLayer._create_normalization_layer`
