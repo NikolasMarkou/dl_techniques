@@ -425,6 +425,51 @@ _CAUSAL_SAFE_NORM: str = "zero_centered_rms_norm"
 # ---------------------------------------------------------------------------
 
 
+def _call_with_training_gate(
+    layer: keras.layers.Layer,
+    *args: Any,
+    training: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Call ``layer`` with a ``training`` flag that may be a SYMBOLIC tensor.
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-056
+    Keras 3.8's ``BatchNormalization.call`` (and ``Dropout.call``) branches on
+    ``training`` with a Python ``if``, so under ``@tf.function`` a traced
+    ``training`` argument raises ``OperatorNotAllowedInGraphError``. MEASURED
+    2026-08-19 on keras 3.8.0 / tf 2.18.0: ``BatchNormalization`` and
+    ``Dropout`` both raise for ``tf.constant(False)`` AND ``tf.constant(True)``;
+    ``LayerNormalization`` accepts either (it ignores the flag). This is a
+    FRAMEWORK constraint, not a defect of this module.
+
+    Do NOT "fix" this by resolving the flag to a Python bool at the call site:
+    MEASURED, ``tf.get_static_value`` on a traced argument returns ``None``
+    (it is a placeholder, not a constant), so no resolution is possible from
+    inside the trace. Do NOT drop the flag either — that would silently pick
+    one regime. The gate is expressed as a graph conditional instead.
+
+    The Python-``bool``/``None`` path is left EXACTLY as it was, which is the
+    path every trainer and every eager call in this repo takes; only a caller
+    that passes a tensor reaches ``keras.ops.cond``. MEASURED: the
+    ``cond``-wrapped inference path is bit-identical (max|delta| == 0.0) to the
+    direct ``training=False`` call, and the ``True`` branch still moves
+    ``moving_mean``.
+
+    :param layer: Sublayer to invoke.
+    :param args: Positional arguments forwarded to the layer.
+    :param training: ``None``, a Python ``bool``, or a scalar boolean tensor.
+    :param kwargs: Keyword arguments forwarded to the layer.
+    :return: The layer's output.
+    """
+    if training is None or isinstance(training, bool):
+        return layer(*args, training=training, **kwargs)
+    return keras.ops.cond(
+        keras.ops.cast(training, "bool"),
+        lambda: layer(*args, training=True, **kwargs),
+        lambda: layer(*args, training=False, **kwargs),
+    )
+
+
 def _activation_spec(activation: Any) -> Any:
     """Canonicalise an activation spec for storage on the layer.
 
@@ -1736,8 +1781,12 @@ class CliffordNetBlock(keras.layers.Layer):
         # --- Step 1: Normalise ---
         # `training` is passed explicitly: a configurable input normalization
         # may be a batch-norm variant. Keras drops the kwarg for layers whose
-        # call() does not accept it.
-        x_norm = self.input_norm(x_prev, training=training)
+        # call() does not accept it. Routed through the gate helper because
+        # that batch-norm variant cannot take a SYMBOLIC `training` under
+        # @tf.function (D-056); the Python-bool path is unchanged.
+        x_norm = _call_with_training_gate(
+            self.input_norm, x_prev, training=training
+        )
 
         # --- Step 2: Dual-stream generation ---
         z_det = self.linear_det(x_norm)
@@ -1756,7 +1805,9 @@ class CliffordNetBlock(keras.layers.Layer):
         else:
             z_ctx = self.dw_conv(x_norm)
             z_ctx = self.dw_conv2(z_ctx)
-        z_ctx = self._activation_fn(self.ctx_norm(z_ctx, training=training))
+        z_ctx = self._activation_fn(
+            _call_with_training_gate(self.ctx_norm, z_ctx, training=training)
+        )
 
         if self.ctx_mode == "diff":
             # Differential ("Laplacian-like") context. Note this is C_loc minus
@@ -1787,6 +1838,8 @@ class CliffordNetBlock(keras.layers.Layer):
             g_feat = g_feat + g_glo
 
         # --- Step 5: GGR (transform only; residual add is external) ---
+        # GGR's `training` is accepted but unused (it holds no normalization
+        # and no dropout), so it needs no gate — verified at its `call`.
         h_mix = self.ggr(x_norm, g_feat, training=training)
         if call_rank == 3:
             h_mix = keras.ops.squeeze(h_mix, axis=1)
