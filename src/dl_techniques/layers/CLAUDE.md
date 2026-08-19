@@ -82,6 +82,9 @@ Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequ
 ### Tokenizers (`tokenizers/`)
 BPE tokenizer implementation.
 
+### Sequence Pooling (`sequence_pooling/`)
+Pool a `(B, T, D)` sequence to `(B, D)`: `sequence_pooling.py` (`SequencePooling` — the shared `cls`/`mean`/`max`/positional strategies, reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Includes `factory.py` (`create_sequence_pooling_layer`, keys `sequence` / `attention` / `weighted`) plus its own `README.md` and `GUIDE.md`.
+
 ### Task Heads (`heads/`)
 Single merged package consolidating the formerly-separate `nlp_heads/`,
 `vision_heads/`, and `vlm_heads/` packages into three sub-packages:
@@ -106,17 +109,18 @@ enums/configs. Import via `from dl_techniques.layers.heads import create_head` o
 Experimental/unstable layers: band RMS OOD, contextual counter FFN, contextual memory, field embeddings, graph MANN, hierarchical evidence LLM, hierarchical memory system, MST correlation filter.
 
 ### Standalone Layers (top-level files)
-Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE, complex-valued layers, conditional output, Conv2D builder, ConvNeXt v1/v2 blocks, convolutional KAN, depthwise separable, downsample/upsample, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal block, FFT layers, Gaussian filter/pyramid, global sum pool, HANC block/layer, hierarchical MLP stem, inverted residual block, IO preparation, KAN linear, Laplacian filter, layer scale, mobile-one block, modality projection, MothNet blocks, MPS layer, multi-level feature compilation, one-hot encoding, orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible; see module docstring), patch merging, pixel shuffle, random Fourier features, RepMixer block (`repmixer_block.py` — consumed by `models/fastvlm/`; **not** FastViT's RepMixer, which is `fastvit/FastVitRepMixerBlock`), res-path, restricted Boltzmann machine, rigid simplex, router, sampling (Gaussian-ball / thin-shell hypersphere / von Mises-Fisher reparameterization samplers + inline factory; `vmf` adds `VMFSampling` + the closed-form `vmf_kl_divergence`), scheduled dropout, selective gradient mask, sequence pooling, shearlet transform, sparse autoencoder, spatial layer, squeeze-excitation, standard blocks, stochastic depth/gradient, strong augmentation, TabM blocks, Tversky projection, universal inverted bottleneck, vector quantizer, YOLO12 blocks/heads.
+Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE, complex-valued layers, conditional output, Conv2D builder, ConvNeXt v1/v2 blocks, convolutional KAN, depthwise separable, downsample/upsample, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal block, FFT layers, Gaussian filter/pyramid, global sum pool, HANC block/layer, hierarchical MLP stem, inverted residual block, IO preparation, KAN linear, Laplacian filter, layer scale, mobile-one block, modality projection, MothNet blocks, MPS layer, multi-level feature compilation, one-hot encoding, orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible; see module docstring), patch merging, pixel shuffle, random Fourier features, RepMixer block (`repmixer_block.py` — consumed by `models/fastvlm/`; **not** FastViT's RepMixer, which is `fastvit/FastVitRepMixerBlock`), res-path, restricted Boltzmann machine, rigid simplex, router, sampling (Gaussian-ball / thin-shell hypersphere / von Mises-Fisher reparameterization samplers + inline factory; `vmf` adds `VMFSampling` + the closed-form `vmf_kl_divergence`), scheduled dropout, selective gradient mask, shearlet transform, sparse autoencoder, spatial layer, squeeze-excitation, standard blocks, stochastic depth/gradient, strong augmentation, TabM blocks, Tversky projection, universal inverted bottleneck, vector quantizer, YOLO12 blocks/heads.
 
 ## Conventions
 
 - **`__init__.py` policy varies by subpackage — check before assuming.** The `layers/__init__.py` root *is* empty, but most subpackages are **not**:
-  - **Curated re-export modules with `__all__`** (import the public name straight from the subpackage): `activations`, `attention` (42 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers`.
+  - **Curated re-export modules with `__all__`** (import the public name straight from the subpackage): `activations`, `attention` (43 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers`.
 
     ```python
     from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer
     ```
   - **Empty** (import from the submodule directly): `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, and the top-level standalone layer modules.
+  - **No `__init__.py` at all**: `experimental/` — a namespace package, so only submodule imports work there.
 
     ```python
     from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork
@@ -141,9 +145,11 @@ Check in this precedence order; only proceed to the next step when nothing fits:
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
    | Attention | `create_attention_layer()` in `attention/factory.py` | 32 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
-   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | ~13 |
-   | Activations | `create_activation_layer()` in `activations/factory.py` | ~22 |
-   | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | RBF / KMeans / GMM |
+   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 13 |
+   | Activations | `create_activation_layer()` in `activations/factory.py` | 22 |
+   | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
+   | Logic | `create_logic_layer()` in `logic/factory.py` | 4 (`logic`, `arithmetic`, `neural_circuit`, `circuit_depth`) |
+   | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | 3 (RBF / KMeans / GMM) |
    | Memory | `create_mann()` / `create_som_2d()` in `memory/factory.py` | n/a |
    | Task heads | `create_head(domain, ...)` in `heads/factory.py` (NLP / vision / VLM) | n/a |
    | Transformer blocks | `TransformerLayer` in `transformers/transformer.py` (direct import) | n/a |

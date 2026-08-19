@@ -87,7 +87,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 296 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 267 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-17 **69 of 73** bind a `create_*` factory in their package init and **all 73** export a curated `__all__`; the 4 without one are `power_sampling`, `mamba`, `fnet` and the nested family `SAM/`. (This sentence said "70 of 73 ... the 3 without a factory (`power_sampling`, `SAM/`, `time_series/`)" until 2026-08-17: the count was one high and the list was wrong in both directions — `time_series/` DOES bind one, while `mamba` and `fnet` do not. Re-derive from the Numbers table row, never by memory.) See Part C. |
+| **`src/dl_techniques/models/`** | 267 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-19 **69 of 73** bind a `create_*` factory in their package init and **72 of 73** export a curated `__all__`; the 4 without a factory are `power_sampling`, `mamba`, `fnet` and the nested family `SAM/`, and `SAM/` is also the one without an `__all__` — a documented, deliberate exception, because re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning). (This sentence said "70 of 73 ... the 3 without a factory (`power_sampling`, `SAM/`, `time_series/`)" until 2026-08-17: the count was one high and the list was wrong in both directions — `time_series/` DOES bind one, while `mamba` and `fnet` do not. Re-derive from the Numbers table row, never by memory.) See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -343,9 +343,10 @@ thing you will meet and should not be surprised by.
   document themselves in reST. Read the root `CLAUDE.md`'s "Google-style
   docstrings" line as a preference for new code, not a description of the tree.
 - **The factory convention is now near-universal, but this entry is kept because
-  the measurement trap that produced it is not.** As of 2026-08-17 **69 of 73**
-  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **all 73**
-  declare a curated `__all__`, so the old "read the init before assuming
+  the measurement trap that produced it is not.** As of 2026-08-19 **69 of 73**
+  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **72 of 73**
+  declare a curated `__all__` (`SAM/` is the deliberate exception), so the old
+  "read the init before assuming
   importability" caveat is largely retired. Before the `1bfe89d08` curated-export
   pass the binding figure was 27 of 73 while 14 packages defined no `create_*`
   *anywhere* — two different numbers answering two different questions, which is

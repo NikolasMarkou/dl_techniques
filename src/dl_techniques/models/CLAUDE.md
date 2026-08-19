@@ -115,18 +115,30 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 
 - `src/dl_techniques/models/__init__.py` (the parent) is empty — always import
   from the model subpackage, never from `dl_techniques.models` itself.
-- Per-model `<pkg>/__init__.py` is **mixed, and the empty case is no longer a
-  safe default assumption**. Re-measured 2026-08-14 (second pass, after the `mobile_clip_v2/` split): 27 of the 73 model packages
-  bind a `create_*` factory in their own `__init__.py` (an import, a `def` or an
-  assignment). A plain `grep create_` now agrees at 27 — it used to give one more
-  than the binding count, because `convnext_patch_vae/__init__.py` mentioned its
-  factories in a docstring without binding them, and that package has since been
-  deleted; the two figures can diverge again the moment any init mentions a
-  factory it does not bind. Exemplars of a curated init with `__all__`:
-  `energy_transformer/`, `dino/`, `vit/`. The remaining 46 are empty or
-  near-empty and do require importing from the submodule directly. **Read the
-  package init before assuming either shape.** (`REPO_MAP.md` § "The factory
-  convention is not universal" carries the same derivation.)
+- **Per-model `<pkg>/__init__.py` is now curated almost everywhere — the "mostly
+  empty" era is over.** Re-measured 2026-08-19 over the 73 model packages:
+  **73 of 73** have a non-empty `__init__.py`; **72 of 73** declare `__all__`
+  (`SAM/` is the sole exception, and it is the multi-model family package);
+  **69 of 73** actually *bind* a `create_*` name (an import, a `def` or an
+  assignment). Import the public name straight from the package. Exemplars:
+  `accunet/`, `energy_transformer/`, `dino/`, `vit/`.
+
+  Re-derive with an **AST walk**, not a grep — a plain `grep -l create_` over the
+  same inits returns **71**, because two of them mention a factory in a docstring
+  or comment without binding it. The gap between those two numbers is the whole
+  reason to prefer the AST:
+
+  ```bash
+  # non-empty inits / inits declaring __all__
+  for d in src/dl_techniques/models/*/; do [ -s "$d/__init__.py" ] && echo "$d"; done | wc -l
+  grep -l "^__all__" src/dl_techniques/models/*/__init__.py | wc -l
+  ```
+
+  This paragraph asserted "27 of 73 bind a factory, the remaining 46 are empty or
+  near-empty" from a 2026-08-14 measurement. The package surface was curated
+  repo-wide after that and the claim inverted; it was corrected on 2026-08-19.
+  The census is guarded by `tests/test_models/test_package_api_contract.py`, so
+  prefer running that over re-deriving by hand.
 - Each model subdirectory typically contains:
   - Model definition module(s)
   - Block/layer definitions specific to that architecture
@@ -316,7 +328,10 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
 - **Never delete the deep-supervision re-export shim** at the bottom of `resnet/model.py`,
   `convunext/model.py`, `bias_free_denoisers/bfunet.py` and
-  `bias_free_denoisers/bfconvunext.py`. It is a deliberate late import with `# noqa: E402`.
+  `bias_free_denoisers/bfconvunext.py`. It is a deliberate late import. Three of the four
+  carry an explicit `# noqa: E402`; `bfconvunext.py` has the same trailing import block
+  without the marker (verified 2026-08-19) — that is a lint-annotation gap, not a licence
+  to remove the import.
 
 ### When the shape does not apply
 
@@ -418,9 +433,9 @@ rationale for each is in `research/2026_keras_custom_models_instructions_v2.md`.
 
 ## Testing
 
-Tests in `tests/test_models/` with one subdirectory per model — 81 test directories
-as of 2026-08-14, more than the 73 model packages because several architectures get
-more than one suite. One exception: `lewm` is tested by the loose
+Tests in `tests/test_models/` with one subdirectory per model — 82 test directories
+as of 2026-08-19 (`ls -d tests/test_models/*/ | wc -l`), more than the 73 model
+packages because several architectures get more than one suite. One exception: `lewm` is tested by the loose
 `tests/test_models/test_lewm.py`, so a directory-to-directory comparison will
 wrongly report it as untested. Test pattern:
 - Class-based organization: `class TestModelName`
