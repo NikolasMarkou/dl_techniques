@@ -1,37 +1,33 @@
-# Authoring Keras 3 Custom Layers and Models — v2
+# Authoring Keras 3 Custom Layers and Models
 
-The canonical guide for creating layers and models in `dl_techniques`. It supersedes
-`research/2026_keras_custom_models_instructions.md` (v1), which is retained only for historical
-reference.
+The canonical guide for creating layers and models in `dl_techniques`.
 
-## Why there is a v2
+## What this guide is for
 
-v1 taught how to make a layer **construct and serialize**. Those rules were correct and they
-held. But a library-wide audit of every model package found that almost none of the real defects
-were of that kind. They were defects in code that satisfied every rule v1 states:
+Making a layer construct and serialize correctly is the easy half, and it is not where the defects
+are. A library-wide audit of every model package found this pattern again and again:
 
 - A layer stored, validated, serialized and documented a parameter that no code path read. Several
   models measured `max|dy| = 0.000e+00` across every legal value of a knob.
 - A rotary position embedding was constructed, built, parameter-counted and serialized while being
   an **exact algebraic no-op**, because it received the head axis instead of the sequence axis.
   Rotating query-head *h* and key-head *h* by the same matrix leaves `(Rq)·(Rk) = q·k`.
-- `add_weight(initializer='zeros')` followed by `.assign(table)` inside `build()` — a pattern v1
-  permits — leaves the table all zeros in every real model. A trend-only N-BEATS returned exactly
-  `0.0` everywhere and still trained and still reported a loss.
+- `add_weight(initializer='zeros')` followed by `.assign(table)` inside `build()` left the table all
+  zeros in every real model, because Keras discards the assignment. A trend-only N-BEATS returned
+  exactly `0.0` everywhere and still trained and still reported a loss.
 - A decoder-only language model attended bidirectionally under a next-token objective.
 - A model reloaded from `.keras` restored **zero** weights and passed its round-trip test.
 
-Each of these shipped behind a green suite. Shapes matched, parameter counts matched, gradients
-existed, serialization round-tripped, and the loss curve looked normal.
+Every one of these shipped behind a green suite. Shapes matched, parameter counts matched,
+gradients existed, serialization round-tripped, and the loss curve looked normal.
 
-The lesson is not that v1 was wrong. It is that **construction correctness and behavioural
-correctness are different properties, and only the first one is easy to test.** A guide that stops
-at construction produces exactly the library the audit found.
+**Construction correctness and behavioural correctness are different properties, and only the first
+one is easy to test.** A guide that stops at construction produces exactly the library the audit
+found.
 
-v2 therefore has two halves. Parts I–III are what to write. Parts IV–V are how to prove what you
-wrote does what you claim. The second half is the one that was missing, and it is not optional:
-in this repo, a guard that cannot fail is the *most common* outcome of writing a new test, not an
-edge case.
+This document therefore has two halves. Parts I–III are what to write. Parts IV–V are how to prove
+that what you wrote does what you claim. The second half is not optional polish: in this repo, a
+guard that cannot fail is the *most common* outcome of writing a new test, not an edge case.
 
 ## How to use this document
 
@@ -2271,7 +2267,3 @@ has already been falsified by measurement.
   requested 0.25 became an effective 0.4375; resolving an echoed mask earlier was a no-op for one
   model and a `6.42e-01` change for its sibling. **Run the prescribed fix and diff the number, not
   just the shape.**
-
----
-
-*This document supersedes `research/2026_keras_custom_models_instructions.md`.*
