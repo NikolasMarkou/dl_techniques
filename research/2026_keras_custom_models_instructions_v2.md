@@ -1,6 +1,7 @@
 # Authoring Keras 3 Custom Layers and Models
 
-The canonical guide for creating layers and models in `dl_techniques`.
+A guide to writing Keras 3 custom layers and models that are correct, serializable, and
+verifiably do what they claim.
 
 ## What this guide is for
 
@@ -26,8 +27,8 @@ one is easy to test.** A guide that stops at construction produces exactly the l
 found.
 
 This document therefore has two halves. Parts I–III are what to write. Parts IV–V are how to prove
-that what you wrote does what you claim. The second half is not optional polish: in this repo, a
-guard that cannot fail is the *most common* outcome of writing a new test, not an edge case.
+that what you wrote does what you claim. The second half is not optional polish: a guard that
+cannot fail is the *most common* outcome of writing a new test, not an edge case.
 
 ## How to use this document
 
@@ -51,10 +52,10 @@ Part VI lists claims that were investigated and **refuted**, so they do not get 
 5. [compute_output_shape](#5-compute_output_shape)
 6. [Graph-safe call()](#6-graph-safe-call)
 7. [Configuration and get_config](#7-configuration-and-get_config)
-8. [Model patterns and the house shape](#8-model-patterns-and-the-house-shape)
+8. [Model packages](#8-model-packages)
 
 **Part II — Reuse before you author**
-9. [The factory registries](#9-the-factory-registries)
+9. [Reuse before you author](#9-reuse-before-you-author)
 10. [Porting from a reference implementation](#10-porting-from-a-reference-implementation)
 
 **Part III — The failure catalogue**
@@ -69,7 +70,7 @@ Part VI lists claims that were investigated and **refuted**, so they do not get 
 **Part IV — Proving it works**
 18. [The five house rules](#18-the-five-house-rules)
 19. [The instruments](#19-the-instruments)
-20. [The shared oracles](#20-the-shared-oracles)
+20. [Three reusable oracles](#20-three-reusable-oracles)
 21. [Why guards fail](#21-why-guards-fail)
 22. [Test anti-patterns](#22-test-anti-patterns)
 23. [Measurement traps](#23-measurement-traps)
@@ -167,7 +168,7 @@ def __init__(self, layer_sizes: Optional[List[int]] = None):
 ## 2. Registration and serialization identity
 
 ```python
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable(package="my_project")
 class MyLayer(keras.layers.Layer):
     ...
 ```
@@ -193,7 +194,7 @@ Corollaries:
 Run the tree-wide collection gate after any change to a package's public surface:
 
 ```bash
-CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/ -q --collect-only
+pytest tests/ -q --collect-only
 ```
 
 ## 3. Layer implementation patterns
@@ -201,7 +202,7 @@ CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/ -q --colle
 ### 3.1 A layer with its own weights
 
 ```python
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable(package="my_project")
 class SimpleCustomLayer(keras.layers.Layer):
     """One-line statement of what this layer is and what distinguishes it.
 
@@ -380,7 +381,7 @@ Two clarifications that matter, because both were initially got wrong:
   dummy forward pass round-trips cleanly. A model that overrides `build()` to create two scalars
   does not.
 - On a **subclassed** model, `Model.build(batch_shape)` only marks the model built and walks no
-  sub-layers, so `count_params()` returns exactly `0`. Several packages in this tree do this. It is
+  sub-layers, so `count_params()` returns exactly `0`. Several widely-copied packages do this. It is
   not a working precedent to copy.
 
 Enforce it with a build-parity test (§19.3) **plus** a direct layout assertion for each
@@ -464,7 +465,7 @@ TypeError: ('pred must not be a Python bool', True)
 
 They pass every eager test and simultaneously break `fit`, `predict`, `jit_compile=True`, `.keras`
 save/load and every symbolic-shape path. Build triangular masks by comparing `ops.arange`, or reuse
-`dl_techniques.utils.masking`'s causal-mask helper.
+a shared causal-mask helper.
 
 **Symbolic `training` into `BatchNormalization` or `Dropout`.** Measured on this stack: both raise
 `OperatorNotAllowedInGraphError` for a traced `tf.constant(True)` **and** a traced
@@ -528,8 +529,8 @@ bit-identical outputs.
 A new `ValueError` on a value the **old default** produced breaks deserialization of every existing
 checkpoint. Soften only the `from_config` path — substitute the value and warn that the numerics
 have changed — and leave the constructor raise in place for fresh code. Record every
-checkpoint-affecting change in a **shipping** document (`src/dl_techniques/models/CLAUDE.md`
-carries the table); notes in gitignored directories do not ship.
+checkpoint-affecting change in a document that **ships with the code**; a note that lives only in
+an untracked planning directory does not reach the next reader.
 
 Sometimes the right answer is to refuse the shim. A remapping that would rebuild a *different*
 weight tree than the file contains is worse than a hard failure.
@@ -540,54 +541,35 @@ Value-exact round-tripping is not sufficient for a cache computed **from a weigh
 positional table computed from a stale pre-restore weight was off by 1.999 while thirteen
 round-trip tests passed. Cache only pure functions of shape and dtype, or invalidate on the weight.
 
-## 8. Model patterns and the house shape
+## 8. Model packages
 
-A model package that implements **one architecture with named variants** follows the shape below.
-It is a target, not a universal law; the exemptions are at the end.
+A package implementing one architecture with named variants follows the shape below. It is a target,
+not a universal law; the exemptions are at the end.
 
-### 8.1 Module skeleton
+### 8.1 The module docstring is substantive prose, not a template
 
-The module docstring is **substantive prose, not a template**:
-
-1. **One opening sentence** naming the architecture and its distinguishing options — a sentence,
-   not a title with an `====` underline.
+1. **One opening sentence** naming the architecture and its distinguishing options — a sentence, not
+   a title with an `====` underline.
 2. **Prose explaining the principle**: what problem the architecture solves and *why its mechanism
-   resolves it*, not just what the layers are. Inline math in backticks (`` `y = F(x) + x` ``)
-   where an equation carries the idea.
-3. **Prose on the architecture itself**: the stage/block structure, the design trade-offs, and —
-   importantly — the places where the code does something non-obvious, and why. This is the part a
+   resolves it*, not just what the layers are. Inline math in backticks (`` `y = F(x) + x` ``) where
+   an equation carries the idea.
+3. **Prose on the architecture itself**: the stage and block structure, the design trade-offs, and —
+   importantly — the places where the code does something non-obvious, and why. That is the part a
    reader would otherwise get wrong.
 4. **Every deliberate behavioural choice, stated as a choice with its reason** (for example, why
    `pretrained=True` raises rather than warning and returning a random model).
-5. **A `References:` section** listing papers as `- Author et al., YEAR. Title. (url)`, including
-   the papers the design actually draws on, not only the headline one.
+5. **A `References:` section** listing papers as `- Author et al., YEAR. Title. (url)`, including the
+   papers the design actually draws on, not only the headline one.
 
-This **replaces** terse `Model Variants:` / `Usage Examples:` boilerplate that restates the
-`MODEL_VARIANTS` dict and the factory signature sitting directly below it. The docstring's job is
-the reasoning that is *not* in the code. Length follows the architecture; do not pad, and do not
-move real explanation into the README to hit a line budget — benchmark tables and usage
-walkthroughs are what belongs in a README.
-
-Then imports, a `# local imports` banner, `# -----` separator bars, and the registration decorator:
-
-```python
-import os
-import keras
-from typing import List, Optional, Union, Tuple, Dict, Any, Literal
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-
-# ---------------------------------------------------------------------
-```
+This **replaces** terse `Model Variants:` / `Usage Examples:` boilerplate that restates the variant
+dict and the factory signature sitting directly below it. The docstring's job is the reasoning that
+is *not* in the code. Length follows the architecture; do not pad, and do not move real explanation
+into a README to hit a line budget — benchmark tables and usage walkthroughs are what belongs there.
 
 ### 8.2 Class API
 
 ```python
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable(package="my_project")
 class MyModel(keras.Model):
     MODEL_VARIANTS = {"my_model_base": {...}}
 
@@ -601,59 +583,53 @@ class MyModel(keras.Model):
 ```
 
 - `call(self, inputs, training=None)` — **no logging inside**. It fires on every trace.
-- `get_config()` returns every constructor argument, with `keras.regularizers.serialize(...)` for
-  regularizers; `from_config()` deserializes them.
-- `from_variant(cls, variant, ..., pretrained=False, **kwargs)` looks the name up in
-  `MODEL_VARIANTS` and raises `ValueError` **listing the available keys** when it misses. It must
-  accept the overrides its own docstring advertises — several packages raised `TypeError` on
-  exactly the documented override — and it must not splat description metadata into the
-  constructor.
+- `get_config()` returns every constructor argument, complex objects serialized; `from_config()`
+  deserializes them.
+- `from_variant(cls, variant, ..., pretrained=False, **kwargs)` looks the name up and raises
+  `ValueError` **listing the available keys** on a miss. It must accept the overrides its own
+  docstring advertises — several implementations raised `TypeError` on exactly the documented
+  override — and it must not splat description metadata into the constructor.
 
-**Two variant tables, deliberately.** `MODEL_VARIANTS` is the canonical name for the registry of
-publicly named variants. Where a package predates this and uses another spelling as its *only*
-table, add `MODEL_VARIANTS` as a class-level **alias** to the same dict — never rename, because
-trainers and tests reference the old spelling and the rename buys nothing the alias does not.
+**A variant registry and an architecture table are different things.** Where a package has both,
+keep them separate:
 
-`SCALE_CONFIGS` is **not** a stale spelling and the two must not be merged where both appear. They
-answer different questions:
+- the **architecture table** maps a scale to dimensions: `'tiny' -> {hidden_size: 192,
+  num_layers: 12, num_heads: 3, ...}`;
+- the **public-name registry** maps each name a caller may pass to a scale plus any overrides:
+  `'beit_tiny' -> {scale: 'tiny'}`.
 
-- `SCALE_CONFIGS` is the **architecture table**: `'tiny' -> {hidden_size: 192, num_layers: 12,
-  num_heads: 3, ...}`.
-- `MODEL_VARIANTS` is the **public-name registry**: `'beit_tiny' -> {scale: 'tiny'}`, one row per
-  name a caller may pass, resolving to a scale.
+Merging them collapses a name-to-scale indirection that exists precisely so a variant can pin a
+patch size or an input resolution alongside its scale. Where a package genuinely has one table, give
+it one canonical name and add an **alias** rather than renaming — trainers and tests reference the
+old spelling, and a rename buys nothing an alias does not.
 
-Merging them would collapse a name→scale indirection that exists precisely so a variant can pin a
-patch size or an input resolution alongside its scale.
-
-**Variant tables are derived from a named reference** — the released checkpoint's own
-`config.json`, fetched and cited — never from a sibling file in this repo and never from a paper
-table read once. Variant tables in this tree have been wrong by roughly half the parameter count in
-their own name, with the test suite pinning the wrong values.
+**Variant values are derived from a named reference** — the released checkpoint's own config, fetched
+and cited — never from a sibling file in the same codebase and never from a paper table read once.
+Variant tables have shipped wrong by roughly half the parameter count in their own name, with the
+test suite pinning the wrong values.
 
 ### 8.3 Pretrained weights
 
-`load_pretrained_weights(weights_path, skip_mismatch)` loads from a **local path**, building the
-model with a dummy forward pass first if needed.
+A loader takes a **local path** and builds the model with a dummy forward pass first if needed.
 
-There is **no `by_name` parameter** — Keras 3 removed it from `Model.load_weights`. Transfer here
-is layer-by-layer and therefore always name-based. The argument survived for a while as a supposed
-no-op; in fact every `load_weights(path, by_name=True)` call *raised*, and the enclosing `except`
-turned it into a warning and continued with random weights. Do not reintroduce it.
+Keras 3 **removed `by_name`** from `Model.load_weights`. Transfer is layer-by-layer and therefore
+always name-based. Where the argument survived as a supposed no-op, every call actually *raised*,
+and the enclosing `except` turned it into a warning and continued with random weights.
 
-`_download_weights(...)` **raises `NotImplementedError`, naming the variant and showing the
-local-path alternative.**
+A download hook that has nothing to download **raises `NotImplementedError`, naming the variant and
+showing the local-path alternative.**
 
-**Never** write a placeholder URL table plus a `try/except` in `from_variant` that logs a warning
-and continues with random initialization. That combination means `pretrained=True` silently returns
-an untrained model: the caller asked for trained weights, got random ones, and got no error. Nine
-packages shipped this simultaneously. Never swallow a load failure into a warning — a local-path
-load that restores nothing must raise.
+**Never** write a placeholder URL table plus a `try/except` that logs a warning and continues with
+random initialization. That combination means `pretrained=True` silently returns an untrained model:
+the caller asked for trained weights, got random ones, and got no error. Nine packages in one
+codebase shipped this simultaneously, and the documented alternative was broken too. Never swallow a
+load failure into a warning — a local-path load that restores nothing must raise.
 
 ### 8.4 Factory and exports
 
 A module-level `create_<name>(variant="<default>", ...)` that delegates to `from_variant` with **no
 logic of its own**. The package `__init__.py` exports the class and the factory with a curated
-`__all__`.
+`__all__`, and binds no name matching one of its own subpackages (§2).
 
 ### 8.5 Hygiene
 
@@ -661,159 +637,157 @@ logic of its own**. The package `__init__.py` exports the class and the factory 
 - No `# 1. / # 2. / # 3.` step ladders. A comment earns its place by explaining *why*, or by
   recording a non-obvious constraint — not by narrating *what*.
 - No mutable default arguments; `None` sentinels resolved in the body.
-- No unused imports — an imported-but-never-called `logger` is the common case.
+- No unused imports — an imported-but-never-called logger is the common case.
 - Prefer `keras.ops`; `keras.config.floatx()` / `keras.config.epsilon()` over `keras.backend.*`.
-- Centralized logging via `dl_techniques.utils.logger`; never `print`.
+- Route logging through one logger; never `print`.
+- **Never convert docstring style wholesale.** Match the file you are editing.
+- **Never delete or reword a decision-anchor comment** that records why a non-obvious choice was
+  made. Supersede it in place with a dated note. Files with a high comment density are often dense
+  *because of* these anchors — never target a file by comment density.
 
-### 8.6 Things you must not do
+### 8.6 When the shape does not apply
 
-- **Never delete or reword a `# DECISION <plan-id>/D-NNN` comment.** Supersede it in place with a
-  dated note. Files with a high comment density are often dense *because of* these anchors — never
-  target a file by comment density.
-- **Never rename a module file to `model.py`** to match the template; it breaks every import.
-- **Never convert docstring style wholesale.** Match the file you are editing. `layers/` is
-  predominantly Sphinx/reST, and this is effectively mandatory in `layers/attention/`. `models/` is
-  measurably mixed; for a **new** package follow `src/dl_techniques/models/bert/bert.py`, which is
-  entirely Sphinx/reST.
-- **Never delete a deliberate late-import re-export shim** carrying `# noqa: E402` at the bottom of
-  a module.
-
-### 8.7 When the shape does not apply
-
-- **No genuine named variants** — do not invent a `MODEL_VARIANTS` table to satisfy the template.
-  Apply §8.1, §8.4 and §8.5 only, and say why in the package README.
+- **No genuine named variants** — do not invent a variant table to satisfy the template. Apply §8.1,
+  §8.4 and §8.5 only, and say why in the package README.
 - **Functional builders** that return `keras.Model(inputs, outputs)` and have no subclass stay
   functional. Converting them breaks existing checkpoints. §8.1, §8.4 and §8.5 still apply.
 - **Multi-model families and nested packages** apply the shape per *inner architecture*, not per
   directory.
 
-Before classifying a package as functional, verify with
-`grep -n "^class .*(.*Model)" <pkg>/*.py`. A grep-based census of this question was wrong about
-several packages.
+Before classifying a package as functional, verify with `grep -n "^class .*(.*Model)" <pkg>/*.py`. A
+grep-based census of this question was wrong about several packages.
 
----
 
 # Part II — Reuse before you author
 
-## 9. The factory registries
+## 9. Reuse before you author
 
-**Authoring a bespoke layer is the last resort, not the first move.** Check in this order and only
-move to the next step when nothing fits:
+**Writing a bespoke layer is the last resort, not the first move.** Before implementing anything,
+check in this order and only move on when nothing fits:
 
-1. **The domain factory.** Each exposes a `create_*_layer()` entry point over a registry of named
-   types. Pass a type string plus config; do not hand-roll what a factory already builds.
+1. **A config-driven factory for the domain**, if the codebase has one — normalization, attention,
+   feed-forward, activations, embeddings, pooling. Pass a type string plus config rather than
+   hand-rolling what a registry already builds.
+2. **The existing layer surface.** Search for an implementation before writing one.
+3. **Only then a new layer**, placed in the domain package alongside its siblings and registered in
+   that domain's registry if one exists, so the next author can reuse it too. Do not bury a new
+   general-purpose layer inside a single model's directory.
 
-   | Domain | Entry point | Types |
-   |---|---|---|
-   | Normalization | `create_normalization_layer()` — `layers/norms/factory.py` | 18 |
-   | Attention | `create_attention_layer()` — `layers/attention/factory.py` | 32 |
-   | FFN / MLP | `create_ffn_layer()` — `layers/ffn/factory.py` | 21 |
-   | Activations | `create_activation_layer()` — `layers/activations/factory.py` | 22 |
-   | Embeddings | `create_embedding_layer()` — `layers/embedding/factory.py` | 13 |
-   | Logic | `create_logic_layer()` — `layers/logic/factory.py` | 4 |
-   | Mixtures | `create_mixture_layer()` — `layers/mixtures/factory.py` | 3 |
-   | Sequence pooling | `create_sequence_pooling_layer()` — `layers/sequence_pooling/factory.py` | 3 |
-   | Heads | `create_head()` / `create_nlp_head()` / `create_vision_head()` — `layers/heads/factory.py` | task-typed |
-   | Memory | `create_ntm()` / `create_mann()` / … — `layers/memory/factory.py` | constructor set |
-   | Masks | `create_mask()` — `utils/masking/factory.py` | constructor set |
+The rest of this section is about building and using such a registry correctly, because the way it
+fails is silent.
 
-   **Transformer blocks have no `create_*_layer` factory.** Use `TransformerLayer` from
-   `layers/transformers/transformer.py` directly — it is highly configurable (selectable attention,
-   FFN and normalization types, and normalization position) and composes the factories above
-   internally, so it covers most cases without a custom block. Higher-level `create_*_encoder`
-   builders exist alongside it.
+### 9.1 A registry-backed factory must raise on undeclared keys
 
-2. **The broader `layers/` package** — 20+ subpackages of standalone layers.
+This is the single highest-yield rule in this document.
 
-3. **Only then a new layer**, placed in the appropriate domain subpackage and registered in that
-   subpackage's `factory.py` where one exists, so the next author can reuse it too. Do not bury a
-   new layer inside a model directory.
+The tempting implementation filters the caller's keyword arguments against the target type's
+accepted parameters and **drops the rest**. A misspelled or undeclared key then produces a valid
+layer carrying a default value, and nothing raises, warns or logs. Measured consequences of exactly
+this design:
 
-### 9.1 A factory's registry is a frozen public surface
-
-Where a factory declares its registry frozen, the key set, the `Literal` type aliases and each
-entry's `required_params` / `optional_params` are **public API** consumed by config-driven callers
-and asserted by drift tests. Adding, renaming or removing any of them is a breaking change, not a
-cleanup. Docstrings and comments may be improved freely; the data may not.
-
-Some registry entries deliberately map to module-level **functions** rather than classes, where the
-function pins a mode the class itself does not encode. A configuration reachable by passing an
-argument to the general class is deliberately **not** registered — do not add keys "for
-consistency", because that grows the frozen surface.
-
-### 9.2 Unknown keys: the factories raise, and it took work
-
-All the main factories now **raise `ValueError` on any keyword the target type does not declare**.
-Confirmed by execution on the current tree:
-
-```
-create_attention_layer('multi_head', dim=32, num_heads=4, bogus_key=1)
-  -> ValueError: 1 unsupported parameter(s) ['bogus_key']
-create_ffn_layer('mlp', hidden_dim=32, output_dim=16, bogus_key=1)          -> ValueError
-create_normalization_layer('layer_norm', bogus_key=1)                       -> ValueError
-create_activation_layer('gelu', bogus_key=1)                                -> ValueError
-create_embedding_layer('positional_learned', ..., bogus_key=1)              -> ValueError
-```
-
-This is worth stating as history, because it is the single most productive rule in this document.
-Before the factories were hardened they **silently filtered** unknown keys against the target type's
-allowlist and dropped the rest. A misspelled or undeclared key produced a valid layer carrying a
-default value, and nothing raised, warned, or logged. The measured consequences:
-
-- Four call sites spelled a dropout argument `dropout=` where the registry declares
-  `dropout_rate`. Positional dropout was **repo-wide dead** across every vision encoder that used
-  them, building `Dropout(rate=0.0)` no matter what the caller passed.
-- One model forwarded `max_seq_len` and `rope_theta` into an attention type that declares no RoPE
+- Four call sites spelled a dropout argument `dropout=` where the registry declared `dropout_rate`.
+  Positional dropout was **dead across every vision encoder that used them**, building
+  `Dropout(rate=0.0)` no matter what the caller passed.
+- One model forwarded `max_seq_len` and `rope_theta` into an attention type that declares no rotary
   parameter. Both keys evaporated, and the entire reasoning stack was exactly
   permutation-equivariant.
-- `qkv_bias=True` built a layer with **zero bias weights**, because the declared spelling is
+- `qkv_bias=True` built a layer with **zero bias weights**, because the declared spelling was
   `use_bias`.
 - Hardening one factory immediately exposed four more live sites that had been silently discarding
   a normalization choice on every construction.
 
-**Therefore:** when you add a factory or a registry entry, it raises on undeclared keys. When you
-add a new registry-backed dispatch anywhere, it raises. And when you *use* a factory, do not assume
-a key was accepted because nothing complained — the guard is a scoped weight-value probe on the one
-subtree the knob is meant to reach (§19.6), not a whole-model output diff.
+The correct shape:
 
-### 9.3 The inverse: hand-written kwarg lists that omit a key
+```python
+REGISTRY: Dict[str, Dict[str, Any]] = {
+    "multi_head": {
+        "class": MultiHeadAttention,
+        "required_params": ["dim", "num_heads"],
+        "optional_params": {"dropout_rate": 0.0, "use_bias": True},
+    },
+}
+
+def create_attention_layer(attention_type: str, **kwargs: Any) -> keras.layers.Layer:
+    if attention_type not in REGISTRY:
+        raise ValueError(
+            f"Unknown attention type {attention_type!r}. Available: {sorted(REGISTRY)}"
+        )
+    entry = REGISTRY[attention_type]
+    declared = set(entry["required_params"]) | set(entry["optional_params"])
+
+    unsupported = sorted(set(kwargs) - declared)
+    if unsupported:
+        raise ValueError(                       # NEVER filter-and-drop
+            f"create_attention_layer({attention_type!r}): "
+            f"{len(unsupported)} unsupported parameter(s) {unsupported}. "
+            f"Accepted: {sorted(declared)}"
+        )
+    missing = sorted(set(entry["required_params"]) - set(kwargs))
+    if missing:
+        raise ValueError(f"{attention_type!r} requires {missing}")
+
+    params = {**entry["optional_params"], **kwargs}
+    return entry["class"](**params)
+```
+
+Two design notes:
+
+- **Do not "validate" by relying on the layer constructor to reject the key.** That works only for
+  layers whose `__init__` does not accept `**kwargs`, and it produces an error message about the
+  base class rather than about the factory.
+- A flat allowlist of parameter *names* applied uniformly to every type is weaker than per-type
+  schemas: a parameter gets range-checked because of what it is *called*, and a constraint that
+  differs between two types cannot be expressed at all.
+
+### 9.2 A registry's key set is a public surface
+
+Once callers pass type strings from configuration files, the key set, the type aliases and each
+entry's declared parameters are **API**. Adding, renaming or removing one is a breaking change, not
+a cleanup. Say so in the module docstring and pin it with a drift test.
+
+Some entries may deliberately map to module-level **functions** rather than classes, where the
+function pins a mode the class does not encode. A configuration reachable by passing an argument to
+the general class should deliberately **not** be registered — adding keys "for consistency" grows
+the frozen surface for nothing.
+
+### 9.3 The inverse defect: a hand-written kwarg list that omits a key
 
 Hardening the factory does not catch the other shape, where the call site hand-writes its argument
 list and simply **omits** a key it holds in `self`. Nine such sites were measured at exactly
 `0.000000e+00` weight delta: attention projections that never received `kernel_initializer` or
-`use_bias`, patch embeddings that never received initializers or regularizers, a final norm that
-never received `epsilon`.
+`use_bias`, patch embeddings that never received initializers or regularizers, a final
+normalization that never received `epsilon`.
 
 When you audit "who calls factory X", also sweep **"who builds X's argument dict without calling X
-directly"**. Files that assemble an `ffn_args` dict and pass it to a wrapper are invisible to an
+directly"**. A file that assembles an `ffn_args` dict and passes it to a wrapper is invisible to an
 AST call inventory, and a suite sweep run at site defaults cannot see the break either, because it
 needs a non-empty caller dict to appear. A `**kwargs`-splat site has the identical blind spot.
 
 ### 9.4 An "optional" parameter the layer derives is not safe to pass
 
-Consult the registry entry's `required_params` before deciding. One FFN type derives its hidden
-dimension from a two-thirds rule plus a multiple-of constraint, while thirteen others require it.
-Making the parameter conditional turned an expansion-factor knob into a no-op for eight types — and
-the change shipped with a guard that asserted that invariance **as correct**, pinning the new
-defect. Forward the derived parameter registry-driven, and pin the layer's own derivation rather
-than pinning invariance.
+Consult the registry entry before deciding. One feed-forward type derived its hidden dimension from
+a two-thirds rule plus a multiple-of constraint, while thirteen others required it. Making the
+parameter conditional turned an expansion-factor knob into a no-op for eight types — and the change
+shipped with a guard asserting that invariance **as correct**, pinning the new defect. Forward the
+derived parameter registry-driven, and pin the layer's own derivation rather than pinning
+invariance.
 
 ### 9.5 Normalization epsilon
 
-The factory sets `epsilon=1e-6`. Keras' `LayerNormalization` and `BatchNormalization` default to
-**`1e-3`**. Both figures confirmed by execution on the current tree. That is a factor of 1000 in
-every denominator, with no shape symptom, no warning, and no test failure.
+Keras' `LayerNormalization` and `BatchNormalization` both default to `epsilon=1e-3`. Most reference
+implementations of transformer-family architectures use `1e-5` or `1e-6`. That is a factor of 100
+to 1000 in every denominator, with no shape symptom, no warning and no test failure.
 
-Direct construction has put a norm at `1e-3` inside a stack whose other norms ran at `1e-6` — a
-1000x spread inside one forward pass. A related port had the reference epsilon reach 1 of
-`2*num_layers+1` norms, and an earlier one had 86 of 114 layers silently wrong with every test
-green.
+Direct construction has put a normalization layer at `1e-3` inside a stack whose others ran at
+`1e-6` — a 1000x spread inside one forward pass. A related port had the reference epsilon reach 1
+of `2*num_layers+1` normalization layers, and an earlier one had 86 of 114 layers silently wrong
+with every test green.
 
-**Route normalization through `create_normalization_layer`.** If you must construct directly,
-`epsilon=` is mandatory and must cite a named reference.
+**Route normalization through one factory so there is exactly one source for the value.** If you
+must construct directly, `epsilon=` is mandatory and must cite a named reference.
 
-Do **not** blanket-fix this. Some architectures' reference implementations genuinely use `1e-3`.
-And when you do sweep, sweep **every** epsilon-owning sub-layer rather than naming one.
+Do **not** blanket-fix this: some architectures' reference implementations genuinely use `1e-3`.
+And when you sweep, sweep **every** epsilon-owning sub-layer rather than the one that was noticed.
 
 ## 10. Porting from a reference implementation
 
@@ -829,7 +803,7 @@ shape.
   Dirac kernels, a `k=1` branch read one 2x2 patch of a feature map while the `k=3` branch of the
   same block read a different one. Shape assertions cannot see this. Apply a symmetric padding mode
   uniformly at every port site rather than at the one that was noticed.
-- **Vendor the reference.** Put the reference implementation's config or source under `research/`,
+- **Vendor the reference.** Keep the reference implementation's config or source in the repository,
   off the import path, and have the test read it with `ast` or `json`. An oracle you transcribed by
   hand in the same session as the port is a second copy of your own understanding, not a
   reference (§21.3).
@@ -979,8 +953,7 @@ broken composition rule.
 
 ### 14.1 Transform-only blocks called without the external residual
 
-Some blocks in this tree compute a **transform** and document that the *caller* supplies the skip
-connection. Calling them as `x = block(x)` drops the residual. Measured: signal collapse of roughly
+Some blocks compute a **transform** and document that the *caller* supplies the skip connection. Calling them as `x = block(x)` drops the residual. Measured: signal collapse of roughly
 `1e-5` per block, and a layer-scale initialization of 1.0 did **not** rescue it.
 
 **Rule.** Read the block's docstring for who owns the residual. Assert a post-ladder magnitude:
@@ -1018,7 +991,7 @@ architecture does not do what its name says as a defect report, not as documenta
 
 ### 15.1 fp16 mask sentinels
 
-`scores + (1 - mask) * (-1e9)` is the single most replicated numerical defect in this tree.
+`scores + (1 - mask) * (-1e9)` is the single most replicated numerical defect in this family of code.
 Confirmed by execution: `np.float16(-1e9)` is `-inf`, and `0.0 * -inf` is `nan`.
 
 So under `mixed_float16`:
@@ -1153,8 +1126,8 @@ Two clarifications that were initially got wrong:
   caller's encoder `kernel_regularizer` reached neither the gradient nor the reported loss —
   identical loss to six digits with and without an `l2(1e-1)`.
 
-`model.losses` is never empty in this tree (several blocks hardcode a layer-scale L2), so
-`assert model.losses` always passes. Assert a **delta** against a no-regularizer baseline.
+`model.losses` is often non-empty for reasons unrelated to the regularizer under test — a block
+that hardcodes a layer-scale L2 is enough — so `assert model.losses` can always pass. Assert a **delta** against a no-regularizer baseline.
 
 ### 16.2 Python state that never reaches the traced graph
 
@@ -1276,8 +1249,8 @@ pre-change output was itself meaningful before calling a delta a regression.
 Every defect in Part III shipped behind a green suite. This part is how to write a suite that would
 have caught them.
 
-The governing observation, measured repeatedly across this library: **a guard that cannot fail is
-the most likely outcome of writing a new test, not an edge case.** One freshly written 140-test
+The governing observation, measured repeatedly: **a guard that cannot fail is the most likely
+outcome of writing a new test, not an edge case.** One freshly written 140-test
 suite contained 12 vacuous tests, including *every* forward-pass test and *both* gradient-flow
 tests. Another probe suite measured 57 of 57 guards blind. Budget the work to prove your guard can
 fail; it is not optional polish.
@@ -1623,18 +1596,26 @@ Three things this encodes:
 Note that layer normalization **breaks** degree-1 homogeneity (81–98% error) while a bias-free batch
 norm gives it exactly. A generic `verify_bias_free()` structural check gives false assurance here.
 
-## 20. The shared oracles
+## 20. Three reusable oracles
 
-Three instruments already exist in `tests/`. **Reuse them; do not reinvent them.** All three are
-deliberately named **without** a `test_` prefix so pytest does not collect them, and each has its
-own RED-proof module.
+Write these once, as shared modules, and call them from every layer and model suite. Name the module
+**without** a `test_` prefix so the runner does not collect it, and give each one its own RED-proof
+test module.
 
-### 20.1 `tests/test_models/smoke_contract_oracle.py`
+### 20.1 The smoke contract, and the meta-test that proves it can reject
 
-Mutation-injects the model's own forward output to prove a smoke contract can reject a broken
-model.
+A smoke test asserts that a model builds and produces a sane output. On its own it is nearly
+worthless, because it passes on almost any broken model. What makes it real is the **meta-test**:
+mutate the model's own forward output and require the contract to reject it.
 
 ```python
+import contextlib
+from unittest import mock
+
+def collapse_to_scalar(output):   return ops.mean(output)
+def slice_leading_axis(output):   return output[:1]
+def append_trailing_axis(output): return ops.expand_dims(output, -1)
+
 DEFAULT_BREAKERS = (collapse_to_scalar, slice_leading_axis, append_trailing_axis)
 
 @contextlib.contextmanager
@@ -1644,9 +1625,30 @@ def broken_forward(model, breaker):
         return breaker(original_call(*a, **kw))
     with mock.patch.object(model, "call", _broken_call):
         yield
+
+
+def assert_contract_rejects_a_broken_forward(model, inputs, contract, breakers=DEFAULT_BREAKERS):
+    # Anti-vacuity control FIRST: the contract must pass on the unbroken model,
+    # or every rejection below is meaningless.
+    contract(model(inputs, training=False))
+
+    for breaker in breakers:
+        with broken_forward(model, breaker):
+            try:
+                contract(model(inputs, training=False))
+            except AssertionError:
+                continue                      # the contract JUDGED - correct
+            except Exception as exc:
+                # A TypeError from a contract that indexed a scalar is the contract
+                # CRASHING, not judging. Never accept a bare Exception here.
+                raise AssertionError(
+                    f"{breaker.__name__}: contract raised {type(exc).__name__}, "
+                    f"not AssertionError -- it crashed rather than judged"
+                ) from exc
+            raise AssertionError(f"{breaker.__name__}: contract accepted a broken forward")
 ```
 
-Usage contract — the meta-test is mandatory, not optional:
+Used as a mandatory pair:
 
 ```python
 def test_smoke_build_and_forward(model):
@@ -1656,34 +1658,62 @@ def test_the_contract_rejects_a_broken_forward(model):
     assert_contract_rejects_a_broken_forward(model, _inputs(), _assert_contract)
 ```
 
-Two rules baked in:
+**A meta-test must break the MODEL, not its argument validation.** One earlier attempt passed an
+invalid variant name, which fails at variant lookup *before a model exists*, so the meta-test passed
+while proving nothing about the contract.
 
-- An **anti-vacuity control runs first**: the contract must pass on the unbroken model.
-- It requires an **`AssertionError` specifically, never `Exception`**. A `TypeError` from a contract
-  that indexed a scalar is the contract *crashing*, not the contract *judging*.
+### 20.2 Knob sensitivity, with the instrument matched to the knob class
 
-The precedent it replaces: a meta-test that passed an invalid variant name, which fails at variant
-lookup *before the model is built*. **A meta-test must break the MODEL, not its argument
-validation.**
+Choosing the wrong instrument here is the most common way a knob test goes vacuous.
 
-### 20.2 `tests/test_models/knob_sensitivity_oracle.py`
-
-Three instruments, chosen by knob class. Choosing the wrong one is how a knob test goes vacuous.
-
-| knob class | example | instrument |
+| knob class | example | what must change |
 |---|---|---|
-| **structural** | depth, heads, filters | `assert_structural_knob_changes_weights` — the **weight-shape signature** must change |
-| **value** | activation, epsilon | `assert_value_knob_changes_output` — signature identical under the same seed, outputs differ |
-| **scoped value** | an initializer honoured in part of the tree | `assert_scoped_value_knob_changes_weights` — weight **values** of a named subtree |
+| **structural** | depth, heads, filters | the **weight-shape signature** |
+| **value** | activation, epsilon | outputs, with the signature **identical** under the same seed |
+| **scoped value** | an initializer honoured in part of the tree | weight **values** of a named subtree |
 
-**The trap.** Two models built with different `depth` values have different weight *shapes*, so
-they consume different draws from the RNG and their outputs differ **whether or not the argument was
-honoured**. An output-difference assertion on a structural knob is satisfied by random-init luck
-alone — it is a second unfalsifiable test wearing a stronger-looking assertion.
+```python
+def weight_signature(model):
+    """Shape signature. Capture AFTER a forward pass: before one, a subclassed
+    model has no weights and every config yields the same empty signature."""
+    sig = tuple(tuple(w.shape) for w in model.weights)
+    assert sig, "empty weight signature -- the model was not built before capture"
+    return sig
 
-Capture the weight signature **after** the forward pass. Before it, a subclassed model has
-`len(model.weights) == 0`, so two genuinely different configurations both produce the empty
-signature `()` and pass. **Raise on an empty signature.**
+
+def build_seeded(build_fn, seed=0):
+    keras.utils.set_random_seed(seed)
+    return build_fn()
+
+
+def assert_structural_knob_changes_weights(builders, x):
+    """Structural knobs are pinned on SHAPES, never on outputs."""
+    sigs = {}
+    for key, build_fn in builders.items():
+        m = build_seeded(build_fn); m(x)
+        sigs[key] = weight_signature(m)
+    distinct = set(sigs.values())
+    assert len(distinct) == len(sigs), f"structural knob did not change the weight shapes: {sigs}"
+
+
+def assert_value_knob_changes_output(builders, x):
+    """Value knobs must move the OUTPUT while leaving the shape signature identical."""
+    outs, sigs = {}, {}
+    for key, build_fn in builders.items():
+        m = build_seeded(build_fn)
+        outs[key] = ops.convert_to_numpy(m(x, training=False))
+        sigs[key] = weight_signature(m)
+    assert len(set(sigs.values())) == 1, "a value knob must not change the weight shapes"
+    keys = list(outs)
+    for a, b in zip(keys, keys[1:]):
+        assert not np.allclose(outs[a], outs[b]), f"value knob {a!r} vs {b!r} changed nothing"
+```
+
+**The trap the shape assertion exists to avoid.** Two models built with different `depth` values
+have different weight shapes, so they consume different draws from the RNG and their outputs differ
+**whether or not the argument was honoured**. An output-difference assertion on a structural knob is
+satisfied by random-init luck alone — it is a second unfalsifiable test wearing a stronger-looking
+assertion.
 
 And the closure gotcha, which silently makes every builder identical:
 
@@ -1698,19 +1728,79 @@ When a knob measures inert and the fix is deliberately out of scope, pin it with
 `@pytest.mark.xfail(strict=True, reason="<measured>: ...")`. It XPASSes loudly when someone fixes
 it. A plain `skip` is inert, and deleting the test leaves the gap unguarded.
 
-### 20.3 `tests/test_models/test_sam/dead_component_oracle.py`
+### 20.3 Dead-component detection
 
-- `fit_one_step_moved_variables()` — returns **name sets**, not a count. `moved > 0` is not an
-  acceptable assertion: an earlier iteration shipped "118 of 137 moved" figures whose residual was
-  never identified.
-- `outputs_stop_gradient(model)` — injects `ops.stop_gradient` on every output. A live training path
-  **must** then raise, matched **verbatim** against
-  `NO_GRADIENTS_MESSAGE = "No gradients provided for any variable"`, never `raises(Exception)`.
-- `component_response()` plus the killers `zeroed_variables`, `destroy_negatives`,
-  `destroy_positives`, `layer_returns_its_input`.
+```python
+NO_GRADIENTS_MESSAGE = "No gradients provided for any variable"
 
-The rule the module encodes: **every function reports a NUMBER, never a bare boolean verdict alone.
-A probe with no number is not a probe.**
+
+@contextlib.contextmanager
+def outputs_stop_gradient(model):
+    """Cut every output off the tape. A LIVE training path must then raise.
+
+    `train_function` is reset on BOTH edges. Keras caches the traced train step,
+    so a model that has already been fitted keeps running the UNPATCHED graph and
+    the injection silently does nothing -- the probe reports green against a model
+    it never actually broke. Measured: on a fresh model this raises; on a
+    pre-fitted one it does not, until the cache is cleared.
+    """
+    original_call = model.call
+    def _cut(*a, **kw):
+        return keras.tree.map_structure(ops.stop_gradient, original_call(*a, **kw))
+    with mock.patch.object(model, "call", _cut):
+        model.train_function = None
+        try:
+            yield
+        finally:
+            model.train_function = None
+
+
+def fit_one_step_moved_variables(model, x, y):
+    """Return the NAME SET of variables that moved -- never a bare count.
+
+    `moved > 0` is not an acceptable assertion: it was once satisfied by a
+    118-of-137 result whose 19-variable residual was never identified.
+    """
+    before = {v.path: ops.convert_to_numpy(v).copy() for v in model.trainable_variables}
+    model.fit(x, y, epochs=1, verbose=0)
+    return {
+        v.path for v in model.trainable_variables
+        if not np.array_equal(before[v.path], ops.convert_to_numpy(v))
+    }
+
+
+@contextlib.contextmanager
+def layer_returns_its_input(layer):
+    """Kill one component by making it the identity."""
+    original = layer.call
+    with mock.patch.object(layer, "call", lambda x, *a, **kw: x):
+        yield
+```
+
+Used together:
+
+```python
+def test_every_component_is_live(model, x, y):
+    moved = fit_one_step_moved_variables(model, x, y)
+    expected = {v.path for v in model.trainable_variables}
+    assert moved == expected, f"never moved: {sorted(expected - moved)}"
+
+def test_the_probe_can_detect_a_dead_training_path(model, x, y):
+    """RED proof: with the outputs cut off the tape, fit MUST raise."""
+    with outputs_stop_gradient(model):
+        with pytest.raises(ValueError, match=NO_GRADIENTS_MESSAGE):
+            model.fit(x, y, epochs=1, verbose=0)
+```
+
+Match the message **verbatim**, never `pytest.raises(Exception)`.
+
+Note the ordering hazard in that pair: `fit_one_step_moved_variables` fits the model, which caches a
+traced train step. Any injection applied afterwards must invalidate that cache or it patches code
+the training loop no longer runs. This is the same class of defect as §16.2 — Python-side state that
+never reaches the traced graph — arriving this time in the *instrument* rather than in the model.
+
+The rule all three encode: **every probe reports a NUMBER or a NAME SET, never a bare boolean
+verdict alone. A probe with no number is not a probe.**
 
 ## 21. Why guards fail
 
@@ -1741,7 +1831,7 @@ that only makes sense if you had read the implementation.
 
 Fix: derive the oracle from the **reference**, and reach the implementation through explicitly
 signed, named divergence terms (`_reference_params + _port_only_x - _reference_only_y`). The
-cheapest form is to **vendor the reference file** under `research/`, off the import path, parsed
+cheapest form is to **vendor the reference file** in the repository, off the import path, parsed
 with `ast` or `json`, and point the test at it.
 
 Apply the identical suspicion to a **fix round's own new guard**.
@@ -1846,7 +1936,7 @@ nine passing tests on provably correct geometry.
 
 ## 22. Test anti-patterns
 
-All of these have live examples in this tree.
+All of these have been found in shipped test suites.
 
 | Anti-pattern | Why it passes |
 |---|---|
@@ -1889,7 +1979,7 @@ Two more, about the shape of the whole gate:
 
 ## 23. Measurement traps
 
-### 23.1 TF32 is this repo's default false model defect
+### 23.1 TF32 is the default false model defect
 
 Three confirmed instances. A GPU-only RED with a CPU-green counterpart is a TF32 suspect **before**
 it is a bias hunt.
@@ -1989,7 +2079,7 @@ regression; the tell is `cudaSetDevice() ... out of memory` **at import**. Three
 agents once manufactured a false "8 pre-existing failures" premise that serial re-measurement
 reduced to zero.
 
-Check `pgrep -fc "\.venv/bin/python -m pytest"` is 1 before believing a red run.
+Check that exactly one pytest process is running before believing a red run.
 
 Use a pristine `git worktree` at the true base as a control. A **partial revert** is not a
 substitute — one "pre-existing RED" claim survived reverting three files while the suspect change
@@ -2024,7 +2114,7 @@ And verify an assertion actually **executes on every arm** of a parametrized bui
 ### 24.1 A new layer
 
 **Construction**
-- [ ] `@keras.saving.register_keras_serializable(package="dl_techniques")` with an explicit package.
+- [ ] `@keras.saving.register_keras_serializable(package="my_project")` with an explicit package.
 - [ ] Class name does not collide with an existing registered class; if a generic name already
       exists in the tree, prefixed.
 - [ ] All sub-layers created in `__init__`, unconditionally, with explicit `name=`.
@@ -2057,7 +2147,7 @@ And verify an assertion actually **executes on every arm** of a parametrized bui
 - [ ] Normalization epsilon comes from the factory, or is passed explicitly with a cited reference.
 
 **Reuse**
-- [ ] Checked the domain factory, then `layers/`, before authoring.
+- [ ] Checked the domain factory, then the existing layer surface, before authoring.
 - [ ] Registered in the domain `factory.py` if one exists; the factory raises on undeclared keys.
 
 ### 24.2 A new model package
@@ -2065,8 +2155,7 @@ And verify an assertion actually **executes on every arm** of a parametrized bui
 Everything above, plus:
 
 - [ ] Module docstring is substantive prose with a `References:` section (§8.1).
-- [ ] `MODEL_VARIANTS` present, or an alias to the package's single variant table; `SCALE_CONFIGS`
-      not merged into it.
+- [ ] A variant registry present; a separate architecture table, if there is one, not merged into it.
 - [ ] Variant values derived from a **named reference**, cited.
 - [ ] `from_variant` raises `ValueError` listing available keys, accepts its documented overrides,
       and does not splat description metadata.
@@ -2078,7 +2167,7 @@ Everything above, plus:
 - [ ] One `logger.info` in `__init__`; none in `call`.
 - [ ] No new custom `train_step`.
 - [ ] Checkpoint-affecting changes recorded in a shipping document.
-- [ ] Tree-wide collection gate run: `pytest tests/test_models/ -q --collect-only`.
+- [ ] Tree-wide collection gate run: `pytest tests/ -q --collect-only`.
 
 ### 24.3 The tests, before you call it done
 
@@ -2168,32 +2257,39 @@ class TestMyLayer:
   `atol=0.0` for restoration and bit-identity.
 - Any process-global setting (dtype policy, TF32, `floatx`) is owned by one fixture that restores in
   `finally` and asserts the restoration.
-- **No test writes into the repo-root `results/`.** Route every config through `tmp_path`. Enforce
-  this with an autouse fixture that **asserts** — never one that cleans up:
+- **No test writes into the project's real output directory.** Route every config through
+  `tmp_path`. Enforce it with an autouse fixture that **asserts** — never one that cleans up:
 
 ```python
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parents[1] / "results"
+
+def _entries():
+    return set(OUTPUT_DIR.iterdir()) if OUTPUT_DIR.is_dir() else set()
+
 @pytest.fixture(autouse=True)
-def no_repo_root_results_writes():
-    before = _results_entries()
+def no_writes_to_the_real_output_dir():
+    before = _entries()
     yield
-    new = sorted(_results_entries() - before)
+    new = sorted(p.name for p in _entries() - before)
     assert not new, (
-        f"this test wrote into the repo-root results/ directory: {new}. "
+        f"this test wrote into the project output directory: {new}. "
         f"route the config through tmp_path"
     )
 ```
 
-  `results/` is gitignored and untracked, so deletion there is **unrecoverable**. A cleanup fixture
-  once destroyed 62 run directories at once, including a published paper's subject checkpoint,
-  because relative paths in its log resolved against the repo root rather than the pytest
-  `tmp_path`. Cleanup fixtures that delete artifacts are banned outright.
+  **Assert, never clean up.** A training-output directory is typically untracked and unbacked, so
+  deletion there is unrecoverable. A cleanup step written as "remove every output directory this run
+  created" once destroyed 62 run directories at once, including a published paper's subject
+  checkpoint, because the relative paths in its log resolved against the project root rather than
+  against the pytest `tmp_path` the test had actually written to. Delete only absolute paths
+  recorded at creation time and verified created, or do not delete at all.
 
 ### 25.5 Scoping runs
 
-The full suite takes about 1.5 hours and is the pre-push hook. Do not run it as a routine
-regression check. Scope pytest to the modules you changed plus anything that imports what you
-touched, and run the tree-wide **collection** gate after any change to a package's public surface.
-Reserve the full suite for when it is explicitly asked for.
+A full suite over a library of this kind runs for hours, so it is not a routine regression check.
+Scope the runner to the modules you changed plus anything that imports what you touched, and run
+the tree-wide **collection** gate after any change to a package's public surface. Reserve the full
+suite for when it is explicitly asked for.
 
 Do not trust a red run that was not the only pytest on the machine (§23.7).
 
@@ -2249,8 +2345,8 @@ has already been falsified by measurement.
   not automatically drop regularizer terms. The real instance of that defect summed a *sub-layer's*
   `.losses` explicitly. An AST predicate "does the body mention `self.losses`" measures the wrong
   thing.
-- **`model.losses` is never empty in this tree**, so `assert model.losses` always passes. Assert a
-  delta against a no-regularizer baseline.
+- **`model.losses` being non-empty proves nothing** when an unrelated block contributes to it.
+  Assert a delta against a no-regularizer baseline.
 - **A "silent un-masking regression" measured as a large delta was not one.** Softmax is invariant
   to a constant shift along its reduction axis, and `x - 1e9` in float32 collapses a row to a single
   value (the ulp at `1e9` is 64). Add a control proving the pre-change output was itself meaningful
