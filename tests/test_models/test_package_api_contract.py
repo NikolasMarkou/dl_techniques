@@ -20,9 +20,12 @@ convention these tests enforce.
 """
 
 import ast
+import functools
 import importlib
 import inspect
 import re
+import sys
+import types
 import warnings
 from pathlib import Path
 from typing import Any, List, Tuple
@@ -44,16 +47,118 @@ def _package_names() -> List[str]:
 PACKAGES = _package_names()
 
 
-def _pretrained_factories() -> List[Tuple[str, Any]]:
-    """Every public model factory that (a) takes ``pretrained`` and (b) is callable
-    with no other argument.
+#: Variant-name fragments ordered smallest-first. Used only to pick which named
+#: variant the behavioural ``pretrained`` arm probes with; an unranked name falls
+#: back to sorted order. A wrong pick cannot make the probe *wrong* -- every
+#: ``from_variant`` validates the name against the very table the key came from --
+#: it can only make it more expensive, which is why smallest-first is preferred.
+_VARIANT_SIZE_ORDER = (
+    "nano", "pico", "micro", "tiny", "mini", "xs", "small", "light",
+    "base", "medium", "large", "xl", "xlarge", "huge",
+)
 
-    Discovered from the real package listing, so a new model package is covered the
-    moment it is added. The "no other required argument" filter is what keeps this
-    test cheap and generic: it needs no hand-written table of variant names, and the
-    contract under test (``pretrained=True`` raises) fires before anything is built.
+
+def _smallest_variant(keys) -> str:
+    """The smallest-looking key of a MODEL_VARIANTS table, deterministically."""
+
+    def rank(key: str):
+        low = key.lower()
+        for i, token in enumerate(_VARIANT_SIZE_ORDER):
+            if token in low:
+                return (i, key)
+        return (len(_VARIANT_SIZE_ORDER), key)
+
+    return sorted(keys, key=rank)[0]
+
+
+def _variant_table_for(fn):
+    """The ``MODEL_VARIANTS`` table a ``variant``-taking callable looks names up in.
+
+    Contract: takes any callable; returns a non-empty ``dict`` or ``None``.
+    Resolution order, and why:
+
+    1. ``fn.__self__`` -- a bound ``from_variant`` classmethod carries its owning
+       class, which is where the house rule (``models/CLAUDE.md`` Axis 2) puts the
+       table. This is the exact channel step 6 was told to read, in place of a
+       hand-maintained variant table that would rot the moment a package renames
+       a size.
+    2. otherwise the *defining module*'s first class (``dir()`` order, so
+       deterministic) carrying a ``MODEL_VARIANTS``. This is what reaches the
+       ``create_<x>_with_head(<x>_variant, task_config)`` factories, which are
+       plain functions sitting beside their model class.
+
+    If (2) ever picks the wrong class in a two-model module, the probe fails LOUDLY
+    with the package's own ``ValueError: Unknown variant`` rather than silently
+    skipping the site -- the failure mode a discovery arm is allowed to have.
     """
-    out: List[Tuple[str, Any]] = []
+    owner = getattr(fn, "__self__", None)
+    if inspect.isclass(owner):
+        table = getattr(owner, "MODEL_VARIANTS", None)
+        if isinstance(table, dict) and table:
+            return table
+    module = sys.modules.get(getattr(fn, "__module__", ""))
+    if module is None:
+        return None
+    for name in dir(module):
+        obj = getattr(module, name, None)
+        if not (inspect.isclass(obj) and obj.__module__ == fn.__module__):
+            continue
+        table = getattr(obj, "MODEL_VARIANTS", None)
+        if isinstance(table, dict) and table:
+            return table
+    return None
+
+
+def _resolve_required_arg(param_name: str, fn) -> Tuple[Any, str]:
+    """Return ``(value, "")`` for a required argument, or ``(None, reason)``.
+
+    The table is keyed by ARGUMENT KIND, never by call site: ``variant`` comes from
+    the model's own ``MODEL_VARIANTS``, and the handful of remaining kinds are
+    sizes, which any value satisfies because the contract under test
+    (``pretrained=True`` raises) fires before anything is built. A per-factory
+    table of variant names is exactly what this replaces -- it would have to be
+    hand-maintained, and a renamed variant would silently drop a site.
+    """
+    if param_name == "variant" or param_name.endswith("_variant"):
+        table = _variant_table_for(fn)
+        if table is None:
+            return None, "no MODEL_VARIANTS table is reachable from this callable"
+        return _smallest_variant(list(table)), ""
+    if param_name == "task_config":
+        from dl_techniques.layers.heads.nlp.task_types import (
+            NLPTaskConfig,
+            NLPTaskType,
+        )
+
+        return (
+            NLPTaskConfig(
+                name="pretrained-contract-probe",
+                task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=2,
+            ),
+            "",
+        )
+    if param_name in ("num_classes", "num_labels", "input_features", "output_features"):
+        return 2, ""
+    if param_name == "vocab_size":
+        return 32, ""
+    if param_name == "input_shape":
+        return (32, 32, 3), ""
+    return None, f"required argument {param_name!r} has no generic resolution"
+
+
+def _iter_pretrained_callables():
+    """Yield ``(label, fn, signature)`` for every public ``pretrained``-taking
+    callable reachable from a model package's own namespace, deduplicated.
+
+    Contract: iterates ``PACKAGES``, importing each; a package that fails to import
+    is skipped silently (``test_every_package_imports`` is what catches that). The
+    label is ``"<pkg>.<name>"`` or ``"<pkg>.<Class>.from_variant"``; dedup key is
+    ``(module, qualname)`` so a symbol re-exported by two packages is probed once.
+
+    Shared by ``_pretrained_factories`` and by the coverage test below so the two
+    cannot drift in what they walk.
+    """
     seen = set()
     for pkg in PACKAGES:
         try:
@@ -74,28 +179,133 @@ def _pretrained_factories() -> List[Tuple[str, Any]]:
                     sig = inspect.signature(fn)
                 except (TypeError, ValueError):
                     continue
-                params = sig.parameters
-                if "pretrained" not in params:
-                    continue
-                required = [
-                    n
-                    for n, p in params.items()
-                    if n != "pretrained"
-                    and p.default is inspect.Parameter.empty
-                    and p.kind
-                    not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
-                ]
-                if required:
+                if "pretrained" not in sig.parameters:
                     continue
                 key = (fn.__module__, getattr(fn, "__qualname__", label))
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append((label, fn))
-    return sorted(out, key=lambda t: t[0])
+                yield label, fn, sig
 
 
-PRETRAINED_FACTORIES = _pretrained_factories()
+def _pretrained_factories() -> Tuple[List[Tuple[str, Any, dict]], List[Tuple[str, str]]]:
+    """Every public model factory taking ``pretrained``, with the arguments needed
+    to call it.
+
+    Returns ``(reached, unreached)``. ``reached`` is ``(label, fn, kwargs)`` where
+    ``kwargs`` satisfies every *required* parameter other than ``pretrained``;
+    ``unreached`` is ``(label, reason)``.
+
+    **Widened 2026-08-20 (plan-2026-08-19T163559-499b6f0e step 6(iii)).** The arm
+    previously kept only factories callable with NO other required argument, which
+    measured **21 of the 45-site AST population** -- every ``from_variant`` and
+    every ``create_<x>_with_head`` in the tree was outside it, i.e. exactly the
+    entry points a user reaches for a *named* model. The resolver above lifts that
+    to 42; the three it still cannot reach are named, with reasons, in
+    ``_PRETRAINED_UNREACHABLE_EVIDENCE`` below.
+    """
+    reached: List[Tuple[str, Any, dict]] = []
+    unreached: List[Tuple[str, str]] = []
+    for label, fn, sig in _iter_pretrained_callables():
+        kwargs = {}
+        reason = ""
+        for name, param in sig.parameters.items():
+            if name == "pretrained":
+                continue
+            if param.default is not inspect.Parameter.empty:
+                continue
+            if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+                continue
+            value, reason = _resolve_required_arg(name, fn)
+            if reason:
+                break
+            kwargs[name] = value
+        if reason:
+            unreached.append((label, reason))
+        else:
+            reached.append((label, fn, kwargs))
+    return (
+        sorted(reached, key=lambda t: t[0]),
+        sorted(unreached, key=lambda t: t[0]),
+    )
+
+
+PRETRAINED_FACTORIES, PRETRAINED_UNREACHED = _pretrained_factories()
+
+#: The AST-population sites the widened arm still cannot call, each keyed by
+#: ``(relpath, function name)`` -- never by line, for the reason
+#: ``_SCHEDULED_FIXES`` gives -- and each carrying the evidence that clears it.
+#: Measured 2026-08-20: 3 of 45, so the arm reaches **42 of 45**.
+#:
+#: ``test_the_uncovered_sites_are_the_named_ones`` fails if this set stops
+#: matching, in EITHER direction: a new uncovered site is a factory that silently
+#: left behavioural coverage, and a recorded site that became reachable is a
+#: waiver hiding nothing.
+_PRETRAINED_UNREACHABLE_EVIDENCE = {
+    # bfunet's variants live in a module-level dict consumed by a plain factory;
+    # the class carries no MODEL_VARIANTS, so the variant resolver has nothing to
+    # read. Its `pretrained` contract is still covered statically by
+    # `test_no_pretrained_branch_only_logs`, and it was probed by hand at D-003
+    # (raises NotImplementedError). DISCOVERY reaches it; the RESOLVER does not.
+    (
+        "models/bias_free_denoisers/bfunet.py",
+        "create_bfunet_variant",
+    ): "no MODEL_VARIANTS table is reachable from the callable",
+    # These two are not exported by their package `__init__.py`, so no namespace
+    # walk can see them at all -- their four siblings (bert, distilbert,
+    # modern_bert, tree_transformer `create_*_with_head`) ARE exported and ARE
+    # reached, with the same resolver. The gap is an EXPORT gap, not a resolver
+    # gap: this arm reaches them the day they are exported, and the fix is in the
+    # package, not in this file.
+    (
+        "models/fnet/model.py",
+        "create_fnet_with_head",
+    ): "not exported from dl_techniques.models.fnet",
+    (
+        "models/mamba/mamba_v1.py",
+        "create_mamba_with_head",
+    ): "not exported from dl_techniques.models.mamba",
+}
+
+
+def _population_key(fn) -> Tuple[str, str]:
+    """The ``(relpath, name)`` an imported callable occupies in the AST population.
+
+    Contract: ``fn.__module__`` must live under ``dl_techniques``; returns the path
+    relative to ``src/dl_techniques`` plus the callable's own name (the last
+    component of ``__qualname__``, so ``BERT.from_variant`` -> ``from_variant``).
+    Measured 2026-08-20: this key is UNIQUE across all 45 population entries and
+    every reached factory maps into it, which is what makes the coverage claim a
+    set difference rather than a count comparison.
+    """
+    rel = fn.__module__.split("dl_techniques.", 1)[-1].replace(".", "/") + ".py"
+    return rel, getattr(fn, "__qualname__", fn.__name__).split(".")[-1]
+
+
+def _sweep_pretrained_population(roots=None, src_root=None):
+    """The AST population: every public ``def`` under ``models/`` taking ``pretrained``.
+
+    Contract: returns ``[(relpath, lineno, funcname)]``. This is the DENOMINATOR the
+    behavioural arm's coverage is measured against, so the coverage claim is a
+    ratio against the tree rather than against the arm's own discovery -- an arm
+    that stopped seeing half the tree would otherwise report 100%.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = MODELS_DIR.parent if src_root is None else src_root
+    out = []
+    for rel, tree in _iter_modules(roots, src_root):
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith("_"):
+                continue
+            args = node.args
+            names = [
+                a.arg for a in args.posonlyargs + args.args + args.kwonlyargs
+            ]
+            if "pretrained" in names:
+                out.append((rel, node.lineno, node.name))
+    return sorted(out)
 
 
 def _all_node(init_path: Path):
@@ -319,23 +529,72 @@ class TestPretrainedNeverSilentlyRandom:
             f"resnet/model.py). Found: {offenders}"
         )
 
-    def test_the_behavioural_arm_found_factories(self):
-        """The parameterization must not silently collapse to nothing."""
-        assert len(PRETRAINED_FACTORIES) >= 20, (
-            "expected at least 20 no-required-argument factories taking "
-            f"`pretrained`; discovery found {len(PRETRAINED_FACTORIES)}: "
-            f"{[label for label, _ in PRETRAINED_FACTORIES]}"
+    def test_the_behavioural_arm_reaches_almost_the_whole_population(self):
+        """The arm must cover >= 40 of the 45-site AST population (step 6(iii)).
+
+        Two separate assertions, deliberately:
+
+        * a **ratio against the tree** -- at most five of the AST population may be
+          unreached. Measuring coverage against the arm's own discovery would let a
+          decayed walk report 100% of a shrinking denominator;
+        * an **absolute floor**, derived as ``int(0.8 * 42)`` from the 2026-08-20
+          measurement (42 reached, 45 in the population). It is deliberately NOT
+          set a couple of sites under 42: Phase 4 of this plan edits these very
+          packages, and a floor with 5% headroom trips on a legitimate refactor
+          rather than on the decay it exists to catch.
+        """
+        population = _sweep_pretrained_population()
+        assert len(population) >= 40, (
+            f"the AST population collapsed to {len(population)}; the walk stopped "
+            "seeing models/"
+        )
+        assert len(PRETRAINED_FACTORIES) >= 33, (
+            "expected the widened behavioural arm to reach dozens of `pretrained` "
+            f"factories; discovery found {len(PRETRAINED_FACTORIES)}: "
+            f"{[label for label, _, _ in PRETRAINED_FACTORIES]}"
+        )
+        assert len(population) - len(PRETRAINED_FACTORIES) <= 5, (
+            f"the behavioural arm reaches {len(PRETRAINED_FACTORIES)} of "
+            f"{len(population)} AST sites; step 6(iii) requires >= 40 of 45. "
+            f"Unreached: {PRETRAINED_UNREACHED}"
+        )
+
+    def test_the_uncovered_sites_are_the_named_ones(self):
+        """A site may not drop out of behavioural coverage unnoticed.
+
+        The waiver-liveness rule of this file, applied to a coverage list rather
+        than to an offender list. Note the two DIFFERENT ways a site stays
+        uncovered, both folded into one set difference on purpose: the resolver
+        cannot satisfy its arguments (bfunet), or the namespace walk never sees it
+        because the package does not export it (fnet, mamba). Reporting only the
+        first -- which is all the resolver itself knows about -- would have hidden
+        the two export gaps entirely.
+        """
+        population = {(rel, name) for rel, _, name in _sweep_pretrained_population()}
+        covered = {_population_key(fn) for _, fn, _ in PRETRAINED_FACTORIES}
+        uncovered = population - covered
+        expected = set(_PRETRAINED_UNREACHABLE_EVIDENCE)
+        assert uncovered == expected, (
+            "the set of `pretrained` sites the behavioural arm does not call "
+            f"changed.\n  newly uncovered (no evidence recorded): {sorted(uncovered - expected)}"
+            f"\n  recorded but now covered (delete the entry): {sorted(expected - uncovered)}"
+            f"\n  resolver-level reasons: {PRETRAINED_UNREACHED}"
         )
 
     @pytest.mark.parametrize(
-        "label,factory",
+        "label,factory,kwargs",
         PRETRAINED_FACTORIES,
-        ids=[label for label, _ in PRETRAINED_FACTORIES],
+        ids=[label for label, _, _ in PRETRAINED_FACTORIES],
     )
-    def test_pretrained_true_raises(self, label: str, factory):
-        """``pretrained=True`` must raise; no public weights ship with this repo."""
+    def test_pretrained_true_raises(self, label: str, factory, kwargs):
+        """``pretrained=True`` must raise; no public weights ship with this repo.
+
+        Cheap by construction: the smallest named variant, and never a forward
+        pass. The contract is that the raise happens BEFORE any weight is
+        allocated, so a site that got expensive here is itself a finding.
+        """
         with pytest.raises(NotImplementedError):
-            factory(pretrained=True)
+            factory(pretrained=True, **kwargs)
 
 
 def _docstring_line_numbers(path: Path) -> set:
@@ -1569,3 +1828,948 @@ class TestModelVariantsArePresent:
             "MODEL_VARIANTS waiver entries no longer match any site; delete them "
             f"if the exception is gone, re-key them if the code moved: {stale}"
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Registration and export guards (plan-2026-08-19T163559-499b6f0e step 6).
+#
+# Three families, all FREEZE-FORWARD: the measured offender count is 0 for every
+# one of them, so none can be validated by "it finds the known defects" -- each
+# ships with an injected-defect fixture proving it goes RED and a fixed twin
+# proving it does not fire on the repair.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Memo for the sweeps below when they run over their DEFAULT roots.
+#:
+#: The registry-key sweep parses ``src/`` plus the whole of ``tests/`` -- ~2,900
+#: files -- and five tests call it. Measured 2026-08-20: without this memo the
+#: file's runtime went 40s -> 94s; with it, 44s. The memo is keyed by function
+#: name and is bypassed entirely when explicit roots are passed, so every injected
+#: fixture below still runs a real sweep and cannot be served a cached answer.
+_SWEEP_MEMO: dict = {}
+
+
+def _memo_default_roots(fn):
+    """Cache ``fn()`` when, and only when, it is called with no explicit roots."""
+
+    @functools.wraps(fn)
+    def wrapper(roots=None, src_root=None):
+        if roots is not None or src_root is not None:
+            return fn(roots, src_root)
+        if fn.__name__ not in _SWEEP_MEMO:
+            _SWEEP_MEMO[fn.__name__] = fn(None, None)
+        return _SWEEP_MEMO[fn.__name__]
+
+    return wrapper
+
+
+#: Root set of the registry-key sweep: **every registering path in the repo**.
+#:
+#: NOT ``models/`` (220 decorated classes) and NOT ``src/dl_techniques/`` alone
+#: (726). A bare ``@register_keras_serializable()`` registers under the literal
+#: key ``Custom><ClassName>``, which is MODULE-INDEPENDENT -- measured on Keras
+#: 3.8.0, see decisions.md D-002 -- so the namespace those classes compete in is
+#: flat and repo-global. Both narrower scopings are structurally blind to the
+#: family this guard exists for: each of the four duplicate class-NAME near
+#: misses in the tree (``ConvBlock``, ``MLPBlock``, ``Downsample``, ``Upsample``)
+#: has at least one leg outside ``models/``, and 20+ classes under ``src/train/``
+#: register into the same flat namespace as the library's.
+_REGISTRY_KEY_ROOTS = (
+    REPO_ROOT / "src" / "dl_techniques",
+    REPO_ROOT / "src" / "train",
+    REPO_ROOT / "src" / "applications",
+    REPO_ROOT / "tests",
+)
+
+
+def _decorator_name(node: ast.expr) -> str:
+    """The bare name a decorator expression names, called or not.
+
+    Contract: takes any decorator node; returns the last name component for
+    ``@f``, ``@mod.f``, ``@f(...)`` and ``@mod.f(...)`` alike, or ``""`` for
+    anything else. The call form delegates to ``_callee_name`` -- do not
+    re-implement that branch here.
+    """
+    if isinstance(node, ast.Call):
+        return _callee_name(node)
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+@_memo_default_roots
+def _sweep_registry_keys(roots=None, src_root=None):
+    """Every ``@register_keras_serializable`` class, by the key it claims.
+
+    Contract: returns ``(keys, counts)``. ``keys`` maps ``"<package>><name>"`` to
+    the list of ``"relpath:lineno"`` claiming it; ``counts`` carries the sweep's
+    population and its three measured-empty blind spots.
+
+    The key is computed the way Keras computes it: ``package`` defaults to the
+    literal string ``"Custom"`` and ``name`` to the class's own name, and both
+    are read from POSITIONAL as well as keyword decorator arguments (the Keras
+    signature is ``register_keras_serializable(package="Custom", name=None)``, so
+    ``@register_keras_serializable("dl_techniques")`` is a legal spelling this
+    sweep must not miss).
+    """
+    roots = _REGISTRY_KEY_ROOTS if roots is None else roots
+    src_root = REPO_ROOT if src_root is None else src_root
+    keys: dict = {}
+    counts = {
+        "n_decorated": 0,
+        "n_bare": 0,
+        "n_package": 0,
+        "n_named": 0,
+        "n_aliased_import": 0,
+        "n_function_decorated": 0,
+        "n_dynamic_registration": 0,
+    }
+    for rel, tree in _iter_modules(roots, src_root):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if (
+                        alias.name.rsplit(".", 1)[-1] == "register_keras_serializable"
+                        and alias.asname
+                        and alias.asname != "register_keras_serializable"
+                    ):
+                        counts["n_aliased_import"] += 1
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(
+                    _decorator_name(d) == "register_keras_serializable"
+                    for d in node.decorator_list
+                ):
+                    counts["n_function_decorated"] += 1
+                continue
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Call):
+                if _callee_name(node.value) == "get_custom_objects":
+                    counts["n_dynamic_registration"] += 1
+                continue
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for dec in node.decorator_list:
+                if _decorator_name(dec) != "register_keras_serializable":
+                    continue
+                counts["n_decorated"] += 1
+                package = name = None
+                if isinstance(dec, ast.Call):
+                    for i, arg in enumerate(dec.args):
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            if i == 0:
+                                package = arg.value
+                            elif i == 1:
+                                name = arg.value
+                    for kw in dec.keywords:
+                        if not (
+                            isinstance(kw.value, ast.Constant)
+                            and isinstance(kw.value.value, str)
+                        ):
+                            continue
+                        if kw.arg == "package":
+                            package = kw.value.value
+                        elif kw.arg == "name":
+                            name = kw.value.value
+                counts["n_package" if package else "n_bare"] += 1
+                if name:
+                    counts["n_named"] += 1
+                key = f"{package or 'Custom'}>{name or node.name}"
+                keys.setdefault(key, []).append(f"{rel}:{node.lineno}")
+    return keys, counts
+
+
+#: Two classes claiming one registry key, in the exact shape the tree's four
+#: duplicate class-NAME near-misses would take if one of them ever lost its
+#: prefix. Parsed, never imported.
+_INJECTED_REGISTRY_DEFECT_SRC = '''
+@keras.saving.register_keras_serializable()
+class Downsample(keras.layers.Layer):
+    pass
+
+
+@keras.saving.register_keras_serializable()
+class Downsample(keras.layers.Layer):  # noqa: F811 -- a second FILE in reality
+    pass
+'''
+
+#: The same two classes, one of them prefixed per R-011. A predicate that flags
+#: this too is matching on the class name, not on the registry key.
+_INJECTED_REGISTRY_FIXED_SRC = '''
+@keras.saving.register_keras_serializable()
+class Downsample(keras.layers.Layer):
+    pass
+
+
+@keras.saving.register_keras_serializable()
+class ConvUNextDownsample(keras.layers.Layer):
+    pass
+'''
+
+
+class TestRegistryKeysDoNotCollide:
+    """No two registered classes may claim the same Keras registry key.
+
+    A bare ``@register_keras_serializable()`` claims ``Custom><ClassName>``, and
+    that key is module-independent: two classes with the same name in two
+    different files silently occupy one slot, and whichever imports LAST wins
+    every ``.keras`` deserialization of both. Measured 2026-08-20 over the whole
+    repo: **761 decorated classes, 761 distinct keys, 0 collisions** -- so this is
+    a freeze, and the only evidence it works is the injected pair below.
+
+    Adding ``package=`` to a bare decorator is NOT a safe repair: it moves the key
+    (measured on Keras 3.8.0 -- ``Custom>ProbeBare`` vs ``dl_techniques>ProbePkg``)
+    and every ``.keras`` config storing the old ``registered_name`` stops
+    resolving. The repair for a collision is to PREFIX the class name (R-011).
+
+    Three blind spots, each measured EMPTY today and each therefore a shape this
+    guard would silently skip if it ever appeared. They are reported non-fatally
+    by ``test_registration_blind_spots_are_still_empty`` rather than left implicit,
+    because a ``>=`` population floor cannot expose any of them:
+
+    * an aliased decorator import (``register_keras_serializable as reg``) -- the
+      predicate matches the literal name, so ``@reg()`` is invisible: **0 today**;
+    * the decorator on a ``FunctionDef`` rather than a ``ClassDef``. Keras allows
+      it, and such a function competes for the same key namespace: **0 today**;
+    * a dynamic ``get_custom_objects()["Custom>X"] = X``, which registers with no
+      decorator at all: **0 today**.
+    """
+
+    def test_no_two_registered_classes_claim_the_same_key(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-012
+        # The subject set is the WHOLE REPO -- src/dl_techniques + src/train +
+        # src/applications + tests -- and that is load-bearing, not incidental.
+        # WHAT NOT TO DO: do not narrow this to `models/` (220 classes) or to
+        # `src/dl_techniques/` (726). The key a bare decorator claims is
+        # module-independent, so `src/train/` and `tests/` compete in the SAME
+        # flat `Custom>` namespace; 20+ src/train classes register there today,
+        # and every one of the four duplicate class-name near-misses in the tree
+        # has a leg outside `models/`. A narrower subject set is structurally
+        # blind to the family this guard exists for. Also do NOT "fix" a future
+        # collision by adding `package=`: that moves the key and breaks every
+        # existing checkpoint that stored the old registered_name (D-002).
+        # See decisions.md D-012.
+        keys, _ = _sweep_registry_keys()
+        offenders = [
+            f"{key} claimed by {sites}"
+            for key, sites in sorted(keys.items())
+            if len(sites) > 1
+        ]
+        assert not offenders, (
+            "two @register_keras_serializable classes claim one registry key; "
+            "whichever module imports last wins every deserialization of both. "
+            "PREFIX the class name (models/CLAUDE.md R-011) -- do NOT add "
+            "`package=`, which moves the key and invalidates existing "
+            ".keras checkpoints. Found:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_the_sweep_found_registered_classes(self):
+        """Anti-vacuity floor, DERIVED rather than set just under the population.
+
+        Measured 2026-08-20: 761 decorated classes (725 bare, 36 with
+        ``package=``). The floor is ``int(0.8 * 761) == 608``: a fifth of the
+        repo's registered classes may disappear before this guard is allowed to
+        call itself alive. A floor a few percent under 761 would trip on a
+        legitimate refactor -- Phase 4 of this plan edits these very packages --
+        and would say nothing more about whether the walk still sees the tree.
+        """
+        keys, counts = _sweep_registry_keys()
+        assert counts["n_decorated"] >= 608, (
+            f"expected ~761 @register_keras_serializable classes repo-wide, found "
+            f"{counts['n_decorated']}: the AST walk stopped seeing the tree ({counts})"
+        )
+        assert len(keys) >= 608, counts
+        assert counts["n_bare"] >= counts["n_package"], (
+            "the bare decorator is this repo's convention (725 vs 36 measured); "
+            f"an inversion means the sweep is reading something else: {counts}"
+        )
+
+    def test_registration_blind_spots_are_still_empty(self):
+        """Non-fatal: the three registration shapes this predicate cannot key.
+
+        All three measured 0 on 2026-08-20. They are reported rather than asserted
+        at zero because appearing is not itself a defect -- it is a hole in THIS
+        guard, and the inventory is what stops the hole opening silently.
+        """
+        _, counts = _sweep_registry_keys()
+        blind = {
+            k: counts[k]
+            for k in (
+                "n_aliased_import",
+                "n_function_decorated",
+                "n_dynamic_registration",
+            )
+            if counts[k]
+        }
+        if blind:
+            warnings.warn(
+                "registration shapes the registry-key guard cannot see have "
+                f"appeared: {blind}. Extend _sweep_registry_keys before trusting "
+                "its zero.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    def test_predicate_fires_on_an_injected_collision(self, tmp_path):
+        """Dead-component probe: the predicate must go RED on a real collision."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_REGISTRY_DEFECT_SRC)
+        keys, counts = _sweep_registry_keys(roots, src_root)
+        assert counts["n_decorated"] == 2, counts
+        collisions = {k: v for k, v in keys.items() if len(v) > 1}
+        assert list(collisions) == ["Custom>Downsample"], keys
+        assert len(collisions["Custom>Downsample"]) == 2, collisions
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once one of the two is prefixed."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_REGISTRY_FIXED_SRC)
+        keys, counts = _sweep_registry_keys(roots, src_root)
+        assert counts["n_decorated"] == 2, "the fixture must still be reached"
+        assert sorted(keys) == ["Custom>ConvUNextDownsample", "Custom>Downsample"]
+        assert not [k for k, v in keys.items() if len(v) > 1], keys
+
+
+# ---------------------------------------------------------------------------
+# R-013: an __init__.py may not bind a name over its own subpackage.
+# ---------------------------------------------------------------------------
+
+
+@_memo_default_roots
+def _sweep_init_subpackage_shadows(roots=None, src_root=None):
+    """Package ``__init__.py`` files binding a name over their own subpackage.
+
+    Contract: returns ``(hits, counts)`` where ``hits`` is
+    ``[(relpath, lineno, name)]``.
+
+    ``from . import sub`` is deliberately NOT a hit: that binds the subpackage
+    itself, which is the whole point of the form. Every other binding of the same
+    name -- an assignment, a ``def``/``class``, ``from .other import sub``, or
+    ``from .sub import sub`` -- puts a non-module object where ``import
+    <pkg>.<sub>`` expects the submodule, and the break surfaces only at collection
+    time, in a traceback that names the importer rather than the shadow.
+    """
+    roots = (SRC_ROOT,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    hits = []
+    counts = {"n_packages": 0, "n_subpackage_relations": 0}
+    for root in roots:
+        for init in sorted(Path(root).rglob("__init__.py")):
+            counts["n_packages"] += 1
+            subs = {
+                p.name
+                for p in init.parent.iterdir()
+                if p.is_dir()
+                and p.name != "__pycache__"
+                and (p / "__init__.py").exists()
+            }
+            if not subs:
+                continue
+            counts["n_subpackage_relations"] += len(subs)
+            try:
+                tree = ast.parse(init.read_text())
+            except SyntaxError:  # covered by the import tests
+                continue
+            rel = init.relative_to(src_root).as_posix()
+            bound: dict = {}
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            bound.setdefault(t.id, node.lineno)
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                    node.target, ast.Name
+                ):
+                    bound.setdefault(node.target.id, node.lineno)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    bound.setdefault(node.name, node.lineno)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module is None:
+                        continue  # `from . import sub` binds the subpackage itself
+                    for alias in node.names:
+                        name = alias.asname or alias.name
+                        if name != "*":
+                            bound.setdefault(name, node.lineno)
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        name = alias.asname or alias.name.split(".")[0]
+                        bound.setdefault(name, node.lineno)
+            for name, lineno in sorted(bound.items()):
+                if name in subs:
+                    hits.append((rel, lineno, name))
+    return sorted(hits), counts
+
+
+def _write_shadow_fixture(tmp_path: Path, init_source: str):
+    """Write a two-level fake package; return ``(roots, src_root)``.
+
+    Deliberately NOT ``_write_fixture``: this predicate's subject is a package
+    __init__ *and the sibling directories beside it*, which a single-file fixture
+    cannot express. Everything else about the shape -- parsed, never imported,
+    RED source and fixed twin -- is the same.
+    """
+    pkg = tmp_path / "models" / "injected"
+    (pkg / "components").mkdir(parents=True, exist_ok=True)
+    (pkg / "components" / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text(init_source)
+    (pkg / "model.py").write_text("components = None\nInjected = None\n")
+    return (tmp_path / "models",), tmp_path
+
+
+#: A package whose ``__init__.py`` re-exports a name that happens to match its own
+#: ``components/`` subpackage. Every test in the package still passes; the break
+#: is ``import ...injected.components`` returning a non-module.
+_INJECTED_SHADOW_DEFECT_SRC = '''from .model import Injected, components
+
+__all__ = ["Injected", "components"]
+'''
+
+#: The same package, the shadow renamed, and -- deliberately -- the LEGAL
+#: ``from . import components`` form added, so the fixed twin also proves the
+#: exclusion is real rather than the predicate simply having stopped matching.
+_INJECTED_SHADOW_FIXED_SRC = '''from . import components
+from .model import Injected
+
+__all__ = ["Injected", "components"]
+'''
+
+
+class TestNoInitShadowsItsOwnSubpackage:
+    """R-013/R-052: a package ``__init__.py`` may not bind over its own subpackage.
+
+    ``from .model import components`` in a package that also HAS a
+    ``components/`` directory leaves ``<pkg>.components`` bound to whatever
+    ``model.py`` exported. Nothing inside the package notices -- its own imports
+    are relative and resolve to the module -- and the failure surfaces at
+    collection time in some other suite, as an ``AttributeError`` or an
+    ``ImportError`` naming the importer rather than the shadow.
+
+    Measured 2026-08-20 over ``src/dl_techniques/``: 132 packages, 131
+    package/subpackage relations, **0 shadows**. Freeze-forward; the injected pair
+    below is the only evidence the predicate works.
+
+    Narrowings, each a place this can miss a real shadow:
+
+    * ``from .sub import *`` is not resolved, so a star-exported name matching a
+      sibling subpackage is invisible;
+    * bindings created at runtime (``globals()[name] = ...``, a ``for`` loop over
+      ``__all__``) are not seen -- only module-level static binding forms.
+    """
+
+    def test_no_package_init_binds_over_a_subpackage(self):
+        hits, _ = _sweep_init_subpackage_shadows()
+        offenders = [
+            f"{rel}:{line} binds {name!r}, which is also the name of the "
+            f"{name}/ subpackage beside it"
+            for rel, line, name in hits
+        ]
+        assert not offenders, (
+            "a package __init__.py binds a name over one of its own subpackage "
+            "directories, so `import <pkg>.<sub>` returns the bound object "
+            "instead of the module. Rename the export. Found:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_sweep_found_packages(self):
+        """Anti-vacuity floor, derived from the 2026-08-20 measurement.
+
+        132 packages and 131 subpackage relations under ``src/dl_techniques/``;
+        the floors are ``int(0.8 * n)`` of each. The subpackage-relation floor is
+        the load-bearing one: a sweep that found the ``__init__.py`` files but
+        stopped listing the directories beside them would report zero shadows
+        forever while still passing a package count.
+        """
+        _, counts = _sweep_init_subpackage_shadows()
+        assert counts["n_packages"] >= 105, counts
+        assert counts["n_subpackage_relations"] >= 104, counts
+
+    def test_predicate_fires_on_an_injected_shadow(self, tmp_path):
+        """Dead-component probe: the predicate must go RED on a real shadow."""
+        roots, src_root = _write_shadow_fixture(
+            tmp_path, _INJECTED_SHADOW_DEFECT_SRC
+        )
+        hits, counts = _sweep_init_subpackage_shadows(roots, src_root)
+        assert counts["n_subpackage_relations"] == 1, counts
+        assert [(rel, name) for rel, _, name in hits] == [
+            ("models/injected/__init__.py", "components")
+        ], hits
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire on the rename, nor on `from . import <sub>`."""
+        roots, src_root = _write_shadow_fixture(tmp_path, _INJECTED_SHADOW_FIXED_SRC)
+        hits, counts = _sweep_init_subpackage_shadows(roots, src_root)
+        assert counts["n_subpackage_relations"] == 1, "the fixture must be reached"
+        assert hits == [], hits
+
+
+# ---------------------------------------------------------------------------
+# The three D-003 prevention guards: `by_name`, swallowed loads, `pretrained`.
+# ---------------------------------------------------------------------------
+
+#: Callees whose kwargs are searched for `by_name`.
+_WEIGHT_LOAD_CALLEES = frozenset(
+    {"load_weights", "load_own_variables", "set_weights"}
+)
+
+#: Callees whose presence inside a ``try`` body makes that ``try`` a weight load.
+_WEIGHT_LOAD_TRY_CALLEES = frozenset(
+    {
+        "load_weights",
+        "load_model",
+        "load_weights_or_raise",
+        "_download_weights",
+        "_download_bfunet_weights",
+        "get_file",
+        "load_own_variables",
+        "set_weights",
+    }
+)
+
+
+@_memo_default_roots
+def _sweep_by_name_kwargs(roots=None, src_root=None):
+    """``load_weights(..., by_name=...)`` call sites. Contract: ``(hits, n_calls)``.
+
+    ``hits`` is ``["relpath:lineno"]``; ``n_calls`` is the whole weight-load call
+    population, which is the anti-vacuity denominator.
+    """
+    roots = (SRC_ROOT,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    hits = []
+    n_calls = 0
+    for rel, tree in _iter_modules(roots, src_root):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _callee_name(node) not in _WEIGHT_LOAD_CALLEES:
+                continue
+            n_calls += 1
+            if any(kw.arg == "by_name" for kw in node.keywords):
+                hits.append(f"{rel}:{node.lineno}")
+    return sorted(hits), n_calls
+
+
+def _enclosing_symbol_map(tree: ast.Module) -> dict:
+    """Map every node to the name of the nearest enclosing def/class, or ``"<module>"``.
+
+    Contract: takes a parsed module; returns a dict keyed by node identity. Used to
+    key the R-049 waivers by ENCLOSING SYMBOL rather than by line number, so a
+    waiver keeps matching while the fixes around it move lines.
+    """
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    out = {}
+    for node in ast.walk(tree):
+        cur = parents.get(node)
+        name = "<module>"
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = cur.name
+                break
+            cur = parents.get(cur)
+        out[id(node)] = name
+    return out
+
+
+@_memo_default_roots
+def _sweep_weight_load_handlers(roots=None, src_root=None):
+    """``except`` handlers around a weight load that log without re-raising.
+
+    Contract: returns ``(offenders, n_handlers)``. ``offenders`` is
+    ``[(relpath, lineno, enclosing symbol, except-clause source)]`` for every
+    handler that logs and does NOT re-raise; ``n_handlers`` counts every handler
+    around a weight load, offending or not.
+    """
+    roots = (SRC_ROOT,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    offenders = []
+    n_handlers = 0
+    for rel, tree in _iter_modules(roots, src_root):
+        enclosing = _enclosing_symbol_map(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not any(
+                isinstance(c, ast.Call) and _callee_name(c) in _WEIGHT_LOAD_TRY_CALLEES
+                for stmt in node.body
+                for c in ast.walk(stmt)
+            ):
+                continue
+            for handler in node.handlers:
+                n_handlers += 1
+                logs = any(
+                    isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Attribute)
+                    and isinstance(c.func.value, ast.Name)
+                    and c.func.value.id == "logger"
+                    for stmt in handler.body
+                    for c in ast.walk(stmt)
+                )
+                reraises = any(isinstance(n, ast.Raise) for n in ast.walk(handler))
+                if logs and not reraises:
+                    clause = (
+                        ast.unparse(handler.type) if handler.type is not None else "bare"
+                    )
+                    offenders.append(
+                        (rel, handler.lineno, enclosing[id(handler)], clause)
+                    )
+    return sorted(offenders), n_handlers
+
+
+#: The seven handlers that match "logs a weight-load failure and falls through"
+#: today, keyed by ``(relpath, enclosing symbol, except-clause source)`` -- NEVER
+#: by line number -- each with the read from D-003 §6 that clears it.
+#:
+#: This is a WAIVER, not a narrowed predicate, and the distinction is the whole
+#: point. Narrowing the predicate to exclude these shapes (e.g. "only bare
+#: ``except Exception`` counts", or "only handlers around ``load_weights``")
+#: would stop matching the moment somebody broadened one of the five narrow
+#: tuples to ``Exception`` -- which is the ONLY way this defect can appear here,
+#: since all five are currently unreachable precisely because their tuple does
+#: not catch the ``NotImplementedError`` their body can raise. A waiver keyed to
+#: the clause TEXT fails loudly on exactly that edit.
+_WEIGHT_LOAD_HANDLER_WAIVERS = {
+    # 1-5: dead by construction. `_download_weights` raises only
+    # NotImplementedError, which `(IOError, OSError, ValueError)` does not catch,
+    # so the handler body never runs and the NIE reaches the caller (runtime-proved
+    # at D-003 §3a: 45/45 sites raise). Each is one broadened `except` away from
+    # being the live defect, which is what the clause-text key catches.
+    (
+        "models/bert/bert.py",
+        "from_variant",
+        "(IOError, OSError, ValueError)",
+    ): "dead handler -- _download_weights raises only NotImplementedError",
+    (
+        "models/cliffordnet/model.py",
+        "from_variant",
+        "(IOError, OSError, ValueError)",
+    ): "dead handler -- same proof as bert",
+    (
+        "models/tree_transformer/model.py",
+        "from_variant",
+        "(IOError, OSError, ValueError)",
+    ): "dead handler -- same proof as bert",
+    (
+        "models/vit/model.py",
+        "from_variant",
+        "(IOError, OSError, ValueError)",
+    ): "dead handler -- same proof as bert; scheduled for deletion (prior plan F-32)",
+    (
+        "models/wave_field/model.py",
+        "from_variant",
+        "(IOError, OSError, ValueError)",
+    ): (
+        "dead handler -- same proof as bert; carries an explicit "
+        "`# DECISION plan-2026-08-13T091555-230c101d/D-005` forbidding broadening "
+        "the tuple to Exception, i.e. the narrow tuple IS the guard there"
+    ),
+    # 6-7: matched by the shape, but not R-049 -- no weight FILE is loaded.
+    (
+        "models/depth_anything/model.py",
+        "build",
+        "Exception",
+    ): (
+        "not R-049 -- degrades a teacher clone and sets use_feature_alignment = "
+        "False; a genuine silent-knob-disable, routed to Phase 3 batch 5 as an "
+        "R-119/R-120 candidate rather than waived away"
+    ),
+    (
+        "models/depth_anything/model.py",
+        "from_pretrained_encoder",
+        "Exception",
+    ): (
+        "not R-049 -- the pretrained load itself (load_weights_from_checkpoint) "
+        "is OUTSIDE any try; this handler covers only the post-load teacher "
+        "EMA re-sync"
+    ),
+}
+
+
+#: A `by_name` call site and a swallowed load, in one parsed-never-imported file.
+_INJECTED_LOAD_DEFECT_SRC = '''
+class InjectedLoader(keras.Model):
+    def restore(self, path):
+        self.load_weights(path, by_name=True, skip_mismatch=True)
+
+    def restore_pretrained(self, path):
+        try:
+            self.load_weights(path)
+        except (IOError, OSError):
+            logger.warning("could not load %s, continuing with random weights", path)
+'''
+
+#: The same two methods repaired: the kwarg dropped (Keras 3 removed it), and the
+#: handler re-raising instead of falling through into a random-init model.
+_INJECTED_LOAD_FIXED_SRC = '''
+class InjectedLoader(keras.Model):
+    def restore(self, path):
+        self.load_weights(path, skip_mismatch=True)
+
+    def restore_pretrained(self, path):
+        try:
+            self.load_weights(path)
+        except (IOError, OSError) as exc:
+            logger.error("could not load %s", path)
+            raise ValueError(f"failed to load weights from {path}") from exc
+'''
+
+
+class TestWeightLoadingContract:
+    """The two static halves of the ``pretrained`` contract, frozen at zero.
+
+    ``TestPretrainedNeverSilentlyRandom`` above covers the ``if pretrained:``
+    branch. These cover the two ways a load can go wrong AFTER that branch, both
+    measured at **0 live instances** on 2026-08-20 (D-003) and therefore both
+    freeze-forward:
+
+    * ``by_name=`` on a weight load. Keras 3 removed the kwarg; a call passing it
+      raises, and where such calls "survived" it was because an enclosing
+      ``except`` swallowed the raise. **The instrument must be AST**: the naive
+      text control ``grep -rn by_name src/dl_techniques/`` returns 10 hits and
+      ALL TEN are false positives -- 4 in ``.md`` files and 6 in comments that
+      exist precisely to record that the kwarg was removed;
+    * an ``except`` around a weight load that logs and falls through, returning a
+      randomly-initialized model to a caller who asked for a trained one.
+    """
+
+    def test_no_weight_load_passes_by_name(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-012
+        # AST, never a text grep. WHAT NOT TO DO: do not "simplify" this into
+        # `grep -rn by_name`. Measured at D-003: the text form returns 10 hits
+        # over src/dl_techniques/ and every one is a false positive -- 4 .md
+        # files and 6 comments/docstrings written to record that Keras 3 REMOVED
+        # the kwarg. A text guard here would be permanently red for reasons that
+        # have nothing to do with the contract, and would be deleted. See
+        # decisions.md D-012 and reference_grep_over_this_repo_finds_docstrings.
+        hits, _ = _sweep_by_name_kwargs()
+        assert not hits, (
+            "`by_name` was removed from Model.load_weights in Keras 3; a call "
+            "passing it raises at runtime. Use dl_techniques.utils.weight_transfer "
+            f"for partial restores instead. Found: {hits}"
+        )
+
+    def test_no_weight_load_handler_logs_and_falls_through(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-012
+        # The seven known handlers are cleared by an EVIDENCE-KEYED WAIVER, not by
+        # a narrowed predicate. WHAT NOT TO DO: do not narrow this to bare
+        # `except Exception`, and do not restrict it to `load_weights` callees, to
+        # make the seven go away. Five of the seven are dead ONLY because their
+        # `(IOError, OSError, ValueError)` tuple fails to catch the
+        # NotImplementedError their body can raise -- so broadening that tuple is
+        # the single edit that turns them into the live defect, and a narrowed
+        # predicate is exactly the thing that would stop seeing them at that
+        # moment. The waiver is keyed by clause TEXT so that edit fails loudly.
+        # See decisions.md D-012.
+        offenders, _ = _sweep_weight_load_handlers()
+        live = [
+            f"{rel}:{line} in {sym}(): `except {clause}` logs and falls through"
+            for rel, line, sym, clause in offenders
+            if (rel, sym, clause) not in _WEIGHT_LOAD_HANDLER_WAIVERS
+        ]
+        assert not live, (
+            "an except around a weight load logs and falls through, so a failed "
+            "load returns a randomly-initialized model as if it were pretrained. "
+            "Re-raise, or -- if the handler is provably not a weight-file load -- "
+            "add it to _WEIGHT_LOAD_HANDLER_WAIVERS with the read that clears it. "
+            "Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_waivers_still_match_a_real_site(self):
+        """A waiver matching nothing is a waiver hiding nothing (see the siblings).
+
+        This one has teeth beyond the usual: step 25 of this plan DELETES the
+        ``vit`` handler, and two of the five carry decision anchors. A path-keyed
+        or line-keyed waiver would linger after either edit and silently permit a
+        LATER, DIFFERENT handler at the same site.
+        """
+        offenders, _ = _sweep_weight_load_handlers()
+        live = {(rel, sym, clause) for rel, _, sym, clause in offenders}
+        stale = sorted(set(_WEIGHT_LOAD_HANDLER_WAIVERS) - live)
+        assert not stale, (
+            "weight-load handler waivers no longer match any site; delete them if "
+            f"the handler is gone, re-key them if the code moved: {stale}"
+        )
+
+    def test_the_sweeps_found_load_sites(self):
+        """Anti-vacuity floors, derived from the 2026-08-20 measurement.
+
+        12 weight-load call sites and 9 handlers around a weight load, over
+        ``src/dl_techniques/``. Floors are ``int(0.8 * n)`` of each -- 9 and 7.
+        Note that this population is genuinely SMALL: the D-003 write-up proposed
+        a floor of ">= 30 call sites" from a partial count, and re-deriving it at
+        the moment the guard landed is what caught that. A floor above the
+        population is a guard that fails for a reason unrelated to its contract.
+        """
+        _, n_calls = _sweep_by_name_kwargs()
+        _, n_handlers = _sweep_weight_load_handlers()
+        assert n_calls >= 9, (
+            f"expected ~12 weight-load call sites, found {n_calls}: the AST walk "
+            "stopped seeing the tree"
+        )
+        assert n_handlers >= 7, (
+            f"expected ~9 handlers around a weight load, found {n_handlers}"
+        )
+
+    def test_predicates_fire_on_an_injected_defect(self, tmp_path):
+        """Dead-component probe: both predicates must go RED on a real site."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_LOAD_DEFECT_SRC)
+        hits, n_calls = _sweep_by_name_kwargs(roots, src_root)
+        assert n_calls == 2, n_calls
+        assert hits == ["models/injected/model.py:4"], hits
+        offenders, n_handlers = _sweep_weight_load_handlers(roots, src_root)
+        assert n_handlers == 1, n_handlers
+        assert [(rel, sym, clause) for rel, _, sym, clause in offenders] == [
+            ("models/injected/model.py", "restore_pretrained", "(IOError, OSError)")
+        ], offenders
+
+    def test_predicates_are_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once the kwarg is dropped and the handler re-raises."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_LOAD_FIXED_SRC)
+        hits, n_calls = _sweep_by_name_kwargs(roots, src_root)
+        assert n_calls == 2, "the fixture must still be reached"
+        assert hits == [], hits
+        offenders, n_handlers = _sweep_weight_load_handlers(roots, src_root)
+        assert n_handlers == 1, "the fixture must still be reached"
+        assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# The behavioural `pretrained` arm's own RED proof.
+# ---------------------------------------------------------------------------
+
+
+class _InjectedPretrainedDefect:
+    """A factory that LOGS on ``pretrained=True`` and returns a random model.
+
+    The exact nine-site defect D-003 was written about, in miniature: it has a
+    real ``MODEL_VARIANTS`` table so the discovery arm reaches it, and it does not
+    raise, so the behavioural predicate must fail on it.
+    """
+
+    MODEL_VARIANTS = {"small": {"width": 8}, "large": {"width": 64}}
+
+    @classmethod
+    def from_variant(cls, variant, pretrained=False, **kwargs):
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(f"Unknown variant {variant!r}: {list(cls.MODEL_VARIANTS)}")
+        if pretrained:
+            logger_message = "Pretrained weights are not yet implemented"
+            del logger_message
+        return cls.MODEL_VARIANTS[variant]
+
+
+class _InjectedPretrainedFixed:
+    """The same factory, repaired: ``pretrained=True`` raises before it builds."""
+
+    MODEL_VARIANTS = {"small": {"width": 8}, "large": {"width": 64}}
+
+    @classmethod
+    def from_variant(cls, variant, pretrained=False, **kwargs):
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(f"Unknown variant {variant!r}: {list(cls.MODEL_VARIANTS)}")
+        if pretrained:
+            raise NotImplementedError("no public weights ship with dl_techniques")
+        return cls.MODEL_VARIANTS[variant]
+
+
+def _probe_pretrained_raises(fn, kwargs) -> str:
+    """``""`` if ``fn(pretrained=True, **kwargs)`` raises ``NotImplementedError``.
+
+    Contract: returns a one-line description of the violation otherwise. Factored
+    out of ``test_pretrained_true_raises`` for one reason only -- so the predicate
+    itself can be proven RED against the injected pair below. A predicate that
+    exists only inside a parametrized test cannot be shown to fire.
+    """
+    try:
+        fn(pretrained=True, **kwargs)
+    except NotImplementedError:
+        return ""
+    except Exception as exc:  # noqa: BLE001 -- the wrong exception is also a failure
+        return f"raised {type(exc).__name__} instead of NotImplementedError: {exc}"
+    return "returned a model instead of raising"
+
+
+class TestPretrainedBehaviouralArmIsProvenRed:
+    """The widened behavioural arm, proven to fire.
+
+    The arm reaches 42 of the 45-site AST population and every one of the 42
+    raises today, so nothing in the tree can demonstrate that the arm would notice
+    if one stopped. These four tests do, on both halves of it: the RESOLVER (does
+    it read ``MODEL_VARIANTS`` and produce a callable argument set?) and the
+    PREDICATE (does ``pretrained=True`` raise?).
+    """
+
+    def test_the_predicate_fires_on_an_injected_silent_random(self):
+        """Dead-component probe: a log-and-return factory must be caught."""
+        kwargs = {}
+        value, reason = _resolve_required_arg(
+            "variant", _InjectedPretrainedDefect.from_variant
+        )
+        assert reason == "", reason
+        kwargs["variant"] = value
+        assert value == "small", "the resolver must pick the smallest named variant"
+        problem = _probe_pretrained_raises(
+            _InjectedPretrainedDefect.from_variant, kwargs
+        )
+        assert problem == "returned a model instead of raising", problem
+
+    def test_the_predicate_is_silent_on_the_fixed_twin(self):
+        """...and must NOT fire once the same factory raises."""
+        value, reason = _resolve_required_arg(
+            "variant", _InjectedPretrainedFixed.from_variant
+        )
+        assert reason == ""
+        assert _probe_pretrained_raises(
+            _InjectedPretrainedFixed.from_variant, {"variant": value}
+        ) == ""
+
+    def test_the_resolver_reports_an_unreachable_from_variant(self):
+        """The resolver must SAY it cannot reach a table, never guess one.
+
+        Guessing (e.g. falling back to ``"base"``) would turn an unreachable site
+        into one that silently passes on a ValueError path, which is how a
+        coverage arm rots into a coverage claim.
+
+        The injected class is built in a THROWAWAY MODULE, not beside its twins in
+        this file, and that is load-bearing: ``_variant_table_for``'s second
+        resolution step reads the defining module's classes, so a no-table class
+        declared here would resolve ``_InjectedPretrainedDefect.MODEL_VARIANTS``
+        and this test would prove the opposite of what it says. (It did, the first
+        time it was run -- the resolver returned ``"small"``.)
+        """
+        module = types.ModuleType("_injected_no_variant_table")
+        sys.modules[module.__name__] = module
+        try:
+            exec(  # noqa: S102 -- a 3-line fixture, parsed nowhere else
+                "class NoTable:\n"
+                "    @classmethod\n"
+                "    def from_variant(cls, variant, pretrained=False, **kwargs):\n"
+                "        return variant\n",
+                module.__dict__,
+            )
+            value, reason = _resolve_required_arg(
+                "variant", module.NoTable.from_variant
+            )
+        finally:
+            del sys.modules[module.__name__]
+        assert value is None
+        assert "MODEL_VARIANTS" in reason, reason
+
+    def test_every_reached_factory_raises(self):
+        """The whole reached set, as a single non-parametrized assertion.
+
+        Redundant with ``test_pretrained_true_raises`` by design: that one reports
+        per-site (which is what a developer wants), this one reports the SET (which
+        is what makes "42 of 45 raise" a single checkable statement, and what the
+        RED proof above is a proof about).
+        """
+        problems = {
+            label: problem
+            for label, fn, kwargs in PRETRAINED_FACTORIES
+            if (problem := _probe_pretrained_raises(fn, kwargs))
+        }
+        assert not problems, problems
