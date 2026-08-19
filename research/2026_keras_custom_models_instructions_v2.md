@@ -188,6 +188,9 @@ import numpy as np
 import tensorflow as tf          # tests and graph-mode probes only
 ```
 
+Type every public signature — `__init__`, `call`, `compute_output_shape`, `get_config`. §3.1 shows
+the full form on a complete layer.
+
 ### 2.2 The Registration Decorator
 
 ```python
@@ -219,30 +222,6 @@ Run the tree-wide collection gate after any change to a package's public surface
 
 ```bash
 pytest tests/ -q --collect-only
-```
-
-### 2.3 Type Hints
-
-```python
-def __init__(
-    self,
-    units: int,
-    activation: Optional[Union[str, Callable]] = None,
-    kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-    use_bias: bool = True,
-    **kwargs: Any,
-) -> None: ...
-
-def call(
-    self,
-    inputs: keras.KerasTensor,
-    training: Optional[bool] = None,
-    mask: Optional[keras.KerasTensor] = None,
-) -> keras.KerasTensor: ...
-
-def compute_output_shape(
-    self, input_shape: Tuple[Optional[int], ...]
-) -> Tuple[Optional[int], ...]: ...
 ```
 
 ---
@@ -429,7 +408,7 @@ The last row is every real model.
 **Measured:** a trend-only N-BEATS returned exactly `0.0` everywhere and still trained and still
 reported a loss.
 
-**Detect:** §13.2.4 — build the layer *through a parent*. A unit test that calls `.build(...)`
+**Detect:** §13.2.1 — build the layer *through a parent*. A unit test that calls `.build(...)`
 directly is structurally blind to this.
 
 **Related, same cause.** Never materialize a constant with `ops.convert_to_tensor` inside `build()`
@@ -778,11 +757,10 @@ Three details are load-bearing:
 | `training=False`, explicit | a bare `model(x)` is not inference; stochastic-depth layers short-circuit only on `training is False` |
 | Values, never shapes | a shape-only round trip is satisfied by a model that restored **zero** weights |
 
-### 7.2 Registry Key Collisions
+A round trip can also fail for an *identity* reason rather than a value one: see §2.2 for registry
+key collisions, which make a saved model load as a different class entirely.
 
-See §2.2. Explicit `package=`, prefixed generic names, `get_registered_name` for `custom_objects`.
-
-### 7.3 Public Methods That Bypass Lazy Build
+### 7.2 Public Methods That Bypass Lazy Build
 
 **Measured:** a model's `encode_image` / `encode_text` did not route through `__call__`, so on a
 freshly constructed model a `build()`-created variable was still `None` and the method died inside a
@@ -794,7 +772,7 @@ has at least one test that actually executes it — one such override used a Ker
 exist in Keras 3, was reachable by any `fit()`, and sat behind a suite that was forward-pass and
 save/reload only.
 
-### 7.4 Output Structures That Break `predict`
+### 7.3 Output Structures That Break `predict`
 
 `predict({"input_ids": ...})` has raised `Structures don't have the same nested structure` because
 `call` echoed a bare `None` mask back in its output dict.
@@ -1443,19 +1421,17 @@ have caught them.
 
 ### 13.2 The Instruments
 
-#### 13.2.1 `.keras` round trip on values
+Three instruments are defined where the rule they enforce is stated, not repeated here:
 
-See §7.1.
+| Instrument | Defined in |
+|---|---|
+| `.keras` round trip on **values** | §7.1 |
+| Weight-value comparison before the loaded model's first call | §8.4 |
+| Build parity by relative weight path, plus its no-sub-layer sibling | §8.3 |
 
-#### 13.2.2 Weight-value comparison before the first call
+The rest follow.
 
-See §8.4.
-
-#### 13.2.3 Build parity by relative weight path
-
-See §8.3.
-
-#### 13.2.4 Build through a parent's `call()`
+#### 13.2.1 Build through a parent's `call()`
 
 The only probe that sees the `StatelessScope` trap (§3.3).
 
@@ -1484,7 +1460,7 @@ def test_the_table_survives_the_stateless_build_pass():
     np.testing.assert_allclose(omega[0], 1.0, atol=0.0, rtol=0)
 ```
 
-#### 13.2.5 Gradient flow, per variable
+#### 13.2.2 Gradient flow, per variable
 
 ```python
 def test_gradients_flow_to_every_trainable_weight(self, sample_input):
@@ -1504,7 +1480,7 @@ Non-`None` **and** non-zero, named by `var.path`.
 **Measured:** a guard written as `assert all(norm >= 0.0)` reported green while **61 of 61** trainable
 weights had identically-zero gradients.
 
-#### 13.2.6 Scoped weight probes for a knob
+#### 13.2.3 Scoped weight probes for a knob
 
 To prove a knob reached the one subtree it is meant to reach, compare the **weight values of a named
 subtree** — not a whole-model output diff, which passes on the broken tree whenever the same knob
@@ -1515,7 +1491,7 @@ def weights_in_scope(model, scope: str):
     return [w for w in model.weights if scope in w.path]
 ```
 
-#### 13.2.7 Both-ways pairs
+#### 13.2.4 Both-ways pairs
 
 Every "nothing moved" assertion is half of a pair.
 
@@ -1542,7 +1518,7 @@ class TestAttentionMaskIsHonoured:
 | **Never perturb with a DC or uniform per-channel signal** when a per-position normalization precedes the guarded reduction | one such probe measured a leak of `1.9e-06` against a real leak of 0.33–1.07. Use fresh non-DC noise |
 | **Watch for configurations that make the mechanism structurally unobservable** | a single-layer text tower reads its last position, whose causal row is unmasked, so the pin reads exactly `0.0` with and without the mask. A deep tower at small input resolution can collapse its deepest attention stage to **one token**, where softmax is identically 1.0. Cheap detector: `pytest -W error::UserWarning` turns Keras' size-1-softmax warning into a failure |
 
-#### 13.2.8 Orientation — delta impulses and non-square grids
+#### 13.2.5 Orientation — delta impulses and non-square grids
 
 Orientation and direction are invisible to shape, config and serialization tests.
 
@@ -1552,7 +1528,7 @@ relative-position bias (`bias[h, key, query]`) passed 219; a shifted CLS slice p
 **Rule:** use a **delta-impulse probe** — a one-hot input, asserting the destination slot — on a
 **non-square grid**. A square-only test cannot see a transposed stride.
 
-#### 13.2.9 Precision arms
+#### 13.2.6 Precision arms
 
 ```python
 DTYPE_POLICIES = ("float32", "mixed_float16", "float64")
@@ -1592,7 +1568,7 @@ graph rounds to float32 at the boundary. Also call `keras.backend.set_floatx("fl
 `inputs[0].dtype`** — otherwise the arm is a fake reading that agrees with float32 to eight digits.
 Note `UpSampling2D(interpolation='bilinear')` returns float32 for float64 input.
 
-#### 13.2.10 Graph and XLA equivalence
+#### 13.2.7 Graph and XLA equivalence
 
 An eager-only fix is not a fix.
 
@@ -1625,7 +1601,7 @@ Where XLA reassociates, the tolerance is **measured**, not guessed, and recorded
 magnitude — for example: *"measured 0.0151 against an output absmax of ~5.9, i.e. 0.25% relative;
 0.05 keeps ~3x headroom while still failing loudly on a NaN or a collapsed output."*
 
-#### 13.2.11 Derived tolerances
+#### 13.2.8 Derived tolerances
 
 Where a bound must come from a noise source rather than a measurement, derive it and write the
 derivation in the docstring:
@@ -1648,7 +1624,11 @@ instruction that callers must pass `rtol=0`.
 > matmul-free path once dominated the real term by 3 to 12 orders of magnitude and passed a
 > projection that was systematically 1% wrong.
 
-#### 13.2.12 Homogeneity and scale invariance
+A bound derived from the noise floor alone is not a tolerance — it only says the computation ran. It
+sits **between** the floor and the smallest defect you intend to catch, and the test records **both**
+numbers.
+
+#### 13.2.9 Homogeneity and scale invariance
 
 ```python
 HOMOGENEITY_RTOL = 1e-5
@@ -2169,13 +2149,7 @@ Use seeded **non-zero** weights and biases — the state a trained model is in.
 structurally unobservable, and a sampled path was green with a live defect at a single perturbation
 scale, caught only by sweeping four.
 
-#### 13.6.6 Set the tolerance from the defect signal, not the noise floor
-
-A tolerance derived from the noise floor is not a tolerance; it only says the computation ran. The
-bound must sit **between** the floor and the smallest defect you intend to catch, and the test should
-record both numbers.
-
-#### 13.6.7 Never run GPU jobs in parallel
+#### 13.6.6 Never run GPU jobs in parallel
 
 Contention causes false **failures**, never false passes.
 
@@ -2190,13 +2164,13 @@ Use a pristine `git worktree` at the true base as a control. A **partial revert*
 — one "pre-existing RED" claim survived reverting three files while the suspect change lived in a
 fourth.
 
-#### 13.6.8 Patch the defining module
+#### 13.6.7 Patch the defining module
 
 A shadow-import or monkeypatch binds the **importing** module only. Patching a re-exported name cannot
 reach the defining module's own call site, and a package `__init__.py` re-export can make a
 shadow-import exercise the unpatched code. Patch the **defining** module's namespace.
 
-#### 13.6.9 Exhaustiveness by grid size is not exhaustiveness
+#### 13.6.8 Exhaustiveness by grid size is not exhaustiveness
 
 **Measured:** "0 violations over 281,604 rows" held while a small targeted counterexample broke the
 property immediately. A grid can be structurally blind regardless of cell count: sampling one
@@ -2307,7 +2281,7 @@ Scope the runner to the modules you changed plus anything that imports what you 
 tree-wide **collection** gate after any change to a package's public surface. Reserve the full suite
 for when it is explicitly asked for.
 
-Do not trust a red run that was not the only pytest on the machine (§13.6.7).
+Do not trust a red run that was not the only pytest on the machine (§13.6.6).
 
 ---
 
@@ -2602,12 +2576,12 @@ line — the scaled value must be the one handed to `tape.gradient`.
 | `cannot compute AddV2 as input #1 was expected to be a half tensor` | one-sided cast under autocast; cast both sides | §10.1 |
 | **Training does not move under `mixed_float16`** | custom `train_step` missing `optimizer.scale_loss` | §11.1 |
 | A knob has no measurable effect | dead knob (§12.5), or silently dropped at a factory | §12.5, §9.2, §13.3.2 |
-| `Structures don't have the same nested structure` from `predict` | `call` echoing a bare `None` in its output dict | §7.4 |
+| `Structures don't have the same nested structure` from `predict` | `call` echoing a bare `None` in its output dict | §7.3 |
 | A causal model's loss looks fine but generation is poor | no causal mask; or the head pools token 0 | §12.1, §12.2 |
 | Green suite, broken trainer | entry point with zero tests; run the CLI | §13.5 |
 | Test passes alone, fails in the directory gate | global-RNG coupling, or TF32 leaked from an earlier module | §13.6.4, §13.6.1 |
 | GPU red, CPU green, on a precision assertion | TF32 | §13.6.1 |
-| `cudaSetDevice() ... out of memory` at import | another GPU job is running; the failure is contention | §13.6.7 |
+| `cudaSetDevice() ... out of memory` at import | another GPU job is running; the failure is contention | §13.6.6 |
 | `RecursionError` during serialization | circular references in config; store parameters explicitly, not `locals()` | §6.1 |
 
 ---
