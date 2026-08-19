@@ -4,7 +4,7 @@ Neural Arithmetic Module Cell — single reduction step.
 Performs one step of expression reduction:
 1. Tree induction via GroupAttention (identifies sub-expression structure)
 2. Sub-expression scoring (which sub-expression to reduce)
-3. Operand extraction via NTM read heads
+3. Operand assembly from the RAW token ids, split at that position
 4. Operator classification (which fixed arithmetic op to apply)
 5. Fixed arithmetic execution with validity tracking
 6. Result writeback to NTM memory
@@ -12,6 +12,15 @@ Performs one step of expression reduction:
 
 Arithmetic operations are FIXED (not learned). The cell learns to parse,
 route, and decide when to halt.
+
+**Scope: single-operator, integer-only.** Step 3 reads ``token_ids`` and
+nothing else — the NTM read heads (step 6/step 11) feed the *controller*, not
+the operands, so the step-6 writeback can move WHICH position is selected but
+can never supply a numeric operand. A multi-operator expression therefore
+concatenates the far side's digits rather than reducing them (``"1 + 2 * 3"``
+-> ``(1, 23)`` at the ``+``), and ``DOT_ID`` is excluded from ``is_digit`` so
+decimals lose their point (``"1.5 + 2"`` -> ``(15, 2)``). See the ``NAM`` module
+docstring and ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
 """
 
 import keras
@@ -133,7 +142,8 @@ class NAMCell(keras.layers.Layer):
     expression. The cell combines:
 
     - **Tree Transformer** (GroupAttention + TreeMHA) for structural parsing
-    - **NTM Memory** for intermediate result storage and operand retrieval
+    - **NTM Memory** as the controller's recurrent context (it does NOT supply
+      the operands — those come from the raw tokens; see the module docstring)
     - **Fixed arithmetic units** (add, sub, mul, div) with validity flags
     - **Halting head** for adaptive computation time
 
@@ -149,7 +159,9 @@ class NAMCell(keras.layers.Layer):
                               ▼
                     ┌── Reduction Scorer ──► select sub-expression
                     │
-                    ├── NTM Read Heads ──► extract operands (left, right)
+                    ├── Token split at that position ──► operands (left, right)
+                    │
+                    ├── NTM Read Heads ──► controller context (NOT operands)
                     │
                     ├── Op Classifier ──► identify operator (+,-,*,/)
                     │
@@ -441,6 +453,18 @@ class NAMCell(keras.layers.Layer):
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
         # --- 5. Deterministic number assembly from tokens ---
+        # DECISION plan-2026-08-18T140459-7991552f/D-055
+        # This split is the WHOLE numeric path, and it is single-operator,
+        # integer-only BY CONSTRUCTION. Do NOT add a docstring, README line or
+        # example that promises multi-step reduction or decimals without first
+        # building the mechanism: `token_ids` is the raw input, re-read
+        # unchanged by `NAM.call` on every ACT step, so a previous step's
+        # result cannot become an operand at ANY weights, and `is_digit`
+        # excludes DOT_ID so a decimal point is silently dropped
+        # ("1.5 + 2" assembles 15). The docs were corrected to match rather
+        # than the machine built (Assumption A1). Pinned by
+        # tests/test_models/test_nam/test_documented_scope.py and measured by
+        # test_operand_derivation_through_call.py. See decisions.md D-055.
         # The operator position is the argmax of reduction_weights (already
         # trained to 100% accuracy). Given the position, we split the tokens
         # into left-of-operator and right-of-operator digit masks, then

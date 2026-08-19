@@ -4,11 +4,36 @@ Neural Arithmetic Module (NAM) — full model.
 Merges three architectures for arithmetic expression evaluation:
 
 1. **Tree Transformer** (GroupAttention) — parses expression structure
-2. **Neural Turing Machine** (memory + addressing) — stores/retrieves intermediates
-3. **Tiny Recursive Model** (ACT loop) — iterative expression reduction
+2. **Neural Turing Machine** (memory + addressing) — a recurrent context vector
+   for the controller
+3. **Tiny Recursive Model** (ACT loop) — iterative re-scoring of the expression
 
 Arithmetic operations are FIXED — the model learns parsing, routing, and halting.
 Each operation outputs both a result and a validity flag (e.g., division by zero → invalid).
+
+.. warning::
+
+   **Scope: single-operator, integer-only.** MEASURED 2026-08-19, pinned by
+   ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
+   The two operands are assembled **exclusively** from the raw ``token_ids``
+   (``cell.py`` step 5), split at ``argmax(reduction_weights)``, and
+   ``NAM.call`` re-reads ``batch["input_ids"]`` unchanged on every ACT step.
+   Nothing written to NTM memory ever re-enters ``left_val`` / ``right_val``.
+   Two consequences, neither of which is reachable at ANY weights:
+
+   * **Multi-operator expressions do not chain.** ``"1 + 2 * 3"`` splits at the
+     ``+`` into ``1`` and the *concatenated* digits ``23``; at the ``*`` into
+     ``12`` and ``3``. The answer 7 is not a candidate at any position.
+     Parentheses (ids 18/19) are not digits, so they neither delimit nor group
+     an operand: ``"( 1 + 2 ) * 3"`` gives ``(12, 3)`` at the ``*``.
+   * **Decimals are dropped.** ``is_digit`` is ``4 <= id <= 13``; ``DOT_ID = 20``
+     is tokenized and round-trips, but number assembly has no fractional
+     branch, so ``"1.5 + 2"`` assembles ``15`` and ``2`` and computes 17 with
+     ``valid = 1.0``. There is no error and no validity flag for this.
+
+   Supporting either would be a new mechanism (an operand path from a previous
+   step's result; a fractional branch in ``_assemble_number_from_tokens``), not
+   a bug fix. Until then this docstring is the contract.
 
 Architecture::
 
@@ -56,12 +81,17 @@ class NAM(keras.Model):
     - **valid**: 1.0 if the operation is valid, 0.0 if invalid
       (e.g., division by zero).
 
+    **Scope: single-operator, integer-only** — see the module docstring for the
+    measurement. A multi-operator expression does not chain (step N's result
+    cannot reach step N+1's operands at any weights) and the decimal point is
+    tokenized but dropped by number assembly.
+
     The model uses Adaptive Computation Time (ACT) from TRM to dynamically
-    decide how many reduction steps are needed. Simple expressions like
-    ``1 + 2`` take 1 step; complex expressions like ``(1 + 2) * (3 + 4)``
-    take 3 steps. That is true at inference as well as during training: both
-    branches halt on ``q_halt > 0`` (D-033). It was NOT true before
-    2026-08-15 — inference halted on ``halt_max_steps`` alone, so every
+    decide how many ACT steps to run. Extra steps re-score the SAME token
+    sequence — they do not reduce it, so a second step cannot consume the
+    first step's answer. That halting is live at inference as well as during
+    training: both branches halt on ``q_halt > 0`` (D-033). It was NOT true
+    before 2026-08-15 — inference halted on ``halt_max_steps`` alone, so every
     sequence ran the full budget and the sentence above was false. Note that
     ``q_halt`` only earns its keep if the trainer supervises it;
     ``src/train/nam/train_nam.py`` does so via ``--w-halt`` (D-034), and
