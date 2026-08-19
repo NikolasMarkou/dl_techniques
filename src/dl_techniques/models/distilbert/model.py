@@ -161,6 +161,11 @@ class DistilBERT(keras.Model):
     :param initializer_range: Stddev for weight initialization. Defaults to 0.02.
     :type initializer_range: float
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-12.
+        Applies to the embedding norm AND to every one of the ``2 * num_layers``
+        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):** the
+        in-block norms previously ignored this knob and ran at the normalization
+        factory's ``1e-6`` default. Weight shapes are unchanged -- existing
+        ``.keras`` files still load -- but forward values move slightly.
     :type layer_norm_eps: float
     :param pad_token_id: ID of the padding token. Defaults to 0.
         **ADVISORY ONLY — nothing in this model reads it.** It is stored and
@@ -489,6 +494,19 @@ class DistilBERT(keras.Model):
             normalization_type=self.normalization_type,
         )
 
+        # DECISION plan-2026-08-19-a616f581/D-007
+        # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above); the
+        # `TransformerLayer` loop passed neither `attention_norm_args` nor
+        # `ffn_norm_args`, so every one of the `2 * num_layers` block norms ran
+        # at `create_normalization_layer`'s own `epsilon=1e-6` default instead of
+        # DistilBERT's 1e-12. MEASURED pre-fix at `num_layers=2`: 4 of 4 block
+        # norms at 1e-06.
+        # WHAT NOT TO DO: do not change the factory's 1e-6 default (shared by
+        # every transformer in the repo) and do not hard-code 1e-12 here -- a
+        # test asserts the block norms TRACK `self.layer_norm_eps`.
+        # See decisions.md D-007.
+        _norm_args = {'epsilon': self.layer_norm_eps}
+
         self.encoder_layers: List[TransformerLayer] = []
         for i in range(self.num_layers):
             transformer_layer = TransformerLayer(
@@ -496,6 +514,8 @@ class DistilBERT(keras.Model):
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
                 normalization_type=self.normalization_type,
+                attention_norm_args=dict(_norm_args),
+                ffn_norm_args=dict(_norm_args),
                 normalization_position=self.normalization_position,
                 attention_type=self.attention_type,
                 ffn_type=self.ffn_type,

@@ -179,7 +179,12 @@ class TextDecoder(keras.layers.Layer):
     :type attention_dropout_rate: float
     :param initializer_range: Std-dev for TruncatedNormal. Default: 0.02.
     :type initializer_range: float
-    :param layer_norm_eps: Normalization epsilon. Default: 1e-12.
+    :param layer_norm_eps: Normalization epsilon. Default: 1e-12. Applies to
+        ``embed_norm``, ``final_norm`` AND every one of the ``2 * depth``
+        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):**
+        the in-block norms previously ignored this knob and ran at the
+        normalization factory's ``1e-6`` default. Weight shapes are unchanged --
+        existing ``.keras`` files still load -- but forward values move slightly.
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
@@ -312,12 +317,25 @@ class TextDecoder(keras.layers.Layer):
         for i in range(self.depth):
             # Linearly increase drop rate per layer
             layer_drop_rate = self.stochastic_depth_rate * i / max(1, self.depth - 1)
+            # DECISION plan-2026-08-19-a616f581/D-007
+            # `layer_norm_eps` used to reach ONLY `embed_norm` and `final_norm`.
+            # This loop
+            # passed neither `attention_norm_args` nor `ffn_norm_args`, so all
+            # `2 * depth` block norms inherited
+            # `create_normalization_layer`'s `epsilon=1e-6` default while
+            # `final_norm` ran at this decoder's own 1e-12. MEASURED pre-fix at
+            # `depth=2`: 4 of 4 block norms at 1e-06, final_norm at 1e-12.
+            # WHAT NOT TO DO: do not change the factory's shared 1e-6 default,
+            # and do not hard-code 1e-12 here -- a test asserts the block norms
+            # TRACK `self.layer_norm_eps`. See decisions.md D-007.
             layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=int(self.embed_dim * 4),  # Standard 4x expansion
                 attention_type=self.attention_type,
                 normalization_type=self.normalization_type,
+                attention_norm_args={'epsilon': self.layer_norm_eps},
+                ffn_norm_args={'epsilon': self.layer_norm_eps},
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,

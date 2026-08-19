@@ -157,6 +157,12 @@ class Qwen3(keras.Model):
         num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
         moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
         norm_eps: Float, epsilon for normalization layers. Defaults to 1e-6.
+            Applies to `final_norm` AND to every one of the `2 * num_layers`
+            in-block norms. Numerics change (2026-08-19, decisions.md D-007):
+            the in-block norms previously ignored this knob and ran at the
+            normalization factory's own 1e-6 default -- invisible at the default
+            `norm_eps=1e-6`, a silent mismatch at any other value. Weight shapes
+            are unchanged, so existing `.keras` files still load.
         dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
         initializer_range: Float, standard deviation for weight initialization. Defaults to 0.02.
         normalization_type: String, type of normalization layer. Defaults to "rms_norm".
@@ -420,6 +426,18 @@ class Qwen3(keras.Model):
                 'use_bias': False
             })
 
+            # DECISION plan-2026-08-19-a616f581/D-007
+            # `norm_eps` used to reach ONLY `final_norm` below (F-10). This
+            # construction passed neither `attention_norm_args` nor
+            # `ffn_norm_args`, so all `2 * num_layers` block norms inherited
+            # `create_normalization_layer`'s own `epsilon=1e-6` default.
+            # The trap here: `norm_eps`'s DEFAULT is ALSO 1e-6, so at default
+            # construction the defect is invisible -- measured pre-fix at
+            # `norm_eps=1e-6` the block norms read 1e-06 and looked correct.
+            # Only a non-default knob exposes it (pre-fix at `norm_eps=1e-3`:
+            # 0 of 4 block norms at 1e-3, all at 1e-06). Any test for this MUST
+            # therefore use a non-default `norm_eps`.
+            # See decisions.md D-007.
             block = TransformerLayer(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_attention_heads,
@@ -427,6 +445,8 @@ class Qwen3(keras.Model):
                 attention_type='group_query',
                 attention_args=attention_args,
                 normalization_type=self.normalization_type,
+                attention_norm_args={'epsilon': self.norm_eps},
+                ffn_norm_args={'epsilon': self.norm_eps},
                 normalization_position='pre',
                 moe_config=moe_config if is_moe_layer else None,
                 ffn_type=self.ffn_type,

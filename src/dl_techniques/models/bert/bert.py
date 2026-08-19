@@ -151,6 +151,13 @@ class BERT(keras.Model):
         all weight matrices. Defaults to 0.02.
     :type initializer_range: float
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-12.
+        Applies to the embedding norm AND to every one of the ``2 * num_layers``
+        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):** the
+        in-block norms previously ignored this knob and ran at the normalization
+        factory's ``1e-6`` default. Weight shapes are unchanged -- existing
+        ``.keras`` files still load -- but forward values move slightly
+        (measured at ``hidden_size=64, num_layers=4``: max |delta| 1.9e-06,
+        mean 4.0e-07, i.e. ~6e-07 relative).
     :type layer_norm_eps: float
     :param pad_token_id: ID of padding token. Defaults to 0.
     :type pad_token_id: int
@@ -436,6 +443,23 @@ class BERT(keras.Model):
             name="embeddings"
         )
 
+        # DECISION plan-2026-08-19-a616f581/D-007
+        # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above). The
+        # `TransformerLayer` loop below passed neither `attention_norm_args` nor
+        # `ffn_norm_args`, so `TransformerLayer._create_normalization_layer`
+        # fell through to `create_normalization_layer`'s own `epsilon=1e-6`
+        # default and all `2 * num_layers` encoder norms ran at 1e-6 while the
+        # embedding norm ran at BERT's own 1e-12 -- a 1e6x split INSIDE one
+        # model. MEASURED pre-fix at `num_layers=2`: 4 of 4 block norms at
+        # 1e-06, embeddings at 1e-12.
+        # WHAT NOT TO DO: do not "fix" this by changing the factory's 1e-6
+        # default -- that factory is shared by every transformer in the repo.
+        # These two dicts are the per-site channel it already provides. Do not
+        # write 1e-12 as a literal here either; `self.layer_norm_eps` is the
+        # model's knob and a test asserts the block norms TRACK it.
+        # See decisions.md D-007.
+        _norm_args = {'epsilon': self.layer_norm_eps}
+
         self.encoder_layers: List[TransformerLayer] = []
         for i in range(self.num_layers):
             transformer_layer = TransformerLayer(
@@ -443,6 +467,8 @@ class BERT(keras.Model):
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
                 normalization_type=self.normalization_type,
+                attention_norm_args=dict(_norm_args),
+                ffn_norm_args=dict(_norm_args),
                 normalization_position=self.normalization_position,
                 attention_type=self.attention_type,
                 ffn_type=self.ffn_type,

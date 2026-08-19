@@ -198,6 +198,14 @@ class GroupAttention(keras.layers.Layer):
     :type hidden_size: int
     :param normalization_type: The type of normalization layer to use (e.g., "layer_norm").
     :type normalization_type: str
+    :param layer_norm_eps: Epsilon for this layer's own normalization. Defaults to
+        1e-12, matching :class:`TreeTransformerBlock`'s default.
+        **Numerics change (2026-08-19, decisions.md D-007):** this parameter did
+        not exist before, so ``self.norm`` ran at ``create_normalization_layer``'s
+        ``1e-6`` default and there was no channel through which the enclosing
+        block's ``layer_norm_eps`` could reach it. Weight shapes are unchanged --
+        existing ``.keras`` files still load -- but forward values move slightly.
+    :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
     **Input shape**:
@@ -216,6 +224,7 @@ class GroupAttention(keras.layers.Layer):
         self,
         hidden_size: int,
         normalization_type: str = "layer_norm",
+        layer_norm_eps: float = 1e-12,
         **kwargs: Any,
     ) -> None:
         """Initializes the GroupAttention layer."""
@@ -226,9 +235,25 @@ class GroupAttention(keras.layers.Layer):
             )
         self.hidden_size = hidden_size
         self.normalization_type = normalization_type
+        self.layer_norm_eps = layer_norm_eps
 
-        # Create sub-layers in __init__
-        self.norm = create_normalization_layer(normalization_type)
+        # DECISION plan-2026-08-19-a616f581/D-007
+        # `layer_norm_eps` is a NEW constructor parameter. Before it existed this
+        # call was a bare `create_normalization_layer(normalization_type)`, so
+        # `self.norm` silently took the factory's `epsilon=1e-6` default while
+        # the enclosing `TreeTransformerBlock`'s `norm1`/`norm2` ran at its own
+        # `layer_norm_eps` (1e-12 by default) -- and the block had NO channel to
+        # pass its knob down, so no guard over call sites could ever have seen
+        # it. This is the "unreachable from the assembled model" class, a PRODUCT
+        # gap, not a dropped keyword.
+        # WHAT NOT TO DO: do not remove this parameter to "simplify" the
+        # signature -- deleting it re-opens the gap invisibly, since the factory
+        # default makes the wrong value look deliberate. It is serialized in
+        # `get_config` so a round trip preserves it.
+        # See decisions.md D-007.
+        self.norm = create_normalization_layer(
+            normalization_type, epsilon=layer_norm_eps
+        )
         self.linear_key = keras.layers.Dense(
             hidden_size, name="key_projection"
         )
@@ -350,6 +375,7 @@ class GroupAttention(keras.layers.Layer):
             {
                 "hidden_size": self.hidden_size,
                 "normalization_type": self.normalization_type,
+                "layer_norm_eps": self.layer_norm_eps,
             }
         )
         return config
@@ -562,7 +588,12 @@ class TreeTransformerBlock(keras.layers.Layer):
     :type ffn_type: FFNType
     :param hidden_act: Activation function for the FFN.
     :type hidden_act: str
-    :param layer_norm_eps: Epsilon for normalization layers.
+    :param layer_norm_eps: Epsilon for normalization layers. Applies to ``norm1``,
+        ``norm2`` AND (since 2026-08-19, decisions.md D-007) to the
+        :class:`GroupAttention` sub-layer's own norm, which previously had no
+        channel to receive it and ran at the normalization factory's ``1e-6``
+        default. Weight shapes are unchanged -- existing ``.keras`` files still
+        load -- but forward values move slightly.
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
@@ -615,8 +646,15 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.layer_norm_eps = layer_norm_eps
 
         # Create all sub-layers in __init__
+        # DECISION plan-2026-08-19-a616f581/D-007
+        # `layer_norm_eps` reached `norm1`/`norm2` below but had no channel into
+        # `GroupAttention`, whose own norm therefore ran at the factory's 1e-6
+        # default. `GroupAttention` gained the parameter for exactly this wiring;
+        # do not drop it here. See decisions.md D-007.
         self.group_attn = GroupAttention(
-            hidden_size=hidden_size, normalization_type=normalization_type
+            hidden_size=hidden_size,
+            normalization_type=normalization_type,
+            layer_norm_eps=layer_norm_eps,
         )
         self.self_attn = TreeMHA(
             num_heads=num_heads,

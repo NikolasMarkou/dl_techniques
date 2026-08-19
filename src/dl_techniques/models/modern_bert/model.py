@@ -230,6 +230,12 @@ class ModernBERT(keras.Model):
         all weight matrices. Defaults to 0.02.
     :type initializer_range: float
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-12.
+        Applies to the embedding norm, ``final_layer_norm`` AND every one of the
+        ``2 * num_layers`` in-block norms. **Numerics change (2026-08-19,
+        decisions.md D-007):** the in-block norms previously ignored this knob and
+        ran at the normalization factory's ``1e-6`` default. Weight shapes are
+        unchanged -- existing ``.keras`` files still load -- but forward values
+        move slightly.
     :type layer_norm_eps: float
     :param use_bias: Whether to use bias vectors in linear layers.
         Defaults to False.
@@ -549,12 +555,25 @@ class ModernBERT(keras.Model):
                 else {"window_size": self.local_attention_window_size}
             )
 
+            # DECISION plan-2026-08-19-a616f581/D-007
+            # `layer_norm_eps` used to reach ONLY the embeddings and
+            # `final_norm` below. This loop passed neither `attention_norm_args`
+            # nor `ffn_norm_args`, so `TransformerLayer` fell through to
+            # `create_normalization_layer`'s `epsilon=1e-6` default and all
+            # `2 * num_layers` encoder norms ran at 1e-6 while `final_norm` ran
+            # at ModernBERT's own 1e-12. MEASURED pre-fix at `num_layers=2`:
+            # 4 of 4 block norms at 1e-06, final_norm at 1e-12.
+            # WHAT NOT TO DO: do not change the factory's shared 1e-6 default,
+            # and do not hard-code 1e-12 here -- a test asserts the block norms
+            # TRACK `self.layer_norm_eps`. See decisions.md D-007.
             layer = TransformerLayer(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
                 attention_type=attention_type,
                 attention_args=attention_args,
+                attention_norm_args={'epsilon': self.layer_norm_eps},
+                ffn_norm_args={'epsilon': self.layer_norm_eps},
                 normalization_position='pre',
                 ffn_type='geglu',
                 ffn_args={'activation': self.hidden_act},
