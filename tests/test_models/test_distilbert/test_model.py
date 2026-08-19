@@ -408,7 +408,14 @@ class TestMaskingContract:
         # (c) The mask is passed through unchanged for downstream heads.
         out = model({"input_ids": ids, "attention_mask": pad_mask}, training=False)
         np.testing.assert_array_equal(_np(out["attention_mask"]), pad_mask)
-        assert model({"input_ids": ids}, training=False)["attention_mask"] is None
+        # (d) An OMITTED mask is echoed back as all ones, not as `None`
+        # (decisions.md D-062). This assertion used to read `... is None`,
+        # i.e. it pinned the defect that made `predict()` unusable. The echo
+        # is a return-site substitution only: the encoder still sees `None`,
+        # which is exactly what (b) above measures.
+        echoed = _np(model({"input_ids": ids}, training=False)["attention_mask"])
+        np.testing.assert_array_equal(echoed, np.ones_like(echoed))
+        assert echoed.shape == ids.shape
 
 
 class TestHeadIntegration:

@@ -171,11 +171,74 @@ class TestTabMLossSerialization:
         assert rebuilt.share_training_batches is True
 
     def test_share_training_batches_false_keeps_the_row_axis(self):
-        """With unshared batches `y_true` already carries `B * k` rows."""
+        """With unshared batches `y_true` already carries `B * k` rows, so the
+        returned axis is `B * k` too -- one value per SUPPLIED row, which is
+        the axis `sample_weight` is sized against (decisions.md D-064).
+
+        This assertion used to read `(4,)`, the averaged-over-k shape, which is
+        the shared mode's answer applied to a batch that has no ensemble axis
+        left to average. It made `sample_weight` an unconditional crash here.
+        """
         rng = np.random.default_rng(1)
         y_pred = rng.uniform(0.05, 0.95, size=(4, 3, 1)).astype("float32")
         y_true = rng.integers(0, 2, size=(12, 1)).astype("float32")
         loss = TabMLoss("binary_crossentropy", share_training_batches=False)
         out = loss.call(ops.convert_to_tensor(y_true),
                         ops.convert_to_tensor(y_pred))
-        assert tuple(ops.shape(out)) == (4,)
+        assert tuple(ops.shape(out)) == (12,)
+
+
+class TestTabMLossUnsharedWeighting:
+    """The `share_training_batches=False` half of the F-68 family (D-064).
+
+    RED at 9d71a8c4d: every test here raised
+    `InvalidArgumentError: Incompatible shapes: [4] vs. [12] [Op:Mul]`.
+    """
+
+    @staticmethod
+    def _unshared(seed: int = 1):
+        rng = np.random.default_rng(seed)
+        y_pred = rng.uniform(0.05, 0.95, size=(4, 3, 1)).astype("float32")
+        y_true = rng.integers(0, 2, size=(12, 1)).astype("float32")
+        return y_true, y_pred
+
+    def test_sample_weight_of_the_label_length_is_accepted(self):
+        y_true, y_pred = self._unshared()
+        loss = TabMLoss("binary_crossentropy", share_training_batches=False)
+        value = float(ops.convert_to_numpy(
+            loss(y_true, y_pred, sample_weight=np.ones(12, "float32"))))
+        assert np.isfinite(value)
+
+    def test_each_row_is_weighted_INDIVIDUALLY(self):
+        """Anti-vacuity: a per-row weight must not degenerate to a global
+        rescale. Zeroing all rows but one must leave exactly that row's loss."""
+        y_true, y_pred = self._unshared()
+        loss = TabMLoss("binary_crossentropy", share_training_batches=False)
+        per_row = ops.convert_to_numpy(
+            loss.call(ops.convert_to_tensor(y_true),
+                      ops.convert_to_tensor(y_pred)))
+        for row in (0, 5, 11):
+            w = np.zeros(12, dtype="float32")
+            w[row] = 1.0
+            got = float(ops.convert_to_numpy(
+                loss(y_true, y_pred, sample_weight=w)))
+            # `sum_over_batch_size` divides by the full 12 rows.
+            np.testing.assert_allclose(got, per_row[row] / 12.0, rtol=1e-5)
+
+    def test_row_i_is_paired_with_prediction_row_i(self):
+        """Guards the ordering claim in the D-064 anchor: `reshape` is the
+        inverse of the model's own `(B * k, D) -> (B, k, D)`. A transposed
+        pairing would still have shape `(12,)` and still weight per row."""
+        y_true, y_pred = self._unshared()
+        loss = TabMLoss("binary_crossentropy", share_training_batches=False)
+        got = ops.convert_to_numpy(
+            loss.call(ops.convert_to_tensor(y_true),
+                      ops.convert_to_tensor(y_pred)))
+        flat = y_pred.reshape(12, 1)
+        expected = -(
+            y_true * np.log(flat) + (1.0 - y_true) * np.log(1.0 - flat)
+        ).mean(axis=-1)
+        np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-5)
+        # Anti-vacuity: the transposed pairing really is a different answer.
+        transposed = y_pred.transpose(1, 0, 2).reshape(12, 1)
+        assert not np.allclose(flat, transposed)

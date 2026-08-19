@@ -105,7 +105,11 @@ class DistilBERT(keras.Model):
 
     The model expects inputs as a dictionary containing 'input_ids', and
     optionally 'attention_mask' and 'position_ids'. It outputs a dictionary
-    containing the 'last_hidden_state' and the forwarded 'attention_mask'.
+    containing the 'last_hidden_state' and the forwarded 'attention_mask'. That
+    second entry is never ``None``: an omitted mask is echoed back as all ones
+    so the output structure does not depend on the input (which is what makes
+    ``predict({"input_ids": ...})`` work). The encoder still sees ``None``, so
+    the echo is numerically inert — it is not a mask being applied.
 
     **Architecture Overview:**
 
@@ -537,8 +541,13 @@ class DistilBERT(keras.Model):
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
-                 - ``attention_mask``: The original attention mask, passed
-                   through for convenience in downstream models.
+                 - ``attention_mask``: The attention mask, passed through for
+                   convenience in downstream models. When the caller omitted
+                   it, an all-ones mask of the same shape as ``input_ids`` is
+                   returned rather than ``None``, so the output structure is
+                   independent of the input and ``predict()`` works on a
+                   single-key input dict. The encoder itself still receives
+                   ``None`` — the echo does not change any numerics.
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
@@ -568,9 +577,36 @@ class DistilBERT(keras.Model):
                 training=training
             )
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-062
+        # The echoed mask is RESOLVED HERE, at the return, and nowhere else.
+        # Echoing a possibly-`None` `attention_mask` made the output structure
+        # depend on the input, so `DistilBERT.predict({"input_ids": ids})`
+        # raised `ValueError: Structures don't have the same nested structure`
+        # (Keras concatenates per-batch outputs and a `None` slot has no
+        # structure). `model(inputs)` always worked, which is why no test
+        # caught it -- worse, `test_model.py` PINNED `... is None` as a
+        # contract.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT drop the "attention_mask" key when it is None. That makes
+        #     the OUTPUT structure depend on the INPUT, which is the same
+        #     defect wearing different clothes, and it breaks
+        #     `create_distilbert_with_head`, which reads the key unconditionally.
+        #   * Do NOT resolve the mask BEFORE the encoder loop. It is an exact
+        #     no-op for DistilBERT (measured max|delta| = 0.000000e+00 over the
+        #     whole output on a 2-layer model, seq 12, against max|out| = 2.76)
+        #     but the SAME edit in `modern_bert/model.py` measured 6.415714e-01,
+        #     because `WindowAttention._call_grid` zero-pads a rank-2 mask up to
+        #     its synthetic grid. All three siblings therefore resolve at the
+        #     RETURN only, so no shipped checkpoint's numerics move and the rule
+        #     is uniform rather than per-model. See decisions.md D-062 (and
+        #     D-031 for the FNet/ModernBERT half).
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": attention_mask
+            "attention_mask": (
+                attention_mask if attention_mask is not None
+                else keras.ops.ones_like(input_ids)
+            ),
         }
 
     def load_pretrained_weights(

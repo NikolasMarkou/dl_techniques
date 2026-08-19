@@ -15,9 +15,23 @@ from dl_techniques.utils.logger import logger
 class TabMLoss(keras.losses.Loss):
     """Custom loss for TabM ensemble training.
 
-    The ensemble's ``k`` members are scored independently and then averaged, so
-    ``call`` returns one value **per input row** -- shape ``(batch_size,)``, the
-    same batch axis Keras uses for ``sample_weight`` and ``class_weight``.
+    ``call`` returns one value **per input row** -- the same batch axis Keras
+    uses for ``sample_weight`` and ``class_weight``. What that axis is depends
+    on ``share_training_batches``, because the two modes feed the model
+    differently:
+
+    * ``share_training_batches=True`` (default, and always at inference): the
+      caller supplies ``B`` rows, the model tiles them ``k`` ways, and every
+      member scores the same row. The ``k`` member losses are AVERAGED, so the
+      returned shape is ``(B,)`` -- one value per supplied row.
+    * ``share_training_batches=False``: the caller supplies ``B * k`` rows and
+      the model reshapes them so each member gets a disjoint slice. Each row is
+      then a distinct sample scored by exactly one member, there is nothing to
+      average over, and the returned shape is ``(B * k,)`` -- again one value
+      per supplied row.
+
+    In both cases the returned axis matches ``y_true``'s leading axis, so a
+    ``sample_weight`` / ``class_weight`` sized like the labels lines up.
 
     Args:
         base_loss: Base loss function to use.
@@ -64,19 +78,41 @@ class TabMLoss(keras.losses.Loss):
             y_pred: Ensemble predictions with shape (batch_size, k, n_outputs).
 
         Returns:
-            Per-sample loss with shape ``(batch_size,)`` -- the ensemble members'
-            losses averaged over ``k``.
+            Per-input-row loss: shape ``(B,)`` when ``share_training_batches``
+            (the ensemble members' losses averaged over ``k``), shape
+            ``(B * k,)`` when not (each row is one member's own sample).
         """
         # Flatten ensemble predictions: (batch_size, k, n_outputs) -> (batch_size * k, n_outputs)
         k = ops.shape(y_pred)[1]
         y_pred_flat = ops.reshape(y_pred, (-1, ops.shape(y_pred)[-1]))
 
-        if self.share_training_batches:
-            # Repeat true labels for each ensemble member
-            y_true_expanded = ops.repeat(y_true, k, axis=0)
-        else:
-            # Labels are already arranged for each ensemble member
-            y_true_expanded = y_true
+        if not self.share_training_batches:
+            # DECISION plan-2026-08-18T140459-7991552f/D-064: in the UNSHARED
+            # arrangement the caller supplied `B * k` rows and
+            # `TabM.call` reshaped them `(B * k, D) -> (B, k, D)` so each member
+            # got a disjoint slice. Every row is therefore a distinct sample
+            # scored by exactly ONE member.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT fall through to the shared branch's `reshape((-1, k))`
+            #     + `mean(axis=-1)`. There is no ensemble axis to average here;
+            #     doing it anyway returns `(B,)` against labels of `(B * k,)`,
+            #     which is what shipped: MEASURED at 9d71a8c4d,
+            #     `TabMLoss('binary_crossentropy', share_training_batches=False)
+            #     (y_true_(12,1), y_pred_(4,3,1), sample_weight=ones(12))` ->
+            #     `InvalidArgumentError: Incompatible shapes: [4] vs. [12]
+            #     [Op:Mul]`, i.e. `sample_weight`/`class_weight` was an
+            #     unconditional crash in this mode while the class docstring
+            #     claimed the axis lined up.
+            #   * Do NOT reorder `y_pred_flat`. `reshape` is the exact inverse
+            #     of the model's own `(B * k, D) -> (B, k, D)`, so flat row `i`
+            #     is input row `i`; a `transpose` here would silently pair each
+            #     label with another member's prediction.
+            # See decisions.md D-064.
+            return self._unreduced_base_loss(y_true, y_pred_flat)
+
+        # Repeat true labels for each ensemble member
+        y_true_expanded = ops.repeat(y_true, k, axis=0)
 
         # DECISION plan-2026-08-18T140459-7991552f/D-027: reduce the ENSEMBLE axis
         # here and return one value per input ROW. Do NOT `return

@@ -93,14 +93,32 @@ class DenoisingScoreMatchingLoss(keras.losses.Loss):
             y_pred: Predicted data from denoiser
 
         Returns:
-            Scalar loss value
+            Per-sample loss with shape ``(batch_size,)`` -- the squared error
+            averaged over every non-batch axis. ``Loss.__call__`` applies
+            ``sample_weight`` and the configured reduction on top of it.
         """
         # Simple MSE - the magic is in what we're predicting.
         # There is no timestep-dependent weighting here and no branch on a
-        # parameterisation; see the class-level D-032 anchor.
-        loss = ops.mean(ops.square(y_pred - y_true), axis=list(range(1, len(y_pred.shape))))
-
-        return ops.mean(loss)
+        # parameterisation; see the class-level D-034 anchor.
+        #
+        # DECISION plan-2026-08-18T140459-7991552f/D-063: return the PER-SAMPLE
+        # vector. Do NOT wrap this in a second `ops.mean(...)`. That is what it
+        # used to do, and a scalar `call()` silently degrades `sample_weight` to
+        # a GLOBAL rescale: `Loss.__call__` multiplies a scalar by the weight
+        # vector and then averages, so every per-sample weight collapses into
+        # `mean(sample_weight)`. MEASURED at 9d71a8c4d, B=4: base 1.5745 vs
+        # `sample_weight=[1,1,1,100]` 40.5424, ratio 25.7500 == mean(w) exactly,
+        # where the per-sample semantics give 59.5290. The class docstring
+        # points a caller wanting min-SNR weighting at `sample_weight`, so this
+        # is the one knob that must actually work. Note also that `rank <= 1` is
+        # handled explicitly: `axis=[]` is not a "reduce nothing" no-op in every
+        # backend. See decisions.md D-063.
+        rank = len(y_pred.shape)
+        if rank <= 1:
+            return ops.square(y_pred - y_true)
+        return ops.mean(
+            ops.square(y_pred - y_true), axis=list(range(1, rank))
+        )
 
     def get_config(self) -> Dict[str, Any]:
         return super().get_config()
@@ -156,7 +174,7 @@ class VLMDenoisingLoss(keras.losses.Loss):
 
         # Component losses
         # The `prediction_type='sample'` this used to pass was a no-op on a
-        # class that never read it (D-032); the sub-loss is a plain MSE.
+        # class that never read it (D-034); the sub-loss is a plain MSE.
         self.dsm_loss = DenoisingScoreMatchingLoss()
 
     def call(
