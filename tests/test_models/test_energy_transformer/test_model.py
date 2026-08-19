@@ -246,17 +246,50 @@ class TestSerialization:
         assert len(loaded.weights) == len(model.weights)
         np.testing.assert_allclose(before, after, atol=1e-4)
 
+    # DECISION plan-2026-08-19-a616f581/D-015: perturb ONE ELEMENT of
+    # `decoder_proj/kernel`, keep the `> 1e-2` bound, and assert the un-perturbed
+    # round trip FIRST. The bound was never the problem -- the perturbation was
+    # annihilated by `decoder_norm` and the old bite was TF32 rounding noise.
+    # WHAT NOT TO DO: do not lower the threshold to green this test (the delta it
+    # would then accept is floating-point residue, not an effect); do not restore
+    # the whole-kernel `+1.0`; do not drop arm (0) or arm (2). See decisions.md
+    # D-015.
     def test_round_trip_compare_is_alive(self, fixed_batch, tmp_path):
         """GUARD-BITE: a +1.0 perturbation of ONE loaded weight must break the compare.
 
-        **Perturb a POST-NORM weight** (`decoder_proj`), never `weights[0]`.
-        Measured over all 13 weights of the tiny MIM model: perturbing the
-        patch-embed kernel (`weights[0]`) moves the output by only 9.4e-04 — a
-        ~5x margin over atol=1e-4, i.e. a nearly-dead guard — because
-        `EnergyLayerNorm` heads every one of the T descent steps and normalizes
-        an upstream UNIFORM shift away. `decoder_proj` sits AFTER the last norm,
-        so the same +1.0 moves the output by O(1e0-1e1). Do NOT "simplify" this
-        back to `model.weights[0]`.
+        **Perturb ONE ELEMENT of a POST-NORM kernel** (`decoder_proj`), never
+        `weights[0]`, and never the WHOLE kernel.
+
+        Two separate traps are encoded here, both MEASURED:
+
+        1. `weights[0]` (the patch-embed kernel) is a nearly-dead target: +1.0
+           moves the output by only 9.4e-04, a ~5x margin over atol=1e-4,
+           because `EnergyLayerNorm` heads every one of the T descent steps and
+           normalizes an upstream UNIFORM shift away.
+        2. Adding +1.0 to the *entire* `decoder_proj` kernel -- which is what
+           this guard did until 2026-08-19 -- is ANNIHILATED, for the same
+           reason one level lower. `decoder_norm` is a stock
+           `LayerNormalization` (`beta=0`, `gamma=1` at init), so `x` is
+           EXACTLY zero-mean along the feature axis, and a uniform kernel shift
+           contributes `sum_i x_i == 0` to every output. What survives is pure
+           floating-point cancellation residue, and it is HARDWARE-DEPENDENT:
+           1.6e-05..2.5e-05 over 10 seeds in fp32 on CPU, but 1.8e-02 on an
+           RTX 4090, where the TF32 matmul's ~1e-3 relative epsilon inflates it
+           by three orders of magnitude. The original `> 1e-2` bound was
+           calibrated against that GPU noise (the commit that introduced this
+           test recorded "max|d|=1.92e-02"), so the guard passed on GPU and was
+           RED on CPU while never once observing a real effect.
+
+        A SINGLE-element +1.0 is not annihilated -- it shifts one output
+        channel by `x_0` -- and measures 2.28..3.97 over the same 10 seeds, on
+        both devices. The `> 1e-2` bound is therefore UNCHANGED: it now carries
+        a 228x margin instead of a 1.2x one. Do NOT "simplify" this back to
+        either `model.weights[0]` or a whole-kernel shift.
+
+        The un-perturbed round trip is asserted FIRST (measured bit-identical,
+        max|delta| = 0.0). Without that baseline this guard would also pass
+        when the round trip is BROKEN -- fresh random weights move the output
+        too -- and would then be asserting nothing about the perturbation.
         """
         image, input_mask, _t, _w = fixed_batch
         model = _mim()
@@ -268,9 +301,24 @@ class TestSerialization:
         model.save(path)
         loaded = keras.models.load_model(path)
 
-        target = next(w for w in loaded.weights if "decoder_proj" in w.path)
-        target.assign(keras.ops.add(target.value, 1.0))
+        # (0) BASELINE. The bite below is only attributable to the perturbation
+        # if the round trip itself contributes nothing.
+        np.testing.assert_allclose(
+            before,
+            keras.ops.convert_to_numpy(loaded((image, input_mask), training=False)),
+            atol=1e-4,
+            err_msg="the round trip already differs BEFORE any perturbation",
+        )
 
+        target = next(
+            w for w in loaded.weights if w.path.endswith("decoder_proj/kernel")
+        )
+        pristine = keras.ops.convert_to_numpy(target.value).copy()
+
+        # (1) THE BITE: one element, +1.0.
+        perturbed = pristine.copy()
+        perturbed[0, 0] += 1.0
+        target.assign(perturbed)
         after = keras.ops.convert_to_numpy(
             loaded((image, input_mask), training=False)
         )
@@ -280,6 +328,27 @@ class TestSerialization:
         assert max_delta > 1e-2, f"round-trip guard is dead: max|delta|={max_delta:.3e}"
         with pytest.raises(AssertionError):
             np.testing.assert_allclose(before, after, atol=1e-4)
+
+        # (2) INERTNESS CONTROL, and the reason for (1)'s shape: the uniform
+        # shift this guard used to apply is annihilated by `decoder_norm`.
+        # Stated as a RATIO so the claim holds on CPU (2e-05 vs 2.4) and on a
+        # TF32 GPU (1.8e-02 vs 2.8) alike.
+        target.assign(pristine + 1.0)
+        inert = float(
+            np.max(
+                np.abs(
+                    before
+                    - keras.ops.convert_to_numpy(
+                        loaded((image, input_mask), training=False)
+                    )
+                )
+            )
+        )
+        assert inert < 0.01 * max_delta, (
+            "a WHOLE-kernel +1.0 is supposed to be annihilated by decoder_norm's "
+            f"zero-mean output; it moved the model by {inert:.3e} against the "
+            f"single-element bite's {max_delta:.3e}"
+        )
 
 
 class TestMaskedLossThroughFit:
