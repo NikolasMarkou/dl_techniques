@@ -2773,3 +2773,1175 @@ class TestPretrainedBehaviouralArmIsProvenRed:
             if (problem := _probe_pretrained_raises(fn, kwargs))
         }
         assert not problems, problems
+
+
+# ---------------------------------------------------------------------------
+# Package-shape guards (plan-2026-08-19T163559-499b6f0e step 7).
+#
+# Three families from guide-v2 §5: R-039's mechanical half (a `References:`
+# section on the main module's docstring), R-043 (`from_variant` must raise a
+# ValueError that ENUMERATES the available keys) and R-051 (a module-level
+# `create_<name>(variant=...)` delegates to `from_variant` with no logic of its
+# own). Unlike step 6's five freeze-forward guards, all three of these have LIVE
+# offenders at HEAD; every one is waived BY NAME with the read that clears it and
+# routed to a later fix step, never by narrowing the predicate.
+# ---------------------------------------------------------------------------
+
+
+def _init_imported_submodules(pkgdir: Path, pkg_suffix: str) -> dict:
+    """Every submodule of ``pkgdir`` that its own ``__init__.py`` imports FROM.
+
+    Contract: takes the package directory and its dotted path relative to the
+    sweep root (``"accunet"``, ``"time_series"``, ``"SAM/SAM2"`` -> ``"SAM.SAM2"``);
+    returns ``{submodule_dotted_path: [imported names]}``. Returns ``{}`` for a
+    package with no ``__init__.py`` or no first-party imports.
+
+    Both spellings are resolved, because this tree uses both: the relative
+    ``from .model import X`` (``node.level == 1``) and the ABSOLUTE
+    ``from dl_techniques.models.accunet.model import X``. Reading only the
+    relative form is not a stylistic miss -- measured 2026-08-20, it drops the
+    main module of 15 packages (``accunet``, ``detr``, ``fastvlm``, ``lewm``,
+    ``nam``, ``pw_fnet``, ``scunet``, ``shgcn``, ``som``, ``thera``,
+    ``tree_transformer``, ``video_jepa``, ``vq_vae``, ``vq_vae_rotation``,
+    ``latent_gmm_registration``) and would silently shrink the subject set to the
+    packages that happen to spell their re-exports relatively.
+
+    The absolute form is matched on the package's own path SUFFIX rather than on
+    a hard-coded ``dl_techniques.models.`` prefix, so the injected fixtures below
+    -- which live under ``tmp_path`` and have no such prefix -- exercise the same
+    code path the real tree does.
+
+    ``node.level > 1`` is deliberately skipped: it reaches OUT of this package,
+    so whatever it names is not this package's own module. Measured 0 today.
+    """
+    init = pkgdir / "__init__.py"
+    if not init.exists():
+        return {}
+    try:
+        tree = ast.parse(init.read_text())
+    except SyntaxError:  # covered by test_every_package_imports
+        return {}
+    marker = "." + pkg_suffix + "."
+    mods: dict = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            if node.level > 1:
+                continue
+            rel = node.module or ""
+        else:
+            full = "." + (node.module or "")
+            if marker not in full:
+                continue
+            rel = full.split(marker, 1)[1]
+        if not rel:
+            continue
+        mods.setdefault(rel, []).extend(alias.name for alias in node.names)
+    return mods
+
+
+def _base_names(cls: ast.ClassDef) -> List[str]:
+    """The last name component of each of ``cls``'s bases (``keras.Model`` -> ``Model``)."""
+    out = []
+    for base in cls.bases:
+        if isinstance(base, ast.Name):
+            out.append(base.id)
+        elif isinstance(base, ast.Attribute):
+            out.append(base.attr)
+    return out
+
+
+def _is_model_module(tree: ast.Module) -> bool:
+    """True when a module defines a model at MODULE scope.
+
+    Two shapes, both deliberate:
+
+    * a class whose base's last component is ``Model`` (``keras.Model``,
+      ``keras.models.Model``, an already-imported ``Model``);
+    * a module-level ``create_*`` function -- which is what keeps the FUNCTIONAL
+      builder packages in the subject set. ``convunext``, ``darkir`` and
+      ``bias_free_denoisers`` define no ``keras.Model`` subclass at all (they
+      return ``keras.Model(inputs, outputs)``), and a class-only predicate would
+      drop all three -- silently excluding two of the packages this guard then
+      goes on to find offending.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and "Model" in _base_names(node):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+            "create_"
+        ):
+            return True
+    return False
+
+
+@_memo_default_roots
+def _sweep_main_modules(roots=None, src_root=None):
+    """Resolve each package's MAIN MODULE(S) THROUGH its ``__init__.py``.
+
+    Contract: returns ``(mains, counts)``. ``mains`` maps ``"relpath.py"`` to
+    ``(package_name, module_docstring_or_None)``; ``counts`` carries the
+    population and the packages for which nothing resolved.
+
+    **This resolution is the substance of the guard, not plumbing.** The
+    step-EXPLORE census used a two-NAME heuristic -- look for ``model.py`` or
+    ``<pkg>.py`` -- and reported ``main_doc_present=N`` for 17 packages purely
+    because they name their module something else (``bert/bert.py`` is fine but
+    ``gemma/gemma3.py``, ``qwen/qwen3.py``, ``mobilenet/mobilenet_v4.py``,
+    ``masked_autoencoder/mae.py`` are not ``model.py``). That is a filename
+    artifact, not a missing docstring, and acting on it would have "fixed" 17
+    packages that were never broken.
+
+    A package whose ``__init__.py`` re-exports nothing first-party (``SAM``,
+    which documents in its own docstring WHY it exports nothing) is resolved by
+    recursing into its subpackages -- that is what reaches
+    ``SAM/SAM1/model.py``, ``SAM/SAM2/model.py`` and ``SAM/SAM3/sam3_image.py``.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = MODELS_DIR.parent if src_root is None else src_root
+    mains: dict = {}
+    counts = {"n_packages": 0, "n_main_modules": 0, "n_packages_without_main": 0}
+    unresolved: List[str] = []
+
+    def handle(pkgdir: Path, pkg_suffix: str, label: str) -> bool:
+        found = False
+        for sub in _init_imported_submodules(pkgdir, pkg_suffix):
+            path = pkgdir / (sub.replace(".", "/") + ".py")
+            if not path.exists():
+                continue
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:
+                continue
+            if not _is_model_module(tree):
+                continue
+            rel = path.relative_to(src_root).as_posix()
+            mains[rel] = (label, ast.get_docstring(tree))
+            found = True
+        if found:
+            return True
+        for child in sorted(pkgdir.iterdir()):
+            if (
+                child.is_dir()
+                and child.name != "__pycache__"
+                and (child / "__init__.py").exists()
+            ):
+                if handle(child, f"{pkg_suffix}.{child.name}", label):
+                    found = True
+        return found
+
+    for root in roots:
+        for pkgdir in sorted(Path(root).iterdir()):
+            if not (
+                pkgdir.is_dir()
+                and pkgdir.name != "__pycache__"
+                and (pkgdir / "__init__.py").exists()
+            ):
+                continue
+            counts["n_packages"] += 1
+            if not handle(pkgdir, pkgdir.name, pkgdir.name):
+                unresolved.append(pkgdir.name)
+    counts["n_main_modules"] = len(mains)
+    counts["n_packages_without_main"] = len(unresolved)
+    counts["packages_without_main"] = tuple(sorted(unresolved))
+    return mains, counts
+
+
+#: A ``References`` heading, in every spelling this tree actually uses:
+#: Google ``References:``, reST ``References`` + underline, and the Markdown-ish
+#: ``**References:**`` that a handful of docstrings carry.
+_REFERENCES_HEADING_RE = re.compile(r"^[ \t]*\**\s*References?\s*\**\s*:?[ \t]*$")
+_REST_UNDERLINE_RE = re.compile(r"^[ \t]*[-=~^]{3,}[ \t]*$")
+
+
+def _references_section_state(doc) -> str:
+    """``"ok"``, ``"no-docstring"``, ``"no-heading"`` or ``"empty-body"``.
+
+    ``"empty-body"`` is the whole reason this returns a state rather than a bool:
+    the vacuous version of this guard is ``"References:" in doc``, which a
+    heading with nothing under it satisfies. The body is taken as every line
+    after the heading (skipping a reST underline), and at least one must be
+    non-blank.
+    """
+    if not doc or not doc.strip():
+        return "no-docstring"
+    lines = doc.splitlines()
+    idx = None
+    for i, line in enumerate(lines):
+        if _REFERENCES_HEADING_RE.match(line):
+            idx = i
+            break
+    if idx is None:
+        return "no-heading"
+    body = lines[idx + 1 :]
+    if body and _REST_UNDERLINE_RE.match(body[0]):
+        body = body[1:]
+    if not any(line.strip() for line in body):
+        return "empty-body"
+    return "ok"
+
+
+#: Live R-039-mechanical-half offenders at HEAD, waived BY NAME with the read
+#: that clears them, keyed by ``relpath`` and carrying their routing.
+#:
+#: Measured 2026-08-20: 108 main modules resolve across 72 of the 73 packages;
+#: **88 carry a non-empty ``References`` section, 18 carry no heading at all, and
+#: 2 carry no module docstring at all.** Zero carry an EMPTY section -- so the
+#: vacuous form of this predicate (``"References:" in doc``) would have agreed
+#: with the strict one today, and the empty-body arm is proven only by injection.
+#:
+#: Two of the twenty are genuine EXEMPTIONS (a composition module over siblings
+#: that carry the citation). The other eighteen are real defects; they are waived
+#: so the guard can ship GREEN over the rest of the tree and are routed to
+#: **step 19** (R-039 is graded MEDIUM in findings/guide-v2-rubric.md). They are
+#: NOT fixed here: step 7 ships the guard, step 19 ships the docstrings.
+_MAIN_DOC_REFERENCES_WAIVERS = {
+    # --- EXEMPT: composition/integration modules whose citations live on the
+    # sibling main modules they compose, both of which pass this guard.
+    "models/dino/training.py": (
+        "EXEMPT -- DINOTrainingModel is the `fit()` harness around the DINO "
+        "backbones, not an architecture; the Caron et al. citation lives on "
+        "models/dino/dino_v1.py, which passes this guard"
+    ),
+    "models/sd3_mmdit/pipeline.py": (
+        "EXEMPT -- its own docstring says it 'integrates the four already-built, "
+        "separately-tested pieces'; the SD3 citation lives on "
+        "models/sd3_mmdit/transformer.py, which passes this guard"
+    ),
+    # --- ROUTED to step 19: no `References` heading. Each is a real
+    # architecture with a real paper behind it.
+    "models/bias_free_denoisers/bfcnn.py": "ROUTE step 19 -- bias-free CNN denoiser, no References section",
+    "models/bias_free_denoisers/bfconvunext.py": "ROUTE step 19 -- bias-free arm of ConvUNext, no References section",
+    "models/convunext/model.py": "ROUTE step 19 -- ConvNeXt-derived U-Net, no References section",
+    "models/fastvlm/model.py": "ROUTE step 19 -- FastVLM, no References section",
+    "models/ideogram4/vae.py": "ROUTE step 19 -- names the Flux2 reference in prose but has no References section",
+    "models/latent_gmm_registration/model.py": "ROUTE step 19 -- no References section",
+    "models/lewm/model.py": "ROUTE step 19 -- 'Keras 3 port' with no References section naming the source",
+    "models/memory_bank/wave_field_memory_llm.py": "ROUTE step 19 -- no References section",
+    "models/nam/model.py": "ROUTE step 19 -- 'merges three architectures', none of them cited",
+    "models/pw_fnet/model.py": "ROUTE step 19 -- no References section",
+    "models/sd3_mmdit/text_encoders.py": "ROUTE step 19 -- CLIP/OpenCLIP/T5 towers, none cited",
+    "models/sd3_mmdit/vae.py": "ROUTE step 19 -- reuse wrapper; its reuse target (ideogram4/vae.py) is also an offender",
+    "models/shgcn/model.py": "ROUTE step 19 -- no References section",
+    "models/video_jepa/model.py": "ROUTE step 19 -- no References section",
+    "models/yolo12/feature_extractor.py": "ROUTE step 19 -- no References section",
+    "models/yolo12/multitask.py": "ROUTE step 19 -- 76-line docstring, no References section",
+    # --- ROUTED to step 19: NO module docstring at all. Both are reached by the
+    # `create_*` arm of the main-module resolver; each package's architecture
+    # module (mae.py / mlm.py) passes this guard.
+    "models/masked_autoencoder/utils.py": "ROUTE step 19 -- module has no docstring at all",
+    "models/masked_language_model/utils.py": "ROUTE step 19 -- module has no docstring at all",
+}
+
+#: The one package for which NO main module resolves, with the read that clears
+#: it. Pinned by name so the number cannot drift silently: a second package
+#: appearing here means either a real regression (a package stopped re-exporting
+#: its model) or a resolver blind spot, and both must be looked at.
+_PACKAGES_WITHOUT_MAIN_MODULE = {
+    "power_sampling": (
+        "designed §5.6 exemption -- its own __init__.py documents it as a "
+        "DECODING-ALGORITHM package: it defines no keras.Model subclass and no "
+        "create_* factory, only PowerSampler (a plain object) plus config/ops/"
+        "protocols. plan.md's Edge Cases name it as the designed exception and "
+        "Phase 3 batch 1 (step 9) settles its shape classification."
+    ),
+}
+
+
+#: A package whose main module's docstring has a `References` heading with an
+#: EMPTY body -- the shape a `"References:" in doc` predicate cannot see.
+_INJECTED_REFERENCES_DEFECT_INIT = "from .model import InjectedModel\n"
+_INJECTED_REFERENCES_DEFECT_MODEL = '''"""Injected architecture with an empty References section.
+
+References:
+"""
+
+
+class InjectedModel(keras.Model):
+    pass
+'''
+
+#: The same module with one citation under the heading.
+_INJECTED_REFERENCES_FIXED_MODEL = '''"""Injected architecture with a real References section.
+
+References:
+    - Author et al. (2020). Some Paper. arXiv:0000.00000
+"""
+
+
+class InjectedModel(keras.Model):
+    pass
+'''
+
+
+def _write_package_fixture(tmp_path: Path, init_source: str, *files) -> Tuple[tuple, Path]:
+    """Write a fake PACKAGE (``__init__.py`` plus named modules); return roots.
+
+    Needed instead of ``_write_fixture`` because these guards resolve the main
+    module THROUGH ``__init__.py``, so the fixture must have one.
+    """
+    pkg = tmp_path / "models" / "injected"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(init_source)
+    for name, source in files:
+        (pkg / name).write_text(source)
+    return (tmp_path / "models",), tmp_path
+
+
+class TestMainModuleDocstringCitesReferences:
+    """Every package's MAIN module must carry a non-empty ``References`` section.
+
+    R-039's mechanical half only. Whether the citations are the RIGHT ones, and
+    whether the rest of the docstring is substantive prose rather than a restated
+    variant dict, is SEMANTIC and belongs to Phase 3 (steps 9-16) -- this guard
+    cannot and does not judge it.
+
+    Measured 2026-08-20 over 73 packages: **108 main modules, 72 packages covered,
+    88 clean, 20 offenders** (18 with no heading, 2 with no docstring at all, 0
+    with an empty section). Every offender is waived by name in
+    ``_MAIN_DOC_REFERENCES_WAIVERS`` with its read and its routing.
+
+    **The resolution through ``__init__.py`` is the guard.** The census this plan
+    inherited used a two-filename heuristic (``model.py`` or ``<pkg>.py``) and
+    reported ``main_doc_present=N`` for 17 packages that simply name their module
+    something else. Acting on that number would have edited 17 healthy packages
+    and still missed every one of the 20 real offenders above.
+    """
+
+    def test_every_main_module_docstring_has_a_references_section(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-013
+        # WHAT NOT TO DO: do not replace this with `"References:" in doc`. That
+        # is the vacuous form -- it passes on a heading with nothing under it,
+        # which is exactly the shape the injected fixture below ships. And do NOT
+        # resolve the main module by filename (`model.py` / `<pkg>.py`): measured
+        # 2026-08-20, that heuristic misreports 17 packages as undocumented
+        # purely because they name their module `gemma3.py` / `qwen3.py` /
+        # `mae.py`, and it never reaches SAM's three nested generations at all.
+        # The 20 live offenders are WAIVED BY NAME and routed to step 19; they
+        # are not fixed here and the predicate is not narrowed to hide them.
+        # See decisions.md D-013.
+        mains, _ = _sweep_main_modules()
+        live = [
+            f"{rel} ({pkg}): {state}"
+            for rel, (pkg, doc) in sorted(mains.items())
+            for state in [_references_section_state(doc)]
+            if state != "ok" and rel not in _MAIN_DOC_REFERENCES_WAIVERS
+        ]
+        assert not live, (
+            "a model package's main module has no non-empty `References:` "
+            "section (guide-v2 §5.1 / R-039). Add the papers the implementation "
+            "actually draws on -- models/resnet/model.py is the house exemplar -- "
+            "or, if the module is a composition over siblings that carry the "
+            "citation, add it to _MAIN_DOC_REFERENCES_WAIVERS with that read. "
+            "Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_references_waivers_still_match_a_real_offender(self):
+        """A waiver matching nothing is a waiver hiding nothing.
+
+        This one has real teeth: step 19 FIXES eighteen of these twenty, and each
+        fix must delete its waiver in the same commit or this test goes red.
+        """
+        mains, _ = _sweep_main_modules()
+        offending = {
+            rel
+            for rel, (_, doc) in mains.items()
+            if _references_section_state(doc) != "ok"
+        }
+        stale = sorted(set(_MAIN_DOC_REFERENCES_WAIVERS) - offending)
+        assert not stale, (
+            "these References waivers no longer match an offending main module "
+            f"-- delete them (the docstring was fixed) or re-key them: {stale}"
+        )
+
+    def test_the_main_module_resolver_found_the_tree(self):
+        """Anti-vacuity floor, DERIVED at landing time from the measurement.
+
+        Measured 2026-08-20: 73 packages, **108 main modules**, 72 packages with
+        at least one. The floors are ``int(0.8 * n)`` -- 86 modules and 57
+        packages -- so a fifth of the tree may be refactored away before this
+        guard is allowed to call itself alive. A floor a few percent under the
+        population would trip on a legitimate rename, and would say nothing more
+        about whether the resolver still walks the tree.
+        """
+        mains, counts = _sweep_main_modules()
+        assert counts["n_packages"] >= 58, (
+            f"expected 73 model packages, found {counts['n_packages']}"
+        )
+        assert counts["n_main_modules"] >= 86, (
+            f"expected ~108 resolvable main modules, found "
+            f"{counts['n_main_modules']}: the __init__.py resolver stopped "
+            f"seeing the tree ({counts})"
+        )
+        covered = {pkg for pkg, _ in mains.values()}
+        assert len(covered) >= 57, (
+            f"expected ~72 packages with a resolvable main module, found "
+            f"{len(covered)}"
+        )
+
+    def test_the_only_unresolved_package_is_the_designed_exemption(self):
+        """``power_sampling`` and nothing else may resolve to no main module.
+
+        Pinned rather than counted: a package that stops re-exporting its model
+        would silently leave this guard's subject set, and a bare
+        ``<= 1 unresolved`` assertion would not notice which one it was.
+        """
+        _, counts = _sweep_main_modules()
+        unexpected = sorted(
+            set(counts["packages_without_main"]) - set(_PACKAGES_WITHOUT_MAIN_MODULE)
+        )
+        assert not unexpected, (
+            "these packages no longer expose a model module through their "
+            "__init__.py, so they have silently left the R-039 subject set: "
+            f"{unexpected}"
+        )
+
+    def test_predicate_fires_on_an_empty_references_section(self, tmp_path):
+        """Dead-component probe: an EMPTY section must go RED, not just a missing one."""
+        roots, src_root = _write_package_fixture(
+            tmp_path,
+            _INJECTED_REFERENCES_DEFECT_INIT,
+            ("model.py", _INJECTED_REFERENCES_DEFECT_MODEL),
+        )
+        mains, counts = _sweep_main_modules(roots, src_root)
+        assert counts["n_main_modules"] == 1, counts
+        (rel, (pkg, doc)), = mains.items()
+        assert rel == "models/injected/model.py", mains
+        assert "References:" in doc, "the vacuous predicate would PASS this file"
+        assert _references_section_state(doc) == "empty-body"
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once one citation is written under the heading."""
+        roots, src_root = _write_package_fixture(
+            tmp_path,
+            _INJECTED_REFERENCES_DEFECT_INIT,
+            ("model.py", _INJECTED_REFERENCES_FIXED_MODEL),
+        )
+        mains, counts = _sweep_main_modules(roots, src_root)
+        assert counts["n_main_modules"] == 1, "the fixture must still be reached"
+        (_, (_, doc)), = mains.items()
+        assert _references_section_state(doc) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# R-043: `from_variant` must raise a ValueError that ENUMERATES the valid keys.
+# ---------------------------------------------------------------------------
+
+
+def _import_model_class(rel: str, class_name: str):
+    """Import ``rel`` (a path relative to ``SRC_ROOT``) and return ``(module, cls)``.
+
+    Contract: returns ``(None, None)`` when the module does not import or the
+    name is gone -- ``test_every_package_imports`` is what fails on a broken
+    module, and this guard must not double-report it.
+    """
+    dotted = "dl_techniques." + rel[: -len(".py")].replace("/", ".")
+    try:
+        module = importlib.import_module(dotted)
+    except Exception:  # noqa: BLE001 - covered by test_every_package_imports
+        return None, None
+    return module, getattr(module, class_name, None)
+
+
+@_memo_default_roots
+def _sweep_from_variant_classes(roots=None, src_root=None):
+    """Every MODULE-LEVEL class under ``models/`` that defines ``from_variant``.
+
+    Contract: returns ``(sites, counts)`` where ``sites`` is a sorted list of
+    ``(relpath, class_name, lineno)``. Module-level only: a ``from_variant`` on a
+    nested class is not part of a package's public shape and is measured 0 today.
+
+    This is the POPULATION, and the runtime arm below is checked against it --
+    never against its own list of things it failed to reach, which is blind by
+    construction to every site the resolver never sees.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    sites = []
+    for rel, tree in _iter_modules(roots, src_root):
+        for cls in tree.body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for fn in cls.body:
+                if (
+                    isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and fn.name == "from_variant"
+                ):
+                    sites.append((rel, cls.name, fn.lineno))
+    sites.sort()
+    return sites, {"n_from_variant": len(sites)}
+
+
+#: Names a module-level variant table goes by in this tree. Deliberately WIDER
+#: than ``_LEGACY_VARIANT_TABLE_RE`` above (which exists to FLAG legacy names):
+#: this one only has to FIND the keys, so it also accepts ``MODEL_VARIANTS``
+#: itself and ``PRESETS`` (``sd3_mmdit/config.py``).
+_VARIANT_TABLE_NAME_RE = re.compile(r"^(?:[A-Z0-9_]*VARIANTS?|VARIANT_CONFIGS|PRESETS)$")
+
+#: Required-argument kinds ``_resolve_required_arg`` does not carry, all of them
+#: plain sizes. Kept LOCAL to this guard rather than merged into
+#: ``_resolve_required_arg``: that helper is the ``pretrained`` arm's, and its
+#: reach ("42 of 45 sites") is a number step 6 recorded and asserts against.
+#: Widening it here would silently move that measurement.
+_GENERIC_SIZE_ARGS = {
+    "seq_len": 16,
+    "output_dim": 2,
+    "input_dim": 4,
+    "n_num_features": 3,
+    "cat_cardinalities": (),
+    "context_len": 16,
+    "forecast_len": 4,
+    "num_features": 3,
+}
+
+
+def _from_variant_probe_kwargs(fn) -> Tuple[dict, str]:
+    """Arguments needed to CALL ``from_variant``, other than ``variant`` itself.
+
+    Contract: returns ``(kwargs, "")`` or ``({}, reason)``. Values are arbitrary
+    -- the contract under test (an unknown variant raises) fires before anything
+    is built, so nothing here is ever constructed. Delegates to
+    ``_resolve_required_arg`` first so the two guards cannot disagree about what
+    a ``vocab_size`` is, and falls back to ``_GENERIC_SIZE_ARGS``.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        return {}, f"uninspectable signature: {exc}"
+    kwargs = {}
+    for param in sig.parameters.values():
+        if param.name in ("variant", "cls", "self"):
+            continue
+        if param.default is not param.empty:
+            continue
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        value, reason = _resolve_required_arg(param.name, fn)
+        if reason:
+            if param.name not in _GENERIC_SIZE_ARGS:
+                return {}, reason
+            value = _GENERIC_SIZE_ARGS[param.name]
+        kwargs[param.name] = value
+    return kwargs, ""
+
+
+def _variant_keys_for(cls, module) -> Tuple[Any, str]:
+    """The variant keys ``cls.from_variant`` is supposed to enumerate.
+
+    Contract: returns ``(sorted_keys, source)``, or ``(None, "unresolved")``.
+    A three-step cascade, first hit wins:
+
+    1. ``cls.MODEL_VARIANTS`` -- the house shape (models/CLAUDE.md Axis 2);
+    2. a class DEFINED IN THE SAME MODULE carrying one. This is what clears
+       ``DINOv2``, whose ``from_variant`` deliberately reads
+       ``DINOv2VisionTransformer.MODEL_VARIANTS`` -- one table, one home;
+    3. module-level dicts whose name matches ``_VARIANT_TABLE_NAME_RE``.
+
+    Step 2 is restricted to classes whose ``__module__`` is this module: without
+    that, an IMPORTED sibling's table would be handed to a class that has none,
+    and the guard would assert against keys the class never had. That is exactly
+    the trap step 6 hit from the other direction -- an injected class relying on
+    an attribute being ABSENT picked up a neighbour's -- which is why the
+    injections below live in a throwaway ``types.ModuleType`` and not beside
+    their twins in this file.
+    """
+    table = getattr(cls, "MODEL_VARIANTS", None)
+    if isinstance(table, dict) and table:
+        return sorted(table), "class.MODEL_VARIANTS"
+    for name, obj in vars(module).items():
+        if not inspect.isclass(obj):
+            continue
+        if getattr(obj, "__module__", None) != getattr(module, "__name__", None):
+            continue
+        sibling = getattr(obj, "MODEL_VARIANTS", None)
+        if isinstance(sibling, dict) and sibling:
+            return sorted(sibling), f"sibling {name}.MODEL_VARIANTS"
+    keys: set = set()
+    for name, obj in vars(module).items():
+        if _VARIANT_TABLE_NAME_RE.match(name) and isinstance(obj, dict) and obj:
+            keys |= set(obj)
+    if keys:
+        return sorted(keys), "module-level table"
+    return None, "unresolved"
+
+
+_BRACKETED_LIST_RE = re.compile(r"\[[^\]]+\]")
+
+
+def _probe_from_variant_enumeration(cls, module) -> str:
+    """``""`` if ``cls.from_variant`` enumerates its keys on a miss, else why not.
+
+    Cheap by construction: an unknown variant must be rejected BEFORE anything is
+    constructed, so this never builds a model and never runs a forward pass. If a
+    class ever does construct first, this probe gets slow and that is itself the
+    finding.
+    """
+    fn = getattr(cls, "from_variant", None)
+    if fn is None:  # pragma: no cover - the AST sweep found it
+        return "class has no from_variant attribute"
+    kwargs, reason = _from_variant_probe_kwargs(fn)
+    if reason:
+        return f"not callable by the probe: {reason}"
+    keys, source = _variant_keys_for(cls, module)
+    try:
+        fn("__no_such_variant__", **kwargs)
+    except ValueError as exc:
+        message = str(exc)
+    except Exception as exc:  # noqa: BLE001 - any other type is the finding
+        return f"raised {type(exc).__name__} rather than ValueError: {str(exc)[:120]}"
+    else:
+        return "an unknown variant did not raise at all"
+    if keys is None:
+        # No table reachable from this module. The enumeration cannot be checked
+        # key-by-key, but the WEAK arm still holds: the message must carry a
+        # list, not a bare "unknown variant".
+        if not _BRACKETED_LIST_RE.search(message):
+            return f"unresolved table, and the message lists nothing: {message[:120]}"
+        return ""
+    missing = [k for k in keys if k not in message]
+    if missing:
+        return (
+            f"ValueError does not name {len(missing)} of {len(keys)} keys from "
+            f"{source} ({missing[:5]}): {message[:120]}"
+        )
+    return ""
+
+
+#: Classes whose enumeration this guard checks only WEAKLY (the message must
+#: carry a bracketed list, but the keys cannot be verified against a table),
+#: with the read that explains why the table is unreachable from the module.
+_FROM_VARIANT_WEAK_ENUMERATION = {
+    ("models/sd3_mmdit/vae.py", "SD3VAE"): (
+        "its from_variant delegates to create_sd3_vae -> get_sd3_config, whose "
+        "table is `PRESETS` in the SIBLING module sd3_mmdit/config.py; the "
+        "message it raises does enumerate (`Available: ['full', 'tiny']`), but "
+        "this guard verifies the list is present rather than key-exact"
+    ),
+}
+
+
+class _InjectedBareRaise:
+    """``from_variant`` that raises without naming a single key.
+
+    This is the defect R-043 exists to prevent, and it is precisely what a
+    ``pytest.raises(ValueError)`` guard PASSES. It carries a real
+    ``MODEL_VARIANTS`` table so the key resolver reaches it.
+    """
+
+    MODEL_VARIANTS = {"tiny": {}, "base": {}, "large": {}}
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError("unknown variant")
+        return cls()
+
+
+class _InjectedEnumeratingRaise:
+    """The same class, repaired: the message lists the available keys."""
+
+    MODEL_VARIANTS = {"tiny": {}, "base": {}, "large": {}}
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available: {sorted(cls.MODEL_VARIANTS)}"
+            )
+        return cls()
+
+
+def _throwaway_module(**members) -> types.ModuleType:
+    """A module namespace containing exactly ``members`` and nothing else.
+
+    Step 6's hard-won lesson, applied: an injected class that must NOT find a
+    variant table cannot live beside its twins in this file, because
+    ``_variant_keys_for``'s step-2/3 fallbacks would hand it a neighbour's and
+    the RED proof would quietly become a lie. Each fixture gets its own empty
+    namespace, so the only table in scope is the one the fixture defines.
+    """
+    module = types.ModuleType("injected_from_variant_fixture")
+    for name, obj in members.items():
+        setattr(module, name, obj)
+    return module
+
+
+class TestFromVariantEnumeratesItsKeys:
+    """``from_variant`` must reject an unknown variant by LISTING what is valid.
+
+    R-043. Asserting only ``pytest.raises(ValueError)`` is the vacuous form of
+    this guard and it is not hypothetical: it passes against
+    ``raise ValueError("unknown variant")``, which tells a caller nothing and is
+    exactly the defect the rule names. This guard therefore asserts that the
+    message contains EVERY key of the class's own variant table.
+
+    Measured 2026-08-20 over the whole of ``models/``: **64 module-level classes
+    define ``from_variant``** (the inherited census said 44 *packages*, a
+    different axis and a lower number), the probe reaches **64 of 64**, and
+    **63 are key-exact, 1 is weak-only, 0 are offenders.** So this arm is a
+    freeze -- its only evidence is the injected pair.
+
+    The probe never builds a model: an unknown variant must be rejected before
+    construction, so each call returns in microseconds.
+    """
+
+    def test_every_from_variant_enumerates_its_keys_on_a_miss(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-013
+        # WHAT NOT TO DO: do not weaken this to `with pytest.raises(ValueError)`.
+        # That form passes against `raise ValueError("unknown variant")` -- the
+        # exact defect R-043 exists to prevent -- and would have been green on
+        # every one of the 64 sites no matter what they said. The assertion is on
+        # the CONTENT of the message: every key of the class's own MODEL_VARIANTS
+        # must appear in it. Do not swap the runtime probe for an AST read of the
+        # raise site either: measured 2026-08-20, an AST predicate reports 7 false
+        # offenders because beit / fastvit / mobile_clip_v2 / sd3_mmdit raise from
+        # a HELPER (`_resolve_scale`, `_resolve_model_variant`, `get_sd3_config`)
+        # and three more build the list into a local `available` first.
+        # See decisions.md D-013.
+        sites, _ = _sweep_from_variant_classes()
+        offenders = []
+        for rel, cname, _lineno in sites:
+            module, cls = _import_model_class(rel, cname)
+            if cls is None:
+                continue
+            reason = _probe_from_variant_enumeration(cls, module)
+            if reason:
+                offenders.append(f"{rel}::{cname}: {reason}")
+        assert not offenders, (
+            "from_variant must raise a ValueError LISTING the available variant "
+            "keys on an unknown name (guide-v2 §5.2 / R-043) -- a bare "
+            "`raise ValueError('unknown variant')` satisfies pytest.raises and "
+            "helps nobody. Found:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_the_runtime_arm_reaches_the_ast_population(self):
+        """Coverage, measured against the AST population -- never against itself.
+
+        The blind version of this test diffs the probe's own failure list against
+        the probe's own reached list, which cannot see a site the resolver never
+        enumerated. The denominator here is the AST sweep: **64 module-level
+        classes defining ``from_variant``, measured 2026-08-20**, of which the
+        runtime arm reaches 64. The floor is ``int(0.8 * 64) == 51``.
+        """
+        sites, counts = _sweep_from_variant_classes()
+        assert counts["n_from_variant"] >= 51, (
+            f"expected ~64 module-level classes defining from_variant, found "
+            f"{counts['n_from_variant']}: the AST walk stopped seeing the tree"
+        )
+        unreached = []
+        for rel, cname, _lineno in sites:
+            _module, cls = _import_model_class(rel, cname)
+            if cls is None or getattr(cls, "from_variant", None) is None:
+                unreached.append(f"{rel}::{cname}")
+        assert len(sites) - len(unreached) >= 51, (
+            f"the runtime arm reaches only {len(sites) - len(unreached)} of "
+            f"{len(sites)} AST-found from_variant classes: {unreached}"
+        )
+
+    def test_weak_enumeration_waivers_still_match_a_real_site(self):
+        """The one weak-only site must still be weak-only, and still exist."""
+        for (rel, cname), evidence in _FROM_VARIANT_WEAK_ENUMERATION.items():
+            module, cls = _import_model_class(rel, cname)
+            assert cls is not None, (
+                f"{rel}::{cname} is gone -- drop the waiver ({evidence})"
+            )
+            keys, source = _variant_keys_for(cls, module)
+            assert keys is None, (
+                f"{rel}::{cname} now has a reachable variant table ({source}); "
+                "delete its entry from _FROM_VARIANT_WEAK_ENUMERATION so the "
+                "key-exact arm starts checking it"
+            )
+
+    def test_predicate_fires_on_a_bare_valueerror(self):
+        """Dead-component probe: a raise that names no key must go RED."""
+        module = _throwaway_module(_InjectedBareRaise=_InjectedBareRaise)
+        with pytest.raises(ValueError):  # the vacuous guard's whole assertion
+            _InjectedBareRaise.from_variant("__no_such_variant__")
+        reason = _probe_from_variant_enumeration(_InjectedBareRaise, module)
+        assert reason.startswith("ValueError does not name 3 of 3 keys"), reason
+
+    def test_predicate_is_silent_on_the_enumerating_twin(self):
+        """...and must NOT fire once the message lists the keys."""
+        module = _throwaway_module(
+            _InjectedEnumeratingRaise=_InjectedEnumeratingRaise
+        )
+        keys, source = _variant_keys_for(_InjectedEnumeratingRaise, module)
+        assert keys == ["base", "large", "tiny"], (keys, source)
+        assert _probe_from_variant_enumeration(_InjectedEnumeratingRaise, module) == ""
+
+
+# ---------------------------------------------------------------------------
+# R-051: a module-level `create_<name>(variant=...)` delegates to `from_variant`
+# with no logic of its own.
+# ---------------------------------------------------------------------------
+
+
+@_memo_default_roots
+def _sweep_create_delegation(roots=None, src_root=None):
+    """Module-level ``create_*(variant=...)`` factories, by what their body does.
+
+    Contract: returns ``(sites, counts)`` where ``sites`` is a sorted list of
+    ``(relpath, func_name, lineno, verdict, detail)`` and ``verdict`` is one of:
+
+    * ``"delegates"`` -- the two ALLOWED shapes (below);
+    * ``"logic"`` -- anything else, in a module that defines ``from_variant``;
+    * ``"no-from_variant"`` -- the module defines no ``from_variant`` at all, so
+      R-051's premise does not hold. §5.6's functional-builder exemption.
+
+    **The predicate, stated so it can be argued with.** A ``create_*`` has "no
+    logic of its own" iff, after dropping its docstring, its body is either
+
+    1. a single ``return <anything>.from_variant(...)``, or
+    2. exactly ``<name> = <anything>.from_variant(...)`` followed by
+       ``return <name>`` -- the same thing spelled over two lines.
+
+    Argument forwarding inside the call is unrestricted; that IS the delegation.
+    Everything else is flagged: any ``if``/``for``/``while``/``try``/``with``,
+    any ``assert``, any ``raise``, any second call (which is what catches
+    ``logger.info``, ``model.compile``, a dummy forward pass, and a direct
+    constructor call that bypasses ``from_variant`` entirely), and any second
+    ``return``.
+
+    **What this predicate does NOT catch**, stated because a guard whose limits
+    are unwritten gets trusted past them:
+
+    * logic INSIDE the ``from_variant(...)`` call expression -- a conditional
+      expression or a comprehension in an argument is invisible to it;
+    * a ``create_*`` with no ``variant`` parameter (74 of the 135 module-level
+      ``create_*`` functions in ``models/``, measured 2026-08-20). R-051's own
+      wording is
+      ``create_<name>(variant="<default>", ...)``, and a builder with a fixed
+      architecture has nothing to delegate;
+    * whether the delegation targets the RIGHT class -- ``X.from_variant`` and
+      ``Y.from_variant`` are indistinguishable here;
+    * ``no-from_variant`` modules, which are excluded by scope rather than
+      judged. Their §5.6 classification is Phase 3's (steps 9-16), and the exact
+      16 excluded functions are pinned by name below so the exclusion cannot
+      grow silently.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    sites = []
+    for rel, tree in _iter_modules(roots, src_root):
+        module_has_from_variant = any(
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "from_variant"
+            for n in ast.walk(tree)
+        )
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not fn.name.startswith("create_"):
+                continue
+            params = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
+            if "variant" not in params:
+                continue
+            if not module_has_from_variant:
+                sites.append((rel, fn.name, fn.lineno, "no-from_variant", ""))
+                continue
+            body = [
+                stmt
+                for stmt in fn.body
+                if not (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                )
+            ]
+            verdict, detail = _classify_create_body(body)
+            sites.append((rel, fn.name, fn.lineno, verdict, detail))
+    sites.sort()
+    counts = {
+        "n_variant_factories": len(sites),
+        "n_delegates": sum(1 for s in sites if s[3] == "delegates"),
+        "n_logic": sum(1 for s in sites if s[3] == "logic"),
+        "n_no_from_variant": sum(1 for s in sites if s[3] == "no-from_variant"),
+    }
+    return sites, counts
+
+
+def _is_from_variant_call(node: ast.expr) -> bool:
+    """True for ``<anything>.from_variant(...)`` and for a bare ``from_variant(...)``."""
+    return isinstance(node, ast.Call) and _callee_name(node) == "from_variant"
+
+
+def _classify_create_body(body: List[ast.stmt]) -> Tuple[str, str]:
+    """``("delegates", "")`` or ``("logic", <first offending statement>)``."""
+    if len(body) == 1 and isinstance(body[0], ast.Return) and _is_from_variant_call(
+        body[0].value
+    ):
+        return "delegates", ""
+    if (
+        len(body) == 2
+        and isinstance(body[0], ast.Assign)
+        and len(body[0].targets) == 1
+        and isinstance(body[0].targets[0], ast.Name)
+        and _is_from_variant_call(body[0].value)
+        and isinstance(body[1], ast.Return)
+        and isinstance(body[1].value, ast.Name)
+        and body[1].value.id == body[0].targets[0].id
+    ):
+        return "delegates", ""
+    if not body:
+        return "logic", "<empty body>"
+    for stmt in body:
+        if isinstance(stmt, ast.Return) and _is_from_variant_call(stmt.value):
+            continue
+        if (
+            isinstance(stmt, ast.Assign)
+            and _is_from_variant_call(stmt.value)
+        ):
+            continue
+        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Name):
+            continue
+        return "logic", ast.unparse(stmt).splitlines()[0][:90]
+    return "logic", ast.unparse(body[0]).splitlines()[0][:90]
+
+
+#: Live R-051 offenders at HEAD, waived BY NAME with the read that clears them.
+#:
+#: Measured 2026-08-20: **61 module-level ``create_*`` functions take a
+#: ``variant`` parameter**; 16 sit in a module with no ``from_variant`` (§5.6
+#: functional builders, excluded by scope and pinned below), leaving a subject
+#: set of **45**, of which **16 delegate cleanly and 29 carry logic.**
+#:
+#: R-051 is graded MEDIUM, so all 29 route to **step 19**. Three of them are
+#: doing considerably more than R-051 describes and are called out as such --
+#: they COMPILE the model, run a forward pass, or assert on its output inside a
+#: factory. None is fixed here.
+_CREATE_DELEGATION_WAIVERS = {
+    # (a) Duplicated `pretrained`/`weights` validation. `from_variant` owns the
+    # pretrained contract (D-003: 45/45 sites raise NotImplementedError), so the
+    # copy in the factory is the duplicated validation R-051 names by name.
+    ("models/mobilenet/mobilenet_v1.py", "create_mobilenetv1"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/mobilenet/mobilenet_v2.py", "create_mobilenetv2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/mobilenet/mobilenet_v3.py", "create_mobilenetv3"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/mobilenet/mobilenet_v4.py", "create_mobilenetv4"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/mobile_clip/mobile_clip_v1.py", "create_mobile_clip_model"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/mobile_clip/mobile_clip_v2.py", "create_mobile_clip_v2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/squeezenet/squeezenet_v1.py", "create_squeezenet_v1"): "ROUTE step 19 -- `if weights is not None: raise` duplicated from from_variant",
+    ("models/squeezenet/squeezenet_v2.py", "create_squeezenodule_net_v2"): "ROUTE step 19 -- `if weights is not None: raise` duplicated from from_variant",
+    ("models/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
+    # (b) Optional-argument patching into **kwargs before delegating. Small, but
+    # it is logic the callee's own signature should be expressing.
+    ("models/bert/bert.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/gpt2/gpt2.py", "create_gpt2"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/tree_transformer/model.py", "create_tree_transformer"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/wave_field/model.py", "create_wave_field_llm"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    # (c) Logging in the factory. Not arithmetic, but not delegation either, and
+    # the predicate cannot tell a `logger.info` call from a `model.compile` one
+    # without becoming a call-name allowlist that the next offender walks past.
+    ("models/coshnet/model.py", "create_coshnet"): "ROUTE step 19 -- logger.info before delegating",
+    ("models/dino/dino_v2.py", "create_dino_v2"): "ROUTE step 19 -- 12 statements: pretrained raise, default backfill from MODEL_VARIANTS, 5 logger.info",
+    ("models/dino/dino_v1.py", "create_dino_v1"): "ROUTE step 19 -- reject_input_shape + patch_size default backfill",
+    # (d) Composite builders: the factory assembles more than one object. These
+    # are arguably outside R-051's `create_<name>` shape entirely; Phase 3
+    # settles that, and until then they are named rather than silently excluded.
+    ("models/dino/dino_v1.py", "create_dino_teacher_student_pair"): "ROUTE step 19 -- builds a teacher/student PAIR and syncs them; returns a tuple, not a model",
+    ("models/beit/model.py", "create_beit_mim"): "ROUTE step 19 -- composite: backbone + MIM head",
+    ("models/beit/model.py", "create_beit_classifier"): "ROUTE step 19 -- composite: backbone + classification head",
+    ("models/fftnet/model.py", "create_fftnet_classifier"): "ROUTE step 19 -- delegates to a sibling create_* , not to from_variant",
+    # (e) Bypasses from_variant entirely though the module defines one.
+    ("models/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
+    ("models/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
+    ("models/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
+    ("models/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
+    # (f) SEVERE -- the factory compiles, runs, or asserts. More than R-051
+    # describes; called out so step 19 does not treat them as cosmetic.
+    ("models/fractalnet/model.py", "create_fractal_net"): "ROUTE step 19 (SEVERE) -- builds an optimizer and CALLS model.compile() inside the factory",
+    ("models/vae/model.py", "create_vae"): "ROUTE step 19 (SEVERE) -- compiles, runs a forward pass on random input, and asserts on the output shapes",
+    ("models/vit/model.py", "create_vit"): "ROUTE step 19 (SEVERE) -- 10 validation branches duplicating checks the constructor already owns",
+    ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "ROUTE step 19 (SEVERE) -- runs a dummy numpy forward pass to force a build",
+}
+
+
+#: The 16 ``create_*(variant=...)`` functions whose module defines no
+#: ``from_variant`` -- excluded from R-051 BY SCOPE, since the rule is about
+#: delegating to a method that does not exist here. §5.6's functional-builder
+#: exemption class. Pinned by name so the exclusion cannot grow silently: a NEW
+#: variant factory that forgets ``from_variant`` altogether would otherwise slip
+#: into this set and never be judged.
+_CREATE_WITHOUT_FROM_VARIANT = {
+    ("models/bias_free_denoisers/bfcnn.py", "create_bfcnn_variant"),
+    ("models/bias_free_denoisers/bfconvunext.py", "create_convunext_variant"),
+    ("models/bias_free_denoisers/bfunet.py", "create_bfunet_variant"),
+    ("models/convunext/model.py", "create_convunext_variant"),
+    ("models/dino/training.py", "create_dino_training_model"),
+    ("models/energy_transformer/model.py", "create_energy_transformer_backbone"),
+    ("models/energy_transformer/model.py", "create_energy_transformer_classifier"),
+    ("models/energy_transformer/model.py", "create_energy_transformer_mim"),
+    ("models/ideogram4/transformer.py", "create_ideogram4_transformer"),
+    ("models/ideogram4/vae.py", "create_ideogram4_autoencoder"),
+    ("models/nano_vlm/model.py", "create_nanovlm"),
+    ("models/nano_vlm_world_model/model.py", "create_score_based_nanovlm"),
+    ("models/pft_sr/model.py", "create_pft_sr"),
+    ("models/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
+    ("models/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
+    ("models/time_series/tirex/model_extended.py", "create_tirex_extended"),
+}
+
+
+#: A factory that validates, logs and compiles instead of delegating -- and a
+#: second one that bypasses ``from_variant`` to construct the class directly.
+_INJECTED_CREATE_DEFECT_SRC = '''
+class Injected(keras.Model):
+    MODEL_VARIANTS = {"tiny": {}}
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        return cls(**kwargs)
+
+
+def create_injected(variant="tiny", num_classes=10, **kwargs):
+    if num_classes <= 0:
+        raise ValueError("num_classes must be positive")
+    model = Injected.from_variant(variant, num_classes=num_classes, **kwargs)
+    logger.info("created")
+    model.compile(optimizer="adam")
+    return model
+
+
+def create_injected_direct(variant="tiny", **kwargs):
+    return Injected(variant=variant, **kwargs)
+'''
+
+#: The same two factories, repaired: one delegates over two lines, the other in
+#: one. A predicate that still flags these is matching on the name, not the body.
+_INJECTED_CREATE_FIXED_SRC = '''
+class Injected(keras.Model):
+    MODEL_VARIANTS = {"tiny": {}}
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        return cls(**kwargs)
+
+
+def create_injected(variant="tiny", num_classes=10, **kwargs):
+    model = Injected.from_variant(variant, num_classes=num_classes, **kwargs)
+    return model
+
+
+def create_injected_direct(variant="tiny", **kwargs):
+    return Injected.from_variant(variant, **kwargs)
+'''
+
+
+class TestCreateFactoriesDelegateToFromVariant:
+    """A module-level ``create_<name>(variant=...)`` must be a thin delegation.
+
+    R-051. The predicate, its two allowed shapes and -- importantly -- the four
+    things it does NOT catch are all written out in ``_sweep_create_delegation``'s
+    docstring; read them before trusting a green run here.
+
+    Measured 2026-08-20: **61** ``create_*`` functions take a ``variant``
+    parameter, **16** are excluded by scope (no ``from_variant`` in the module --
+    §5.6 functional builders, pinned in ``_CREATE_WITHOUT_FROM_VARIANT``), and of
+    the remaining **45**, **16 delegate cleanly and 29 carry logic**. All 29 are
+    live offenders, waived by name with their read and routed to step 19. This
+    is the one guard in this step with a large live offender set, and narrowing
+    the predicate until the tree passed would have been the failure mode.
+    """
+
+    def test_every_variant_factory_delegates_to_from_variant(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-013
+        # WHAT NOT TO DO: do not widen the allowed shapes to make the 29 live
+        # offenders go away. The obvious widenings each erase a real finding --
+        # allowing a leading `if` clears the 10 sites that duplicate
+        # from_variant's own `pretrained` validation, and allowing "any call"
+        # clears create_vae, which COMPILES the model, runs a forward pass on
+        # random input and asserts on its output shapes inside what is
+        # advertised as a factory. The offenders are waived BY NAME in
+        # _CREATE_DELEGATION_WAIVERS and routed to step 19; the predicate stays
+        # strict so a NEW one cannot arrive quietly. See decisions.md D-013.
+        sites, _ = _sweep_create_delegation()
+        live = [
+            f"{rel}::{name} (line {lineno}): {detail}"
+            for rel, name, lineno, verdict, detail in sites
+            if verdict == "logic" and (rel, name) not in _CREATE_DELEGATION_WAIVERS
+        ]
+        assert not live, (
+            "a module-level create_<name>(variant=...) must delegate to "
+            "from_variant with no logic of its own (guide-v2 §5.5 / R-051): move "
+            "validation into the constructor and defaults into MODEL_VARIANTS. "
+            "If the factory is genuinely a composite builder, add it to "
+            "_CREATE_DELEGATION_WAIVERS with that read. Found:\n  "
+            + "\n  ".join(live)
+        )
+
+    def test_delegation_waivers_still_match_a_real_offender(self):
+        """Step 19 fixes these; each fix must delete its waiver in the same commit."""
+        sites, _ = _sweep_create_delegation()
+        offending = {
+            (rel, name) for rel, name, _l, verdict, _d in sites if verdict == "logic"
+        }
+        stale = sorted(set(_CREATE_DELEGATION_WAIVERS) - offending)
+        assert not stale, (
+            "these create_* delegation waivers no longer match an offending "
+            f"factory -- delete them or re-key them: {stale}"
+        )
+
+    def test_the_scope_exclusion_is_exactly_the_pinned_set(self):
+        """The §5.6 functional-builder exclusion may not grow unnoticed.
+
+        Excluding "modules with no from_variant" is a SCOPE ruling, not a waiver,
+        so it needs its own liveness: a new variant factory that simply forgot
+        ``from_variant`` would otherwise land in the exclusion and never be
+        judged by anything.
+        """
+        sites, _ = _sweep_create_delegation()
+        excluded = {
+            (rel, name)
+            for rel, name, _l, verdict, _d in sites
+            if verdict == "no-from_variant"
+        }
+        assert excluded == _CREATE_WITHOUT_FROM_VARIANT, (
+            "the set of create_*(variant=...) factories in a module with no "
+            "from_variant has changed. New: "
+            f"{sorted(excluded - _CREATE_WITHOUT_FROM_VARIANT)}; gone: "
+            f"{sorted(_CREATE_WITHOUT_FROM_VARIANT - excluded)}"
+        )
+
+    def test_the_sweep_found_variant_factories(self):
+        """Anti-vacuity floor, DERIVED at landing time.
+
+        Measured 2026-08-20: 61 ``create_*(variant=...)`` functions, 45 of them
+        in scope, 16 delegating cleanly. The floors are ``int(0.8 * n)`` -- 48,
+        36 and 12. The third one matters most: it is the only floor that fails if
+        the predicate is quietly rewritten to call everything an offender.
+        """
+        sites, counts = _sweep_create_delegation()
+        assert counts["n_variant_factories"] >= 48, (
+            f"expected ~61 module-level create_*(variant=...) factories, found "
+            f"{counts['n_variant_factories']}: the AST walk stopped seeing the "
+            f"tree ({counts})"
+        )
+        in_scope = counts["n_variant_factories"] - counts["n_no_from_variant"]
+        assert in_scope >= 36, f"expected ~45 in-scope factories, found {in_scope}"
+        assert counts["n_delegates"] >= 12, (
+            f"expected ~16 cleanly delegating factories, found "
+            f"{counts['n_delegates']}: a predicate that calls EVERY factory an "
+            f"offender is as useless as one that calls none ({counts})"
+        )
+
+    def test_predicate_fires_on_an_injected_factory_with_logic(self, tmp_path):
+        """Dead-component probe: both offending shapes must go RED."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_CREATE_DEFECT_SRC)
+        sites, counts = _sweep_create_delegation(roots, src_root)
+        assert counts["n_variant_factories"] == 2, counts
+        verdicts = {name: (verdict, detail) for _r, name, _l, verdict, detail in sites}
+        assert verdicts["create_injected"][0] == "logic", verdicts
+        assert verdicts["create_injected"][1].startswith("if num_classes <= 0"), verdicts
+        assert verdicts["create_injected_direct"] == (
+            "logic",
+            "return Injected(variant=variant, **kwargs)",
+        ), verdicts
+
+    def test_predicate_is_silent_on_the_delegating_twin(self, tmp_path):
+        """...and must NOT fire once both factories are thin delegations."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_CREATE_FIXED_SRC)
+        sites, counts = _sweep_create_delegation(roots, src_root)
+        assert counts["n_variant_factories"] == 2, "the fixture must still be reached"
+        assert counts["n_delegates"] == 2, sites
+        assert counts["n_logic"] == 0, sites
