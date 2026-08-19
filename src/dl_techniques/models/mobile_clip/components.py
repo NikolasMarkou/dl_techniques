@@ -449,6 +449,25 @@ class MobileClipTextEncoder(keras.layers.Layer):
             self.max_seq_len, self.embed_dim, self.dropout_rate,
             name='positional_embedding'
         )
+        # DECISION plan-2026-08-18T140459-7991552f/D-049
+        # `attention_norm_args` / `ffn_norm_args` carry the SAME
+        # `REFERENCE_NORM_EPSILON` as `self.layer_norm` below. Without them,
+        # `TransformerLayer._create_normalization_layer` reaches
+        # `layers/norms/factory.py`, which `setdefault`s `epsilon=1e-6`, so
+        # every one of the `2 * num_layers` norms in this tower ran at 1e-6
+        # while the single `ln_final` ran at torch's 1e-5. MEASURED at
+        # `num_layers=3`: six norms at 1e-06 and one at 1e-05 -- for
+        # `mobileclip2_s3` that is 24 wrong and 1 right, in a tower whose own
+        # D-028 anchor states the reference interface contract "applies to it
+        # at every construction site".
+        # WHAT NOT TO DO: do not fix this by changing
+        # `layers/norms/factory.py`'s 1e-6 default -- that factory is shared by
+        # every transformer in the repository and its default is not this
+        # port's business; and do not re-declare 1e-5 as a literal here, the
+        # constant has ONE definition (`layers/fastvit/reference.py`) on
+        # purpose. These two dicts are the per-site channel the factory already
+        # provides. See decisions.md D-049.
+        _norm_args = {'epsilon': REFERENCE_NORM_EPSILON}
         self.transformer_layers = [
             TransformerLayer(
                 hidden_size=self.embed_dim,
@@ -457,6 +476,8 @@ class MobileClipTextEncoder(keras.layers.Layer):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 normalization_position='pre',
+                attention_norm_args=dict(_norm_args),
+                ffn_norm_args=dict(_norm_args),
                 name=f'transformer_layer_{i}'
             ) for i in range(self.num_layers)
         ]

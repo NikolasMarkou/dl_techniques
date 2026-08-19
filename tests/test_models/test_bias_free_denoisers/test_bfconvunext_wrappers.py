@@ -13,6 +13,10 @@ The three pinned facts (plan assumption A-1, decisions.md D-003 / D-014):
 
 (i)   `bfconvunext.create_convunext_variant('tiny', ...)` builds with BATCHNORM blocks.
 (ii)  A bare `bfconvunext.create_convunext_denoiser(...)` still builds with LAYERNORM.
+      Since F-42 / D-048 its `block_normalization` default is the `None` SENTINEL,
+      which RESOLVES to `'layernorm'` and warns -- the built graph is unchanged, so
+      (ii) reads exactly as before. The warning contract lives in
+      `test_bfconvunext_norm_sentinel.py`.
 (iii) `models.convunext.model.create_convunext_variant('tiny', ...)` — the bias-ON path —
       still builds with LAYERNORM.
 
@@ -110,6 +114,18 @@ class TestVariantBlockNormalization:
         # (ii) The batchnorm setdefault must NOT leak into the raw builder call.
         # This is what keeps the byte-identity tripwire in test_bfconvunext_denoiser.py
         # green and `utils/multiplicative_miyasawa.py`'s omitted-kwarg call unchanged.
+        #
+        # F-42 UPDATE (plan-2026-08-18T140459-7991552f, D-048): the raw builder's
+        # `block_normalization` default is now the `None` SENTINEL rather than the
+        # literal `'layernorm'`. The sentinel RESOLVES to `'layernorm'` and warns, so
+        # the graph assertions below are unchanged and this test keeps its stated
+        # purpose intact -- isolating the variant wrapper's `setdefault` from the raw
+        # builder. It would have been WRONG to "update" this test to expect
+        # `'batchnorm'`: that is the leak it exists to detect, and doing so would have
+        # destroyed the only guard on the property while appearing to fix it.
+        # The new contract (that the sentinel warns, and that it warns only when the
+        # choice was NOT made) is pinned separately, in
+        # `test_bfconvunext_norm_sentinel.py`.
         counts = _norm_type_counts(
             create_convunext_denoiser(input_shape=INPUT_SHAPE, depth=3, **SMALL)
         )
@@ -120,6 +136,22 @@ class TestVariantBlockNormalization:
             "the batchnorm setdefault leaked out of create_convunext_variant into "
             f"the raw builder call: {counts}"
         )
+
+    def test_the_bare_builder_resolves_the_sentinel_rather_than_defaulting(
+        self,
+    ) -> None:
+        """F-42/D-048: the default is `None`, and it resolves HERE, not downstream.
+
+        The assertion above reads the built graph, which is identical either way.
+        This one reads the signature, so that replacing the sentinel with a plain
+        `'layernorm'` string -- which would silently re-erase the
+        chosen-vs-defaulted distinction the sentinel exists to draw -- goes red.
+        """
+        import inspect
+
+        assert inspect.signature(
+            create_convunext_denoiser
+        ).parameters['block_normalization'].default is None
 
     def test_bias_on_variant_still_builds_with_layernorm(self) -> None:
         # (iii) The CONTROL that isolates the contract: the shared CONVUNEXT_CONFIGS

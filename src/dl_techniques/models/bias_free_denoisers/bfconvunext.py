@@ -42,6 +42,8 @@ from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.match_channels import MatchChannels
 from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 
+from dl_techniques.utils.logger import logger
+
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
 # ---------------------------------------------------------------------
@@ -101,7 +103,7 @@ def create_convunext_denoiser(
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_activation: Union[str, keras.layers.Layer] = 'gelu',
-        block_normalization: str = "layernorm",
+        block_normalization: Optional[str] = None,
         stem_activation: Union[str, keras.layers.Layer] = 'gelu',
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
@@ -134,6 +136,14 @@ def create_convunext_denoiser(
 
     :param input_shape: Shape of input images ``(height, width, channels)``.
     :type input_shape: tuple of 3 ints
+    :param block_normalization: ``None`` (the default) is a SENTINEL meaning
+        "not chosen". It resolves to ``'layernorm'`` -- the historical default,
+        so the built graph is unchanged -- and logs a warning that this
+        builder's default is scale-INVARIANT (degree 0) and therefore breaks
+        the ``f(a*x) = a*f(x)`` homogeneity the package name promises. Pass
+        ``'batchnorm'`` for a homogeneous bias-free stack, or ``'layernorm'``
+        explicitly to keep the historical graph without the warning.
+    :type block_normalization: Optional[str]
     :return: A functional, bias-free ``keras.Model``.
     :rtype: keras.Model
     """
@@ -147,6 +157,47 @@ def create_convunext_denoiser(
     # impossible to ship. Do NOT "clean this up" into an explicit argument list, and do
     # NOT move any statement above it (that would sweep locals into the forward).
     forwarded = dict(locals())
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-048
+    # `block_normalization` defaults to the `None` SENTINEL, not to the string
+    # `'layernorm'`, so that "the caller did not choose" is distinguishable
+    # from "the caller chose LayerNorm". The sentinel resolves to `'layernorm'`
+    # -- the historical default -- so the built graph is byte-identical to
+    # before; the only new thing is this warning.
+    # Why it is needed even though `create_convunext` ALREADY warns: that guard
+    # (`convunext/model.py:665`) fires for `block_normalization == 'layernorm'`
+    # under `use_bias=False` whatever the provenance, so a caller who
+    # deliberately passed `'layernorm'` gets nagged identically to one who
+    # passed nothing at all. That makes the signal unactionable, and it is the
+    # unchosen case that matters: this package's `__init__.py:6-8` states
+    # "bias-free means ... degree-1 homogeneous", and LayerNorm is degree 0, so
+    # the ONE exported builder whose default is not homogeneous is the one that
+    # silently invalidates the Miyasawa residual-as-score reading that
+    # `applications/bias_free_denoiser/denoiser_prior.py` and `ddnm.py` depend
+    # on.
+    # WHAT NOT TO DO: do NOT make the sentinel raise, and do NOT resolve it to
+    # `'batchnorm'`. Both are behaviour changes on a frozen signature. Raising
+    # breaks every omitted-kwarg caller, including
+    # `utils/multiplicative_miyasawa.py:835` and ~20 test constructions;
+    # resolving to `'batchnorm'` moves the shipped graph (and, at the batch
+    # size that caller controls, BatchNorm at batch 1 is a real hazard), and it
+    # would erase the very distinction that `create_convunext_variant`'s
+    # `setdefault` exists to draw (D-014: batchnorm is selected at the VARIANT
+    # wrapper and nowhere else). See decisions.md D-048.
+    if block_normalization is None:
+        forwarded['block_normalization'] = 'layernorm'
+        logger.warning(
+            "create_convunext_denoiser: no block_normalization was passed, so "
+            "it resolves to 'layernorm' -- the historical default, which is "
+            "scale-INVARIANT (degree 0) and therefore NOT degree-1 "
+            "homogeneous. This builder is the one exported bias-free entry "
+            "point whose default breaks f(a*x) = a*f(x); the named variants "
+            "(create_convunext_variant) select 'batchnorm' and do not. Pass "
+            "block_normalization='batchnorm' for a homogeneous bias-free "
+            "stack, or pass block_normalization='layernorm' explicitly to "
+            "silence this and keep the historical graph."
+        )
+
     return create_convunext(use_bias=False, **forwarded)
 
 

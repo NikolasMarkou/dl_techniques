@@ -463,19 +463,27 @@ class TestTrunkOutputArity:
         earlier = TINY["global_att_blocks"][0]
         assert np.max(np.abs(got - maps[earlier])) > 1e-4
 
-    def test_blocks_after_the_last_global_block_are_not_run(self):
-        trunk = Sam3ViTDetBackbone(**{**TINY, "depth": 6,
-                                      "global_att_blocks": (1, 3)})
-        image = np.random.RandomState(5).randn(
-            1, TINY["img_size"], TINY["img_size"], 3
-        ).astype("float32")
-        trunk.build((None, TINY["img_size"], TINY["img_size"], 3))
-        base = keras.ops.convert_to_numpy(trunk(image, training=False))
-        # Zero every weight of block 5 (past the last global block, index 3).
-        for var in trunk.blocks[5].weights:
-            var.assign(ops.zeros_like(var))
-        after = keras.ops.convert_to_numpy(trunk(image, training=False))
-        assert np.max(np.abs(after - base)) == 0.0
+    def test_a_trunk_with_blocks_past_the_last_global_one_cannot_be_BUILT(self):
+        """F-17: this construction is now REFUSED, not merely wasteful.
+
+        This test previously asserted the opposite -- it BUILT a
+        ``depth=6, global_att_blocks=(1, 3)`` trunk and measured that zeroing
+        block 5 moved the output by exactly 0.0, i.e. it PINNED the dead-block
+        behaviour as if it were a feature. It was documenting the early return,
+        but the configuration it used to do so is one no caller should be able
+        to create: blocks 4 and 5 (1,744 parameters, measured) were built,
+        parameter-counted and handed to the optimizer while contributing
+        nothing.
+
+        The early-return behaviour it meant to test is still covered, by
+        ``test_output_equals_the_last_global_block_not_an_earlier_one`` above,
+        which reads the LEGAL ``TINY`` trunk. The refusal itself, and the proof
+        that every shipped variant survives it, live in
+        ``test_vitdet_last_block_is_global.py``.
+        """
+        with pytest.raises(ValueError, match="must name the LAST block"):
+            Sam3ViTDetBackbone(**{**TINY, "depth": 6,
+                                  "global_att_blocks": (1, 3)})
 
 
 class TestLnPrePlacement:

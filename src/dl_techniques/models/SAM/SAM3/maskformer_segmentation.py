@@ -95,7 +95,7 @@ class Sam3SegmentationHead(keras.layers.Layer):
                         │                                  │
               ┌─────────┴──────────┐                       │
               ▼                    ▼                       │
-        Conv1x1 -> 1        Conv1x1 -> d_model             │
+        Conv1x1 -> 1        Conv1x1 -> mask_dim            │
         semantic_seg          pixel_embed ──▶ einsum ◀── mask_embed(queries)
                                                  │
                                              pred_masks
@@ -236,8 +236,28 @@ class Sam3SegmentationHead(keras.layers.Layer):
 
         self.semantic_seg_head = layers.Conv2D(
             1, kernel_size=1, use_bias=True, name="semantic_seg_head")
+
+        # DECISION plan-2026-08-18T140459-7991552f/D-045
+        # The pixel-embedding conv is sized by `mask_dim`, NOT by `d_model`.
+        # The two are the SAME number at every shipped configuration
+        # (`mask_dim=None` resolves to `d_model` and `Sam3Image.from_variant`
+        # never passes it), which is why sizing it by `d_model` was invisible:
+        # the head constructs, validates and BUILDS fine at any
+        # `mask_dim != d_model` -- the two layers are built against different
+        # shapes and never compared -- and then raises `InvalidArgumentError`
+        # on the first forward, because `call`'s
+        # `ops.einsum("bqc,bhwc->bqhw", queries, pixel_embed)` contracts this
+        # conv's channel axis against `mask_embed_2`'s output width. MEASURED
+        # at `d_model=32, mask_dim=16`: "Expected dimension 16 at axis 3 of the
+        # input shaped [1,8,8,32]".
+        # WHAT NOT TO DO: do not "fix" the mismatch the other way by sizing
+        # `mask_embed_2` with `d_model` -- that deletes the parameter's only
+        # meaning (the mask embedding's width IS `mask_dim`; reference
+        # MaskFormer sizes the pixel-embedding conv by `mask_dim` too), and the
+        # class docstring at `:109-111` already documents this direction.
+        # See decisions.md D-045.
         self.instance_seg_head = layers.Conv2D(
-            self.d_model, kernel_size=1, use_bias=True,
+            self.mask_dim, kernel_size=1, use_bias=True,
             name="instance_seg_head")
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-117

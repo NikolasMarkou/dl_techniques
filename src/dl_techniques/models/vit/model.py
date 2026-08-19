@@ -37,8 +37,24 @@ sequence and roughly sixteen-times the attention cost. Five scales span tiny
 (192d, 3 heads, 12 layers) through huge (1280d, 16 heads, 32 layers). Block
 internals -- attention type, FFN type, normalization type and position -- are
 supplied through the `dl_techniques` factories rather than hard-coded, so a
-variant can be swapped in without forking the file; the defaults reproduce the
-published configuration.
+variant can be swapped in without forking the file. The scale table
+(`ViT.MODEL_VARIANTS`) reproduces the published widths, depths and head counts;
+the BLOCK defaults do not, in one named respect.
+
+**`normalization_position` defaults to `"post"`, and published ViT is pre-LN.**
+Dosovitskiy et al. 2020 normalize BEFORE each sub-layer; the default here takes
+`TransformerLayer.call`'s post-LN branch (`SubLayer -> Add -> Norm`) instead. So
+`ViT(scale='base')`, `create_vit()` and `ViT.from_variant('vit_large')` are a
+different function from any checkpoint ported from the paper's release, and at
+the deeper scales they are the configuration the pre-LN literature reports as
+needing warmup to converge at all. Pass `normalization_position='pre'` for the
+published architecture. The sibling `vit_hmlp/model.py` defaults to `"pre"`, so
+the repository's two ViTs deliberately disagree on this one knob: the default is
+NOT flipped here because it would silently change the function every existing
+`vit` checkpoint and training script was fitted under, and nothing in the
+package can tell which of the two a saved model used beyond its own stored
+config. This is a documented divergence, not an oversight -- see
+`plans/plan-2026-08-18T140459-7991552f/decisions.md` D-047.
 
 No pretrained weights are distributed with this package. `pretrained=True`
 raises `NotImplementedError` rather than warning and returning a randomly
@@ -170,9 +186,13 @@ class ViT(keras.Model):
             - 'dynamic_tanh': Dynamic Tanh normalization
             Defaults to 'layer_norm'.
         normalization_position: Literal['pre', 'post'], normalization position in transformer.
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'post'.
+            - 'post': Post-normalization (Vaswani et al. 2017's original Transformer)
+            - 'pre': Pre-normalization (Dosovitskiy et al. 2020's published ViT,
+              and what the `References` block above cites)
+            Defaults to 'post', which is NOT the published ViT configuration.
+            Pass 'pre' to reproduce the paper or to load a checkpoint ported
+            from its release. See the module docstring for why the default is
+            deliberately not flipped.
         ffn_type: FFNType, feed-forward network type for transformer layers.
             Uses factory for consistent creation. Available options:
             - 'mlp': Standard MLP with intermediate expansion (default)
@@ -385,6 +405,26 @@ class ViT(keras.Model):
         # the ResNet path in `dl_techniques/models/resnet/model.py` for the
         # rms_variants_train Phase 3 `param_matched` mode (use_scale=False).
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
+        # DECISION plan-2026-08-18T140459-7991552f/D-047
+        # `normalization_position` DEFAULTS TO `"post"` while this file's
+        # `References` block cites Dosovitskiy et al. 2020, which is PRE-LN.
+        # The mismatch is real and is documented in the module docstring; the
+        # resolution taken was to correct the documentation, NOT to flip the
+        # default (see the plan's Assumption A2).
+        # WHAT NOT TO DO: do not "fix" this by changing the default here or in
+        # `create_vit` to `"pre"` to match the sibling `vit_hmlp/model.py`.
+        # `normalization_position` selects between two different functions
+        # (`TransformerLayer.call`'s pre-LN and post-LN branches), and every
+        # `vit` checkpoint, training script and result in this repository was
+        # fitted under `"post"`. A saved model records the value in its config,
+        # so a flipped default silently rebuilds only the models that DID NOT
+        # store one -- i.e. every fresh construction -- while old artifacts keep
+        # loading as post-LN, which is the worst possible split. The flip
+        # remains a one-line change plus one test edit
+        # (`tests/test_models/test_vit/test_model.py:46`) if it is ever taken
+        # deliberately. Related: `ViT.call`'s final `self.norm` over the whole
+        # sequence is the pre-LN idiom and is redundant (not wrong) under the
+        # post-LN default. See decisions.md D-047.
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
         self.activation = activation
@@ -990,6 +1030,8 @@ def create_vit(
         bias_regularizer: Bias regularizer for all layers.
         normalization_type: Type of normalization layer to use.
         normalization_position: Position of normalization in transformer layers.
+            Defaults to 'post', which is NOT the published ViT configuration
+            ('pre'); see the module docstring.
         ffn_type: Type of feed-forward network for transformer layers.
         activation: Activation function for feed-forward networks.
         **kwargs: Additional arguments for ViT constructor.
