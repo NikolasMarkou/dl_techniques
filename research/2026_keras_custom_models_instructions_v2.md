@@ -33,7 +33,7 @@ cannot fail is the *most common* outcome of writing a new test, not an edge case
 ## How to use this document
 
 - Writing a new layer → Parts I, II, III, then the checklist in V.
-- Writing a new model package → all of it. Part V carries the house shape.
+- Writing a new model package → all of it; §8 is the package shape and Part V the checklists.
 - Fixing a bug → Part III to find the family, Part IV to build a guard that can actually fail.
 - Reviewing → Part III as the checklist, Part IV § anti-patterns as the test-review checklist.
 
@@ -136,8 +136,13 @@ def call(self, inputs, training=None):
     return x
 ```
 
-This keeps the checkpoint layout stable across configurations, which is what makes
-`include_top=False` transfer and warm-starting work.
+**Be precise about what this buys.** It does *not* make the checkpoint
+configuration-independent: an unused layer is never built, so it contributes no weights either way
+(and building it anyway is the over-building defect of §4). What it buys is a **stable object graph
+and stable names** — conditional creation shifts the auto-generated names of every layer after it,
+so flipping an unrelated flag silently renames weights and breaks by-name transfer. With an explicit
+`name=` on every sub-layer the naming hazard mostly goes away, and always-create is then a
+consistency preference rather than a correctness requirement. Both are cheap; do both.
 
 **Two things this rule does not give you, both of which have been mistaken for defects:**
 
@@ -295,18 +300,30 @@ def __init__(self, hidden_dim, output_dim, dropout_rate=0.1, use_norm=True, **kw
 
     self.dense1  = layers.Dense(hidden_dim, activation="gelu", name="dense1")
     self.dropout = layers.Dropout(dropout_rate, name="dropout")
-    self.norm    = layers.LayerNormalization(epsilon=1e-6, name="norm") if use_norm else None
+    self.norm    = layers.LayerNormalization(epsilon=1e-6, name="norm")   # created ALWAYS
     self.dense2  = layers.Dense(output_dim, name="dense2")
 
 def build(self, input_shape):
     self.dense1.build(input_shape)
     hidden_shape = self.dense1.compute_output_shape(input_shape)
     self.dropout.build(hidden_shape)
-    if self.norm is not None:
+    if self.use_norm:                 # built only if call() runs it -- see below
         self.norm.build(hidden_shape)
     self.dense2.build(hidden_shape)
     super().build(input_shape)
+
+def call(self, inputs, training=None):
+    x = self.dense1(inputs)
+    x = self.dropout(x, training=training)
+    if self.use_norm:
+        x = self.norm(x, training=training)
+    return self.dense2(x)
 ```
+
+Note the asymmetry, which is deliberate and is where §1.1 and §4 meet: the norm is **created
+unconditionally** (stable object graph, §1.1) and **built conditionally**, because `build()` must
+materialize exactly what `call()` runs and no more (§4). Creating it costs nothing; building a layer
+`call()` skips would add weights the lazy path never makes.
 
 Give sub-layers explicit names, including inside loops (`name=f"block_{i}"`). Auto-generated names
 shift when depth changes, and checkpoints stop matching.
@@ -455,7 +472,7 @@ def call(self, inputs, training=None):
 Python `if` on **configuration** is correct and expected — `self.use_norm` is known at trace time.
 The rule is about tensor *values*.
 
-### 6.1 Operations that are traps on this stack
+### 6.1 Operations that are traps under tracing
 
 **`keras.ops.tril` and `keras.ops.triu`.** Both raise the moment they are traced:
 
@@ -467,7 +484,7 @@ They pass every eager test and simultaneously break `fit`, `predict`, `jit_compi
 save/load and every symbolic-shape path. Build triangular masks by comparing `ops.arange`, or reuse
 a shared causal-mask helper.
 
-**Symbolic `training` into `BatchNormalization` or `Dropout`.** Measured on this stack: both raise
+**Symbolic `training` into `BatchNormalization` or `Dropout`.** Measured on Keras 3.8: both raise
 `OperatorNotAllowedInGraphError` for a traced `tf.constant(True)` **and** a traced
 `tf.constant(False)`. `LayerNormalization` does not. `tf.get_static_value` on a traced argument
 returns `None`, so the value cannot be recovered inside the trace. Route through an explicit gate
@@ -657,6 +674,7 @@ logic of its own**. The package `__init__.py` exports the class and the factory 
 Before classifying a package as functional, verify with `grep -n "^class .*(.*Model)" <pkg>/*.py`. A
 grep-based census of this question was wrong about several packages.
 
+---
 
 # Part II — Reuse before you author
 
@@ -677,8 +695,6 @@ The rest of this section is about building and using such a registry correctly, 
 fails is silent.
 
 ### 9.1 A registry-backed factory must raise on undeclared keys
-
-This is the single highest-yield rule in this document.
 
 The tempting implementation filters the caller's keyword arguments against the target type's
 accepted parameters and **drops the rest**. A misspelled or undeclared key then produces a valid
@@ -807,9 +823,9 @@ shape.
   off the import path, and have the test read it with `ast` or `json`. An oracle you transcribed by
   hand in the same session as the port is a second copy of your own understanding, not a
   reference (§21.3).
-- **A class that shares a name with a reference is not necessarily that architecture.** This tree
-  contains a `RepMixerBlock` that is a different architecture from the FastViT block of the same
-  name, and several packages whose names misattribute the architecture they implement. Check the
+- **A class that shares a name with a reference is not necessarily that architecture.** One
+  codebase carried a `RepMixerBlock` that was a different architecture from the FastViT block of the
+  same name, alongside several packages whose names misattribute what they implement. Check the
   composition rule, not the name.
 
 ---
@@ -912,8 +928,8 @@ groups must produce different outputs.
 
 ### 13.1 The `StatelessScope` assign trap
 
-See §3.3. The rule again, because it is the highest-yield one in this document: **never `.assign()`
-a constant table inside `build()`.**
+See §3.3. Worth repeating in full: **never `.assign()` a constant table inside `build()`.** Of every
+rule here, this one and the factory contract of §9.1 caught the most defects per line written.
 
 ### 13.2 `build()` that under- or over-materializes
 
@@ -953,8 +969,9 @@ broken composition rule.
 
 ### 14.1 Transform-only blocks called without the external residual
 
-Some blocks compute a **transform** and document that the *caller* supplies the skip connection. Calling them as `x = block(x)` drops the residual. Measured: signal collapse of roughly
-`1e-5` per block, and a layer-scale initialization of 1.0 did **not** rescue it.
+Some blocks compute a **transform** and document that the *caller* supplies the skip connection.
+Calling them as `x = block(x)` drops the residual. Measured: signal collapse of roughly `1e-5` per
+block, and a layer-scale initialization of 1.0 did **not** rescue it.
 
 **Rule.** Read the block's docstring for who owns the residual. Assert a post-ladder magnitude:
 `std(out) / std(in)` must stay near 1 across the stack.
@@ -991,7 +1008,7 @@ architecture does not do what its name says as a defect report, not as documenta
 
 ### 15.1 fp16 mask sentinels
 
-`scores + (1 - mask) * (-1e9)` is the single most replicated numerical defect in this family of code.
+`scores + (1 - mask) * (-1e9)` is the most replicated numerical defect in attention code.
 Confirmed by execution: `np.float16(-1e9)` is `-inf`, and `0.0 * -inf` is `nan`.
 
 So under `mixed_float16`:
@@ -1093,9 +1110,9 @@ See §5.
 
 ### 16.1 Custom `train_step`
 
-**This repo's standing constraint is: do not write a new custom `train_step`.** Use stock `fit()`
-and feed extra signals through `tf.data` inputs. The rules below apply to the ones that already
-exist.
+**Prefer not to write a custom `train_step` at all.** Use stock `fit()` and feed extra signals
+through `tf.data` inputs; the override is what opts you out of the machinery below. The rules here
+apply to the ones that already exist.
 
 **Mixed-precision loss scaling.** Keras' default TF `train_step` calls
 `optimizer.scale_loss(loss)` inside the tape, and `LossScaleOptimizer.apply()` divides every
@@ -1127,7 +1144,8 @@ Two clarifications that were initially got wrong:
   identical loss to six digits with and without an `l2(1e-1)`.
 
 `model.losses` is often non-empty for reasons unrelated to the regularizer under test — a block
-that hardcodes a layer-scale L2 is enough — so `assert model.losses` can always pass. Assert a **delta** against a no-regularizer baseline.
+that hardcodes a layer-scale L2 is enough — so `assert model.losses` can always pass. Assert a
+**delta** against a no-regularizer baseline.
 
 ### 16.2 Python state that never reaches the traced graph
 
@@ -1261,8 +1279,8 @@ fail; it is not optional polish.
    its measurement — date, device, dtype policy, configuration, the number — and the defect signal
    it must sit below.
 2. **Every guard is proven RED**, by an injected mutation or a recorded bisect, *in the committed
-   record*. A demonstration in a scratch session that is then discarded is exactly the shape this
-   library keeps rediscovering.
+   record*. A demonstration in a scratch session that is then discarded leaves
+   nothing a later reader can re-check.
 3. **Every "nothing changed" assertion has a "something changed" twin.** An identity assertion
    alone is satisfied by a completely dead component.
 4. **Process-global state is owned by exactly one fixture** that captures it, restores it in
@@ -1593,8 +1611,9 @@ Three things this encodes:
   fixed: a deeper graph accumulates more round-off, and the headroom is what makes the tolerance
   meaningful rather than decorative.
 
-Note that layer normalization **breaks** degree-1 homogeneity (81–98% error) while a bias-free batch
-norm gives it exactly. A generic `verify_bias_free()` structural check gives false assurance here.
+Note that layer normalization **breaks** degree-1 homogeneity (81–98% error) while a bias-free
+batch norm gives it exactly. A structural "are all the biases zero?" check gives false assurance
+here — homogeneity is a property of the normalization too, not only of the biases.
 
 ## 20. Three reusable oracles
 
@@ -1772,7 +1791,6 @@ def fit_one_step_moved_variables(model, x, y):
 @contextlib.contextmanager
 def layer_returns_its_input(layer):
     """Kill one component by making it the identity."""
-    original = layer.call
     with mock.patch.object(layer, "call", lambda x, *a, **kw: x):
         yield
 ```
@@ -2310,7 +2328,7 @@ Do not trust a red run that was not the only pytest on the machine (§23.7).
 | NaN on the positions the mask is meant to KEEP | `0.0 * -inf` from an additive fp16 sentinel | §15.1 |
 | `cannot compute AddV2 as input #1 was expected to be a half tensor` | one-sided cast under autocast; cast both sides | §15.1 |
 | **Training does not move under `mixed_float16`** | custom `train_step` missing `optimizer.scale_loss` | §16.1 |
-| A knob has no measurable effect | dead knob, or silently dropped at a factory | §11.1, §9.2 |
+| A knob has no measurable effect | dead knob, or silently dropped at a factory | §11.1, §9.1 |
 | `Structures don't have the same nested structure` from `predict` | `call` echoing a bare `None` in its output dict | §13.5 |
 | A causal model's loss looks fine but generation is poor | no causal mask; or the head pools token 0 | §17.1, §17.2 |
 | Green suite, broken trainer | entry point with zero tests; run the CLI | §22 |
