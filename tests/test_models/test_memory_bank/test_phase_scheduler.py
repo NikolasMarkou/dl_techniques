@@ -427,6 +427,26 @@ class _StepRecorder(keras.callbacks.Callback):
 def _compiled_probe_model(weight_decay: float = 0.01, **overrides):
     kwargs = _tiny_kwargs()
     kwargs.update(overrides)
+    # DECISION plan-2026-08-19T070627-a616f581/D-003 — the probe's WEIGHT
+    # init is seeded here, not just its data. `_one_batch_dataset(seed=0)`
+    # below seeds the batch; before this line nothing seeded the model, so
+    # every fresh process drew different initial weights for the two
+    # watched variables and `TestCurriculumReachesTheTracedGraph`'s
+    # single-draw thresholds collapsed intermittently (~1-in-3 at the
+    # plan base of plan-2026-08-18T140459-7991552f/D-038).
+    # 6 is not "the first seed that passed". A 12-seed sweep measured the
+    # RAW tape gradient at both watched variables in phases 1/2/3 (weight
+    # MOVEMENT is not the instrument: AdamW's first update is ~lr whatever
+    # the gradient is, and decoupled decay moves a weight whose gradient
+    # is exactly 0). Seed 6 is the argmax on BOTH variables at once —
+    # |dL/d final_norm.gamma| = 1.93e-2 (median 1.10e-2) and
+    # |dL/d read_controller.W_g.kernel| = 1.02e-3 (median 6.9e-4).
+    # Do NOT "simplify" this to a phase-1 assertion on the memory
+    # gradient: it is EXACTLY 0.0 there for every seed, by design —
+    # `call()` scales both the injection and `aux_scale` by
+    # `memory_active` (wave_field_memory_llm.py, `call`), so phase 1 has
+    # no memory gradient to find. See decisions.md D-003.
+    keras.utils.set_random_seed(6)
     m = AuxProbeLLM(**kwargs)
     m(np.random.randint(0, _VOCAB, size=(1, _SEQ)).astype(np.int32),
       training=False)
