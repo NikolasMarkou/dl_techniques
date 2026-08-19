@@ -344,6 +344,110 @@ class TestFrequencyBandStatisticsDynamicTimeAxis:
         )
 
 
+class TestDynamicPathDoesNotLaunderGenuineNaNs:
+    """The dynamic-path repair must fix LENGTH artifacts, not corrupt DATA.
+
+    See the ``plan-2026-08-18T140459-7991552f/D-050`` anchor in
+    ``prism_blocks.py``.  The repair D-001 added was unconditional, so on the
+    dynamic path a genuine NaN or +/-inf in the caller's data came back as
+    exact ``0.0`` -- a corrupt window indistinguishable from a constant one --
+    while the static path (the control) propagated it.  MEASURED before the
+    fix, on the ``x`` this class builds: static 9 non-finite statistics,
+    dynamic 0.
+
+    The discriminator is the INPUT VALUES, not the shape: the two degenerate
+    cases D-001 exists for are properties of the LENGTH, and in both of them
+    every sample that does exist is finite.  Both directions are pinned here --
+    corrupt data must survive, and a length artifact must still be repaired.
+    """
+
+    CHANNELS = 3
+    BATCH = 2
+
+    _call_dynamic = staticmethod(
+        TestFrequencyBandStatisticsDynamicTimeAxis._call_dynamic
+    )
+
+    def _corrupt_batch(self):
+        """An all-ones batch with one NaN sample and one +inf sample."""
+        x = np.ones((self.BATCH, 16, self.CHANNELS), dtype="float32")
+        x[0, 5, 1] = np.nan
+        x[1, 7, 2] = np.inf
+        return x
+
+    def test_dynamic_path_propagates_a_genuine_nan(self):
+        layer = FrequencyBandStatistics()
+        x = self._corrupt_batch()
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        assert np.isnan(out[0, 1, :]).any(), (
+            "a genuine NaN input was laundered to 0.0 on the DYNAMIC path"
+        )
+
+    def test_dynamic_path_propagates_a_genuine_inf(self):
+        layer = FrequencyBandStatistics()
+        x = self._corrupt_batch()
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        assert not np.isfinite(out[1, 2, :]).all(), (
+            "a genuine +inf input was laundered to 0.0 on the DYNAMIC path"
+        )
+
+    def test_dynamic_path_matches_the_static_path_on_corrupt_data(self):
+        """The static path is the control: on corrupt data the two must agree."""
+        layer = FrequencyBandStatistics()
+        x = self._corrupt_batch()
+
+        dynamic = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        static = keras.ops.convert_to_numpy(layer(x))
+
+        # Built-in non-vacuity check: the control itself must be non-finite,
+        # otherwise this assertion would pass on two clean tensors.
+        assert not np.isfinite(static).all(), (
+            "control is vacuous -- the STATIC path produced no non-finite "
+            "statistic for this input"
+        )
+        np.testing.assert_array_equal(np.isnan(dynamic), np.isnan(static))
+        np.testing.assert_array_equal(
+            np.isfinite(dynamic), np.isfinite(static)
+        )
+
+    def test_a_corrupt_channel_does_not_suppress_repair_for_its_siblings(self):
+        """The repair is decided per (batch, channel), not per batch element.
+
+        A length-1 band is a LENGTH artifact whose diff features must still
+        become 0.0 -- including in a batch element that has a corrupt sibling
+        channel.
+        """
+        layer = FrequencyBandStatistics()
+        x = np.ones((self.BATCH, 1, self.CHANNELS), dtype="float32")
+        x[0, 0, 1] = np.nan
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+
+        # channel 1 of batch 0 is corrupt -> propagates
+        assert np.isnan(out[0, 1, :]).any()
+        # its finite siblings are still repaired to the static semantics
+        for c in (0, 2):
+            assert np.isfinite(out[0, c, :]).all(), (
+                f"channel {c} was not repaired because a SIBLING channel was "
+                "corrupt"
+            )
+            assert out[0, c, 4] == 0.0 and out[0, c, 5] == 0.0
+
+    @pytest.mark.parametrize("length", [0, 1])
+    def test_a_degenerate_length_is_still_repaired(self, length):
+        """D-001's own case, re-pinned: all-finite input, non-finite stats -> 0.0."""
+        layer = FrequencyBandStatistics()
+        x = np.ones((self.BATCH, length, self.CHANNELS), dtype="float32")
+
+        out = keras.ops.convert_to_numpy(self._call_dynamic(layer, x))
+        assert np.isfinite(out).all(), (
+            f"the length-{length} repair stopped firing; the D-050 condition "
+            "must not be readable as 'never repair'"
+        )
+
+
 class TestPRISMModelDynamicTimeAxis:
     """Model-level closure: a traced PRISM with an unknown time axis is finite."""
 

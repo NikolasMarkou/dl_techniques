@@ -196,10 +196,49 @@ class FrequencyBandStatistics(keras.layers.Layer):
         # it here would make a corrupt window indistinguishable from a constant
         # one.  Pinned by
         # ``test_static_path_still_propagates_genuine_nan_inputs``.
+        # [SUPERSEDED IN PLACE 2026-08-19 by
+        # plan-2026-08-18T140459-7991552f/D-050 -- the repair is now CONDITIONED
+        # on the input series being finite, so the dynamic path no longer
+        # launders a genuine NaN either.  Everything above still holds; only the
+        # predicate of the ``ops.where`` moved.  See the D-050 anchor below.]
         # See decisions.md D-001 (and D-004/D-012 of
         # plan-2026-08-18T073231-52a93f8c for the static branch this completes).
         if static_len is None:
-            stats = ops.where(ops.isfinite(stats), stats, ops.zeros_like(stats))
+            # DECISION plan-2026-08-18T140459-7991552f/D-050
+            # The D-001 repair above was unconditional, so on the dynamic path
+            # it rewrote EVERY non-finite statistic to 0.0 -- including the ones
+            # a genuine NaN in the caller's data produced.  MEASURED at the
+            # commit before this one, ``FrequencyBandStatistics`` on a
+            # ``[2, 16, 3]`` all-ones batch with one NaN and one +inf sample
+            # injected: the STATIC path returned 9 NaN statistics, the SAME
+            # batch through ``tf.function([None, None, 3])`` returned 0 -- the
+            # corrupt series came back as exact zeros, indistinguishable from a
+            # constant one.  That is the very laundering the comment above
+            # forbids for the static path, happening one branch over.
+            # The discriminator is NOT the shape and NOT a wider ``input_spec``
+            # (``assert_input_compatibility`` accepts ``None`` -- measured, see
+            # above and ``plans/SYSTEM.md``): it is the INPUT VALUES.  The two
+            # degenerate cases D-001 exists for -- a length-0 or length-1 band
+            # -- are properties of the LENGTH, and in both of them every sample
+            # that does exist is finite.  A non-finite statistic computed from
+            # an all-finite series is therefore a length artifact and is
+            # repaired; a non-finite statistic computed from a series that
+            # already contained a NaN/inf is a data defect and PROPAGATES.
+            # ``ops.all`` over a length-0 axis is ``True`` (the AND identity),
+            # so the length-0 case still repairs -- checked, not assumed.
+            # The reduction is per ``(batch, channel)`` on purpose: a single
+            # corrupt channel must not suppress the repair for its siblings.
+            # Do NOT "simplify" this back to the unconditional ``ops.where``.
+            # Pinned in BOTH directions by
+            # ``TestDynamicPathDoesNotLaunderGenuineNaNs``.
+            # See decisions.md D-050.
+            series_is_finite = ops.all(ops.isfinite(inputs), axis=1)  # [b, c]
+            repairable = ops.expand_dims(series_is_finite, axis=-1)   # [b, c, 1]
+            stats = ops.where(
+                ops.logical_and(ops.logical_not(ops.isfinite(stats)), repairable),
+                ops.zeros_like(stats),
+                stats,
+            )
 
         return stats
 
