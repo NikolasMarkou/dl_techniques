@@ -87,7 +87,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 296 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 266 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-17 **69 of 73** bind a `create_*` factory in their package init and **all 73** export a curated `__all__`; the 4 without one are `power_sampling`, `mamba`, `fnet` and the nested family `SAM/`. (This sentence said "70 of 73 ... the 3 without a factory (`power_sampling`, `SAM/`, `time_series/`)" until 2026-08-17: the count was one high and the list was wrong in both directions — `time_series/` DOES bind one, while `mamba` and `fnet` do not. Re-derive from the Numbers table row, never by memory.) See Part C. |
+| **`src/dl_techniques/models/`** | 267 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-17 **69 of 73** bind a `create_*` factory in their package init and **all 73** export a curated `__all__`; the 4 without one are `power_sampling`, `mamba`, `fnet` and the nested family `SAM/`. (This sentence said "70 of 73 ... the 3 without a factory (`power_sampling`, `SAM/`, `time_series/`)" until 2026-08-17: the count was one high and the list was wrong in both directions — `time_series/` DOES bind one, while `mamba` and `fnet` do not. Re-derive from the Numbers table row, never by memory.) See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -321,7 +321,7 @@ Every command is in the Numbers table at the foot of this file.
 |---|---|
 | `@keras.saving.register_keras_serializable()` on custom classes | 478 |
 | A `get_config()` for round-trip serialization | 479 |
-| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 355 |
+| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 357 |
 
 Three honest exceptions. None of them is a defect to go fix on sight; each is a
 thing you will meet and should not be surprised by.
@@ -551,7 +551,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1005 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 864 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 900 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -610,7 +610,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
 | Files using `@keras.saving.register_keras_serializable` | 478 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 479 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
-| Files using the central logger | 355 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 357 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
 | Files importing raw `tensorflow` | 62 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
