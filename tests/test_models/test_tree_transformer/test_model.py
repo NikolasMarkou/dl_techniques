@@ -906,3 +906,121 @@ class TestTreeTransformerComponentsSplitLockIn:
         # Sub-layers are re-exports — verify they live in components, not model.
         assert m.GroupAttention.__module__ == "dl_techniques.models.tree_transformer.components"
         assert m.TreeTransformer.__module__ == "dl_techniques.models.tree_transformer.model"
+
+
+# ---------------------------------------------------------------------
+# group_prob: the "core innovation" line, pinned by ORIENTATION
+# (plan-2026-08-19-a616f581 step 12)
+# ---------------------------------------------------------------------
+
+from dl_techniques.models.tree_transformer.components import GroupAttention, TreeMHA
+
+
+class TestGroupProbIsAppliedOnTheKeyAxis:
+    """`attention_weights *= expand_dims(group_prob, axis=1)` -- components.py:516.
+
+    Two mutations were run against this package at HEAD, out of tree:
+
+    * `group_prob -> ones_like(group_prob)` (the line DELETED): **1 failed, 40
+      passed**. `TestTreeTransformerIntegration::test_gradient_flow_integration`
+      catches it, because all 24 `GroupAttention` weights leave the backward
+      graph (75 live gradients instead of 99). So F-58's claim that deleting the
+      line is undetectable is REFUTED at HEAD.
+    * `group_prob -> transpose(group_prob, (0, 2, 1))` (the line kept, its
+      matrix TRANSPOSED): **41 passed** -- the whole suite green, including the
+      gradient test, since a transpose changes no gradient's support. That is
+      the gap this class closes, and it is this repository's most expensive
+      documented failure mode (a transposed attention bias once passed 219
+      tests).
+
+    The oracle is derived from the CLAIM, not from the implementation: axis 2 of
+    `group_prob` indexes KEYS, so changing WHICH key position `group_prob`
+    selects must move EVERY query row of the attention output. Feed a
+    column-selector matrix (all-zero except column `j`, which is 1) for two
+    different `j` and compare.
+
+        correct orientation  -> every row moves (MEASURED min row delta 0.625)
+        transposed           -> only rows j0 and j1 move; the other 4 are 0.0
+        line deleted         -> no row moves at all; all 6 are exactly 0.0
+
+    One test, RED under both mutations.
+    """
+
+    # DECISION plan-2026-08-19-a616f581/D-017
+    # The oracle is a COLUMN SELECTOR compared across two key positions, and the
+    # assertion is on the MINIMUM row delta. Do NOT "simplify" this to "the
+    # output differs when group_prob is replaced by ones": that claim is already
+    # made (indirectly) by TestTreeTransformerIntegration::
+    # test_gradient_flow_integration, and it stays GREEN on a product whose
+    # group_prob matrix is TRANSPOSED -- measured, 41 passed. Do NOT average the
+    # row deltas either: the transposed mutant moves 2 of 6 rows a lot, so a mean
+    # would stay green. See decisions.md D-017.
+    BATCH, SEQ, HIDDEN, HEADS = 1, 6, 32, 4
+    J0, J1 = 2, 4
+
+    def _built_mha(self):
+        keras.utils.set_random_seed(7)
+        mha = TreeMHA(num_heads=self.HEADS, hidden_size=self.HIDDEN,
+                      attention_dropout_rate=0.0)
+        shape = (self.BATCH, self.SEQ, self.HIDDEN)
+        mha.build((shape, shape, shape, None, (self.BATCH, 1, self.SEQ)))
+        return mha
+
+    def _column_selector(self, j):
+        gp = np.zeros((self.BATCH, self.SEQ, self.SEQ), dtype="float32")
+        gp[:, :, j] = 1.0
+        return keras.ops.convert_to_tensor(gp)
+
+    def test_moving_the_selected_key_moves_every_query_row(self):
+        mha = self._built_mha()
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(11).standard_normal(
+                (self.BATCH, self.SEQ, self.HIDDEN)).astype("float32")
+        )
+        mask = keras.ops.ones((self.BATCH, 1, self.SEQ))
+
+        def run(j):
+            return keras.ops.convert_to_numpy(
+                mha((x, x, x, self._column_selector(j), mask), training=False)
+            )
+
+        per_row = np.max(np.abs(run(self.J0) - run(self.J1)), axis=-1)[0]
+
+        assert per_row.shape == (self.SEQ,)
+        # MEASURED min 0.625 in the correct orientation; the two failure modes
+        # both produce EXACT zeros (structural, not rounding), so the bound is
+        # not a calibrated threshold -- it separates "moved" from "0.0".
+        assert float(per_row.min()) > 1e-3, (
+            "group_prob is not being applied on the key axis: moving the "
+            "selected key from "
+            f"{self.J0} to {self.J1} left {int((per_row <= 1e-3).sum())} of "
+            f"{self.SEQ} query rows unmoved (per-row deltas {per_row})"
+        )
+
+    def test_group_prob_is_non_uniform_across_positions(self):
+        """A constant `group_prob` would make the multiply a no-op up to scale.
+
+        The test above cannot see that: it feeds `group_prob` by hand. This one
+        asserts the matrix `GroupAttention` actually produces is structured.
+        """
+        keras.utils.set_random_seed(7)
+        attn = GroupAttention(hidden_size=self.HIDDEN)
+        shape = (self.BATCH, self.SEQ, self.HIDDEN)
+        mask_shape = (self.BATCH, 1, self.SEQ)
+        attn.build((shape, mask_shape, (self.BATCH, self.SEQ, self.SEQ)))
+
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(12).standard_normal(
+                (self.BATCH, self.SEQ, self.HIDDEN)).astype("float32")
+        )
+        mask = keras.ops.ones(mask_shape)
+        prior = keras.ops.zeros((self.BATCH, self.SEQ, self.SEQ))
+
+        group_prob, _break_prob = attn((x, mask, prior), training=False)
+        gp = keras.ops.convert_to_numpy(group_prob)
+
+        assert gp.shape == (self.BATCH, self.SEQ, self.SEQ), gp.shape
+        assert float(np.std(gp)) > 0.0, (
+            "group_prob is constant, so multiplying the attention weights by it "
+            "is a global rescale and carries no constituency structure"
+        )

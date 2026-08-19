@@ -139,3 +139,101 @@ class TestMothNetGradientFlow:
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
         assert max(v for v in report.values() if v is not None) > 0.0
+
+
+# ---------------------------------------------------------------------
+# The two mechanisms MothNet is named for (plan-2026-08-19-a616f581 step 12)
+# ---------------------------------------------------------------------
+
+
+class TestHebbianUpdateAndWinnerTakeAllAreLoadBearing:
+    """`hebbian_update` and the mushroom-body top-k, in VALUE space.
+
+    MEASURED at HEAD, out of tree: replacing the body of
+    `HebbianReadoutLayer.hebbian_update` (`layers/mothnet_blocks.py:563-586`)
+    with `pass` leaves **8 of 8 tests in this package passing**, including the
+    three `train_hebbian` tests above and the gradient-flow adoption -- the
+    readout is reached by backprop through `call()`, which is untouched by the
+    mutation, and `train_hebbian` is the ONLY training entry point MothNet has.
+    Nothing in the package read `readout_weights` at all.
+
+    `readout_weights` owns **20,000** real variables (2000 mushroom-body units x
+    10 classes), so this is not the inert-stub case where a killer is applied to
+    a component that owns none.
+    """
+
+    # DECISION plan-2026-08-19-a616f581/D-018
+    # The "a mushroom-body unit that never fired keeps its row" assertion below
+    # is NOT ceremony: without it, `W += const` -- which is not Hebbian learning
+    # at all -- satisfies the max|delta| > 0 claim. Measured: the blanket mutant
+    # passes the first assertion and fails only the outer-product one. And do
+    # not tighten the top-k count to `== k`: it is `== k` on every sample today,
+    # but the layer's ReLU may legally zero a top-k entry, which would make the
+    # pin flaky for no gain. See decisions.md D-018.
+    def test_hebbian_update_writes_the_readout_weights(self):
+        model = MothNet(num_classes=NUM_CLASSES)
+        model.build((None, NUM_FEATURES))
+
+        x = _features(batch=8)
+        y = keras.utils.to_categorical(
+            np.arange(8) % NUM_CLASSES, num_classes=NUM_CLASSES
+        ).astype("float32")
+        mb_output = model.mushroom_body(
+            model.antennal_lobe(x, training=False), training=False
+        )
+
+        weights = model.readout.readout_weights
+        assert int(np.prod(weights.shape)) == 20000, tuple(weights.shape)
+        before = np.array(keras.ops.convert_to_numpy(weights), copy=True)
+
+        model.readout.hebbian_update(mb_output, keras.ops.convert_to_tensor(y))
+
+        after = keras.ops.convert_to_numpy(weights)
+        delta = after - before
+        assert float(np.max(np.abs(delta))) > 0.0, (
+            "hebbian_update left readout_weights bit-identical: MothNet's only "
+            "training rule is a no-op"
+        )
+
+        # It is an OUTER PRODUCT, not a blanket update: a mushroom-body unit
+        # that fired for no sample in the batch cannot have its row moved.
+        silent = np.all(
+            keras.ops.convert_to_numpy(mb_output) == 0.0, axis=0
+        )
+        assert silent.any(), (
+            "precondition: the sparse code must leave some units silent "
+            "(k=200 of 2000), or this assertion is vacuous"
+        )
+        assert float(np.max(np.abs(delta[silent]))) == 0.0, (
+            "hebbian_update moved the readout row of a mushroom-body unit that "
+            "never fired -- the update is not the outer product it claims"
+        )
+
+    def test_mushroom_body_fires_at_most_k_of_its_units(self):
+        """Winner-take-all sparsity, the second half of F-80.
+
+        `MushroomBodyLayer.call` ends in a `top_k` scatter-into-zeros. Deleting
+        that block leaves the shape, the weights and the config identical and
+        roughly half the 2000 units firing (ReLU of a random projection), so
+        only a per-sample nonzero COUNT can see it.
+        """
+        model = MothNet(num_classes=NUM_CLASSES)
+        model.build((None, NUM_FEATURES))
+        mb_layer = model.mushroom_body
+        k, units = mb_layer.k, mb_layer.units
+        assert k == 200 and units == 2000, (k, units)
+
+        mb_output = keras.ops.convert_to_numpy(
+            mb_layer(
+                model.antennal_lobe(_features(batch=8), training=False),
+                training=False,
+            )
+        )
+
+        fired = np.count_nonzero(mb_output, axis=-1)
+        assert fired.shape == (8,)
+        assert np.all(fired <= k), (
+            f"more than k={k} mushroom-body units fired per sample "
+            f"(counts {fired}); the winner-take-all step is not being applied"
+        )
+        assert np.all(fired > 0), f"no unit fired at all (counts {fired})"
