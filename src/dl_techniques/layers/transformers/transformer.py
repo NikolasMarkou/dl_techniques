@@ -707,11 +707,28 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif self.attention_type == 'window':
+            # DECISION plan-2026-08-19-a616f581/D-005: the block's `use_bias`
+            # MUST be forwarded here, and it is spelled `qkv_bias`/`proj_bias`
+            # -- NOT `use_bias`. The 'window' registry entry
+            # (attention/factory.py, key 'window') declares exactly those two
+            # names under `optional_params`, BOTH DEFAULTING TO True. Do NOT
+            # "simplify" this to `'use_bias': self.use_bias` to match the
+            # 'multi_head'/'group_query'/'anchor' branches: since D-011 the
+            # factory RAISES on undeclared keys, so that spelling is a
+            # construction failure, and before this branch forwarded anything
+            # at all the two `True` defaults silently won -- ModernBERT (all
+            # three variants set `use_bias: False`) carried `qkv/bias` and
+            # `proj/bias` on every one of its ~68% local layers. This is a
+            # weight-SET change: it removes 2 of the 5 tensors in a local
+            # layer's attention subtree at `use_bias=False`, so any pre-fix
+            # `.keras` built that way will not load. See decisions.md D-005.
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
                 **self._required_attention_params(),
                 'dropout_rate': self.attention_dropout_rate,
+                'qkv_bias': self.use_bias,
+                'proj_bias': self.use_bias,
                 'name': name
             }
         elif self.attention_type == 'beit':

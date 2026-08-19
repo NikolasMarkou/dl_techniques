@@ -522,8 +522,13 @@ class TestTransformerLayerExtendedAttention:
 
         layer_win = TransformerLayer(64, 4, 128, attention_type='window', window_size=4)
         p = layer_win._get_attention_params('attn')
+        # `qkv_bias`/`proj_bias` added by D-005 (see TestWindowBranchForwardsUseBias
+        # at the bottom of this file): the branch used to forward NOTHING for
+        # bias, so the registry's two `True` defaults silently won and
+        # `use_bias=False` leaked two bias tensors per local layer.
         assert p == {'dim': 64, 'num_heads': 4, 'window_size': 4,
-                     'dropout_rate': 0.1, 'name': 'attn'}
+                     'dropout_rate': 0.1, 'qkv_bias': True, 'proj_bias': True,
+                     'name': 'attn'}
 
         layer_gqa = TransformerLayer(64, 4, 128, attention_type='group_query', n_kv_head=2)
         p = layer_gqa._get_attention_params('attn')
@@ -1021,3 +1026,61 @@ class TestNormalizationPositionValidation:
         assert not np.allclose(out_pre, out_post, rtol=1e-4, atol=1e-4), (
             "pre-norm and post-norm produced the same output"
         )
+
+
+# ---------------------------------------------------------------------
+# D-005: the 'window' attention branch forwards `use_bias`.
+# ---------------------------------------------------------------------
+def _d005_window_attention_bias_paths(*, use_bias: bool) -> list:
+    """Build a window-attention `TransformerLayer`, call it, list attn biases.
+
+    :param use_bias: value handed to `TransformerLayer(use_bias=...)`.
+    :type use_bias: bool
+    :return: weight paths under the attention sub-tree ending in ``/bias``.
+    :rtype: list
+
+    The ``/bias`` SUFFIX test is load-bearing: it excludes
+    ``.../relative_position_bias_table``, which is a positional-bias table and
+    must survive at both settings.
+    """
+    layer = TransformerLayer(
+        hidden_size=32, num_heads=4, intermediate_size=64,
+        attention_type="window", attention_args={"window_size": 4},
+        use_bias=use_bias, name="probe",
+    )
+    _ = layer(keras.random.normal((1, 16, 32)))
+    return [
+        w.path for w in layer.weights
+        if "attention" in w.path and w.path.endswith("/bias")
+    ]
+
+
+class TestWindowBranchForwardsUseBias:
+    """`use_bias` must reach the 'window' attention sub-layer's weight tree.
+
+    Before D-005, `_get_attention_params`'s `'window'` branch forwarded no
+    bias parameter at all, so `ATTENTION_REGISTRY['window']`'s
+    `optional_params` defaults (`qkv_bias=True`, `proj_bias=True`) silently
+    won and every ModernBERT local layer (all three variants set
+    `use_bias=False`) carried `qkv/bias` and `proj/bias`. Measured pre-fix:
+    ``['probe/attention/single_window_attention/qkv/bias',
+    'probe/attention/single_window_attention/proj/bias']``.
+    """
+
+    def test_use_bias_false_leaves_no_attention_bias_weights(self) -> None:
+        """The fix arm: `use_bias=False` yields ZERO attention bias tensors."""
+        leaked = _d005_window_attention_bias_paths(use_bias=False)
+        assert leaked == [], (
+            f"use_bias=False leaked attention bias weights: {leaked}"
+        )
+
+    def test_use_bias_true_still_creates_both_attention_biases(self) -> None:
+        """LIVENESS arm — without it the test above passes against a layer
+        that has no biases at any setting (e.g. a `proj_bias=False` hard-code,
+        or a probe that never builds the attention sub-layer at all)."""
+        present = _d005_window_attention_bias_paths(use_bias=True)
+        assert len(present) == 2, (
+            f"expected qkv/bias and proj/bias at use_bias=True, got {present}"
+        )
+        assert any(p.endswith("/qkv/bias") for p in present), present
+        assert any(p.endswith("/proj/bias") for p in present), present
