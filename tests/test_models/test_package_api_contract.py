@@ -395,6 +395,24 @@ class TestNoKeras2Residues:
 
 LAYERS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "layers"
 
+#: Paths in every sweep below are reported relative to this, so a waiver key is
+#: stable no matter which root the file was reached through.
+SRC_ROOT = MODELS_DIR.parent
+
+#: Root set of the registry sweep. Unchanged since the guard shipped: the three
+#: registry-backed factories are called from ``models/`` and from the shared
+#: transformer blocks, and widening it has never been measured to add a site.
+_REGISTRY_SWEEP_ROOTS = (MODELS_DIR, LAYERS_DIR / "transformers")
+
+#: Root set of the two NORM sweeps, deliberately WIDER than the registry sweep's.
+#: ``grep -rn "TransformerLayer(" src/dl_techniques/`` (2026-08-19) found three
+#: construction sites outside ``layers/transformers/`` -- ``layers/blt_blocks.py``,
+#: ``layers/graphs/relational_graph_transformer_blocks.py`` and
+#: ``layers/reasoning/hrm_reasoning_module.py`` -- so the narrower root set would
+#: have been silently blind to them. Measured cost of widening: 0 extra hits, and
+#: the sweep still runs in well under a second.
+_NORM_SWEEP_ROOTS = (MODELS_DIR, LAYERS_DIR)
+
 #: The three factories whose registries declare a per-type parameter set. Maps
 #: the factory's function name to (its type-selecting parameter, its registry).
 #: ``norms``/``activations``/``sampling`` are deliberately absent: they have no
@@ -505,6 +523,42 @@ def _init_stored_attrs(cls: ast.ClassDef) -> set:
     return stored - _KERAS_BASE_ATTRS
 
 
+def _callee_name(node: ast.Call) -> str:
+    """The bare name a call node invokes, for ``f(...)`` and ``mod.f(...)`` alike.
+
+    Contract: takes an ``ast.Call``; returns the callee's last name component, or
+    ``""`` when the callee is neither a ``Name`` nor an ``Attribute`` (a call on a
+    subscript or a call result, which no sweep in this file matches). Shared by all
+    three sweeps below -- do not re-derive it inline.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _iter_classes(roots, src_root):
+    """Yield ``(relpath, ast.ClassDef)`` for every class under ``roots``.
+
+    Contract: ``roots`` is any iterable of directories to ``rglob("*.py")``;
+    ``src_root`` is the directory paths are reported relative to (it must be a
+    parent of every root, or ``relative_to`` raises). Files that do not parse are
+    skipped silently -- ``test_every_package_imports`` is what catches those.
+    Shared by the three call-site sweeps so they cannot drift in what they walk.
+    """
+    for root in roots:
+        for path in sorted(Path(root).rglob("*.py")):
+            rel = path.relative_to(src_root).as_posix()
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:  # covered by the import tests
+                continue
+            for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+                yield rel, cls
+
+
 def _sweep_factory_call_sites() -> Tuple[List[tuple], List[str]]:
     """Return ``(dropped, dynamic)`` for every registry-backed factory call site.
 
@@ -523,56 +577,41 @@ def _sweep_factory_call_sites() -> Tuple[List[tuple], List[str]]:
         "create_ffn_layer": (_REGISTRY_FACTORIES["create_ffn_layer"], FFN_REGISTRY),
         "create_embedding_layer": (_REGISTRY_FACTORIES["create_embedding_layer"], EMBEDDING_REGISTRY),
     }
-    src_root = MODELS_DIR.parent
     dropped: List[tuple] = []
     dynamic: List[str] = []
 
-    for root in (MODELS_DIR, LAYERS_DIR / "transformers"):
-        for path in sorted(root.rglob("*.py")):
-            rel = path.relative_to(src_root).as_posix()
-            try:
-                tree = ast.parse(path.read_text())
-            except SyntaxError:  # covered by the import tests
+    for rel, cls in _iter_classes(_REGISTRY_SWEEP_ROOTS, SRC_ROOT):
+        stored = _init_stored_attrs(cls)
+        for node in ast.walk(cls):
+            if not isinstance(node, ast.Call):
                 continue
-            for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
-                stored = _init_stored_attrs(cls)
-                for node in ast.walk(cls):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    func = node.func
-                    fname = (
-                        func.id
-                        if isinstance(func, ast.Name)
-                        else func.attr
-                        if isinstance(func, ast.Attribute)
-                        else None
-                    )
-                    if fname not in registries:
-                        continue
-                    type_kw, registry = registries[fname]
-                    type_node = node.args[0] if node.args else None
-                    for kw in node.keywords:
-                        if kw.arg == type_kw:
-                            type_node = kw.value
-                    if not (
-                        isinstance(type_node, ast.Constant)
-                        and isinstance(type_node.value, str)
-                    ):
-                        dynamic.append(f"{rel}:{node.lineno}")
-                        continue
-                    declared = _declared_params(registry, type_node.value)
-                    if declared is None:
-                        dynamic.append(f"{rel}:{node.lineno} (unknown type {type_node.value!r})")
-                        continue
-                    # A `**config` unpack can carry anything; only literal kwargs
-                    # are provably present, so an unpack clears the whole call.
-                    if any(kw.arg is None for kw in node.keywords):
-                        continue
-                    passed = {kw.arg for kw in node.keywords}
-                    for param in sorted((declared - passed) & stored):
-                        dropped.append(
-                            (rel, node.lineno, cls.name, type_node.value, param)
-                        )
+            fname = _callee_name(node)
+            if fname not in registries:
+                continue
+            type_kw, registry = registries[fname]
+            type_node = node.args[0] if node.args else None
+            for kw in node.keywords:
+                if kw.arg == type_kw:
+                    type_node = kw.value
+            if not (
+                isinstance(type_node, ast.Constant)
+                and isinstance(type_node.value, str)
+            ):
+                dynamic.append(f"{rel}:{node.lineno}")
+                continue
+            declared = _declared_params(registry, type_node.value)
+            if declared is None:
+                dynamic.append(f"{rel}:{node.lineno} (unknown type {type_node.value!r})")
+                continue
+            # A `**config` unpack can carry anything; only literal kwargs
+            # are provably present, so an unpack clears the whole call.
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            passed = {kw.arg for kw in node.keywords}
+            for param in sorted((declared - passed) & stored):
+                dropped.append(
+                    (rel, node.lineno, cls.name, type_node.value, param)
+                )
     return dropped, dynamic
 
 
@@ -599,12 +638,16 @@ class TestFactoryKnobsAreForwarded:
     * only calls with **no** ``**unpack`` (an unpack may well carry the param);
     * only the three registry-backed factories -- ``create_normalization_layer``
       has no ``required_params``/``optional_params`` registry, so the norm-epsilon
-      family of this same defect is out of reach here. This is also why the two
-      by-design omissions catalogued in the sweep that motivated this guard
-      (``adaln_zero.py`` and ``text_encoder.py``'s ``**norm_config`` unpack) need
-      no waiver: both are ``create_normalization_layer`` calls and the predicate
-      never reaches them. Waiving them anyway would have been a waiver guarding
-      nothing;
+      family of this same defect is out of reach here. **Superseded 2026-08-19**:
+      the norm family is now covered by ``TestNormalizationKnobsAreForwarded`` and
+      ``TestTransformerLayerNormArgsAreForwarded`` below, which reach it through
+      ``inspect.signature`` and through the ``TransformerLayer(...)`` indirection
+      respectively -- but THIS predicate still does not, and must not be widened
+      to try. This is also why the two by-design omissions catalogued in the sweep
+      that motivated this guard (``adaln_zero.py`` and ``text_encoder.py``'s
+      ``**norm_config`` unpack) need no waiver here: both are
+      ``create_normalization_layer`` calls and this predicate never reaches them.
+      Waiving them anyway would have been a waiver guarding nothing;
     * only params the enclosing class stores in ``__init__``, which is what makes
       a hit *demonstrable* rather than merely suspicious.
     """
@@ -678,6 +721,406 @@ class TestFactoryKnobsAreForwarded:
             warnings.warn(
                 "factory call sites with a non-literal type (not statically "
                 f"checkable, {len(dynamic)}): {dynamic}",
+                UserWarning,
+                stacklevel=2,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Norm-forwarding guards: the same silent-drop defect, one indirection away.
+# ---------------------------------------------------------------------------
+
+#: Stored-attribute names that mean "this class holds a normalization epsilon".
+#:
+#: A plain ``"eps" in name`` substring test matches ``mask_annealing_steps``
+#: (``layers/transformers/eomt_transformer.py``) -- st-EPS. The token form below
+#: matches ``eps``, ``epsilon``, ``norm_eps``, ``layer_norm_eps``,
+#: ``norm_epsilon`` and misses ``steps``/``keeps``/``epsilon_decay``-style
+#: near-misses. Measured 2026-08-19: the substring form found 8 candidate classes,
+#: this form finds 7, and the one it drops is the ``steps`` collision.
+_EPS_ATTR_RE = re.compile(r"(?:^|_)(?:eps|epsilon)(?:$|_)")
+
+#: The two ``TransformerLayer`` parameters that carry a caller's norm config into
+#: every in-block norm. ``TransformerLayer._create_normalization_layer`` calls
+#: ``create_normalization_layer(..., **custom_args)`` where ``custom_args`` is one
+#: of these (default ``{}``), so omitting both silently pins every in-block norm
+#: to the FACTORY's ``epsilon`` default regardless of the model's own knob.
+_TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
+
+#: Name collisions for the DIRECT ``create_normalization_layer`` predicate,
+#: cleared by manual read. Sibling of ``_NAME_COLLISIONS``, deliberately a
+#: separate constant: that one is keyed by a registry factory's declared params,
+#: this one by ``_accepted_params``' ``inspect.signature``-derived set, and
+#: conflating the two would hide which predicate a waiver actually clears.
+#:
+#: The single entry is the ViT-family ``scale`` shape already catalogued in
+#: ``_NAME_COLLISIONS``, reached here through a different factory:
+#: ``SigLIPVisionTransformer`` stores ``self.scale = str(scale)`` (the variant
+#: size, ``vit_siglip/model.py:357``) while ``LayerNormalization.__init__``
+#: declares ``scale: bool``. Same two words, unrelated meanings.
+#:
+#: Key is ``(path relative to src/dl_techniques, class, normalization type,
+#: param)`` -- never a line number, for the reason ``_SCHEDULED_FIXES`` gives.
+_NORM_NAME_COLLISIONS = {
+    ("models/vit_siglip/model.py", "SigLIPVisionTransformer", "layer_norm", "scale"),
+}
+
+
+def _stored_eps_attrs(stored: set) -> set:
+    """The subset of ``stored`` that names a normalization epsilon."""
+    return {attr for attr in stored if _EPS_ATTR_RE.search(attr.lower())}
+
+
+def _sweep_transformer_layer_norm_args(roots=None, src_root=None):
+    """Find ``TransformerLayer(...)`` sites that cannot pass their own epsilon on.
+
+    Contract: returns ``(hits, n_constructions, n_candidates)``.
+
+    * ``hits`` -- ``(relpath, lineno, class, sorted eps attrs, sorted missing
+      kwargs)`` for every construction inside a class that stores an epsilon
+      attribute and passes NEITHER ``attention_norm_args`` NOR ``ffn_norm_args``
+      (a call passing one of the two is not flagged: the caller demonstrably knows
+      the channel exists, and which of the two norms a knob belongs to is a design
+      choice this predicate has no standing to make).
+    * ``n_constructions`` -- every ``TransformerLayer(...)`` seen, for the vacuity
+      assertion.
+    * ``n_candidates`` -- those whose enclosing class stores an epsilon attribute.
+
+    ``roots``/``src_root`` default to the real tree; they exist so the predicate
+    can be pointed at a synthetic fixture and proven to fire. A ``**unpack`` clears
+    a call, exactly as in ``_sweep_factory_call_sites``.
+    """
+    roots = _NORM_SWEEP_ROOTS if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    hits: List[tuple] = []
+    n_constructions = 0
+    n_candidates = 0
+
+    for rel, cls in _iter_classes(roots, src_root):
+        eps_attrs = _stored_eps_attrs(_init_stored_attrs(cls))
+        for node in ast.walk(cls):
+            if not isinstance(node, ast.Call):
+                continue
+            if _callee_name(node) != "TransformerLayer":
+                continue
+            n_constructions += 1
+            if not eps_attrs:
+                continue
+            n_candidates += 1
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            passed = {kw.arg for kw in node.keywords}
+            missing = [k for k in _TRANSFORMER_NORM_ARG_KWARGS if k not in passed]
+            if len(missing) == len(_TRANSFORMER_NORM_ARG_KWARGS):
+                hits.append((rel, node.lineno, cls.name, sorted(eps_attrs), missing))
+    return hits, n_constructions, n_candidates
+
+
+def _sweep_norm_factory_call_sites(roots=None, src_root=None):
+    """The registry-shaped predicate for ``create_normalization_layer``.
+
+    Contract: returns ``(dropped, dynamic, n_literal)`` with the same element
+    shapes as ``_sweep_factory_call_sites``' ``(dropped, dynamic)``, plus the
+    literal-type call count for the vacuity assertion.
+
+    ``norms/factory.py`` has no ``required_params``/``optional_params`` registry,
+    so the declared-param ground truth comes from ``_accepted_params(type)``, which
+    derives it from ``inspect.signature`` of ``_TYPE_TO_CLASS[type].__init__``. Do
+    NOT hand-maintain a second accepted-param list here: that list has drifted
+    twice already, which is why the factory replaced it with the signature.
+    """
+    from dl_techniques.layers.norms.factory import _TYPE_TO_CLASS, _accepted_params
+
+    roots = _NORM_SWEEP_ROOTS if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    dropped: List[tuple] = []
+    dynamic: List[str] = []
+    n_literal = 0
+
+    for rel, cls in _iter_classes(roots, src_root):
+        stored = _init_stored_attrs(cls)
+        for node in ast.walk(cls):
+            if not isinstance(node, ast.Call):
+                continue
+            if _callee_name(node) != "create_normalization_layer":
+                continue
+            type_node = node.args[0] if node.args else None
+            for kw in node.keywords:
+                if kw.arg in ("normalization_type", "type"):
+                    type_node = kw.value
+            if not (
+                isinstance(type_node, ast.Constant)
+                and isinstance(type_node.value, str)
+            ):
+                dynamic.append(f"{rel}:{node.lineno}")
+                continue
+            norm_type = type_node.value
+            if norm_type not in _TYPE_TO_CLASS:
+                dynamic.append(f"{rel}:{node.lineno} (unknown type {norm_type!r})")
+                continue
+            n_literal += 1
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            declared = _accepted_params(norm_type)
+            passed = {kw.arg for kw in node.keywords}
+            for param in sorted((declared - passed) & stored):
+                dropped.append((rel, node.lineno, cls.name, norm_type, param))
+    return dropped, dynamic, n_literal
+
+
+#: A synthetic module, never imported -- only parsed. Both predicates are proven
+#: to fire on it, and proven NOT to fire on its fixed twin below, so neither can
+#: pass by finding nothing. Kept as source text rather than as a real defect in
+#: the tree for the obvious reason: the tree is supposed to be clean.
+_INJECTED_DEFECT_SRC = '''
+class InjectedTransformerUser(keras.layers.Layer):
+    def __init__(self, layer_norm_eps=1e-12, **kwargs):
+        super().__init__(**kwargs)
+        self.layer_norm_eps = layer_norm_eps
+        self.blocks = [
+            TransformerLayer(hidden_size=8, num_heads=2, intermediate_size=16)
+            for _ in range(2)
+        ]
+
+
+class InjectedNormUser(keras.layers.Layer):
+    def __init__(self, epsilon=1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.norm = create_normalization_layer('layer_norm', name='n')
+'''
+
+#: The same two classes with the omission repaired. A predicate that flags this
+#: too is shape-matching, not measuring.
+_INJECTED_FIXED_SRC = '''
+class InjectedTransformerUser(keras.layers.Layer):
+    def __init__(self, layer_norm_eps=1e-12, **kwargs):
+        super().__init__(**kwargs)
+        self.layer_norm_eps = layer_norm_eps
+        norm_args = {'epsilon': layer_norm_eps}
+        self.blocks = [
+            TransformerLayer(
+                hidden_size=8,
+                num_heads=2,
+                intermediate_size=16,
+                attention_norm_args=dict(norm_args),
+                ffn_norm_args=dict(norm_args),
+            )
+            for _ in range(2)
+        ]
+
+
+class InjectedNormUser(keras.layers.Layer):
+    def __init__(self, epsilon=1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.norm = create_normalization_layer(
+            'layer_norm', epsilon=epsilon, name='n'
+        )
+'''
+
+
+def _write_fixture(tmp_path: Path, source: str) -> Tuple[tuple, Path]:
+    """Write ``source`` as a fake package file; return ``(roots, src_root)``."""
+    pkg = tmp_path / "models" / "injected"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "model.py").write_text(source)
+    return (tmp_path / "models",), tmp_path
+
+
+class TestTransformerLayerNormArgsAreForwarded:
+    """A model's epsilon knob must have a route into its own in-block norms.
+
+    This is the predicate that finds real defects. The direct-call one below is
+    the shape the norm factory's own registry gap suggests, but MEASURED against
+    this tree it finds zero genuine drops (44 literal-type calls, one hit, and
+    that hit is the ``vit_siglip`` ``scale`` name collision). The defect family
+    actually lives one indirection out: a model stores ``self.layer_norm_eps``,
+    forwards it to its embedding norm, and then builds its encoder stack with
+    ``TransformerLayer(...)`` passing neither ``attention_norm_args`` nor
+    ``ffn_norm_args`` -- so all ``2*num_layers`` in-block norms run at the
+    factory's default instead. Five models did exactly that until 2026-08-19
+    (BERT/DistilBERT/ModernBERT at ``1e-6`` instead of their own ``1e-12``, a
+    ~1e5x mismatch against the embedding norm they sit beside).
+
+    Narrowings, each a place this can miss a real defect:
+
+    * only classes storing an epsilon-named attribute. ``MobileClipTextEncoder``
+      (``models/mobile_clip/components.py``) is invisible to this predicate for
+      that reason -- its epsilon is a module-level ``REFERENCE_NORM_EPSILON``
+      constant, not a stored attribute -- and it is a *correct* site, so the
+      narrowing costs nothing there today. Dropping the clause is not the fix:
+      without it every ``TransformerLayer(...)`` that legitimately wants the
+      default becomes a failure (14 such sites at the time of writing);
+    * only calls with no ``**unpack``;
+    * only ``TransformerLayer``. ``TransformerDecoderLayer`` takes the same two
+      dicts and is not swept -- no measured instance, and adding it unmeasured
+      would be a guard nobody has seen fire;
+    * nothing here reaches a knob that has no channel at all. ``GroupAttention``
+      (``models/tree_transformer/components.py``) had no ``layer_norm_eps``
+      parameter until it was given one as a PRODUCT fix; no call-site predicate
+      can see a parameter that does not exist. It is still out of reach today for
+      a second reason -- it calls ``create_normalization_layer`` with a dynamic
+      type -- and is therefore reported by ``test_dynamic_call_sites_are_reported``
+      rather than checked.
+    """
+
+    def test_no_eps_storing_class_omits_both_norm_arg_dicts(self):
+        # DECISION plan-2026-08-19-a616f581/D-008
+        # This guard is written against the TransformerLayer INDIRECTION, not
+        # against `create_normalization_layer(...)` call sites, because the
+        # direct-call form guards ZERO: measured over models/ + layers/, the
+        # signature-derived direct predicate returns exactly one hit and it is a
+        # known name collision. The epsilon a model stores never reaches a
+        # `create_normalization_layer` call it writes itself -- it reaches (or
+        # fails to reach) one that `TransformerLayer._create_normalization_layer`
+        # writes, through the `attention_norm_args`/`ffn_norm_args` dicts.
+        # WHAT NOT TO DO: do not "simplify" this into the direct-call predicate
+        # below, and do not delete this class as redundant with it -- they have
+        # disjoint reach, and this is the one with a demonstrated defect family
+        # (5 models, fixed the same day this shipped). See decisions.md D-008.
+        hits, _, _ = _sweep_transformer_layer_norm_args()
+        offenders = [
+            f"{rel}:{line} {cls}: TransformerLayer(...) passes neither "
+            f"{' nor '.join(missing)} while the class stores {eps} -- every "
+            "in-block norm runs at the factory's epsilon default"
+            for rel, line, cls, eps, missing in hits
+        ]
+        assert not offenders, (
+            "a model's epsilon knob has no route into its own in-block norms. "
+            "Build a `{'epsilon': self.<knob>}` dict and pass it as BOTH "
+            "attention_norm_args and ffn_norm_args. Found:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_sweep_found_call_sites(self):
+        """The AST walk must not silently collapse to nothing.
+
+        A guard that reports zero offenders because it looked in the wrong place
+        is indistinguishable from a clean tree -- which is the entire failure mode
+        of writing this guard the day after the last offender was fixed. Floors
+        are set well under the 2026-08-19 measurement (28 constructions, 7
+        candidates) so ordinary churn does not trip them.
+        """
+        _, n_constructions, n_candidates = _sweep_transformer_layer_norm_args()
+        assert n_constructions >= 20, (
+            f"expected dozens of TransformerLayer(...) sites, found "
+            f"{n_constructions}: the AST walk stopped seeing the tree"
+        )
+        assert n_candidates >= 5, (
+            f"expected several eps-storing classes to build TransformerLayers, "
+            f"found {n_candidates}: the stored-attribute predicate stopped matching"
+        )
+
+    def test_predicate_fires_on_an_injected_defect(self, tmp_path):
+        """Dead-component probe: the predicate must go RED on a real omission."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_DEFECT_SRC)
+        hits, n_constructions, n_candidates = _sweep_transformer_layer_norm_args(
+            roots, src_root
+        )
+        assert n_constructions == 1 and n_candidates == 1
+        assert len(hits) == 1, hits
+        rel, _, cls, eps, missing = hits[0]
+        assert cls == "InjectedTransformerUser"
+        assert eps == ["layer_norm_eps"]
+        assert missing == ["attention_norm_args", "ffn_norm_args"]
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once the same site forwards the dicts."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_FIXED_SRC)
+        hits, _, n_candidates = _sweep_transformer_layer_norm_args(roots, src_root)
+        assert n_candidates == 1, "the fixture must still be reached"
+        assert hits == [], hits
+
+
+class TestNormalizationKnobsAreForwarded:
+    """``create_normalization_layer`` call sites, checked against the signature.
+
+    The registry-shaped sibling of ``TestFactoryKnobsAreForwarded``, for the one
+    factory that has no registry: the declared-param set comes from
+    ``norms/factory.py::_accepted_params``, i.e. from ``inspect.signature`` of the
+    class each type instantiates.
+
+    Its measured yield on this tree is zero genuine drops, and that is expected --
+    it is here for the regression direction, not because it found anything. The
+    reason is structural and worth stating so nobody "fixes" it by loosening the
+    name match: an epsilon knob is almost always stored under a *different* name
+    than the parameter that carries it (``self.norm_eps`` -> ``epsilon=``,
+    ``self.norm_epsilon`` -> ``epsilon=``), so the stored-attribute clause that
+    makes a hit demonstrable is also what makes this predicate quiet. Matching on
+    value rather than name would need dataflow, not AST shape.
+
+    Same four narrowings as ``TestFactoryKnobsAreForwarded``, and the first one
+    bites much harder here: 138 of ~167 call sites pass a dynamic
+    ``normalization_type`` (it is nearly always ``self.normalization_type``), so
+    this predicate sees under a fifth of the tree's calls.
+    """
+
+    def test_no_declared_and_stored_param_is_dropped(self):
+        dropped, _, _ = _sweep_norm_factory_call_sites()
+        offenders = [
+            f"{rel}:{line} {cls}: create_normalization_layer({typ!r}) drops "
+            f"{param!r} (self.{param} is stored in __init__)"
+            for rel, line, cls, typ, param in dropped
+            if (rel, cls, typ, param) not in _NORM_NAME_COLLISIONS
+        ]
+        assert not offenders, (
+            "a create_normalization_layer call site drops a parameter its "
+            "enclosing class stores. Forward it, or -- if the names merely "
+            "collide -- add it to _NORM_NAME_COLLISIONS with the read that "
+            "clears it. Found:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_waivers_still_match_a_real_site(self):
+        """A waiver matching nothing is a waiver hiding nothing (see the sibling)."""
+        dropped, _, _ = _sweep_norm_factory_call_sites()
+        live = {(rel, cls, typ, param) for rel, _, cls, typ, param in dropped}
+        stale = sorted(_NORM_NAME_COLLISIONS - live)
+        assert not stale, (
+            "norm waiver entries no longer match any call site; delete them if "
+            f"the collision is gone, re-key them if the code moved: {stale}"
+        )
+
+    def test_the_sweep_found_call_sites(self):
+        """The walk must reach a plausible share of the tree's call sites."""
+        dropped, dynamic, n_literal = _sweep_norm_factory_call_sites()
+        assert n_literal >= 15, (
+            f"expected dozens of literal-type create_normalization_layer calls, "
+            f"found {n_literal} (2026-08-19: 29)"
+        )
+        assert len(dynamic) >= 50, (
+            f"expected the dynamic-type inventory to stay large, found "
+            f"{len(dynamic)} (2026-08-19: 138); a collapse here means the AST "
+            "walk stopped seeing the tree, not that the tree got more static"
+        )
+        assert len(dropped) + n_literal >= 15
+
+    def test_predicate_fires_on_an_injected_defect(self, tmp_path):
+        """Dead-component probe: a stored, declared, unpassed param must be seen."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_DEFECT_SRC)
+        dropped, _, n_literal = _sweep_norm_factory_call_sites(roots, src_root)
+        assert n_literal == 1
+        assert len(dropped) == 1, dropped
+        _, _, cls, typ, param = dropped[0]
+        assert (cls, typ, param) == ("InjectedNormUser", "layer_norm", "epsilon")
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once the same call forwards the parameter."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_FIXED_SRC)
+        dropped, _, n_literal = _sweep_norm_factory_call_sites(roots, src_root)
+        assert n_literal == 1, "the fixture must still be reached"
+        assert dropped == [], dropped
+
+    def test_dynamic_call_sites_are_reported(self):
+        """Non-fatal inventory of what this predicate structurally cannot check.
+
+        ``GroupAttention``'s own norm lives in here, not in the checked set.
+        """
+        _, dynamic, _ = _sweep_norm_factory_call_sites()
+        if dynamic:
+            warnings.warn(
+                "create_normalization_layer call sites with a non-literal type "
+                f"(not statically checkable, {len(dynamic)}): {dynamic}",
                 UserWarning,
                 stacklevel=2,
             )
