@@ -3945,3 +3945,1528 @@ class TestCreateFactoriesDelegateToFromVariant:
         assert counts["n_variant_factories"] == 2, "the fixture must still be reached"
         assert counts["n_delegates"] == 2, sites
         assert counts["n_logic"] == 0, sites
+
+
+# ---------------------------------------------------------------------------
+# Step 8 (plan-2026-08-19T163559-499b6f0e) -- call purity, config contract,
+# mutable defaults, and a population freeze on custom step overrides.
+#
+# The subject set of the two call-purity guards is the ONE-LEVEL INTRA-MODULE
+# CALLEE CLOSURE of every ``call()``, not a lexical scan of ``call()`` itself.
+# Measured 2026-08-20 (see the sweep docstring): the lexical scan finds 17
+# ``logger.*`` sites, the closure finds 24. The 7 it adds are not hypothetical --
+# one of them, ``DeepAR._training_mode``, is inside ``models/`` and would have
+# made this guard's own headline number wrong.
+# ---------------------------------------------------------------------------
+
+_LIB_ROOT = REPO_ROOT / "src" / "dl_techniques"
+_SRC_ROOT = REPO_ROOT / "src"
+
+
+def _dotted_callee(node: ast.Call) -> str:
+    """The full dotted spelling of a call's callee, e.g. ``logger.debug``.
+
+    Contract: takes an ``ast.Call``; returns the dotted attribute chain rooted at
+    a ``Name`` (``"a.b.c"``), or ``""`` when the root is not a plain name (a
+    subscript, a literal, another call). Distinct from ``_callee_name``, which
+    deliberately collapses to the ROOT name -- this one keeps the whole chain
+    because every predicate below matches on the ATTRIBUTE (``.numpy``,
+    ``.tril``) or on the root plus attribute (``logger.debug``).
+    """
+    parts: List[str] = []
+    node_func = node.func
+    while isinstance(node_func, ast.Attribute):
+        parts.append(node_func.attr)
+        node_func = node_func.value
+    if isinstance(node_func, ast.Name):
+        parts.append(node_func.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _call_closure_bodies(tree: ast.Module):
+    """Every function body reachable from a ``call()`` at ONE level, same module.
+
+    Contract: takes a parsed module; yields ``(class_name, body_name, FunctionDef,
+    kind)`` where ``kind`` is
+
+    * ``"direct"``  -- the ``call`` method itself;
+    * ``"helper"``  -- a MODULE-LEVEL function ``call`` invokes by bare name;
+    * ``"method"``  -- a SIBLING METHOD of the same class ``call`` invokes as
+      ``self.<name>()``.
+
+    **Why this and not a lexical ``call()`` scan.** `findings/measured-systemic-
+    families.md` §5d proved the indirection live twice over:
+    ``LatentGMMRegistration.call`` invokes the module-level
+    ``compute_rigid_transform``, whose body holds ``tf.linalg.svd``/``det``/
+    ``diag``; ``Thera.call`` reaches ``decode_with_jac`` and four more raw-TF
+    sites. A ``.numpy()`` or a ``logger.debug`` moved one call deep passes a
+    lexical guard unchanged. This closure is what the step-8 predicates are
+    written against.
+
+    **What the closure does NOT reach**, stated so nobody trusts it past its
+    edge -- these are MEASURED gaps, not omissions:
+
+    * depth 2 and beyond (a helper's own helpers);
+    * cross-object calls, ``self.<sublayer>.<method>()`` -- which is exactly how
+      ``Thera.call`` reaches ``decode_with_jac`` (``self.hypernetwork.
+      decode_with_jac``). §5d's second proven indirection is therefore still
+      outside this guard even though its first, ``compute_rigid_transform``, is
+      inside it. Widening to cross-object needs a type inference this AST-only
+      suite does not have;
+    * calls through a local alias (``fn = self._helper; fn()``);
+    * ``__call__``/``compute_loss``/``train_step`` roots -- the root is ``call``
+      alone, because that is the method R-033/R-041/R-028/R-034 name.
+    """
+    module_funcs = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        methods = {
+            m.name: m
+            for m in cls.body
+            if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for method in cls.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if method.name != "call":
+                continue
+            yield cls.name, "call", method, "direct"
+            seen = set()
+            for sub in ast.walk(method):
+                if not isinstance(sub, ast.Call):
+                    continue
+                func = sub.func
+                if isinstance(func, ast.Name):
+                    if func.id in module_funcs and func.id not in seen:
+                        seen.add(func.id)
+                        yield cls.name, func.id, module_funcs[func.id], "helper"
+                elif (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "self"
+                    and func.attr in methods
+                    and func.attr != "call"
+                    and func.attr not in seen
+                ):
+                    seen.add(func.attr)
+                    yield cls.name, func.attr, methods[func.attr], "method"
+
+
+#: Predicates of the two call-purity families, keyed by the family name the
+#: sweep reports. Each takes the dotted callee spelling.
+_CALL_PURITY_FAMILIES = {
+    # R-033 / R-041: logging on a traced path. Anything on a `logger` object.
+    "logger": lambda dotted: dotted.split(".")[0] == "logger" and "." in dotted,
+    # R-028: materializing a tensor to host memory breaks the graph.
+    "numpy": lambda dotted: dotted.split(".")[-1] in ("numpy", "convert_to_numpy"),
+    # R-034: `tril`/`triu` allocate a dense mask instead of using the causal
+    # attention path.
+    "tri": lambda dotted: dotted.split(".")[-1] in ("tril", "triu"),
+}
+
+
+@_memo_default_roots
+def _sweep_call_closure_hygiene(roots=None, src_root=None):
+    """Impure calls in the one-level callee closure of every ``call()``.
+
+    Contract: returns ``(hits, counts)``. ``hits`` is a sorted list of
+    ``(rel, class, body, kind, lineno, dotted, family)`` with ``family`` in
+    ``{"logger", "numpy", "tri"}``. ``counts`` carries the anti-vacuity figures
+    (``n_call_methods``, ``n_closure_bodies``) plus the per-family site counts
+    and, for ``logger``, the LEXICAL-ONLY count so the closure's added value is
+    itself asserted rather than asserted-about.
+
+    Default roots: the whole of ``src/dl_techniques/`` -- NOT ``models/``.
+    Scope reasoning: step 19 owns all 17 lexical sites library-wide, and 11 of
+    the 15 offending keys are in ``layers/`` and ``losses/``, where the same rule
+    holds and the same fix is planned. A ``models/``-only guard would freeze 4
+    keys and leave 11 unguarded.
+
+    Measured 2026-08-20 over ``src/dl_techniques/``: 651 ``call`` methods, 1010
+    closure bodies, **24 logger sites across 15 keys** (lexical: 17 sites),
+    **0 numpy** and **0 tril/triu** -- the latter two are freeze-forward and can
+    only be validated by injection.
+    """
+    if roots is None:
+        roots, src_root = (_LIB_ROOT,), REPO_ROOT
+    hits: List[tuple] = []
+    n_call_methods = 0
+    n_closure_bodies = 0
+    for rel, tree in _iter_modules(roots, src_root):
+        for cls_name, body_name, fn, kind in _call_closure_bodies(tree):
+            n_closure_bodies += 1
+            if kind == "direct":
+                n_call_methods += 1
+            for sub in ast.walk(fn):
+                if not isinstance(sub, ast.Call):
+                    continue
+                dotted = _dotted_callee(sub)
+                if not dotted:
+                    continue
+                for family, predicate in _CALL_PURITY_FAMILIES.items():
+                    if predicate(dotted):
+                        hits.append(
+                            (rel, cls_name, body_name, kind, sub.lineno, dotted, family)
+                        )
+    hits.sort()
+    counts = {
+        "n_call_methods": n_call_methods,
+        "n_closure_bodies": n_closure_bodies,
+        "n_logger": sum(1 for h in hits if h[6] == "logger"),
+        "n_logger_lexical": sum(
+            1 for h in hits if h[6] == "logger" and h[3] == "direct"
+        ),
+        "n_logger_keys": len({h[:3] for h in hits if h[6] == "logger"}),
+        "n_numpy": sum(1 for h in hits if h[6] == "numpy"),
+        "n_tri": sum(1 for h in hits if h[6] == "tri"),
+    }
+    return hits, counts
+
+
+#: The 15 LIVE ``logger.*``-on-a-forward-path keys, waived BY NAME and routed to
+#: step 19, which fixes all of them (the 4 ``models/`` ones first). Keyed by
+#: ``(relpath, class, body)`` -- never by line -- so line drift cannot silence a
+#: waiver and a move fails loudly. 24 call sites across these 15 keys.
+#:
+#: Re-derived 2026-08-20. The carried figure was "17 library-wide, 4 in
+#: ``models/``"; that is the LEXICAL count and it is exactly right as such. By
+#: the closure predicate this step actually ships it is **24 sites / 15 keys
+#: library-wide, 5 sites / 2 keys in ``models/``** -- ``DeepAR._training_mode``
+#: is a ``models/`` site no lexical sweep sees.
+_CALL_LOGGER_WAIVERS = {
+    ("src/dl_techniques/layers/attention/wave_field_attention.py",
+     "WaveFieldAttention", "call"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "_apply_masks"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "_apply_sparsification"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "_extract_entities"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "_initialize_dense_graph"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "_refine_graph"),
+    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
+     "EntityGraphRefinement", "call"),
+    ("src/dl_techniques/layers/logic/arithmetic_operators.py",
+     "LearnableArithmeticOperator", "call"),
+    ("src/dl_techniques/layers/logic/logic_operators.py",
+     "LearnableLogicOperator", "call"),
+    ("src/dl_techniques/layers/statistics/residual_acf.py",
+     "ResidualACFLayer", "call"),
+    ("src/dl_techniques/losses/clip_contrastive_loss.py",
+     "CLIPContrastiveLoss", "_validate_logits"),
+    ("src/dl_techniques/losses/nano_vlm_loss.py", "NanoVLMLoss", "call"),
+    ("src/dl_techniques/losses/yolo12_multitask_loss.py",
+     "DiceFocalSegmentationLoss", "call"),
+    ("src/dl_techniques/models/nano_vlm/model.py", "NanoVLM", "call"),
+    ("src/dl_techniques/models/time_series/deepar/model.py",
+     "DeepAR", "_training_mode"),
+}
+
+
+#: A ``call()`` that is clean on its own face and a one-level helper that is not:
+#: the shape a lexical guard passes. All three families are represented.
+_INJECTED_CALL_PURITY_DEFECT_SRC = '''
+def _prepare(x):
+    logger.debug("preparing %s", x)
+    return ops.tril(x)
+
+
+class Injected(keras.layers.Layer):
+    def call(self, inputs, training=None):
+        return self._finish(_prepare(inputs))
+
+    def _finish(self, x):
+        return x.numpy() + 1
+'''
+
+#: The same layer with the impurity removed from the helpers. A predicate that
+#: still fires here is matching on the file, not on the bodies.
+_INJECTED_CALL_PURITY_FIXED_SRC = '''
+def _prepare(x):
+    return ops.triu_free_mask(x)
+
+
+class Injected(keras.layers.Layer):
+    def call(self, inputs, training=None):
+        return self._finish(_prepare(inputs))
+
+    def _finish(self, x):
+        return x + 1
+'''
+
+
+class TestCallClosureIsPure:
+    """No logging and no host-materialization on a forward path (R-033/R-041/R-028/R-034).
+
+    The three families ship at different maturities and the guard says so:
+
+    * ``logger`` -- **24 live sites across 15 keys** (measured 2026-08-20),
+      every one waived BY NAME in ``_CALL_LOGGER_WAIVERS`` with a liveness test,
+      and routed to step 19. The predicate is NOT narrowed to make them go away;
+    * ``numpy`` (``.numpy()``/``convert_to_numpy``) -- **0**, CLOSED-as-refuted
+      at step 5 (all 4 known sites are eager: ``generate``, two ``Callback``
+      hooks, one warm-up helper, none of them in a ``call`` closure). Ships as a
+      freeze-forward;
+    * ``tril``/``triu`` -- **0**, likewise a freeze-forward.
+
+    Because two of the three have no live offender, injection is the ONLY
+    evidence that they work, which is what the last two tests are.
+    """
+
+    def test_no_logger_call_on_a_forward_path(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-014
+        # WHAT NOT TO DO: do not re-scope this predicate to `call()` bodies to
+        # make it cheaper or quieter. The lexical form is what the carried
+        # measurement used, and it is blind to 7 of the 24 live sites -- one of
+        # them, DeepAR._training_mode, inside models/. See decisions.md D-014.
+        hits, _ = _sweep_call_closure_hygiene()
+        live = [
+            f"{rel}::{cls}.{body} line {lineno} -> {dotted} ({kind})"
+            for rel, cls, body, kind, lineno, dotted, family in hits
+            if family == "logger" and (rel, cls, body) not in _CALL_LOGGER_WAIVERS
+        ]
+        assert not live, (
+            "logging on a forward path (R-033/R-041): a `logger.*` call reachable "
+            "from `call()` runs once at trace time and never again under "
+            "`tf.function`, so it is at best dead and at worst a retrace. Move it "
+            "to `build()` or delete it. Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_logger_waivers_still_match_a_real_site(self):
+        """Step 19 deletes these sites; each fix must delete its waiver too."""
+        hits, _ = _sweep_call_closure_hygiene()
+        offending = {(h[0], h[1], h[2]) for h in hits if h[6] == "logger"}
+        stale = sorted(_CALL_LOGGER_WAIVERS - offending)
+        assert not stale, (
+            "these logger-in-call waivers no longer match a real site -- delete "
+            f"them or re-key them: {stale}"
+        )
+
+    def test_no_host_materialization_on_a_forward_path(self):
+        """``.numpy()`` / ``convert_to_numpy`` -- population 0, freeze-forward."""
+        hits, _ = _sweep_call_closure_hygiene()
+        live = [
+            f"{rel}::{cls}.{body} line {lineno} -> {dotted}"
+            for rel, cls, body, kind, lineno, dotted, family in hits
+            if family == "numpy"
+        ]
+        assert not live, (
+            "R-028: `.numpy()` / `convert_to_numpy` reachable from `call()` "
+            "materializes a symbolic tensor and raises the moment the layer is "
+            "traced. There is no waiver list here because the measured "
+            "population is 0 -- if you are adding the first one, it is a defect. "
+            "Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_no_tril_or_triu_on_a_forward_path(self):
+        """``ops.tril``/``ops.triu`` -- population 0, freeze-forward."""
+        hits, _ = _sweep_call_closure_hygiene()
+        live = [
+            f"{rel}::{cls}.{body} line {lineno} -> {dotted}"
+            for rel, cls, body, kind, lineno, dotted, family in hits
+            if family == "tri"
+        ]
+        assert not live, (
+            "R-034: build the causal mask through the attention path, not with "
+            "a dense `tril`/`triu` allocation on every forward pass. Measured "
+            "population is 0. Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_the_closure_sweep_actually_walked_the_tree(self):
+        """Anti-vacuity floors, DERIVED at landing time.
+
+        Measured 2026-08-20 over ``src/dl_techniques/``: 651 ``call`` methods
+        and 1010 closure bodies. Floors are ``int(0.8 * measured)`` = 520 and
+        808. The second floor is the one that fails if ``_call_closure_bodies``
+        silently stops resolving helpers, which would turn all four predicates
+        above back into the lexical guard this step exists to replace.
+        """
+        _hits, counts = _sweep_call_closure_hygiene()
+        assert counts["n_call_methods"] >= 520, (
+            f"expected ~651 `call` methods under src/dl_techniques, found "
+            f"{counts['n_call_methods']} ({counts})"
+        )
+        assert counts["n_closure_bodies"] >= 808, (
+            f"expected ~1010 bodies in the one-level call closure, found "
+            f"{counts['n_closure_bodies']}: the closure has collapsed to a "
+            f"lexical `call()` scan ({counts})"
+        )
+
+    def test_the_closure_sees_more_than_a_lexical_call_scan(self):
+        """The correction this step exists for, asserted rather than asserted-about.
+
+        Measured 2026-08-20: 17 ``logger.*`` sites lexically inside ``call()``,
+        **24** in the one-level closure. The 7 extra are all real, and one of
+        them -- ``DeepAR._training_mode``, reached from ``DeepAR.call`` --
+        is inside ``models/``, so the carried "4 in models/" figure was the
+        lexical count, not the population.
+        """
+        hits, counts = _sweep_call_closure_hygiene()
+        assert counts["n_logger"] > counts["n_logger_lexical"], (
+            "the closure found no logger site a lexical scan would miss; either "
+            "step 19 landed early or the closure regressed to lexical "
+            f"({counts})"
+        )
+        indirect = {
+            (rel, cls, body)
+            for rel, cls, body, kind, _l, _d, family in hits
+            if family == "logger" and kind != "direct"
+        }
+        assert (
+            "src/dl_techniques/models/time_series/deepar/model.py",
+            "DeepAR",
+            "_training_mode",
+        ) in indirect, (
+            "the named proof site is gone from the indirect set; if step 19 "
+            "fixed it, re-point this test at another member of "
+            f"{sorted(indirect)}"
+        )
+
+    def test_predicate_fires_on_impurity_one_call_deep(self, tmp_path):
+        """RED proof: a clean-looking ``call()`` whose helpers are dirty."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_CALL_PURITY_DEFECT_SRC)
+        hits, counts = _sweep_call_closure_hygiene(roots, src_root)
+        assert counts["n_call_methods"] == 1, counts
+        assert counts["n_closure_bodies"] == 3, counts
+        found = {(body, family) for _r, _c, body, _k, _l, _d, family in hits}
+        assert ("_prepare", "logger") in found, hits
+        assert ("_prepare", "tri") in found, hits
+        assert ("_finish", "numpy") in found, hits
+        assert counts["n_logger_lexical"] == 0, (
+            "the whole point of the fixture is that a LEXICAL scan of `call()` "
+            f"finds nothing here: {hits}"
+        )
+
+    def test_predicate_is_silent_on_the_pure_twin(self, tmp_path):
+        """...and must not fire once the helpers are clean."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_CALL_PURITY_FIXED_SRC)
+        hits, counts = _sweep_call_closure_hygiene(roots, src_root)
+        assert counts["n_closure_bodies"] == 3, "the fixture must still be reached"
+        assert hits == [], hits
+
+
+# ---------------------------------------------------------------------------
+# R-056: ``get_config()`` must start from ``super().get_config()`` -- but ONLY
+# where the base class has one that works.
+# ---------------------------------------------------------------------------
+
+#: Base classes whose ``get_config`` is a real, callable contract. A class that
+#: reaches one of these transitively MUST chain to it.
+_CONFIG_CHAINING_BASES = {"Model", "Layer", "Loss", "Metric"}
+
+#: Base classes that must NOT be asked to chain. MEASURED on Keras 3.8.0:
+#: ``Regularizer.get_config`` and ``LearningRateSchedule.get_config`` raise
+#: ``NotImplementedError``; ``Callback`` has no ``get_config`` attribute at all;
+#: ``Initializer.get_config`` returns ``{}``. A base-blind predicate would
+#: demand 16 edits that each introduce a crash or a no-op -- which is why this
+#: guard is conditioned on the base class and why 20 of the 31 library-wide
+#: omissions are CLOSED-as-refuted rather than routed to a fix step.
+_CONFIG_NON_CHAINING_BASES = {
+    "Callback",
+    "Regularizer",
+    "LearningRateSchedule",
+    "Initializer",
+    "Constraint",
+    "Optimizer",
+}
+
+
+def _classify_config_base(bases: List[str], index: dict, depth: int = 0) -> str:
+    """Which config contract a class inherits, resolved through the repo's own classes.
+
+    Contract: ``bases`` is the output of the file's existing ``_base_names``
+    (last name components -- do not re-implement it here); ``index`` maps a
+    class NAME to the lists of base names seen under the sweep's roots.
+    Returns ``"chaining:<Base>"``, ``"non-chaining:<Base>"``, ``"plain"`` (a
+    class with bases none of which resolve) or ``"no-base"``. Recursion is capped
+    at depth 6, which is 3 more than the deepest chain in this tree.
+
+    Name-keyed, deliberately: an import-based resolution would mean importing
+    every module in the library to classify it, and this suite is AST-only by
+    design. The cost is that two same-named classes with different bases are
+    conflated; ``TestRegistryKeysDoNotCollide`` is what keeps that set empty.
+    """
+    if depth > 6:
+        return "plain"
+    for last in bases:
+        if last in _CONFIG_CHAINING_BASES:
+            return f"chaining:{last}"
+        if last in _CONFIG_NON_CHAINING_BASES:
+            return f"non-chaining:{last}"
+    for last in bases:
+        for parent_bases in index.get(last, []):
+            verdict = _classify_config_base(parent_bases, index, depth + 1)
+            if verdict not in ("plain", "no-base"):
+                return verdict
+    return "plain" if bases else "no-base"
+
+
+def _is_super_get_config(node: ast.AST) -> bool:
+    """True for the expression ``super().get_config()`` (and ``super(X, self)``)."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get_config"
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "super"
+    )
+
+
+@_memo_default_roots
+def _sweep_get_config_chaining(roots=None, src_root=None):
+    """Classes whose ``get_config`` does not chain, and those that chain BACKWARDS.
+
+    Contract: returns ``(rows, counts)``. ``rows`` is a sorted list of
+    ``(rel, class, lineno, base_verdict, defect)`` with ``defect`` one of
+
+    * ``"no-super"``    -- no ``super().get_config()`` anywhere in the method;
+    * ``"base-last"``   -- the base config is merged so that it OVERWRITES the
+      subclass's own keys: either ``own.update(super().get_config())`` or a dict
+      display in which the base is unpacked after another entry.
+
+    ``counts`` carries ``n_get_config``, ``n_chaining_base``, ``n_no_super``,
+    ``n_no_super_chaining`` and ``n_base_last``.
+
+    **The "base-class-first" arm is about MERGE ORDER, not statement order.**
+    The naive predicate -- "``super().get_config()`` must be the first
+    statement" -- was measured on 2026-08-20 and reports **8 FALSE offenders**
+    (``resnet``, ``convnext_v1``, ``convnext_v2``, ``mobilenet_v1``,
+    ``mobilenet_v4``, ``clip``, ``mdn``, ``clifford_rnn``), every one of which
+    builds its own dict first and then returns ``{**base_config, **config}``.
+    That is correct precedence: the subclass's keys win. The real defect is the
+    mirror image, and its measured population is **0**, so this arm is a
+    freeze-forward.
+
+    Measured 2026-08-20 over ``src/dl_techniques/``: 713 classes define
+    ``get_config``, 680 of them on a chaining base; **31 omit ``super()``**, of
+    which **11 are genuine** (all ``keras.Model``) and 20 sit on a base that
+    cannot be chained.
+    """
+    if roots is None:
+        roots, src_root = (_LIB_ROOT,), REPO_ROOT
+    index: dict = {}
+    parsed = []
+    for rel, tree in _iter_modules(roots, src_root):
+        parsed.append((rel, tree))
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            index.setdefault(cls.name, []).append(_base_names(cls))
+
+    rows: List[tuple] = []
+    n_get_config = 0
+    n_chaining_base = 0
+    for rel, tree in parsed:
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            methods = [
+                m
+                for m in cls.body
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and m.name == "get_config"
+            ]
+            if not methods:
+                continue
+            n_get_config += 1
+            verdict = _classify_config_base(_base_names(cls), index)
+            if verdict.startswith("chaining"):
+                n_chaining_base += 1
+            method = methods[0]
+
+            bound = {
+                target.id
+                for node in ast.walk(method)
+                if isinstance(node, ast.Assign) and _is_super_get_config(node.value)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            chains = bool(bound) or any(
+                _is_super_get_config(n) for n in ast.walk(method)
+            )
+
+            def _is_base(expr):
+                return _is_super_get_config(expr) or (
+                    isinstance(expr, ast.Name) and expr.id in bound
+                )
+
+            if not chains:
+                rows.append((rel, cls.name, cls.lineno, verdict, "no-super"))
+                continue
+            for node in ast.walk(method):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "update"
+                    and node.args
+                    and _is_base(node.args[0])
+                ):
+                    rows.append((rel, cls.name, cls.lineno, verdict, "base-last"))
+                    break
+                if isinstance(node, ast.Dict):
+                    late = [
+                        value
+                        for i, (key, value) in enumerate(zip(node.keys, node.values))
+                        if key is None and _is_base(value) and i > 0
+                    ]
+                    if late:
+                        rows.append((rel, cls.name, cls.lineno, verdict, "base-last"))
+                        break
+    rows.sort()
+    counts = {
+        "n_get_config": n_get_config,
+        "n_chaining_base": n_chaining_base,
+        "n_no_super": sum(1 for r in rows if r[4] == "no-super"),
+        "n_no_super_chaining": sum(
+            1 for r in rows if r[4] == "no-super" and r[3].startswith("chaining")
+        ),
+        "n_base_last": sum(1 for r in rows if r[4] == "base-last"),
+    }
+    return rows, counts
+
+
+#: The 11 GENUINE ``super().get_config()`` omissions -- every one a
+#: ``keras.Model`` subclass, across 8 packages -- waived by name and routed to
+#: step 19. Keyed by ``(relpath, class)``.
+#:
+#: Re-derived 2026-08-20: the 31/11 split is exact, and so is the reviewer's
+#: correction to the non-genuine 20 (6 ``Regularizer``, 5 ``Callback``, 5
+#: plain-or-no-base, 3 ``Initializer``, 1 ``LearningRateSchedule``). The
+#: carried "9 packages" is **8**: dino contributes 4 of the 11 classes.
+_GET_CONFIG_CHAINING_WAIVERS = {
+    ("src/dl_techniques/models/coshnet/model.py", "CoShNet"),
+    ("src/dl_techniques/models/dino/dino_v1.py", "DINOv1"),
+    ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2"),
+    ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2VisionTransformer"),
+    ("src/dl_techniques/models/dino/dino_v3.py", "DINOv3"),
+    ("src/dl_techniques/models/fastvlm/model.py", "FastVLM"),
+    ("src/dl_techniques/models/fractalnet/model.py", "FractalNet"),
+    ("src/dl_techniques/models/kan/model.py", "KAN"),
+    ("src/dl_techniques/models/relgt/model.py", "RELGT"),
+    ("src/dl_techniques/models/swin_transformer/model.py", "SwinTransformer"),
+    ("src/dl_techniques/models/vae/model.py", "VAE"),
+}
+
+
+#: One class that never chains and one that chains backwards, plus a
+#: ``Regularizer`` that correctly does neither.
+_INJECTED_GET_CONFIG_DEFECT_SRC = '''
+class InjectedModel(keras.Model):
+    def get_config(self):
+        return {"units": self.units}
+
+
+class InjectedLayer(keras.layers.Layer):
+    def get_config(self):
+        config = {"units": self.units}
+        config.update(super().get_config())
+        return config
+
+
+class InjectedRegularizer(keras.regularizers.Regularizer):
+    def get_config(self):
+        return {"strength": self.strength}
+'''
+
+#: The repaired twin. The regularizer is UNCHANGED on purpose: if the guard's
+#: base-class condition regresses, this file stops being clean and the fixed-twin
+#: test fails -- which is the only cheap way to keep the 20 refuted rows refuted.
+_INJECTED_GET_CONFIG_FIXED_SRC = '''
+class InjectedModel(keras.Model):
+    def get_config(self):
+        config = super().get_config()
+        config.update({"units": self.units})
+        return config
+
+
+class InjectedLayer(keras.layers.Layer):
+    def get_config(self):
+        return {**super().get_config(), "units": self.units}
+
+
+class InjectedRegularizer(keras.regularizers.Regularizer):
+    def get_config(self):
+        return {"strength": self.strength}
+'''
+
+
+@functools.lru_cache(maxsize=1)
+def _config_probe_classes():
+    """``(defective, repaired)`` Layer pair for the behavioural consequence tests.
+
+    Contract: returns two ``keras.layers.Layer`` subclasses differing ONLY in
+    whether ``get_config`` chains to the base. Keras is imported inside the
+    function on purpose -- this module is otherwise keras-free and collects in
+    milliseconds, and only these three tests need a real layer.
+    """
+    import keras
+
+    class ConfigDropsBase(keras.layers.Layer):
+        """A layer whose ``get_config`` forgets the base -- the defect, in the flesh."""
+
+        def __init__(self, units: int = 3, **kwargs):
+            super().__init__(**kwargs)
+            self.units = units
+
+        def get_config(self):
+            return {"units": self.units}
+
+    class ConfigKeepsBase(ConfigDropsBase):
+        """The repaired twin: same class, one added line."""
+
+        def get_config(self):
+            config = super(ConfigDropsBase, self).get_config()
+            config.update({"units": self.units})
+            return config
+
+    return ConfigDropsBase, ConfigKeepsBase
+
+
+class TestGetConfigChainsToItsBase:
+    """``get_config`` starts from the base config -- where the base has one.
+
+    R-056. Two arms:
+
+    * **no-super** -- 31 classes library-wide omit the chain, **11 genuine**
+      (all ``keras.Model``, 8 packages), waived by name and routed to step 19.
+      The other 20 are CLOSED-as-refuted ON THE BASE CLASS and that ruling is
+      load-bearing: ``Regularizer.get_config`` and
+      ``LearningRateSchedule.get_config`` RAISE on Keras 3.8.0, ``Callback`` has
+      no such attribute, and ``Initializer.get_config`` returns ``{}``. A
+      base-blind guard would demand 16 crash-introducing edits.
+    * **base-last** -- the base config merged so it overwrites the subclass's own
+      keys. Population **0**; freeze-forward, injection-proven.
+
+    The consequence tests at the end pin WHY the chain matters, and pin the
+    assertion that does NOT see it.
+    """
+
+    def test_every_chaining_class_calls_super_get_config(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-015
+        # WHAT NOT TO DO: do not drop the base-class condition to "every class
+        # with get_config must chain". MEASURED on Keras 3.8.0: that demands 16
+        # edits into Regularizer/LearningRateSchedule/Callback/Initializer
+        # subclasses, where the call raises NotImplementedError, has no
+        # attribute to call, or returns {}. See decisions.md D-015.
+        rows, _ = _sweep_get_config_chaining()
+        live = [
+            f"{rel}::{cls} (line {lineno}, base {verdict})"
+            for rel, cls, lineno, verdict, defect in rows
+            if defect == "no-super"
+            and verdict.startswith("chaining")
+            and (rel, cls) not in _GET_CONFIG_CHAINING_WAIVERS
+        ]
+        assert not live, (
+            "R-056: `get_config()` must start from `super().get_config()`. "
+            "Without it the base's own keys -- `name` and `trainable` measurably, "
+            "and `dtype_policy` under a non-default policy -- are silently "
+            "dropped on every save/reload. Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_the_base_config_is_never_merged_last(self):
+        """Freeze-forward: population 0, and the naive predicate reports 8 FPs."""
+        rows, _ = _sweep_get_config_chaining()
+        live = [
+            f"{rel}::{cls} (line {lineno})"
+            for rel, cls, lineno, _v, defect in rows
+            if defect == "base-last"
+        ]
+        assert not live, (
+            "R-056: the base config must be merged FIRST -- "
+            "`config = super().get_config(); config.update({...})` or "
+            "`{**super().get_config(), ...}` -- so the subclass's own keys win. "
+            "Merging it last lets the base overwrite them. Found:\n  "
+            + "\n  ".join(live)
+        )
+
+    def test_chaining_waivers_still_match_a_real_omission(self):
+        rows, _ = _sweep_get_config_chaining()
+        offending = {(r[0], r[1]) for r in rows if r[4] == "no-super"}
+        stale = sorted(_GET_CONFIG_CHAINING_WAIVERS - offending)
+        assert not stale, (
+            "these get_config-chaining waivers no longer match an omission -- "
+            f"delete them or re-key them: {stale}"
+        )
+
+    def test_the_non_chaining_bases_are_not_demanded_to_chain(self):
+        """The 20 refuted rows must stay refuted, and be non-empty.
+
+        This is the liveness test for the SCOPE ruling. If the base-class
+        condition is ever dropped, the waiver list above stays green (it only
+        covers the 11) while this test fails -- which is the point.
+        """
+        rows, counts = _sweep_get_config_chaining()
+        refuted = [
+            (rel, cls, verdict)
+            for rel, cls, _l, verdict, defect in rows
+            if defect == "no-super" and not verdict.startswith("chaining")
+        ]
+        assert len(refuted) >= 16, (
+            "expected ~20 get_config omissions on non-chainable bases "
+            f"(Regularizer/Callback/Initializer/LearningRateSchedule/plain); "
+            f"found {len(refuted)}: {refuted}"
+        )
+        assert counts["n_no_super_chaining"] == len(_GET_CONFIG_CHAINING_WAIVERS), (
+            "the genuine omission count moved away from the 11 waived here "
+            f"({counts})"
+        )
+
+    def test_keras_really_cannot_chain_from_those_bases(self):
+        """The measurement the scope ruling rests on, re-run every time.
+
+        Carried as a claim it is just an assertion; run here it is evidence. If a
+        future Keras gives ``Regularizer`` a working ``get_config``, this test
+        fails and the ruling gets revisited instead of quietly rotting.
+        """
+        import keras
+
+        with pytest.raises(NotImplementedError):
+            keras.regularizers.Regularizer().get_config()
+        with pytest.raises(NotImplementedError):
+            keras.optimizers.schedules.LearningRateSchedule().get_config()
+        assert not hasattr(keras.callbacks.Callback(), "get_config")
+        assert keras.initializers.Initializer().get_config() == {}
+
+    def test_dropping_the_base_config_loses_name_and_trainable(self):
+        """The consequence, measured -- 4/4 probed attributes behave as recorded."""
+        drops, _keeps = _config_probe_classes()
+        original = drops(units=3, name="pinned", trainable=False, dtype="mixed_float16")
+        clone = drops.from_config(original.get_config())
+        assert original.trainable is False and clone.trainable is True, (
+            "the defect stopped reproducing: `trainable` survived a get_config "
+            "that never called super()"
+        )
+        assert clone.name != "pinned"
+        assert clone.dtype_policy.name == "float32" != original.dtype_policy.name
+
+    def test_a_dtype_assertion_would_have_passed_against_the_defect(self):
+        """Guard-authoring trap, pinned so nobody writes the blind assertion.
+
+        MEASURED: under ``mixed_float16`` the VARIABLE dtype of both the original
+        and the config-losing clone reads ``'float32'``, so
+        ``assert clone.dtype == original.dtype`` passes against the defect. Only
+        ``.dtype_policy.name`` discriminates. Same trap under the DEFAULT policy,
+        where Keras 3.8 "restores" the dtype purely because the reconstructed
+        object defaults to the same value.
+        """
+        drops, _keeps = _config_probe_classes()
+        original = drops(units=3, dtype="mixed_float16")
+        clone = drops.from_config(original.get_config())
+        assert clone.dtype == original.dtype == "float32"
+        assert clone.dtype_policy.name != original.dtype_policy.name
+
+    def test_the_repaired_twin_round_trips(self):
+        _drops, keeps = _config_probe_classes()
+        original = keeps(units=3, name="pinned", trainable=False, dtype="mixed_float16")
+        clone = keeps.from_config(original.get_config())
+        assert clone.name == "pinned"
+        assert clone.trainable is False
+        assert clone.dtype_policy.name == original.dtype_policy.name
+
+    def test_the_config_sweep_actually_walked_the_tree(self):
+        """Anti-vacuity floors, DERIVED at landing time.
+
+        Measured 2026-08-20: 713 classes define ``get_config``; 680 sit on a
+        chaining base. Floors are ``int(0.8 * measured)`` = 570 and 544.
+        """
+        _rows, counts = _sweep_get_config_chaining()
+        assert counts["n_get_config"] >= 570, (
+            f"expected ~713 classes with get_config, found "
+            f"{counts['n_get_config']} ({counts})"
+        )
+        assert counts["n_chaining_base"] >= 544, (
+            f"expected ~680 of them on a Model/Layer/Loss/Metric base, found "
+            f"{counts['n_chaining_base']}: the base resolver stopped resolving "
+            f"({counts})"
+        )
+
+    def test_predicate_fires_on_an_injected_config_defect(self, tmp_path):
+        """RED proof: both arms, plus the base-class condition holding."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_GET_CONFIG_DEFECT_SRC)
+        rows, counts = _sweep_get_config_chaining(roots, src_root)
+        assert counts["n_get_config"] == 3, counts
+        found = {(cls, defect) for _r, cls, _l, _v, defect in rows}
+        assert ("InjectedModel", "no-super") in found, rows
+        assert ("InjectedLayer", "base-last") in found, rows
+        verdicts = {cls: verdict for _r, cls, _l, verdict, _d in rows}
+        assert verdicts["InjectedModel"] == "chaining:Model", rows
+        assert verdicts.get("InjectedRegularizer") == "non-chaining:Regularizer", rows
+
+    def test_predicate_is_silent_on_the_repaired_twin(self, tmp_path):
+        """...and the regularizer, unchanged, must still be classified as refuted."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_GET_CONFIG_FIXED_SRC)
+        rows, counts = _sweep_get_config_chaining(roots, src_root)
+        assert counts["n_get_config"] == 3, "the fixture must still be reached"
+        assert counts["n_no_super_chaining"] == 0, rows
+        assert counts["n_base_last"] == 0, rows
+        assert [(r[1], r[3]) for r in rows if r[4] == "no-super"] == [
+            ("InjectedRegularizer", "non-chaining:Regularizer")
+        ], rows
+
+
+# ---------------------------------------------------------------------------
+# R-009: no mutable default -- in THREE shapes, not one.
+# ---------------------------------------------------------------------------
+
+#: Constructors of the built-in mutable containers, as bare-name calls.
+_MUTABLE_FACTORIES = {"list", "dict", "set"}
+
+
+def _is_mutable_expr(node: ast.expr) -> bool:
+    """True for an expression that evaluates to a fresh mutable container.
+
+    Contract: literal displays and comprehensions of ``list``/``dict``/``set``,
+    plus ``list()``/``dict()``/``set()`` called by bare name. Tuples and
+    frozensets are deliberately absent -- they are the REMEDY.
+    """
+    if isinstance(
+        node, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
+    ):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _MUTABLE_FACTORIES
+    )
+
+
+def _module_mutable_bindings(tree: ast.Module) -> dict:
+    """Module-level names bound to a mutable container -> the binding's line.
+
+    Contract: walks ``tree.body`` only (module scope, not nested scopes) and
+    handles BOTH ``ast.Assign`` (``X = [...]``) and ``ast.AnnAssign``
+    (``X: List[float] = [...]``). The annotated form is not an edge case here:
+    it is the form BOTH ``DEFAULT_QUANTILES`` constants use, so a plain
+    ``ast.Assign`` collector misses every one of the 10 exposure sites.
+    """
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _is_mutable_expr(node.value):
+                    out[target.id] = node.lineno
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and _is_mutable_expr(node.value)
+        ):
+            out[node.target.id] = node.lineno
+    return out
+
+
+@_memo_default_roots
+def _sweep_mutable_defaults(roots=None, src_root=None):
+    """Every mutable-default exposure site, in all three shapes.
+
+    Contract: returns ``(rows, counts)``. ``rows`` is a sorted list of
+    ``(rel, scope, name, shape, lineno)`` where ``scope`` is the enclosing
+    function or class name and ``shape`` is:
+
+    * ``"S1"`` -- a parameter whose default is a mutable LITERAL or a
+      ``list()``/``dict()``/``set()`` call;
+    * ``"S2"`` -- a parameter whose default is an ``ast.Name`` resolving to a
+      module-level mutable binding (the shared-object shape);
+    * ``"S3"`` -- a CLASS ATTRIBUTE aliasing a module-level mutable binding
+      (``DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES``), so that
+      ``Cls.ATTR is <module>.ATTR``.
+
+    **Shape 3 is why a parameter-default-only predicate is not enough.** At
+    ``models/time_series/tirex/model.py:225`` and
+    ``models/time_series/xlstm/forecaster.py:225`` the class attribute IS the
+    module constant -- one object with two names and a proven contamination
+    mechanism (mutate it through either name and every default in the module
+    changes). A guard flagging only parameter defaults ships green over both.
+
+    **Remedy asymmetry, recorded here because it is easy to get wrong:** making
+    the constants TUPLES covers all three shapes at once. Copying at
+    ``TiRexCore.__init__`` alone does NOT -- it leaves the class attribute and
+    the module constant the same object, and leaves the three OTHER tirex
+    entry points (``from_variant``, ``create_tirex_model``,
+    ``create_tirex_by_variant``) handing the shared list straight out.
+
+    Measured 2026-08-20 over ``src/dl_techniques/``: **46 sites by the rule --
+    34 S1, 6 S2, 6 S3** -- and **0 LIVE HAZARD** (no site mutates its default).
+    The carried figure of 42 counted only the 2 ``DEFAULT_QUANTILES`` aliases as
+    S3; the sweep finds 4 more of exactly the same shape (three
+    ``datasets/time_series`` ``CONFIGS`` aliases and ``FastVitImageEncoder.
+    MODEL_VARIANTS = MCI_VARIANTS``). ``DEFAULT_QUANTILES`` exposure is 10 sites:
+    6 parameter defaults + 2 class aliases + the 2 module constants themselves.
+
+    NOT flagged, deliberately: the 78 class attributes bound to a mutable
+    LITERAL (almost all of them ``MODEL_VARIANTS`` tables). A per-class literal
+    is not shared with anything, so it carries neither the aliasing hazard nor
+    the call-to-call persistence hazard; flagging them would bury the 46 real
+    rows under noise the rule does not name.
+    """
+    if roots is None:
+        roots, src_root = (_LIB_ROOT,), REPO_ROOT
+    rows: List[tuple] = []
+    n_functions_with_defaults = 0
+    n_module_mutables = 0
+    for rel, tree in _iter_modules(roots, src_root):
+        bindings = _module_mutable_bindings(tree)
+        n_module_mutables += len(bindings)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                args = node.args
+                positional = list(args.posonlyargs) + list(args.args)
+                pairs = list(
+                    zip(positional[len(positional) - len(args.defaults):], args.defaults)
+                )
+                pairs += [
+                    (arg, default)
+                    for arg, default in zip(args.kwonlyargs, args.kw_defaults)
+                    if default is not None
+                ]
+                if pairs:
+                    n_functions_with_defaults += 1
+                for arg, default in pairs:
+                    if _is_mutable_expr(default):
+                        rows.append((rel, node.name, arg.arg, "S1", default.lineno))
+                    elif isinstance(default, ast.Name) and default.id in bindings:
+                        rows.append((rel, node.name, arg.arg, "S2", default.lineno))
+            elif isinstance(node, ast.ClassDef):
+                for stmt in node.body:
+                    target = value = None
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(
+                        stmt.target, ast.Name
+                    ):
+                        target, value = stmt.target.id, stmt.value
+                    elif (
+                        isinstance(stmt, ast.Assign)
+                        and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name)
+                    ):
+                        target, value = stmt.targets[0].id, stmt.value
+                    if (
+                        target is not None
+                        and isinstance(value, ast.Name)
+                        and value.id in bindings
+                    ):
+                        rows.append((rel, node.name, target, "S3", stmt.lineno))
+    rows.sort()
+    counts = {
+        "n_functions_with_defaults": n_functions_with_defaults,
+        "n_module_mutables": n_module_mutables,
+        "n_S1": sum(1 for r in rows if r[3] == "S1"),
+        "n_S2": sum(1 for r in rows if r[3] == "S2"),
+        "n_S3": sum(1 for r in rows if r[3] == "S3"),
+    }
+    return rows, counts
+
+
+#: The 46 live mutable-default sites, waived BY NAME and routed to step 19.
+#: Keyed by ``(relpath, scope, name, shape)`` -- never by line. Zero of them is a
+#: LIVE HAZARD today (no site mutates its default), which is exactly why they are
+#: waived rather than fixed here and why the freeze matters: the next one added
+#: is the one that will mutate.
+_MUTABLE_DEFAULT_WAIVERS = {
+    ("src/dl_techniques/datasets/arc/arc_keras.py",
+     "__init__", "ignore_tokens", "S1"),
+    ("src/dl_techniques/datasets/time_series/favorita.py",
+     "FavoritaDataset", "CONFIGS", "S3"),
+    ("src/dl_techniques/datasets/time_series/long_horizon.py",
+     "LongHorizonDataset", "CONFIGS", "S3"),
+    ("src/dl_techniques/datasets/time_series/m4.py",
+     "M4Dataset", "CONFIGS", "S3"),
+    ("src/dl_techniques/layers/heads/vlm/factory.py",
+     "__init__", "hidden_dims", "S1"),
+    ("src/dl_techniques/layers/yolo12_heads.py",
+     "__init__", "hidden_dims", "S1"),
+    ("src/dl_techniques/layers/yolo12_heads.py",
+     "__init__", "intermediate_filters", "S1"),
+    ("src/dl_techniques/layers/yolo12_heads.py",
+     "__init__", "pooling_types", "S1"),
+    ("src/dl_techniques/models/SAM/SAM1/model.py",
+     "__init__", "pixel_mean", "S1"),
+    ("src/dl_techniques/models/SAM/SAM1/model.py",
+     "__init__", "pixel_std", "S1"),
+    ("src/dl_techniques/models/capsnet/model.py",
+     "__init__", "conv_filters", "S1"),
+    ("src/dl_techniques/models/capsnet/model.py",
+     "__init__", "decoder_architecture", "S1"),
+    ("src/dl_techniques/models/fastvit/model.py",
+     "FastVitImageEncoder", "MODEL_VARIANTS", "S3"),
+    ("src/dl_techniques/models/fractalnet/model.py",
+     "__init__", "depths", "S1"),
+    ("src/dl_techniques/models/fractalnet/model.py",
+     "__init__", "filters", "S1"),
+    ("src/dl_techniques/models/fractalnet/model.py",
+     "__init__", "strides", "S1"),
+    ("src/dl_techniques/models/masked_autoencoder/conv_decoder.py",
+     "__init__", "decoder_dims", "S1"),
+    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
+     "__init__", "attention_stages", "S1"),
+    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
+     "__init__", "block_types", "S1"),
+    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
+     "__init__", "depths", "S1"),
+    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
+     "__init__", "dims", "S1"),
+    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
+     "__init__", "strides", "S1"),
+    ("src/dl_techniques/models/superpoint/model.py",
+     "__init__", "depths", "S1"),
+    ("src/dl_techniques/models/superpoint/model.py",
+     "__init__", "dims", "S1"),
+    ("src/dl_techniques/models/swin_transformer/model.py",
+     "__init__", "depths", "S1"),
+    ("src/dl_techniques/models/swin_transformer/model.py",
+     "__init__", "num_heads", "S1"),
+    ("src/dl_techniques/models/tabm/model.py",
+     "create_tabm_ensemble", "hidden_dims", "S1"),
+    ("src/dl_techniques/models/tabm/model.py",
+     "create_tabm_for_dataset", "hidden_dims", "S1"),
+    ("src/dl_techniques/models/tabm/model.py",
+     "create_tabm_mini", "hidden_dims", "S1"),
+    ("src/dl_techniques/models/tabm/model.py",
+     "create_tabm_model", "hidden_dims", "S1"),
+    ("src/dl_techniques/models/tabm/model.py",
+     "create_tabm_plain", "hidden_dims", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
+     "__init__", "stack_types", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
+     "__init__", "thetas_dim", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
+     "create_nbeats_model", "stack_types", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
+     "__init__", "stack_types", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
+     "__init__", "thetas_dim", "S1"),
+    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
+     "create_nbeatsx_model", "stack_types", "S1"),
+    ("src/dl_techniques/models/time_series/tirex/model.py",
+     "TiRexCore", "DEFAULT_QUANTILES", "S3"),
+    ("src/dl_techniques/models/time_series/tirex/model.py",
+     "__init__", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/tirex/model.py",
+     "create_tirex_by_variant", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/tirex/model.py",
+     "create_tirex_model", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/tirex/model.py",
+     "from_variant", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
+     "__init__", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
+     "create_xlstm_forecaster", "quantile_levels", "S2"),
+    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
+     "xLSTMForecaster", "DEFAULT_QUANTILES", "S3"),
+    ("src/dl_techniques/visualization/classification.py",
+     "create_visualization", "metrics", "S1"),
+}
+
+
+#: All three shapes at once, including the aliasing shape a parameter-default
+#: predicate cannot see.
+_INJECTED_MUTABLE_DEFAULT_DEFECT_SRC = '''
+DEFAULT_LEVELS: List[float] = [0.1, 0.5, 0.9]
+
+
+class Injected(keras.Model):
+    DEFAULT_LEVELS: List[float] = DEFAULT_LEVELS
+
+    def __init__(self, stages=[1, 2, 3], levels=DEFAULT_LEVELS, extras=dict(), **kwargs):
+        super().__init__(**kwargs)
+'''
+
+#: The remedy the docstring names: the constant becomes a TUPLE, which kills all
+#: three shapes at once -- S1 because tuples are not flagged, S2 and S3 because
+#: the binding is no longer mutable.
+_INJECTED_MUTABLE_DEFAULT_FIXED_SRC = '''
+DEFAULT_LEVELS: Tuple[float, ...] = (0.1, 0.5, 0.9)
+
+
+class Injected(keras.Model):
+    DEFAULT_LEVELS: Tuple[float, ...] = DEFAULT_LEVELS
+
+    def __init__(self, stages=(1, 2, 3), levels=DEFAULT_LEVELS, extras=None, **kwargs):
+        super().__init__(**kwargs)
+'''
+
+
+class TestNoMutableDefaults:
+    """R-009, in all three shapes it actually takes in this tree.
+
+    Measured 2026-08-20: **46 sites -- 34 S1 / 6 S2 / 6 S3** under
+    ``src/dl_techniques/``, **0 of them a LIVE HAZARD** (no site mutates its
+    default). All 46 are waived by name and routed to step 19. The shapes and
+    the remedy asymmetry are documented on ``_sweep_mutable_defaults``; read
+    that before touching the predicate.
+    """
+
+    def test_no_mutable_default_anywhere(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-016
+        # WHAT NOT TO DO: do not reduce this to "a List/Dict/Set literal in
+        # ast.arguments.defaults". That predicate is blind to BOTH remaining
+        # shapes -- the ast.Name default resolving to a module-level
+        # AnnAssign constant, and the class attribute that IS that constant --
+        # and would ship green over two live aliases of one object with a proven
+        # contamination mechanism. See decisions.md D-016.
+        rows, _ = _sweep_mutable_defaults()
+        live = [
+            f"{rel}::{scope}.{name} (line {lineno}, shape {shape})"
+            for rel, scope, name, shape, lineno in rows
+            if (rel, scope, name, shape) not in _MUTABLE_DEFAULT_WAIVERS
+        ]
+        assert not live, (
+            "R-009: a mutable default is created ONCE, at def time, and shared by "
+            "every call; a class attribute aliasing a module-level mutable is the "
+            "same object under two names. Use a tuple (which fixes the parameter "
+            "default and the alias together) or `None` plus a copy in the body. "
+            "Found:\n  " + "\n  ".join(live)
+        )
+
+    def test_mutable_default_waivers_still_match_a_real_site(self):
+        rows, _ = _sweep_mutable_defaults()
+        offending = {(r[0], r[1], r[2], r[3]) for r in rows}
+        stale = sorted(_MUTABLE_DEFAULT_WAIVERS - offending)
+        assert not stale, (
+            "these mutable-default waivers no longer match a real site -- delete "
+            f"them or re-key them: {stale}"
+        )
+
+    def test_the_alias_shape_is_actually_live(self):
+        """The two ``DEFAULT_QUANTILES`` aliases, asserted at RUNTIME.
+
+        Not an AST claim: this imports both modules and asserts the class
+        attribute and the module constant are the SAME OBJECT. That identity is
+        the contamination mechanism, and it is what makes "copy in
+        ``TiRexCore.__init__``" an insufficient remedy.
+        """
+        import importlib
+
+        for module_name, class_name in (
+            ("dl_techniques.models.time_series.tirex.model", "TiRexCore"),
+            ("dl_techniques.models.time_series.xlstm.forecaster", "xLSTMForecaster"),
+        ):
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name)
+            assert cls.DEFAULT_QUANTILES is module.DEFAULT_QUANTILES, (
+                f"{class_name}.DEFAULT_QUANTILES is no longer the module "
+                "constant -- if step 19 made them tuples, delete this test's "
+                "entry along with the S3 waiver"
+            )
+            assert isinstance(module.DEFAULT_QUANTILES, list), (
+                f"{module_name}.DEFAULT_QUANTILES is no longer mutable; the "
+                "waiver for it should have gone in the same commit"
+            )
+
+    def test_the_mutable_default_sweep_walked_the_tree(self):
+        """Anti-vacuity floors, DERIVED at landing time.
+
+        Measured 2026-08-20: 2217 functions carry at least one default and 185
+        module-level names are bound to a mutable. Floors are ``int(0.8 *
+        measured)`` = 1773 and 148. The second one is the floor that fails if
+        ``_module_mutable_bindings`` stops seeing ``ast.AnnAssign`` -- the exact
+        blindness that hid every ``DEFAULT_QUANTILES`` site from the carried
+        measurement.
+        """
+        _rows, counts = _sweep_mutable_defaults()
+        assert counts["n_functions_with_defaults"] >= 1773, counts
+        assert counts["n_module_mutables"] >= 148, counts
+
+    def test_predicate_fires_on_all_three_injected_shapes(self, tmp_path):
+        """RED proof, one fixture per shape and all three in one file."""
+        roots, src_root = _write_fixture(
+            tmp_path, _INJECTED_MUTABLE_DEFAULT_DEFECT_SRC
+        )
+        rows, counts = _sweep_mutable_defaults(roots, src_root)
+        found = {(scope, name, shape) for _r, scope, name, shape, _l in rows}
+        assert ("__init__", "stages", "S1") in found, rows
+        assert ("__init__", "extras", "S1") in found, rows
+        assert ("__init__", "levels", "S2") in found, rows
+        assert ("Injected", "DEFAULT_LEVELS", "S3") in found, rows
+        assert counts["n_module_mutables"] == 1, counts
+
+    def test_a_parameter_only_predicate_would_miss_the_alias(self, tmp_path):
+        """The correction, asserted: shape 3 is invisible to shapes 1+2.
+
+        Without this the "three shapes" claim is a docstring. Here the fixture
+        keeps only the alias -- no mutable parameter default at all -- and the
+        sweep must still report it.
+        """
+        roots, src_root = _write_fixture(
+            tmp_path,
+            "\nLEVELS: List[float] = [0.1]\n\n\nclass Injected:\n"
+            "    LEVELS: List[float] = LEVELS\n",
+        )
+        rows, counts = _sweep_mutable_defaults(roots, src_root)
+        assert counts["n_S1"] == 0 and counts["n_S2"] == 0, rows
+        assert counts["n_S3"] == 1, rows
+
+    def test_predicate_is_silent_on_the_tuple_twin(self, tmp_path):
+        """...and the documented remedy must clear all three shapes at once."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_MUTABLE_DEFAULT_FIXED_SRC)
+        rows, counts = _sweep_mutable_defaults(roots, src_root)
+        assert counts["n_functions_with_defaults"] == 1, "the fixture must be reached"
+        assert rows == [], rows
+
+
+# ---------------------------------------------------------------------------
+# R-067 / R-097 / R-100: the custom step-override population is FROZEN.
+# ---------------------------------------------------------------------------
+
+_STEP_OVERRIDE_NAMES = ("train_step", "test_step", "predict_step")
+
+
+@_memo_default_roots
+def _sweep_step_overrides(roots=None, src_root=None):
+    """Every ``train_step``/``test_step``/``predict_step`` method under ``src/``.
+
+    Contract: returns ``(rows, counts)``. ``rows`` is a sorted list of
+    ``(rel, class, method, lineno)``; the FROZEN KEY is the first THREE fields --
+    never the line number, so a rename or a move reads as a REMOVE plus an ADD
+    and fails loudly instead of drifting.
+
+    Subject set is NAME-based and covers all of ``src/`` (library, trainers and
+    applications), deliberately: a base-class-based predicate could be evaded by
+    changing what the class inherits from, and 12 of the 34 sites live under
+    ``src/train/`` where the same house rule applies.
+
+    Measured 2026-08-20: **34 keys -- 22 train_step, 11 test_step, 1
+    predict_step** -- independently re-derived three times now (ip-verifier,
+    ip-reviewer, and here), exact every time.
+    """
+    if roots is None:
+        roots, src_root = (_SRC_ROOT,), REPO_ROOT
+    rows = []
+    for rel, tree in _iter_modules(roots, src_root):
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            for method in cls.body:
+                if (
+                    isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and method.name in _STEP_OVERRIDE_NAMES
+                ):
+                    rows.append((rel, cls.name, method.name, method.lineno))
+    rows.sort()
+    counts = {
+        "n_overrides": len(rows),
+        **{
+            f"n_{name}": sum(1 for r in rows if r[2] == name)
+            for name in _STEP_OVERRIDE_NAMES
+        },
+    }
+    return rows, counts
+
+
+#: The frozen population: 34 ``(path, class, method)`` keys, measured 2026-08-20.
+#:
+#: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
+#: growth predicate -- but they fail the liveness test below, which is
+#: deliberate: **dropping a key from this set requires a ``decisions.md`` entry,
+#: not a silent edit.** Phases 4 and 6 of this plan delete and rewrite step
+#: overrides, and a liveness that only checked the FILE still existed would let a
+#: dead key linger until a LATER, DIFFERENT ``train_step`` at the same key was
+#: silently permitted.
+_FROZEN_STEP_OVERRIDES = {
+    ("src/dl_techniques/models/byte_latent_transformer/model.py",
+     "ByteLatentTransformer", "train_step"),
+    ("src/dl_techniques/models/capsnet/model.py", "CapsNet", "test_step"),
+    ("src/dl_techniques/models/capsnet/model.py", "CapsNet", "train_step"),
+    ("src/dl_techniques/models/depth_anything/model.py", "DepthAnything", "train_step"),
+    ("src/dl_techniques/models/latent_gmm_registration/model.py",
+     "LatentGMMRegistration", "test_step"),
+    ("src/dl_techniques/models/latent_gmm_registration/model.py",
+     "LatentGMMRegistration", "train_step"),
+    ("src/dl_techniques/models/masked_autoencoder/mae.py",
+     "MaskedAutoencoder", "test_step"),
+    ("src/dl_techniques/models/masked_autoencoder/mae.py",
+     "MaskedAutoencoder", "train_step"),
+    ("src/dl_techniques/models/masked_language_model/clm.py",
+     "CausalLanguageModel", "test_step"),
+    ("src/dl_techniques/models/masked_language_model/clm.py",
+     "CausalLanguageModel", "train_step"),
+    ("src/dl_techniques/models/masked_language_model/mlm.py",
+     "MaskedLanguageModel", "test_step"),
+    ("src/dl_techniques/models/masked_language_model/mlm.py",
+     "MaskedLanguageModel", "train_step"),
+    ("src/dl_techniques/models/memory_bank/wave_field_memory_llm.py",
+     "WaveFieldMemoryLLM", "train_step"),
+    ("src/dl_techniques/models/nano_vlm_world_model/train.py",
+     "ScoreVLMTrainer", "train_step"),
+    ("src/dl_techniques/models/time_series/deepar/model.py", "DeepAR", "predict_step"),
+    ("src/dl_techniques/models/vae/model.py", "VAE", "test_step"),
+    ("src/dl_techniques/models/vae/model.py", "VAE", "train_step"),
+    ("src/dl_techniques/models/video_jepa/model.py", "VideoJEPA", "train_step"),
+    ("src/dl_techniques/models/vq_vae/model.py", "VQVAEModel", "test_step"),
+    ("src/dl_techniques/models/vq_vae/model.py", "VQVAEModel", "train_step"),
+    ("src/dl_techniques/models/vq_vae_rotation/model.py",
+     "VQVAERotationTrick", "test_step"),
+    ("src/dl_techniques/models/vq_vae_rotation/model.py",
+     "VQVAERotationTrick", "train_step"),
+    ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "test_step"),
+    ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "train_step"),
+    ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "test_step"),
+    ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "train_step"),
+    ("src/train/clip/train_clip.py", "CLIPTrainer", "train_step"),
+    ("src/train/hrm/train_hrm.py", "HRMTrainer", "train_step"),
+    ("src/train/nano_vlm/train_nano_vlm.py", "NanoVLMTrainer", "train_step"),
+    ("src/train/sd3_mmdit/train_sd3_mmdit.py", "SD3FlowTrainer", "train_step"),
+    ("src/train/superpoint/train_superpoint.py", "SuperPointJointModel", "train_step"),
+    ("src/train/thera/train_thera.py", "TheraTrainingModel", "test_step"),
+    ("src/train/thera/train_thera.py", "TheraTrainingModel", "train_step"),
+    ("src/train/tiny_recursive_model/train_trm.py", "TRMTrainer", "train_step"),
+}
+
+
+#: A brand-new override in a package that had none.
+_INJECTED_STEP_OVERRIDE_SRC = '''
+class Injected(keras.Model):
+    def call(self, inputs):
+        return inputs
+
+    def train_step(self, data):
+        return {"loss": 0.0}
+'''
+
+#: The same model with the override removed: stock ``fit()``.
+_INJECTED_STEP_OVERRIDE_FIXED_SRC = '''
+class Injected(keras.Model):
+    def call(self, inputs):
+        return inputs
+'''
+
+
+class TestCustomStepOverridePopulationIsFrozen:
+    """The custom ``train_step`` population may not grow (R-067/R-097/R-100).
+
+    Why a freeze and not a ban: 6 of the 34 implement genuinely non-stock
+    objectives (VAE ELBO, VQ-VAE codebook, MAE masking, V-JEPA EMA target,
+    CapsNet margin+reconstruction, memory_bank's dual-optimizer phase freeze),
+    and step 4 measured none of them defective on any of the three rules. Why a
+    freeze and not nothing: the same measurement found 2 LIVE CRITICALs
+    (``byte_latent_transformer`` and ``latent_gmm_registration`` cannot train
+    through stock ``fit()`` on GPU at the default ``jit_compile``) and four
+    sites silently under-updating gradients by 2.05e4-6.38e4x under
+    ``mixed_float16``. Every new override is another instance of that risk
+    surface, and the house rule is: use stock ``fit()`` and feed extra signals
+    through ``tf.data``.
+    """
+
+    def test_no_new_custom_train_step(self):
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-017
+        # WHAT NOT TO DO: do not key this freeze on the line number, and do not
+        # restrict the subject set to keras.Model subclasses. Line keys drift on
+        # every edit above them; a base-class key is evaded by changing what the
+        # class inherits. The key is (path, class, method) so a rename or a move
+        # reads as REMOVE + ADD and fails. See decisions.md D-017.
+        rows, _ = _sweep_step_overrides()
+        derived = {(rel, cls, method) for rel, cls, method, _l in rows}
+        added = sorted(derived - _FROZEN_STEP_OVERRIDES)
+        assert not added, (
+            "a new custom train_step/test_step/predict_step has appeared. The "
+            "house rule is stock `fit()` with extra signals fed through the "
+            "tf.data inputs -- see feedback_no_custom_train_step. If the "
+            "override is genuinely unavoidable, add it to "
+            "_FROZEN_STEP_OVERRIDES with a decisions.md ruling and a "
+            "jit_compile=True execution test. Found:\n  "
+            + "\n  ".join(f"{r[0]}::{r[1]}.{r[2]}" for r in added)
+        )
+
+    def test_every_frozen_key_still_resolves_to_a_real_method(self):
+        """Liveness: the frozen key must name a method that EXISTS.
+
+        Not "the path exists on disk" -- that version weakens monotonically
+        across this plan's own Phase 4 and Phase 6, which delete and rewrite step
+        overrides: once the method is gone the entry lingers, and a later,
+        different ``train_step`` at the same key slips in unnoticed.
+
+        Resolution is two-armed and the arms differ in strength, which is stated
+        rather than hidden:
+
+        * the 22 ``dl_techniques.models.*`` keys are resolved at RUNTIME --
+          import the module, get the class, ``getattr`` the method, and check it
+          is defined on that class rather than inherited;
+        * the 12 ``src/train/*`` keys are resolved by AST. MEASURED 2026-08-20:
+          importing those 9 trainer modules costs 4.6s wall, pulls in
+          ``transformers`` and creates a GPU device inside a suite whose whole
+          premise is that it builds nothing. The AST arm still fails the moment
+          the method is deleted or renamed, which is what this test is for.
+
+        Removing a key from ``_FROZEN_STEP_OVERRIDES`` requires a decisions.md
+        entry. Silently deleting the line is the failure mode this test exists
+        to make visible.
+        """
+        import importlib
+
+        rows, _ = _sweep_step_overrides()
+        derived = {(rel, cls, method) for rel, cls, method, _l in rows}
+        missing = sorted(_FROZEN_STEP_OVERRIDES - derived)
+        assert not missing, (
+            "these frozen step-override keys no longer name a method in the "
+            "tree. If they were deliberately deleted, remove them here IN THE "
+            "SAME COMMIT and record the removal in decisions.md -- an entry that "
+            "resolves to nothing silently permits a different override at the "
+            f"same key later. Found:\n  {missing}"
+        )
+
+        unresolved = []
+        for rel, cls_name, method_name in sorted(_FROZEN_STEP_OVERRIDES):
+            if not rel.startswith("src/dl_techniques/"):
+                continue
+            module_name = rel[len("src/"):-len(".py")].replace("/", ".")
+            module = importlib.import_module(module_name)
+            cls = getattr(module, cls_name, None)
+            if cls is None or method_name not in vars(cls):
+                unresolved.append(f"{module_name}::{cls_name}.{method_name}")
+        assert not unresolved, (
+            "these frozen keys parse but do not RESOLVE -- the class or the "
+            f"method is not importable at that path: {unresolved}"
+        )
+
+    def test_the_frozen_population_is_the_measured_one(self):
+        """Anti-vacuity: the frozen set is exactly the 34 keys step 4 measured.
+
+        No 0.8 floor here -- a freeze is an equality, and a floor would let the
+        set decay to 27 unnoticed.
+        """
+        _rows, counts = _sweep_step_overrides()
+        assert len(_FROZEN_STEP_OVERRIDES) == 34
+        assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
+        assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
+            22,
+            11,
+            1,
+        ), (
+            "the step-override mix moved off the measured 22/11/1; reconcile "
+            f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
+        )
+
+    def test_predicate_fires_on_an_injected_override(self, tmp_path):
+        """RED proof: a new override in a scratch package must be reported."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_STEP_OVERRIDE_SRC)
+        rows, counts = _sweep_step_overrides(roots, src_root)
+        assert counts["n_overrides"] == 1, rows
+        derived = {(rel, cls, method) for rel, cls, method, _l in rows}
+        assert derived - _FROZEN_STEP_OVERRIDES == {
+            ("models/injected/model.py", "Injected", "train_step")
+        }, rows
+
+    def test_predicate_is_silent_on_the_stock_fit_twin(self, tmp_path):
+        """...and must not fire on a model that uses stock ``fit()``."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_STEP_OVERRIDE_FIXED_SRC)
+        rows, counts = _sweep_step_overrides(roots, src_root)
+        assert counts["n_overrides"] == 0, rows
+        derived = {(rel, cls, method) for rel, cls, method, _l in rows}
+        assert derived - _FROZEN_STEP_OVERRIDES == set(), rows
+
+    def test_a_line_keyed_freeze_would_have_drifted(self):
+        """The key choice, asserted rather than asserted-about.
+
+        Every one of the 34 sites carries a line number, and 15 of the 34 files
+        were edited by this plan's own step 5.8. A line-keyed freeze would have
+        gone stale on a commit that changed no override at all; this asserts the
+        key genuinely excludes the line.
+        """
+        rows, _ = _sweep_step_overrides()
+        by_key = {(rel, cls, method): lineno for rel, cls, method, lineno in rows}
+        assert len(by_key) == len(rows), "two overrides share a (path, class, method)"
+        assert all(isinstance(lineno, int) for lineno in by_key.values())
+        assert all(len(key) == 3 for key in _FROZEN_STEP_OVERRIDES), (
+            "a frozen key grew a fourth field -- if that field is the line "
+            "number, this freeze now fails on unrelated edits"
+        )
