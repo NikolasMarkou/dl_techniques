@@ -377,6 +377,45 @@ swin_transformer vit_hmlp vit_siglip vq_vae` — are kept. They all have tests; 
 surface without a trainer, not dead code. This closes a question that had been re-asked across
 three planning rounds.
 
+## Verification conventions
+
+The house shape above makes a model package *look* right. These make it *be* right; the full
+rationale for each is in `research/2026_keras_custom_models_instructions_v2.md`.
+
+- **Every constructor knob is pinned by a test that varies it and asserts a measured difference in
+  weights or outputs.** `assert model.d_state == d_state` proves the constructor stored the argument
+  and nothing else. Use `tests/test_models/knob_sensitivity_oracle.py` and pick the instrument by
+  knob class — a **structural** knob (depth/heads/filters) must be pinned on the weight-SHAPE
+  signature, because different shapes consume different RNG draws and an output-difference
+  assertion is satisfied by random-init luck alone.
+- **Every smoke test ships with the meta-test that proves its contract can reject**
+  (`tests/test_models/smoke_contract_oracle.py`). Never wrap build+forward in a blanket
+  `except Exception: pytest.xfail(...)` — a total build break then reports green.
+- **Serialization round-trips compare weight VALUES at `atol=0.0`, sampled BEFORE the loaded
+  model's first call**, and pass `training=False` explicitly. A shape-only round trip is satisfied
+  by a model that restored zero weights; after a forward pass, fresh random weights fill the gap
+  and the count matches either way.
+- **`build()` materializes exactly the tree `call()` runs** — no more, no less. Overriding `build()`
+  is not itself the hazard; failing to materialize is. Pin it with an explicit-vs-lazy weight-path
+  parity test PLUS a direct no-sub-layer layout assertion for each `None`/`False` config, since
+  parity alone is blind to over-building.
+- **Never `.assign()` a constant table inside `build()`** — Keras discards it whenever the layer is
+  first reached from a parent's `call()`. Compute it inside an `add_weight(initializer=<callable>)`,
+  and test it by building through a parent, never by calling `.build()` directly.
+- **Causal models carry a three-armed future-leak probe**: perturb token `t`, assert positions `< t`
+  are bit-identical (exactly `0.0`), assert positions `>= t` still move, and add an all-attend
+  negative control. `test_attention_mask_functionality` asserting only that masked ≠ unmasked is
+  satisfied by any mask. Pass the causal mask at **rank 3** — a rank-2 mask is silently reinterpreted
+  as a padding mask by `GroupedQueryAttention`.
+- **Pooling strategy and attention causality are one decision.** Assert the pooled representation
+  depends on more than one input token.
+- **Every forward test asserts `ops.all(ops.isfinite(y))`**, never just `y.shape`. An all-NaN output
+  of the correct shape has shipped green more than once.
+- **Every guard is proven RED by an injection in the committed record**, and every "nothing changed"
+  assertion has a "something changed" twin. A dead-component probe catching a vacuous guard is the
+  dominant outcome of writing a new test here, not an edge case.
+- **No new custom `train_step`** — stock `fit()` plus extra signals through `tf.data`.
+
 ## Testing
 
 Tests in `tests/test_models/` with one subdirectory per model — 81 test directories
