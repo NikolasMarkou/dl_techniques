@@ -626,6 +626,6 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Model packages BINDING a `create_` in their own package init (what a caller sees) | 69 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 71 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
-| Lines in the mandatory authoring guide | 2678 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
+| Lines in the mandatory authoring guide | 2724 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |

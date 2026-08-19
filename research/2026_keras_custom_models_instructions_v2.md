@@ -1314,7 +1314,43 @@ Softmax is invariant to a constant shift along its reduction axis, so a large de
 change can be uniform garbage on both sides. Add a control proving the pre-change output was itself
 meaningful before calling a delta a regression.
 
-### 12.5 Inert Components
+### 12.5 Inert Configuration — the Dead Knob
+
+**Symptom.** A parameter is validated, stored, serialized and documented, and changing it changes
+nothing. The constructed layer is valid; it is just not the one requested.
+
+**Mechanism.** One of:
+
+| Shape | What happens |
+|---|---|
+| The knob is never forwarded to the sub-layer that would consume it | the sub-layer uses its own default |
+| It is read only at build time, but the branch is hardcoded | the value is inspected and discarded |
+| A sibling consumes it and ignores it | no error anywhere |
+| It mutates a Python attribute an already-traced function never re-reads | correct in eager, inert under `fit()` (§11.2) |
+
+**Measured instances:**
+
+| Knob | Result |
+|---|---|
+| A normalization-position flag on a model whose encoder block had no such parameter at all | `'pre'` built a post-norm stack |
+| A KV-head count printed by `summary()` | the attention was plain multi-head |
+| An `arch_type` argument accepting three values that no branch consulted | all three gave 612 parameters and `max\|dy\| = 0.000e+00` |
+| A weight-sharing flag | identical parameter counts *and* identical object counts both ways |
+| A reconstruction-weight documented as a penalty | `model.losses` was `[]` |
+
+**Why the obvious test is blind.** The only assertion was a constructor-attribute echo
+(`assert model.d_state == d_state`) or a shape check. Both are invariant under the defect, and
+`get_config` round-trips perfectly — because the value *is* stored.
+
+**Rule: every constructor parameter is pinned by a test that varies it and asserts a measured
+difference in weights or outputs**, with an anti-vacuity control. Reading the value back off `self`
+is not coverage. If a knob is deliberately inert, delete it, or pin the inertness with
+`xfail(strict=True)` carrying the measurement and the reason.
+
+Choose the instrument by knob class (§13.3.2) — this is the single most common way a knob test goes
+vacuous.
+
+### 12.6 Inert Components
 
 The unifying property: the component exists, has weights, has gradients, serializes — and contributes
 nothing. Parameter counts, shapes, finiteness and gradient-existence assertions are all blind by
@@ -1355,7 +1391,7 @@ and whose *identity* is wrong.
 **Rule:** assert the identity, not the count. Two register tokens must differ from each other; two
 groups must produce different outputs.
 
-### 12.6 Composition Failures
+### 12.7 Composition Failures
 
 Architectures whose entire value is *how blocks compose* are the ones where composition is never
 tested, because shape, parameter count, finiteness and gradient existence are all invariant under a
@@ -2490,6 +2526,10 @@ def call(self, x):
 A layer-tree walk cannot see the untracked object. **Detect by counting constructor invocations
 across two forward passes.**
 
+The fix above removes the constructed layer. The list mutation needs its own fix: cross-step state
+belongs in a `keras.Variable` updated under `ops.cond`, never a Python container — a list appended to
+inside `call()` grows once per **trace**, not once per batch (§11.2).
+
 ### Pitfall 17: `pretrained=True` that warns and returns random weights
 
 ```python
@@ -2511,12 +2551,18 @@ if pretrained:
 # ❌ WRONG - under mixed_float16 the gradients are divided but never scaled: 2^15 too small
 with tf.GradientTape() as tape:
     loss = self.compute_loss(x, y, self(x, training=True))
+grads = tape.gradient(loss, self.trainable_variables)
 
-# ✅ CORRECT
+# ✅ CORRECT - differentiate the SCALED loss; scale_loss is a no-op off mixed precision
 with tf.GradientTape() as tape:
     loss = self.compute_loss(x, y, self(x, training=True))
-    scaled = self.optimizer.scale_loss(loss)
+    scaled_loss = self.optimizer.scale_loss(loss)
+grads = tape.gradient(scaled_loss, self.trainable_variables)
+self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 ```
+
+Computing `scale_loss(loss)` and then differentiating `loss` anyway is the same bug with an extra
+line — the scaled value must be the one handed to `tape.gradient`.
 
 ---
 
@@ -2555,7 +2601,7 @@ with tf.GradientTape() as tape:
 | NaN on the positions the mask is meant to KEEP | `0.0 * -inf` from an additive fp16 sentinel | §10.1 |
 | `cannot compute AddV2 as input #1 was expected to be a half tensor` | one-sided cast under autocast; cast both sides | §10.1 |
 | **Training does not move under `mixed_float16`** | custom `train_step` missing `optimizer.scale_loss` | §11.1 |
-| A knob has no measurable effect | dead knob, or silently dropped at a factory | §9.2, §13.3.2 |
+| A knob has no measurable effect | dead knob (§12.5), or silently dropped at a factory | §12.5, §9.2, §13.3.2 |
 | `Structures don't have the same nested structure` from `predict` | `call` echoing a bare `None` in its output dict | §7.4 |
 | A causal model's loss looks fine but generation is poor | no causal mask; or the head pools token 0 | §12.1, §12.2 |
 | Green suite, broken trainer | entry point with zero tests; run the CLI | §13.5 |
