@@ -15,6 +15,7 @@ site previously had zero coverage of any kind.
 import numpy as np
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 from train.cliffordnet.train_clip import _TextLMWrapper
 
@@ -148,12 +149,19 @@ def test_text_lm_wrapper_applies_external_residual():
     )
 
 
-def test_text_lm_wrapper_applies_drop_path():
-    """The wrapper must route the blocks through the model's own drop-paths.
+def test_text_lm_wrapper_applies_drop_path(monkeypatch):
+    """The wrapper must route the blocks through the model's OWN drop-paths.
 
-    With ``dropout_rate=0.0`` the text drop-paths are the only stochastic
-    source, so a wrapper that skipped them would be deterministic under
-    ``training=True``.
+    Observed at the ground truth: every ``StochasticDepth`` invocation is
+    recorded, checked to be one of ``m.text_drop_paths`` BY IDENTITY, and
+    reduced to the per-sample keep/drop realization its Bernoulli mask
+    produced. A wrapper that bypasses ``m.text_drop_paths`` records nothing.
+
+    Do NOT reduce this to ``ops.max(ops.abs(logits))`` over the batch again
+    (D-061): ``StochasticDepth`` draws ONE independent mask per sample, so a
+    surviving sample carrying the batch extremum makes that scalar insensitive
+    to the drop. Measured 5 failures / 74 fresh-process runs (~6.8%) on the
+    scalar-max form, against a ~5e-10 collapse probability for this one.
     """
     from keras import ops
 
@@ -170,12 +178,86 @@ def test_text_lm_wrapper_applies_drop_path():
     ids = np.random.default_rng(0).integers(
         0, VOCAB, size=(2, CONTEXT)
     ).astype("int32")
-    draws = [
-        float(ops.max(ops.abs(wrapper(ids, training=True)["logits"])))
-        for _ in range(8)
-    ]
-    assert len(set(draws)) > 1, (
-        f"_TextLMWrapper produced identical output across 8 training-mode "
-        f"draws ({draws[0]:.6e}) with drop_path rates {rates}. The block loop "
-        f"is bypassing m.text_drop_paths."
+    # Warm-up OUTSIDE the recorder: the first ``wrapper(...)`` runs ``call``
+    # twice (Keras builds, then invokes), so the record count would otherwise
+    # be an artefact of Keras' build protocol.
+    wrapper(ids, training=False)
+
+    own = {id(dp) for dp in m.text_drop_paths}
+    observed = []
+    foreign = []
+    original_call = StochasticDepth.call
+
+    def recording_call(self, inputs, training=None):
+        out = original_call(self, inputs, training=training)
+        if id(self) not in own:
+            foreign.append(self.name)
+            return out
+        # Recorded for EVERY invocation, not only training-mode ones: a
+        # wrapper that forgets to forward ``training=`` must be distinguished
+        # from one that bypasses the drop-paths altogether.
+        #
+        # A dropped sample is EXACTLY zero (``inputs * 0 / keep_prob``); a
+        # kept one is ``inputs / keep_prob``. Read the realization off the
+        # output rather than re-deriving the mask, so this oracle does not
+        # restate the implementation it is meant to observe.
+        flat_in = ops.reshape(inputs, (ops.shape(inputs)[0], -1))
+        flat_out = ops.reshape(out, (ops.shape(out)[0], -1))
+        live_in = np.asarray(ops.max(ops.abs(flat_in), axis=-1))
+        live_out = np.asarray(ops.max(ops.abs(flat_out), axis=-1))
+        observed.append((bool(training), self.name, self.drop_path_rate,
+                         tuple(float(v) for v in live_in),
+                         tuple(bool(v > 0.0) for v in live_out)))
+        return out
+
+    monkeypatch.setattr(StochasticDepth, "call", recording_call)
+
+    draws = 16
+    for _ in range(draws):
+        wrapper(ids, training=True)
+
+    assert not foreign, (
+        f"the wrapper routed the text blocks through StochasticDepth layers "
+        f"that are NOT m.text_drop_paths: {sorted(set(foreign))}. It must "
+        f"reuse the model's own drop-paths so the CLM and contrastive phases "
+        f"train one function."
     )
+    expected = draws * len(m.text_drop_paths)
+    assert len(observed) == expected, (
+        f"recorder saw {len(observed)} StochasticDepth call(s) on the model's "
+        f"own drop-paths, expected {expected} ({draws} draws x "
+        f"{len(m.text_drop_paths)} drop-paths). The block loop is bypassing "
+        f"m.text_drop_paths."
+    )
+
+    inference_mode = [i for i, rec in enumerate(observed) if not rec[0]]
+    assert not inference_mode, (
+        f"{len(inference_mode)} of {expected} drop-path invocations ran with "
+        f"a falsy training= flag (draw indices {inference_mode[:5]}). The "
+        f"wrapper must forward its own training= into drop_path(...), or the "
+        f"drop-paths are inert identities during CLM pretraining."
+    )
+
+    # Anti-vacuity: "dropped" is only readable as an all-zero output while
+    # every sample ARRIVES nonzero. If a block emitted an all-zero sample the
+    # keep/drop reading below would be undefined, not merely noisy.
+    dead_inputs = [rec for rec in observed if min(rec[3]) <= 0.0]
+    assert not dead_inputs, (
+        f"{len(dead_inputs)} drop-path input sample(s) arrived all-zero, so "
+        f"keep/drop cannot be read off the output: {dead_inputs[:3]}"
+    )
+
+    # Pooled PER LAYER, and only over the layers whose rate is live: the
+    # linear schedule gives the first drop-path rate 0.0, and a rate-0.0 layer
+    # is an identity by design, so pooling all layers together would let one
+    # live layer's variation mask another's deadness.
+    live = {rec[1] for rec in observed if rec[2] > 0.0}
+    assert live, f"no live-rate drop-path was invoked; rates {rates}"
+    for name in sorted(live):
+        masks = {rec[4] for rec in observed if rec[1] == name}
+        assert len(masks) > 1, (
+            f"drop-path {name!r} (rate {dict((r[1], r[2]) for r in observed)[name]}) "
+            f"realized the SAME per-sample keep/drop mask {masks} on all "
+            f"{draws} draws. Either it is running in inference mode "
+            f"(training= not forwarded) or the mask is not drawn per call."
+        )
