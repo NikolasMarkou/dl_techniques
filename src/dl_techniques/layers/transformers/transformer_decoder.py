@@ -382,6 +382,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             dropout_rate=self.dropout_rate,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            use_bias=self.use_bias,
             ffn_args=self.ffn_args,
         )
 

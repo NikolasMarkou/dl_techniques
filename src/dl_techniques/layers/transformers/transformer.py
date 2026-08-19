@@ -127,6 +127,7 @@ def build_transformer_ffn_config(
         dropout_rate: float,
         kernel_initializer: Any,
         bias_initializer: Any,
+        use_bias: bool,
         ffn_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the FFN factory config for a transformer encoder/decoder block.
@@ -157,6 +158,8 @@ def build_transformer_ffn_config(
        not ``activation`` (D-016). ``gate_activation`` is deliberately not
        forwarded -- the sigmoid gate is the layer's defining feature.
     3. ``_FFN_TYPES_WITH_FIXED_ACTIVATION`` withholds ``activation`` (D-005).
+    4. ``swiglu`` also withholds ``use_bias``
+       (plan-2026-08-19-a616f581/D-006, see the branch below).
 
     # DECISION plan-2026-07-30T140922-8af1028f/D-018
     Do NOT re-inline this table into either caller. Two independently
@@ -185,6 +188,10 @@ def build_transformer_ffn_config(
     :type kernel_initializer: Any
     :param bias_initializer: The block's bias initializer.
     :type bias_initializer: Any
+    :param use_bias: The block's bias switch. Forwarded to every registry type
+        that declares a ``use_bias`` key EXCEPT ``swiglu`` (policy 4); types
+        that declare none (``kan``, ``tversky``) drop it in the pre-filter.
+    :type use_bias: bool
     :param ffn_args: The caller's explicit FFN args; merged LAST and NEVER
         filtered, so a caller key the type does not accept still reaches
         ``create_ffn_layer``.
@@ -202,11 +209,27 @@ def build_transformer_ffn_config(
         'hidden_dim': intermediate_size,
         'output_dim': hidden_size,
         'activation': activation,
+        'use_bias': use_bias,
     }
 
     if ffn_type == 'swiglu':
         del config['hidden_dim']
         del config['activation']
+        # DECISION plan-2026-08-19-a616f581/D-006: `swiglu` is the ONE registry
+        # type whose own `use_bias` default is False (measured: every other
+        # bias-declaring type defaults True), because a bias-free gated FFN is
+        # SwiGLUFFN's defining LLaMA-style design. The block's `use_bias`
+        # therefore must NOT be forwarded here. Do NOT "make it uniform" by
+        # deleting this line: `TransformerLayer`'s own `use_bias` default is
+        # True, so forwarding would ADD `gate_proj/bias`, `up_proj/bias` and
+        # `down_proj/bias` (measured) to every swiglu block of every model that
+        # never asked for them -- vit_siglip, tiny_recursive_model,
+        # qwen3_embeddings, nano_vlm, dino v2/v3 giant and the HRM family all
+        # default to `ffn_type='swiglu'` with `use_bias` at its True default,
+        # so their `.keras` files would all stop matching. A caller who really
+        # wants biased swiglu passes `ffn_args={'use_bias': True}`, which the
+        # pre-filter never touches. See decisions.md D-006.
+        del config['use_bias']
         config['ffn_expansion_factor'] = 4
         config['ffn_multiple_of'] = 256
     elif ffn_type == 'differential':
@@ -851,6 +874,7 @@ class TransformerLayer(keras.layers.Layer):
             dropout_rate=self.dropout_rate,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            use_bias=self.use_bias,
             ffn_args=self.ffn_args,
         )
 

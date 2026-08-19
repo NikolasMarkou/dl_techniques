@@ -849,12 +849,12 @@ class TestEncoderDecoderFFNConfigParity:
 class TestTransformerFFNPolicyPreserved:
     """The three things a pure registry intersection CANNOT express."""
 
-    def _cfg(self, ffn_type: str) -> Dict[str, Any]:
+    def _cfg(self, ffn_type: str, use_bias: bool = True) -> Dict[str, Any]:
         return build_transformer_ffn_config(
             ffn_type=ffn_type, name='ffn', hidden_size=_GRID_HIDDEN,
             intermediate_size=_GRID_INTER, activation='relu',
             dropout_rate=0.1, kernel_initializer='glorot_uniform',
-            bias_initializer='zeros',
+            bias_initializer='zeros', use_bias=use_bias,
         )
 
     def test_differential_renames_activation_to_branch_activation(self) -> None:
@@ -889,6 +889,26 @@ class TestTransformerFFNPolicyPreserved:
         )
         assert cfg['ffn_expansion_factor'] == 4
         assert cfg['ffn_multiple_of'] == 256
+
+    @pytest.mark.parametrize('use_bias', [False, True])
+    def test_swiglu_withholds_use_bias(self, use_bias: bool) -> None:
+        """Policy 4 (D-006): `use_bias` is OPTIONAL for swiglu, so the filter
+        would keep it -- only the explicit withholding stops the block's own
+        `use_bias=True` default from adding three bias tensors SwiGLUFFN's
+        `use_bias=False` default deliberately omits."""
+        assert 'use_bias' in FFN_REGISTRY['swiglu']['optional_params'], (
+            "anti-vacuity: if the registry stops accepting `use_bias` for "
+            "swiglu, the pre-filter would drop it anyway and this test would "
+            "no longer be testing the withholding"
+        )
+        assert 'use_bias' not in self._cfg('swiglu', use_bias=use_bias)
+
+    @pytest.mark.parametrize('ffn_type', ['mlp', 'geglu', 'glu'])
+    def test_non_swiglu_types_receive_use_bias(self, ffn_type: str) -> None:
+        """LIVENESS twin for the withholding above: every OTHER bias-declaring
+        type must still be handed the block's `use_bias`, in both directions."""
+        assert self._cfg(ffn_type, use_bias=False)['use_bias'] is False
+        assert self._cfg(ffn_type, use_bias=True)['use_bias'] is True
 
     def test_unknown_type_raises_from_the_helper(self) -> None:
         with pytest.raises(ValueError, match="Unknown ffn_type"):
@@ -1084,3 +1104,179 @@ class TestWindowBranchForwardsUseBias:
         )
         assert any(p.endswith("/qkv/bias") for p in present), present
         assert any(p.endswith("/proj/bias") for p in present), present
+
+
+# ---------------------------------------------------------------------
+# D-006 (plan-2026-08-19-a616f581): the FFN sublayer honours `use_bias`.
+# ---------------------------------------------------------------------
+#: Registry types reachable from `TransformerLayer` that declare a `use_bias`
+#: key AND whose own class default is True -- i.e. the types whose FFN biases
+#: survived `use_bias=False` before D-006. `swiglu` is deliberately EXCLUDED
+#: (its class default is False and D-006 withholds the key; see
+#: `TestFFNUseBiasSwigluPolicy`). `kan`/`tversky` declare no `use_bias` at all.
+_D006_BIAS_DECLARING_FFN_TYPES = (
+    'mlp', 'geglu', 'glu', 'differential', 'swin_mlp', 'residual',
+    'gelu_tanh', 'orthoglu',
+)
+
+
+def _d006_ffn_bias_paths(*, ffn_type: str, use_bias: bool) -> list:
+    """Build a `group_query` `TransformerLayer`, call it, list FFN biases.
+
+    :param ffn_type: an `FFN_REGISTRY` key handed to `TransformerLayer`.
+    :type ffn_type: str
+    :param use_bias: value handed to `TransformerLayer(use_bias=...)`.
+    :type use_bias: bool
+    :return: weight paths under the ``ffn`` sub-tree ending in ``/bias``.
+    :rtype: list
+
+    The ``/bias`` SUFFIX test (not a substring test) is what keeps positional
+    or gating bias TABLES out of the result, exactly as in the D-005 helper.
+    """
+    layer = TransformerLayer(
+        hidden_size=32, num_heads=4, intermediate_size=64,
+        attention_type='group_query', n_kv_head=2,
+        ffn_type=ffn_type, use_bias=use_bias, name='probe',
+    )
+    _ = layer(keras.random.normal((1, 8, 32)))
+    return [
+        w.path for w in layer.weights
+        if '/ffn/' in w.path and w.path.endswith('/bias')
+    ]
+
+
+class TestFFNBranchForwardsUseBias:
+    """`use_bias` must reach the FFN sub-layer's weight tree.
+
+    Before D-006, `build_transformer_ffn_config` had no `use_bias` parameter
+    at all, so neither `TransformerLayer._get_ffn_config` nor its decoder twin
+    could pass one and each FFN type's own `use_bias=True` default silently
+    won. Measured pre-fix at `attention_type='group_query', use_bias=False`:
+    `mlp` -> ``['probe/ffn/fc1/bias', 'probe/ffn/fc2/bias']``, `geglu` ->
+    ``['probe/ffn/input_proj/bias', 'probe/ffn/output_proj/bias']``, `glu` ->
+    3 paths, `differential` -> 5 paths, `residual` -> 3 paths.
+    """
+
+    @pytest.mark.parametrize('ffn_type', _D006_BIAS_DECLARING_FFN_TYPES)
+    def test_use_bias_false_leaves_no_ffn_bias_weights(self, ffn_type: str) -> None:
+        """The fix arm: `use_bias=False` yields ZERO FFN bias tensors."""
+        leaked = _d006_ffn_bias_paths(ffn_type=ffn_type, use_bias=False)
+        assert leaked == [], (
+            f"ffn_type={ffn_type!r} leaked FFN bias weights at "
+            f"use_bias=False: {leaked}"
+        )
+
+    @pytest.mark.parametrize('ffn_type', _D006_BIAS_DECLARING_FFN_TYPES)
+    def test_use_bias_true_still_creates_ffn_biases(self, ffn_type: str) -> None:
+        """LIVENESS arm — without it the arm above passes just as well against
+        an FFN that has no biases at ANY setting (a hard-coded
+        `use_bias=False`, or a probe that never builds the FFN)."""
+        present = _d006_ffn_bias_paths(ffn_type=ffn_type, use_bias=True)
+        assert present, (
+            f"ffn_type={ffn_type!r} produced NO FFN bias weights at "
+            f"use_bias=True; the bias-absent arm is therefore vacuous"
+        )
+
+
+class TestFFNUseBiasSwigluPolicy:
+    """`swiglu` is the ONE type whose `use_bias` is deliberately withheld.
+
+    `SwiGLUFFN`'s own default is `use_bias=False` (bias-free gated FFN, the
+    LLaMA-style design) while every other bias-declaring type defaults True.
+    Forwarding `TransformerLayer`'s own True default would therefore ADD
+    `gate_proj/bias`, `up_proj/bias` and `down_proj/bias` to every swiglu
+    block that never asked for them. D-006 withholds the key instead; this
+    class pins BOTH directions so a later "make it uniform" edit fails here.
+    """
+
+    @pytest.mark.parametrize('use_bias', [False, True])
+    def test_swiglu_stays_bias_free_at_both_settings(self, use_bias: bool) -> None:
+        paths = _d006_ffn_bias_paths(ffn_type='swiglu', use_bias=use_bias)
+        assert paths == [], (
+            f"swiglu gained FFN bias weights at use_bias={use_bias}: {paths}. "
+            f"D-006 withholds `use_bias` for swiglu precisely to keep every "
+            f"shipped swiglu checkpoint's weight set unchanged."
+        )
+
+    def test_swiglu_biases_remain_reachable_through_ffn_args(self) -> None:
+        """The documented escape hatch: `ffn_args` is never pre-filtered, so a
+        caller who really wants a biased swiglu can still ask for one. This is
+        also what makes the withholding a POLICY rather than a capability loss.
+        """
+        layer = TransformerLayer(
+            hidden_size=32, num_heads=4, intermediate_size=64,
+            attention_type='group_query', n_kv_head=2,
+            ffn_type='swiglu', use_bias=False,
+            ffn_args={'use_bias': True}, name='probe',
+        )
+        _ = layer(keras.random.normal((1, 8, 32)))
+        paths = [
+            w.path for w in layer.weights
+            if '/ffn/' in w.path and w.path.endswith('/bias')
+        ]
+        assert len(paths) == 3, (
+            f"ffn_args={{'use_bias': True}} did not reach SwiGLUFFN: {paths}"
+        )
+
+
+class TestFFNUseBiasArgsOverrideStillWins:
+    """`ffn_args` is merged LAST and NEVER filtered (D-017), so a caller's own
+    `use_bias` must still beat the block's. Qwen3 relies on exactly this — it
+    passes `use_bias: False` through `ffn_args` — so a regression here would
+    silently re-bias every Qwen3 FFN for any non-swiglu `ffn_type`.
+    """
+
+    def test_ffn_args_use_bias_true_overrides_block_use_bias_false(self) -> None:
+        layer = TransformerLayer(
+            hidden_size=32, num_heads=4, intermediate_size=64,
+            attention_type='group_query', n_kv_head=2,
+            ffn_type='mlp', use_bias=False,
+            ffn_args={'use_bias': True}, name='probe',
+        )
+        _ = layer(keras.random.normal((1, 8, 32)))
+        paths = [
+            w.path for w in layer.weights
+            if '/ffn/' in w.path and w.path.endswith('/bias')
+        ]
+        assert len(paths) == 2, (
+            f"ffn_args did not override the block's use_bias=False: {paths}"
+        )
+
+
+class TestDecoderFFNForwardsUseBias:
+    """The decoder dispatcher shares `build_transformer_ffn_config` (D-018),
+    so it must forward `use_bias` too — otherwise the two dispatchers diverge
+    and `TestEncoderDecoderFFNConfigParity` becomes the only thing standing
+    between the decoder and the exact defect D-006 fixes on the encoder.
+    """
+
+    @staticmethod
+    def _decoder_ffn_bias_paths(*, use_bias: bool) -> list:
+        from dl_techniques.layers.transformers.transformer_decoder import (
+            TransformerDecoderLayer,
+        )
+        layer = TransformerDecoderLayer(
+            hidden_size=32, num_heads=4, intermediate_size=64,
+            ffn_type='mlp', use_bias=use_bias, name='probe',
+        )
+        _ = layer(
+            keras.random.normal((1, 8, 32)),
+            encoder_output=keras.random.normal((1, 8, 32)),
+        )
+        return [
+            w.path for w in layer.weights
+            if '/ffn/' in w.path and w.path.endswith('/bias')
+        ]
+
+    def test_decoder_use_bias_false_leaves_no_ffn_bias_weights(self) -> None:
+        leaked = self._decoder_ffn_bias_paths(use_bias=False)
+        assert leaked == [], (
+            f"decoder leaked FFN bias weights at use_bias=False: {leaked}"
+        )
+
+    def test_decoder_use_bias_true_still_creates_ffn_biases(self) -> None:
+        """LIVENESS twin for the decoder arm."""
+        present = self._decoder_ffn_bias_paths(use_bias=True)
+        assert len(present) == 2, (
+            f"expected fc1/bias and fc2/bias at use_bias=True, got {present}"
+        )
